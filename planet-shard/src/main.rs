@@ -86,7 +86,8 @@ struct PlanetState {
 
     // System context
     system_params: Option<SystemParams>,
-    game_time: f64,
+    physics_time: f64,
+    celestial_time: f64,
     tick_count: u64,
     planet_position_in_system: DVec3,
 }
@@ -121,7 +122,8 @@ impl PlanetState {
             ground_collider: Some(ground_handle),
             players: HashMap::new(),
             system_params,
-            game_time: 0.0,
+            physics_time: 0.0,
+            celestial_time: 0.0,
             tick_count: 0,
             planet_position_in_system: DVec3::ZERO,
         }
@@ -169,7 +171,7 @@ impl PlanetState {
     fn compute_planet_system_position(&mut self) {
         if let Some(ref sys) = self.system_params {
             if let Some(planet) = sys.planets.get(self.planet_index as usize) {
-                self.planet_position_in_system = compute_planet_position(planet, self.game_time);
+                self.planet_position_in_system = compute_planet_position(planet, self.celestial_time);
             }
         }
     }
@@ -201,7 +203,7 @@ impl PlanetState {
 
             // Other planets.
             for (i, planet) in sys.planets.iter().enumerate() {
-                let planet_sys_pos = compute_planet_position(planet, self.game_time);
+                let planet_sys_pos = compute_planet_position(planet, self.celestial_time);
                 bodies.push(CelestialBodyData {
                     body_id: (i + 1) as u32,
                     position: planet_sys_pos - self.planet_position_in_system,
@@ -235,7 +237,7 @@ impl PlanetState {
             players, bodies,
             ships: vec![],
             lighting,
-            game_time: self.game_time,
+            game_time: self.celestial_time,
         }
     }
 }
@@ -325,7 +327,7 @@ fn main() {
 
                 let st = state_connect.lock().unwrap();
                 let tcp_stream = conn.tcp_stream.clone();
-                let game_time = st.game_time;
+                let game_time = st.celestial_time;
                 let planet_pos = st.planet_position_in_system;
                 let sys_seed = st.system_seed.unwrap_or(0);
 
@@ -424,7 +426,9 @@ fn main() {
         let state_physics = state.clone();
         harness.add_system("physics_step", move || {
             let mut st = state_physics.lock().unwrap();
-            st.game_time += 0.05;
+            st.physics_time += 0.05;
+            st.celestial_time += 0.05 * st.system_params.as_ref()
+                .map(|s| s.scale.time_scale).unwrap_or(1.0);
             st.tick_count += 1;
             st.compute_planet_system_position();
             st.step();
@@ -444,7 +448,8 @@ fn main() {
             let st = state_log.lock().unwrap();
             if st.tick_count % 100 == 0 && st.tick_count > 0 {
                 info!(
-                    game_time = format!("{:.1}s", st.game_time),
+                    physics_time = format!("{:.1}s", st.physics_time),
+                    celestial_time = format!("{:.1}s", st.celestial_time),
                     players = st.players.len(),
                     surface_g = format!("{:.2} m/s²", st.surface_gravity),
                     "planet state"

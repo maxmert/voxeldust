@@ -13,6 +13,44 @@ pub const G: f64 = 6.674e-11;
 /// Hill sphere SOI factor: r_soi = a * (m_planet / m_star)^(2/5).
 pub const SOI_EXPONENT: f64 = 0.4; // 2/5
 
+/// All gameplay-vs-realistic scale tuning in one place.
+/// Switch `SCALE` between `GAMEPLAY` and `REALISTIC` to change mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CelestialScaleConfig {
+    /// Celestial time runs this many times faster than real time.
+    /// 1.0 = real-time, 12.0 = 1 real second equals 12 celestial seconds.
+    pub time_scale: f64,
+    /// Base semi-major axis for innermost planet orbit (meters).
+    pub base_sma: f64,
+    /// Ship spawn offset from nearest planet (meters). Must be < SOI radius.
+    pub spawn_offset: f64,
+    /// Fallback spawn when no planets exist (meters from star).
+    pub fallback_spawn_distance: f64,
+    /// Min/max planet sidereal rotation period in celestial seconds.
+    pub rotation_period_range: (f64, f64),
+}
+
+impl CelestialScaleConfig {
+    pub const GAMEPLAY: Self = Self {
+        time_scale: 12.0,
+        base_sma: 2.0e9,
+        spawn_offset: 4.0e6,
+        fallback_spawn_distance: 4.0e7,
+        rotation_period_range: (60_000.0, 120_000.0), // ~1.4-2.8 real hours at 12x
+    };
+
+    pub const REALISTIC: Self = Self {
+        time_scale: 1.0,
+        base_sma: 5.0e10,
+        spawn_offset: 1.0e8,
+        fallback_spawn_distance: 1.0e11,
+        rotation_period_range: (36_000.0, 172_800.0), // 10h-48h
+    };
+}
+
+/// Active scale config. Change this one line to switch modes.
+pub const SCALE: CelestialScaleConfig = CelestialScaleConfig::GAMEPLAY;
+
 /// Keplerian orbital elements for a planet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrbitalElements {
@@ -54,6 +92,8 @@ pub struct PlanetParams {
     pub gm: f64,
     /// Orbital period in seconds.
     pub period: f64,
+    /// Sidereal rotation period in celestial seconds (for day/night cycle).
+    pub rotation_period: f64,
 }
 
 /// Complete star system parameters, generated deterministically from a seed.
@@ -62,6 +102,7 @@ pub struct SystemParams {
     pub system_seed: u64,
     pub star: StarParams,
     pub planets: Vec<PlanetParams>,
+    pub scale: CelestialScaleConfig,
 }
 
 /// Lighting information computed by the server, sent to the client.
@@ -119,6 +160,7 @@ impl SystemParams {
             system_seed,
             star,
             planets,
+            scale: SCALE,
         }
     }
 }
@@ -126,7 +168,7 @@ impl SystemParams {
 /// Generate a single planet's parameters.
 fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetParams {
     // Semi-major axis: planets spread out logarithmically (Titius-Bode-like).
-    let base_sma = 5.0e10; // ~0.33 AU
+    let base_sma = SCALE.base_sma;
     let sma = base_sma * (1.5_f64).powf(index as f64 + seed_to_range(derive_seed(planet_seed, 0), 0.0, 1.0));
 
     let eccentricity = seed_to_range(derive_seed(planet_seed, 1), 0.0, 0.3);
@@ -158,6 +200,13 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
     // Orbital period from Kepler's third law: T = 2π√(a³/GM_star).
     let period = std::f64::consts::TAU * (sma.powi(3) / star.gm).sqrt();
 
+    // Sidereal rotation period in celestial seconds (for day/night cycle).
+    let rotation_period = seed_to_range(
+        derive_seed(planet_seed, 9),
+        SCALE.rotation_period_range.0,
+        SCALE.rotation_period_range.1,
+    );
+
     PlanetParams {
         index,
         planet_seed,
@@ -174,6 +223,7 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
         color,
         gm,
         period,
+        rotation_period,
     }
 }
 
@@ -221,6 +271,12 @@ pub fn compute_planet_position(planet: &PlanetParams, time_s: f64) -> DVec3 {
 
     // state = [x, y, z, vx, vy, vz] — we only need position.
     DVec3::new(state[0], state[1], state[2])
+}
+
+/// Compute a planet's rotation angle at a given celestial time.
+/// Returns angle in radians [0, TAU).
+pub fn compute_planet_rotation(planet: &PlanetParams, celestial_time_s: f64) -> f64 {
+    (std::f64::consts::TAU * celestial_time_s / planet.rotation_period) % std::f64::consts::TAU
 }
 
 /// Compute gravitational acceleration at a position from all bodies.
@@ -406,6 +462,42 @@ mod tests {
         let local = system_to_planet_local(system_pos, planet_pos);
         let back = planet_local_to_system(local, planet_pos);
         assert!((back - system_pos).length() < 1e-6);
+    }
+
+    #[test]
+    fn rotation_period_in_range() {
+        for seed in 0..20 {
+            let sys = SystemParams::from_seed(seed);
+            for planet in &sys.planets {
+                assert!(
+                    planet.rotation_period >= SCALE.rotation_period_range.0
+                        && planet.rotation_period <= SCALE.rotation_period_range.1,
+                    "seed {seed}, planet {}: rotation_period {} out of range",
+                    planet.index,
+                    planet.rotation_period
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn planet_rotation_deterministic() {
+        let sys = SystemParams::from_seed(42);
+        let planet = &sys.planets[0];
+        let angle_a = compute_planet_rotation(planet, 1000.0);
+        let angle_b = compute_planet_rotation(planet, 1000.0);
+        assert_eq!(angle_a, angle_b);
+        // Different time = different angle
+        let angle_c = compute_planet_rotation(planet, 2000.0);
+        assert!((angle_a - angle_c).abs() > 1e-10);
+    }
+
+    #[test]
+    fn scale_config_switchable() {
+        // Verify both configs have sane values
+        assert_eq!(CelestialScaleConfig::REALISTIC.time_scale, 1.0);
+        assert!(CelestialScaleConfig::GAMEPLAY.time_scale > 1.0);
+        assert!(CelestialScaleConfig::GAMEPLAY.base_sma < CelestialScaleConfig::REALISTIC.base_sma);
     }
 
     #[test]

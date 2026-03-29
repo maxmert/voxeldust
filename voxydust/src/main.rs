@@ -304,6 +304,15 @@ impl App {
                                     self.camera_pitch = fwd.y.asin() as f64;
                                 }
                             }
+
+                            // Pilot → walk transition: reset camera to ship-local forward.
+                            // camera_yaw/pitch are ship-local when walking in a ship, so
+                            // the server interprets them correctly for movement direction.
+                            // Ship forward is -Z, which in our yaw convention is -π/2.
+                            if was_piloting && !self.is_piloting {
+                                self.camera_yaw = -std::f64::consts::FRAC_PI_2;
+                                self.camera_pitch = 0.0;
+                            }
                         }
                         if self.latest_world_state.is_none() {
                             info!(bodies = ws.bodies.len(), tick = ws.tick, "first WorldState");
@@ -394,31 +403,24 @@ impl App {
         let cam_fwd = if self.is_piloting && !free_look {
             // Camera locked to ship heading.
             let fwd = self.ship_rotation * DVec3::NEG_Z;
-            let f = fwd.as_vec3().normalize();
-            if self.frame_count % 60 == 0 {
-                info!(
-                    "LOCKED cam: fwd=({:.3},{:.3},{:.3}) rot=({:.3},{:.3},{:.3},{:.3})",
-                    f.x, f.y, f.z,
-                    self.ship_rotation.x, self.ship_rotation.y, self.ship_rotation.z, self.ship_rotation.w
-                );
-            }
-            f
-        } else {
-            // Free camera (walking or free-look).
+            fwd.as_vec3().normalize()
+        } else if self.current_shard_type == 2 {
+            // Walking inside ship: camera_yaw/pitch are ship-local.
+            // Rotate local look direction by ship_rotation for world-space rendering.
             let (sy, cy) = (self.camera_yaw as f32).sin_cos();
             let (sp, cp) = (self.camera_pitch as f32).sin_cos();
-            let f = Vec3::new(cy * cp, sp, sy * cp).normalize();
-            if self.frame_count % 60 == 0 {
-                info!(
-                    "FREE cam: yaw={:.3} pitch={:.3} fwd=({:.3},{:.3},{:.3}) is_piloting={} free_look={}",
-                    self.camera_yaw, self.camera_pitch, f.x, f.y, f.z, self.is_piloting, free_look
-                );
-            }
-            f
+            let local_fwd = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+            (self.ship_rotation * local_fwd).as_vec3().normalize()
+        } else {
+            // Planet/System: camera_yaw/pitch are world-space.
+            let (sy, cy) = (self.camera_yaw as f32).sin_cos();
+            let (sp, cp) = (self.camera_pitch as f32).sin_cos();
+            Vec3::new(cy * cp, sp, sy * cp).normalize()
         };
         let aspect = gpu.config.width as f32 / gpu.config.height as f32;
         let proj = Mat4::perspective_rh(70.0_f32.to_radians(), aspect, 0.1, 1e13);
-        let cam_up = if self.is_piloting && !free_look {
+        let cam_up = if self.current_shard_type == 2 {
+            // Inside ship: up follows ship rotation (artificial gravity floor).
             (self.ship_rotation * DVec3::Y).as_vec3().normalize()
         } else {
             Vec3::Y

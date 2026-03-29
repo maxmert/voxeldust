@@ -63,7 +63,8 @@ const ANGULAR_ACCEL_RATE: f64 = 1.0;
 struct SystemState {
     system_params: SystemParams,
     shard_id: ShardId,
-    game_time: f64,
+    physics_time: f64,
+    celestial_time: f64,
     planet_positions: Vec<DVec3>,
     ships: HashMap<u64, ShipState>,
     next_ship_id: u64,
@@ -77,7 +78,8 @@ impl SystemState {
         Self {
             system_params,
             shard_id,
-            game_time: 0.0,
+            physics_time: 0.0,
+            celestial_time: 0.0,
             planet_positions: vec![DVec3::ZERO; planet_count],
             ships: HashMap::new(),
             next_ship_id: 1,
@@ -89,9 +91,9 @@ impl SystemState {
         let id = self.next_ship_id;
         self.next_ship_id += 1;
         let start_pos = if !self.planet_positions.is_empty() {
-            self.planet_positions[0] + DVec3::new(1e8, 0.0, 0.0)
+            self.planet_positions[0] + DVec3::new(self.system_params.scale.spawn_offset, 0.0, 0.0)
         } else {
-            DVec3::new(1e11, 0.0, 0.0)
+            DVec3::new(self.system_params.scale.fallback_spawn_distance, 0.0, 0.0)
         };
         self.ships.insert(id, ShipState {
             ship_id: id,
@@ -151,7 +153,7 @@ impl SystemState {
                 sun_direction: lighting.sun_direction, sun_color: lighting.sun_color,
                 sun_intensity: lighting.sun_intensity, ambient: lighting.ambient,
             }),
-            game_time: self.game_time,
+            game_time: self.celestial_time,
         }
     }
 }
@@ -225,7 +227,7 @@ fn main() {
                 }
 
                 let tcp_stream = conn.tcp_stream.clone();
-                let game_time = st.game_time;
+                let game_time = st.celestial_time;
                 tokio::spawn(async move {
                     let jr = ServerMsg::JoinResponse(JoinResponseData {
                         seed: system_seed, planet_radius: 0, player_id: token.0,
@@ -285,9 +287,9 @@ fn main() {
 
                         // New ship — create entity at default position.
                         let start_pos = if !st.planet_positions.is_empty() {
-                            st.planet_positions[0] + DVec3::new(1e8, 0.0, 0.0)
+                            st.planet_positions[0] + DVec3::new(st.system_params.scale.spawn_offset, 0.0, 0.0)
                         } else {
-                            DVec3::new(1e11, 0.0, 0.0)
+                            DVec3::new(st.system_params.scale.fallback_spawn_distance, 0.0, 0.0)
                         };
 
                         st.ships.insert(ship_id, ShipState {
@@ -314,19 +316,20 @@ fn main() {
         let state_physics = state.clone();
         harness.add_system("physics", move || {
             let mut st = state_physics.lock().unwrap();
-            st.game_time += DT;
+            st.physics_time += DT;
+            st.celestial_time += DT * st.system_params.scale.time_scale;
             st.tick_count += 1;
 
-            let game_time = st.game_time;
+            let celestial_time = st.celestial_time;
             let positions: Vec<DVec3> = st.system_params.planets.iter()
-                .map(|p| compute_planet_position(p, game_time))
+                .map(|p| compute_planet_position(p, celestial_time))
                 .collect();
             st.planet_positions = positions;
 
             let accels: Vec<(u64, DVec3)> = st.ships.iter().map(|(&id, ship)| {
                 let grav = compute_gravity_acceleration(
                     ship.position, &st.system_params.star,
-                    &st.system_params.planets, &st.planet_positions, st.game_time,
+                    &st.system_params.planets, &st.planet_positions, st.celestial_time,
                 );
                 let thrust_world = ship.rotation * ship.thrust / SHIP_MASS;
                 (id, grav + thrust_world)
@@ -430,7 +433,7 @@ fn main() {
             let lighting = st.build_lighting(observer_pos);
 
             let scene = SystemSceneUpdateData {
-                game_time: st.game_time,
+                game_time: st.celestial_time,
                 bodies,
                 ships: vec![], // TODO: include other ships
                 lighting,
@@ -472,7 +475,8 @@ fn main() {
             let st = state_log.lock().unwrap();
             if st.tick_count % 100 == 0 && st.tick_count > 0 {
                 info!(
-                    game_time = format!("{:.1}s", st.game_time),
+                    physics_time = format!("{:.1}s", st.physics_time),
+                    celestial_time = format!("{:.1}s", st.celestial_time),
                     ships = st.ships.len(),
                     tick = st.tick_count,
                     "system state"
