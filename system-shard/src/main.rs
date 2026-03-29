@@ -362,9 +362,12 @@ fn main() {
                 }
 
                 // Apply angular velocity to rotation quaternion.
-                let ang_speed = ship.angular_velocity.length();
+                // Angular velocity is in ship-local space (pitch=X, yaw=Y, roll=Z).
+                // Transform to world space before applying to the world-space rotation.
+                let world_angular_vel = ship.rotation * ship.angular_velocity;
+                let ang_speed = world_angular_vel.length();
                 if ang_speed > 1e-8 {
-                    let axis = ship.angular_velocity / ang_speed;
+                    let axis = world_angular_vel / ang_speed;
                     let delta_rot = DQuat::from_axis_angle(axis, ang_speed * DT);
                     ship.rotation = (delta_rot * ship.rotation).normalize();
                 }

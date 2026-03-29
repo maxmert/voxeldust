@@ -797,7 +797,7 @@ impl ApplicationHandler for App {
             if self.is_piloting && !free_look {
                 // Piloting: set yaw/pitch rate from mouse movement.
                 // Rate is proportional to mouse velocity, clamped to [-1, 1].
-                self.pilot_yaw_rate = (self.pilot_yaw_rate + delta.0 * sensitivity * 5.0).clamp(-1.0, 1.0);
+                self.pilot_yaw_rate = (self.pilot_yaw_rate - delta.0 * sensitivity * 5.0).clamp(-1.0, 1.0);
                 self.pilot_pitch_rate = (self.pilot_pitch_rate - delta.1 * sensitivity * 5.0).clamp(-1.0, 1.0);
             } else {
                 // Walking or free-look: move camera yaw/pitch directly.
