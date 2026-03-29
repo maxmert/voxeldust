@@ -1,0 +1,30 @@
+[package]
+name = "orchestrator"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+voxeldust-core = { workspace = true }
+voxeldust-shard-common = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+redb = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+flatbuffers = { workspace = true }
+
+kube = { version = "0.98", features = ["client", "runtime"] }
+k8s-openapi = { version = "0.24", features = ["v1_32"] }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = "3"

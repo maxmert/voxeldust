@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: voxeldust
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voxeldust-orchestrator
+  template:
+    metadata:
+      labels:
+        app: voxeldust-orchestrator
+    spec:
+      serviceAccountName: orchestrator
+      containers:
+      - name: orchestrator
+        image: voxeldust-orchestrator:latest
+        imagePullPolicy: Never
+        args:
+        - "--http-addr=0.0.0.0:8080"
+        - "--heartbeat-addr=0.0.0.0:9090"
+        - "--db-path=/data/orchestrator.redb"
+        - "--provisioner-mode=kubernetes"
+        - "--shard-image=voxeldust-stub-shard:latest"
+        - "--shard-namespace=voxeldust"
+        - "--shard-port-range-start=10000"
+        - "--shard-port-range-end=10100"
+        - "--shard-advertise-host=172.18.0.3"
+        - "--idle-shutdown-secs=600"
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        - containerPort: 9090
+          protocol: UDP
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        livenessProbe:
+          httpGet:
+            path: /shards
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: orchestrator-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator-data
+  namespace: voxeldust
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: voxeldust
+spec:
+  selector:
+    app: voxeldust-orchestrator
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  - name: heartbeat
+    port: 9090
+    targetPort: 9090
+    protocol: UDP

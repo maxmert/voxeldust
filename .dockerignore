@@ -1,0 +1,6 @@
+target/
+.git/
+*.redb
+k8s/
+deploy/
+.claude/

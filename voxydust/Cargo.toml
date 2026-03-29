@@ -1,0 +1,24 @@
+[package]
+name = "voxydust"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "voxydust"
+path = "src/main.rs"
+
+[dependencies]
+voxeldust-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+glam = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+bytemuck = { workspace = true }
+flatbuffers = { workspace = true }
+pollster = "0.4"

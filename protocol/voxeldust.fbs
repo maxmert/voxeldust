@@ -1,0 +1,324 @@
+namespace voxeldust.protocol;
+
+// ============================================================
+// Shared primitives
+// ============================================================
+
+struct Vec3d {
+    x: double;
+    y: double;
+    z: double;
+}
+
+struct Quatd {
+    x: double;
+    y: double;
+    z: double;
+    w: double;
+}
+
+// ============================================================
+// Inter-shard messages (QUIC)
+// ============================================================
+
+/// Galaxy context for handoffs between galaxy and system shards.
+table GalaxyHandoffContext {
+    galaxy_seed: uint64;
+    star_index: uint32;
+    star_position: Vec3d;
+}
+
+table PlayerHandoff {
+    session_token: uint64;
+    player_name: string;
+    position: Vec3d;
+    velocity: Vec3d;
+    rotation: Quatd;
+    forward: Vec3d;
+    fly_mode: bool;
+    speed_tier: uint8;
+    grounded: bool;
+    health: float;
+    shield: float;
+    source_shard_id: uint64;
+    source_tick: uint64;
+    /// For galaxy→system handoffs: target star index (0xFFFFFFFF = not set).
+    target_star_index: uint32 = 4294967295;
+    /// For system→galaxy handoffs: galaxy context for coordinate transform.
+    galaxy_context: GalaxyHandoffContext;
+}
+
+table HandoffAccepted {
+    session_token: uint64;
+    target_shard_id: uint64;
+}
+
+table GhostUpdate {
+    session_token: uint64;
+    position: Vec3d;
+    rotation: Quatd;
+    velocity: Vec3d;
+    tick: uint64;
+}
+
+table ShardHeartbeat {
+    shard_id: uint64;
+    tick_ms: float;
+    p99_tick_ms: float;
+    player_count: uint32;
+    chunk_count: uint32;
+}
+
+table SplitDirective {
+    target_shard_id: uint64;
+    /// Sectors to hand off to a new shard.
+    sectors_to_split: [uint8];
+    /// Seed for provisioning the new shard.
+    planet_seed: uint64;
+}
+
+table MergeDirective {
+    absorbing_shard_id: uint64;
+    merging_shard_id: uint64;
+    /// Sectors being transferred to the absorbing shard.
+    sectors: [uint8];
+}
+
+table CrossShardBlockEdits {
+    /// Chunk address bytes (sector, shell, cx, cy, cz).
+    chunk_address: [uint8];
+    /// Block edits: 5 bytes each (bx, by, bz, block_type_lo, block_type_hi).
+    edits: [uint8];
+    /// Monotonic sequence number for this chunk.
+    seq: uint64;
+}
+
+table ShipPositionUpdate {
+    ship_id: uint64;
+    position: Vec3d;
+    velocity: Vec3d;
+    rotation: Quatd;
+    angular_velocity: Vec3d;
+}
+
+/// Pilot control input sent from ship shard to system shard.
+/// Translates player input inside the ship into thrust/rotation
+/// commands applied to the ship's rigid body in the system shard.
+table ShipControlInput {
+    ship_id: uint64;
+    /// Thrust vector in ship-local coordinates.
+    thrust: Vec3d;
+    /// Desired rotation torque.
+    torque: Vec3d;
+    /// Whether the ship is braking (retrograde thrust).
+    braking: bool;
+    /// Tick number on the ship shard.
+    tick: uint64;
+}
+
+/// Snapshot of a celestial body's state for scene rendering.
+table CelestialBodySnapshot {
+    body_id: uint32;       // 0 = star, 1..N = planets
+    position: Vec3d;       // in system coordinates (meters)
+    radius: double;        // meters
+    color_r: float;
+    color_g: float;
+    color_b: float;
+}
+
+/// Snapshot of a ship's state for scene rendering.
+table ShipSnapshotEntry {
+    ship_id: uint64;
+    position: Vec3d;
+    rotation: Quatd;
+    is_own_ship: bool;     // true for the player's own ship
+}
+
+/// Lighting parameters computed by server.
+table LightingInfoMsg {
+    sun_direction: Vec3d;  // normalized, toward star
+    sun_color_r: float;
+    sun_color_g: float;
+    sun_color_b: float;
+    sun_intensity: float;
+    ambient: float;
+}
+
+/// Scene update sent from system shard to ship/planet shards.
+/// Contains positions of all celestial bodies and ships for rendering.
+table SystemSceneUpdate {
+    game_time: double;
+    bodies: [CelestialBodySnapshot];
+    ships: [ShipSnapshotEntry];
+    lighting: LightingInfoMsg;
+}
+
+// Union of all inter-shard message payloads.
+union ShardPayload {
+    PlayerHandoff,
+    HandoffAccepted,
+    GhostUpdate,
+    ShardHeartbeat,
+    SplitDirective,
+    MergeDirective,
+    CrossShardBlockEdits,
+    ShipPositionUpdate,
+    ShipControlInput,
+    SystemSceneUpdate,
+}
+
+/// Root type for all inter-shard QUIC messages.
+table ShardMessage {
+    payload: ShardPayload;
+}
+
+// ============================================================
+// Client ↔ Server messages (TCP/UDP)
+// ============================================================
+
+table Connect {
+    player_name: string;
+}
+
+table JoinResponse {
+    seed: uint64;
+    planet_radius: uint32;
+    player_id: uint64;
+    spawn_position: Vec3d;
+    spawn_rotation: Quatd;
+    spawn_forward: Vec3d;
+    session_token: uint64;
+    shard_type: uint8; // 0=Planet, 1=System, 2=Ship, 3=Galaxy
+    galaxy_seed: uint64;
+    system_seed: uint64;
+    game_time: double;
+    /// Origin of the local coordinate frame in system coords.
+    reference_position: Vec3d;
+    /// Rotation of the local frame (ship rotation or identity).
+    reference_rotation: Quatd;
+}
+
+/// Single star entry in the galaxy catalog.
+table StarCatalogEntry {
+    index: uint32;
+    position: Vec3d;
+    system_seed: uint64;
+    star_class: uint8;  // 0=O, 1=B, 2=A, 3=F, 4=G, 5=K, 6=M
+    luminosity: float;
+}
+
+/// Star catalog sent from galaxy shard to client on join.
+table StarCatalog {
+    galaxy_seed: uint64;
+    stars: [StarCatalogEntry];
+}
+
+table PlayerInput {
+    movement_x: float;
+    movement_y: float;
+    movement_z: float;
+    look_yaw: float;
+    look_pitch: float;
+    jump: bool;
+    fly_toggle: bool;
+    speed_tier: uint8;
+    action: uint8; // 0=none, 1=break, 2=place
+    block_type: uint16;
+    tick: uint64;
+}
+
+table PlayerSnapshot {
+    player_id: uint64;
+    position: Vec3d;
+    rotation: Quatd;
+    velocity: Vec3d;
+    grounded: bool;
+    health: float;
+    shield: float;
+}
+
+table WorldState {
+    tick: uint64;
+    origin: Vec3d;
+    players: [PlayerSnapshot];
+    bodies: [CelestialBodySnapshot];
+    ships: [ShipSnapshotEntry];
+    lighting: LightingInfoMsg;
+    game_time: double;
+}
+
+table BlockMod {
+    bx: uint8;
+    by: uint8;
+    bz: uint8;
+    block_type: uint16;
+}
+
+table ChunkBlockMods {
+    sector: uint8;
+    shell: uint16;
+    cx: uint16;
+    cy: uint16;
+    cz: uint16;
+    seq: uint64;
+    mods: [BlockMod];
+}
+
+table BlockEditRequest {
+    action: uint8; // 1=break, 2=place
+    eye_x: double;
+    eye_y: double;
+    eye_z: double;
+    look_x: double;
+    look_y: double;
+    look_z: double;
+    block_type: uint16;
+}
+
+table ShardRedirectMsg {
+    session_token: uint64;
+    target_tcp_addr: string;
+    target_udp_addr: string;
+    shard_id: uint64;
+}
+
+table DamageEvent {
+    target_id: uint64;
+    source_id: uint64;
+    damage: float;
+    weapon_type: uint8;
+}
+
+table PlayerDestroyed {
+    player_id: uint64;
+    killer_id: uint64;
+    position: Vec3d;
+}
+
+union ServerPayload {
+    JoinResponse,
+    WorldState,
+    ChunkBlockMods,
+    ShardRedirectMsg,
+    DamageEvent,
+    PlayerDestroyed,
+    StarCatalog,
+}
+
+/// Root type for server → client messages.
+table ServerMessage {
+    payload: ServerPayload;
+}
+
+union ClientPayload {
+    Connect,
+    PlayerInput,
+    BlockEditRequest,
+}
+
+/// Root type for client → server messages.
+table ClientMessage {
+    payload: ClientPayload;
+}
+
+root_type ShardMessage;

@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database files (runtime-generated)
+*.redb
+
+# Docker/K8s runtime
+*.tar
+
+# Claude Code
+.claude/

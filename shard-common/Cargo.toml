@@ -1,0 +1,22 @@
+[package]
+name = "voxeldust-shard-common"
+version.workspace = true
+edition.workspace = true
+
+[dev-dependencies]
+glam = { workspace = true }
+
+[dependencies]
+voxeldust-core = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+flatbuffers = { workspace = true }

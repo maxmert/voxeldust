@@ -1,0 +1,12 @@
+[package]
+name = "voxeldust-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+flatbuffers = { workspace = true }
+thiserror = { workspace = true }
+brahe = { workspace = true }
+nalgebra = { workspace = true }

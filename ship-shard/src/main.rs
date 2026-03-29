@@ -1,0 +1,554 @@
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
+use clap::Parser;
+use glam::{DQuat, DVec3, Vec3};
+use rapier3d::prelude::*;
+use tracing::info;
+
+use voxeldust_core::client_message::{
+    CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData,
+    ServerMsg, ShipRenderData, WorldStateData,
+};
+use voxeldust_core::shard_message::{
+    CelestialBodySnapshotData, LightingInfoData, ShardMsg, ShipControlInput,
+    ShipSnapshotEntryData,
+};
+use voxeldust_core::shard_types::{ShardId, ShardType, SessionToken};
+use voxeldust_shard_common::client_listener;
+use voxeldust_shard_common::harness::{ShardHarness, ShardHarnessConfig};
+
+#[derive(Parser, Debug)]
+#[command(name = "ship-shard", about = "Voxeldust ship shard — ship interior physics")]
+struct Args {
+    #[arg(long)]
+    shard_id: u64,
+    #[arg(long, default_value = "0")]
+    ship_id: u64,
+    #[arg(long)]
+    host_shard: Option<u64>,
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
+    orchestrator: String,
+    #[arg(long, default_value = "127.0.0.1:9090")]
+    orchestrator_heartbeat: String,
+    #[arg(long, default_value = "7777")]
+    tcp_port: u16,
+    #[arg(long, default_value = "7778")]
+    udp_port: u16,
+    #[arg(long, default_value = "7779")]
+    quic_port: u16,
+    #[arg(long, default_value = "8081")]
+    healthz_port: u16,
+    #[arg(long)]
+    advertise_host: Option<String>,
+    #[arg(long, default_value = "0")]
+    seed: u64,
+}
+
+const SHIP_WIDTH: f32 = 4.0;
+const SHIP_LENGTH: f32 = 8.0;
+const SHIP_HEIGHT: f32 = 3.0;
+const WALL_THICKNESS: f32 = 0.1;
+const WALK_SPEED: f32 = 4.0;
+const JUMP_IMPULSE: f32 = 5.0;
+const THRUST_FORCE: f64 = 50_000.0; // Newtons
+const TORQUE_FORCE: f64 = 5_000.0;
+
+// Interaction points (ship-local coordinates).
+const PILOT_SEAT: Vec3 = Vec3::new(0.0, 0.5, -3.0);
+const EXIT_DOOR: Vec3 = Vec3::new(2.0, 0.5, 0.0);
+const INTERACT_DIST: f32 = 1.5;
+
+/// Configurable gravity source — future: one per gravity block.
+/// For now, ships have a single default source (floor plates).
+#[derive(Clone)]
+struct GravitySource {
+    /// Direction of gravity in ship-local space.
+    direction: Vec3,
+    /// Strength in m/s².
+    strength: f32,
+    /// Shape of the gravity field.
+    shape: GravityShape,
+}
+
+#[derive(Clone)]
+enum GravityShape {
+    /// Applies uniformly everywhere in the ship.
+    Uniform,
+    // Future: Sphere { radius: f32 }, Zone { min: Vec3, max: Vec3 }
+}
+
+impl GravitySource {
+    fn default_floor_plates() -> Self {
+        Self {
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            strength: 9.81,
+            shape: GravityShape::Uniform,
+        }
+    }
+
+    /// Compute gravity vector at a given ship-local position.
+    fn gravity_at(&self, _position: Vec3) -> Vector<f32> {
+        match self.shape {
+            GravityShape::Uniform => {
+                let g = self.direction * self.strength;
+                vector![g.x, g.y, g.z]
+            }
+            // Future: Sphere/Zone would check distance/containment
+        }
+    }
+}
+
+struct ShipInteriorState {
+    // Rapier physics
+    rigid_body_set: RigidBodySet,
+    collider_set: ColliderSet,
+    /// Gravity sources in the ship. Future: populated from gravity blocks.
+    gravity_sources: Vec<GravitySource>,
+    integration_params: IntegrationParameters,
+    physics_pipeline: PhysicsPipeline,
+    island_manager: IslandManager,
+    broad_phase: DefaultBroadPhase,
+    narrow_phase: NarrowPhase,
+    impulse_joint_set: ImpulseJointSet,
+    multibody_joint_set: MultibodyJointSet,
+    ccd_solver: CCDSolver,
+    query_pipeline: QueryPipeline,
+
+    // Player
+    player_body: Option<RigidBodyHandle>,
+    player_position: Vec3,
+    player_yaw: f32,
+    is_piloting: bool,
+    gravity_enabled: bool,
+
+    // Ship exterior state (from system shard)
+    ship_position: DVec3,
+    ship_velocity: DVec3,
+    ship_rotation: DQuat,
+
+    // Cached scene from system shard
+    scene_bodies: Vec<CelestialBodySnapshotData>,
+    scene_lighting: Option<LightingInfoData>,
+    game_time: f64,
+
+    // Pilot thrust (accumulated from input, sent each tick, then reset)
+    pilot_thrust: DVec3,
+    pilot_torque: DVec3,
+
+    // Identity
+    ship_id: u64,
+    host_shard_id: Option<ShardId>,
+    tick_count: u64,
+
+    // Input state
+    last_action: u8,
+    prev_action: u8,
+}
+
+impl ShipInteriorState {
+    fn new(ship_id: u64, host_shard_id: Option<ShardId>) -> Self {
+        let mut rigid_body_set = RigidBodySet::new();
+        let mut collider_set = ColliderSet::new();
+
+        // Ship interior colliders.
+        let floor = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, WALL_THICKNESS, SHIP_LENGTH / 2.0)
+            .translation(vector![0.0, -WALL_THICKNESS, 0.0]).build();
+        collider_set.insert(floor);
+
+        let ceiling = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, WALL_THICKNESS, SHIP_LENGTH / 2.0)
+            .translation(vector![0.0, SHIP_HEIGHT + WALL_THICKNESS, 0.0]).build();
+        collider_set.insert(ceiling);
+
+        let left = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, SHIP_LENGTH / 2.0)
+            .translation(vector![-SHIP_WIDTH / 2.0 - WALL_THICKNESS, SHIP_HEIGHT / 2.0, 0.0]).build();
+        collider_set.insert(left);
+
+        let right = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, SHIP_LENGTH / 2.0)
+            .translation(vector![SHIP_WIDTH / 2.0 + WALL_THICKNESS, SHIP_HEIGHT / 2.0, 0.0]).build();
+        collider_set.insert(right);
+
+        let back = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, SHIP_HEIGHT / 2.0, WALL_THICKNESS)
+            .translation(vector![0.0, SHIP_HEIGHT / 2.0, SHIP_LENGTH / 2.0 + WALL_THICKNESS]).build();
+        collider_set.insert(back);
+
+        let front = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, SHIP_HEIGHT / 2.0, WALL_THICKNESS)
+            .translation(vector![0.0, SHIP_HEIGHT / 2.0, -SHIP_LENGTH / 2.0 - WALL_THICKNESS]).build();
+        collider_set.insert(front);
+
+        // Player capsule.
+        let player_rb = RigidBodyBuilder::dynamic()
+            .translation(vector![0.0, 1.0, 0.0])
+            .lock_rotations()
+            .build();
+        let player_handle = rigid_body_set.insert(player_rb);
+        let player_collider = ColliderBuilder::capsule_y(0.6, 0.3).build();
+        collider_set.insert_with_parent(player_collider, player_handle, &mut rigid_body_set);
+
+        Self {
+            rigid_body_set, collider_set,
+            gravity_sources: vec![GravitySource::default_floor_plates()],
+            integration_params: IntegrationParameters::default(),
+            physics_pipeline: PhysicsPipeline::new(),
+            island_manager: IslandManager::new(),
+            broad_phase: DefaultBroadPhase::new(),
+            narrow_phase: NarrowPhase::new(),
+            impulse_joint_set: ImpulseJointSet::new(),
+            multibody_joint_set: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            query_pipeline: QueryPipeline::new(),
+            player_body: Some(player_handle),
+            player_position: Vec3::new(0.0, 1.0, 0.0),
+            player_yaw: 0.0,
+            is_piloting: false,
+            gravity_enabled: true,
+            ship_position: DVec3::ZERO,
+            ship_velocity: DVec3::ZERO,
+            ship_rotation: DQuat::IDENTITY,
+            scene_bodies: vec![],
+            scene_lighting: None,
+            game_time: 0.0,
+            pilot_thrust: DVec3::ZERO,
+            pilot_torque: DVec3::ZERO,
+            ship_id, host_shard_id,
+            tick_count: 0,
+            last_action: 0,
+            prev_action: 0,
+        }
+    }
+
+    fn step(&mut self) {
+        // Compute gravity from all sources at the player's position.
+        let gravity = if self.gravity_enabled {
+            let mut total = vector![0.0, 0.0, 0.0];
+            for source in &self.gravity_sources {
+                total += source.gravity_at(self.player_position);
+            }
+            total
+        } else {
+            vector![0.0, 0.0, 0.0]
+        };
+
+        self.physics_pipeline.step(
+            &gravity, &self.integration_params,
+            &mut self.island_manager, &mut self.broad_phase, &mut self.narrow_phase,
+            &mut self.rigid_body_set, &mut self.collider_set,
+            &mut self.impulse_joint_set, &mut self.multibody_joint_set,
+            &mut self.ccd_solver, Some(&mut self.query_pipeline), &(), &(),
+        );
+        if let Some(handle) = self.player_body {
+            if let Some(body) = self.rigid_body_set.get(handle) {
+                let t = body.translation();
+                self.player_position = Vec3::new(t.x, t.y, t.z);
+            }
+        }
+    }
+
+    fn build_world_state(&self) -> WorldStateData {
+        let bodies: Vec<CelestialBodyData> = self.scene_bodies.iter().map(|b| {
+            CelestialBodyData {
+                body_id: b.body_id,
+                position: b.position,
+                radius: b.radius,
+                color: b.color,
+            }
+        }).collect();
+
+        let lighting = self.scene_lighting.as_ref().map(|l| LightingData {
+            sun_direction: l.sun_direction,
+            sun_color: l.sun_color,
+            sun_intensity: l.sun_intensity,
+            ambient: l.ambient,
+        });
+
+        WorldStateData {
+            tick: self.tick_count,
+            origin: self.ship_position,
+            players: vec![PlayerSnapshotData {
+                player_id: 0,
+                position: DVec3::new(
+                    self.player_position.x as f64,
+                    self.player_position.y as f64,
+                    self.player_position.z as f64,
+                ),
+                rotation: if self.is_piloting { self.ship_rotation } else { DQuat::IDENTITY },
+                velocity: self.ship_velocity,
+                grounded: !self.is_piloting,
+                health: 100.0,
+                shield: 100.0,
+            }],
+            bodies,
+            ships: vec![],
+            lighting,
+            game_time: self.game_time,
+        }
+    }
+}
+
+fn main() {
+    let args = Args::parse();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let ship_id = if args.ship_id > 0 { args.ship_id } else { args.seed };
+    let host_shard_id = args.host_shard.map(ShardId);
+
+    let bind = "0.0.0.0";
+    let config = ShardHarnessConfig {
+        shard_id: ShardId(args.shard_id),
+        shard_type: ShardType::Ship,
+        tcp_addr: format!("{bind}:{}", args.tcp_port).parse().unwrap(),
+        udp_addr: format!("{bind}:{}", args.udp_port).parse().unwrap(),
+        quic_addr: format!("{bind}:{}", args.quic_port).parse().unwrap(),
+        orchestrator_url: args.orchestrator.clone(),
+        orchestrator_heartbeat_addr: args.orchestrator_heartbeat,
+        healthz_addr: format!("{bind}:{}", args.healthz_port).parse().unwrap(),
+        planet_seed: None,
+        system_seed: None,
+        ship_id: Some(ship_id),
+        galaxy_seed: None,
+        host_shard_id,
+        advertise_host: args.advertise_host,
+    };
+
+    info!(shard_id = args.shard_id, ship_id, host_shard = ?host_shard_id, "ship shard starting");
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    rt.block_on(async {
+        let mut harness = ShardHarness::new(config);
+
+        let state = Arc::new(Mutex::new(ShipInteriorState::new(ship_id, host_shard_id)));
+        let client_registry = harness.client_registry.clone();
+
+        // Take channels from harness.
+        let mut connect_rx = std::mem::replace(
+            &mut harness.connect_rx,
+            tokio::sync::mpsc::unbounded_channel().1,
+        );
+        let mut input_rx = std::mem::replace(
+            &mut harness.input_rx,
+            tokio::sync::mpsc::unbounded_channel().1,
+        );
+        let mut quic_msg_rx = std::mem::replace(
+            &mut harness.quic_msg_rx,
+            tokio::sync::mpsc::unbounded_channel().1,
+        );
+        let broadcast_tx = harness.broadcast_tx.clone();
+        let quic_send_tx = harness.quic_send_tx.clone();
+        let peer_registry = harness.peer_registry.clone();
+
+        // System 1: Drain client connections + send JoinResponse.
+        let state_connect = state.clone();
+        let registry_connect = client_registry.clone();
+        let orchestrator_url = args.orchestrator.clone();
+        harness.add_system("drain_connects", move || {
+            while let Ok(event) = connect_rx.try_recv() {
+                let conn = event.connection;
+                let token = conn.session_token;
+
+                if let Ok(mut reg) = registry_connect.try_write() {
+                    reg.register(&conn);
+                }
+
+                let st = state_connect.lock().unwrap();
+                let tcp_stream = conn.tcp_stream.clone();
+                let ship_pos = st.ship_position;
+                let ship_rot = st.ship_rotation;
+                let game_time = st.game_time;
+                let ship_id = st.ship_id;
+
+                tokio::spawn(async move {
+                    let jr = ServerMsg::JoinResponse(JoinResponseData {
+                        seed: ship_id,
+                        planet_radius: 0,
+                        player_id: token.0,
+                        spawn_position: DVec3::new(0.0, 1.0, 0.0),
+                        spawn_rotation: DQuat::IDENTITY,
+                        spawn_forward: DVec3::NEG_Z,
+                        session_token: token,
+                        shard_type: 2, // Ship
+                        galaxy_seed: 0,
+                        system_seed: 0,
+                        game_time,
+                        reference_position: ship_pos,
+                        reference_rotation: ship_rot,
+                    });
+                    let mut stream = tcp_stream.lock().await;
+                    let _ = client_listener::send_tcp_msg(&mut stream, &jr).await;
+                });
+
+                info!(player = %conn.player_name, session = token.0, "player entered ship");
+            }
+        });
+
+        // System 2: Drain PlayerInput from UDP.
+        let state_input = state.clone();
+        harness.add_system("drain_input", move || {
+            while let Ok((_src, input)) = input_rx.try_recv() {
+                let mut st = state_input.lock().unwrap();
+                st.prev_action = st.last_action;
+                st.last_action = input.action;
+                st.player_yaw = input.look_yaw;
+
+                if st.is_piloting {
+                    // Pilot mode: WASD → thrust in ship-local frame.
+                    st.pilot_thrust = DVec3::new(
+                        input.movement[0] as f64 * THRUST_FORCE,
+                        input.movement[1] as f64 * THRUST_FORCE,
+                        input.movement[2] as f64 * THRUST_FORCE,
+                    );
+                    // Mouse look_yaw/pitch is the desired turn rate (-1 to 1).
+                    // Pass through directly — system shard interprets as target angular rate.
+                    st.pilot_torque = DVec3::new(
+                        input.look_pitch as f64, // pitch rate
+                        input.look_yaw as f64,   // yaw rate
+                        0.0,                      // roll
+                    );
+                } else if let Some(handle) = st.player_body {
+                    // Walking mode: apply velocity to Rapier body.
+                    let (sin_y, cos_y) = st.player_yaw.sin_cos();
+                    let fwd = Vec3::new(cos_y, 0.0, sin_y);
+                    let right = Vec3::new(-sin_y, 0.0, cos_y);
+
+                    let move_vel = fwd * input.movement[2] * WALK_SPEED
+                        + right * input.movement[0] * WALK_SPEED;
+
+                    if let Some(body) = st.rigid_body_set.get_mut(handle) {
+                        let current_vel = *body.linvel();
+                        body.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
+
+                        if input.jump && current_vel.y.abs() < 0.1 {
+                            body.apply_impulse(vector![0.0, JUMP_IMPULSE, 0.0], true);
+                        }
+                    }
+                }
+            }
+        });
+
+        // System 3: Drain QUIC messages from system shard.
+        let state_quic = state.clone();
+        harness.add_system("drain_quic", move || {
+            while let Ok(msg) = quic_msg_rx.try_recv() {
+                let mut st = state_quic.lock().unwrap();
+                match msg {
+                    ShardMsg::SystemSceneUpdate(data) => {
+                        st.scene_bodies = data.bodies;
+                        st.scene_lighting = Some(data.lighting);
+                        st.game_time = data.game_time;
+                    }
+                    ShardMsg::ShipPositionUpdate(data) => {
+                        st.ship_position = data.position;
+                        st.ship_velocity = data.velocity;
+                        st.ship_rotation = data.rotation;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // System 4: Interaction — pilot seat + exit door.
+        let state_interact = state.clone();
+        harness.add_system("interaction", move || {
+            let mut st = state_interact.lock().unwrap();
+            // Action key pressed this tick (rising edge: action == 3, prev != 3).
+            let action_pressed = st.last_action == 3 && st.prev_action != 3;
+
+            if action_pressed {
+                let pos = st.player_position;
+                let dist_to_seat = (pos - PILOT_SEAT).length();
+                let dist_to_exit = (pos - EXIT_DOOR).length();
+
+                if dist_to_seat < INTERACT_DIST {
+                    st.is_piloting = !st.is_piloting;
+                    if st.is_piloting {
+                        // Lock player in seat.
+                        if let Some(handle) = st.player_body {
+                            if let Some(body) = st.rigid_body_set.get_mut(handle) {
+                                body.set_linvel(vector![0.0, 0.0, 0.0], true);
+                            }
+                        }
+                        info!("entered pilot mode");
+                    } else {
+                        info!("exited pilot mode");
+                    }
+                } else if dist_to_exit < INTERACT_DIST {
+                    info!("exit door interaction — handoff TODO");
+                }
+            }
+        });
+
+        // System 5: Send pilot thrust to system shard via QUIC.
+        let state_pilot = state.clone();
+        let peer_reg = peer_registry.clone();
+        harness.add_system("pilot_send", move || {
+            let mut st = state_pilot.lock().unwrap();
+            if !st.is_piloting { return; }
+
+            if let Some(host_id) = st.host_shard_id {
+                if let Ok(reg) = peer_reg.try_read() {
+                    if let Some(addr) = reg.quic_addr(host_id) {
+                        let msg = ShardMsg::ShipControlInput(ShipControlInput {
+                            ship_id: st.ship_id,
+                            thrust: st.pilot_thrust,
+                            torque: st.pilot_torque,
+                            braking: false,
+                            tick: st.tick_count,
+                        });
+                        if st.tick_count % 100 == 0 {
+                            info!(thrust_z = st.pilot_thrust.z, %addr, "sending ShipControlInput");
+                        }
+                        let _ = quic_send_tx.send((host_id, addr, msg));
+                    } else if st.tick_count % 100 == 0 {
+                        let all_peers: Vec<_> = reg.all().iter().map(|s| format!("{}({})", s.id, s.shard_type)).collect();
+                        info!(host = host_id.0, peers = ?all_peers, "host shard not found in peer registry");
+                    }
+                } else if st.tick_count % 100 == 0 {
+                    info!("peer_reg lock failed");
+                }
+            } else if st.tick_count % 100 == 0 {
+                info!("no host_shard_id");
+            }
+
+            st.pilot_thrust = DVec3::ZERO;
+            st.pilot_torque = DVec3::ZERO;
+        });
+
+        // System 6: Physics step.
+        let state_physics = state.clone();
+        harness.add_system("physics_step", move || {
+            let mut st = state_physics.lock().unwrap();
+            st.tick_count += 1;
+            st.step();
+        });
+
+        // System 7: Broadcast WorldState to client.
+        let state_broadcast = state.clone();
+        harness.add_system("broadcast", move || {
+            let st = state_broadcast.lock().unwrap();
+            let ws = ServerMsg::WorldState(st.build_world_state());
+            let _ = broadcast_tx.send(ws);
+        });
+
+        // System 8: Periodic log.
+        let state_log = state.clone();
+        harness.add_system("log_state", move || {
+            let st = state_log.lock().unwrap();
+            if st.tick_count % 100 == 0 {
+                info!(
+                    pos = format!("({:.1}, {:.1}, {:.1})", st.player_position.x, st.player_position.y, st.player_position.z),
+                    piloting = st.is_piloting,
+                    gravity = st.gravity_enabled,
+                    tick = st.tick_count,
+                    "ship state"
+                );
+            }
+        });
+
+        harness.run().await;
+    });
+}

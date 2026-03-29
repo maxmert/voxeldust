@@ -1,0 +1,19 @@
+[package]
+name = "system-shard"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "system-shard"
+path = "src/main.rs"
+
+[dependencies]
+voxeldust-core = { workspace = true }
+voxeldust-shard-common = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "shard-common",
+    "orchestrator",
+    "gateway",
+    "stub-shard",
+    "e2e-tests",
+    "system-shard",
+    "ship-shard",
+    "planet-shard",
+    "voxydust",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+voxeldust-core = { path = "core" }
+voxeldust-shard-common = { path = "shard-common" }
+glam = { version = "0.29", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+thiserror = "2"
+flatbuffers = "24.12.23"
+axum = "0.8"
+redb = "2"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+brahe = "1.2"
+nalgebra = "0.34"
+rapier3d = "0.22"
+wgpu = "23"
+winit = "0.30"
+egui = "0.30"
+egui-wgpu = "0.30"
+egui-winit = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.dev.package.noise]
+opt-level = 3
+
+[profile.dev.package.voxeldust-core]
+opt-level = 2
