@@ -11,8 +11,8 @@ use voxeldust_core::client_message::{
     ServerMsg, ShipRenderData, WorldStateData,
 };
 use voxeldust_core::shard_message::{
-    CelestialBodySnapshotData, LightingInfoData, ShardMsg, ShipControlInput,
-    ShipSnapshotEntryData,
+    AutopilotCommandData, CelestialBodySnapshotData, LightingInfoData, ShardMsg,
+    ShipControlInput, ShipSnapshotEntryData,
 };
 use voxeldust_core::shard_types::{ShardId, ShardType, SessionToken};
 use voxeldust_shard_common::client_listener;
@@ -43,6 +43,8 @@ struct Args {
     advertise_host: Option<String>,
     #[arg(long, default_value = "0")]
     seed: u64,
+    #[arg(long, default_value = "0")]
+    system_seed: u64,
 }
 
 const SHIP_WIDTH: f32 = 4.0;
@@ -144,10 +146,14 @@ struct ShipInteriorState {
     // Input state
     last_action: u8,
     prev_action: u8,
+
+    // Autopilot
+    autopilot_target_body_id: Option<u32>,
+    pending_autopilot_cmd: Option<(u32, u8)>, // (target_body_id, speed_tier)
 }
 
 impl ShipInteriorState {
-    fn new(ship_id: u64, host_shard_id: Option<ShardId>) -> Self {
+    fn new(ship_id: u64, host_shard_id: Option<ShardId>, system_seed: u64) -> Self {
         let mut rigid_body_set = RigidBodySet::new();
         let mut collider_set = ColliderSet::new();
 
@@ -185,7 +191,7 @@ impl ShipInteriorState {
         let player_collider = ColliderBuilder::capsule_y(0.6, 0.3).build();
         collider_set.insert_with_parent(player_collider, player_handle, &mut rigid_body_set);
 
-        Self {
+        let mut s = Self {
             rigid_body_set, collider_set,
             gravity_sources: vec![GravitySource::default_floor_plates()],
             integration_params: IntegrationParameters::default(),
@@ -202,7 +208,7 @@ impl ShipInteriorState {
             player_yaw: 0.0,
             is_piloting: false,
             gravity_enabled: true,
-            ship_position: DVec3::ZERO,
+            ship_position: DVec3::ZERO, // overwritten below
             ship_velocity: DVec3::ZERO,
             ship_rotation: DQuat::IDENTITY,
             scene_bodies: vec![],
@@ -214,7 +220,43 @@ impl ShipInteriorState {
             tick_count: 0,
             last_action: 0,
             prev_action: 0,
+            autopilot_target_body_id: None,
+            pending_autopilot_cmd: None,
+        };
+
+        // Initialize ship position and scene from system seed so the ship
+        // has correct state before the system shard's first QUIC update.
+        if system_seed > 0 {
+            use voxeldust_core::system::{SystemParams, compute_planet_position, compute_lighting};
+            let sys = SystemParams::from_seed(system_seed);
+            let planet_pos = compute_planet_position(&sys.planets[0], 0.0);
+            s.ship_position = planet_pos + DVec3::new(sys.scale.spawn_offset, 0.0, 0.0);
+
+            s.scene_bodies.push(CelestialBodySnapshotData {
+                body_id: 0,
+                position: DVec3::ZERO,
+                radius: sys.star.radius_m,
+                color: sys.star.color,
+            });
+            for (i, planet) in sys.planets.iter().enumerate() {
+                let pos = compute_planet_position(planet, 0.0);
+                s.scene_bodies.push(CelestialBodySnapshotData {
+                    body_id: (i + 1) as u32,
+                    position: pos,
+                    radius: planet.radius_m,
+                    color: planet.color,
+                });
+            }
+            let l = compute_lighting(s.ship_position, &sys.star);
+            s.scene_lighting = Some(LightingInfoData {
+                sun_direction: l.sun_direction,
+                sun_color: l.sun_color,
+                sun_intensity: l.sun_intensity,
+                ambient: l.ambient,
+            });
         }
+
+        s
     }
 
     fn step(&mut self) {
@@ -309,7 +351,7 @@ fn main() {
         orchestrator_heartbeat_addr: args.orchestrator_heartbeat,
         healthz_addr: format!("{bind}:{}", args.healthz_port).parse().unwrap(),
         planet_seed: None,
-        system_seed: None,
+        system_seed: if args.system_seed > 0 { Some(args.system_seed) } else { None },
         ship_id: Some(ship_id),
         galaxy_seed: None,
         host_shard_id,
@@ -322,7 +364,7 @@ fn main() {
     rt.block_on(async {
         let mut harness = ShardHarness::new(config);
 
-        let state = Arc::new(Mutex::new(ShipInteriorState::new(ship_id, host_shard_id)));
+        let state = Arc::new(Mutex::new(ShipInteriorState::new(ship_id, host_shard_id, args.system_seed)));
         let client_registry = harness.client_registry.clone();
 
         // Take channels from harness.
@@ -346,6 +388,7 @@ fn main() {
         let state_connect = state.clone();
         let registry_connect = client_registry.clone();
         let orchestrator_url = args.orchestrator.clone();
+        let system_seed_for_jr = args.system_seed;
         harness.add_system("drain_connects", move || {
             while let Ok(event) = connect_rx.try_recv() {
                 let conn = event.connection;
@@ -373,7 +416,7 @@ fn main() {
                         session_token: token,
                         shard_type: 2, // Ship
                         galaxy_seed: 0,
-                        system_seed: 0,
+                        system_seed: system_seed_for_jr,
                         game_time,
                         reference_position: ship_pos,
                         reference_rotation: ship_rot,
@@ -396,19 +439,61 @@ fn main() {
                 st.player_yaw = input.look_yaw;
 
                 if st.is_piloting {
-                    // Pilot mode: WASD → thrust in ship-local frame.
-                    st.pilot_thrust = DVec3::new(
-                        input.movement[0] as f64 * THRUST_FORCE,
-                        input.movement[1] as f64 * THRUST_FORCE,
-                        input.movement[2] as f64 * THRUST_FORCE,
-                    );
-                    // Mouse look_yaw/pitch is the desired turn rate (-1 to 1).
-                    // Pass through directly — system shard interprets as target angular rate.
-                    st.pilot_torque = DVec3::new(
-                        input.look_pitch as f64, // pitch rate
-                        input.look_yaw as f64,   // yaw rate
-                        0.0,                      // roll
-                    );
+                    // Autopilot toggle (T key = action 4, rising edge).
+                    let autopilot_pressed = input.action == 4 && st.prev_action != 4;
+                    if autopilot_pressed {
+                        if st.autopilot_target_body_id.is_some() {
+                            // Disengage.
+                            st.autopilot_target_body_id = None;
+                            st.pending_autopilot_cmd = Some((0xFFFFFFFF, 0));
+                            info!("autopilot disengage requested");
+                        } else {
+                            // Engage: find planet most aligned with ship forward.
+                            let ship_fwd = st.ship_rotation * DVec3::NEG_Z;
+                            let mut best_body_id: Option<u32> = None;
+                            let mut best_dot = 0.9; // ~25° alignment threshold
+                            for body in &st.scene_bodies {
+                                if body.body_id == 0 { continue; } // skip star
+                                let to_body = (body.position - st.ship_position).normalize_or_zero();
+                                let d = ship_fwd.dot(to_body);
+                                if d > best_dot {
+                                    best_dot = d;
+                                    best_body_id = Some(body.body_id);
+                                }
+                            }
+                            if let Some(body_id) = best_body_id {
+                                st.autopilot_target_body_id = Some(body_id);
+                                st.pending_autopilot_cmd = Some((body_id, input.speed_tier));
+                                info!(body_id, "autopilot engage requested");
+                            }
+                        }
+                    }
+
+                    // Cancel autopilot on manual WASD input.
+                    if st.autopilot_target_body_id.is_some() {
+                        let has_manual = input.movement[0].abs() > 0.01
+                            || input.movement[1].abs() > 0.01
+                            || input.movement[2].abs() > 0.01;
+                        if has_manual {
+                            st.autopilot_target_body_id = None;
+                            st.pending_autopilot_cmd = Some((0xFFFFFFFF, 0));
+                            info!("autopilot cancelled by manual input");
+                        }
+                    }
+
+                    // Pilot mode: WASD → thrust (only when autopilot is off).
+                    if st.autopilot_target_body_id.is_none() {
+                        st.pilot_thrust = DVec3::new(
+                            input.movement[0] as f64 * THRUST_FORCE,
+                            input.movement[1] as f64 * THRUST_FORCE,
+                            input.movement[2] as f64 * THRUST_FORCE,
+                        );
+                        st.pilot_torque = DVec3::new(
+                            input.look_pitch as f64,
+                            input.look_yaw as f64,
+                            0.0,
+                        );
+                    }
                 } else if let Some(handle) = st.player_body {
                     // Walking mode: apply velocity to Rapier body.
                     let (sin_y, cos_y) = st.player_yaw.sin_cos();
@@ -502,7 +587,20 @@ fn main() {
                         if st.tick_count % 100 == 0 {
                             info!(thrust_z = st.pilot_thrust.z, %addr, "sending ShipControlInput");
                         }
-                        let _ = quic_send_tx.send((host_id, addr, msg));
+                        // Only send manual control when autopilot is not active.
+                        if st.autopilot_target_body_id.is_none() {
+                            let _ = quic_send_tx.send((host_id, addr, msg));
+                        }
+
+                        // Send pending autopilot command.
+                        if let Some((target, tier)) = st.pending_autopilot_cmd.take() {
+                            let ap_msg = ShardMsg::AutopilotCommand(AutopilotCommandData {
+                                ship_id: st.ship_id,
+                                target_body_id: target,
+                                speed_tier: tier,
+                            });
+                            let _ = quic_send_tx.send((host_id, addr, ap_msg));
+                        }
                     } else if st.tick_count % 100 == 0 {
                         let all_peers: Vec<_> = reg.all().iter().map(|s| format!("{}({})", s.id, s.shard_type)).collect();
                         info!(host = host_id.0, peers = ?all_peers, "host shard not found in peer registry");

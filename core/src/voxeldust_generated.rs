@@ -13,10 +13,10 @@ pub mod protocol {
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 10;
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 11;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 11] = [
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 12] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -28,6 +28,7 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 11] = [
   ShardPayload::ShipPositionUpdate,
   ShardPayload::ShipControlInput,
   ShardPayload::SystemSceneUpdate,
+  ShardPayload::AutopilotCommand,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -46,9 +47,10 @@ impl ShardPayload {
   pub const ShipPositionUpdate: Self = Self(8);
   pub const ShipControlInput: Self = Self(9);
   pub const SystemSceneUpdate: Self = Self(10);
+  pub const AutopilotCommand: Self = Self(11);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 10;
+  pub const ENUM_MAX: u8 = 11;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -61,6 +63,7 @@ impl ShardPayload {
     Self::ShipPositionUpdate,
     Self::ShipControlInput,
     Self::SystemSceneUpdate,
+    Self::AutopilotCommand,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -76,6 +79,7 @@ impl ShardPayload {
       Self::ShipPositionUpdate => Some("ShipPositionUpdate"),
       Self::ShipControlInput => Some("ShipControlInput"),
       Self::SystemSceneUpdate => Some("SystemSceneUpdate"),
+      Self::AutopilotCommand => Some("AutopilotCommand"),
       _ => None,
     }
   }
@@ -2325,6 +2329,140 @@ impl ::core::fmt::Debug for ShipControlInput<'_> {
       ds.finish()
   }
 }
+pub enum AutopilotCommandOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Autopilot command sent from ship shard to system shard.
+pub struct AutopilotCommand<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for AutopilotCommand<'a> {
+  type Inner = AutopilotCommand<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> AutopilotCommand<'a> {
+  pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_TARGET_BODY_ID: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SPEED_TIER: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    AutopilotCommand { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args AutopilotCommandArgs
+  ) -> ::flatbuffers::WIPOffset<AutopilotCommand<'bldr>> {
+    let mut builder = AutopilotCommandBuilder::new(_fbb);
+    builder.add_ship_id(args.ship_id);
+    builder.add_target_body_id(args.target_body_id);
+    builder.add_speed_tier(args.speed_tier);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(AutopilotCommand::VT_SHIP_ID, Some(0)).unwrap()}
+  }
+  /// Target body id: 0 = star, 1..N = planets.
+  /// 0xFFFFFFFF = disengage autopilot.
+  #[inline]
+  pub fn target_body_id(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(AutopilotCommand::VT_TARGET_BODY_ID, Some(0)).unwrap()}
+  }
+  /// Speed tier (0=maneuver, 1=1g, 2=3g, 3=6g).
+  #[inline]
+  pub fn speed_tier(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(AutopilotCommand::VT_SPEED_TIER, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for AutopilotCommand<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
+     .visit_field::<u32>("target_body_id", Self::VT_TARGET_BODY_ID, false)?
+     .visit_field::<u8>("speed_tier", Self::VT_SPEED_TIER, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct AutopilotCommandArgs {
+    pub ship_id: u64,
+    pub target_body_id: u32,
+    pub speed_tier: u8,
+}
+impl<'a> Default for AutopilotCommandArgs {
+  #[inline]
+  fn default() -> Self {
+    AutopilotCommandArgs {
+      ship_id: 0,
+      target_body_id: 0,
+      speed_tier: 0,
+    }
+  }
+}
+
+pub struct AutopilotCommandBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AutopilotCommandBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ship_id(&mut self, ship_id: u64) {
+    self.fbb_.push_slot::<u64>(AutopilotCommand::VT_SHIP_ID, ship_id, 0);
+  }
+  #[inline]
+  pub fn add_target_body_id(&mut self, target_body_id: u32) {
+    self.fbb_.push_slot::<u32>(AutopilotCommand::VT_TARGET_BODY_ID, target_body_id, 0);
+  }
+  #[inline]
+  pub fn add_speed_tier(&mut self, speed_tier: u8) {
+    self.fbb_.push_slot::<u8>(AutopilotCommand::VT_SPEED_TIER, speed_tier, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> AutopilotCommandBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    AutopilotCommandBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<AutopilotCommand<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for AutopilotCommand<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("AutopilotCommand");
+      ds.field("ship_id", &self.ship_id());
+      ds.field("target_body_id", &self.target_body_id());
+      ds.field("speed_tier", &self.speed_tier());
+      ds.finish()
+  }
+}
 pub enum CelestialBodySnapshotOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -3186,6 +3324,21 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_autopilot_command(&self) -> Option<AutopilotCommand<'a>> {
+    if self.payload_type() == ShardPayload::AutopilotCommand {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { AutopilotCommand::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -3206,6 +3359,7 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::ShipPositionUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipPositionUpdate>>("ShardPayload::ShipPositionUpdate", pos),
           ShardPayload::ShipControlInput => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipControlInput>>("ShardPayload::ShipControlInput", pos),
           ShardPayload::SystemSceneUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SystemSceneUpdate>>("ShardPayload::SystemSceneUpdate", pos),
+          ShardPayload::AutopilotCommand => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<AutopilotCommand>>("ShardPayload::AutopilotCommand", pos),
           _ => Ok(()),
         }
      })?
@@ -3325,6 +3479,13 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::SystemSceneUpdate => {
           if let Some(x) = self.payload_as_system_scene_update() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::AutopilotCommand => {
+          if let Some(x) = self.payload_as_autopilot_command() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

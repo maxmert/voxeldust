@@ -18,6 +18,7 @@ use voxeldust_core::system::{
     compute_gravity_acceleration, compute_lighting, compute_planet_position, compute_soi_radius,
     SystemParams,
 };
+use voxeldust_core::autopilot::{self, FlightPhase, GuidanceCommand};
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{ShardHarness, ShardHarnessConfig};
 
@@ -44,6 +45,13 @@ struct Args {
     advertise_host: Option<String>,
 }
 
+struct AutopilotState {
+    target_planet_index: usize,
+    thrust_tier: u8,
+    intercept_pos: DVec3,
+    last_solve_tick: u64,
+}
+
 struct ShipState {
     ship_id: u64,
     position: DVec3,
@@ -52,6 +60,7 @@ struct ShipState {
     angular_velocity: DVec3,
     thrust: DVec3,
     torque: DVec3,
+    autopilot: Option<AutopilotState>,
 }
 
 /// Maximum angular velocity (rad/s). ~30 deg/s — gameplay-appropriate for a small ship.
@@ -74,13 +83,17 @@ struct SystemState {
 impl SystemState {
     fn new(system_seed: u64, shard_id: ShardId) -> Self {
         let system_params = SystemParams::from_seed(system_seed);
-        let planet_count = system_params.planets.len();
+        // Compute initial planet positions at t=0 so ships spawned before
+        // the first physics tick get placed near actual planets, not the star.
+        let planet_positions: Vec<DVec3> = system_params.planets.iter()
+            .map(|p| compute_planet_position(p, 0.0))
+            .collect();
         Self {
             system_params,
             shard_id,
             physics_time: 0.0,
             celestial_time: 0.0,
-            planet_positions: vec![DVec3::ZERO; planet_count],
+            planet_positions,
             ships: HashMap::new(),
             next_ship_id: 1,
             tick_count: 0,
@@ -103,6 +116,7 @@ impl SystemState {
             angular_velocity: DVec3::ZERO,
             thrust: DVec3::ZERO,
             torque: DVec3::ZERO,
+            autopilot: None,
         });
         info!(ship_id = id, "spawned ship");
         id
@@ -258,6 +272,44 @@ fn main() {
                             info!(ship_id = ctrl.ship_id, "received ShipControlInput for unknown ship");
                         }
                     }
+                    ShardMsg::AutopilotCommand(cmd) => {
+                        let mut st = state_quic.lock().unwrap();
+                        if cmd.target_body_id == 0xFFFFFFFF {
+                            if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
+                                ship.autopilot = None;
+                                info!(ship_id = cmd.ship_id, "autopilot disengaged");
+                            }
+                        } else {
+                            let planet_index = (cmd.target_body_id - 1) as usize;
+                            // Read ship state and system params before mutating.
+                            let solve_result = st.ships.get(&cmd.ship_id).and_then(|ship| {
+                                if planet_index >= st.system_params.planets.len() { return None; }
+                                let intercept = autopilot::solve_intercept(
+                                    ship.position, ship.velocity,
+                                    &st.system_params.planets[planet_index],
+                                    &st.system_params.star,
+                                    st.celestial_time,
+                                    st.system_params.scale.time_scale,
+                                    cmd.speed_tier,
+                                ).map(|(pos, _)| pos)
+                                    .unwrap_or(st.planet_positions[planet_index]);
+                                Some(intercept)
+                            });
+                            if let Some(intercept_pos) = solve_result {
+                                let tick = st.tick_count;
+                                if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
+                                    ship.autopilot = Some(AutopilotState {
+                                        target_planet_index: planet_index,
+                                        thrust_tier: cmd.speed_tier,
+                                        intercept_pos,
+                                        last_solve_tick: tick,
+                                    });
+                                    info!(ship_id = cmd.ship_id, planet = planet_index,
+                                        tier = cmd.speed_tier, "autopilot engaged");
+                                }
+                            }
+                        }
+                    }
                     other => {
                         info!("received QUIC message: {:?}", std::mem::discriminant(&other));
                     }
@@ -300,6 +352,7 @@ fn main() {
                             angular_velocity: DVec3::ZERO,
                             thrust: DVec3::ZERO,
                             torque: DVec3::ZERO,
+                            autopilot: None,
                         });
 
                         info!(
@@ -326,37 +379,157 @@ fn main() {
                 .collect();
             st.planet_positions = positions;
 
-            let accels: Vec<(u64, DVec3)> = st.ships.iter().map(|(&id, ship)| {
-                let grav = compute_gravity_acceleration(
-                    ship.position, &st.system_params.star,
-                    &st.system_params.planets, &st.planet_positions, st.celestial_time,
-                );
-                let thrust_world = ship.rotation * ship.thrust / SHIP_MASS;
-                (id, grav + thrust_world)
+            // Destructure to satisfy borrow checker — ships, system_params,
+            // planet_positions, and celestial_time are disjoint fields.
+            let sys = &st.system_params;
+            let pp = &st.planet_positions;
+            let ct = st.celestial_time;
+            let tick = st.tick_count;
+
+            // Re-solve autopilot intercepts every 20 ticks (~1 second).
+            let ap_updates: Vec<(u64, DVec3)> = st.ships.iter().filter_map(|(&id, ship)| {
+                if let Some(ref ap) = ship.autopilot {
+                    if tick - ap.last_solve_tick >= 20 {
+                        if let Some((new_intercept, _)) = autopilot::solve_intercept(
+                            ship.position, ship.velocity,
+                            &sys.planets[ap.target_planet_index],
+                            &sys.star, ct, sys.scale.time_scale, ap.thrust_tier,
+                        ) {
+                            return Some((id, new_intercept));
+                        }
+                    }
+                }
+                None
             }).collect();
 
-            for (ship_id, accel) in accels {
-                let ship = st.ships.get_mut(&ship_id).unwrap();
+            for (sid, new_intercept) in ap_updates {
+                if let Some(ship) = st.ships.get_mut(&sid) {
+                    if let Some(ref mut ap) = ship.autopilot {
+                        ap.intercept_pos = new_intercept;
+                        ap.last_solve_tick = tick;
+                    }
+                }
+            }
 
-                // Linear integration (Velocity Verlet).
-                ship.position += ship.velocity * DT + 0.5 * accel * DT * DT;
-                ship.velocity += accel * DT;
+            // Phase 1: Autopilot controller — sets ship.thrust and ship.torque
+            // through the same thruster system as manual piloting.
+            // Guidance computes desired direction; autopilot rotates ship to face it,
+            // then fires the main drive along the ship's forward axis (-Z).
+            {
+            let sys = &st.system_params;
+            let pp = &st.planet_positions;
+            let ct = st.celestial_time;
+            let ap_commands: Vec<(u64, GuidanceCommand)> = st.ships.iter()
+                .filter_map(|(&id, ship)| {
+                    let ap = ship.autopilot.as_ref()?;
+                    let guidance = autopilot::compute_guidance(
+                        ship.position, ship.velocity,
+                        ap.intercept_pos, ap.target_planet_index,
+                        sys, pp, ct, ap.thrust_tier,
+                    );
+                    Some((id, guidance))
+                }).collect();
+
+            for (ship_id, guidance) in &ap_commands {
+                let ship = st.ships.get_mut(ship_id).unwrap();
+
+                if guidance.completed {
+                    info!(ship_id, "autopilot arrived at SOI — disengaging");
+                    ship.autopilot = None;
+                    ship.thrust = DVec3::ZERO;
+                    ship.torque = DVec3::ZERO;
+                    continue;
+                }
+
+                // Rotation: PD controller to align ship forward (-Z) with thrust direction.
+                let desired_fwd = guidance.thrust_direction;
+                let current_fwd = ship.rotation * DVec3::NEG_Z;
+                let cross = current_fwd.cross(desired_fwd);
+                let dot_align = current_fwd.dot(desired_fwd).clamp(-1.0, 1.0);
+                let angle = dot_align.acos();
+
+                if angle > 0.001 && cross.length() > 1e-8 {
+                    let axis = cross.normalize();
+                    let p_gain = 2.0;
+                    let target_omega = axis * (angle * p_gain).min(MAX_ANGULAR_VELOCITY);
+                    let world_omega = ship.rotation * ship.angular_velocity;
+                    let error = target_omega - world_omega;
+                    let local_error = ship.rotation.inverse() * error;
+                    ship.torque = local_error.clamp_length_max(1.0);
+                } else {
+                    ship.torque = DVec3::ZERO;
+                }
+
+                // Thrust: main drive fires along ship's -Z axis.
+                // Scale by alignment — only full thrust when facing the right direction.
+                // cos(misalignment) gives the useful thrust component along desired direction.
+                // Below 0 (>90° off) = no thrust, ship is still rotating.
+                let thrust_scale = dot_align.max(0.0);
+                ship.thrust = DVec3::new(0.0, 0.0, -guidance.thrust_magnitude * thrust_scale);
+            }
+
+            } // end autopilot controller block
+
+            // Phase 2: True Velocity Verlet (Störmer-Verlet) integration.
+            // Two-pass for symplectic energy conservation — critical for orbital stability.
+            //   Pass A: a_old at current position → advance position
+            //   Pass B: a_new at new position → advance velocity with average
+            let sys = &st.system_params;
+            let pp = &st.planet_positions;
+            let ct = st.celestial_time;
+
+            // Pass A: compute a_old, store thrust_accel, advance position.
+            let pass_a: Vec<(u64, DVec3, DVec3)> = {
+                let sys = &st.system_params;
+                let pp = &st.planet_positions;
+                let ct = st.celestial_time;
+                st.ships.iter().map(|(&id, ship)| {
+                    let grav = compute_gravity_acceleration(
+                        ship.position, &sys.star, &sys.planets, pp, ct,
+                    );
+                    let thrust_accel = ship.rotation * ship.thrust / SHIP_MASS;
+                    let accel_old = grav + thrust_accel;
+                    (id, accel_old, thrust_accel)
+                }).collect()
+            };
+
+            for &(ship_id, accel_old, _) in &pass_a {
+                let ship = st.ships.get_mut(&ship_id).unwrap();
+                ship.position += ship.velocity * DT + 0.5 * accel_old * DT * DT;
+            }
+
+            // Pass B: recompute gravity at new position, average with a_old for velocity.
+            // Collect new positions first (immutable borrow), then mutate.
+            let pass_b: Vec<(u64, DVec3)> = {
+                let sys = &st.system_params;
+                let pp = &st.planet_positions;
+                let ct = st.celestial_time;
+                pass_a.iter().map(|&(ship_id, accel_old, thrust_accel)| {
+                    let ship = &st.ships[&ship_id];
+                    let grav_new = compute_gravity_acceleration(
+                        ship.position, &sys.star, &sys.planets, pp, ct,
+                    );
+                    let accel_new = grav_new + thrust_accel;
+                    let vel_delta = 0.5 * (accel_old + accel_new) * DT;
+                    (ship_id, vel_delta)
+                }).collect()
+            };
+            for (ship_id, vel_delta) in pass_b {
+                let ship = st.ships.get_mut(&ship_id).unwrap();
+                ship.velocity += vel_delta;
                 ship.thrust = DVec3::ZERO;
 
-                // Angular control: torque field carries the desired yaw/pitch rate (-1 to 1).
-                // Convert to target angular velocity, accelerate toward it.
+                // Standard angular velocity control (works for both manual and autopilot torque).
                 let target_angular_vel = DVec3::new(
                     ship.torque.x.clamp(-1.0, 1.0) * MAX_ANGULAR_VELOCITY,
                     ship.torque.y.clamp(-1.0, 1.0) * MAX_ANGULAR_VELOCITY,
                     ship.torque.z.clamp(-1.0, 1.0) * MAX_ANGULAR_VELOCITY,
                 );
 
-                // Accelerate toward target (proportional control).
                 let diff = target_angular_vel - ship.angular_velocity;
-                let accel = diff.clamp_length_max(ANGULAR_ACCEL_RATE * DT);
-                ship.angular_velocity += accel;
+                let ang_accel = diff.clamp_length_max(ANGULAR_ACCEL_RATE * DT);
+                ship.angular_velocity += ang_accel;
 
-                // When no input, decelerate (reaction wheel damping).
                 if ship.torque.length_squared() < 0.001 {
                     ship.angular_velocity *= 0.95;
                     if ship.angular_velocity.length_squared() < 1e-6 {
@@ -364,9 +537,6 @@ fn main() {
                     }
                 }
 
-                // Apply angular velocity to rotation quaternion.
-                // Angular velocity is in ship-local space (pitch=X, yaw=Y, roll=Z).
-                // Transform to world space before applying to the world-space rotation.
                 let world_angular_vel = ship.rotation * ship.angular_velocity;
                 let ang_speed = world_angular_vel.length();
                 if ang_speed > 1e-8 {

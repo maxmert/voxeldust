@@ -276,6 +276,9 @@ struct ProvisionShipRequest {
     ship_id: u64,
     /// The shard managing this ship's exterior (system or planet shard).
     host_shard_id: Option<u64>,
+    /// System seed for deterministic system generation (passed to JoinResponse).
+    #[serde(default)]
+    system_seed: u64,
 }
 
 /// Provision a new ship shard on demand.
@@ -305,6 +308,10 @@ async fn provision_ship_shard(
     if let Some(host_id) = req.host_shard_id {
         args.push("--host-shard".to_string());
         args.push(host_id.to_string());
+    }
+    if req.system_seed > 0 {
+        args.push("--system-seed".to_string());
+        args.push(req.system_seed.to_string());
     }
     let launch_config = LaunchConfig {
         binary: "ship-shard".to_string(),

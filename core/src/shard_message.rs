@@ -19,6 +19,7 @@ pub enum ShardMsg {
     ShipControlInput(ShipControlInput),
     CrossShardBlockEdits(CrossShardBlockEdits),
     SystemSceneUpdate(SystemSceneUpdateData),
+    AutopilotCommand(AutopilotCommandData),
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,16 @@ pub struct LightingInfoData {
     pub sun_color: [f32; 3],
     pub sun_intensity: f32,
     pub ambient: f32,
+}
+
+/// Autopilot command sent from ship shard to system shard.
+#[derive(Debug, Clone)]
+pub struct AutopilotCommandData {
+    pub ship_id: u64,
+    /// Target body id: 1..N = planets. 0xFFFFFFFF = disengage.
+    pub target_body_id: u32,
+    /// Speed tier (0-3).
+    pub speed_tier: u8,
 }
 
 /// Block edits affecting chunks on adjacent shard boundaries.
@@ -354,6 +365,25 @@ impl ShardMsg {
                 builder.finish(msg, None);
             }
 
+            ShardMsg::AutopilotCommand(a) => {
+                let cmd = fb::AutopilotCommand::create(
+                    &mut builder,
+                    &fb::AutopilotCommandArgs {
+                        ship_id: a.ship_id,
+                        target_body_id: a.target_body_id,
+                        speed_tier: a.speed_tier,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::AutopilotCommand,
+                        payload: Some(cmd.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+
             ShardMsg::SystemSceneUpdate(s) => {
                 let bodies: Vec<_> = s.bodies.iter().map(|b| {
                     let pos = to_fb_vec3d(&b.position);
@@ -610,6 +640,18 @@ impl ShardMsg {
                         sun_intensity: lighting_fb.sun_intensity(),
                         ambient: lighting_fb.ambient(),
                     },
+                }))
+            }
+
+            fb::ShardPayload::AutopilotCommand => {
+                let a = msg
+                    .payload_as_autopilot_command()
+                    .ok_or(MessageError::MissingField("AutopilotCommand payload"))?;
+
+                Ok(ShardMsg::AutopilotCommand(AutopilotCommandData {
+                    ship_id: a.ship_id(),
+                    target_body_id: a.target_body_id(),
+                    speed_tier: a.speed_tier(),
                 }))
             }
 

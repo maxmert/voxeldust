@@ -68,6 +68,7 @@ impl Router {
             .json(&serde_json::json!({
                 "ship_id": ship_id,
                 "host_shard_id": system_shard.id.0,
+                "system_seed": system_seed,
             }))
             .send()
             .await?;

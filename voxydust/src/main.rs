@@ -80,6 +80,12 @@ struct App {
     mouse_grabbed: bool,
     connected: bool,
     frame_count: u64,
+
+    // Autopilot.
+    system_params: Option<voxeldust_core::system::SystemParams>,
+    autopilot_target: Option<usize>,
+    selected_thrust_tier: u8,
+    trajectory_plan: Option<voxeldust_core::autopilot::TrajectoryPlan>,
 }
 
 struct GpuState {
@@ -126,6 +132,10 @@ impl App {
             mouse_grabbed: false,
             connected: false,
             frame_count: 0,
+            system_params: None,
+            autopilot_target: None,
+            selected_thrust_tier: 1, // default 1g
+            trajectory_plan: None,
         }
     }
 
@@ -306,12 +316,11 @@ impl App {
                             }
 
                             // Pilot → walk transition: reset camera to ship-local forward.
-                            // camera_yaw/pitch are ship-local when walking in a ship, so
-                            // the server interprets them correctly for movement direction.
-                            // Ship forward is -Z, which in our yaw convention is -π/2.
                             if was_piloting && !self.is_piloting {
                                 self.camera_yaw = -std::f64::consts::FRAC_PI_2;
                                 self.camera_pitch = 0.0;
+                                self.autopilot_target = None;
+                                self.trajectory_plan = None;
                             }
                         }
                         if self.latest_world_state.is_none() {
@@ -319,11 +328,14 @@ impl App {
                         }
                         self.latest_world_state = Some(ws);
                     }
-                    NetEvent::Connected { shard_type, reference_position, reference_rotation, .. } => {
+                    NetEvent::Connected { shard_type, reference_position, reference_rotation, system_seed, .. } => {
                         self.current_shard_type = shard_type;
                         self.reference_position = reference_position;
                         self.reference_rotation = reference_rotation;
                         self.connected = true;
+                        if system_seed > 0 {
+                            self.system_params = Some(voxeldust_core::system::SystemParams::from_seed(system_seed));
+                        }
                         let shard_name = match shard_type { 0 => "Planet", 1 => "System", 2 => "Ship", _ => "?" };
                         info!(shard_name, "connected to shard");
                     }
@@ -348,7 +360,15 @@ impl App {
             if self.keys_held.contains(&KeyCode::KeyA) { movement[0] -= 1.0; }
 
             let jump = self.keys_held.contains(&KeyCode::Space);
-            let action = if self.keys_held.contains(&KeyCode::KeyE) { 3 } else { 0 };
+            let action = if self.keys_held.contains(&KeyCode::KeyT) { 4 }
+                else if self.keys_held.contains(&KeyCode::KeyE) { 3 }
+                else { 0 };
+
+            // Thrust tier selection (1-4 keys).
+            if self.keys_held.contains(&KeyCode::Digit1) { self.selected_thrust_tier = 0; }
+            if self.keys_held.contains(&KeyCode::Digit2) { self.selected_thrust_tier = 1; }
+            if self.keys_held.contains(&KeyCode::Digit3) { self.selected_thrust_tier = 2; }
+            if self.keys_held.contains(&KeyCode::Digit4) { self.selected_thrust_tier = 3; }
             let free_look = self.keys_held.contains(&KeyCode::AltLeft);
 
             // When piloting: send yaw/pitch rate (-1 to 1) for ship torque.
@@ -370,7 +390,7 @@ impl App {
                 look_pitch,
                 jump,
                 fly_toggle: false,
-                speed_tier: 0,
+                speed_tier: self.selected_thrust_tier,
                 action,
                 block_type: 0,
                 tick: self.frame_count,
@@ -434,11 +454,21 @@ impl App {
         let mut ship_interior_start = 0usize;
         let mut ship_interior_count = 0usize;
 
+        // Camera position in system-space for celestial body rendering.
+        // In ship shard, cam_pos is only the player's offset from ship center;
+        // we must add the ship's system-space position (ws.origin) to get the
+        // true camera position for correct body offsets.
+        let cam_system_pos = if self.current_shard_type == 2 {
+            self.latest_world_state.as_ref().map_or(cam_pos, |ws| ws.origin + cam_pos)
+        } else {
+            cam_pos
+        };
+
         if let Some(ref ws) = self.latest_world_state {
             // Celestial bodies.
             for body in &ws.bodies {
                 if object_count >= MAX_OBJECTS { break; }
-                let offset = (body.position - cam_pos).as_vec3();
+                let offset = (body.position - cam_system_pos).as_vec3();
                 let scale = (body.radius as f32).max(1.0);
                 let model = Mat4::from_translation(offset) * Mat4::from_scale(Vec3::splat(scale));
                 let mvp = vp * model;
@@ -567,6 +597,23 @@ impl App {
         let logical_h = gpu.config.height as f32 / scale_factor;
 
         let raw_input = gpu.egui_winit.take_egui_input(window);
+        // Compute autopilot trajectory for HUD.
+        // Throttle to every 10 frames (~6Hz) to prevent visual jitter.
+        if self.frame_count % 10 == 0 || self.trajectory_plan.is_none() {
+            if let (Some(system), Some(ws), Some(target_idx)) =
+                (&self.system_params, &self.latest_world_state, self.autopilot_target)
+            {
+                let ship_pos = ws.origin;
+                let ship_vel = self.player_velocity;
+                self.trajectory_plan = voxeldust_core::autopilot::plan_trajectory(
+                    ship_pos, ship_vel, target_idx, system,
+                    ws.game_time, self.selected_thrust_tier, 200,
+                );
+            } else if self.autopilot_target.is_none() {
+                self.trajectory_plan = None;
+            }
+        }
+
         let full_output = gpu.egui_ctx.run(raw_input, |ctx| {
             let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hud"));
             let painter = ctx.layer_painter(layer);
@@ -575,7 +622,7 @@ impl App {
             if let Some(ref ws) = self.latest_world_state {
                 let body_names = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
                 for body in &ws.bodies {
-                    let offset = (body.position - cam_pos).as_vec3();
+                    let offset = (body.position - cam_system_pos).as_vec3();
                     let clip = vp * glam::Vec4::new(offset.x, offset.y, offset.z, 1.0);
                     if clip.w <= 0.0 { continue; }
                     let ndc_x = clip.x / clip.w;
@@ -593,6 +640,79 @@ impl App {
                     let color = if body.body_id == 0 { egui::Color32::from_rgb(255, 220, 100) } else { egui::Color32::from_rgb(100, 200, 255) };
                     painter.circle_stroke(egui::pos2(sx, sy), cr, egui::Stroke::new(1.0, color));
                     painter.text(egui::pos2(sx + cr + 4.0, sy - 6.0), egui::Align2::LEFT_CENTER, &label, egui::FontId::proportional(11.0), color);
+                }
+            }
+
+            // Autopilot trajectory line.
+            if let Some(ref plan) = self.trajectory_plan {
+                use voxeldust_core::autopilot::FlightPhase;
+                let accel_color = egui::Color32::from_rgb(100, 200, 255);
+                let brake_color = egui::Color32::from_rgb(255, 150, 50);
+                let flip_color = egui::Color32::from_rgb(255, 255, 100);
+
+                // Project trajectory points to screen space.
+                let mut screen_pts: Vec<(egui::Pos2, FlightPhase)> = Vec::new();
+                for pt in &plan.points {
+                    let offset = (pt.position - cam_pos).as_vec3();
+                    let clip = vp * glam::Vec4::new(offset.x, offset.y, offset.z, 1.0);
+                    if clip.w <= 0.0 { continue; }
+                    let ndc_x = clip.x / clip.w;
+                    let ndc_y = clip.y / clip.w;
+                    if ndc_x.abs() > 2.0 || ndc_y.abs() > 2.0 { continue; }
+                    let sx = (ndc_x * 0.5 + 0.5) * logical_w;
+                    let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * logical_h;
+                    screen_pts.push((egui::pos2(sx, sy), pt.phase));
+                }
+
+                // Catmull-Rom subdivision + dashed rendering.
+                if screen_pts.len() >= 4 {
+                    let dash_offset = (self.frame_count / 3) as usize;
+                    let mut seg_idx = 0usize;
+
+                    for i in 0..screen_pts.len().saturating_sub(1) {
+                        let p0 = screen_pts[i.saturating_sub(1)].0;
+                        let p1 = screen_pts[i].0;
+                        let p2 = screen_pts[(i + 1).min(screen_pts.len() - 1)].0;
+                        let p3 = screen_pts[(i + 2).min(screen_pts.len() - 1)].0;
+                        let phase = screen_pts[i].1;
+                        let color = match phase {
+                            FlightPhase::Accelerate => accel_color,
+                            FlightPhase::Flip => flip_color,
+                            FlightPhase::Brake => brake_color,
+                            FlightPhase::Arrived => egui::Color32::GREEN,
+                        };
+
+                        // Subdivide into 4 sub-segments for smoothness.
+                        for s in 0..4 {
+                            let t0 = s as f32 / 4.0;
+                            let t1 = (s + 1) as f32 / 4.0;
+                            let a = catmull_rom(p0, p1, p2, p3, t0);
+                            let b = catmull_rom(p0, p1, p2, p3, t1);
+
+                            // Dash pattern: draw 3, skip 3.
+                            if (seg_idx + dash_offset) % 6 < 3 {
+                                painter.line_segment([a, b], egui::Stroke::new(2.0, color));
+                            }
+                            seg_idx += 1;
+                        }
+                    }
+
+                    // Flip point marker.
+                    if plan.flip_index < screen_pts.len() {
+                        let (fp, _) = screen_pts[plan.flip_index];
+                        painter.circle_filled(fp, 4.0, flip_color);
+                        painter.text(egui::pos2(fp.x + 8.0, fp.y),
+                            egui::Align2::LEFT_CENTER, "FLIP",
+                            egui::FontId::proportional(10.0), flip_color);
+                    }
+
+                    // Intercept point marker.
+                    if let Some(&(last, _)) = screen_pts.last() {
+                        painter.circle_stroke(last, 6.0, egui::Stroke::new(2.0, egui::Color32::GREEN));
+                        painter.text(egui::pos2(last.x + 8.0, last.y),
+                            egui::Align2::LEFT_CENTER, "SOI",
+                            egui::FontId::proportional(10.0), egui::Color32::GREEN);
+                    }
                 }
             }
 
@@ -666,7 +786,48 @@ impl App {
                         }
 
                         ui.separator();
-                        ui.label("WASD=thrust  E=exit seat");
+                        let tier_label = match self.selected_thrust_tier {
+                            0 => "0.5g MANEUVER", 1 => "1g STANDARD",
+                            2 => "3g HIGH-G", 3 => "6g EMERGENCY", _ => "?",
+                        };
+
+                        // Autopilot status.
+                        if let Some(ref plan) = self.trajectory_plan {
+                            use voxeldust_core::autopilot::FlightPhase;
+                            let phase_name = match plan.current_phase {
+                                FlightPhase::Accelerate => "ACCEL",
+                                FlightPhase::Flip => "FLIP",
+                                FlightPhase::Brake => "BRAKE",
+                                FlightPhase::Arrived => "ARRIVED",
+                            };
+                            let body_names_ap = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
+                            let target_name = body_names_ap.get(plan.target_planet_index + 1).unwrap_or(&"?");
+
+                            ui.colored_label(egui::Color32::from_rgb(100, 255, 200),
+                                format!("AUTOPILOT: {} -> {}", phase_name, target_name));
+                            ui.label(format!("Thrust: {} | Points: {}", tier_label, plan.points.len()));
+
+                            let eta = plan.eta_real_seconds;
+                            let eta_text = if eta > 3600.0 { format!("ETA: {:.1}h", eta / 3600.0) }
+                                else if eta > 60.0 { format!("ETA: {:.0}m {:.0}s", (eta / 60.0).floor(), eta % 60.0) }
+                                else { format!("ETA: {:.1}s", eta) };
+                            ui.label(&eta_text);
+
+                            ui.separator();
+                            ui.label("T=disengage | 1-4=thrust | WASD=cancel");
+                        } else if self.autopilot_target.is_some() {
+                            // Autopilot target selected but trajectory computation failed.
+                            let body_names_ap = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
+                            let idx = self.autopilot_target.unwrap();
+                            let target_name = body_names_ap.get(idx + 1).unwrap_or(&"?");
+                            ui.colored_label(egui::Color32::from_rgb(255, 200, 100),
+                                format!("AUTOPILOT: targeting {} (computing...)", target_name));
+                            ui.label(format!("Thrust: {}", tier_label));
+                            ui.label("T=disengage | 1-4=thrust | WASD=cancel");
+                        } else {
+                            ui.label("WASD=thrust  E=exit seat  T=autopilot");
+                            ui.label(format!("Thrust: {} (1-4 to change)", tier_label));
+                        }
                     } else {
                         // Walking inside ship.
                         ui.label(format!("Pos: ({:.1}, {:.1}, {:.1})",
@@ -755,6 +916,35 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if event.state.is_pressed() {
                         self.keys_held.insert(key);
+                        // Autopilot toggle (T key).
+                        if key == KeyCode::KeyT && self.is_piloting {
+                            if self.autopilot_target.is_some() {
+                                self.autopilot_target = None;
+                                self.trajectory_plan = None;
+                            } else if let Some(ref ws) = self.latest_world_state {
+                                // Find planet most aligned with camera forward.
+                                let ship_fwd = self.ship_rotation * DVec3::NEG_Z;
+                                let ship_pos = ws.origin;
+                                let mut best: Option<(usize, f64)> = None;
+                                for body in &ws.bodies {
+                                    if body.body_id == 0 { continue; }
+                                    let to_body = (body.position - ship_pos).normalize_or_zero();
+                                    let d = ship_fwd.dot(to_body);
+                                    if d > best.map(|(_, bd)| bd).unwrap_or(0.7) {
+                                        best = Some(((body.body_id - 1) as usize, d));
+                                    }
+                                }
+                                if let Some((idx, _)) = best {
+                                    self.autopilot_target = Some(idx);
+                                }
+                            }
+                        }
+                        // WASD cancels autopilot.
+                        if self.autopilot_target.is_some() && matches!(key,
+                            KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD) {
+                            self.autopilot_target = None;
+                            self.trajectory_plan = None;
+                        }
                         if key == KeyCode::Escape {
                             if self.mouse_grabbed {
                                 if let Some(ref w) = self.window {
@@ -844,6 +1034,23 @@ fn generate_box_mesh(width: f32, height: f32, length: f32) -> (Vec<[f32; 3]>, Ve
         20, 22, 21, 20, 23, 22, // front wall (window)
     ];
     (vertices, indices)
+}
+
+/// Catmull-Rom spline interpolation between p1 and p2, using p0 and p3 as control points.
+fn catmull_rom(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t: f32) -> egui::Pos2 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let x = 0.5
+        * ((2.0 * p1.x)
+            + (-p0.x + p2.x) * t
+            + (2.0 * p0.x - 5.0 * p1.x + 4.0 * p2.x - p3.x) * t2
+            + (-p0.x + 3.0 * p1.x - 3.0 * p2.x + p3.x) * t3);
+    let y = 0.5
+        * ((2.0 * p1.y)
+            + (-p0.y + p2.y) * t
+            + (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2
+            + (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3);
+    egui::pos2(x, y)
 }
 
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::TextureView {

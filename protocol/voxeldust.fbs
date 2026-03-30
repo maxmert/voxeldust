@@ -116,6 +116,16 @@ table ShipControlInput {
     tick: uint64;
 }
 
+/// Autopilot command sent from ship shard to system shard.
+table AutopilotCommand {
+    ship_id: uint64;
+    /// Target body id: 0 = star, 1..N = planets.
+    /// 0xFFFFFFFF = disengage autopilot.
+    target_body_id: uint32;
+    /// Speed tier (0=maneuver, 1=1g, 2=3g, 3=6g).
+    speed_tier: uint8;
+}
+
 /// Snapshot of a celestial body's state for scene rendering.
 table CelestialBodySnapshot {
     body_id: uint32;       // 0 = star, 1..N = planets
@@ -165,6 +175,7 @@ union ShardPayload {
     ShipPositionUpdate,
     ShipControlInput,
     SystemSceneUpdate,
+    AutopilotCommand,
 }
 
 /// Root type for all inter-shard QUIC messages.
