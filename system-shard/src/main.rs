@@ -10,10 +10,10 @@ use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, ServerMsg, WorldStateData,
 };
 use voxeldust_core::shard_message::{
-    CelestialBodySnapshotData, LightingInfoData, ShardMsg, ShipPositionUpdate,
-    ShipSnapshotEntryData, SystemSceneUpdateData,
+    CelestialBodySnapshotData, LightingInfoData, ShardMsg, ShipNearbyInfoData,
+    ShipPositionUpdate, ShipSnapshotEntryData, SystemSceneUpdateData,
 };
-use voxeldust_core::shard_types::{ShardId, ShardType};
+use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{
     compute_gravity_acceleration, compute_lighting, compute_planet_position, compute_soi_radius,
     SystemParams,
@@ -50,6 +50,12 @@ struct AutopilotState {
     thrust_tier: u8,
     intercept_pos: DVec3,
     last_solve_tick: u64,
+    /// Physics time when autopilot was engaged (for thrust ramp).
+    engage_time: f64,
+    /// Estimated total time of flight (real seconds, updated on re-solve).
+    estimated_tof: f64,
+    /// Once true, ship stays in Brake phase until velocity reverses or autopilot disengages.
+    braking_committed: bool,
 }
 
 struct ShipState {
@@ -78,6 +84,14 @@ struct SystemState {
     ships: HashMap<u64, ShipState>,
     next_ship_id: u64,
     tick_count: u64,
+    /// Ships currently inside a planet's SOI: ship_id → planet_index.
+    in_soi: HashMap<u64, usize>,
+    /// Planet shards provisioned by this system shard: planet_seed → shard_id.
+    provisioned_planets: HashMap<u64, ShardId>,
+    /// Pending handoffs being relayed: session_token → source shard id.
+    pending_handoffs: HashMap<SessionToken, ShardId>,
+    /// Planet shard provision results arriving from async tasks.
+    planet_provision_results: Vec<(u64, ShardId)>,
 }
 
 impl SystemState {
@@ -97,6 +111,10 @@ impl SystemState {
             ships: HashMap::new(),
             next_ship_id: 1,
             tick_count: 0,
+            in_soi: HashMap::new(),
+            provisioned_planets: HashMap::new(),
+            pending_handoffs: HashMap::new(),
+            planet_provision_results: Vec::new(),
         }
     }
 
@@ -186,6 +204,7 @@ fn main() {
         .init();
 
     let shard_id = ShardId(args.shard_id);
+    let orchestrator_url = args.orchestrator.clone();
     let bind = "0.0.0.0";
     let config = ShardHarnessConfig {
         shard_id,
@@ -258,8 +277,10 @@ fn main() {
             }
         });
 
-        // System 2: Drain QUIC messages — ShipControlInput from ship shards.
+        // System 2: Drain QUIC messages — ShipControlInput, AutopilotCommand, PlayerHandoff, HandoffAccepted.
         let state_quic = state.clone();
+        let peer_reg_quic = peer_registry.clone();
+        let quic_send_quic = quic_send_tx.clone();
         harness.add_system("drain_quic", move || {
             while let Ok(msg) = quic_msg_rx.try_recv() {
                 match msg {
@@ -284,28 +305,86 @@ fn main() {
                             // Read ship state and system params before mutating.
                             let solve_result = st.ships.get(&cmd.ship_id).and_then(|ship| {
                                 if planet_index >= st.system_params.planets.len() { return None; }
-                                let intercept = autopilot::solve_intercept(
+                                autopilot::solve_intercept(
                                     ship.position, ship.velocity,
                                     &st.system_params.planets[planet_index],
                                     &st.system_params.star,
                                     st.celestial_time,
                                     st.system_params.scale.time_scale,
                                     cmd.speed_tier,
-                                ).map(|(pos, _)| pos)
-                                    .unwrap_or(st.planet_positions[planet_index]);
-                                Some(intercept)
+                                )
                             });
-                            if let Some(intercept_pos) = solve_result {
+                            if let Some((intercept_pos, estimated_tof)) = solve_result {
                                 let tick = st.tick_count;
+                                let physics_time = st.physics_time;
                                 if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
                                     ship.autopilot = Some(AutopilotState {
                                         target_planet_index: planet_index,
                                         thrust_tier: cmd.speed_tier,
                                         intercept_pos,
                                         last_solve_tick: tick,
+                                        engage_time: physics_time,
+                                        estimated_tof,
+                                        braking_committed: false,
                                     });
                                     info!(ship_id = cmd.ship_id, planet = planet_index,
-                                        tier = cmd.speed_tier, "autopilot engaged");
+                                        tier = cmd.speed_tier, eta_s = estimated_tof as u64,
+                                        "autopilot engaged");
+                                }
+                            }
+                        }
+                    }
+                    ShardMsg::PlayerHandoff(handoff) => {
+                        // Forward handoff to target shard (ship→planet or planet→ship).
+                        let mut st = state_quic.lock().unwrap();
+                        let source = handoff.source_shard;
+                        let session = handoff.session_token;
+                        st.pending_handoffs.insert(session, source);
+
+                        if let Some(planet_seed) = handoff.target_planet_seed {
+                            // Ship→Planet handoff: forward to planet shard.
+                            if let Some(&planet_shard_id) = st.provisioned_planets.get(&planet_seed) {
+                                drop(st);
+                                if let Ok(reg) = peer_reg_quic.try_read() {
+                                    if let Some(addr) = reg.quic_addr(planet_shard_id) {
+                                        let msg = ShardMsg::PlayerHandoff(handoff);
+                                        let _ = quic_send_quic.send((planet_shard_id, addr, msg));
+                                        info!(planet_seed, target = planet_shard_id.0,
+                                            "forwarded player handoff to planet shard");
+                                    }
+                                }
+                            } else {
+                                tracing::warn!(planet_seed, "no provisioned planet shard for handoff");
+                            }
+                        } else if let Some(ship_id) = handoff.target_ship_id {
+                            // Planet→Ship handoff: forward to ship shard.
+                            drop(st);
+                            if let Ok(reg) = peer_reg_quic.try_read() {
+                                let ship_shard = reg.find_by_type(ShardType::Ship).iter()
+                                    .find(|s| s.ship_id == Some(ship_id))
+                                    .map(|s| (s.id, s.endpoint.quic_addr));
+                                if let Some((sid, addr)) = ship_shard {
+                                    let msg = ShardMsg::PlayerHandoff(handoff);
+                                    let _ = quic_send_quic.send((sid, addr, msg));
+                                    info!(ship_id, target = sid.0,
+                                        "forwarded player handoff to ship shard");
+                                }
+                            }
+                        } else {
+                            tracing::warn!("received PlayerHandoff with no target");
+                        }
+                    }
+                    ShardMsg::HandoffAccepted(accepted) => {
+                        // Relay HandoffAccepted back to the source shard.
+                        let mut st = state_quic.lock().unwrap();
+                        if let Some(source_shard) = st.pending_handoffs.remove(&accepted.session_token) {
+                            drop(st);
+                            if let Ok(reg) = peer_reg_quic.try_read() {
+                                if let Some(addr) = reg.quic_addr(source_shard) {
+                                    let msg = ShardMsg::HandoffAccepted(accepted);
+                                    let _ = quic_send_quic.send((source_shard, addr, msg));
+                                    info!(target = source_shard.0,
+                                        "relayed HandoffAccepted to source shard");
                                 }
                             }
                         }
@@ -387,25 +466,39 @@ fn main() {
             let tick = st.tick_count;
 
             // Re-solve autopilot intercepts every 20 ticks (~1 second).
-            let ap_updates: Vec<(u64, DVec3)> = st.ships.iter().filter_map(|(&id, ship)| {
+            // Smoothed update: blend toward new intercept to prevent oscillation
+            // when planet orbital velocity exceeds ship velocity.
+            let ap_updates: Vec<(u64, DVec3, f64)> = st.ships.iter().filter_map(|(&id, ship)| {
                 if let Some(ref ap) = ship.autopilot {
-                    if tick - ap.last_solve_tick >= 20 {
-                        if let Some((new_intercept, _)) = autopilot::solve_intercept(
+                    // Don't re-solve while braking — ship is committed to its trajectory.
+                    if tick - ap.last_solve_tick >= 20 && !ap.braking_committed {
+                        if let Some((new_intercept, new_tof)) = autopilot::solve_intercept(
                             ship.position, ship.velocity,
                             &sys.planets[ap.target_planet_index],
                             &sys.star, ct, sys.scale.time_scale, ap.thrust_tier,
                         ) {
-                            return Some((id, new_intercept));
+                            return Some((id, new_intercept, new_tof));
                         }
                     }
                 }
                 None
             }).collect();
 
-            for (sid, new_intercept) in ap_updates {
+            for (sid, new_intercept, new_tof) in ap_updates {
                 if let Some(ship) = st.ships.get_mut(&sid) {
                     if let Some(ref mut ap) = ship.autopilot {
-                        ap.intercept_pos = new_intercept;
+                        let old_dist = (ship.position - ap.intercept_pos).length();
+                        let shift = (new_intercept - ap.intercept_pos).length();
+                        let relative_shift = shift / old_dist.max(1.0);
+                        if relative_shift > 0.1 {
+                            // Large correction: blend at 30%
+                            ap.intercept_pos = ap.intercept_pos.lerp(new_intercept, 0.3);
+                        } else if relative_shift > 0.02 {
+                            // Small correction: blend at 10%
+                            ap.intercept_pos = ap.intercept_pos.lerp(new_intercept, 0.1);
+                        }
+                        // <2% shift: keep current intercept (stable enough)
+                        ap.estimated_tof = new_tof;
                         ap.last_solve_tick = tick;
                     }
                 }
@@ -419,6 +512,7 @@ fn main() {
             let sys = &st.system_params;
             let pp = &st.planet_positions;
             let ct = st.celestial_time;
+            let physics_time = st.physics_time;
             let ap_commands: Vec<(u64, GuidanceCommand)> = st.ships.iter()
                 .filter_map(|(&id, ship)| {
                     let ap = ship.autopilot.as_ref()?;
@@ -441,8 +535,40 @@ fn main() {
                     continue;
                 }
 
+                // Sticky brake: once committed, stay in Brake until velocity reverses.
+                // Prevents phase oscillation during the flip rotation at high accelerations.
+                let ap = ship.autopilot.as_mut().unwrap();
+                if guidance.phase == FlightPhase::Brake && !ap.braking_committed {
+                    ap.braking_committed = true;
+                }
+
+                let effective_phase = if ap.braking_committed {
+                    let desired_dir = (ap.intercept_pos - ship.position).normalize_or_zero();
+                    let v_along = ship.velocity.dot(desired_dir);
+                    if v_along <= 0.0 {
+                        // Velocity reversed — ship stopped or overshot, release brake lock.
+                        ap.braking_committed = false;
+                        guidance.phase
+                    } else {
+                        FlightPhase::Brake
+                    }
+                } else {
+                    guidance.phase
+                };
+
+                // Compute thrust direction based on effective phase.
+                let thrust_dir = if effective_phase == FlightPhase::Brake {
+                    // Always use guidance's brake direction when committed.
+                    guidance.thrust_direction
+                } else {
+                    guidance.thrust_direction
+                };
+
+                let elapsed = physics_time - ap.engage_time;
+                let ramp = autopilot::thrust_ramp_factor(elapsed, ap.estimated_tof, effective_phase);
+
                 // Rotation: PD controller to align ship forward (-Z) with thrust direction.
-                let desired_fwd = guidance.thrust_direction;
+                let desired_fwd = thrust_dir;
                 let current_fwd = ship.rotation * DVec3::NEG_Z;
                 let cross = current_fwd.cross(desired_fwd);
                 let dot_align = current_fwd.dot(desired_fwd).clamp(-1.0, 1.0);
@@ -461,10 +587,8 @@ fn main() {
                 }
 
                 // Thrust: main drive fires along ship's -Z axis.
-                // Scale by alignment — only full thrust when facing the right direction.
-                // cos(misalignment) gives the useful thrust component along desired direction.
-                // Below 0 (>90° off) = no thrust, ship is still rotating.
-                let thrust_scale = dot_align.max(0.0);
+                // Scale by alignment (cos(misalignment)) and progressive ramp.
+                let thrust_scale = dot_align.max(0.0) * ramp;
                 ship.thrust = DVec3::new(0.0, 0.0, -guidance.thrust_magnitude * thrust_scale);
             }
 
@@ -549,27 +673,89 @@ fn main() {
             }
         });
 
-        // System 4: SOI detection.
+        // System 4: SOI detection + planet shard provisioning.
+        // Tracks ships entering/leaving planet SOIs and provisions planet shards.
         let state_soi = state.clone();
+        let orchestrator_url_soi = orchestrator_url.clone();
+        let state_soi_provision = state.clone();
         harness.add_system("soi_detection", move || {
-            let st = state_soi.lock().unwrap();
+            let mut st = state_soi.lock().unwrap();
             if st.tick_count % 20 != 0 { return; } // check every second
 
+            // Drain async planet provision results.
+            let results = std::mem::take(&mut st.planet_provision_results);
+            for (planet_seed, shard_id) in results {
+                st.provisioned_planets.insert(planet_seed, shard_id);
+                info!(planet_seed, shard_id = shard_id.0, "planet shard provisioned");
+            }
+
+            // Check each ship against each planet SOI.
+            let mut soi_entries: Vec<(u64, usize)> = Vec::new();
+            let mut soi_exits: Vec<u64> = Vec::new();
+
             for ship in st.ships.values() {
+                let mut found_soi = false;
                 for (i, planet) in st.system_params.planets.iter().enumerate() {
                     let dist = (ship.position - st.planet_positions[i]).length();
                     let soi = compute_soi_radius(planet, &st.system_params.star);
                     if dist < soi {
-                        info!(
-                            ship_id = ship.ship_id,
-                            planet_index = i,
-                            distance = format!("{:.2e}", dist),
-                            soi_radius = format!("{:.2e}", soi),
-                            "ship entered planet SOI — handoff needed"
-                        );
-                        // TODO: provision planet shard, send PlayerHandoff
+                        found_soi = true;
+                        if st.in_soi.get(&ship.ship_id) != Some(&i) {
+                            soi_entries.push((ship.ship_id, i));
+                        }
+                        break;
                     }
                 }
+                if !found_soi && st.in_soi.contains_key(&ship.ship_id) {
+                    soi_exits.push(ship.ship_id);
+                }
+            }
+
+            // Process SOI entries.
+            for (ship_id, planet_index) in soi_entries {
+                st.in_soi.insert(ship_id, planet_index);
+                let planet = &st.system_params.planets[planet_index];
+                let planet_seed = planet.planet_seed;
+                info!(ship_id, planet_index, planet_seed, "ship entered planet SOI");
+
+                // Provision planet shard if not already provisioned.
+                if !st.provisioned_planets.contains_key(&planet_seed) {
+                    let url = orchestrator_url_soi.clone();
+                    let system_seed = st.system_params.system_seed;
+                    let state_cb = state_soi_provision.clone();
+                    tokio::spawn(async move {
+                        let endpoint = format!(
+                            "{}/planet/{}?system_seed={}&planet_index={}",
+                            url, planet_seed, system_seed, planet_index
+                        );
+                        match reqwest::get(&endpoint).await {
+                            Ok(resp) if resp.status().is_success() => {
+                                if let Ok(body) = resp.text().await {
+                                    // Parse shard_id from JSON response.
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                                        if let Some(id) = v.get("id").and_then(|v| v.as_u64()) {
+                                            let mut st = state_cb.lock().unwrap();
+                                            st.planet_provision_results.push((planet_seed, ShardId(id)));
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(resp) => {
+                                tracing::warn!(status = %resp.status(), planet_seed,
+                                    "failed to provision planet shard");
+                            }
+                            Err(e) => {
+                                tracing::warn!(%e, planet_seed, "planet shard provision request failed");
+                            }
+                        }
+                    });
+                }
+            }
+
+            // Process SOI exits.
+            for ship_id in soi_exits {
+                st.in_soi.remove(&ship_id);
+                info!(ship_id, "ship left planet SOI");
             }
         });
 
@@ -615,9 +801,8 @@ fn main() {
                 let _ = quic_send_scene.send((*shard_id, *quic_addr, scene_msg.clone()));
             }
 
-            // Also send per-ship position updates.
+            // Also send per-ship position updates to ship shards.
             for ship in st.ships.values() {
-                // Find which ship shard manages this ship (by ship_id match in ShardInfo).
                 for (shard_id, quic_addr) in &ship_shards {
                     let pos_msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
                         ship_id: ship.ship_id,
@@ -627,6 +812,35 @@ fn main() {
                         angular_velocity: DVec3::ZERO,
                     });
                     let _ = quic_send_scene.send((*shard_id, *quic_addr, pos_msg));
+                }
+            }
+
+            // Send ShipNearbyInfo to planet shards for ships within their SOI.
+            // This allows planet shards to render ships and detect player re-entry.
+            if let Ok(reg) = peer_reg_scene.try_read() {
+                for (&ship_id, &planet_index) in &st.in_soi {
+                    let planet_seed = st.system_params.planets[planet_index].planet_seed;
+                    // Find the planet shard for this planet.
+                    let planet_shard = reg.find_by_type(ShardType::Planet).iter()
+                        .find(|s| s.planet_seed == Some(planet_seed))
+                        .map(|s| (s.id, s.endpoint.quic_addr));
+
+                    if let (Some((psid, paddr)), Some(ship)) = (planet_shard, st.ships.get(&ship_id)) {
+                        // Find the ship shard ID from ship shards list.
+                        let ship_shard_id = ship_shards.iter()
+                            .find(|_| true) // TODO: match by ship_id in ShardInfo
+                            .map(|(sid, _)| *sid)
+                            .unwrap_or(ShardId(0));
+
+                        let nearby_msg = ShardMsg::ShipNearbyInfo(ShipNearbyInfoData {
+                            ship_id,
+                            ship_shard_id,
+                            position: ship.position,
+                            rotation: ship.rotation,
+                            velocity: ship.velocity,
+                        });
+                        let _ = quic_send_scene.send((psid, paddr, nearby_msg));
+                    }
                 }
             }
         });

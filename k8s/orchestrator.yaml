@@ -5,6 +5,8 @@ metadata:
   namespace: voxeldust
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: voxeldust-orchestrator
@@ -27,7 +29,7 @@ spec:
         - "--shard-namespace=voxeldust"
         - "--shard-port-range-start=10000"
         - "--shard-port-range-end=10100"
-        - "--shard-advertise-host=172.18.0.3"
+        - "--shard-advertise-host=127.0.0.1"
         - "--idle-shutdown-secs=600"
         ports:
         - containerPort: 8080

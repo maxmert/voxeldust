@@ -1,8 +1,8 @@
 //! Client networking: connect to gateway, handle redirect, receive WorldState.
+//! Supports mid-gameplay shard transitions via ShardRedirect on TCP.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-
 
 use glam::{DQuat, DVec3};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,9 +11,9 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
-    ClientMsg, JoinResponseData, PlayerInputData, ServerMsg, WorldStateData,
+    ClientMsg, PlayerInputData, ServerMsg, WorldStateData,
 };
-use voxeldust_core::handoff::ShardRedirect;
+use voxeldust_core::handoff::{ShardPreConnect, ShardRedirect};
 
 /// Events from the network thread to the render thread.
 pub enum NetEvent {
@@ -25,11 +25,21 @@ pub enum NetEvent {
         system_seed: u64,
     },
     WorldState(WorldStateData),
+    /// A secondary shard has been pre-connected for rendering.
+    SecondaryConnected {
+        shard_type: u8,
+        seed: u64,
+        reference_position: DVec3,
+        reference_rotation: DQuat,
+    },
+    /// WorldState from a secondary shard (for composite rendering).
+    SecondaryWorldState(WorldStateData),
+    /// Primary shard is changing (ShardRedirect received).
     Transitioning,
     Disconnected(String),
 }
 
-/// Run the network loop on a tokio runtime.
+/// Run the network loop on a tokio runtime. Handles shard transitions.
 pub async fn run_network(
     gateway_addr: SocketAddr,
     player_name: String,
@@ -37,8 +47,8 @@ pub async fn run_network(
     input_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<PlayerInputData>>>,
     direct: Option<String>,
 ) {
-    // Determine shard TCP/UDP addresses.
-    let (shard_tcp_addr, shard_udp_addr) = if let Some(ref direct_addr) = direct {
+    // Resolve initial shard addresses (via gateway or direct).
+    let (mut shard_tcp_addr, mut shard_udp_addr) = if let Some(ref direct_addr) = direct {
         let parts: Vec<&str> = direct_addr.split(',').collect();
         let tcp: SocketAddr = parts[0].parse().expect("bad direct tcp addr");
         let udp: SocketAddr = if parts.len() > 1 {
@@ -57,94 +67,184 @@ pub async fn run_network(
                 return;
             }
         };
-        info!(tcp = %redirect.target_tcp_addr, udp = %redirect.target_udp_addr, "received shard redirect");
-
-        let tcp: SocketAddr = match redirect.target_tcp_addr.parse() {
-            Ok(a) => a,
-            Err(e) => { let _ = event_tx.send(NetEvent::Disconnected(format!("bad tcp: {e}"))); return; }
-        };
-        let udp: SocketAddr = match redirect.target_udp_addr.parse() {
-            Ok(a) => a,
-            Err(e) => { let _ = event_tx.send(NetEvent::Disconnected(format!("bad udp: {e}"))); return; }
-        };
-        (tcp, udp)
-    };
-
-    // Connect to shard.
-    info!(%shard_tcp_addr, "connecting to shard");
-    let jr = match connect_to_shard(shard_tcp_addr, &player_name).await {
-        Ok(jr) => jr,
-        Err(e) => {
-            let _ = event_tx.send(NetEvent::Disconnected(format!("shard connect error: {e}")));
-            return;
+        info!(tcp = %redirect.target_tcp_addr, udp = %redirect.target_udp_addr,
+            "received shard redirect");
+        match (redirect.target_tcp_addr.parse(), redirect.target_udp_addr.parse()) {
+            (Ok(tcp), Ok(udp)) => (tcp, udp),
+            _ => {
+                let _ = event_tx.send(NetEvent::Disconnected("bad redirect addrs".into()));
+                return;
+            }
         }
     };
 
-    info!(shard_type = jr.shard_type, "joined shard");
-    let _ = event_tx.send(NetEvent::Connected {
-        shard_type: jr.shard_type,
-        reference_position: jr.reference_position,
-        reference_rotation: jr.reference_rotation,
-        game_time: jr.game_time,
-        system_seed: jr.system_seed,
-    });
-
-    // UDP loop.
-    let udp = match UdpSocket::bind("0.0.0.0:0").await {
-        Ok(s) => s,
-        Err(e) => { let _ = event_tx.send(NetEvent::Disconnected(format!("udp: {e}"))); return; }
-    };
-
-    // Send initial hole-punch.
-    let hello = build_input(&empty_input());
-    let _ = udp.send_to(&hello, shard_udp_addr).await;
-    info!(%shard_udp_addr, "UDP hole-punch sent");
-
-    let udp = Arc::new(udp);
-    let udp_send = udp.clone();
-
-    // Input sender: reads from main thread, sends at 20Hz.
-    let send_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
-        loop {
-            interval.tick().await;
-
-            let input = {
-                let mut rx = input_rx.lock().await;
-                // Drain to latest input. For pilot yaw/pitch rate, latest-wins is correct
-                // since the rate represents the current desired turn speed, not a delta.
-                let mut latest = empty_input();
-                while let Ok(i) = rx.try_recv() {
-                    latest = i;
-                }
-                latest
-            };
-
-            let pkt = build_input(&input);
-            let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
-        }
-    });
-
-    // WorldState receiver.
-    let mut buf = vec![0u8; 65536];
+    // Main shard connection loop — reconnects on ShardRedirect.
     loop {
-        match udp.recv_from(&mut buf).await {
-            Ok((len, _)) => {
-                if len < 4 { continue; }
-                let msg_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-                if len < 4 + msg_len { continue; }
-                match ServerMsg::deserialize(&buf[4..4 + msg_len]) {
-                    Ok(ServerMsg::WorldState(ws)) => {
-                        let _ = event_tx.send(NetEvent::WorldState(ws));
+        info!(%shard_tcp_addr, "connecting to shard");
+        let (tcp_stream, jr) = match connect_to_shard_full(shard_tcp_addr, &player_name).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = event_tx.send(NetEvent::Disconnected(format!("shard connect: {e}")));
+                return;
+            }
+        };
+
+        info!(shard_type = jr.shard_type, "joined shard");
+        let _ = event_tx.send(NetEvent::Connected {
+            shard_type: jr.shard_type,
+            reference_position: jr.reference_position,
+            reference_rotation: jr.reference_rotation,
+            game_time: jr.game_time,
+            system_seed: jr.system_seed,
+        });
+
+        // Set up UDP for this shard.
+        let udp = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = event_tx.send(NetEvent::Disconnected(format!("udp: {e}")));
+                return;
+            }
+        };
+        let hello = build_input(&empty_input());
+        let _ = udp.send_to(&hello, shard_udp_addr).await;
+        info!(%shard_udp_addr, "UDP hole-punch sent");
+
+        let udp = Arc::new(udp);
+
+        // Channel to signal shutdown to child tasks.
+        let (cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
+        // Input sender task (20Hz).
+        let udp_send = udp.clone();
+        let input_rx_clone = input_rx.clone();
+        let mut cancel_input = cancel_tx.subscribe();
+        let send_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let input = {
+                            let mut rx = input_rx_clone.lock().await;
+                            let mut latest = empty_input();
+                            while let Ok(i) = rx.try_recv() { latest = i; }
+                            latest
+                        };
+                        let pkt = build_input(&input);
+                        let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
                     }
-                    _ => {}
+                    _ = cancel_input.recv() => { return; }
                 }
             }
-            Err(e) => { warn!(%e, "UDP recv error"); break; }
+        });
+
+        // UDP WorldState receiver task.
+        let event_tx_udp = event_tx.clone();
+        let udp_recv = udp.clone();
+        let mut cancel_udp = cancel_tx.subscribe();
+        let mut recv_handle = tokio::spawn(async move {
+            let mut buf = vec![0u8; 65536];
+            loop {
+                tokio::select! {
+                    result = udp_recv.recv_from(&mut buf) => {
+                        match result {
+                            Ok((len, _)) => {
+                                if len < 4 { continue; }
+                                let msg_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+                                if len < 4 + msg_len { continue; }
+                                if let Ok(ServerMsg::WorldState(ws)) = ServerMsg::deserialize(&buf[4..4 + msg_len]) {
+                                    let _ = event_tx_udp.send(NetEvent::WorldState(ws));
+                                }
+                            }
+                            Err(e) => { warn!(%e, "UDP recv error"); return; }
+                        }
+                    }
+                    _ = cancel_udp.recv() => { return; }
+                }
+            }
+        });
+
+        // TCP listener — monitors for ShardRedirect or ShardPreConnect.
+        let event_tx_tcp = event_tx.clone();
+        let (redirect_tx, mut redirect_rx) = mpsc::channel::<ShardRedirect>(1);
+        let mut cancel_tcp = cancel_tx.subscribe();
+        let tcp_handle = tokio::spawn(async move {
+            let mut stream = tcp_stream;
+            loop {
+                tokio::select! {
+                    result = recv_server_msg(&mut stream) => {
+                        match result {
+                            Ok(ServerMsg::ShardRedirect(r)) => {
+                                info!(target_tcp = %r.target_tcp_addr, "received ShardRedirect");
+                                let _ = redirect_tx.send(r).await;
+                                return;
+                            }
+                            Ok(ServerMsg::ShardPreConnect(pc)) => {
+                                info!(shard_type = pc.shard_type, seed = pc.seed,
+                                    "received ShardPreConnect");
+                                let _ = event_tx_tcp.send(NetEvent::SecondaryConnected {
+                                    shard_type: pc.shard_type,
+                                    seed: pc.seed,
+                                    reference_position: pc.reference_position,
+                                    reference_rotation: pc.reference_rotation,
+                                });
+                                // TODO: open secondary UDP connection to pre-load WorldState.
+                                // For now, just notify the render thread.
+                            }
+                            Ok(_) => { /* ignore other TCP messages */ }
+                            Err(e) => {
+                                warn!(%e, "TCP read error");
+                                return;
+                            }
+                        }
+                    }
+                    _ = cancel_tcp.recv() => { return; }
+                }
+            }
+        });
+
+        // Wait for either a redirect or a disconnect.
+        tokio::select! {
+            redirect = redirect_rx.recv() => {
+                if let Some(r) = redirect {
+                    let _ = event_tx.send(NetEvent::Transitioning);
+                    // Cancel all tasks for current shard.
+                    let _ = cancel_tx.send(());
+                    send_handle.abort();
+                    recv_handle.abort();
+                    tcp_handle.abort();
+
+                    // Parse new shard addresses and loop back to reconnect.
+                    match (r.target_tcp_addr.parse(), r.target_udp_addr.parse()) {
+                        (Ok(tcp), Ok(udp)) => {
+                            shard_tcp_addr = tcp;
+                            shard_udp_addr = udp;
+                            info!(%shard_tcp_addr, "transitioning to new shard");
+                            continue;
+                        }
+                        _ => {
+                            let _ = event_tx.send(NetEvent::Disconnected("bad redirect addrs".into()));
+                            return;
+                        }
+                    }
+                }
+                // redirect_rx closed without value — fall through to disconnect.
+                let _ = cancel_tx.send(());
+                send_handle.abort();
+                tcp_handle.abort();
+                let _ = event_tx.send(NetEvent::Disconnected("redirect channel closed".into()));
+                return;
+            }
+            _ = &mut recv_handle => {
+                // UDP died — disconnect.
+                let _ = cancel_tx.send(());
+                send_handle.abort();
+                tcp_handle.abort();
+                let _ = event_tx.send(NetEvent::Disconnected("connection lost".into()));
+                return;
+            }
         }
     }
-
-    send_handle.abort();
 }
 
 fn build_input(input: &PlayerInputData) -> Vec<u8> {
@@ -169,15 +269,17 @@ async fn connect_to_gateway(
     }
 }
 
-async fn connect_to_shard(
+/// Connect to a shard, returning both the TCP stream (kept alive for redirect
+/// monitoring) and the JoinResponse.
+async fn connect_to_shard_full(
     addr: SocketAddr,
     player_name: &str,
-) -> Result<JoinResponseData, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(TcpStream, voxeldust_core::client_message::JoinResponseData), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(addr).await?;
     send_msg(&mut stream, &ClientMsg::Connect { player_name: player_name.to_string() }).await?;
     let response = recv_server_msg(&mut stream).await?;
     match response {
-        ServerMsg::JoinResponse(jr) => Ok(jr),
+        ServerMsg::JoinResponse(jr) => Ok((stream, jr)),
         other => Err(format!("expected JoinResponse, got {:?}", std::mem::discriminant(&other)).into()),
     }
 }

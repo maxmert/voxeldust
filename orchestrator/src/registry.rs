@@ -248,8 +248,12 @@ impl ShardRegistry {
         if let Some(seed) = entry.info.planet_seed {
             self.planet_index.entry(seed).or_default().push(id);
         }
+        // Only System shards go in the system_index. Planet/ship shards may
+        // carry system_seed for context but should not shadow the system shard.
         if let Some(seed) = entry.info.system_seed {
-            self.system_index.insert(seed, id);
+            if entry.info.shard_type == ShardType::System {
+                self.system_index.insert(seed, id);
+            }
         }
         if let Some(seed) = entry.info.galaxy_seed {
             self.galaxy_index.insert(seed, id);

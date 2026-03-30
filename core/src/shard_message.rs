@@ -20,6 +20,7 @@ pub enum ShardMsg {
     CrossShardBlockEdits(CrossShardBlockEdits),
     SystemSceneUpdate(SystemSceneUpdateData),
     AutopilotCommand(AutopilotCommandData),
+    ShipNearbyInfo(ShipNearbyInfoData),
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +100,16 @@ pub struct AutopilotCommandData {
     pub speed_tier: u8,
 }
 
+/// Ship position/state sent from system shard to planet shards within SOI.
+#[derive(Debug, Clone)]
+pub struct ShipNearbyInfoData {
+    pub ship_id: u64,
+    pub ship_shard_id: ShardId,
+    pub position: DVec3,
+    pub rotation: DQuat,
+    pub velocity: DVec3,
+}
+
 /// Block edits affecting chunks on adjacent shard boundaries.
 #[derive(Debug, Clone)]
 pub struct CrossShardBlockEdits {
@@ -161,6 +172,10 @@ impl ShardMsg {
                     )
                 });
 
+                // Build optional ship position/rotation for ship→planet handoffs.
+                let ship_sys_pos = h.ship_system_position.as_ref().map(|p| to_fb_vec3d(p));
+                let ship_rot = h.ship_rotation.as_ref().map(|r| to_fb_quatd(r));
+
                 let handoff = fb::PlayerHandoff::create(
                     &mut builder,
                     &fb::PlayerHandoffArgs {
@@ -179,6 +194,12 @@ impl ShardMsg {
                         source_tick: h.source_tick,
                         target_star_index: h.target_star_index.unwrap_or(0xFFFFFFFF),
                         galaxy_context: galaxy_ctx,
+                        target_planet_seed: h.target_planet_seed.unwrap_or(u64::MAX),
+                        target_planet_index: h.target_planet_index.unwrap_or(u32::MAX),
+                        target_ship_id: h.target_ship_id.unwrap_or(u64::MAX),
+                        target_ship_shard_id: h.target_ship_shard_id.map(|s| s.0).unwrap_or(u64::MAX),
+                        ship_system_position: ship_sys_pos.as_ref(),
+                        ship_rotation: ship_rot.as_ref(),
                     },
                 );
 
@@ -422,6 +443,30 @@ impl ShardMsg {
                 });
                 builder.finish(msg, None);
             }
+
+            ShardMsg::ShipNearbyInfo(info) => {
+                let pos = to_fb_vec3d(&info.position);
+                let rot = to_fb_quatd(&info.rotation);
+                let vel = to_fb_vec3d(&info.velocity);
+                let nearby = fb::ShipNearbyInfo::create(
+                    &mut builder,
+                    &fb::ShipNearbyInfoArgs {
+                        ship_id: info.ship_id,
+                        ship_shard_id: info.ship_shard_id.0,
+                        position: Some(&pos),
+                        rotation: Some(&rot),
+                        velocity: Some(&vel),
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::ShipNearbyInfo,
+                        payload: Some(nearby.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         builder.finished_data().to_vec()
@@ -478,6 +523,24 @@ impl ShardMsg {
                             star_position: from_fb_vec3d(sp),
                         }
                     }),
+                    target_planet_seed: {
+                        let v = h.target_planet_seed();
+                        if v == u64::MAX { None } else { Some(v) }
+                    },
+                    target_planet_index: {
+                        let v = h.target_planet_index();
+                        if v == u32::MAX { None } else { Some(v) }
+                    },
+                    target_ship_id: {
+                        let v = h.target_ship_id();
+                        if v == u64::MAX { None } else { Some(v) }
+                    },
+                    target_ship_shard_id: {
+                        let v = h.target_ship_shard_id();
+                        if v == u64::MAX { None } else { Some(ShardId(v)) }
+                    },
+                    ship_system_position: h.ship_system_position().map(|p| from_fb_vec3d(p)),
+                    ship_rotation: h.ship_rotation().map(|r| from_fb_quatd(r)),
                 }))
             }
 
@@ -655,6 +718,23 @@ impl ShardMsg {
                 }))
             }
 
+            fb::ShardPayload::ShipNearbyInfo => {
+                let info = msg
+                    .payload_as_ship_nearby_info()
+                    .ok_or(MessageError::MissingField("ShipNearbyInfo payload"))?;
+                let pos = info.position().ok_or(MessageError::MissingField("position"))?;
+                let rot = info.rotation().ok_or(MessageError::MissingField("rotation"))?;
+                let vel = info.velocity().ok_or(MessageError::MissingField("velocity"))?;
+
+                Ok(ShardMsg::ShipNearbyInfo(ShipNearbyInfoData {
+                    ship_id: info.ship_id(),
+                    ship_shard_id: ShardId(info.ship_shard_id()),
+                    position: from_fb_vec3d(pos),
+                    rotation: from_fb_quatd(rot),
+                    velocity: from_fb_vec3d(vel),
+                }))
+            }
+
             fb::ShardPayload::NONE => {
                 Err(MessageError::UnknownPayload(0))
             }
@@ -686,6 +766,12 @@ mod tests {
             source_tick: 10000,
             target_star_index: None,
             galaxy_context: None,
+            target_planet_seed: None,
+            target_planet_index: None,
+            target_ship_id: None,
+            target_ship_shard_id: None,
+            ship_system_position: None,
+            ship_rotation: None,
         }
     }
 

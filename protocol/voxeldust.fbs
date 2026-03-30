@@ -46,6 +46,18 @@ table PlayerHandoff {
     target_star_index: uint32 = 4294967295;
     /// For system→galaxy handoffs: galaxy context for coordinate transform.
     galaxy_context: GalaxyHandoffContext;
+    /// Target planet seed (0xFFFFFFFFFFFFFFFF = not set).
+    target_planet_seed: uint64 = 18446744073709551615;
+    /// Target planet index (0xFFFFFFFF = not set).
+    target_planet_index: uint32 = 4294967295;
+    /// Target ship ID for re-entry (0xFFFFFFFFFFFFFFFF = not set).
+    target_ship_id: uint64 = 18446744073709551615;
+    /// Target ship shard ID (0xFFFFFFFFFFFFFFFF = not set).
+    target_ship_shard_id: uint64 = 18446744073709551615;
+    /// Ship system-space position at handoff time.
+    ship_system_position: Vec3d;
+    /// Ship rotation at handoff time.
+    ship_rotation: Quatd;
 }
 
 table HandoffAccepted {
@@ -126,6 +138,15 @@ table AutopilotCommand {
     speed_tier: uint8;
 }
 
+/// Ship position/state sent from system shard to planet shards within SOI.
+table ShipNearbyInfo {
+    ship_id: uint64;
+    ship_shard_id: uint64;
+    position: Vec3d;
+    rotation: Quatd;
+    velocity: Vec3d;
+}
+
 /// Snapshot of a celestial body's state for scene rendering.
 table CelestialBodySnapshot {
     body_id: uint32;       // 0 = star, 1..N = planets
@@ -176,6 +197,7 @@ union ShardPayload {
     ShipControlInput,
     SystemSceneUpdate,
     AutopilotCommand,
+    ShipNearbyInfo,
 }
 
 /// Root type for all inter-shard QUIC messages.
@@ -293,6 +315,17 @@ table ShardRedirectMsg {
     shard_id: uint64;
 }
 
+/// Pre-connect notification: shard tells client to open a secondary connection.
+table ShardPreConnect {
+    shard_type: uint8;         // 0=Planet, 2=Ship
+    tcp_addr: string;
+    udp_addr: string;
+    seed: uint64;              // planet_seed or system_seed
+    planet_index: uint32;
+    reference_position: Vec3d; // system-space position
+    reference_rotation: Quatd;
+}
+
 table DamageEvent {
     target_id: uint64;
     source_id: uint64;
@@ -314,6 +347,7 @@ union ServerPayload {
     DamageEvent,
     PlayerDestroyed,
     StarCatalog,
+    ShardPreConnect,
 }
 
 /// Root type for server → client messages.

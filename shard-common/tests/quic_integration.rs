@@ -25,6 +25,12 @@ fn make_handoff() -> PlayerHandoff {
         source_tick: 500,
         target_star_index: None,
         galaxy_context: None,
+        target_planet_seed: None,
+        target_planet_index: None,
+        target_ship_id: None,
+        target_ship_shard_id: None,
+        ship_system_position: None,
+        ship_rotation: None,
     }
 }
 

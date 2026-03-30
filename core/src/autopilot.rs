@@ -10,15 +10,45 @@ use crate::system::{
     StarParams, SystemParams,
 };
 
-/// Thrust force (Newtons) for each speed tier.
-pub const THRUST_TIERS: [f64; 4] = [
-    50_000.0,  // 0: maneuver (0.5g)
-    98_100.0,  // 1: standard (1g)
-    294_300.0, // 2: high-g (3g)
-    588_600.0, // 3: emergency (6g)
-];
-
 pub const SHIP_MASS: f64 = 10_000.0;
+
+/// Engine tier definition. Two categories: maneuver (no dampening, low g)
+/// and high-thrust (inertial dampener active, extreme acceleration).
+#[derive(Debug, Clone, Copy)]
+pub struct EngineTier {
+    /// Display name for HUD.
+    pub name: &'static str,
+    /// True acceleration in m/s² (thrust_force / SHIP_MASS).
+    pub acceleration: f64,
+    /// G-force felt by crew after inertial dampening.
+    pub felt_g: f64,
+    /// Whether inertial dampener is active at this tier.
+    pub dampened: bool,
+}
+
+impl EngineTier {
+    /// Thrust force in Newtons for this tier.
+    pub const fn thrust_force(&self) -> f64 {
+        self.acceleration * SHIP_MASS
+    }
+}
+
+/// Engine tiers from maneuver to emergency high-thrust.
+///
+/// | Tier | Name        | Accel      | Felt | ~1e11 m | ~4e11 m |
+/// |------|-------------|------------|------|---------|---------|
+/// | 0    | Maneuver    | 4.9 m/s²   | 0.5g | —       | —       |
+/// | 1    | Impulse     | 29.4 m/s²  | 3.0g | —       | —       |
+/// | 2    | Cruise      | 49 km/s²   | 1.0g | 47 min  | 94 min  |
+/// | 3    | Long Range  | 490 km/s²  | 2.0g | 15 min  | 30 min  |
+/// | 4    | Emergency   | 2450 km/s² | 5.0g | 6.7 min | 13 min  |
+pub const ENGINE_TIERS: [EngineTier; 5] = [
+    EngineTier { name: "Maneuver",   acceleration: 4.905,       felt_g: 0.5, dampened: false },
+    EngineTier { name: "Impulse",    acceleration: 29.43,       felt_g: 3.0, dampened: false },
+    EngineTier { name: "Cruise",     acceleration: 49_050.0,    felt_g: 1.0, dampened: true },
+    EngineTier { name: "Long Range", acceleration: 490_500.0,   felt_g: 2.0, dampened: true },
+    EngineTier { name: "Emergency",  acceleration: 2_452_500.0, felt_g: 5.0, dampened: true },
+];
 
 /// Flight phase of the autopilot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +90,12 @@ pub struct TrajectoryPlan {
     pub target_planet_index: usize,
     /// SOI radius of the target planet.
     pub target_soi_radius: f64,
+    /// G-force felt by crew (dampened).
+    pub felt_g: f64,
+    /// Whether inertial dampener is active.
+    pub dampener_active: bool,
+    /// Engine tier name for HUD display.
+    pub engine_tier_name: &'static str,
 }
 
 /// Output of per-tick guidance computation.
@@ -67,7 +103,7 @@ pub struct TrajectoryPlan {
 pub struct GuidanceCommand {
     /// Thrust direction in world space (unit vector). Ship should orient to face this.
     pub thrust_direction: DVec3,
-    /// Thrust force magnitude (Newtons).
+    /// Thrust force magnitude (Newtons), before ramp factor.
     pub thrust_magnitude: f64,
     /// Current flight phase.
     pub phase: FlightPhase,
@@ -75,11 +111,42 @@ pub struct GuidanceCommand {
     pub completed: bool,
     /// ETA in real seconds.
     pub eta_real_seconds: f64,
+    /// G-force felt by crew (after dampening, before ramp).
+    pub felt_g: f64,
+    /// Whether inertial dampener is active.
+    pub dampener_active: bool,
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Get engine tier, clamped to valid range.
+pub fn engine_tier(tier: u8) -> &'static EngineTier {
+    &ENGINE_TIERS[(tier as usize).min(ENGINE_TIERS.len() - 1)]
+}
+
+/// Progressive thrust ramp factor (0.0–1.0).
+///
+/// Ramps thrust linearly from 0 to full over `ramp_duration` at the start
+/// of acceleration, and from full to 0 over the last `ramp_duration` before
+/// arrival. The flip transition is handled naturally by the alignment-based
+/// thrust scaling (cos(misalignment) → 0 during rotation).
+///
+/// `elapsed` = real seconds since autopilot engage.
+/// `tof` = estimated total time of flight.
+pub fn thrust_ramp_factor(elapsed: f64, tof: f64, phase: FlightPhase) -> f64 {
+    if tof <= 0.0 {
+        return 1.0;
+    }
+    let ramp_duration = (tof / 8.0).clamp(5.0, 30.0);
+    match phase {
+        // Smooth ramp-up at start of acceleration only.
+        // Braking always uses full thrust to match stopping distance formula v²/(2a).
+        FlightPhase::Accelerate => (elapsed / ramp_duration).clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
 
 /// Brachistochrone time-of-flight: accelerate to midpoint, flip, decelerate to rest.
 /// Handles any initial velocity (positive = toward target, negative = away).
@@ -114,8 +181,7 @@ pub fn solve_intercept(
     time_scale: f64,
     thrust_tier: u8,
 ) -> Option<(DVec3, f64)> {
-    let tier = (thrust_tier as usize).min(THRUST_TIERS.len() - 1);
-    let accel = THRUST_TIERS[tier] / SHIP_MASS;
+    let accel = engine_tier(thrust_tier).acceleration;
     let soi = compute_soi_radius(target_planet, star);
 
     // Initial estimate using current target position.
@@ -150,7 +216,7 @@ pub fn solve_intercept(
             return None;
         }
 
-        if (tof_new - tof_real).abs() < 1.0 {
+        if (tof_new - tof_real).abs() < tof_real.max(1.0) * 0.01 {
             tof_real = tof_new;
             break;
         }
@@ -183,9 +249,9 @@ pub fn compute_guidance(
     celestial_time: f64,
     thrust_tier: u8,
 ) -> GuidanceCommand {
-    let tier = (thrust_tier as usize).min(THRUST_TIERS.len() - 1);
-    let thrust_force = THRUST_TIERS[tier];
-    let accel = thrust_force / SHIP_MASS;
+    let et = engine_tier(thrust_tier);
+    let thrust_force = et.acceleration * SHIP_MASS;
+    let accel = et.acceleration;
 
     let planet = &system.planets[target_planet_index];
     let star = &system.star;
@@ -201,6 +267,8 @@ pub fn compute_guidance(
             phase: FlightPhase::Arrived,
             completed: true,
             eta_real_seconds: 0.0,
+            felt_g: 0.0,
+            dampener_active: et.dampened,
         };
     }
 
@@ -214,6 +282,8 @@ pub fn compute_guidance(
             phase: FlightPhase::Arrived,
             completed: true,
             eta_real_seconds: 0.0,
+            felt_g: 0.0,
+            dampener_active: et.dampened,
         };
     }
     let desired_dir = to_intercept / dist_to_intercept;
@@ -272,6 +342,8 @@ pub fn compute_guidance(
             phase: FlightPhase::Brake,
             completed: false,
             eta_real_seconds: eta_real,
+            felt_g: et.felt_g,
+            dampener_active: et.dampened,
         }
     } else {
         // ACCELERATE phase: thrust toward intercept, lean into helpful gravity.
@@ -292,6 +364,8 @@ pub fn compute_guidance(
             phase: FlightPhase::Accelerate,
             completed: false,
             eta_real_seconds: eta_real,
+            felt_g: et.felt_g,
+            dampener_active: et.dampened,
         }
     }
 }
@@ -333,7 +407,22 @@ pub fn plan_trajectory(
     )?;
 
     if eta_real <= 0.0 {
-        return None;
+        // Already inside SOI — return an immediate Arrived plan.
+        let et = engine_tier(thrust_tier);
+        return Some(TrajectoryPlan {
+            points: vec![],
+            current_phase: FlightPhase::Arrived,
+            eta_real_seconds: 0.0,
+            intercept_position: intercept_pos,
+            thrust_direction: DVec3::NEG_Z,
+            thrust_magnitude: 0.0,
+            flip_index: 0,
+            target_planet_index,
+            target_soi_radius: soi,
+            felt_g: 0.0,
+            dampener_active: et.dampened,
+            engine_tier_name: et.name,
+        });
     }
 
     // Forward simulate.
@@ -463,6 +552,7 @@ pub fn plan_trajectory(
         thrust_tier,
     );
 
+    let et = engine_tier(thrust_tier);
     Some(TrajectoryPlan {
         points,
         current_phase: initial_guidance.phase,
@@ -473,6 +563,9 @@ pub fn plan_trajectory(
         flip_index,
         target_planet_index,
         target_soi_radius: soi,
+        felt_g: et.felt_g,
+        dampener_active: et.dampened,
+        engine_tier_name: et.name,
     })
 }
 
@@ -490,11 +583,11 @@ mod tests {
     }
 
     #[test]
-    fn thrust_tiers_increasing() {
-        for i in 1..THRUST_TIERS.len() {
+    fn engine_tiers_increasing() {
+        for i in 1..ENGINE_TIERS.len() {
             assert!(
-                THRUST_TIERS[i] > THRUST_TIERS[i - 1],
-                "tier {} not greater than tier {}",
+                ENGINE_TIERS[i].acceleration > ENGINE_TIERS[i - 1].acceleration,
+                "tier {} accel not greater than tier {}",
                 i,
                 i - 1
             );
@@ -502,12 +595,37 @@ mod tests {
     }
 
     #[test]
-    fn thrust_tier_accelerations() {
-        let accels: Vec<f64> = THRUST_TIERS.iter().map(|&f| f / SHIP_MASS).collect();
-        assert!((accels[0] - 5.0).abs() < 0.1, "tier 0 should be ~5 m/s²");
-        assert!((accels[1] - 9.81).abs() < 0.1, "tier 1 should be ~9.81 m/s²");
-        assert!((accels[2] - 29.43).abs() < 0.1, "tier 2 should be ~29.4 m/s²");
-        assert!((accels[3] - 58.86).abs() < 0.1, "tier 3 should be ~58.9 m/s²");
+    fn engine_tier_accelerations() {
+        assert!((ENGINE_TIERS[0].acceleration - 4.905).abs() < 0.01, "tier 0 should be ~4.9 m/s²");
+        assert!((ENGINE_TIERS[1].acceleration - 29.43).abs() < 0.01, "tier 1 should be ~29.4 m/s²");
+        assert!((ENGINE_TIERS[2].acceleration - 49_050.0).abs() < 1.0, "tier 2 should be ~49050 m/s²");
+        assert!((ENGINE_TIERS[3].acceleration - 490_500.0).abs() < 1.0, "tier 3 should be ~490500 m/s²");
+        assert!((ENGINE_TIERS[4].acceleration - 2_452_500.0).abs() < 1.0, "tier 4 should be ~2452500 m/s²");
+    }
+
+    #[test]
+    fn engine_tier_dampening() {
+        assert!(!ENGINE_TIERS[0].dampened, "maneuver should not be dampened");
+        assert!(!ENGINE_TIERS[1].dampened, "impulse should not be dampened");
+        assert!(ENGINE_TIERS[2].dampened, "cruise should be dampened");
+        assert!(ENGINE_TIERS[3].dampened, "long range should be dampened");
+        assert!(ENGINE_TIERS[4].dampened, "emergency should be dampened");
+    }
+
+    #[test]
+    fn thrust_ramp_factor_values() {
+        let tof = 100.0;
+        let ramp = tof / 8.0; // 12.5s
+        // Start of accel: ramp up
+        assert!((thrust_ramp_factor(0.0, tof, FlightPhase::Accelerate)).abs() < 0.01);
+        assert!((thrust_ramp_factor(ramp / 2.0, tof, FlightPhase::Accelerate) - 0.5).abs() < 0.01);
+        assert!((thrust_ramp_factor(ramp, tof, FlightPhase::Accelerate) - 1.0).abs() < 0.01);
+        // Mid-accel: full
+        assert!((thrust_ramp_factor(50.0, tof, FlightPhase::Accelerate) - 1.0).abs() < 0.01);
+        // Brake: always full thrust (no ramp-down — needed for stopping distance accuracy)
+        assert!((thrust_ramp_factor(60.0, tof, FlightPhase::Brake) - 1.0).abs() < 0.01);
+        assert!((thrust_ramp_factor(tof, tof, FlightPhase::Brake) - 1.0).abs() < 0.01);
+        assert!((thrust_ramp_factor(tof - 1.0, tof, FlightPhase::Brake) - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -627,12 +745,13 @@ mod tests {
 
         let planet_pos = compute_planet_position(planet, 0.0);
         let soi = compute_soi_radius(planet, star);
-        // Ship close to target, moving very fast toward it.
-        // Stopping distance must exceed remaining distance to trigger braking.
-        // At 1g (9.81 m/s²), stopping from 20 km/s takes ~20.4 Mm.
-        // Place ship at soi * 1.5 with soi-sized remaining distance.
-        let ship_pos = planet_pos + DVec3::new(soi * 1.5, 0.0, 0.0);
-        let ship_vel = DVec3::new(-20_000.0, 0.0, 0.0); // 20 km/s toward planet
+        // Ship close to target at high speed. Tier 1 (Impulse) = 29.43 m/s².
+        // Stopping from v at accel a: d_stop = v²/(2*a).
+        // At v=1000 m/s, a=29.43: d_stop = 1e6/58.86 = 16,989 m.
+        // Place ship at soi + 20,000 m with 20,000 m remaining to intercept.
+        let remaining = 20_000.0;
+        let ship_pos = planet_pos + DVec3::new(soi + remaining, 0.0, 0.0);
+        let ship_vel = DVec3::new(-1_000.0, 0.0, 0.0); // 1 km/s toward planet
 
         let intercept_pos = planet_pos + DVec3::new(soi, 0.0, 0.0);
 
@@ -650,10 +769,24 @@ mod tests {
             &sys,
             &planet_positions,
             0.0,
+            1, // Impulse tier
+        );
+
+        // stopping_dist = 1000²/(2*29.43) ≈ 16,989 m ≥ 20,000 * 0.95 = 19,000? No.
+        // Need higher speed: v=1100 → d_stop = 1.21e6/58.86 = 20,557 ≥ 19,000 → braking.
+        // Let's use v=1100.
+        let ship_vel_fast = DVec3::new(-1_100.0, 0.0, 0.0);
+        let cmd = compute_guidance(
+            ship_pos,
+            ship_vel_fast,
+            intercept_pos,
+            0,
+            &sys,
+            &planet_positions,
+            0.0,
             1,
         );
 
-        // At 20 km/s with only 0.5 * soi distance remaining, should be braking.
         assert_eq!(cmd.phase, FlightPhase::Brake);
     }
 
@@ -728,35 +861,35 @@ mod tests {
         let planet_pos = compute_planet_position(&sys.planets[0], 0.0);
         let ship_pos = planet_pos + DVec3::new(sys.scale.spawn_offset * 10.0, 0.0, 0.0);
 
-        let eta_1g = solve_intercept(
+        let eta_impulse = solve_intercept(
             ship_pos,
             DVec3::ZERO,
             &sys.planets[0],
             &sys.star,
             0.0,
             sys.scale.time_scale,
-            1,
+            1, // Impulse (29.4 m/s²)
         )
         .unwrap()
         .1;
 
-        let eta_3g = solve_intercept(
+        let eta_cruise = solve_intercept(
             ship_pos,
             DVec3::ZERO,
             &sys.planets[0],
             &sys.star,
             0.0,
             sys.scale.time_scale,
-            2,
+            2, // Cruise (49050 m/s²)
         )
         .unwrap()
         .1;
 
         assert!(
-            eta_3g < eta_1g,
-            "3g ({:.0}s) should be faster than 1g ({:.0}s)",
-            eta_3g,
-            eta_1g
+            eta_cruise < eta_impulse,
+            "Cruise ({:.0}s) should be faster than Impulse ({:.0}s)",
+            eta_cruise,
+            eta_impulse
         );
     }
 }

@@ -33,9 +33,9 @@ pub struct CelestialScaleConfig {
 impl CelestialScaleConfig {
     pub const GAMEPLAY: Self = Self {
         time_scale: 12.0,
-        base_sma: 2.0e9,
-        spawn_offset: 4.0e6,
-        fallback_spawn_distance: 4.0e7,
+        base_sma: 1.0e10,
+        spawn_offset: 2.0e7,
+        fallback_spawn_distance: 2.0e8,
         rotation_period_range: (60_000.0, 120_000.0), // ~1.4-2.8 real hours at 12x
     };
 

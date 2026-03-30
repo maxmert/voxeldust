@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -110,9 +110,17 @@ async fn get_shard(
     }
 }
 
+/// Query parameters for planet shard provisioning.
+#[derive(Deserialize, Default)]
+struct PlanetQueryParams {
+    system_seed: Option<u64>,
+    planet_index: Option<u32>,
+}
+
 async fn find_planet_shard(
     State(state): State<Arc<AppState>>,
     Path(seed): Path<u64>,
+    Query(params): Query<PlanetQueryParams>,
 ) -> Result<Json<ShardsResponse>, StatusCode> {
     // Check if a Ready shard already exists for this planet.
     {
@@ -126,13 +134,23 @@ async fn find_planet_shard(
     }
 
     // No shard — provision one.
-    info!(seed, "no planet shard found, provisioning on demand");
+    info!(seed, system_seed = ?params.system_seed, planet_index = ?params.planet_index,
+        "no planet shard found, provisioning on demand");
+    let mut args = vec![
+        "--seed".to_string(),
+        seed.to_string(),
+    ];
+    if let Some(sys_seed) = params.system_seed {
+        args.push("--system-seed".to_string());
+        args.push(sys_seed.to_string());
+    }
+    if let Some(planet_idx) = params.planet_index {
+        args.push("--planet-index".to_string());
+        args.push(planet_idx.to_string());
+    }
     let launch_config = LaunchConfig {
         binary: "planet-shard".to_string(),
-        args: vec![
-            "--seed".to_string(),
-            seed.to_string(),
-        ],
+        args,
         shard_type: ShardType::Planet,
     };
 

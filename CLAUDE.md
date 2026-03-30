@@ -9,7 +9,7 @@ universe with spherical voxel planets, player-built ships, and Newtonian space p
 ### Three-Crate Structure
 - **Core** (`core/`): Rust library — terrain gen, meshing, coordinate math. Shared by server and client as a direct Rust dependency.
 - **Server** (`server/`): Rust — Tokio async networking, Rapier3D physics, game loop at 20Hz.
-- **Client** (`voxygen/`): Rust — wgpu renderer, winit windowing, egui UI. Generates terrain/meshes locally, connects to server for multiplayer.
+- **Client** (`voxydust/`): Rust — wgpu renderer, winit windowing, egui UI. Generates terrain/meshes locally, connects to server for multiplayer.
 
 ### Key Principles
 - **No magic numbers**: All world parameters derived deterministically from seeds (planet size, gravity, terrain, biomes).
@@ -57,9 +57,13 @@ System Shard (1 per star system)
 ## Build & Run
 ```bash
 cargo test -p voxeldust-core          # Core tests (124 tests)
-cargo run -p voxygen                  # Run client (standalone mode)
-cargo run -p voxygen -- --server 127.0.0.1:7777  # Connect to server
-cargo run -p voxeldust-server         # Run server
+cargo run -p voxydust                 # Run client (connects to localhost:7777 by default)
+cargo run -p voxydust -- --gateway 127.0.0.1:7777 --name Player  # Explicit options
+./dev-cluster.sh up                   # Build images & deploy to k3d
+./dev-cluster.sh rebuild              # Rebuild images & redeploy
+./dev-cluster.sh down                 # Tear down cluster
+./dev-cluster.sh status               # Check pod status
+./dev-cluster.sh logs [component]     # Tail logs (default: orchestrator)
 ./build_protocol.sh                   # Regenerate FlatBuffers (Rust)
 ```
 

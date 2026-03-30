@@ -1,7 +1,7 @@
 use flatbuffers::FlatBufferBuilder;
 use glam::{DQuat, DVec3};
 
-use crate::handoff::ShardRedirect;
+use crate::handoff::{self, ShardRedirect};
 use crate::protocol_generated as fb;
 use crate::shard_message::MessageError;
 use crate::shard_types::{SessionToken, ShardId};
@@ -24,6 +24,7 @@ pub enum ServerMsg {
     DamageEvent(DamageEventData),
     PlayerDestroyed(PlayerDestroyedData),
     StarCatalog(StarCatalogData),
+    ShardPreConnect(handoff::ShardPreConnect),
 }
 
 #[derive(Debug, Clone)]
@@ -479,6 +480,26 @@ impl ServerMsg {
                 });
                 builder.finish(msg, None);
             }
+            ServerMsg::ShardPreConnect(data) => {
+                let tcp = builder.create_string(&data.tcp_addr);
+                let udp = builder.create_string(&data.udp_addr);
+                let ref_pos = to_fb_vec3d(&data.reference_position);
+                let ref_rot = to_fb_quatd(&data.reference_rotation);
+                let pc = fb::ShardPreConnect::create(&mut builder, &fb::ShardPreConnectArgs {
+                    shard_type: data.shard_type,
+                    tcp_addr: Some(tcp),
+                    udp_addr: Some(udp),
+                    seed: data.seed,
+                    planet_index: data.planet_index,
+                    reference_position: Some(&ref_pos),
+                    reference_rotation: Some(&ref_rot),
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::ShardPreConnect,
+                    payload: Some(pc.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         builder.finished_data().to_vec()
@@ -641,6 +662,23 @@ impl ServerMsg {
                 Ok(ServerMsg::StarCatalog(StarCatalogData {
                     galaxy_seed: sc.galaxy_seed(),
                     stars,
+                }))
+            }
+            fb::ServerPayload::ShardPreConnect => {
+                let pc = msg.payload_as_shard_pre_connect()
+                    .ok_or(MessageError::MissingField("ShardPreConnect payload"))?;
+                let ref_pos = pc.reference_position()
+                    .ok_or(MessageError::MissingField("reference_position"))?;
+                let ref_rot = pc.reference_rotation()
+                    .ok_or(MessageError::MissingField("reference_rotation"))?;
+                Ok(ServerMsg::ShardPreConnect(handoff::ShardPreConnect {
+                    shard_type: pc.shard_type(),
+                    tcp_addr: pc.tcp_addr().unwrap_or("").to_string(),
+                    udp_addr: pc.udp_addr().unwrap_or("").to_string(),
+                    seed: pc.seed(),
+                    planet_index: pc.planet_index(),
+                    reference_position: from_fb_vec3d(ref_pos),
+                    reference_rotation: from_fb_quatd(ref_rot),
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),

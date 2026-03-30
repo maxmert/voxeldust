@@ -134,7 +134,7 @@ impl App {
             frame_count: 0,
             system_params: None,
             autopilot_target: None,
-            selected_thrust_tier: 1, // default 1g
+            selected_thrust_tier: 3, // default Long Range
             trajectory_plan: None,
         }
     }
@@ -225,7 +225,7 @@ impl App {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format, depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
                 stencil: Default::default(), bias: Default::default(),
             }),
             multisample: Default::default(), multiview: None, cache: None,
@@ -343,8 +343,19 @@ impl App {
                         info!(%reason, "disconnected");
                         self.connected = false;
                     }
+                    NetEvent::SecondaryConnected { shard_type, seed, reference_position, reference_rotation } => {
+                        let shard_name = match shard_type { 0 => "Planet", 2 => "Ship", _ => "?" };
+                        info!(shard_name, seed, "secondary shard pre-connected");
+                        // Store for future composite rendering.
+                        // TODO: generate terrain chunks for planet secondary.
+                    }
+                    NetEvent::SecondaryWorldState(_ws) => {
+                        // TODO: store for composite rendering alongside primary WorldState.
+                    }
                     NetEvent::Transitioning => {
                         info!("transitioning to new shard...");
+                        // Clear stale world state so we don't render old data.
+                        self.latest_world_state = None;
                     }
                 }
             }
@@ -364,11 +375,12 @@ impl App {
                 else if self.keys_held.contains(&KeyCode::KeyE) { 3 }
                 else { 0 };
 
-            // Thrust tier selection (1-4 keys).
+            // Thrust tier selection (1-5 keys).
             if self.keys_held.contains(&KeyCode::Digit1) { self.selected_thrust_tier = 0; }
             if self.keys_held.contains(&KeyCode::Digit2) { self.selected_thrust_tier = 1; }
             if self.keys_held.contains(&KeyCode::Digit3) { self.selected_thrust_tier = 2; }
             if self.keys_held.contains(&KeyCode::Digit4) { self.selected_thrust_tier = 3; }
+            if self.keys_held.contains(&KeyCode::Digit5) { self.selected_thrust_tier = 4; }
             let free_look = self.keys_held.contains(&KeyCode::AltLeft);
 
             // When piloting: send yaw/pitch rate (-1 to 1) for ship torque.
@@ -438,7 +450,7 @@ impl App {
             Vec3::new(cy * cp, sp, sy * cp).normalize()
         };
         let aspect = gpu.config.width as f32 / gpu.config.height as f32;
-        let proj = Mat4::perspective_rh(70.0_f32.to_radians(), aspect, 0.1, 1e13);
+        let proj = Mat4::perspective_infinite_reverse_rh(70.0_f32.to_radians(), aspect, 0.1);
         let cam_up = if self.current_shard_type == 2 {
             // Inside ship: up follows ship rotation (artificial gravity floor).
             (self.ship_rotation * DVec3::Y).as_vec3().normalize()
@@ -554,7 +566,7 @@ impl App {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &gpu.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
@@ -787,8 +799,12 @@ impl App {
 
                         ui.separator();
                         let tier_label = match self.selected_thrust_tier {
-                            0 => "0.5g MANEUVER", 1 => "1g STANDARD",
-                            2 => "3g HIGH-G", 3 => "6g EMERGENCY", _ => "?",
+                            0 => "MANEUVER 0.5g",
+                            1 => "IMPULSE 3g",
+                            2 => "CRUISE 5000g",
+                            3 => "LONG RANGE 50000g",
+                            4 => "EMERGENCY 250000g",
+                            _ => "?",
                         };
 
                         // Autopilot status.
@@ -805,7 +821,8 @@ impl App {
 
                             ui.colored_label(egui::Color32::from_rgb(100, 255, 200),
                                 format!("AUTOPILOT: {} -> {}", phase_name, target_name));
-                            ui.label(format!("Thrust: {} | Points: {}", tier_label, plan.points.len()));
+                            let dampener_str = if plan.dampener_active { "DAMPENER ON" } else { "" };
+                            ui.label(format!("{} | Felt: {:.1}g {}", tier_label, plan.felt_g, dampener_str));
 
                             let eta = plan.eta_real_seconds;
                             let eta_text = if eta > 3600.0 { format!("ETA: {:.1}h", eta / 3600.0) }
@@ -814,7 +831,7 @@ impl App {
                             ui.label(&eta_text);
 
                             ui.separator();
-                            ui.label("T=disengage | 1-4=thrust | WASD=cancel");
+                            ui.label("T=disengage | 1-5=thrust | WASD=cancel");
                         } else if self.autopilot_target.is_some() {
                             // Autopilot target selected but trajectory computation failed.
                             let body_names_ap = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
@@ -823,10 +840,10 @@ impl App {
                             ui.colored_label(egui::Color32::from_rgb(255, 200, 100),
                                 format!("AUTOPILOT: targeting {} (computing...)", target_name));
                             ui.label(format!("Thrust: {}", tier_label));
-                            ui.label("T=disengage | 1-4=thrust | WASD=cancel");
+                            ui.label("T=disengage | 1-5=thrust | WASD=cancel");
                         } else {
                             ui.label("WASD=thrust  E=exit seat  T=autopilot");
-                            ui.label(format!("Thrust: {} (1-4 to change)", tier_label));
+                            ui.label(format!("Thrust: {} (1-5 to change)", tier_label));
                         }
                     } else {
                         // Walking inside ship.
@@ -1008,30 +1025,43 @@ impl ApplicationHandler for App {
 fn generate_box_mesh(width: f32, height: f32, length: f32) -> (Vec<[f32; 3]>, Vec<u32>) {
     let hw = width / 2.0;
     let hl = length / 2.0;
-    #[rustfmt::skip]
-    let vertices: Vec<[f32; 3]> = vec![
-        // Floor (y=0)
+
+    // Door hole in the right wall (x=+hw), centered at z=0.
+    // Door dimensions: 1.2m wide (z: -0.6 to 0.6), 2.1m tall (y: 0 to 2.1).
+    let dz = 0.6_f32;  // half-width of door
+    let dh = 2.1_f32;  // door height
+
+    let mut vertices: Vec<[f32; 3]> = vec![
+        // 0-3: Floor (y=0)
         [-hw, 0.0, -hl], [hw, 0.0, -hl], [hw, 0.0, hl], [-hw, 0.0, hl],
-        // Ceiling (y=height)
+        // 4-7: Ceiling (y=height)
         [-hw, height, -hl], [hw, height, -hl], [hw, height, hl], [-hw, height, hl],
-        // Left wall (x=-hw)
+        // 8-11: Left wall (x=-hw)
         [-hw, 0.0, -hl], [-hw, 0.0, hl], [-hw, height, hl], [-hw, height, -hl],
-        // Right wall (x=+hw)
-        [hw, 0.0, -hl], [hw, 0.0, hl], [hw, height, hl], [hw, height, -hl],
-        // Back wall (z=+hl)
+        // 12-19: Right wall with door hole — 4 quads around the opening.
+        //   Below door (y: 0 to 0 — skip, door goes to floor)
+        //   Left of door (z: -hl to -dz)
+        [hw, 0.0, -hl], [hw, 0.0, -dz], [hw, height, -dz], [hw, height, -hl],   // 12-15
+        //   Right of door (z: +dz to +hl)
+        [hw, 0.0, dz], [hw, 0.0, hl], [hw, height, hl], [hw, height, dz],        // 16-19
+        //   Above door (z: -dz to +dz, y: dh to height)
+        [hw, dh, -dz], [hw, dh, dz], [hw, height, dz], [hw, height, -dz],        // 20-23
+        // 24-27: Back wall (z=+hl)
         [-hw, 0.0, hl], [hw, 0.0, hl], [hw, height, hl], [-hw, height, hl],
-        // Front wall (z=-hl) — window
+        // 28-31: Front wall (z=-hl) — cockpit window
         [-hw, 0.0, -hl], [hw, 0.0, -hl], [hw, height, -hl], [-hw, height, -hl],
     ];
+
     // Inward-facing triangles (CW from outside = CCW from inside).
-    #[rustfmt::skip]
     let indices: Vec<u32> = vec![
-        0, 2, 1, 0, 3, 2,       // floor (viewed from above)
-        4, 5, 6, 4, 6, 7,       // ceiling (viewed from below)
+        0, 2, 1, 0, 3, 2,       // floor
+        4, 5, 6, 4, 6, 7,       // ceiling
         8, 10, 9, 8, 11, 10,    // left wall
-        12, 13, 14, 12, 14, 15, // right wall
-        16, 17, 18, 16, 18, 19, // back wall
-        20, 22, 21, 20, 23, 22, // front wall (window)
+        12, 13, 14, 12, 14, 15, // right wall: left of door
+        16, 17, 18, 16, 18, 19, // right wall: right of door
+        20, 21, 22, 20, 22, 23, // right wall: above door
+        24, 25, 26, 24, 26, 27, // back wall
+        28, 30, 29, 28, 31, 30, // front wall (window)
     ];
     (vertices, indices)
 }

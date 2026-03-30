@@ -14,6 +14,7 @@ use voxeldust_core::shard_message::{
     AutopilotCommandData, CelestialBodySnapshotData, LightingInfoData, ShardMsg,
     ShipControlInput, ShipSnapshotEntryData,
 };
+use voxeldust_core::handoff;
 use voxeldust_core::shard_types::{ShardId, ShardType, SessionToken};
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{ShardHarness, ShardHarnessConfig};
@@ -53,7 +54,7 @@ const SHIP_HEIGHT: f32 = 3.0;
 const WALL_THICKNESS: f32 = 0.1;
 const WALK_SPEED: f32 = 4.0;
 const JUMP_IMPULSE: f32 = 5.0;
-const THRUST_FORCE: f64 = 50_000.0; // Newtons
+const THRUST_FORCE: f64 = 49_050.0; // Newtons (maneuver tier: 0.5g at 10t)
 const TORQUE_FORCE: f64 = 5_000.0;
 
 // Interaction points (ship-local coordinates).
@@ -139,6 +140,7 @@ struct ShipInteriorState {
     pilot_torque: DVec3,
 
     // Identity
+    shard_id: ShardId,
     ship_id: u64,
     host_shard_id: Option<ShardId>,
     tick_count: u64,
@@ -150,10 +152,20 @@ struct ShipInteriorState {
     // Autopilot
     autopilot_target_body_id: Option<u32>,
     pending_autopilot_cmd: Option<(u32, u8)>, // (target_body_id, speed_tier)
+
+    // Connected player (for handoff)
+    connected_session: Option<SessionToken>,
+    connected_player_name: Option<String>,
+    /// True while a handoff is in-flight (block input processing).
+    handoff_pending: bool,
+    /// System seed for planet seed derivation during handoff.
+    system_seed: u64,
+    /// Pending handoff message to send via QUIC (set by interaction, sent by pilot_send).
+    pending_handoff_msg: Option<ShardMsg>,
 }
 
 impl ShipInteriorState {
-    fn new(ship_id: u64, host_shard_id: Option<ShardId>, system_seed: u64) -> Self {
+    fn new(shard_id: ShardId, ship_id: u64, host_shard_id: Option<ShardId>, system_seed: u64) -> Self {
         let mut rigid_body_set = RigidBodySet::new();
         let mut collider_set = ColliderSet::new();
 
@@ -216,12 +228,17 @@ impl ShipInteriorState {
             game_time: 0.0,
             pilot_thrust: DVec3::ZERO,
             pilot_torque: DVec3::ZERO,
-            ship_id, host_shard_id,
+            shard_id, ship_id, host_shard_id,
             tick_count: 0,
             last_action: 0,
             prev_action: 0,
             autopilot_target_body_id: None,
             pending_autopilot_cmd: None,
+            connected_session: None,
+            connected_player_name: None,
+            handoff_pending: false,
+            system_seed,
+            pending_handoff_msg: None,
         };
 
         // Initialize ship position and scene from system seed so the ship
@@ -364,7 +381,9 @@ fn main() {
     rt.block_on(async {
         let mut harness = ShardHarness::new(config);
 
-        let state = Arc::new(Mutex::new(ShipInteriorState::new(ship_id, host_shard_id, args.system_seed)));
+        let state = Arc::new(Mutex::new(ShipInteriorState::new(
+            ShardId(args.shard_id), ship_id, host_shard_id, args.system_seed,
+        )));
         let client_registry = harness.client_registry.clone();
 
         // Take channels from harness.
@@ -398,7 +417,10 @@ fn main() {
                     reg.register(&conn);
                 }
 
-                let st = state_connect.lock().unwrap();
+                let mut st = state_connect.lock().unwrap();
+                st.connected_session = Some(token);
+                st.connected_player_name = Some(conn.player_name.clone());
+                st.handoff_pending = false;
                 let tcp_stream = conn.tcp_stream.clone();
                 let ship_pos = st.ship_position;
                 let ship_rot = st.ship_rotation;
@@ -481,12 +503,15 @@ fn main() {
                         }
                     }
 
-                    // Pilot mode: WASD → thrust (only when autopilot is off).
-                    if st.autopilot_target_body_id.is_none() {
+                    // Pilot mode: WASD → thrust.
+                    // WASD cancels autopilot above, so this always applies.
+                    {
+                        let tier_thrust = voxeldust_core::autopilot::engine_tier(input.speed_tier)
+                            .acceleration * voxeldust_core::autopilot::SHIP_MASS;
                         st.pilot_thrust = DVec3::new(
-                            input.movement[0] as f64 * THRUST_FORCE,
-                            input.movement[1] as f64 * THRUST_FORCE,
-                            input.movement[2] as f64 * THRUST_FORCE,
+                            input.movement[0] as f64 * tier_thrust,
+                            input.movement[1] as f64 * tier_thrust,
+                            input.movement[2] as f64 * tier_thrust,
                         );
                         st.pilot_torque = DVec3::new(
                             input.look_pitch as f64,
@@ -517,6 +542,9 @@ fn main() {
 
         // System 3: Drain QUIC messages from system shard.
         let state_quic = state.clone();
+        let client_reg_quic = client_registry.clone();
+        let peer_reg_quic = peer_registry.clone();
+        let quic_send_quic = quic_send_tx.clone();
         harness.add_system("drain_quic", move || {
             while let Ok(msg) = quic_msg_rx.try_recv() {
                 let mut st = state_quic.lock().unwrap();
@@ -530,6 +558,71 @@ fn main() {
                         st.ship_position = data.position;
                         st.ship_velocity = data.velocity;
                         st.ship_rotation = data.rotation;
+                    }
+                    ShardMsg::HandoffAccepted(accepted) => {
+                        // Planet shard accepted the player. Send ShardRedirect to client.
+                        let session = accepted.session_token;
+                        let target_shard = accepted.target_shard;
+                        info!(session = session.0, target = target_shard.0,
+                            "received HandoffAccepted, sending ShardRedirect to client");
+
+                        // Look up target shard endpoint from peer registry.
+                        if let Ok(reg) = peer_reg_quic.try_read() {
+                            if let Some(info) = reg.get(target_shard) {
+                                let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
+                                    session_token: session,
+                                    target_tcp_addr: info.endpoint.tcp_addr.to_string(),
+                                    target_udp_addr: info.endpoint.udp_addr.to_string(),
+                                    shard_id: target_shard,
+                                });
+                                let cr = client_reg_quic.clone();
+                                tokio::spawn(async move {
+                                    if let Ok(reg) = cr.try_read() {
+                                        if let Err(e) = reg.send_tcp(session, &redirect).await {
+                                            tracing::warn!(%e, "failed to send ShardRedirect");
+                                        }
+                                    }
+                                });
+                            }
+                        }
+
+                        // Remove player from interior.
+                        st.connected_session = None;
+                        st.connected_player_name = None;
+                        st.handoff_pending = false;
+                        st.is_piloting = false;
+                    }
+                    ShardMsg::PlayerHandoff(h) => {
+                        // Player re-entering ship from planet.
+                        info!(session = h.session_token.0, player = %h.player_name,
+                            "player re-entering ship via handoff");
+                        st.connected_session = Some(h.session_token);
+                        st.connected_player_name = Some(h.player_name.clone());
+                        st.handoff_pending = false;
+                        st.is_piloting = false;
+
+                        // Spawn player at EXIT_DOOR interior position.
+                        if let Some(handle) = st.player_body {
+                            if let Some(body) = st.rigid_body_set.get_mut(handle) {
+                                body.set_translation(
+                                    vector![EXIT_DOOR.x, EXIT_DOOR.y, EXIT_DOOR.z], true);
+                                body.set_linvel(vector![0.0, 0.0, 0.0], true);
+                            }
+                        }
+                        st.player_position = EXIT_DOOR;
+
+                        // Send HandoffAccepted back to system shard.
+                        let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
+                            session_token: h.session_token,
+                            target_shard: st.shard_id,
+                        });
+                        if let Some(host_id) = st.host_shard_id {
+                            if let Ok(reg) = peer_reg_quic.try_read() {
+                                if let Some(addr) = reg.quic_addr(host_id) {
+                                    let _ = quic_send_quic.send((host_id, addr, accepted_msg));
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -561,8 +654,66 @@ fn main() {
                     } else {
                         info!("exited pilot mode");
                     }
-                } else if dist_to_exit < INTERACT_DIST {
-                    info!("exit door interaction — handoff TODO");
+                } else if dist_to_exit < INTERACT_DIST && !st.handoff_pending {
+                    // Exit door: initiate handoff to planet shard.
+                    if let (Some(session), Some(player_name)) =
+                        (st.connected_session, st.connected_player_name.clone())
+                    {
+                        // Compute player's system-space position.
+                        let player_local = DVec3::new(
+                            pos.x as f64, pos.y as f64, pos.z as f64,
+                        );
+                        let player_system_pos = st.ship_position + st.ship_rotation * player_local;
+
+                        // Find closest planet from scene_bodies (body_id > 0 = planets).
+                        let closest_planet = st.scene_bodies.iter()
+                            .filter(|b| b.body_id > 0)
+                            .min_by_key(|b| {
+                                ((b.position - st.ship_position).length() * 1000.0) as u64
+                            });
+
+                        if let Some(planet_body) = closest_planet {
+                            let planet_index = (planet_body.body_id - 1) as usize;
+                            // Derive planet_seed from system_seed.
+                            let sys = voxeldust_core::system::SystemParams::from_seed(st.system_seed);
+                            if planet_index < sys.planets.len() {
+                                let planet_seed = sys.planets[planet_index].planet_seed;
+
+                                let h = handoff::PlayerHandoff {
+                                    session_token: session,
+                                    player_name,
+                                    position: player_system_pos,
+                                    velocity: st.ship_velocity,
+                                    rotation: DQuat::IDENTITY,
+                                    forward: st.ship_rotation * DVec3::NEG_Z,
+                                    fly_mode: false,
+                                    speed_tier: 0,
+                                    grounded: false,
+                                    health: 100.0,
+                                    shield: 100.0,
+                                    source_shard: st.shard_id,
+                                    source_tick: st.tick_count,
+                                    target_star_index: None,
+                                    galaxy_context: None,
+                                    target_planet_seed: Some(planet_seed),
+                                    target_planet_index: Some(planet_index as u32),
+                                    target_ship_id: None,
+                                    target_ship_shard_id: None,
+                                    ship_system_position: Some(st.ship_position),
+                                    ship_rotation: Some(st.ship_rotation),
+                                };
+
+                                // Send to system shard (host) via QUIC.
+                                // The actual send happens via the quic_send_tx channel
+                                // captured in the interaction closure.
+                                st.handoff_pending = true;
+                                st.pending_handoff_msg = Some(ShardMsg::PlayerHandoff(h));
+                                info!(planet_index, planet_seed, "exit door handoff initiated");
+                            }
+                        } else {
+                            info!("no nearby planet for exit handoff");
+                        }
+                    }
                 }
             }
         });
@@ -587,10 +738,9 @@ fn main() {
                         if st.tick_count % 100 == 0 {
                             info!(thrust_z = st.pilot_thrust.z, %addr, "sending ShipControlInput");
                         }
-                        // Only send manual control when autopilot is not active.
-                        if st.autopilot_target_body_id.is_none() {
-                            let _ = quic_send_tx.send((host_id, addr, msg));
-                        }
+                        // Always send manual control — WASD cancels autopilot via
+                        // pending_autopilot_cmd above, so this won't conflict.
+                        let _ = quic_send_tx.send((host_id, addr, msg));
 
                         // Send pending autopilot command.
                         if let Some((target, tier)) = st.pending_autopilot_cmd.take() {
@@ -600,6 +750,11 @@ fn main() {
                                 speed_tier: tier,
                             });
                             let _ = quic_send_tx.send((host_id, addr, ap_msg));
+                        }
+
+                        // Send pending handoff message (from door interaction).
+                        if let Some(handoff_msg) = st.pending_handoff_msg.take() {
+                            let _ = quic_send_tx.send((host_id, addr, handoff_msg));
                         }
                     } else if st.tick_count % 100 == 0 {
                         let all_peers: Vec<_> = reg.all().iter().map(|s| format!("{}({})", s.id, s.shard_type)).collect();
