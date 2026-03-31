@@ -30,7 +30,7 @@ spec:
         - "--shard-port-range-start=10000"
         - "--shard-port-range-end=10100"
         - "--shard-advertise-host=127.0.0.1"
-        - "--idle-shutdown-secs=600"
+        - "--idle-shutdown-secs=3600"
         ports:
         - containerPort: 8080
           protocol: TCP

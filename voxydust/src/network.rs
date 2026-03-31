@@ -170,8 +170,16 @@ pub async fn run_network(
         let mut cancel_tcp = cancel_tx.subscribe();
         let tcp_handle = tokio::spawn(async move {
             let mut stream = tcp_stream;
+            let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            keepalive_interval.tick().await; // skip first immediate tick
             loop {
                 tokio::select! {
+                    _ = keepalive_interval.tick() => {
+                        // Send a tiny TCP message to prevent proxy idle timeout.
+                        // A zero-length frame is ignored by the server's message parser.
+                        let _ = stream.write_all(&0u32.to_be_bytes()).await;
+                        let _ = stream.flush().await;
+                    }
                     result = recv_server_msg(&mut stream) => {
                         match result {
                             Ok(ServerMsg::ShardRedirect(r)) => {
@@ -276,6 +284,10 @@ async fn connect_to_shard_full(
     player_name: &str,
 ) -> Result<(TcpStream, voxeldust_core::client_message::JoinResponseData), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(addr).await?;
+
+    // Set TCP nodelay for low latency.
+    let _ = stream.set_nodelay(true);
+
     send_msg(&mut stream, &ClientMsg::Connect { player_name: player_name.to_string() }).await?;
     let response = recv_server_msg(&mut stream).await?;
     match response {

@@ -2465,6 +2465,7 @@ impl<'a> AutopilotCommand<'a> {
   pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
   pub const VT_TARGET_BODY_ID: ::flatbuffers::VOffsetT = 6;
   pub const VT_SPEED_TIER: ::flatbuffers::VOffsetT = 8;
+  pub const VT_AUTOPILOT_MODE: ::flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2478,6 +2479,7 @@ impl<'a> AutopilotCommand<'a> {
     let mut builder = AutopilotCommandBuilder::new(_fbb);
     builder.add_ship_id(args.ship_id);
     builder.add_target_body_id(args.target_body_id);
+    builder.add_autopilot_mode(args.autopilot_mode);
     builder.add_speed_tier(args.speed_tier);
     builder.finish()
   }
@@ -2499,13 +2501,21 @@ impl<'a> AutopilotCommand<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(AutopilotCommand::VT_TARGET_BODY_ID, Some(0)).unwrap()}
   }
-  /// Speed tier (0=maneuver, 1=1g, 2=3g, 3=6g).
+  /// Speed tier (0=maneuver, 1=impulse, 2=cruise, 3=long_range, 4=emergency).
   #[inline]
   pub fn speed_tier(&self) -> u8 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u8>(AutopilotCommand::VT_SPEED_TIER, Some(0)).unwrap()}
+  }
+  /// Autopilot mode: 0=DirectApproach, 1=OrbitInsertion, 2=Landing, 3=Takeoff, 4=Departure.
+  #[inline]
+  pub fn autopilot_mode(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(AutopilotCommand::VT_AUTOPILOT_MODE, Some(0)).unwrap()}
   }
 }
 
@@ -2518,6 +2528,7 @@ impl ::flatbuffers::Verifiable for AutopilotCommand<'_> {
      .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
      .visit_field::<u32>("target_body_id", Self::VT_TARGET_BODY_ID, false)?
      .visit_field::<u8>("speed_tier", Self::VT_SPEED_TIER, false)?
+     .visit_field::<u8>("autopilot_mode", Self::VT_AUTOPILOT_MODE, false)?
      .finish();
     Ok(())
   }
@@ -2526,6 +2537,7 @@ pub struct AutopilotCommandArgs {
     pub ship_id: u64,
     pub target_body_id: u32,
     pub speed_tier: u8,
+    pub autopilot_mode: u8,
 }
 impl<'a> Default for AutopilotCommandArgs {
   #[inline]
@@ -2534,6 +2546,7 @@ impl<'a> Default for AutopilotCommandArgs {
       ship_id: 0,
       target_body_id: 0,
       speed_tier: 0,
+      autopilot_mode: 0,
     }
   }
 }
@@ -2556,6 +2569,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AutopilotCommandBuilder<'a, '
     self.fbb_.push_slot::<u8>(AutopilotCommand::VT_SPEED_TIER, speed_tier, 0);
   }
   #[inline]
+  pub fn add_autopilot_mode(&mut self, autopilot_mode: u8) {
+    self.fbb_.push_slot::<u8>(AutopilotCommand::VT_AUTOPILOT_MODE, autopilot_mode, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> AutopilotCommandBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     AutopilotCommandBuilder {
@@ -2576,6 +2593,7 @@ impl ::core::fmt::Debug for AutopilotCommand<'_> {
       ds.field("ship_id", &self.ship_id());
       ds.field("target_body_id", &self.target_body_id());
       ds.field("speed_tier", &self.speed_tier());
+      ds.field("autopilot_mode", &self.autopilot_mode());
       ds.finish()
   }
 }

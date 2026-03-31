@@ -86,6 +86,12 @@ struct App {
     autopilot_target: Option<usize>,
     selected_thrust_tier: u8,
     trajectory_plan: Option<voxeldust_core::autopilot::TrajectoryPlan>,
+    /// Timestamp of last T key press (for double-tap orbit detection).
+    last_t_press: Option<std::time::Instant>,
+    /// Engine cutoff — when true, no thrust or gravity compensation is sent. Toggle with X.
+    engines_off: bool,
+    /// Autopilot mode for the current engagement.
+    autopilot_mode: voxeldust_core::autopilot::AutopilotMode,
 }
 
 struct GpuState {
@@ -135,6 +141,9 @@ impl App {
             system_params: None,
             autopilot_target: None,
             selected_thrust_tier: 3, // default Long Range
+            last_t_press: None,
+            engines_off: false,
+            autopilot_mode: voxeldust_core::autopilot::AutopilotMode::DirectApproach,
             trajectory_plan: None,
         }
     }
@@ -362,16 +371,52 @@ impl App {
         }
     }
 
+    /// Engage autopilot to the nearest planet in the ship's forward direction.
+    fn engage_autopilot_to_nearest(&mut self, mode: voxeldust_core::autopilot::AutopilotMode) {
+        if let Some(ref ws) = self.latest_world_state {
+            let ship_fwd = self.ship_rotation * DVec3::NEG_Z;
+            let ship_pos = ws.origin;
+            let mut best: Option<(usize, f64)> = None;
+            for body in &ws.bodies {
+                if body.body_id == 0 { continue; }
+                let to_body = (body.position - ship_pos).normalize_or_zero();
+                let d = ship_fwd.dot(to_body);
+                if d > best.map(|(_, bd)| bd).unwrap_or(0.7) {
+                    best = Some(((body.body_id - 1) as usize, d));
+                }
+            }
+            if let Some((idx, _)) = best {
+                self.autopilot_target = Some(idx);
+                self.autopilot_mode = mode;
+                info!(planet = idx, mode = ?mode, "autopilot engaged");
+            }
+        }
+    }
+
+    /// Check for double-tap T timeout — if 400ms elapsed since first tap, engage DirectApproach.
+    fn check_autopilot_tap_timeout(&mut self) {
+        if let Some(press_time) = self.last_t_press {
+            if press_time.elapsed() >= std::time::Duration::from_millis(400) {
+                self.last_t_press = None;
+                self.engage_autopilot_to_nearest(voxeldust_core::autopilot::AutopilotMode::DirectApproach);
+            }
+        }
+    }
+
     fn send_input(&mut self) {
         if let Some(tx) = &self.input_tx {
             let mut movement = [0.0f32; 3];
-            if self.keys_held.contains(&KeyCode::KeyW) { movement[2] += 1.0; }
-            if self.keys_held.contains(&KeyCode::KeyS) { movement[2] -= 1.0; }
-            if self.keys_held.contains(&KeyCode::KeyD) { movement[0] += 1.0; }
-            if self.keys_held.contains(&KeyCode::KeyA) { movement[0] -= 1.0; }
+            // Engine cutoff: zero all thrust inputs. Ship goes ballistic.
+            if !self.engines_off {
+                if self.keys_held.contains(&KeyCode::KeyW) { movement[2] += 1.0; }
+                if self.keys_held.contains(&KeyCode::KeyS) { movement[2] -= 1.0; }
+                if self.keys_held.contains(&KeyCode::KeyD) { movement[0] += 1.0; }
+                if self.keys_held.contains(&KeyCode::KeyA) { movement[0] -= 1.0; }
+            }
 
             let jump = self.keys_held.contains(&KeyCode::Space);
-            let action = if self.keys_held.contains(&KeyCode::KeyT) { 4 }
+            let action = if self.engines_off { 5 } // engine cutoff signal
+                else if self.keys_held.contains(&KeyCode::KeyT) { 4 }
                 else if self.keys_held.contains(&KeyCode::KeyE) { 3 }
                 else { 0 };
 
@@ -692,6 +737,14 @@ impl App {
                             FlightPhase::Flip => flip_color,
                             FlightPhase::Brake => brake_color,
                             FlightPhase::Arrived => egui::Color32::GREEN,
+                            FlightPhase::SoiApproach | FlightPhase::CircularizeBurn => egui::Color32::from_rgb(100, 200, 255),
+                            FlightPhase::StableOrbit => egui::Color32::from_rgb(80, 180, 255),
+                            FlightPhase::DeorbitBurn => egui::Color32::from_rgb(255, 200, 50),
+                            FlightPhase::AtmosphericEntry => egui::Color32::from_rgb(255, 150, 50),
+                            FlightPhase::TerminalDescent | FlightPhase::Landing => egui::Color32::from_rgb(255, 100, 50),
+                            FlightPhase::Landed => egui::Color32::from_rgb(100, 255, 100),
+                            FlightPhase::Liftoff | FlightPhase::GravityTurn | FlightPhase::AscentBurn => egui::Color32::from_rgb(100, 255, 200),
+                            FlightPhase::EscapeBurn => egui::Color32::from_rgb(200, 100, 255),
                         };
 
                         // Subdivide into 4 sub-segments for smoothness.
@@ -815,6 +868,18 @@ impl App {
                                 FlightPhase::Flip => "FLIP",
                                 FlightPhase::Brake => "BRAKE",
                                 FlightPhase::Arrived => "ARRIVED",
+                                FlightPhase::SoiApproach => "SOI APPROACH",
+                                FlightPhase::CircularizeBurn => "CIRCULARIZE",
+                                FlightPhase::StableOrbit => "ORBIT",
+                                FlightPhase::DeorbitBurn => "DEORBIT",
+                                FlightPhase::AtmosphericEntry => "ATMO ENTRY",
+                                FlightPhase::TerminalDescent => "DESCENT",
+                                FlightPhase::Landing => "LANDING",
+                                FlightPhase::Landed => "LANDED",
+                                FlightPhase::Liftoff => "LIFTOFF",
+                                FlightPhase::GravityTurn => "GRAVITY TURN",
+                                FlightPhase::AscentBurn => "ASCENT",
+                                FlightPhase::EscapeBurn => "ESCAPE",
                             };
                             let body_names_ap = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
                             let target_name = body_names_ap.get(plan.target_planet_index + 1).unwrap_or(&"?");
@@ -842,8 +907,51 @@ impl App {
                             ui.label(format!("Thrust: {}", tier_label));
                             ui.label("T=disengage | 1-5=thrust | WASD=cancel");
                         } else {
-                            ui.label("WASD=thrust  E=exit seat  T=autopilot");
+                            if self.engines_off {
+                                ui.colored_label(egui::Color32::RED, "ENGINES OFF (X to restart)");
+                            }
+                            ui.label("WASD=thrust  E=exit seat  X=engine cutoff");
+                            ui.label("T=autopilot | TT=orbit");
                             ui.label(format!("Thrust: {} (1-5 to change)", tier_label));
+                        }
+
+                        // Orbital elements display when near a planet.
+                        if let (Some(ws), Some(sp)) = (&self.latest_world_state, &self.system_params) {
+                            let ship_pos = ws.origin;
+                            for body in &ws.bodies {
+                                if body.body_id == 0 { continue; }
+                                let pi = (body.body_id - 1) as usize;
+                                if pi >= sp.planets.len() { continue; }
+                                let planet = &sp.planets[pi];
+                                let soi = voxeldust_core::system::compute_soi_radius(planet, &sp.star);
+                                let dist = (ship_pos - body.position).length();
+                                if dist < soi {
+                                    ui.separator();
+                                    let body_names = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
+                                    let name = body_names.get(pi + 1).unwrap_or(&"?");
+                                    let alt = dist - planet.radius_m;
+                                    let alt_text = if alt > 1e6 { format!("{:.0} km", alt / 1000.0) }
+                                        else { format!("{:.0} m", alt) };
+                                    let soi_text = if soi > 1e6 { format!("{:.0} km", soi / 1000.0) }
+                                        else { format!("{:.0} m", soi) };
+                                    let v_circ = voxeldust_core::autopilot::circular_orbit_velocity(planet, alt);
+                                    let v_esc = voxeldust_core::autopilot::escape_velocity(planet, alt);
+                                    ui.colored_label(egui::Color32::from_rgb(100, 200, 255),
+                                        format!("SOI: {}  Alt: {}  g: {:.1} m/s\u{00B2}", name, alt_text, planet.surface_gravity));
+                                    ui.label(format!("SOI: {}  v_circ: {:.0} m/s  v_esc: {:.0} m/s",
+                                        soi_text, v_circ, v_esc));
+                                    if planet.atmosphere.has_atmosphere {
+                                        let density = planet.atmosphere.density_at_altitude(alt);
+                                        let atmo_text = if alt < planet.atmosphere.atmosphere_height {
+                                            format!("ATMO: rho={:.4} kg/m\u{00B3}", density)
+                                        } else {
+                                            "ABOVE ATMOSPHERE".to_string()
+                                        };
+                                        ui.label(atmo_text);
+                                    }
+                                    break;
+                                }
+                            }
                         }
                     } else {
                         // Walking inside ship.
@@ -933,26 +1041,26 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if event.state.is_pressed() {
                         self.keys_held.insert(key);
-                        // Autopilot toggle (T key).
+                        // Autopilot: double-tap T = orbit, single-tap T = direct approach.
                         if key == KeyCode::KeyT && self.is_piloting {
                             if self.autopilot_target.is_some() {
+                                // Disengage.
                                 self.autopilot_target = None;
                                 self.trajectory_plan = None;
-                            } else if let Some(ref ws) = self.latest_world_state {
-                                // Find planet most aligned with camera forward.
-                                let ship_fwd = self.ship_rotation * DVec3::NEG_Z;
-                                let ship_pos = ws.origin;
-                                let mut best: Option<(usize, f64)> = None;
-                                for body in &ws.bodies {
-                                    if body.body_id == 0 { continue; }
-                                    let to_body = (body.position - ship_pos).normalize_or_zero();
-                                    let d = ship_fwd.dot(to_body);
-                                    if d > best.map(|(_, bd)| bd).unwrap_or(0.7) {
-                                        best = Some(((body.body_id - 1) as usize, d));
-                                    }
-                                }
-                                if let Some((idx, _)) = best {
-                                    self.autopilot_target = Some(idx);
+                                self.autopilot_mode = voxeldust_core::autopilot::AutopilotMode::DirectApproach;
+                            } else {
+                                let now = std::time::Instant::now();
+                                let is_double = self.last_t_press
+                                    .map(|prev| now.duration_since(prev) < std::time::Duration::from_millis(400))
+                                    .unwrap_or(false);
+
+                                if is_double {
+                                    // Double-tap: orbit insertion mode — engage immediately.
+                                    self.last_t_press = None;
+                                    self.engage_autopilot_to_nearest(voxeldust_core::autopilot::AutopilotMode::OrbitInsertion);
+                                } else {
+                                    // First tap: record time, wait for possible second tap.
+                                    self.last_t_press = Some(now);
                                 }
                             }
                         }
@@ -961,6 +1069,12 @@ impl ApplicationHandler for App {
                             KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD) {
                             self.autopilot_target = None;
                             self.trajectory_plan = None;
+                            self.autopilot_mode = voxeldust_core::autopilot::AutopilotMode::DirectApproach;
+                        }
+                        // X key: toggle engine cutoff (SC-style decoupled mode).
+                        if key == KeyCode::KeyX && self.is_piloting {
+                            self.engines_off = !self.engines_off;
+                            info!(engines_off = self.engines_off, "engine cutoff toggled");
                         }
                         if key == KeyCode::Escape {
                             if self.mouse_grabbed {
@@ -990,6 +1104,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                self.check_autopilot_tap_timeout();
                 self.render();
                 if let Some(ref window) = self.window { window.request_redraw(); }
             }

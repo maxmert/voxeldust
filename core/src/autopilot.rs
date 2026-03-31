@@ -50,13 +50,738 @@ pub const ENGINE_TIERS: [EngineTier; 5] = [
     EngineTier { name: "Emergency",  acceleration: 2_452_500.0, felt_g: 5.0, dampened: true },
 ];
 
+/// Physical properties of a ship, derived from its block composition.
+/// Future: recomputed dynamically when blocks are added/removed.
+#[derive(Debug, Clone)]
+pub struct ShipPhysicalProperties {
+    /// Total mass in kg (hull + cargo + fuel).
+    pub mass_kg: f64,
+    /// Per-axis cross-sectional areas in m² for orientation-dependent drag.
+    /// Front/back (along Z, nose-first): width × height.
+    pub cross_section_front: f64,
+    /// Side (along X, broadside): length × height.
+    pub cross_section_side: f64,
+    /// Top/bottom (along Y, belly): width × length.
+    pub cross_section_top: f64,
+    /// Drag coefficient when flow is along Z (nose-first, streamlined end).
+    pub cd_front: f64,
+    /// Drag coefficient when flow is along X (broadside, flat plate).
+    pub cd_side: f64,
+    /// Drag coefficient when flow is along Y (belly, flat plate).
+    pub cd_top: f64,
+    /// Engine power scaling (1.0 = standard, based on thruster block count).
+    pub thrust_multiplier: f64,
+    /// Ship bounding box dimensions in meters (width_x, height_y, length_z).
+    /// Used for moment of inertia computation.
+    pub dimensions: (f64, f64, f64),
+    /// Center of pressure offset behind center of mass along ship Z axis (meters).
+    /// Positive = CoP behind CoM = aerodynamically stable (weathercock effect).
+    pub cop_offset_z: f64,
+    /// Thermal capacity in joules before structural damage begins.
+    pub thermal_capacity_j: f64,
+    /// Thermal emissivity for radiative cooling (0-1). Steel: ~0.8.
+    pub thermal_emissivity: f64,
+    /// Effective nose radius for Sutton-Graves re-entry heating (meters).
+    pub nose_radius_m: f64,
+    /// Landing gear height above ship bottom (meters). Defines ground contact margin.
+    pub landing_gear_height: f64,
+    /// Hull structural strength (arbitrary units). Determines impact damage thresholds.
+    pub hull_strength: f64,
+}
+
+impl ShipPhysicalProperties {
+    /// Default properties for the starter ship (4m × 8m × 3m box, 10 tonnes).
+    pub fn starter_ship() -> Self {
+        let (w, h, l) = (4.0_f64, 3.0_f64, 8.0_f64);
+        Self {
+            mass_kg: 10_000.0,
+            cross_section_front: w * h,  // 12 m²
+            cross_section_side: l * h,   // 24 m²
+            cross_section_top: w * l,    // 32 m²
+            cd_front: 1.2,               // streamlined nose
+            cd_side: 2.0,                // flat plate broadside
+            cd_top: 2.0,                 // flat plate belly
+            thrust_multiplier: 1.0,
+            dimensions: (w, h, l),
+            cop_offset_z: 1.0,           // CoP 1m behind CoM (stable)
+            thermal_capacity_j: 500.0e6, // 500 MJ
+            thermal_emissivity: 0.8,     // steel hull
+            nose_radius_m: (w * h / std::f64::consts::PI).sqrt(), // ~1.95m
+            landing_gear_height: 1.5,
+            hull_strength: 100.0,
+        }
+    }
+
+    /// Moment of inertia for a uniform-density box about each principal axis (kg*m²).
+    /// Returns (I_pitch about X, I_yaw about Y, I_roll about Z).
+    pub fn moment_of_inertia(&self) -> (f64, f64, f64) {
+        let (w, h, l) = self.dimensions;
+        let m = self.mass_kg;
+        let i_x = m * (h * h + l * l) / 12.0; // pitch
+        let i_y = m * (w * w + l * l) / 12.0;  // yaw
+        let i_z = m * (w * w + h * h) / 12.0;  // roll
+        (i_x, i_y, i_z)
+    }
+}
+
+/// Autopilot engagement mode — determines behavior after reaching SOI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutopilotMode {
+    /// Single-tap T: brachistochrone to SOI boundary, then disengage for manual control.
+    DirectApproach,
+    /// Double-tap T: brachistochrone to SOI, then circularize into orbit.
+    OrbitInsertion,
+    /// From orbit: deorbit burn + atmospheric entry + powered landing.
+    LandingSequence,
+    /// From surface: vertical ascent + gravity turn + orbit insertion.
+    TakeoffSequence,
+    /// From orbit: escape burn + resume interplanetary travel.
+    DepartureSequence,
+}
+
+impl AutopilotMode {
+    /// Convert from wire format (u8).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::OrbitInsertion,
+            2 => Self::LandingSequence,
+            3 => Self::TakeoffSequence,
+            4 => Self::DepartureSequence,
+            _ => Self::DirectApproach,
+        }
+    }
+
+    /// Convert to wire format (u8).
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::DirectApproach => 0,
+            Self::OrbitInsertion => 1,
+            Self::LandingSequence => 2,
+            Self::TakeoffSequence => 3,
+            Self::DepartureSequence => 4,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orbital mechanics (planet-relative)
+// ---------------------------------------------------------------------------
+
+/// Compute Keplerian orbital elements from a ship's Cartesian state relative to a planet.
+///
+/// `rel_pos`: position relative to planet center (meters).
+/// `rel_vel`: velocity relative to planet (meters/second).
+/// `gm`: gravitational parameter of the planet (m³/s²).
+/// `planet_radius`: surface radius (meters), for altitude computation.
+pub fn cartesian_to_orbital_elements(
+    rel_pos: DVec3,
+    rel_vel: DVec3,
+    gm: f64,
+    planet_radius: f64,
+) -> ShipOrbitalElements {
+    let r = rel_pos.length();
+    let v = rel_vel.length();
+
+    if r < 1.0 || gm <= 0.0 {
+        return ShipOrbitalElements {
+            sma: 0.0, eccentricity: 0.0, inclination: 0.0,
+            raan: 0.0, arg_periapsis: 0.0, true_anomaly: 0.0,
+            periapsis_altitude: 0.0, apoapsis_altitude: 0.0,
+            period: 0.0, speed: v, is_bound: false,
+        };
+    }
+
+    // Specific angular momentum: h = r × v
+    let h = rel_pos.cross(rel_vel);
+    let h_mag = h.length();
+
+    // Node vector: n = k × h (k = Z-axis unit vector)
+    let k = DVec3::Z;
+    let n = k.cross(h);
+    let n_mag = n.length();
+
+    // Eccentricity vector: e = ((v² - GM/r) * r - (r·v) * v) / GM
+    let r_dot_v = rel_pos.dot(rel_vel);
+    let e_vec = ((v * v - gm / r) * rel_pos - r_dot_v * rel_vel) / gm;
+    let e = e_vec.length();
+
+    // Specific orbital energy: ε = v²/2 - GM/r
+    let energy = v * v / 2.0 - gm / r;
+
+    // Semi-major axis from vis-viva: a = -GM / (2ε)
+    let sma = if energy.abs() > 1e-10 {
+        -gm / (2.0 * energy)
+    } else {
+        f64::INFINITY // parabolic
+    };
+
+    // Inclination: i = acos(h_z / |h|)
+    let inclination = if h_mag > 1e-10 {
+        (h.z / h_mag).clamp(-1.0, 1.0).acos()
+    } else {
+        0.0
+    };
+
+    // Right ascension of ascending node
+    let raan = if n_mag > 1e-10 {
+        let raw = (n.x / n_mag).clamp(-1.0, 1.0).acos();
+        if n.y >= 0.0 { raw } else { std::f64::consts::TAU - raw }
+    } else {
+        0.0
+    };
+
+    // Argument of periapsis
+    let arg_periapsis = if n_mag > 1e-10 && e > 1e-10 {
+        let cos_omega = n.dot(e_vec) / (n_mag * e);
+        let raw = cos_omega.clamp(-1.0, 1.0).acos();
+        if e_vec.z >= 0.0 { raw } else { std::f64::consts::TAU - raw }
+    } else {
+        0.0
+    };
+
+    // True anomaly
+    let true_anomaly = if e > 1e-10 {
+        let cos_nu = e_vec.dot(rel_pos) / (e * r);
+        let raw = cos_nu.clamp(-1.0, 1.0).acos();
+        if r_dot_v >= 0.0 { raw } else { std::f64::consts::TAU - raw }
+    } else {
+        0.0
+    };
+
+    // Periapsis and apoapsis
+    let is_bound = e < 1.0;
+    let periapsis_r = if e < 1.0 - 1e-10 {
+        sma * (1.0 - e)
+    } else if e > 1e-10 {
+        // Hyperbolic: periapsis = a * (1 - e), but a is negative
+        sma.abs() * (e - 1.0)
+    } else {
+        r // circular
+    };
+
+    let apoapsis_r = if is_bound && sma.is_finite() {
+        sma * (1.0 + e)
+    } else {
+        f64::INFINITY
+    };
+
+    let periapsis_altitude = periapsis_r - planet_radius;
+    let apoapsis_altitude = if apoapsis_r.is_finite() {
+        apoapsis_r - planet_radius
+    } else {
+        f64::INFINITY
+    };
+
+    // Orbital period (Kepler's third law)
+    let period = if is_bound && sma > 0.0 {
+        std::f64::consts::TAU * (sma.powi(3) / gm).sqrt()
+    } else {
+        f64::INFINITY
+    };
+
+    ShipOrbitalElements {
+        sma, eccentricity: e, inclination, raan, arg_periapsis, true_anomaly,
+        periapsis_altitude, apoapsis_altitude, period, speed: v, is_bound,
+    }
+}
+
+/// Compute the delta-v and burn direction needed to circularize at the current radius.
+///
+/// Returns `(delta_v_magnitude, burn_direction_unit_vector)`.
+/// Positive delta-v = prograde burn (speed up), negative = retrograde (slow down).
+/// `rel_pos` and `rel_vel` are planet-relative.
+pub fn circularization_delta_v(
+    rel_pos: DVec3,
+    rel_vel: DVec3,
+    planet_gm: f64,
+) -> (f64, DVec3) {
+    let r = rel_pos.length();
+    if r < 1.0 || planet_gm <= 0.0 {
+        return (0.0, DVec3::NEG_Z);
+    }
+
+    let v_circ = (planet_gm / r).sqrt();
+    let r_hat = rel_pos / r;
+
+    // Angular momentum defines orbital plane
+    let h = rel_pos.cross(rel_vel);
+    // Prograde direction: perpendicular to radial, in the orbital plane
+    let prograde = if h.length_squared() > 1e-10 {
+        h.cross(rel_pos).normalize()
+    } else {
+        // Degenerate (radial trajectory): pick arbitrary tangent
+        let candidate = if r_hat.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+        r_hat.cross(candidate).normalize()
+    };
+
+    // Current tangential speed (positive = prograde)
+    let v_prograde = rel_vel.dot(prograde);
+
+    let delta_v = v_circ - v_prograde;
+    let burn_dir = if delta_v >= 0.0 { prograde } else { -prograde };
+
+    (delta_v.abs(), burn_dir)
+}
+
+/// Compute the retrograde delta-v to lower periapsis from a circular orbit.
+///
+/// Ship is assumed to be in circular orbit at `current_radius`.
+/// Target: periapsis at `planet_radius + target_periapsis_alt`.
+/// Returns the magnitude of the retrograde burn (always positive).
+pub fn deorbit_delta_v(
+    current_radius: f64,
+    target_periapsis_alt: f64,
+    planet_radius: f64,
+    gm: f64,
+) -> f64 {
+    let r_peri = planet_radius + target_periapsis_alt;
+    if r_peri >= current_radius || gm <= 0.0 {
+        return 0.0; // already at or below target
+    }
+
+    // Transfer orbit: apoapsis = current_radius, periapsis = r_peri
+    let a_transfer = (current_radius + r_peri) / 2.0;
+
+    // Vis-viva at apoapsis of transfer orbit: v = sqrt(GM * (2/r - 1/a))
+    let v_transfer = (gm * (2.0 / current_radius - 1.0 / a_transfer)).sqrt();
+
+    // Current circular velocity
+    let v_circ = (gm / current_radius).sqrt();
+
+    // Delta-v is the difference (we need to slow down)
+    v_circ - v_transfer
+}
+
+/// Compute landing guidance — all thresholds derived from planet and ship properties.
+///
+/// Two-phase descent:
+/// 1. Deceleration burn: retrograde thrust, suicide-burn timing
+/// 2. Final approach: PD controller maintaining target descent rate
+pub fn compute_landing_guidance(
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    planet_pos: DVec3,
+    planet: &PlanetParams,
+    props: &ShipPhysicalProperties,
+    engine_accel: f64,
+) -> GuidanceCommand {
+    let to_center = planet_pos - ship_pos;
+    let dist = to_center.length();
+    let altitude = dist - planet.radius_m;
+    let radial_dir = if dist > 1.0 { -to_center / dist } else { DVec3::Y }; // "up"
+
+    let v_radial = ship_vel.dot(radial_dir);
+    let v_lateral = ship_vel - radial_dir * v_radial;
+    let descent_rate = -v_radial; // positive = descending
+    let speed = ship_vel.length();
+    let g = planet.surface_gravity;
+
+    // Derived thresholds (no magic numbers)
+    let target_descent_rate = 2.0 * g.sqrt(); // ~6.3 m/s for Earth-g
+    let final_approach_alt = if planet.atmosphere.has_atmosphere {
+        planet.atmosphere.scale_height * 0.05
+    } else {
+        (500.0_f64).min(planet.radius_m * 0.0005)
+    };
+
+    if altitude < final_approach_alt && descent_rate < target_descent_rate * 3.0 {
+        // PHASE 2: Final approach — PD controller on descent rate
+        let rate_error = descent_rate - target_descent_rate;
+        let kp = g * 0.2;
+        let required_accel = g + kp * rate_error;
+
+        let mut thrust_dir = radial_dir;
+        if v_lateral.length() > 0.5 {
+            let lateral_correction = -v_lateral.normalize() * 0.5;
+            thrust_dir = (thrust_dir + lateral_correction).normalize();
+        }
+
+        let thrust_mag = (required_accel * props.mass_kg).clamp(0.0, engine_accel * props.mass_kg);
+
+        GuidanceCommand {
+            thrust_direction: thrust_dir,
+            thrust_magnitude: thrust_mag,
+            phase: FlightPhase::Landing,
+            completed: false,
+            eta_real_seconds: altitude / target_descent_rate.max(0.1),
+            felt_g: thrust_mag / (props.mass_kg * 9.81),
+            dampener_active: false,
+        }
+    } else if descent_rate > target_descent_rate || speed > target_descent_rate * 2.0 {
+        // PHASE 1: Deceleration burn
+        let thrust_dir = if speed > 0.5 { -ship_vel.normalize() } else { radial_dir };
+        let excess_speed = speed - target_descent_rate;
+        let decel_budget = engine_accel - g;
+
+        let should_burn = if decel_budget > 0.0 && excess_speed > 0.0 {
+            let stopping_dist = excess_speed * excess_speed / (2.0 * decel_budget);
+            altitude < stopping_dist * 1.5 || descent_rate > g * 5.0
+        } else {
+            true // not enough thrust to hover, burn always
+        };
+
+        GuidanceCommand {
+            thrust_direction: thrust_dir,
+            thrust_magnitude: if should_burn { engine_accel * props.mass_kg } else { 0.0 },
+            phase: FlightPhase::TerminalDescent,
+            completed: false,
+            eta_real_seconds: altitude / descent_rate.max(0.1),
+            felt_g: if should_burn { engine_accel / 9.81 } else { 0.0 },
+            dampener_active: false,
+        }
+    } else {
+        // Coast (low speed, high altitude)
+        GuidanceCommand {
+            thrust_direction: radial_dir,
+            thrust_magnitude: 0.0,
+            phase: FlightPhase::AtmosphericEntry,
+            completed: false,
+            eta_real_seconds: altitude / descent_rate.max(0.1),
+            felt_g: 0.0,
+            dampener_active: false,
+        }
+    }
+}
+
+/// Compute takeoff guidance — all altitudes derived from planet geometry.
+///
+/// Three-phase ascent:
+/// 1. Vertical thrust from surface
+/// 2. Gravity turn toward orbital velocity
+/// 3. Circularize at target orbit altitude
+pub fn compute_takeoff_guidance(
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    planet_pos: DVec3,
+    planet: &PlanetParams,
+    props: &ShipPhysicalProperties,
+    engine_accel: f64,
+    target_orbit_alt: f64,
+) -> GuidanceCommand {
+    let to_ship = ship_pos - planet_pos;
+    let dist = to_ship.length();
+    let altitude = dist - planet.radius_m;
+    let radial = if dist > 1.0 { to_ship / dist } else { DVec3::Y };
+
+    // Derived thresholds
+    let clear_alt = (planet.radius_m * 0.00005).clamp(100.0, 1000.0);
+    let atmo_top = if planet.atmosphere.has_atmosphere {
+        planet.atmosphere.atmosphere_height
+    } else {
+        clear_alt * 5.0
+    };
+
+    // Prograde direction in orbital plane
+    let orbit_n = {
+        let candidate = DVec3::Y;
+        let n = radial.cross(candidate);
+        if n.length() < 0.01 { radial.cross(DVec3::X).normalize() } else { n.normalize() }
+    };
+    let prograde = orbit_n.cross(radial).normalize();
+
+    let v_radial = ship_vel.dot(radial);
+    let v_prograde = ship_vel.dot(prograde);
+
+    if altitude < clear_alt {
+        // PHASE 1: Vertical ascent
+        let mut thrust_dir = radial;
+        let v_lateral = ship_vel - radial * v_radial;
+        if v_lateral.length() > 1.0 {
+            let correction = -v_lateral.normalize() * 0.3;
+            thrust_dir = (thrust_dir + correction).normalize();
+        }
+
+        GuidanceCommand {
+            thrust_direction: thrust_dir,
+            thrust_magnitude: engine_accel * props.mass_kg,
+            phase: FlightPhase::Liftoff,
+            completed: false,
+            eta_real_seconds: 0.0,
+            felt_g: engine_accel / 9.81,
+            dampener_active: false,
+        }
+    } else if altitude < atmo_top * 0.95 {
+        // PHASE 2: Gravity turn
+        let progress = ((altitude - clear_alt) / (atmo_top - clear_alt).max(1.0)).clamp(0.0, 1.0);
+        let pitch_over = progress.powf(0.7); // 0 = vertical, 1 = horizontal
+        let thrust_dir = (radial * (1.0 - pitch_over) + prograde * pitch_over).normalize();
+
+        GuidanceCommand {
+            thrust_direction: thrust_dir,
+            thrust_magnitude: engine_accel * props.mass_kg,
+            phase: FlightPhase::GravityTurn,
+            completed: false,
+            eta_real_seconds: 0.0,
+            felt_g: engine_accel / 9.81,
+            dampener_active: false,
+        }
+    } else {
+        // PHASE 3: Circularize
+        let v_circ = (planet.gm / dist).sqrt();
+        let deficit = v_circ - v_prograde;
+
+        if deficit > 10.0 {
+            GuidanceCommand {
+                thrust_direction: prograde,
+                thrust_magnitude: engine_accel * props.mass_kg,
+                phase: FlightPhase::AscentBurn,
+                completed: false,
+                eta_real_seconds: deficit / engine_accel,
+                felt_g: engine_accel / 9.81,
+                dampener_active: false,
+            }
+        } else {
+            GuidanceCommand {
+                thrust_direction: prograde,
+                thrust_magnitude: 0.0,
+                phase: FlightPhase::StableOrbit,
+                completed: true,
+                eta_real_seconds: 0.0,
+                felt_g: 0.0,
+                dampener_active: false,
+            }
+        }
+    }
+}
+
+/// Check if a flight phase transition should occur.
+///
+/// All thresholds are relative to planet/ship properties — no magic numbers.
+/// Deterministic: shared between client (HUD preview) and server (authoritative).
+pub fn check_phase_transition(
+    current_phase: FlightPhase,
+    mode: AutopilotMode,
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    planet_pos: DVec3,
+    planet_vel: DVec3,
+    planet: &PlanetParams,
+    star: &StarParams,
+    soi_radius: f64,
+    target_orbit_alt: f64,
+    props: &ShipPhysicalProperties,
+) -> FlightPhase {
+    let rel_pos = ship_pos - planet_pos;
+    let rel_vel = ship_vel - planet_vel;
+    let dist = rel_pos.length();
+    let altitude = dist - planet.radius_m;
+    let speed = rel_vel.length();
+
+    match current_phase {
+        FlightPhase::Brake | FlightPhase::Arrived => {
+            if dist < soi_radius {
+                match mode {
+                    AutopilotMode::OrbitInsertion | AutopilotMode::LandingSequence => FlightPhase::SoiApproach,
+                    _ => FlightPhase::Arrived,
+                }
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::SoiApproach => {
+            let v_circ = circular_orbit_velocity(planet, altitude);
+            if speed < v_circ * 2.0 {
+                FlightPhase::CircularizeBurn
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::CircularizeBurn => {
+            let oe = cartesian_to_orbital_elements(rel_pos, rel_vel, planet.gm, planet.radius_m);
+            if oe.eccentricity < 0.02 && oe.is_bound {
+                match mode {
+                    AutopilotMode::LandingSequence => FlightPhase::DeorbitBurn,
+                    _ => FlightPhase::StableOrbit,
+                }
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::StableOrbit => {
+            match mode {
+                AutopilotMode::LandingSequence => FlightPhase::DeorbitBurn,
+                AutopilotMode::DepartureSequence => FlightPhase::EscapeBurn,
+                _ => current_phase,
+            }
+        }
+        FlightPhase::DeorbitBurn => {
+            let oe = cartesian_to_orbital_elements(rel_pos, rel_vel, planet.gm, planet.radius_m);
+            if oe.periapsis_altitude < planet.atmosphere.atmosphere_height || (!planet.atmosphere.has_atmosphere && oe.periapsis_altitude < target_orbit_alt * 0.1) {
+                FlightPhase::AtmosphericEntry
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::AtmosphericEntry => {
+            let threshold_alt = if planet.atmosphere.has_atmosphere {
+                planet.atmosphere.scale_height * 0.5
+            } else {
+                planet.radius_m * 0.001
+            };
+            let threshold_speed = circular_orbit_velocity(planet, 0.0) * 0.1;
+            if altitude < threshold_alt || speed < threshold_speed {
+                FlightPhase::TerminalDescent
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::TerminalDescent => {
+            if altitude < props.landing_gear_height + 1.0 && speed < 0.5 {
+                FlightPhase::Landed
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::Landed => {
+            match mode {
+                AutopilotMode::TakeoffSequence => FlightPhase::Liftoff,
+                _ => current_phase,
+            }
+        }
+        FlightPhase::Liftoff => {
+            let clear_alt = (planet.radius_m * 0.00005).clamp(100.0, 1000.0);
+            if altitude > clear_alt {
+                FlightPhase::GravityTurn
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::GravityTurn => {
+            let atmo_top = if planet.atmosphere.has_atmosphere {
+                planet.atmosphere.atmosphere_height
+            } else {
+                (planet.radius_m * 0.00005).clamp(100.0, 1000.0) * 5.0
+            };
+            if altitude > atmo_top * 0.95 {
+                FlightPhase::AscentBurn
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::AscentBurn => {
+            let oe = cartesian_to_orbital_elements(rel_pos, rel_vel, planet.gm, planet.radius_m);
+            if oe.eccentricity < 0.02 && oe.is_bound {
+                FlightPhase::StableOrbit
+            } else {
+                current_phase
+            }
+        }
+        FlightPhase::EscapeBurn => {
+            if dist > soi_radius {
+                FlightPhase::Accelerate
+            } else {
+                current_phase
+            }
+        }
+        // Interplanetary phases don't transition here
+        _ => current_phase,
+    }
+}
+
+/// Maximum engine tier allowed inside a planet's atmosphere.
+/// Dampened tiers (Cruise/Long Range/Emergency) are blocked.
+pub fn max_tier_in_atmosphere() -> u8 {
+    1 // Impulse
+}
+
+/// Clamp a requested engine tier based on whether the ship is in atmosphere.
+pub fn effective_tier(requested: u8, in_atmosphere: bool) -> u8 {
+    if in_atmosphere {
+        requested.min(max_tier_in_atmosphere())
+    } else {
+        requested
+    }
+}
+
+/// Circular orbit velocity at a given altitude above a planet's surface.
+/// Uses brahe's periapsis_velocity with e=0 for circular orbits.
+pub fn circular_orbit_velocity(planet: &crate::system::PlanetParams, altitude: f64) -> f64 {
+    let r = planet.radius_m + altitude;
+    // v_circ = sqrt(GM/r) — equivalent to brahe::periapsis_velocity(r, 0, gm)
+    (planet.gm / r).sqrt()
+}
+
+/// Escape velocity at a given altitude above a planet's surface.
+pub fn escape_velocity(planet: &crate::system::PlanetParams, altitude: f64) -> f64 {
+    circular_orbit_velocity(planet, altitude) * std::f64::consts::SQRT_2
+}
+
+/// Orbital period at a given altitude above a planet's surface (seconds).
+pub fn orbital_period(planet: &crate::system::PlanetParams, altitude: f64) -> f64 {
+    let r = planet.radius_m + altitude;
+    std::f64::consts::TAU * (r.powi(3) / planet.gm).sqrt()
+}
+
 /// Flight phase of the autopilot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlightPhase {
+    // -- Interplanetary transit --
+    /// Thrusting toward intercept point.
     Accelerate,
+    /// Rotating ship 180 degrees for braking burn.
     Flip,
+    /// Decelerating toward target.
     Brake,
+    /// Arrived at SOI boundary (used by DirectApproach mode).
     Arrived,
+
+    // -- Orbital operations --
+    /// Inside SOI, decelerating to orbital velocity.
+    SoiApproach,
+    /// Executing prograde/retrograde burn to circularize.
+    CircularizeBurn,
+    /// In stable orbit, no thrust (gravity maintains trajectory).
+    StableOrbit,
+
+    // -- Descent --
+    /// Retrograde burn to lower periapsis into atmosphere.
+    DeorbitBurn,
+    /// In atmosphere, aerobraking or controlled aerodynamic flight.
+    AtmosphericEntry,
+    /// Below terminal descent altitude, powered deceleration.
+    TerminalDescent,
+    /// Final approach, precision altitude control.
+    Landing,
+    /// On the planet surface, engines off.
+    Landed,
+
+    // -- Ascent --
+    /// Vertical thrust from surface.
+    Liftoff,
+    /// Pitching from vertical toward orbital velocity.
+    GravityTurn,
+    /// Circularizing from ascent trajectory.
+    AscentBurn,
+    /// Prograde burn to exceed escape velocity.
+    EscapeBurn,
+}
+
+/// Orbital elements computed from a ship's state vector relative to a planet.
+/// All distances in meters, angles in radians, time in seconds.
+#[derive(Debug, Clone)]
+pub struct ShipOrbitalElements {
+    /// Semi-major axis (meters). Negative for hyperbolic trajectories.
+    pub sma: f64,
+    /// Eccentricity. 0 = circular, <1 = elliptical, >=1 = hyperbolic/parabolic.
+    pub eccentricity: f64,
+    /// Orbital inclination (radians).
+    pub inclination: f64,
+    /// Right ascension of ascending node (radians).
+    pub raan: f64,
+    /// Argument of periapsis (radians).
+    pub arg_periapsis: f64,
+    /// True anomaly (radians).
+    pub true_anomaly: f64,
+    /// Periapsis altitude above planet surface (meters).
+    pub periapsis_altitude: f64,
+    /// Apoapsis altitude above planet surface (meters). `f64::INFINITY` for hyperbolic.
+    pub apoapsis_altitude: f64,
+    /// Orbital period (seconds). `f64::INFINITY` for hyperbolic.
+    pub period: f64,
+    /// Current orbital speed (m/s).
+    pub speed: f64,
+    /// Whether the orbit is bound (eccentricity < 1).
+    pub is_bound: bool,
 }
 
 /// A sampled point along the planned trajectory (for HUD rendering).
@@ -891,5 +1616,286 @@ mod tests {
             eta_cruise,
             eta_impulse
         );
+    }
+
+    // -- Orbital math tests --
+
+    #[test]
+    fn orbital_elements_circular_orbit() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let altitude = 100_000.0; // 100 km
+        let r = planet.radius_m + altitude;
+
+        // Circular orbit: velocity perpendicular to radial, magnitude = v_circ
+        let v_circ = (planet.gm / r).sqrt();
+        let rel_pos = DVec3::new(r, 0.0, 0.0);
+        let rel_vel = DVec3::new(0.0, v_circ, 0.0); // prograde in Y
+
+        let oe = cartesian_to_orbital_elements(rel_pos, rel_vel, planet.gm, planet.radius_m);
+
+        assert!(oe.is_bound, "circular orbit should be bound");
+        assert!(oe.eccentricity < 0.01, "eccentricity should be ~0, got {}", oe.eccentricity);
+        assert!((oe.sma - r).abs() / r < 0.01, "SMA should equal radius for circular orbit");
+        assert!((oe.periapsis_altitude - altitude).abs() / altitude < 0.01,
+            "periapsis alt should be ~{altitude}, got {}", oe.periapsis_altitude);
+        assert!((oe.apoapsis_altitude - altitude).abs() / altitude < 0.01,
+            "apoapsis alt should be ~{altitude}, got {}", oe.apoapsis_altitude);
+        assert!(oe.period > 0.0 && oe.period.is_finite(), "period should be finite");
+    }
+
+    #[test]
+    fn orbital_elements_elliptical() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let r = planet.radius_m + 200_000.0; // 200 km altitude
+
+        // Elliptical: give ship 120% of circular velocity (will have higher apoapsis)
+        let v_circ = (planet.gm / r).sqrt();
+        let rel_pos = DVec3::new(r, 0.0, 0.0);
+        let rel_vel = DVec3::new(0.0, v_circ * 1.2, 0.0);
+
+        let oe = cartesian_to_orbital_elements(rel_pos, rel_vel, planet.gm, planet.radius_m);
+
+        assert!(oe.is_bound, "should be bound (below escape velocity)");
+        assert!(oe.eccentricity > 0.01, "should be elliptical, e={}", oe.eccentricity);
+        assert!(oe.eccentricity < 1.0, "should not be hyperbolic");
+        assert!(oe.apoapsis_altitude > oe.periapsis_altitude,
+            "apoapsis should be higher than periapsis");
+    }
+
+    #[test]
+    fn orbital_elements_hyperbolic() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let r = planet.radius_m + 100_000.0;
+
+        // Hyperbolic: give ship 200% of circular velocity (above escape)
+        let v_circ = (planet.gm / r).sqrt();
+        let v_escape = v_circ * std::f64::consts::SQRT_2;
+        let rel_pos = DVec3::new(r, 0.0, 0.0);
+        let rel_vel = DVec3::new(0.0, v_escape * 1.5, 0.0);
+
+        let oe = cartesian_to_orbital_elements(rel_pos, rel_vel, planet.gm, planet.radius_m);
+
+        assert!(!oe.is_bound, "should be unbound (hyperbolic)");
+        assert!(oe.eccentricity >= 1.0, "eccentricity should be >= 1, got {}", oe.eccentricity);
+        assert!(oe.sma < 0.0, "SMA should be negative for hyperbolic");
+        assert!(oe.apoapsis_altitude.is_infinite(), "apoapsis should be infinite");
+        assert!(oe.period.is_infinite(), "period should be infinite");
+    }
+
+    #[test]
+    fn circularization_already_circular() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let r = planet.radius_m + 100_000.0;
+        let v_circ = (planet.gm / r).sqrt();
+
+        let rel_pos = DVec3::new(r, 0.0, 0.0);
+        let rel_vel = DVec3::new(0.0, v_circ, 0.0);
+
+        let (dv, _) = circularization_delta_v(rel_pos, rel_vel, planet.gm);
+        assert!(dv < 1.0, "delta-v should be near zero for circular orbit, got {dv}");
+    }
+
+    #[test]
+    fn circularization_too_fast() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let r = planet.radius_m + 100_000.0;
+        let v_circ = (planet.gm / r).sqrt();
+
+        // Ship going 20% too fast
+        let rel_pos = DVec3::new(r, 0.0, 0.0);
+        let rel_vel = DVec3::new(0.0, v_circ * 1.2, 0.0);
+
+        let (dv, burn_dir) = circularization_delta_v(rel_pos, rel_vel, planet.gm);
+        assert!(dv > 10.0, "delta-v should be significant, got {dv}");
+        // Burn should be retrograde (opposing velocity direction)
+        assert!(burn_dir.dot(rel_vel.normalize()) < -0.9,
+            "burn should be retrograde, dot = {}", burn_dir.dot(rel_vel.normalize()));
+    }
+
+    #[test]
+    fn circularization_too_slow() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let r = planet.radius_m + 100_000.0;
+        let v_circ = (planet.gm / r).sqrt();
+
+        // Ship going 80% of circular velocity
+        let rel_pos = DVec3::new(r, 0.0, 0.0);
+        let rel_vel = DVec3::new(0.0, v_circ * 0.8, 0.0);
+
+        let (dv, burn_dir) = circularization_delta_v(rel_pos, rel_vel, planet.gm);
+        assert!(dv > 10.0, "delta-v should be significant, got {dv}");
+        // Burn should be prograde
+        assert!(burn_dir.dot(rel_vel.normalize()) > 0.9,
+            "burn should be prograde, dot = {}", burn_dir.dot(rel_vel.normalize()));
+    }
+
+    #[test]
+    fn deorbit_delta_v_reasonable() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let orbit_alt = 100_000.0; // 100 km orbit
+        let r = planet.radius_m + orbit_alt;
+        let target_periapsis = 20_000.0; // lower periapsis to 20 km
+
+        let dv = deorbit_delta_v(r, target_periapsis, planet.radius_m, planet.gm);
+        let v_circ = (planet.gm / r).sqrt();
+
+        assert!(dv > 0.0, "deorbit delta-v should be positive");
+        assert!(dv < v_circ * 0.5, "deorbit delta-v should be a fraction of orbital velocity");
+    }
+
+    #[test]
+    fn deorbit_delta_v_zero_when_already_low() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let r = planet.radius_m + 50_000.0;
+
+        // Target periapsis above current orbit — no burn needed
+        let dv = deorbit_delta_v(r, 60_000.0, planet.radius_m, planet.gm);
+        assert!((dv - 0.0).abs() < 0.01, "should be zero when target is above current orbit");
+    }
+
+    #[test]
+    fn autopilot_mode_roundtrip() {
+        for v in 0..=4 {
+            let mode = AutopilotMode::from_u8(v);
+            assert_eq!(mode.to_u8(), v, "roundtrip failed for {v}");
+        }
+        // Unknown values default to DirectApproach
+        assert_eq!(AutopilotMode::from_u8(255).to_u8(), 0);
+    }
+
+    #[test]
+    fn ship_properties_moment_of_inertia() {
+        let props = ShipPhysicalProperties::starter_ship();
+        let (ix, iy, iz) = props.moment_of_inertia();
+        // 10000 kg, 4×3×8 box
+        // I_x = m*(h²+l²)/12 = 10000*(9+64)/12 = 60833
+        assert!((ix - 60_833.0).abs() < 1.0, "I_x should be ~60833, got {ix}");
+        // I_y = m*(w²+l²)/12 = 10000*(16+64)/12 = 66667
+        assert!((iy - 66_667.0).abs() < 1.0, "I_y should be ~66667, got {iy}");
+        // I_z = m*(w²+h²)/12 = 10000*(16+9)/12 = 20833
+        assert!((iz - 20_833.0).abs() < 1.0, "I_z should be ~20833, got {iz}");
+    }
+
+    // -- Landing / takeoff guidance tests --
+
+    #[test]
+    fn landing_guidance_decelerates_when_fast() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let props = ShipPhysicalProperties::starter_ship();
+        let planet_pos = DVec3::ZERO;
+        let altitude = 5000.0;
+        let ship_pos = DVec3::new(planet.radius_m + altitude, 0.0, 0.0);
+        // Falling fast toward planet
+        let ship_vel = DVec3::new(-500.0, 0.0, 0.0);
+        let accel = ENGINE_TIERS[1].acceleration; // Impulse
+
+        let cmd = compute_landing_guidance(ship_pos, ship_vel, planet_pos, planet, &props, accel);
+        assert!(cmd.thrust_magnitude > 0.0, "should be thrusting to decelerate");
+        // Thrust should oppose velocity (retrograde)
+        assert!(cmd.thrust_direction.dot(ship_vel.normalize()) < -0.5,
+            "thrust should oppose velocity");
+    }
+
+    #[test]
+    fn landing_guidance_gentle_final_approach() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let props = ShipPhysicalProperties::starter_ship();
+        let planet_pos = DVec3::ZERO;
+        let altitude = 100.0; // below final approach
+        let ship_pos = DVec3::new(planet.radius_m + altitude, 0.0, 0.0);
+        // Descending slowly
+        let ship_vel = DVec3::new(-5.0, 0.0, 0.0);
+        let accel = ENGINE_TIERS[1].acceleration;
+
+        let cmd = compute_landing_guidance(ship_pos, ship_vel, planet_pos, planet, &props, accel);
+        assert_eq!(cmd.phase, FlightPhase::Landing);
+    }
+
+    #[test]
+    fn takeoff_guidance_vertical_at_surface() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let props = ShipPhysicalProperties::starter_ship();
+        let planet_pos = DVec3::ZERO;
+        let altitude = 10.0; // just above surface
+        let ship_pos = DVec3::new(planet.radius_m + altitude, 0.0, 0.0);
+        let ship_vel = DVec3::ZERO;
+        let accel = ENGINE_TIERS[1].acceleration;
+
+        let cmd = compute_takeoff_guidance(
+            ship_pos, ship_vel, planet_pos, planet, &props, accel, 100_000.0,
+        );
+        assert_eq!(cmd.phase, FlightPhase::Liftoff);
+        assert!(cmd.thrust_magnitude > 0.0, "should be thrusting upward");
+        // Thrust should be mostly radial (upward)
+        let radial = ship_pos.normalize();
+        assert!(cmd.thrust_direction.dot(radial) > 0.9, "thrust should be mostly radial");
+    }
+
+    #[test]
+    fn phase_transition_brake_to_soi_approach() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let props = ShipPhysicalProperties::starter_ship();
+        let planet_pos = compute_planet_position(planet, 0.0);
+        let planet_vel = DVec3::ZERO;
+        let soi = compute_soi_radius(planet, &sys.star);
+        // Ship inside SOI
+        let ship_pos = planet_pos + DVec3::new(soi * 0.5, 0.0, 0.0);
+
+        let phase = check_phase_transition(
+            FlightPhase::Brake, AutopilotMode::OrbitInsertion,
+            ship_pos, DVec3::ZERO, planet_pos, planet_vel, planet, &sys.star,
+            soi, 100_000.0, &props,
+        );
+        assert_eq!(phase, FlightPhase::SoiApproach);
+    }
+
+    #[test]
+    fn phase_transition_direct_approach_arrives() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let props = ShipPhysicalProperties::starter_ship();
+        let planet_pos = compute_planet_position(planet, 0.0);
+        let soi = compute_soi_radius(planet, &sys.star);
+        let ship_pos = planet_pos + DVec3::new(soi * 0.5, 0.0, 0.0);
+
+        let phase = check_phase_transition(
+            FlightPhase::Brake, AutopilotMode::DirectApproach,
+            ship_pos, DVec3::ZERO, planet_pos, DVec3::ZERO, planet, &sys.star,
+            soi, 100_000.0, &props,
+        );
+        assert_eq!(phase, FlightPhase::Arrived, "DirectApproach should arrive, not orbit");
+    }
+
+    #[test]
+    fn phase_transition_circularize_to_orbit() {
+        let sys = test_system();
+        let planet = &sys.planets[0];
+        let props = ShipPhysicalProperties::starter_ship();
+        let alt = 100_000.0;
+        let r = planet.radius_m + alt;
+        let v_circ = (planet.gm / r).sqrt();
+        let planet_pos = DVec3::ZERO;
+        let ship_pos = DVec3::new(r, 0.0, 0.0);
+        let ship_vel = DVec3::new(0.0, v_circ, 0.0); // circular
+        let soi = compute_soi_radius(planet, &sys.star);
+
+        let phase = check_phase_transition(
+            FlightPhase::CircularizeBurn, AutopilotMode::OrbitInsertion,
+            ship_pos, ship_vel, planet_pos, DVec3::ZERO, planet, &sys.star,
+            soi, alt, &props,
+        );
+        assert_eq!(phase, FlightPhase::StableOrbit);
     }
 }

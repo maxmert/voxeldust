@@ -506,8 +506,23 @@ fn main() {
                     // Pilot mode: WASD → thrust.
                     // WASD cancels autopilot above, so this always applies.
                     {
-                        let tier_thrust = voxeldust_core::autopilot::engine_tier(input.speed_tier)
-                            .acceleration * voxeldust_core::autopilot::SHIP_MASS;
+                        // Enforce tier restriction inside atmosphere.
+                        let in_atmosphere = if st.system_seed > 0 {
+                            let sys = voxeldust_core::system::SystemParams::from_seed(st.system_seed);
+                            // Check altitude vs closest planet from scene_bodies.
+                            st.scene_bodies.iter().any(|b| {
+                                if b.body_id == 0 { return false; } // skip star
+                                let pi = (b.body_id - 1) as usize;
+                                if pi >= sys.planets.len() { return false; }
+                                let alt = (st.ship_position - b.position).length() - sys.planets[pi].radius_m;
+                                alt < sys.planets[pi].atmosphere.atmosphere_height
+                                    && sys.planets[pi].atmosphere.has_atmosphere
+                            })
+                        } else { false };
+                        let effective_tier = voxeldust_core::autopilot::effective_tier(
+                            input.speed_tier, in_atmosphere);
+                        let et = voxeldust_core::autopilot::engine_tier(effective_tier);
+                        let tier_thrust = et.acceleration * voxeldust_core::autopilot::SHIP_MASS;
                         st.pilot_thrust = DVec3::new(
                             input.movement[0] as f64 * tier_thrust,
                             input.movement[1] as f64 * tier_thrust,
@@ -518,6 +533,53 @@ fn main() {
                             input.look_yaw as f64,
                             0.0,
                         );
+
+                        // Gravity compensation (coupled mode / hover-assist) in atmosphere.
+                        // When no vertical input, auto-counters gravity so ship hovers.
+                        // When no input at all, dampens velocity to bring ship to a stop.
+                        // Skipped when engines are off (action == 5) — ship goes ballistic.
+                        let engines_off = input.action == 5;
+                        if in_atmosphere && st.autopilot_target_body_id.is_none() && !engines_off {
+                            // Compute gravity from nearest planet.
+                            if st.system_seed > 0 {
+                                let sys = voxeldust_core::system::SystemParams::from_seed(st.system_seed);
+                                for b in &st.scene_bodies {
+                                    if b.body_id == 0 { continue; }
+                                    let pi = (b.body_id - 1) as usize;
+                                    if pi >= sys.planets.len() { continue; }
+                                    let dist = (st.ship_position - b.position).length();
+                                    let alt = dist - sys.planets[pi].radius_m;
+                                    if alt < sys.planets[pi].atmosphere.atmosphere_height {
+                                        // Compute gravity acceleration toward planet.
+                                        let grav_mag = sys.planets[pi].gm / (dist * dist);
+                                        let grav_dir = (b.position - st.ship_position).normalize();
+                                        let grav_world = grav_dir * grav_mag;
+
+                                        // Hover thrust: negate gravity in ship-local frame.
+                                        if input.movement[1].abs() < 0.01 {
+                                            let grav_local = st.ship_rotation.inverse() * (-grav_world);
+                                            let hover = grav_local * voxeldust_core::autopilot::SHIP_MASS;
+                                            st.pilot_thrust += DVec3::new(hover.x, hover.y, hover.z);
+                                        }
+
+                                        // Velocity damping when no movement input.
+                                        let has_input = input.movement[0].abs() > 0.01
+                                            || input.movement[1].abs() > 0.01
+                                            || input.movement[2].abs() > 0.01;
+                                        if !has_input {
+                                            let max_accel = et.acceleration;
+                                            let damping_rate = (max_accel * 0.1).min(5.0);
+                                            let vel_local = st.ship_rotation.inverse() * st.ship_velocity;
+                                            let damping = -vel_local * damping_rate * voxeldust_core::autopilot::SHIP_MASS;
+                                            let max_damp = tier_thrust * 0.5;
+                                            let damping_clamped = damping.clamp_length_max(max_damp);
+                                            st.pilot_thrust += DVec3::new(damping_clamped.x, damping_clamped.y, damping_clamped.z);
+                                        }
+                                        break; // only nearest planet
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else if let Some(handle) = st.player_body {
                     // Walking mode: apply velocity to Rapier body.
@@ -748,6 +810,7 @@ fn main() {
                                 ship_id: st.ship_id,
                                 target_body_id: target,
                                 speed_tier: tier,
+                                autopilot_mode: 0, // DirectApproach default; updated by double-tap T
                             });
                             let _ = quic_send_tx.send((host_id, addr, ap_msg));
                         }

@@ -96,8 +96,10 @@ pub struct AutopilotCommandData {
     pub ship_id: u64,
     /// Target body id: 1..N = planets. 0xFFFFFFFF = disengage.
     pub target_body_id: u32,
-    /// Speed tier (0-3).
+    /// Speed tier (0-4).
     pub speed_tier: u8,
+    /// Autopilot mode: 0=DirectApproach, 1=OrbitInsertion, 2=Landing, 3=Takeoff, 4=Departure.
+    pub autopilot_mode: u8,
 }
 
 /// Ship position/state sent from system shard to planet shards within SOI.
@@ -393,6 +395,7 @@ impl ShardMsg {
                         ship_id: a.ship_id,
                         target_body_id: a.target_body_id,
                         speed_tier: a.speed_tier,
+                        autopilot_mode: a.autopilot_mode,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -715,6 +718,7 @@ impl ShardMsg {
                     ship_id: a.ship_id(),
                     target_body_id: a.target_body_id(),
                     speed_tier: a.speed_tier(),
+                    autopilot_mode: a.autopilot_mode(),
                 }))
             }
 

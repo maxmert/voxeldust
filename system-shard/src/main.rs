@@ -15,8 +15,9 @@ use voxeldust_core::shard_message::{
 };
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{
-    compute_gravity_acceleration, compute_lighting, compute_planet_position, compute_soi_radius,
-    SystemParams,
+    compute_atmospheric_drag, compute_full_aerodynamics, compute_gravity_acceleration,
+    compute_lighting, compute_planet_position, compute_planet_velocity, compute_soi_radius,
+    check_atmosphere, SystemParams,
 };
 use voxeldust_core::autopilot::{self, FlightPhase, GuidanceCommand};
 use voxeldust_shard_common::client_listener;
@@ -46,6 +47,8 @@ struct Args {
 }
 
 struct AutopilotState {
+    mode: autopilot::AutopilotMode,
+    phase: autopilot::FlightPhase,
     target_planet_index: usize,
     thrust_tier: u8,
     intercept_pos: DVec3,
@@ -56,6 +59,8 @@ struct AutopilotState {
     estimated_tof: f64,
     /// Once true, ship stays in Brake phase until velocity reverses or autopilot disengages.
     braking_committed: bool,
+    /// Target orbit altitude (meters above surface). 0 = default.
+    target_orbit_altitude: f64,
 }
 
 struct ShipState {
@@ -67,6 +72,14 @@ struct ShipState {
     thrust: DVec3,
     torque: DVec3,
     autopilot: Option<AutopilotState>,
+    /// Per-ship physical properties (mass, drag, cross-section).
+    physical_properties: autopilot::ShipPhysicalProperties,
+    /// Accumulated thermal energy from re-entry heating (Joules).
+    thermal_energy: f64,
+    /// Whether the ship is on a planet surface.
+    landed: bool,
+    /// Planet index the ship is landed on (valid only when landed=true).
+    landed_planet_index: Option<usize>,
 }
 
 /// Maximum angular velocity (rad/s). ~30 deg/s — gameplay-appropriate for a small ship.
@@ -81,6 +94,8 @@ struct SystemState {
     physics_time: f64,
     celestial_time: f64,
     planet_positions: Vec<DVec3>,
+    /// Orbital velocities of planets in system-space (m/s). Used for patched conics SOI transitions.
+    planet_velocities: Vec<DVec3>,
     ships: HashMap<u64, ShipState>,
     next_ship_id: u64,
     tick_count: u64,
@@ -102,12 +117,17 @@ impl SystemState {
         let planet_positions: Vec<DVec3> = system_params.planets.iter()
             .map(|p| compute_planet_position(p, 0.0))
             .collect();
+        let star_gm = system_params.star.gm;
+        let planet_velocities: Vec<DVec3> = system_params.planets.iter()
+            .map(|p| compute_planet_velocity(p, star_gm, 0.0))
+            .collect();
         Self {
             system_params,
             shard_id,
             physics_time: 0.0,
             celestial_time: 0.0,
             planet_positions,
+            planet_velocities,
             ships: HashMap::new(),
             next_ship_id: 1,
             tick_count: 0,
@@ -135,7 +155,22 @@ impl SystemState {
             thrust: DVec3::ZERO,
             torque: DVec3::ZERO,
             autopilot: None,
+            physical_properties: autopilot::ShipPhysicalProperties::starter_ship(),
+            thermal_energy: 0.0,
+            landed: false,
+            landed_planet_index: None,
         });
+        // Pre-register in SOI if spawning inside one.
+        // Velocity is already zero (planet-relative) — skip the patched conics entry impulse.
+        for (i, planet) in self.system_params.planets.iter().enumerate() {
+            let dist = (start_pos - self.planet_positions[i]).length();
+            let soi = compute_soi_radius(planet, &self.system_params.star);
+            if dist < soi {
+                self.in_soi.insert(id, i);
+                info!(ship_id = id, planet_index = i, "spawned inside SOI — pre-registered");
+                break;
+            }
+        }
         info!(ship_id = id, "spawned ship");
         id
     }
@@ -191,7 +226,6 @@ impl SystemState {
 }
 
 const DT: f64 = 0.05;
-const SHIP_MASS: f64 = 10_000.0;
 
 fn main() {
     let args = Args::parse();
@@ -317,8 +351,15 @@ fn main() {
                             if let Some((intercept_pos, estimated_tof)) = solve_result {
                                 let tick = st.tick_count;
                                 let physics_time = st.physics_time;
+                                let mode = autopilot::AutopilotMode::from_u8(cmd.autopilot_mode);
+                                let planet = &st.system_params.planets[planet_index];
+                                // Default orbit altitude: 1% of planet radius, clamped.
+                                let default_orbit_alt = (planet.radius_m * 0.01)
+                                    .clamp(planet.atmosphere.atmosphere_height * 1.5, planet.radius_m * 0.1);
                                 if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
                                     ship.autopilot = Some(AutopilotState {
+                                        mode,
+                                        phase: FlightPhase::Accelerate,
                                         target_planet_index: planet_index,
                                         thrust_tier: cmd.speed_tier,
                                         intercept_pos,
@@ -326,9 +367,11 @@ fn main() {
                                         engage_time: physics_time,
                                         estimated_tof,
                                         braking_committed: false,
+                                        target_orbit_altitude: default_orbit_alt,
                                     });
                                     info!(ship_id = cmd.ship_id, planet = planet_index,
-                                        tier = cmd.speed_tier, eta_s = estimated_tof as u64,
+                                        tier = cmd.speed_tier, mode = ?mode,
+                                        eta_s = estimated_tof as u64,
                                         "autopilot engaged");
                                 }
                             }
@@ -432,7 +475,21 @@ fn main() {
                             thrust: DVec3::ZERO,
                             torque: DVec3::ZERO,
                             autopilot: None,
+                            physical_properties: autopilot::ShipPhysicalProperties::starter_ship(),
+                            thermal_energy: 0.0,
+                            landed: false,
+                            landed_planet_index: None,
                         });
+
+                        // Pre-register in SOI if spawning inside one.
+                        for (i, planet) in st.system_params.planets.iter().enumerate() {
+                            let dist = (start_pos - st.planet_positions[i]).length();
+                            let soi = compute_soi_radius(planet, &st.system_params.star);
+                            if dist < soi {
+                                st.in_soi.insert(ship_id, i);
+                                break;
+                            }
+                        }
 
                         info!(
                             ship_id,
@@ -453,10 +510,30 @@ fn main() {
             st.tick_count += 1;
 
             let celestial_time = st.celestial_time;
+            let time_scale = st.system_params.scale.time_scale;
+            let old_planet_positions = st.planet_positions.clone();
             let positions: Vec<DVec3> = st.system_params.planets.iter()
                 .map(|p| compute_planet_position(p, celestial_time))
                 .collect();
+            let star_gm = st.system_params.star.gm;
+            // Scale to real-time velocity (m/s per real second).
+            let velocities: Vec<DVec3> = st.system_params.planets.iter()
+                .map(|p| compute_planet_velocity(p, star_gm, celestial_time) * time_scale)
+                .collect();
             st.planet_positions = positions;
+            st.planet_velocities = velocities;
+
+            // Co-move ships inside SOI with their parent planet.
+            // Ships in SOI have planet-relative velocity (from patched conics entry).
+            // The position must track the planet's motion to keep the relative geometry correct.
+            let soi_ships: Vec<(u64, usize)> = st.in_soi.iter()
+                .map(|(&sid, &pi)| (sid, pi)).collect();
+            for (ship_id, planet_index) in soi_ships {
+                let delta_pos = st.planet_positions[planet_index] - old_planet_positions[planet_index];
+                if let Some(ship) = st.ships.get_mut(&ship_id) {
+                    ship.position += delta_pos;
+                }
+            }
 
             // Destructure to satisfy borrow checker — ships, system_params,
             // planet_positions, and celestial_time are disjoint fields.
@@ -504,144 +581,384 @@ fn main() {
                 }
             }
 
-            // Phase 1: Autopilot controller — sets ship.thrust and ship.torque
-            // through the same thruster system as manual piloting.
-            // Guidance computes desired direction; autopilot rotates ship to face it,
-            // then fires the main drive along the ship's forward axis (-Z).
+            // Phase 1: Autopilot controller — phase-aware dispatch.
+            // Interplanetary phases use brachistochrone guidance.
+            // Orbital/descent/ascent phases use specialized guidance functions.
+            // All phases produce thrust/torque commands through the same thruster system.
             {
             let sys = &st.system_params;
             let pp = &st.planet_positions;
+            let pv = &st.planet_velocities;
             let ct = st.celestial_time;
             let physics_time = st.physics_time;
-            let ap_commands: Vec<(u64, GuidanceCommand)> = st.ships.iter()
+
+            // Compute guidance for each ship with active autopilot.
+            let ap_commands: Vec<(u64, GuidanceCommand, FlightPhase)> = st.ships.iter()
                 .filter_map(|(&id, ship)| {
                     let ap = ship.autopilot.as_ref()?;
-                    let guidance = autopilot::compute_guidance(
+                    let planet_idx = ap.target_planet_index;
+                    let planet = &sys.planets[planet_idx];
+                    let planet_pos = pp[planet_idx];
+                    let planet_vel = pv[planet_idx];
+                    let soi = compute_soi_radius(planet, &sys.star);
+
+                    // Enforce tier restriction in atmosphere.
+                    let in_atmo = {
+                        let alt = (ship.position - planet_pos).length() - planet.radius_m;
+                        alt < planet.atmosphere.atmosphere_height && planet.atmosphere.has_atmosphere
+                    };
+                    let effective_tier = autopilot::effective_tier(ap.thrust_tier, in_atmo);
+                    let engine_accel = autopilot::engine_tier(effective_tier).acceleration;
+
+                    // Phase-aware guidance dispatch.
+                    let guidance = match ap.phase {
+                        // Interplanetary phases: existing brachistochrone guidance.
+                        FlightPhase::Accelerate | FlightPhase::Brake | FlightPhase::Flip => {
+                            autopilot::compute_guidance(
+                                ship.position, ship.velocity,
+                                ap.intercept_pos, ap.target_planet_index,
+                                sys, pp, ct, effective_tier,
+                            )
+                        }
+                        // SOI approach: continue braking toward planet.
+                        FlightPhase::SoiApproach => {
+                            autopilot::compute_guidance(
+                                ship.position, ship.velocity,
+                                planet_pos, ap.target_planet_index,
+                                sys, pp, ct, effective_tier,
+                            )
+                        }
+                        // Circularize / ascent burn: prograde/retrograde burn.
+                        FlightPhase::CircularizeBurn | FlightPhase::AscentBurn => {
+                            let rel_pos = ship.position - planet_pos;
+                            let rel_vel = ship.velocity; // already planet-relative (patched conics)
+                            let (dv, burn_dir) = autopilot::circularization_delta_v(
+                                rel_pos, rel_vel, planet.gm,
+                            );
+                            GuidanceCommand {
+                                thrust_direction: burn_dir,
+                                thrust_magnitude: if dv > 1.0 { engine_accel * ship.physical_properties.mass_kg } else { 0.0 },
+                                phase: ap.phase,
+                                completed: dv < 1.0,
+                                eta_real_seconds: dv / engine_accel,
+                                felt_g: autopilot::engine_tier(effective_tier).felt_g,
+                                dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                            }
+                        }
+                        // Stable orbit: no thrust.
+                        FlightPhase::StableOrbit => {
+                            GuidanceCommand {
+                                thrust_direction: DVec3::NEG_Z,
+                                thrust_magnitude: 0.0,
+                                phase: FlightPhase::StableOrbit,
+                                completed: false,
+                                eta_real_seconds: 0.0,
+                                felt_g: 0.0,
+                                dampener_active: false,
+                            }
+                        }
+                        // Deorbit burn: retrograde.
+                        FlightPhase::DeorbitBurn => {
+                            let rel_pos = ship.position - planet_pos;
+                            let rel_vel = ship.velocity; // already planet-relative (patched conics)
+                            let h = rel_pos.cross(rel_vel);
+                            let prograde = if h.length_squared() > 1e-10 {
+                                h.cross(rel_pos).normalize()
+                            } else {
+                                DVec3::NEG_Z
+                            };
+                            GuidanceCommand {
+                                thrust_direction: -prograde,
+                                thrust_magnitude: engine_accel * ship.physical_properties.mass_kg,
+                                phase: FlightPhase::DeorbitBurn,
+                                completed: false,
+                                eta_real_seconds: 0.0,
+                                felt_g: autopilot::engine_tier(effective_tier).felt_g,
+                                dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                            }
+                        }
+                        // Atmospheric entry / terminal descent / landing: use landing guidance.
+                        FlightPhase::AtmosphericEntry | FlightPhase::TerminalDescent | FlightPhase::Landing => {
+                            autopilot::compute_landing_guidance(
+                                ship.position, ship.velocity, planet_pos, planet,
+                                &ship.physical_properties, engine_accel,
+                            )
+                        }
+                        // Landed: zero thrust.
+                        FlightPhase::Landed => {
+                            GuidanceCommand {
+                                thrust_direction: DVec3::Y,
+                                thrust_magnitude: 0.0,
+                                phase: FlightPhase::Landed,
+                                completed: true,
+                                eta_real_seconds: 0.0,
+                                felt_g: 0.0,
+                                dampener_active: false,
+                            }
+                        }
+                        // Liftoff / gravity turn / ascent: use takeoff guidance.
+                        FlightPhase::Liftoff | FlightPhase::GravityTurn => {
+                            autopilot::compute_takeoff_guidance(
+                                ship.position, ship.velocity, planet_pos, planet,
+                                &ship.physical_properties, engine_accel, ap.target_orbit_altitude,
+                            )
+                        }
+                        // Escape burn: prograde until outside SOI.
+                        FlightPhase::EscapeBurn => {
+                            let rel_pos = ship.position - planet_pos;
+                            let rel_vel = ship.velocity; // already planet-relative (patched conics)
+                            let h = rel_pos.cross(rel_vel);
+                            let prograde = if h.length_squared() > 1e-10 {
+                                h.cross(rel_pos).normalize()
+                            } else {
+                                DVec3::NEG_Z
+                            };
+                            GuidanceCommand {
+                                thrust_direction: prograde,
+                                thrust_magnitude: engine_accel * ship.physical_properties.mass_kg,
+                                phase: FlightPhase::EscapeBurn,
+                                completed: (ship.position - planet_pos).length() > soi,
+                                eta_real_seconds: 0.0,
+                                felt_g: autopilot::engine_tier(effective_tier).felt_g,
+                                dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                            }
+                        }
+                        FlightPhase::Arrived => {
+                            GuidanceCommand {
+                                thrust_direction: DVec3::NEG_Z,
+                                thrust_magnitude: 0.0,
+                                phase: FlightPhase::Arrived,
+                                completed: true,
+                                eta_real_seconds: 0.0,
+                                felt_g: 0.0,
+                                dampener_active: false,
+                            }
+                        }
+                    };
+
+                    // Check phase transitions (deterministic, shared with client).
+                    let new_phase = autopilot::check_phase_transition(
+                        ap.phase, ap.mode,
                         ship.position, ship.velocity,
-                        ap.intercept_pos, ap.target_planet_index,
-                        sys, pp, ct, ap.thrust_tier,
+                        planet_pos, planet_vel, planet, &sys.star,
+                        soi, ap.target_orbit_altitude, &ship.physical_properties,
                     );
-                    Some((id, guidance))
+
+                    Some((id, guidance, new_phase))
                 }).collect();
 
-            for (ship_id, guidance) in &ap_commands {
+            for (ship_id, guidance, new_phase) in &ap_commands {
                 let ship = st.ships.get_mut(ship_id).unwrap();
 
-                if guidance.completed {
-                    info!(ship_id, "autopilot arrived at SOI — disengaging");
-                    ship.autopilot = None;
-                    ship.thrust = DVec3::ZERO;
-                    ship.torque = DVec3::ZERO;
-                    continue;
-                }
-
-                // Sticky brake: once committed, stay in Brake until velocity reverses.
-                // Prevents phase oscillation during the flip rotation at high accelerations.
-                let ap = ship.autopilot.as_mut().unwrap();
-                if guidance.phase == FlightPhase::Brake && !ap.braking_committed {
-                    ap.braking_committed = true;
-                }
-
-                let effective_phase = if ap.braking_committed {
-                    let desired_dir = (ap.intercept_pos - ship.position).normalize_or_zero();
-                    let v_along = ship.velocity.dot(desired_dir);
-                    if v_along <= 0.0 {
-                        // Velocity reversed — ship stopped or overshot, release brake lock.
-                        ap.braking_committed = false;
-                        guidance.phase
-                    } else {
-                        FlightPhase::Brake
+                // Apply phase transition.
+                if let Some(ref mut ap) = ship.autopilot {
+                    if *new_phase != ap.phase {
+                        info!(ship_id, old = ?ap.phase, new = ?new_phase, "flight phase transition");
+                        ap.phase = *new_phase;
                     }
-                } else {
-                    guidance.phase
-                };
+                }
 
-                // Compute thrust direction based on effective phase.
-                let thrust_dir = if effective_phase == FlightPhase::Brake {
-                    // Always use guidance's brake direction when committed.
-                    guidance.thrust_direction
-                } else {
-                    guidance.thrust_direction
-                };
+                // Handle completion.
+                if guidance.completed {
+                    let should_disengage = if let Some(ref ap) = ship.autopilot {
+                        matches!(ap.phase, FlightPhase::Arrived | FlightPhase::Landed)
+                            || (ap.phase == FlightPhase::StableOrbit && ap.mode == autopilot::AutopilotMode::OrbitInsertion)
+                    } else {
+                        true
+                    };
+                    if should_disengage {
+                        let mode = ship.autopilot.as_ref().map(|a| a.mode);
+                        info!(ship_id, mode = ?mode, "autopilot completed — disengaging");
+                        ship.autopilot = None;
+                        ship.thrust = DVec3::ZERO;
+                        ship.torque = DVec3::ZERO;
+                        continue;
+                    }
+                }
 
-                let elapsed = physics_time - ap.engage_time;
-                let ramp = autopilot::thrust_ramp_factor(elapsed, ap.estimated_tof, effective_phase);
+                // Sticky brake for interplanetary phases.
+                if let Some(ref mut ap) = ship.autopilot {
+                    if matches!(ap.phase, FlightPhase::Accelerate | FlightPhase::Brake | FlightPhase::Flip) {
+                        if guidance.phase == FlightPhase::Brake && !ap.braking_committed {
+                            ap.braking_committed = true;
+                        }
+                    }
+                }
+
+                let thrust_dir = guidance.thrust_direction;
+                let elapsed = ship.autopilot.as_ref()
+                    .map(|ap| physics_time - ap.engage_time).unwrap_or(0.0);
+                let tof = ship.autopilot.as_ref()
+                    .map(|ap| ap.estimated_tof).unwrap_or(1.0);
+                let ramp = autopilot::thrust_ramp_factor(elapsed, tof, guidance.phase);
 
                 // Rotation: PD controller to align ship forward (-Z) with thrust direction.
-                let desired_fwd = thrust_dir;
-                let current_fwd = ship.rotation * DVec3::NEG_Z;
-                let cross = current_fwd.cross(desired_fwd);
-                let dot_align = current_fwd.dot(desired_fwd).clamp(-1.0, 1.0);
-                let angle = dot_align.acos();
+                if guidance.thrust_magnitude > 0.0 {
+                    let desired_fwd = thrust_dir;
+                    let current_fwd = ship.rotation * DVec3::NEG_Z;
+                    let cross = current_fwd.cross(desired_fwd);
+                    let dot_align = current_fwd.dot(desired_fwd).clamp(-1.0, 1.0);
+                    let angle = dot_align.acos();
 
-                if angle > 0.001 && cross.length() > 1e-8 {
-                    let axis = cross.normalize();
-                    let p_gain = 2.0;
-                    let target_omega = axis * (angle * p_gain).min(MAX_ANGULAR_VELOCITY);
-                    let world_omega = ship.rotation * ship.angular_velocity;
-                    let error = target_omega - world_omega;
-                    let local_error = ship.rotation.inverse() * error;
-                    ship.torque = local_error.clamp_length_max(1.0);
+                    if angle > 0.001 && cross.length() > 1e-8 {
+                        let axis = cross.normalize();
+                        let p_gain = 2.0;
+                        let target_omega = axis * (angle * p_gain).min(MAX_ANGULAR_VELOCITY);
+                        let world_omega = ship.rotation * ship.angular_velocity;
+                        let error = target_omega - world_omega;
+                        let local_error = ship.rotation.inverse() * error;
+                        ship.torque = local_error.clamp_length_max(1.0);
+                    } else {
+                        ship.torque = DVec3::ZERO;
+                    }
+
+                    // Thrust: main drive fires along ship's -Z axis.
+                    let dot_align = ship.rotation.mul_vec3(DVec3::NEG_Z).dot(thrust_dir).clamp(-1.0, 1.0);
+                    let thrust_scale = dot_align.max(0.0) * ramp;
+                    ship.thrust = DVec3::new(0.0, 0.0, -guidance.thrust_magnitude * thrust_scale);
                 } else {
+                    ship.thrust = DVec3::ZERO;
                     ship.torque = DVec3::ZERO;
                 }
-
-                // Thrust: main drive fires along ship's -Z axis.
-                // Scale by alignment (cos(misalignment)) and progressive ramp.
-                let thrust_scale = dot_align.max(0.0) * ramp;
-                ship.thrust = DVec3::new(0.0, 0.0, -guidance.thrust_magnitude * thrust_scale);
             }
 
             } // end autopilot controller block
 
             // Phase 2: True Velocity Verlet (Störmer-Verlet) integration.
             // Two-pass for symplectic energy conservation — critical for orbital stability.
-            //   Pass A: a_old at current position → advance position
-            //   Pass B: a_new at new position → advance velocity with average
-            let sys = &st.system_params;
-            let pp = &st.planet_positions;
-            let ct = st.celestial_time;
+            // Includes: N-body gravity, ship thrust, orientation-dependent aero forces.
 
-            // Pass A: compute a_old, store thrust_accel, advance position.
-            let pass_a: Vec<(u64, DVec3, DVec3)> = {
+            // Find which planet (if any) each ship is in atmosphere of.
+            // Checked every tick against all planets (not gated by in_soi poll).
+            let ship_atmo: HashMap<u64, usize> = {
+                let sys = &st.system_params;
+                let pp = &st.planet_positions;
+                st.ships.iter()
+                    .filter_map(|(&id, ship)| {
+                        check_atmosphere(ship.position, &sys.planets, pp)
+                            .map(|(planet_idx, _alt)| (id, planet_idx))
+                    }).collect()
+            };
+
+            // Snapshot in_soi for gravity computation (avoids borrow conflicts).
+            let in_soi_snapshot: HashMap<u64, usize> = st.in_soi.clone();
+
+            // Pass A: compute a_old (gravity + thrust + aero), advance position.
+            // Collect aero torque for application after velocity update.
+            let pass_a: Vec<(u64, DVec3, DVec3, DVec3)> = {
                 let sys = &st.system_params;
                 let pp = &st.planet_positions;
                 let ct = st.celestial_time;
                 st.ships.iter().map(|(&id, ship)| {
-                    let grav = compute_gravity_acceleration(
-                        ship.position, &sys.star, &sys.planets, pp, ct,
-                    );
-                    let thrust_accel = ship.rotation * ship.thrust / SHIP_MASS;
-                    let accel_old = grav + thrust_accel;
-                    (id, accel_old, thrust_accel)
+                    // Inside SOI: only parent planet gravity (star gravity handled by co-movement).
+                    // Outside SOI: full N-body gravity.
+                    let grav = if let Some(&planet_idx) = in_soi_snapshot.get(&id) {
+                        let r = ship.position - pp[planet_idx];
+                        let dist_sq = r.length_squared();
+                        if dist_sq > 1.0 {
+                            -r.normalize() * sys.planets[planet_idx].gm / dist_sq
+                        } else {
+                            DVec3::ZERO
+                        }
+                    } else {
+                        compute_gravity_acceleration(
+                            ship.position, &sys.star, &sys.planets, pp, ct,
+                        )
+                    };
+                    let thrust_accel = ship.rotation * ship.thrust / ship.physical_properties.mass_kg;
+
+                    // Full orientation-dependent aerodynamics.
+                    let mut aero_accel = DVec3::ZERO;
+                    let mut aero_torque = DVec3::ZERO;
+                    if let Some(&planet_idx) = ship_atmo.get(&id) {
+                        let mut thermal_tmp = ship.thermal_energy;
+                        let aero = compute_full_aerodynamics(
+                            ship.position, ship.velocity, ship.rotation, ship.angular_velocity,
+                            pp[planet_idx], &sys.planets[planet_idx],
+                            &ship.physical_properties, &mut thermal_tmp, DT,
+                        );
+                        aero_accel = aero.drag_accel + aero.lift_accel;
+                        aero_torque = aero.aero_torque;
+                    }
+
+                    let accel_old = grav + thrust_accel + aero_accel;
+                    (id, accel_old, thrust_accel, aero_torque)
                 }).collect()
             };
 
-            for &(ship_id, accel_old, _) in &pass_a {
+            for &(ship_id, accel_old, _, _) in &pass_a {
                 let ship = st.ships.get_mut(&ship_id).unwrap();
                 ship.position += ship.velocity * DT + 0.5 * accel_old * DT * DT;
             }
 
-            // Pass B: recompute gravity at new position, average with a_old for velocity.
-            // Collect new positions first (immutable borrow), then mutate.
+            // Pass B: recompute gravity+aero at new position, average with a_old for velocity.
             let pass_b: Vec<(u64, DVec3)> = {
                 let sys = &st.system_params;
                 let pp = &st.planet_positions;
                 let ct = st.celestial_time;
-                pass_a.iter().map(|&(ship_id, accel_old, thrust_accel)| {
+                pass_a.iter().map(|&(ship_id, accel_old, thrust_accel, _)| {
                     let ship = &st.ships[&ship_id];
-                    let grav_new = compute_gravity_acceleration(
-                        ship.position, &sys.star, &sys.planets, pp, ct,
-                    );
-                    let accel_new = grav_new + thrust_accel;
+                    // Same SOI-aware gravity as Pass A.
+                    let grav_new = if let Some(&planet_idx) = in_soi_snapshot.get(&ship_id) {
+                        let r = ship.position - pp[planet_idx];
+                        let dist_sq = r.length_squared();
+                        if dist_sq > 1.0 {
+                            -r.normalize() * sys.planets[planet_idx].gm / dist_sq
+                        } else {
+                            DVec3::ZERO
+                        }
+                    } else {
+                        compute_gravity_acceleration(
+                            ship.position, &sys.star, &sys.planets, pp, ct,
+                        )
+                    };
+                    let mut aero_accel_new = DVec3::ZERO;
+                    if let Some(&planet_idx) = ship_atmo.get(&ship_id) {
+                        let mut thermal_tmp = ship.thermal_energy;
+                        let aero = compute_full_aerodynamics(
+                            ship.position, ship.velocity, ship.rotation, ship.angular_velocity,
+                            pp[planet_idx], &sys.planets[planet_idx],
+                            &ship.physical_properties, &mut thermal_tmp, DT,
+                        );
+                        aero_accel_new = aero.drag_accel + aero.lift_accel;
+                    }
+                    let accel_new = grav_new + thrust_accel + aero_accel_new;
                     let vel_delta = 0.5 * (accel_old + accel_new) * DT;
                     (ship_id, vel_delta)
                 }).collect()
             };
+
+            // Apply velocity, thermal energy, and aero torque.
+            // Clone planet data to avoid borrowing st while mutating ships.
+            let planets_clone = st.system_params.planets.clone();
+            let pp_clone = st.planet_positions.clone();
             for (ship_id, vel_delta) in pass_b {
                 let ship = st.ships.get_mut(&ship_id).unwrap();
                 ship.velocity += vel_delta;
                 ship.thrust = DVec3::ZERO;
+
+                // Update thermal energy (authoritative, once per tick).
+                if let Some(&planet_idx) = ship_atmo.get(&ship_id) {
+                    compute_full_aerodynamics(
+                        ship.position, ship.velocity, ship.rotation, ship.angular_velocity,
+                        pp_clone[planet_idx], &planets_clone[planet_idx],
+                        &ship.physical_properties, &mut ship.thermal_energy, DT,
+                    );
+                }
+
+                // Apply aerodynamic torque to angular velocity (from pass A).
+                if let Some(&(_, _, _, aero_torque)) = pass_a.iter().find(|t| t.0 == ship_id) {
+                    if aero_torque.length_squared() > 1e-10 {
+                        let (ix, iy, iz) = ship.physical_properties.moment_of_inertia();
+                        let torque_local = ship.rotation.inverse() * aero_torque;
+                        let ang_accel_aero = DVec3::new(
+                            torque_local.x / ix,
+                            torque_local.y / iy,
+                            torque_local.z / iz,
+                        );
+                        ship.angular_velocity += ang_accel_aero * DT;
+                    }
+                }
 
                 // Standard angular velocity control (works for both manual and autopilot torque).
                 let target_angular_vel = DVec3::new(
@@ -670,6 +987,100 @@ fn main() {
                 }
 
                 ship.torque = DVec3::ZERO;
+            }
+
+            // Ground contact — spring-damper model. AFTER Pass B so velocity includes gravity.
+            // Checks ALL planets. Critically damped to prevent bounce.
+            // Impact damage based on ship hull strength, scaled by planet gravity.
+            let ship_ids: Vec<u64> = st.ships.keys().copied().collect();
+            for ship_id in ship_ids {
+                let (contact_planet, contact_data) = {
+                    let ship = &st.ships[&ship_id];
+                    let mut result = None;
+                    for (i, planet) in st.system_params.planets.iter().enumerate() {
+                        let planet_pos = st.planet_positions[i];
+                        let to_ship = ship.position - planet_pos;
+                        let dist = to_ship.length();
+                        let contact_margin = ship.physical_properties.landing_gear_height + 0.5;
+                        let surface_dist = planet.radius_m + contact_margin;
+
+                        if dist < surface_dist && dist > 1.0 {
+                            let radial = to_ship / dist;
+                            let penetration = surface_dist - dist;
+                            let v_radial = ship.velocity.dot(radial);
+
+                            // Derive spring-damper from ship mass and planet gravity (no magic numbers).
+                            let weight = ship.physical_properties.mass_kg * planet.surface_gravity;
+                            let spring_k = weight * 5.0 / contact_margin;
+                            let damping_c = 2.0 * (spring_k * ship.physical_properties.mass_kg).sqrt();
+
+                            // Spring-damper ground reaction
+                            let spring_force = spring_k * penetration;
+                            let damping_force = -damping_c * v_radial;
+                            let ground_force = (spring_force + damping_force).max(0.0);
+                            let ground_accel = radial * ground_force / ship.physical_properties.mass_kg;
+
+                            // Friction: kill lateral velocity (rate proportional to gravity)
+                            let v_lateral = ship.velocity - radial * v_radial;
+                            let friction_rate = planet.surface_gravity / 2.0;
+
+                            result = Some((i, radial, ground_accel, v_radial, v_lateral,
+                                           friction_rate, penetration, contact_margin, planet_pos,
+                                           planet.radius_m));
+                            break;
+                        }
+                    }
+                    (result.map(|r| r.0), result)
+                };
+
+                if let Some((planet_idx, radial, ground_accel, v_radial, v_lateral,
+                             friction_rate, penetration, contact_margin, planet_pos, planet_radius)) = contact_data
+                {
+                    let ship = st.ships.get_mut(&ship_id).unwrap();
+
+                    // Impact damage on first contact
+                    if !ship.landed && v_radial < -0.5 {
+                        let impact_speed = -v_radial;
+                        let max_safe = ship.physical_properties.hull_strength * 0.08;
+                        let lethal = ship.physical_properties.hull_strength * 0.3;
+                        if impact_speed > lethal {
+                            info!(ship_id, impact_speed = format!("{:.1}", impact_speed), "ship destroyed on impact");
+                            // TODO: emit destruction event
+                        } else if impact_speed > max_safe {
+                            let damage = (impact_speed - max_safe).powi(2) * 0.5;
+                            info!(ship_id, impact_speed = format!("{:.1}", impact_speed),
+                                damage = format!("{:.1}", damage), "hard landing — damage taken");
+                        }
+                    }
+
+                    // Apply ground reaction
+                    ship.velocity += ground_accel * DT;
+
+                    // Apply friction
+                    let friction_decay = (-friction_rate * DT).exp();
+                    let v_rad_component = radial * ship.velocity.dot(radial);
+                    let v_lat_component = ship.velocity - v_rad_component;
+                    ship.velocity = v_rad_component + v_lat_component * friction_decay;
+
+                    // Prevent sinking below surface
+                    let dist_now = (ship.position - planet_pos).length();
+                    if dist_now < planet_radius + 0.5 {
+                        ship.position = planet_pos + radial * (planet_radius + contact_margin);
+                    }
+
+                    // Landed detection
+                    let speed = ship.velocity.length();
+                    if speed < 0.5 && penetration > 0.0 {
+                        ship.landed = true;
+                        ship.landed_planet_index = Some(planet_idx);
+                    }
+                } else if let Some(ship) = st.ships.get_mut(&ship_id) {
+                    // No contact — check for takeoff
+                    if ship.landed {
+                        ship.landed = false;
+                        ship.landed_planet_index = None;
+                    }
+                }
             }
         });
 
@@ -711,12 +1122,23 @@ fn main() {
                 }
             }
 
-            // Process SOI entries.
+            // Process SOI entries — patched conics: convert to planet-relative frame.
+            // Subtract planet's real-time velocity so the ship has planet-relative velocity.
+            // The co-movement system (above) keeps the ship's position tracking the planet.
             for (ship_id, planet_index) in soi_entries {
                 st.in_soi.insert(ship_id, planet_index);
                 let planet = &st.system_params.planets[planet_index];
                 let planet_seed = planet.planet_seed;
-                info!(ship_id, planet_index, planet_seed, "ship entered planet SOI");
+
+                let planet_real_vel = st.planet_velocities[planet_index];
+                if let Some(ship) = st.ships.get_mut(&ship_id) {
+                    let rel_speed_before = (ship.velocity - planet_real_vel).length();
+                    ship.velocity -= planet_real_vel; // convert to planet-relative frame
+                    info!(ship_id, planet_index, planet_seed,
+                        planet_vel_mag = format!("{:.0}", planet_real_vel.length()),
+                        rel_speed = format!("{:.0}", rel_speed_before),
+                        "ship entered planet SOI — converted to planet-relative frame");
+                }
 
                 // Provision planet shard if not already provisioned.
                 if !st.provisioned_planets.contains_key(&planet_seed) {
@@ -752,10 +1174,16 @@ fn main() {
                 }
             }
 
-            // Process SOI exits.
+            // Process SOI exits — patched conics: convert back to system-absolute frame.
             for ship_id in soi_exits {
+                if let Some(&planet_index) = st.in_soi.get(&ship_id) {
+                    let planet_real_vel = st.planet_velocities[planet_index];
+                    if let Some(ship) = st.ships.get_mut(&ship_id) {
+                        ship.velocity += planet_real_vel; // convert back to system frame
+                        info!(ship_id, "ship left planet SOI — converted to system frame");
+                    }
+                }
                 st.in_soi.remove(&ship_id);
-                info!(ship_id, "ship left planet SOI");
             }
         });
 

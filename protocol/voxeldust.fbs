@@ -134,8 +134,10 @@ table AutopilotCommand {
     /// Target body id: 0 = star, 1..N = planets.
     /// 0xFFFFFFFF = disengage autopilot.
     target_body_id: uint32;
-    /// Speed tier (0=maneuver, 1=1g, 2=3g, 3=6g).
+    /// Speed tier (0=maneuver, 1=impulse, 2=cruise, 3=long_range, 4=emergency).
     speed_tier: uint8;
+    /// Autopilot mode: 0=DirectApproach, 1=OrbitInsertion, 2=Landing, 3=Takeoff, 4=Departure.
+    autopilot_mode: uint8;
 }
 
 /// Ship position/state sent from system shard to planet shards within SOI.
