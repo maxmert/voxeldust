@@ -103,6 +103,8 @@ struct SystemState {
     in_soi: HashMap<u64, usize>,
     /// Planet shards provisioned by this system shard: planet_seed → shard_id.
     provisioned_planets: HashMap<u64, ShardId>,
+    /// Planet seeds currently being provisioned (async in-flight, not yet ready).
+    provisioning_in_flight: std::collections::HashSet<u64>,
     /// Pending handoffs being relayed: session_token → source shard id.
     pending_handoffs: HashMap<SessionToken, ShardId>,
     /// Planet shard provision results arriving from async tasks.
@@ -133,6 +135,7 @@ impl SystemState {
             tick_count: 0,
             in_soi: HashMap::new(),
             provisioned_planets: HashMap::new(),
+            provisioning_in_flight: std::collections::HashSet::new(),
             pending_handoffs: HashMap::new(),
             planet_provision_results: Vec::new(),
         }
@@ -1097,6 +1100,7 @@ fn main() {
             let results = std::mem::take(&mut st.planet_provision_results);
             for (planet_seed, shard_id) in results {
                 st.provisioned_planets.insert(planet_seed, shard_id);
+                st.provisioning_in_flight.remove(&planet_seed);
                 info!(planet_seed, shard_id = shard_id.0, "planet shard provisioned");
             }
 
@@ -1140,8 +1144,10 @@ fn main() {
                         "ship entered planet SOI — converted to planet-relative frame");
                 }
 
-                // Provision planet shard if not already provisioned.
-                if !st.provisioned_planets.contains_key(&planet_seed) {
+                // Provision planet shard if not already provisioned or in-flight.
+                if !st.provisioned_planets.contains_key(&planet_seed)
+                    && !st.provisioning_in_flight.contains(&planet_seed) {
+                    st.provisioning_in_flight.insert(planet_seed);
                     let url = orchestrator_url_soi.clone();
                     let system_seed = st.system_params.system_seed;
                     let state_cb = state_soi_provision.clone();
@@ -1155,7 +1161,7 @@ fn main() {
                                 if let Ok(body) = resp.text().await {
                                     // Parse shard_id from JSON response.
                                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                                        if let Some(id) = v.get("id").and_then(|v| v.as_u64()) {
+                                        if let Some(id) = v.get("shards").and_then(|s| s.get(0)).and_then(|s| s.get("id")).and_then(|v| v.as_u64()) {
                                             let mut st = state_cb.lock().unwrap();
                                             st.planet_provision_results.push((planet_seed, ShardId(id)));
                                         }
@@ -1171,6 +1177,48 @@ fn main() {
                             }
                         }
                     });
+                }
+            }
+
+            // Provision planet shards for all ships in SOI (catches pre-registered spawns).
+            // This runs every SOI check tick and is idempotent — only provisions if not yet in map.
+            let soi_planet_indices: Vec<usize> = st.in_soi.values().copied().collect();
+            for planet_index in soi_planet_indices {
+                let planet = &st.system_params.planets[planet_index];
+                let planet_seed = planet.planet_seed;
+                if !st.provisioned_planets.contains_key(&planet_seed)
+                    && !st.provisioning_in_flight.contains(&planet_seed) {
+                    st.provisioning_in_flight.insert(planet_seed);
+                    let url = orchestrator_url_soi.clone();
+                    let system_seed = st.system_params.system_seed;
+                    let state_cb = state_soi_provision.clone();
+                    tokio::spawn(async move {
+                        let endpoint = format!(
+                            "{}/planet/{}?system_seed={}&planet_index={}",
+                            url, planet_seed, system_seed, planet_index
+                        );
+                        match reqwest::get(&endpoint).await {
+                            Ok(resp) if resp.status().is_success() => {
+                                if let Ok(body) = resp.text().await {
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                                        if let Some(id) = v.get("shards").and_then(|s| s.get(0)).and_then(|s| s.get("id")).and_then(|v| v.as_u64()) {
+                                            let mut st = state_cb.lock().unwrap();
+                                            st.planet_provision_results.push((planet_seed, ShardId(id)));
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(resp) => {
+                                tracing::warn!(status = %resp.status(), planet_seed,
+                                    "failed to provision planet shard (from SOI check)");
+                            }
+                            Err(e) => {
+                                tracing::warn!(%e, planet_seed,
+                                    "planet shard provision request failed (from SOI check)");
+                            }
+                        }
+                    });
+                    info!(planet_seed, planet_index, "provisioning planet shard for ship in SOI");
                 }
             }
 

@@ -780,44 +780,43 @@ fn main() {
             }
         });
 
-        // System 5: Send pilot thrust to system shard via QUIC.
+        // System 5: Send messages to system shard via QUIC.
+        // Handoff and autopilot messages are sent regardless of piloting state.
+        // Thrust/torque is only sent when piloting.
         let state_pilot = state.clone();
         let peer_reg = peer_registry.clone();
         harness.add_system("pilot_send", move || {
             let mut st = state_pilot.lock().unwrap();
-            if !st.is_piloting { return; }
 
             if let Some(host_id) = st.host_shard_id {
                 if let Ok(reg) = peer_reg.try_read() {
                     if let Some(addr) = reg.quic_addr(host_id) {
-                        let msg = ShardMsg::ShipControlInput(ShipControlInput {
-                            ship_id: st.ship_id,
-                            thrust: st.pilot_thrust,
-                            torque: st.pilot_torque,
-                            braking: false,
-                            tick: st.tick_count,
-                        });
-                        if st.tick_count % 100 == 0 {
-                            info!(thrust_z = st.pilot_thrust.z, %addr, "sending ShipControlInput");
+                        // Always send pending handoff (works when walking to exit door).
+                        if let Some(handoff_msg) = st.pending_handoff_msg.take() {
+                            let _ = quic_send_tx.send((host_id, addr, handoff_msg));
                         }
-                        // Always send manual control — WASD cancels autopilot via
-                        // pending_autopilot_cmd above, so this won't conflict.
-                        let _ = quic_send_tx.send((host_id, addr, msg));
 
-                        // Send pending autopilot command.
+                        // Always send pending autopilot command.
                         if let Some((target, tier)) = st.pending_autopilot_cmd.take() {
                             let ap_msg = ShardMsg::AutopilotCommand(AutopilotCommandData {
                                 ship_id: st.ship_id,
                                 target_body_id: target,
                                 speed_tier: tier,
-                                autopilot_mode: 0, // DirectApproach default; updated by double-tap T
+                                autopilot_mode: 0,
                             });
                             let _ = quic_send_tx.send((host_id, addr, ap_msg));
                         }
 
-                        // Send pending handoff message (from door interaction).
-                        if let Some(handoff_msg) = st.pending_handoff_msg.take() {
-                            let _ = quic_send_tx.send((host_id, addr, handoff_msg));
+                        // Thrust/torque only when piloting.
+                        if st.is_piloting {
+                            let msg = ShardMsg::ShipControlInput(ShipControlInput {
+                                ship_id: st.ship_id,
+                                thrust: st.pilot_thrust,
+                                torque: st.pilot_torque,
+                                braking: false,
+                                tick: st.tick_count,
+                            });
+                            let _ = quic_send_tx.send((host_id, addr, msg));
                         }
                     } else if st.tick_count % 100 == 0 {
                         let all_peers: Vec<_> = reg.all().iter().map(|s| format!("{}({})", s.id, s.shard_type)).collect();
