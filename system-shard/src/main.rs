@@ -16,8 +16,8 @@ use voxeldust_core::shard_message::{
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{
     compute_atmospheric_drag, compute_full_aerodynamics, compute_gravity_acceleration,
-    compute_lighting, compute_planet_position, compute_planet_velocity, compute_soi_radius,
-    check_atmosphere, SystemParams,
+    compute_lighting, compute_planet_position, compute_planet_rotation, compute_planet_velocity,
+    compute_soi_radius, check_atmosphere, SystemParams,
 };
 use voxeldust_core::autopilot::{self, FlightPhase, GuidanceCommand};
 use voxeldust_shard_common::client_listener;
@@ -46,6 +46,7 @@ struct Args {
     advertise_host: Option<String>,
 }
 
+#[derive(Clone)]
 struct AutopilotState {
     mode: autopilot::AutopilotMode,
     phase: autopilot::FlightPhase,
@@ -63,6 +64,7 @@ struct AutopilotState {
     target_orbit_altitude: f64,
 }
 
+#[derive(Clone)]
 struct ShipState {
     ship_id: u64,
     position: DVec3,
@@ -80,6 +82,27 @@ struct ShipState {
     landed: bool,
     /// Planet index the ship is landed on (valid only when landed=true).
     landed_planet_index: Option<usize>,
+    /// Radial direction from planet center at landing time (normalized, planet-local).
+    /// Used with planet rotation to derive position each tick. Only valid when landed.
+    landed_surface_radial: DVec3,
+    /// Celestial time when landing occurred. Used to compute rotation delta.
+    landed_celestial_time: f64,
+    /// Consecutive ticks the ship has been in the landing zone (debounce for landing detection).
+    landing_zone_ticks: u32,
+}
+
+/// Local workspace for the physics system. Holds mutable data extracted from
+/// `SystemState` so the physics computation runs without holding the Mutex.
+/// This eliminates lock contention with async tasks and keeps the tick responsive.
+struct PhysicsWorkspace<'a> {
+    system_params: &'a SystemParams,
+    ships: HashMap<u64, ShipState>,
+    planet_positions: Vec<DVec3>,
+    planet_velocities: Vec<DVec3>,
+    in_soi: HashMap<u64, usize>,
+    celestial_time: f64,
+    physics_time: f64,
+    tick_count: u64,
 }
 
 /// Maximum angular velocity (rad/s). ~30 deg/s — gameplay-appropriate for a small ship.
@@ -107,8 +130,6 @@ struct SystemState {
     provisioning_in_flight: std::collections::HashSet<u64>,
     /// Pending handoffs being relayed: session_token → source shard id.
     pending_handoffs: HashMap<SessionToken, ShardId>,
-    /// Planet shard provision results arriving from async tasks.
-    planet_provision_results: Vec<(u64, ShardId)>,
 }
 
 impl SystemState {
@@ -137,7 +158,6 @@ impl SystemState {
             provisioned_planets: HashMap::new(),
             provisioning_in_flight: std::collections::HashSet::new(),
             pending_handoffs: HashMap::new(),
-            planet_provision_results: Vec::new(),
         }
     }
 
@@ -162,6 +182,9 @@ impl SystemState {
             thermal_energy: 0.0,
             landed: false,
             landed_planet_index: None,
+            landed_surface_radial: DVec3::ZERO,
+            landed_celestial_time: 0.0,
+            landing_zone_ticks: 0,
         });
         // Pre-register in SOI if spawning inside one.
         // Velocity is already zero (planet-relative) — skip the patched conics entry impulse.
@@ -267,6 +290,8 @@ fn main() {
         let mut harness = ShardHarness::new(config);
 
         let state = Arc::new(Mutex::new(SystemState::new(args.seed, shard_id)));
+        // Immutable system params shared with physics (avoids cloning every tick).
+        let sys_params_arc = Arc::new(SystemParams::from_seed(args.seed));
         let client_registry = harness.client_registry.clone();
         let system_seed = args.seed;
 
@@ -280,6 +305,18 @@ fn main() {
         let broadcast_tx = harness.broadcast_tx.clone();
         let quic_send_tx = harness.quic_send_tx.clone();
         let peer_registry = harness.peer_registry.clone();
+
+        // Channel for async planet provisioning results (avoids locking the main
+        // state mutex from spawned tokio tasks, which caused tick-loop stalls).
+        let (provision_tx, mut provision_rx) =
+            tokio::sync::mpsc::channel::<(u64, ShardId)>(32);
+
+        // Shared HTTP client with a timeout so slow/unreachable orchestrator
+        // responses don't block tokio worker threads indefinitely.
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("failed to build HTTP client");
 
         // System 1: Drain client connects (direct connections — debug mode).
         let state_connect = state.clone();
@@ -323,9 +360,29 @@ fn main() {
                 match msg {
                     ShardMsg::ShipControlInput(ctrl) => {
                         let mut st = state_quic.lock().unwrap();
+                        // Pre-extract gravity for takeoff check (avoids borrow conflict).
+                        let takeoff_gravity = st.ships.get(&ctrl.ship_id)
+                            .and_then(|s| s.landed_planet_index)
+                            .and_then(|pi| st.system_params.planets.get(pi).map(|p| p.surface_gravity));
                         if let Some(ship) = st.ships.get_mut(&ctrl.ship_id) {
+                            // Takeoff: if landed and receiving thrust that exceeds gravity, detach.
+                            if ship.landed && ctrl.thrust.length_squared() > 0.01 {
+                                let thrust_accel = ctrl.thrust.length() / ship.physical_properties.mass_kg;
+                                let gravity = takeoff_gravity.unwrap_or(10.0);
+                                if thrust_accel > gravity * 1.1 {
+                                    ship.landed = false;
+                                    ship.landed_planet_index = None;
+                                    info!(ship_id = ctrl.ship_id, "ship taking off — detached from surface");
+                                }
+                            }
                             ship.thrust = ctrl.thrust;
                             ship.torque = ctrl.torque;
+                            if st.tick_count % 100 == 0 {
+                                info!(ship_id = ctrl.ship_id,
+                                    thrust = format!("({:.0},{:.0},{:.0})", ctrl.thrust.x, ctrl.thrust.y, ctrl.thrust.z),
+                                    torque = format!("({:.2},{:.2},{:.2})", ctrl.torque.x, ctrl.torque.y, ctrl.torque.z),
+                                    "ShipControlInput applied");
+                            }
                         } else {
                             info!(ship_id = ctrl.ship_id, "received ShipControlInput for unknown ship");
                         }
@@ -394,7 +451,7 @@ fn main() {
                                 if let Ok(reg) = peer_reg_quic.try_read() {
                                     if let Some(addr) = reg.quic_addr(planet_shard_id) {
                                         let msg = ShardMsg::PlayerHandoff(handoff);
-                                        let _ = quic_send_quic.send((planet_shard_id, addr, msg));
+                                        let _ = quic_send_quic.try_send((planet_shard_id, addr, msg));
                                         info!(planet_seed, target = planet_shard_id.0,
                                             "forwarded player handoff to planet shard");
                                     }
@@ -411,7 +468,7 @@ fn main() {
                                     .map(|s| (s.id, s.endpoint.quic_addr));
                                 if let Some((sid, addr)) = ship_shard {
                                     let msg = ShardMsg::PlayerHandoff(handoff);
-                                    let _ = quic_send_quic.send((sid, addr, msg));
+                                    let _ = quic_send_quic.try_send((sid, addr, msg));
                                     info!(ship_id, target = sid.0,
                                         "forwarded player handoff to ship shard");
                                 }
@@ -428,7 +485,7 @@ fn main() {
                             if let Ok(reg) = peer_reg_quic.try_read() {
                                 if let Some(addr) = reg.quic_addr(source_shard) {
                                     let msg = ShardMsg::HandoffAccepted(accepted);
-                                    let _ = quic_send_quic.send((source_shard, addr, msg));
+                                    let _ = quic_send_quic.try_send((source_shard, addr, msg));
                                     info!(target = source_shard.0,
                                         "relayed HandoffAccepted to source shard");
                                 }
@@ -482,6 +539,9 @@ fn main() {
                             thermal_energy: 0.0,
                             landed: false,
                             landed_planet_index: None,
+                            landed_surface_radial: DVec3::ZERO,
+                            landed_celestial_time: 0.0,
+                            landing_zone_ticks: 0,
                         });
 
                         // Pre-register in SOI if spawning inside one.
@@ -501,16 +561,47 @@ fn main() {
                         );
                     }
                 }
+
+                // Clean up stale ship entities whose shard no longer exists in peer registry.
+                let active_ship_ids: std::collections::HashSet<u64> = reg.find_by_type(ShardType::Ship)
+                    .iter()
+                    .filter(|s| s.host_shard_id == Some(st.shard_id))
+                    .filter_map(|s| s.ship_id)
+                    .collect();
+                let stale: Vec<u64> = st.ships.keys()
+                    .filter(|id| !active_ship_ids.contains(id))
+                    .copied()
+                    .collect();
+                for id in stale {
+                    st.ships.remove(&id);
+                    st.in_soi.remove(&id);
+                    info!(ship_id = id, "removed stale ship entity");
+                }
             }
         });
 
         // System 3: Physics — orbits + ship gravity + integration.
+        // Uses extract → compute → writeback to minimize mutex hold time.
         let state_physics = state.clone();
+        let sys_params_physics = sys_params_arc.clone();
         harness.add_system("physics", move || {
-            let mut st = state_physics.lock().unwrap();
-            st.physics_time += DT;
-            st.celestial_time += DT * st.system_params.scale.time_scale;
-            st.tick_count += 1;
+            // Phase A: Extract mutable state (lock held for microseconds).
+            let mut st = {
+                let mut locked = state_physics.lock().unwrap();
+                locked.physics_time += DT;
+                locked.celestial_time += DT * locked.system_params.scale.time_scale;
+                locked.tick_count += 1;
+                PhysicsWorkspace {
+                    system_params: &*sys_params_physics,
+                    ships: std::mem::take(&mut locked.ships),
+                    planet_positions: std::mem::take(&mut locked.planet_positions),
+                    planet_velocities: std::mem::take(&mut locked.planet_velocities),
+                    in_soi: locked.in_soi.clone(),
+                    celestial_time: locked.celestial_time,
+                    physics_time: locked.physics_time,
+                    tick_count: locked.tick_count,
+                }
+            }; // Lock released — all physics runs without holding the mutex.
 
             let celestial_time = st.celestial_time;
             let time_scale = st.system_params.scale.time_scale;
@@ -526,13 +617,45 @@ fn main() {
             st.planet_positions = positions;
             st.planet_velocities = velocities;
 
-            // Co-move ships inside SOI with their parent planet.
-            // Ships in SOI have planet-relative velocity (from patched conics entry).
-            // The position must track the planet's motion to keep the relative geometry correct.
+            // Pre-compute landed ship position updates (avoids borrow conflicts).
             let soi_ships: Vec<(u64, usize)> = st.in_soi.iter()
                 .map(|(&sid, &pi)| (sid, pi)).collect();
-            for (ship_id, planet_index) in soi_ships {
-                let delta_pos = st.planet_positions[planet_index] - old_planet_positions[planet_index];
+            let celestial_time = st.celestial_time;
+
+            // Compute landed ship derived positions.
+            let landed_updates: Vec<(u64, DVec3)> = soi_ships.iter().filter_map(|(ship_id, planet_index)| {
+                let ship = st.ships.get(ship_id)?;
+                if !ship.landed { return None; }
+                let planet = st.system_params.planets.get(*planet_index)?;
+                let planet_pos = st.planet_positions[*planet_index];
+                let contact_margin = ship.physical_properties.landing_gear_height + 0.5;
+                let landing_rot = compute_planet_rotation(planet, ship.landed_celestial_time);
+                let current_rot = compute_planet_rotation(planet, celestial_time);
+                let delta_rot = current_rot - landing_rot;
+                let spin_quat = DQuat::from_axis_angle(DVec3::Y, delta_rot);
+                let current_radial = (spin_quat * ship.landed_surface_radial).normalize();
+                let new_pos = planet_pos + current_radial * (planet.radius_m + contact_margin);
+                Some((*ship_id, new_pos))
+            }).collect();
+
+            // Apply landed ship positions.
+            for (ship_id, new_pos) in landed_updates {
+                if let Some(ship) = st.ships.get_mut(&ship_id) {
+                    ship.position = new_pos;
+                    ship.velocity = DVec3::ZERO;
+                    ship.angular_velocity = DVec3::ZERO;
+                }
+            }
+
+            // Co-move FLYING (non-landed) ships inside SOI with their parent planet.
+            // Pre-compute deltas to avoid borrow conflicts.
+            let co_move_deltas: Vec<(u64, DVec3)> = soi_ships.iter().filter_map(|(ship_id, planet_index)| {
+                let ship = st.ships.get(ship_id)?;
+                if ship.landed { return None; }
+                let delta = st.planet_positions[*planet_index] - old_planet_positions[*planet_index];
+                Some((*ship_id, delta))
+            }).collect();
+            for (ship_id, delta_pos) in co_move_deltas {
                 if let Some(ship) = st.ships.get_mut(&ship_id) {
                     ship.position += delta_pos;
                 }
@@ -847,12 +970,12 @@ fn main() {
             let in_soi_snapshot: HashMap<u64, usize> = st.in_soi.clone();
 
             // Pass A: compute a_old (gravity + thrust + aero), advance position.
-            // Collect aero torque for application after velocity update.
+            // Landed ships are excluded — their position is derived from planet state.
             let pass_a: Vec<(u64, DVec3, DVec3, DVec3)> = {
                 let sys = &st.system_params;
                 let pp = &st.planet_positions;
                 let ct = st.celestial_time;
-                st.ships.iter().map(|(&id, ship)| {
+                st.ships.iter().filter(|(_, ship)| !ship.landed).map(|(&id, ship)| {
                     // Inside SOI: only parent planet gravity (star gravity handled by co-movement).
                     // Outside SOI: full N-body gravity.
                     let grav = if let Some(&planet_idx) = in_soi_snapshot.get(&id) {
@@ -932,9 +1055,6 @@ fn main() {
             };
 
             // Apply velocity, thermal energy, and aero torque.
-            // Clone planet data to avoid borrowing st while mutating ships.
-            let planets_clone = st.system_params.planets.clone();
-            let pp_clone = st.planet_positions.clone();
             for (ship_id, vel_delta) in pass_b {
                 let ship = st.ships.get_mut(&ship_id).unwrap();
                 ship.velocity += vel_delta;
@@ -944,7 +1064,7 @@ fn main() {
                 if let Some(&planet_idx) = ship_atmo.get(&ship_id) {
                     compute_full_aerodynamics(
                         ship.position, ship.velocity, ship.rotation, ship.angular_velocity,
-                        pp_clone[planet_idx], &planets_clone[planet_idx],
+                        st.planet_positions[planet_idx], &st.system_params.planets[planet_idx],
                         &ship.physical_properties, &mut ship.thermal_energy, DT,
                     );
                 }
@@ -997,6 +1117,8 @@ fn main() {
             // Impact damage based on ship hull strength, scaled by planet gravity.
             let ship_ids: Vec<u64> = st.ships.keys().copied().collect();
             for ship_id in ship_ids {
+                // Skip ground contact for already-landed ships (position is derived).
+                if st.ships.get(&ship_id).map_or(false, |s| s.landed) { continue; }
                 let (contact_planet, contact_data) = {
                     let ship = &st.ships[&ship_id];
                     let mut result = None;
@@ -1039,6 +1161,8 @@ fn main() {
                 if let Some((planet_idx, radial, ground_accel, v_radial, v_lateral,
                              friction_rate, penetration, contact_margin, planet_pos, planet_radius)) = contact_data
                 {
+                    let surface_gravity = st.system_params.planets.get(planet_idx)
+                        .map(|p| p.surface_gravity).unwrap_or(9.81);
                     let ship = st.ships.get_mut(&ship_id).unwrap();
 
                     // Impact damage on first contact
@@ -1071,11 +1195,34 @@ fn main() {
                         ship.position = planet_pos + radial * (planet_radius + contact_margin);
                     }
 
-                    // Landed detection
-                    let speed = ship.velocity.length();
-                    if speed < 0.5 && penetration > 0.0 {
-                        ship.landed = true;
-                        ship.landed_planet_index = Some(planet_idx);
+                    // Landing detection: proximity + low radial velocity + debounce.
+                    // Uses altitude and radial velocity (not penetration, which conflicts with position snap).
+                    let to_ship = ship.position - planet_pos;
+                    let dist_check = to_ship.length();
+                    let altitude_check = dist_check - planet_radius;
+                    let radial_check = to_ship / dist_check;
+                    let v_radial_check = ship.velocity.dot(radial_check);
+
+                    let landing_zone = ship.physical_properties.landing_gear_height + 1.0;
+                    let max_landing_speed = 2.0 * surface_gravity.sqrt();
+
+                    if altitude_check < landing_zone && v_radial_check.abs() < max_landing_speed {
+                        ship.landing_zone_ticks += 1;
+                        // 10 consecutive ticks (~0.5s) in landing zone confirms landing.
+                        if ship.landing_zone_ticks >= 10 {
+                            ship.landed = true;
+                            ship.landed_planet_index = Some(planet_idx);
+                            ship.landed_surface_radial = radial_check;
+                            ship.landed_celestial_time = celestial_time;
+                            ship.velocity = DVec3::ZERO;
+                            ship.angular_velocity = DVec3::ZERO;
+                            ship.landing_zone_ticks = 0;
+                            info!(ship_id, planet_index = planet_idx,
+                                alt = format!("{:.1}", altitude_check),
+                                "ship landed — surface attached");
+                        }
+                    } else {
+                        ship.landing_zone_ticks = 0;
                     }
                 } else if let Some(ship) = st.ships.get_mut(&ship_id) {
                     // No contact — check for takeoff
@@ -1085,20 +1232,28 @@ fn main() {
                     }
                 }
             }
+
+            // Phase C: Write back results (lock held for microseconds).
+            {
+                let mut locked = state_physics.lock().unwrap();
+                locked.ships = st.ships;
+                locked.planet_positions = st.planet_positions;
+                locked.planet_velocities = st.planet_velocities;
+            }
         });
 
         // System 4: SOI detection + planet shard provisioning.
         // Tracks ships entering/leaving planet SOIs and provisions planet shards.
         let state_soi = state.clone();
         let orchestrator_url_soi = orchestrator_url.clone();
-        let state_soi_provision = state.clone();
+        let provision_tx_soi = provision_tx.clone();
+        let http_client_soi = http_client.clone();
         harness.add_system("soi_detection", move || {
             let mut st = state_soi.lock().unwrap();
             if st.tick_count % 20 != 0 { return; } // check every second
 
-            // Drain async planet provision results.
-            let results = std::mem::take(&mut st.planet_provision_results);
-            for (planet_seed, shard_id) in results {
+            // Drain async planet provision results from the channel.
+            while let Ok((planet_seed, shard_id)) = provision_rx.try_recv() {
                 st.provisioned_planets.insert(planet_seed, shard_id);
                 st.provisioning_in_flight.remove(&planet_seed);
                 info!(planet_seed, shard_id = shard_id.0, "planet shard provisioned");
@@ -1150,20 +1305,19 @@ fn main() {
                     st.provisioning_in_flight.insert(planet_seed);
                     let url = orchestrator_url_soi.clone();
                     let system_seed = st.system_params.system_seed;
-                    let state_cb = state_soi_provision.clone();
+                    let tx = provision_tx_soi.clone();
+                    let client = http_client_soi.clone();
                     tokio::spawn(async move {
                         let endpoint = format!(
                             "{}/planet/{}?system_seed={}&planet_index={}",
                             url, planet_seed, system_seed, planet_index
                         );
-                        match reqwest::get(&endpoint).await {
+                        match client.get(&endpoint).send().await {
                             Ok(resp) if resp.status().is_success() => {
                                 if let Ok(body) = resp.text().await {
-                                    // Parse shard_id from JSON response.
                                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                                         if let Some(id) = v.get("shards").and_then(|s| s.get(0)).and_then(|s| s.get("id")).and_then(|v| v.as_u64()) {
-                                            let mut st = state_cb.lock().unwrap();
-                                            st.planet_provision_results.push((planet_seed, ShardId(id)));
+                                            let _ = tx.try_send((planet_seed, ShardId(id)));
                                         }
                                     }
                                 }
@@ -1191,19 +1345,19 @@ fn main() {
                     st.provisioning_in_flight.insert(planet_seed);
                     let url = orchestrator_url_soi.clone();
                     let system_seed = st.system_params.system_seed;
-                    let state_cb = state_soi_provision.clone();
+                    let tx = provision_tx_soi.clone();
+                    let client = http_client_soi.clone();
                     tokio::spawn(async move {
                         let endpoint = format!(
                             "{}/planet/{}?system_seed={}&planet_index={}",
                             url, planet_seed, system_seed, planet_index
                         );
-                        match reqwest::get(&endpoint).await {
+                        match client.get(&endpoint).send().await {
                             Ok(resp) if resp.status().is_success() => {
                                 if let Ok(body) = resp.text().await {
                                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                                         if let Some(id) = v.get("shards").and_then(|s| s.get(0)).and_then(|s| s.get("id")).and_then(|v| v.as_u64()) {
-                                            let mut st = state_cb.lock().unwrap();
-                                            st.planet_provision_results.push((planet_seed, ShardId(id)));
+                                            let _ = tx.try_send((planet_seed, ShardId(id)));
                                         }
                                     }
                                 }
@@ -1240,23 +1394,33 @@ fn main() {
         let peer_reg_scene = peer_registry.clone();
         let quic_send_scene = quic_send_tx.clone();
         harness.add_system("broadcast_scene", move || {
-            let st = state_scene.lock().unwrap();
-
-            // Find ship shards from peer registry.
-            let ship_shards: Vec<(ShardId, SocketAddr)> = if let Ok(reg) = peer_reg_scene.try_read() {
-                reg.find_by_type(ShardType::Ship).iter().filter_map(|info| {
-                    // Only send to ships hosted by this system shard.
-                    if info.host_shard_id == Some(st.shard_id) {
-                        Some((info.id, info.endpoint.quic_addr))
-                    } else {
-                        None
-                    }
-                }).collect()
+            // Snapshot peer registry ONCE, before locking state.
+            // Eliminates 3 separate try_read() calls while holding the state lock,
+            // and prevents RwLock contention with the periodic registry refresh.
+            let (ship_shards, planet_shards): (
+                Vec<(ShardId, SocketAddr, Option<u64>, Option<ShardId>)>,
+                Vec<(ShardId, SocketAddr, Option<u64>)>,
+            ) = if let Ok(reg) = peer_reg_scene.try_read() {
+                let ships = reg.find_by_type(ShardType::Ship).iter()
+                    .map(|info| (info.id, info.endpoint.quic_addr, info.ship_id, info.host_shard_id))
+                    .collect();
+                let planets = reg.find_by_type(ShardType::Planet).iter()
+                    .map(|info| (info.id, info.endpoint.quic_addr, info.planet_seed))
+                    .collect();
+                (ships, planets)
             } else {
-                vec![]
+                return; // Registry write-locked (refresh) — skip this tick
             };
 
-            if ship_shards.is_empty() { return; }
+            let st = state_scene.lock().unwrap();
+
+            // Filter to ship shards hosted by this system shard.
+            let hosted_ships: Vec<(ShardId, SocketAddr, Option<u64>)> = ship_shards.iter()
+                .filter(|(_, _, _, host)| *host == Some(st.shard_id))
+                .map(|(id, addr, ship_id, _)| (*id, *addr, *ship_id))
+                .collect();
+
+            if hosted_ships.is_empty() { return; }
 
             // Build scene update.
             let bodies = st.build_body_snapshots();
@@ -1273,13 +1437,16 @@ fn main() {
 
             let scene_msg = ShardMsg::SystemSceneUpdate(scene);
 
-            for (shard_id, quic_addr) in &ship_shards {
-                let _ = quic_send_scene.send((*shard_id, *quic_addr, scene_msg.clone()));
+            for &(shard_id, quic_addr, _) in &hosted_ships {
+                let _ = quic_send_scene.try_send((shard_id, quic_addr, scene_msg.clone()));
             }
 
-            // Also send per-ship position updates to ship shards.
+            // Send per-ship position updates to the CORRECT ship shard only.
             for ship in st.ships.values() {
-                for (shard_id, quic_addr) in &ship_shards {
+                let target = hosted_ships.iter()
+                    .find(|(_, _, sid)| *sid == Some(ship.ship_id))
+                    .map(|&(sid, addr, _)| (sid, addr));
+                if let Some((sid, addr)) = target {
                     let pos_msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
                         ship_id: ship.ship_id,
                         position: ship.position,
@@ -1287,36 +1454,30 @@ fn main() {
                         rotation: ship.rotation,
                         angular_velocity: DVec3::ZERO,
                     });
-                    let _ = quic_send_scene.send((*shard_id, *quic_addr, pos_msg));
+                    let _ = quic_send_scene.try_send((sid, addr, pos_msg));
                 }
             }
 
             // Send ShipNearbyInfo to planet shards for ships within their SOI.
-            // This allows planet shards to render ships and detect player re-entry.
-            if let Ok(reg) = peer_reg_scene.try_read() {
-                for (&ship_id, &planet_index) in &st.in_soi {
-                    let planet_seed = st.system_params.planets[planet_index].planet_seed;
-                    // Find the planet shard for this planet.
-                    let planet_shard = reg.find_by_type(ShardType::Planet).iter()
-                        .find(|s| s.planet_seed == Some(planet_seed))
-                        .map(|s| (s.id, s.endpoint.quic_addr));
+            for (&ship_id, &planet_index) in &st.in_soi {
+                let planet_seed = st.system_params.planets[planet_index].planet_seed;
+                let planet_shard = planet_shards.iter()
+                    .find(|(_, _, ps)| *ps == Some(planet_seed))
+                    .map(|&(sid, addr, _)| (sid, addr));
 
-                    if let (Some((psid, paddr)), Some(ship)) = (planet_shard, st.ships.get(&ship_id)) {
-                        // Find the ship shard ID from ship shards list.
-                        let ship_shard_id = ship_shards.iter()
-                            .find(|_| true) // TODO: match by ship_id in ShardInfo
-                            .map(|(sid, _)| *sid)
-                            .unwrap_or(ShardId(0));
+                if let (Some((psid, paddr)), Some(ship)) = (planet_shard, st.ships.get(&ship_id)) {
+                    let ship_shard_id = hosted_ships.first()
+                        .map(|&(sid, _, _)| sid)
+                        .unwrap_or(ShardId(0));
 
-                        let nearby_msg = ShardMsg::ShipNearbyInfo(ShipNearbyInfoData {
-                            ship_id,
-                            ship_shard_id,
-                            position: ship.position,
-                            rotation: ship.rotation,
-                            velocity: ship.velocity,
-                        });
-                        let _ = quic_send_scene.send((psid, paddr, nearby_msg));
-                    }
+                    let nearby_msg = ShardMsg::ShipNearbyInfo(ShipNearbyInfoData {
+                        ship_id,
+                        ship_shard_id,
+                        position: ship.position,
+                        rotation: ship.rotation,
+                        velocity: ship.velocity,
+                    });
+                    let _ = quic_send_scene.try_send((psid, paddr, nearby_msg));
                 }
             }
         });
@@ -1326,7 +1487,7 @@ fn main() {
         harness.add_system("broadcast_udp", move || {
             let st = state_broadcast.lock().unwrap();
             let ws = ServerMsg::WorldState(st.build_world_state());
-            let _ = broadcast_tx.send(ws);
+            let _ = broadcast_tx.try_send(ws);
         });
 
         // System 7: Periodic log.

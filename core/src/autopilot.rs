@@ -920,7 +920,7 @@ pub fn solve_intercept(
     // Seed TOF: brachistochrone (accel half, decel half) with initial velocity.
     // Unified formula valid for any v_along sign:
     //   tof = (2*sqrt(a*d + v²/2) - v) / a
-    let dir0 = (target_now - ship_pos).normalize();
+    let dir0 = (target_now - ship_pos).normalize_or_zero();
     let v_along = ship_vel.dot(dir0);
     let mut tof_real = brachistochrone_tof(d0, v_along, accel);
 
@@ -930,11 +930,11 @@ pub fn solve_intercept(
         let planet_future = compute_planet_position(target_planet, arrival_celestial);
 
         // Aim for SOI boundary, on the side facing the ship.
-        let approach_dir = (planet_future - ship_pos).normalize();
+        let approach_dir = (planet_future - ship_pos).normalize_or_zero();
         let intercept_pos = planet_future - approach_dir * soi;
         let d = (intercept_pos - ship_pos).length();
 
-        let dir = (intercept_pos - ship_pos).normalize();
+        let dir = (intercept_pos - ship_pos).normalize_or_zero();
         let v_along = ship_vel.dot(dir);
         let tof_new = brachistochrone_tof(d, v_along, accel);
         if tof_new <= 0.0 {
@@ -950,7 +950,7 @@ pub fn solve_intercept(
 
     let arrival_celestial = celestial_time + tof_real * time_scale;
     let planet_future = compute_planet_position(target_planet, arrival_celestial);
-    let approach_dir = (planet_future - ship_pos).normalize();
+    let approach_dir = (planet_future - ship_pos).normalize_or_zero();
     let intercept_pos = planet_future - approach_dir * soi;
 
     Some((intercept_pos, tof_real))

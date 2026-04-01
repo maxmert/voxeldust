@@ -10,6 +10,46 @@ use crate::seed::{derive_seed, seed_to_f64, seed_to_range, seed_to_u32};
 /// Gravitational constant in m³/(kg·s²).
 pub const G: f64 = 6.674e-11;
 
+/// Normalize an angle to [0, TAU). Rust's `%` on f64 can return negative values.
+fn normalize_angle(angle: f64) -> f64 {
+    let a = angle % std::f64::consts::TAU;
+    if a < 0.0 { a + std::f64::consts::TAU } else { a }
+}
+
+/// Solve Kepler's equation: M = E - e*sin(E) for E, given M and e.
+/// Newton-Raphson with guaranteed convergence for e < 1.
+/// Returns eccentric anomaly in radians.
+fn solve_kepler(mean_anomaly: f64, eccentricity: f64) -> f64 {
+    let m = normalize_angle(mean_anomaly);
+    let e = eccentricity;
+
+    // Initial guess: E = M + e*sin(M) (good for low eccentricity).
+    let mut ea = m + e * m.sin();
+
+    // Newton-Raphson: f(E) = E - e*sin(E) - M, f'(E) = 1 - e*cos(E).
+    for _ in 0..50 {
+        let sin_ea = ea.sin();
+        let cos_ea = ea.cos();
+        let f = ea - e * sin_ea - m;
+        let fp = 1.0 - e * cos_ea;
+        if fp.abs() < 1e-15 { break; } // degenerate
+        let delta = f / fp;
+        ea -= delta;
+        if delta.abs() < 1e-12 { break; } // converged
+    }
+    ea
+}
+
+/// Compute true anomaly from eccentric anomaly and eccentricity.
+fn eccentric_to_true_anomaly(ecc_anomaly: f64, eccentricity: f64) -> f64 {
+    let e = eccentricity;
+    let half_e = ecc_anomaly / 2.0;
+    // ν = 2 * atan2(sqrt(1+e) * sin(E/2), sqrt(1-e) * cos(E/2))
+    let y = (1.0 + e).sqrt() * half_e.sin();
+    let x = (1.0 - e).sqrt() * half_e.cos();
+    2.0 * y.atan2(x)
+}
+
 /// Hill sphere SOI factor: r_soi = a * (m_planet / m_star)^(2/5).
 pub const SOI_EXPONENT: f64 = 0.4; // 2/5
 
@@ -297,57 +337,27 @@ pub fn compute_planet_state(planet: &PlanetParams, star_gm: f64, time_s: f64) ->
 
     // Mean anomaly at time t.
     let mean_motion = std::f64::consts::TAU / planet.period;
-    let mean_anomaly = (oe.mean_anomaly_epoch + mean_motion * time_s) % std::f64::consts::TAU;
+    let mean_anomaly = normalize_angle(oe.mean_anomaly_epoch + mean_motion * time_s);
 
     use brahe::constants::units::AngleFormat;
 
-    // Solve Kepler's equation: M = E - e*sin(E) → find E.
-    let ecc_anomaly = brahe::orbits::keplerian::anomaly_mean_to_eccentric(
-        mean_anomaly,
-        oe.eccentricity,
-        AngleFormat::Radians,
-    )
-    .expect("Kepler equation failed to converge");
-
-    // Eccentric anomaly → true anomaly.
-    let true_anomaly = brahe::orbits::keplerian::anomaly_eccentric_to_true(
-        ecc_anomaly,
-        oe.eccentricity,
-        AngleFormat::Radians,
-    );
-
-    // --- Position: use brahe (geometry-only, no GM dependency) ---
+    // --- Position: use brahe's state_koe_to_eci with MEAN_ANOMALY (not true anomaly). ---
+    // Brahe internally solves M → E → ν → position. Passing mean_anomaly is the correct API usage.
     let koe = nalgebra::SVector::<f64, 6>::new(
-        oe.sma,
-        oe.eccentricity,
-        oe.inclination,
-        oe.raan,
-        oe.arg_periapsis,
-        true_anomaly,
+        oe.sma, oe.eccentricity, oe.inclination, oe.raan, oe.arg_periapsis,
+        mean_anomaly, // CORRECT: 6th element is mean anomaly for state_koe_to_eci
     );
-    let state = brahe::coordinates::cartesian::state_koe_to_eci(
-        koe,
-        AngleFormat::Radians,
-    );
+    let state = brahe::coordinates::cartesian::state_koe_to_eci(koe, AngleFormat::Radians);
     let position = DVec3::new(state[0], state[1], state[2]);
 
-    // --- Velocity: compute with correct star GM ---
-    // In the perifocal (PQW) frame:
-    //   v_r = sqrt(GM/p) * e * sin(ν)   (radial)
-    //   v_t = sqrt(GM/p) * (1 + e*cos(ν)) (tangential)
-    // where p = a(1-e²) is the semi-latus rectum, ν = true anomaly.
-    // Then rotate from perifocal to inertial frame using the P,Q direction vectors.
+    // --- Velocity: compute with correct star GM (brahe hardcodes GM_EARTH). ---
+    // Solve Kepler ourselves for E → ν, then compute velocity in perifocal frame.
+    let ecc_anomaly = solve_kepler(mean_anomaly, oe.eccentricity);
+    let true_anomaly = eccentric_to_true_anomaly(ecc_anomaly, oe.eccentricity);
+
+    // --- Perifocal (PQW) frame vectors ---
+    // P = periapsis direction, Q = 90° ahead in orbit plane.
     let e = oe.eccentricity;
-    let p = oe.sma * (1.0 - e * e); // semi-latus rectum
-    let sqrt_gm_over_p = (star_gm / p).sqrt();
-
-    // Velocity in perifocal frame (radial, tangential components → PQW axes).
-    // PQW frame: P = periapsis direction, Q = 90° ahead in orbit plane.
-    // v_perifocal = sqrt(GM/p) * [-sin(ν) * P + (e + cos(ν)) * Q]
-    let v_p = -true_anomaly.sin() * sqrt_gm_over_p;
-    let v_q = (e + true_anomaly.cos()) * sqrt_gm_over_p;
-
-    // Perifocal → inertial rotation (same P,Q vectors brahe uses for position).
     let i = oe.inclination;
     let raan = oe.raan;
     let omega = oe.arg_periapsis;
@@ -363,27 +373,29 @@ pub fn compute_planet_state(planet: &PlanetParams, star_gm: f64, time_s: f64) ->
         omega.cos() * i.sin(),
     );
 
+    // --- Velocity with correct star GM ---
+    // v_perifocal = sqrt(GM/p) * [-sin(ν) * P + (e + cos(ν)) * Q]
+    // where p = a(1-e²) is the semi-latus rectum, ν = true anomaly.
+    let p_slr = oe.sma * (1.0 - e * e); // semi-latus rectum
+    let sqrt_gm_over_p = (star_gm / p_slr).sqrt();
+    let v_p = -true_anomaly.sin() * sqrt_gm_over_p;
+    let v_q = (e + true_anomaly.cos()) * sqrt_gm_over_p;
     let velocity = p_vec * v_p + q_vec * v_q;
 
     (position, velocity)
 }
 
 /// Compute a planet's 3D position at a given time.
-/// Uses brahe for Kepler equation solving (position is geometry-only, no GM dependency).
+/// Uses brahe's state_koe_to_eci with mean_anomaly (correct 6th element).
 pub fn compute_planet_position(planet: &PlanetParams, time_s: f64) -> DVec3 {
     let oe = &planet.orbital_elements;
     let mean_motion = std::f64::consts::TAU / planet.period;
-    let mean_anomaly = (oe.mean_anomaly_epoch + mean_motion * time_s) % std::f64::consts::TAU;
+    let mean_anomaly = normalize_angle(oe.mean_anomaly_epoch + mean_motion * time_s);
 
     use brahe::constants::units::AngleFormat;
-    let ecc_anomaly = brahe::orbits::keplerian::anomaly_mean_to_eccentric(
-        mean_anomaly, oe.eccentricity, AngleFormat::Radians,
-    ).expect("Kepler equation failed");
-    let true_anomaly = brahe::orbits::keplerian::anomaly_eccentric_to_true(
-        ecc_anomaly, oe.eccentricity, AngleFormat::Radians,
-    );
     let koe = nalgebra::SVector::<f64, 6>::new(
-        oe.sma, oe.eccentricity, oe.inclination, oe.raan, oe.arg_periapsis, true_anomaly,
+        oe.sma, oe.eccentricity, oe.inclination, oe.raan, oe.arg_periapsis,
+        mean_anomaly, // CORRECT: brahe expects mean anomaly, solves Kepler internally
     );
     let state = brahe::coordinates::cartesian::state_koe_to_eci(koe, AngleFormat::Radians);
     DVec3::new(state[0], state[1], state[2])
@@ -414,7 +426,7 @@ pub fn compute_planet_velocity_realtime(
 /// Compute a planet's rotation angle at a given celestial time.
 /// Returns angle in radians [0, TAU).
 pub fn compute_planet_rotation(planet: &PlanetParams, celestial_time_s: f64) -> f64 {
-    (std::f64::consts::TAU * celestial_time_s / planet.rotation_period) % std::f64::consts::TAU
+    normalize_angle(std::f64::consts::TAU * celestial_time_s / planet.rotation_period)
 }
 
 /// Compute gravitational acceleration at a position from all bodies.

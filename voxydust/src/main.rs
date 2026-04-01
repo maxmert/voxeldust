@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
-use glam::{DQuat, DVec3, Mat4, Vec3};
+use glam::{DQuat, DVec3, Mat4, Quat, Vec3};
 use tokio::sync::mpsc;
 use tracing::info;
 use winit::application::ApplicationHandler;
@@ -32,7 +32,7 @@ struct Args {
     direct: Option<String>,
 }
 
-const MAX_OBJECTS: usize = 256;
+const MAX_OBJECTS: usize = 2048;
 // Eye height offset from player position. Player capsule center is at ~1.0m,
 // so eye is at capsule center + 0.5m (roughly head height of 1.5m total).
 const EYE_HEIGHT: f64 = 0.5;
@@ -100,6 +100,7 @@ struct GpuState {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    sphere_inside_pipeline: wgpu::RenderPipeline,
     sphere_vertex_buf: wgpu::Buffer,
     sphere_index_buf: wgpu::Buffer,
     sphere_index_count: u32,
@@ -240,6 +241,37 @@ impl App {
             multisample: Default::default(), multiview: None, cache: None,
         });
 
+        // Pipeline variant for inside-sphere rendering (no backface culling).
+        // Used when camera is inside a celestial body (e.g., standing on planet surface).
+        let sphere_inside_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sphere_inside"), layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader, entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 12, step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // no culling — camera is inside the sphere
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format, depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
+                stencil: Default::default(), bias: Default::default(),
+            }),
+            multisample: Default::default(), multiview: None, cache: None,
+        });
+
         // Sphere mesh.
         let sphere = IcoSphere::generate(4);
         use wgpu::util::DeviceExt;
@@ -270,7 +302,7 @@ impl App {
 
         self.window = Some(window);
         self.gpu = Some(GpuState {
-            surface, device, queue, config, pipeline,
+            surface, device, queue, config, pipeline, sphere_inside_pipeline,
             sphere_vertex_buf, sphere_index_buf, sphere_index_count: sphere.indices.len() as u32,
             box_vertex_buf, box_index_buf, box_index_count: box_idxs.len() as u32,
             depth_view, uniform_buf, bind_group,
@@ -312,16 +344,19 @@ impl App {
                                 info!(piloting = self.is_piloting, grounded = p.grounded, frame = self.frame_count, "pilot mode changed");
                             }
 
-                            if self.is_piloting {
+                            // Always update ship_rotation on a ship shard — needed for
+                            // correct floating-origin rendering of celestial bodies
+                            // even while walking inside the ship.
+                            if self.current_shard_type == 2 {
                                 self.ship_rotation = p.rotation;
+                            }
 
-                                // On first frame of piloting: sync camera yaw to ship heading
+                            if self.is_piloting && !was_piloting {
+                                // First frame of piloting: sync camera yaw to ship heading
                                 // so there's no visual snap.
-                                if !was_piloting {
-                                    let fwd = p.rotation * DVec3::NEG_Z;
-                                    self.camera_yaw = fwd.z.atan2(fwd.x) as f64;
-                                    self.camera_pitch = fwd.y.asin() as f64;
-                                }
+                                let fwd = p.rotation * DVec3::NEG_Z;
+                                self.camera_yaw = fwd.z.atan2(fwd.x) as f64;
+                                self.camera_pitch = fwd.y.asin() as f64;
                             }
 
                             // Pilot → walk transition: reset camera to ship-local forward.
@@ -341,6 +376,9 @@ impl App {
                         self.current_shard_type = shard_type;
                         self.reference_position = reference_position;
                         self.reference_rotation = reference_rotation;
+                        if shard_type == 2 {
+                            self.ship_rotation = reference_rotation;
+                        }
                         self.connected = true;
                         if system_seed > 0 {
                             self.system_params = Some(voxeldust_core::system::SystemParams::from_seed(system_seed));
@@ -413,6 +451,22 @@ impl App {
                 if self.keys_held.contains(&KeyCode::KeyD) { movement[0] += 1.0; }
                 if self.keys_held.contains(&KeyCode::KeyA) { movement[0] -= 1.0; }
             }
+            // Diagnostic: log when WASD should produce movement
+            if self.frame_count % 120 == 0 && self.is_piloting {
+                let has_wasd = self.keys_held.contains(&KeyCode::KeyW)
+                    || self.keys_held.contains(&KeyCode::KeyA)
+                    || self.keys_held.contains(&KeyCode::KeyS)
+                    || self.keys_held.contains(&KeyCode::KeyD);
+                if has_wasd || movement.iter().any(|v| v.abs() > 0.01) {
+                    info!(w=self.keys_held.contains(&KeyCode::KeyW),
+                          a=self.keys_held.contains(&KeyCode::KeyA),
+                          s=self.keys_held.contains(&KeyCode::KeyS),
+                          d=self.keys_held.contains(&KeyCode::KeyD),
+                          engines_off=self.engines_off,
+                          movement_z=movement[2],
+                          "WASD diagnostic");
+                }
+            }
 
             let jump = self.keys_held.contains(&KeyCode::Space);
             let action = if self.engines_off { 5 } // engine cutoff signal
@@ -472,8 +526,12 @@ impl App {
             // Ship: player_position is ship-local. Rotate by ship_rotation to get world-relative.
             let player_local = self.player_position + DVec3::new(0.0, EYE_HEIGHT, 0.0);
             self.ship_rotation * player_local
+        } else if self.current_shard_type == 0 && self.player_position.length_squared() > 1.0 {
+            // Planet: eye height along radial (outward from planet center).
+            let radial = self.player_position.normalize();
+            self.player_position + radial * EYE_HEIGHT
         } else {
-            // Planet/System: player_position is already in the shard's world frame.
+            // System/fallback: Y-up.
             self.player_position + DVec3::new(0.0, EYE_HEIGHT, 0.0)
         };
 
@@ -488,8 +546,26 @@ impl App {
             let (sp, cp) = (self.camera_pitch as f32).sin_cos();
             let local_fwd = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
             (self.ship_rotation * local_fwd).as_vec3().normalize()
+        } else if self.current_shard_type == 0 && self.player_position.length_squared() > 1.0 {
+            // Planet: camera yaw/pitch in the local tangent plane.
+            // Build tangent frame from player position (same algorithm as server).
+            let up = self.player_position.normalize();
+            let pole = DVec3::Y;
+            let east_raw = pole.cross(up);
+            let east = if east_raw.length_squared() > 1e-10 {
+                east_raw.normalize()
+            } else {
+                DVec3::Z.cross(up).normalize()
+            };
+            let north = up.cross(east).normalize();
+            let (sy, cy) = (self.camera_yaw as f32).sin_cos();
+            let (sp, cp) = (self.camera_pitch as f32).sin_cos();
+            // Forward in tangent plane: yaw=0 faces north, increasing yaw rotates clockwise (east).
+            // Standard geographic convention: fwd = north*cos(yaw) + east*sin(yaw).
+            let local_fwd = north * (cy * cp) as f64 + up * sp as f64 + east * (sy * cp) as f64;
+            local_fwd.as_vec3().normalize()
         } else {
-            // Planet/System: camera_yaw/pitch are world-space.
+            // System/fallback: camera_yaw/pitch are world-space Y-up.
             let (sy, cy) = (self.camera_yaw as f32).sin_cos();
             let (sp, cp) = (self.camera_pitch as f32).sin_cos();
             Vec3::new(cy * cp, sp, sy * cp).normalize()
@@ -499,6 +575,9 @@ impl App {
         let cam_up = if self.current_shard_type == 2 {
             // Inside ship: up follows ship rotation (artificial gravity floor).
             (self.ship_rotation * DVec3::Y).as_vec3().normalize()
+        } else if self.current_shard_type == 0 && self.player_position.length_squared() > 1.0 {
+            // Planet: up = radial direction from planet center.
+            self.player_position.normalize().as_vec3()
         } else {
             Vec3::Y
         };
@@ -510,6 +589,7 @@ impl App {
         let mut object_count = 0usize;
         let mut ship_interior_start = 0usize;
         let mut ship_interior_count = 0usize;
+        let mut inside_sphere_indices: Vec<usize> = Vec::new();
 
         // Camera position in system-space for celestial body rendering.
         // In ship shard, cam_pos is only the player's offset from ship center;
@@ -522,10 +602,14 @@ impl App {
         };
 
         if let Some(ref ws) = self.latest_world_state {
-            // Celestial bodies.
+            // Celestial bodies — unified rendering for all shards.
+            // Track which bodies the camera is inside (for inside-sphere pipeline).
             for body in &ws.bodies {
                 if object_count >= MAX_OBJECTS { break; }
-                let offset = (body.position - cam_system_pos).as_vec3();
+                let offset_f64 = body.position - cam_system_pos;
+                let dist_to_center = offset_f64.length();
+                let camera_inside = dist_to_center < body.radius;
+                let offset = offset_f64.as_vec3();
                 let scale = (body.radius as f32).max(1.0);
                 let model = Mat4::from_translation(offset) * Mat4::from_scale(Vec3::splat(scale));
                 let mvp = vp * model;
@@ -533,6 +617,84 @@ impl App {
                 let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
                 obj.mvp = mvp.to_cols_array_2d();
                 obj.color = [body.color[0], body.color[1], body.color[2], alpha];
+                if camera_inside {
+                    inside_sphere_indices.push(object_count);
+                }
+                uniform_data[object_count] = obj;
+                object_count += 1;
+            }
+
+            // Surface reference spots — spherical grid covering the entire planet.
+            // Uses latitude/longitude to place ship-sized markers on the sphere surface.
+            // Visible at all distances — provides visual reference for movement and orientation.
+            for body in &ws.bodies {
+                if body.body_id == 0 { continue; } // skip star
+                if object_count + 100 >= MAX_OBJECTS { break; }
+
+                let body_center = body.position;
+                let r = body.radius;
+
+                // Spot angular spacing: size the spots relative to planet radius.
+                // Each spot subtends ~0.5 degrees of arc on the sphere.
+                let angle_step = 10.0_f64.to_radians(); // 10 degrees between spots
+                let spot_arc = r * 3.0_f64.to_radians(); // each spot covers ~3 degrees of arc
+                let lat_steps = (180.0 / 10.0) as i32; // -90 to +90 in 10-degree steps
+                let lon_steps = (360.0 / 10.0) as i32; // 0 to 360 in 10-degree steps
+
+                for lat_i in -lat_steps/2..=lat_steps/2 {
+                    for lon_i in 0..lon_steps {
+                        if object_count >= MAX_OBJECTS { break; }
+                        // Checkerboard pattern
+                        if (lat_i + lon_i) % 2 != 0 { continue; }
+
+                        let lat = lat_i as f64 * angle_step;
+                        let lon = lon_i as f64 * angle_step;
+
+                        // Spherical to cartesian (on planet surface).
+                        let cos_lat = lat.cos();
+                        let spot_dir = DVec3::new(
+                            cos_lat * lon.cos(),
+                            lat.sin(),
+                            cos_lat * lon.sin(),
+                        );
+                        let spot_pos = body_center + spot_dir * (r + 0.01); // 1cm above surface
+
+                        let offset = (spot_pos - cam_system_pos).as_vec3();
+                        // Orient flat on surface.
+                        let spot_up = spot_dir.as_vec3().normalize();
+                        let spot_rot = Quat::from_rotation_arc(Vec3::Y, spot_up);
+                        // Scale spot to cover ~2 degrees of arc, thin disc on surface.
+                        let spot_render_size = (r * 2.0_f64.to_radians()) as f32;
+                        let model = Mat4::from_translation(offset)
+                            * Mat4::from_quat(spot_rot)
+                            * Mat4::from_scale(Vec3::new(spot_render_size, 0.01, spot_render_size));
+                        let mvp = vp * model;
+                        let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                        obj.mvp = mvp.to_cols_array_2d();
+                        let shade = if (lat_i.abs() + lon_i) % 4 == 0 { 0.7 } else { 0.35 };
+                        obj.color = [shade * body.color[0], shade * body.color[1], shade * body.color[2], 0.9];
+                        uniform_data[object_count] = obj;
+                        object_count += 1;
+                    }
+                }
+            }
+
+            // Render nearby ships as box meshes (visible from planet surface).
+            for ship in &ws.ships {
+                if object_count >= MAX_OBJECTS { break; }
+                let offset = (ship.position - cam_system_pos).as_vec3();
+                let ship_rot = Mat4::from_quat(ship.rotation.as_quat());
+                // Ship box: 4m wide, 3m tall, 8m long (same dimensions as interior).
+                let scale = Mat4::from_scale(Vec3::new(4.0, 3.0, 8.0));
+                let model = Mat4::from_translation(offset) * ship_rot * scale;
+                let mvp = vp * model;
+                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                obj.mvp = mvp.to_cols_array_2d();
+                obj.color = if ship.is_own_ship {
+                    [0.4, 0.5, 0.6, 0.7] // own ship: lighter
+                } else {
+                    [0.3, 0.3, 0.35, 0.7] // other ships
+                };
                 uniform_data[object_count] = obj;
                 object_count += 1;
             }
@@ -617,18 +779,23 @@ impl App {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&gpu.pipeline);
-
             // Draw celestial bodies + ship markers (spheres).
             pass.set_vertex_buffer(0, gpu.sphere_vertex_buf.slice(..));
             pass.set_index_buffer(gpu.sphere_index_buf.slice(..), wgpu::IndexFormat::Uint32);
 
             // Celestial bodies: indices 0..ship_interior_start.
+            // Use inside-sphere pipeline (no backface culling) for bodies the camera is inside.
             let sphere_end = if ship_interior_count > 0 { ship_interior_start } else { object_count };
             for i in 0..sphere_end {
+                if inside_sphere_indices.contains(&i) {
+                    pass.set_pipeline(&gpu.sphere_inside_pipeline);
+                } else {
+                    pass.set_pipeline(&gpu.pipeline);
+                }
                 pass.set_bind_group(0, &gpu.bind_group, &[(i as u32) * 256]);
                 pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
             }
+            pass.set_pipeline(&gpu.pipeline);
 
             // Ship markers (seat + door spheres): indices ship_interior_start+1..object_count.
             if ship_interior_count > 0 {
@@ -948,6 +1115,11 @@ impl App {
                                             "ABOVE ATMOSPHERE".to_string()
                                         };
                                         ui.label(atmo_text);
+                                    }
+                                    // Landing indicator based on altitude and speed.
+                                    let landing_gear = 1.5; // from ShipPhysicalProperties::starter_ship
+                                    if alt < landing_gear + 1.0 && speed < 1.0 {
+                                        ui.colored_label(egui::Color32::GREEN, "LANDED");
                                     }
                                     break;
                                 }

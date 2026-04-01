@@ -59,13 +59,13 @@ pub struct ShardHarness {
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<ShardMsg>,
-    /// Channel to send WorldState for UDP broadcast (sync-safe for tick closures).
-    pub broadcast_tx: mpsc::UnboundedSender<ServerMsg>,
-    /// Channel to send QUIC messages to other shards (sync-safe for tick closures).
+    /// Channel to send WorldState for UDP broadcast (bounded for backpressure).
+    pub broadcast_tx: mpsc::Sender<ServerMsg>,
+    /// Channel to send QUIC messages to other shards (bounded for backpressure).
     /// Each message is (target_shard_id, target_quic_addr, message).
-    pub quic_send_tx: mpsc::UnboundedSender<(ShardId, std::net::SocketAddr, ShardMsg)>,
-    broadcast_rx: Option<mpsc::UnboundedReceiver<ServerMsg>>,
-    quic_send_rx: Option<mpsc::UnboundedReceiver<(ShardId, std::net::SocketAddr, ShardMsg)>>,
+    pub quic_send_tx: mpsc::Sender<(ShardId, std::net::SocketAddr, ShardMsg)>,
+    broadcast_rx: Option<mpsc::Receiver<ServerMsg>>,
+    quic_send_rx: Option<mpsc::Receiver<(ShardId, std::net::SocketAddr, ShardMsg)>>,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
     quic_msg_tx: mpsc::UnboundedSender<ShardMsg>,
@@ -77,8 +77,8 @@ impl ShardHarness {
         let (connect_tx, connect_rx) = mpsc::unbounded_channel();
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
-        let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
-        let (quic_send_tx, quic_send_rx) = mpsc::unbounded_channel();
+        let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
+        let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
 
         Self {
             config,

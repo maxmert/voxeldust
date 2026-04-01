@@ -134,6 +134,10 @@ struct ShipInteriorState {
     scene_bodies: Vec<CelestialBodySnapshotData>,
     scene_lighting: Option<LightingInfoData>,
     game_time: f64,
+    /// Tick when last SystemSceneUpdate arrived via QUIC.
+    last_scene_update_tick: u64,
+    /// Cached system params for Keplerian planet extrapolation during QUIC stalls.
+    cached_system_params: Option<voxeldust_core::system::SystemParams>,
 
     // Pilot thrust (accumulated from input, sent each tick, then reset)
     pilot_thrust: DVec3,
@@ -226,6 +230,8 @@ impl ShipInteriorState {
             scene_bodies: vec![],
             scene_lighting: None,
             game_time: 0.0,
+            last_scene_update_tick: 0,
+            cached_system_params: None,
             pilot_thrust: DVec3::ZERO,
             pilot_torque: DVec3::ZERO,
             shard_id, ship_id, host_shard_id,
@@ -271,6 +277,7 @@ impl ShipInteriorState {
                 sun_intensity: l.sun_intensity,
                 ambient: l.ambient,
             });
+            s.cached_system_params = Some(sys);
         }
 
         s
@@ -330,7 +337,7 @@ impl ShipInteriorState {
                     self.player_position.y as f64,
                     self.player_position.z as f64,
                 ),
-                rotation: if self.is_piloting { self.ship_rotation } else { DQuat::IDENTITY },
+                rotation: self.ship_rotation,
                 velocity: self.ship_velocity,
                 grounded: !self.is_piloting,
                 health: 100.0,
@@ -526,7 +533,7 @@ fn main() {
                         st.pilot_thrust = DVec3::new(
                             input.movement[0] as f64 * tier_thrust,
                             input.movement[1] as f64 * tier_thrust,
-                            input.movement[2] as f64 * tier_thrust,
+                            -input.movement[2] as f64 * tier_thrust, // negated: W = forward = -Z
                         );
                         st.pilot_torque = DVec3::new(
                             input.look_pitch as f64,
@@ -615,11 +622,15 @@ fn main() {
                         st.scene_bodies = data.bodies;
                         st.scene_lighting = Some(data.lighting);
                         st.game_time = data.game_time;
+                        st.last_scene_update_tick = st.tick_count;
                     }
                     ShardMsg::ShipPositionUpdate(data) => {
-                        st.ship_position = data.position;
-                        st.ship_velocity = data.velocity;
-                        st.ship_rotation = data.rotation;
+                        // Only accept position updates for THIS ship — ignore other ships' updates.
+                        if data.ship_id == st.ship_id {
+                            st.ship_position = data.position;
+                            st.ship_velocity = data.velocity;
+                            st.ship_rotation = data.rotation;
+                        }
                     }
                     ShardMsg::HandoffAccepted(accepted) => {
                         // Planet shard accepted the player. Send ShardRedirect to client.
@@ -793,7 +804,7 @@ fn main() {
                     if let Some(addr) = reg.quic_addr(host_id) {
                         // Always send pending handoff (works when walking to exit door).
                         if let Some(handoff_msg) = st.pending_handoff_msg.take() {
-                            let _ = quic_send_tx.send((host_id, addr, handoff_msg));
+                            let _ = quic_send_tx.try_send((host_id, addr, handoff_msg));
                         }
 
                         // Always send pending autopilot command.
@@ -804,7 +815,7 @@ fn main() {
                                 speed_tier: tier,
                                 autopilot_mode: 0,
                             });
-                            let _ = quic_send_tx.send((host_id, addr, ap_msg));
+                            let _ = quic_send_tx.try_send((host_id, addr, ap_msg));
                         }
 
                         // Thrust/torque only when piloting.
@@ -816,7 +827,7 @@ fn main() {
                                 braking: false,
                                 tick: st.tick_count,
                             });
-                            let _ = quic_send_tx.send((host_id, addr, msg));
+                            let _ = quic_send_tx.try_send((host_id, addr, msg));
                         }
                     } else if st.tick_count % 100 == 0 {
                         let all_peers: Vec<_> = reg.all().iter().map(|s| format!("{}({})", s.id, s.shard_type)).collect();
@@ -829,8 +840,8 @@ fn main() {
                 info!("no host_shard_id");
             }
 
-            st.pilot_thrust = DVec3::ZERO;
-            st.pilot_torque = DVec3::ZERO;
+            // Don't zero thrust/torque — keep last input alive until new input arrives.
+            // drain_input sets new values each time a UDP packet arrives from the client.
         });
 
         // System 6: Physics step.
@@ -846,7 +857,7 @@ fn main() {
         harness.add_system("broadcast", move || {
             let st = state_broadcast.lock().unwrap();
             let ws = ServerMsg::WorldState(st.build_world_state());
-            let _ = broadcast_tx.send(ws);
+            let _ = broadcast_tx.try_send(ws);
         });
 
         // System 8: Periodic log.

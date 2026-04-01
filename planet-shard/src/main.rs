@@ -9,7 +9,7 @@ use tracing::info;
 
 use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData,
-    ServerMsg, WorldStateData,
+    ServerMsg, ShipRenderData, WorldStateData,
 };
 use voxeldust_core::handoff;
 use voxeldust_core::shard_message::{ShardMsg, ShipNearbyInfoData};
@@ -51,12 +51,44 @@ const G: f64 = 6.674e-11;
 const WALK_SPEED: f32 = 4.0;
 const JUMP_IMPULSE: f32 = 5.0;
 
+/// Orthonormal frame tangent to the planet sphere at a point.
+/// Maps Rapier flat-space axes to planet-local directions:
+/// Rapier X → east, Rapier Y → up (radial outward), Rapier Z → north.
+struct TangentFrame {
+    up: DVec3,    // radial outward from planet center
+    north: DVec3, // tangent toward geographic north pole
+    east: DVec3,  // tangent, perpendicular to up and north (right-hand rule)
+}
+
+impl TangentFrame {
+    /// Build a tangent frame from a radial direction.
+    /// Uses geographic north pole (Y-axis) as reference for north/east directions.
+    /// Falls back to Z-axis at the poles where the cross product degenerates.
+    fn from_up(up: DVec3) -> Self {
+        let up = up.normalize();
+        let pole = DVec3::Y;
+        let east_raw = pole.cross(up);
+        let east = if east_raw.length_squared() > 1e-10 {
+            east_raw.normalize()
+        } else {
+            // At or near poles: use Z-axis as fallback reference
+            DVec3::Z.cross(up).normalize()
+        };
+        let north = up.cross(east).normalize();
+        Self { up, north, east }
+    }
+}
+
 struct PlayerOnPlanet {
     session_token: SessionToken,
     player_name: String,
     body_handle: RigidBodyHandle,
+    /// Position in planet-local spherical coordinates (vector from planet center).
     position: DVec3,
-    up: DVec3,
+    /// Tangent frame at the player's current position on the sphere.
+    tangent_frame: TangentFrame,
+    /// Rapier flat-space position at last re-center (for computing per-tick delta).
+    rapier_origin: DVec3,
     yaw: f32,
     last_action: u8,
     prev_action: u8,
@@ -149,28 +181,29 @@ impl PlanetState {
         self.spawn_player_at(session_token, name, DVec3::new(0.0, self.planet_radius + 2.0, 0.0));
     }
 
-    /// Spawn a player at a specific planet-local position.
+    /// Spawn a player at a specific planet-local position (vector from planet center).
+    /// Builds a tangent frame at this position and places the Rapier body at (0, height, 0).
     fn spawn_player_at(&mut self, session_token: SessionToken, name: String, planet_local_pos: DVec3) {
-        // Rapier works in flat space near the surface. Convert planet-local
-        // position to flat-space: y is height above surface, x/z are tangent.
-        let height_above_surface = planet_local_pos.length() - self.planet_radius;
-        // For simplicity, project to flat ground coords at the pole.
-        // Full spherical → flat mapping will come with proper chunk-based terrain.
-        let flat_y = height_above_surface.max(0.5) as f32;
+        let radial = planet_local_pos.normalize();
+        let height = (planet_local_pos.length() - self.planet_radius).max(0.5);
+        let frame = TangentFrame::from_up(radial);
 
         let player_rb = RigidBodyBuilder::dynamic()
-            .translation(vector![0.0, flat_y, 0.0])
+            .translation(vector![0.0, height as f32, 0.0])
             .lock_rotations()
             .build();
         let handle = self.rigid_body_set.insert(player_rb);
         let player_collider = ColliderBuilder::capsule_y(0.6, 0.3).build();
         self.collider_set.insert_with_parent(player_collider, handle, &mut self.rigid_body_set);
 
+        let rapier_origin = DVec3::new(0.0, height, 0.0);
+
         self.players.insert(session_token, PlayerOnPlanet {
             session_token, player_name: name,
             body_handle: handle,
             position: planet_local_pos,
-            up: planet_local_pos.normalize(),
+            tangent_frame: frame,
+            rapier_origin,
             yaw: 0.0,
             last_action: 0,
             prev_action: 0,
@@ -189,12 +222,55 @@ impl PlanetState {
             &mut self.ccd_solver, Some(&mut self.query_pipeline), &(), &(),
         );
 
+        let planet_radius = self.planet_radius;
         for player in self.players.values_mut() {
-            if let Some(body) = self.rigid_body_set.get(player.body_handle) {
-                let t = body.translation();
-                player.position = DVec3::new(t.x as f64, self.planet_radius + t.y as f64, t.z as f64);
-                player.up = player.position.normalize();
-            }
+            let body = match self.rigid_body_set.get_mut(player.body_handle) {
+                Some(b) => b,
+                None => continue,
+            };
+            let t = body.translation();
+            let rapier_pos = DVec3::new(t.x as f64, t.y as f64, t.z as f64);
+
+            // Compute displacement in Rapier flat-space since last re-center.
+            let delta = rapier_pos - player.rapier_origin;
+
+            // Map horizontal displacement (dx, dz) to sphere surface movement.
+            let tangent_disp = player.tangent_frame.east * delta.x
+                             + player.tangent_frame.north * delta.z;
+            let horiz_dist = tangent_disp.length();
+
+            // Rotate the radial direction along the sphere by the movement angle.
+            let new_up = if horiz_dist > 1e-12 {
+                let tangent_dir = tangent_disp / horiz_dist;
+                let angle = horiz_dist / planet_radius;
+                (player.tangent_frame.up * angle.cos() + tangent_dir * angle.sin()).normalize()
+            } else {
+                player.tangent_frame.up
+            };
+
+            // Height above surface from Rapier Y (absolute, not delta).
+            let height = rapier_pos.y as f64;
+
+            // Re-center Rapier body to (0, Y, 0) — prevents f32 drift.
+            // Transform velocity from OLD tangent frame to world, then into NEW frame.
+            let vel = body.linvel();
+            let old_frame = &player.tangent_frame; // still the old frame
+            let vel_world = old_frame.east * vel.x as f64
+                          + old_frame.up * vel.y as f64
+                          + old_frame.north * vel.z as f64;
+
+            // Now update to new frame.
+            player.position = new_up * (planet_radius + height);
+            player.tangent_frame = TangentFrame::from_up(new_up);
+
+            // Decompose world velocity into new frame.
+            let new_vx = vel_world.dot(player.tangent_frame.east) as f32;
+            let new_vy = vel_world.dot(player.tangent_frame.up) as f32;
+            let new_vz = vel_world.dot(player.tangent_frame.north) as f32;
+            body.set_translation(vector![0.0, t.y, 0.0], true);
+            body.set_linvel(vector![new_vx, new_vy, new_vz], true);
+
+            player.rapier_origin = DVec3::new(0.0, height, 0.0);
         }
     }
 
@@ -261,11 +337,21 @@ impl PlanetState {
             None
         };
 
+        // Nearby ships — convert from system-space to planet-local.
+        let ships: Vec<ShipRenderData> = self.nearby_ships.values().map(|s| {
+            ShipRenderData {
+                ship_id: s.ship_id,
+                position: s.position - self.planet_position_in_system,
+                rotation: s.rotation,
+                is_own_ship: false,
+            }
+        }).collect();
+
         WorldStateData {
             tick: self.tick_count,
             origin: self.planet_position_in_system,
             players, bodies,
-            ships: vec![],
+            ships,
             lighting,
             game_time: self.celestial_time,
         }
@@ -356,23 +442,32 @@ fn main() {
                     reg.register(&conn);
                 }
 
-                let st = state_connect.lock().unwrap();
+                let mut st = state_connect.lock().unwrap();
                 let tcp_stream = conn.tcp_stream.clone();
                 let game_time = st.celestial_time;
                 let planet_pos = st.planet_position_in_system;
                 let sys_seed = st.system_seed.unwrap_or(0);
+                let planet_radius = st.planet_radius;
 
-                // Spawn player.
-                drop(st);
-                {
-                    let mut st = state_connect.lock().unwrap();
+                // If player was already spawned by handoff, use their position.
+                // Otherwise spawn at default surface position.
+                let spawn_pos = if let Some(existing) = st.players.get(&token) {
+                    existing.position
+                } else {
+                    let default_pos = DVec3::new(0.0, planet_radius + 2.0, 0.0);
                     st.spawn_player(token, conn.player_name.clone());
-                }
+                    default_pos
+                };
+                drop(st);
+
+                // Send spawn position in planet-local coordinates.
+                // The client uses reference_position (planet system pos) to compute absolute coords.
+                let spawn_local = spawn_pos; // already planet-local
 
                 tokio::spawn(async move {
                     let jr = ServerMsg::JoinResponse(JoinResponseData {
                         seed: 0, planet_radius: 0, player_id: token.0,
-                        spawn_position: DVec3::new(0.0, 2.0, 0.0),
+                        spawn_position: spawn_local,
                         spawn_rotation: DQuat::IDENTITY,
                         spawn_forward: DVec3::NEG_Z,
                         session_token: token,
@@ -435,13 +530,16 @@ fn main() {
                 match msg {
                     ShardMsg::PlayerHandoff(h) => {
                         let mut st = state_quic.lock().unwrap();
-                        let planet_local = h.position - st.planet_position_in_system;
-                        let surface_pos = planet_local.normalize() * (st.planet_radius + 2.0);
+                        // Use ship position if available (ship→planet exit), else player position.
+                        let reference_pos = h.ship_system_position.unwrap_or(h.position);
+                        let planet_local = reference_pos - st.planet_position_in_system;
+                        let radial = planet_local.normalize();
+                        let surface_pos = radial * (st.planet_radius + 2.0);
 
                         info!(
                             player = %h.player_name,
                             session = h.session_token.0,
-                            "received player handoff, spawning at surface"
+                            "received player handoff, spawning at ship location on surface"
                         );
 
                         st.spawn_player_at(h.session_token, h.player_name.clone(), surface_pos);
@@ -461,13 +559,18 @@ fn main() {
                             let system_shard = reg.find_by_type(ShardType::System).first()
                                 .map(|s| (s.id, s.endpoint.quic_addr));
                             if let Some((sid, addr)) = system_shard {
-                                let _ = quic_send_quic.send((sid, addr, accepted));
+                                let _ = quic_send_quic.try_send((sid, addr, accepted));
                                 info!(target = sid.0, "sent HandoffAccepted to system shard");
                             }
                         }
                     }
                     ShardMsg::ShipNearbyInfo(info) => {
                         let mut st = state_quic.lock().unwrap();
+                        if !st.nearby_ships.contains_key(&info.ship_id) {
+                            info!(ship_id = info.ship_id,
+                                pos = format!("({:.0},{:.0},{:.0})", info.position.x, info.position.y, info.position.z),
+                                "new ship near planet");
+                        }
                         st.nearby_ships.insert(info.ship_id, NearbyShip {
                             ship_id: info.ship_id,
                             ship_shard_id: info.ship_shard_id,
@@ -611,7 +714,7 @@ fn main() {
                     let system_shard = reg.find_by_type(ShardType::System).first()
                         .map(|s| (s.id, s.endpoint.quic_addr));
                     if let Some((sid, addr)) = system_shard {
-                        let _ = quic_send_proximity.send((sid, addr, ShardMsg::PlayerHandoff(h)));
+                        let _ = quic_send_proximity.try_send((sid, addr, ShardMsg::PlayerHandoff(h)));
                         info!(session = session.0, ship_id, "ship re-entry handoff initiated");
                     }
                 }
@@ -623,7 +726,7 @@ fn main() {
         harness.add_system("broadcast", move || {
             let st = state_broadcast.lock().unwrap();
             let ws = ServerMsg::WorldState(st.build_world_state());
-            let _ = broadcast_tx.send(ws);
+            let _ = broadcast_tx.try_send(ws);
         });
 
         // System 6: Periodic log.
