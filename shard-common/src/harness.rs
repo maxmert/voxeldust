@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -18,6 +19,19 @@ use crate::peer_registry::PeerShardRegistry;
 use crate::quic_transport::QuicTransport;
 use crate::shutdown;
 use crate::tick_loop::TickLoop;
+
+/// Compute deterministic celestial time from the universal epoch.
+/// All shards derive the same value from wall clock — no sync messages needed.
+/// `epoch` is the shared universe epoch Arc (from `harness.epoch_arc()`).
+pub fn celestial_time_from_epoch(epoch: &AtomicU64, time_scale: f64) -> f64 {
+    let epoch_ms = epoch.load(Ordering::Relaxed);
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let elapsed_ms = now_ms.saturating_sub(epoch_ms);
+    (elapsed_ms as f64 / 1000.0) * time_scale
+}
 
 /// Configuration for a shard harness.
 #[derive(Debug, Clone)]
@@ -52,6 +66,9 @@ pub struct ShardHarness {
     pub config: ShardHarnessConfig,
     pub tick_loop: TickLoop,
     pub peer_registry: Arc<RwLock<PeerShardRegistry>>,
+    /// Universe epoch in Unix milliseconds (from orchestrator). Shared with tick
+    /// closures via Arc so they can compute deterministic celestial_time.
+    pub universe_epoch_ms: Arc<AtomicU64>,
     pub connect_rx: mpsc::UnboundedReceiver<ClientConnectEvent>,
     /// Client registry for tracking TCP + UDP connections.
     pub client_registry: Arc<RwLock<ClientRegistry>>,
@@ -80,10 +97,18 @@ impl ShardHarness {
         let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
         let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
 
+        // Default epoch: current wall clock (celestial_time starts at 0).
+        // Overwritten with the orchestrator's epoch during registration.
+        let now_unix_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         Self {
             config,
             tick_loop: TickLoop::new(),
             peer_registry: Arc::new(RwLock::new(PeerShardRegistry::new())),
+            universe_epoch_ms: Arc::new(AtomicU64::new(now_unix_ms)),
             connect_rx,
             client_registry: Arc::new(RwLock::new(ClientRegistry::new())),
             input_rx,
@@ -102,6 +127,11 @@ impl ShardHarness {
     /// Register a system to run each tick.
     pub fn add_system(&mut self, name: impl Into<String>, func: impl FnMut() + Send + 'static) {
         self.tick_loop.add_system(name, func);
+    }
+
+    /// Get the shared universe epoch Arc (for tick closures to capture).
+    pub fn epoch_arc(&self) -> Arc<AtomicU64> {
+        self.universe_epoch_ms.clone()
     }
 
     /// Get the cancellation token (for external shutdown triggers).
@@ -332,7 +362,18 @@ impl ShardHarness {
         let url = format!("{}/register", self.config.orchestrator_url);
         match reqwest::Client::new().post(&url).json(&info).send().await {
             Ok(resp) if resp.status().is_success() => {
-                info!(shard_id = %self.config.shard_id, "registered with orchestrator");
+                // Parse universe epoch from orchestrator response.
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(epoch_ms) = body.get("universe_epoch_ms").and_then(|v| v.as_u64()) {
+                        self.universe_epoch_ms.store(epoch_ms, Ordering::Relaxed);
+                        info!(shard_id = %self.config.shard_id, universe_epoch_ms = epoch_ms,
+                            "registered with orchestrator (epoch synced)");
+                    } else {
+                        info!(shard_id = %self.config.shard_id, "registered with orchestrator");
+                    }
+                } else {
+                    info!(shard_id = %self.config.shard_id, "registered with orchestrator");
+                }
             }
             Ok(resp) => {
                 tracing::warn!(

@@ -19,15 +19,21 @@ use crate::registry::{LaunchConfig, ShardRegistry};
 struct AppState {
     registry: Arc<RwLock<ShardRegistry>>,
     provisioner: Arc<dyn ShardProvisioner>,
+    /// Universe epoch in Unix milliseconds. All shards derive celestial_time
+    /// deterministically from `(wall_clock - epoch) * time_scale`, ensuring
+    /// global time agreement across all star systems with zero coordination.
+    universe_epoch_ms: u64,
 }
 
 pub fn build_router(
     registry: Arc<RwLock<ShardRegistry>>,
     provisioner: Arc<dyn ShardProvisioner>,
+    universe_epoch_ms: u64,
 ) -> Router {
     let state = Arc::new(AppState {
         registry,
         provisioner,
+        universe_epoch_ms,
     });
 
     Router::new()
@@ -55,6 +61,8 @@ struct RegisterRequest {
 struct RegisterResponse {
     shard_id: u64,
     status: String,
+    /// Universe epoch in Unix milliseconds for deterministic celestial time.
+    universe_epoch_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -85,6 +93,7 @@ async fn register_shard(
         Json(RegisterResponse {
             shard_id: id.0,
             status: "registered".to_string(),
+            universe_epoch_ms: state.universe_epoch_ms,
         }),
     )
 }

@@ -866,6 +866,7 @@ impl<'a> PlayerHandoff<'a> {
   pub const VT_TARGET_SHIP_SHARD_ID: ::flatbuffers::VOffsetT = 40;
   pub const VT_SHIP_SYSTEM_POSITION: ::flatbuffers::VOffsetT = 42;
   pub const VT_SHIP_ROTATION: ::flatbuffers::VOffsetT = 44;
+  pub const VT_GAME_TIME: ::flatbuffers::VOffsetT = 46;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -877,6 +878,7 @@ impl<'a> PlayerHandoff<'a> {
     args: &'args PlayerHandoffArgs<'args>
   ) -> ::flatbuffers::WIPOffset<PlayerHandoff<'bldr>> {
     let mut builder = PlayerHandoffBuilder::new(_fbb);
+    builder.add_game_time(args.game_time);
     builder.add_target_ship_shard_id(args.target_ship_shard_id);
     builder.add_target_ship_id(args.target_ship_id);
     builder.add_target_planet_seed(args.target_planet_seed);
@@ -1057,6 +1059,14 @@ impl<'a> PlayerHandoff<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Quatd>(PlayerHandoff::VT_SHIP_ROTATION, None)}
   }
+  /// System shard celestial time for time synchronization.
+  #[inline]
+  pub fn game_time(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(PlayerHandoff::VT_GAME_TIME, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
@@ -1086,6 +1096,7 @@ impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
      .visit_field::<u64>("target_ship_shard_id", Self::VT_TARGET_SHIP_SHARD_ID, false)?
      .visit_field::<Vec3d>("ship_system_position", Self::VT_SHIP_SYSTEM_POSITION, false)?
      .visit_field::<Quatd>("ship_rotation", Self::VT_SHIP_ROTATION, false)?
+     .visit_field::<f64>("game_time", Self::VT_GAME_TIME, false)?
      .finish();
     Ok(())
   }
@@ -1112,6 +1123,7 @@ pub struct PlayerHandoffArgs<'a> {
     pub target_ship_shard_id: u64,
     pub ship_system_position: Option<&'a Vec3d>,
     pub ship_rotation: Option<&'a Quatd>,
+    pub game_time: f64,
 }
 impl<'a> Default for PlayerHandoffArgs<'a> {
   #[inline]
@@ -1138,6 +1150,7 @@ impl<'a> Default for PlayerHandoffArgs<'a> {
       target_ship_shard_id: 18446744073709551615,
       ship_system_position: None,
       ship_rotation: None,
+      game_time: 0.0,
     }
   }
 }
@@ -1232,6 +1245,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerHandoffBuilder<'a, 'b, 
     self.fbb_.push_slot_always::<&Quatd>(PlayerHandoff::VT_SHIP_ROTATION, ship_rotation);
   }
   #[inline]
+  pub fn add_game_time(&mut self, game_time: f64) {
+    self.fbb_.push_slot::<f64>(PlayerHandoff::VT_GAME_TIME, game_time, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerHandoffBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerHandoffBuilder {
@@ -1270,6 +1287,7 @@ impl ::core::fmt::Debug for PlayerHandoff<'_> {
       ds.field("target_ship_shard_id", &self.target_ship_shard_id());
       ds.field("ship_system_position", &self.ship_system_position());
       ds.field("ship_rotation", &self.ship_rotation());
+      ds.field("game_time", &self.game_time());
       ds.finish()
   }
 }
@@ -2619,6 +2637,7 @@ impl<'a> ShipNearbyInfo<'a> {
   pub const VT_POSITION: ::flatbuffers::VOffsetT = 8;
   pub const VT_ROTATION: ::flatbuffers::VOffsetT = 10;
   pub const VT_VELOCITY: ::flatbuffers::VOffsetT = 12;
+  pub const VT_GAME_TIME: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2630,6 +2649,7 @@ impl<'a> ShipNearbyInfo<'a> {
     args: &'args ShipNearbyInfoArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ShipNearbyInfo<'bldr>> {
     let mut builder = ShipNearbyInfoBuilder::new(_fbb);
+    builder.add_game_time(args.game_time);
     builder.add_ship_shard_id(args.ship_shard_id);
     builder.add_ship_id(args.ship_id);
     if let Some(x) = args.velocity { builder.add_velocity(x); }
@@ -2674,6 +2694,13 @@ impl<'a> ShipNearbyInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Vec3d>(ShipNearbyInfo::VT_VELOCITY, None)}
   }
+  #[inline]
+  pub fn game_time(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipNearbyInfo::VT_GAME_TIME, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ShipNearbyInfo<'_> {
@@ -2687,6 +2714,7 @@ impl ::flatbuffers::Verifiable for ShipNearbyInfo<'_> {
      .visit_field::<Vec3d>("position", Self::VT_POSITION, false)?
      .visit_field::<Quatd>("rotation", Self::VT_ROTATION, false)?
      .visit_field::<Vec3d>("velocity", Self::VT_VELOCITY, false)?
+     .visit_field::<f64>("game_time", Self::VT_GAME_TIME, false)?
      .finish();
     Ok(())
   }
@@ -2697,6 +2725,7 @@ pub struct ShipNearbyInfoArgs<'a> {
     pub position: Option<&'a Vec3d>,
     pub rotation: Option<&'a Quatd>,
     pub velocity: Option<&'a Vec3d>,
+    pub game_time: f64,
 }
 impl<'a> Default for ShipNearbyInfoArgs<'a> {
   #[inline]
@@ -2707,6 +2736,7 @@ impl<'a> Default for ShipNearbyInfoArgs<'a> {
       position: None,
       rotation: None,
       velocity: None,
+      game_time: 0.0,
     }
   }
 }
@@ -2737,6 +2767,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipNearbyInfoBuilder<'a, 'b,
     self.fbb_.push_slot_always::<&Vec3d>(ShipNearbyInfo::VT_VELOCITY, velocity);
   }
   #[inline]
+  pub fn add_game_time(&mut self, game_time: f64) {
+    self.fbb_.push_slot::<f64>(ShipNearbyInfo::VT_GAME_TIME, game_time, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipNearbyInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ShipNearbyInfoBuilder {
@@ -2759,6 +2793,7 @@ impl ::core::fmt::Debug for ShipNearbyInfo<'_> {
       ds.field("position", &self.position());
       ds.field("rotation", &self.rotation());
       ds.field("velocity", &self.velocity());
+      ds.field("game_time", &self.game_time());
       ds.finish()
   }
 }

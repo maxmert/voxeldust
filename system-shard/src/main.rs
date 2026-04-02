@@ -305,6 +305,7 @@ fn main() {
         let broadcast_tx = harness.broadcast_tx.clone();
         let quic_send_tx = harness.quic_send_tx.clone();
         let peer_registry = harness.peer_registry.clone();
+        let universe_epoch = harness.epoch_arc();
 
         // Channel for async planet provisioning results (avoids locking the main
         // state mutex from spawned tokio tasks, which caused tick-loop stalls).
@@ -584,12 +585,16 @@ fn main() {
         // Uses extract → compute → writeback to minimize mutex hold time.
         let state_physics = state.clone();
         let sys_params_physics = sys_params_arc.clone();
+        let epoch_physics = universe_epoch.clone();
         harness.add_system("physics", move || {
             // Phase A: Extract mutable state (lock held for microseconds).
             let mut st = {
                 let mut locked = state_physics.lock().unwrap();
                 locked.physics_time += DT;
-                locked.celestial_time += DT * locked.system_params.scale.time_scale;
+                // Celestial time derived from universal epoch — all shards agree.
+                locked.celestial_time = voxeldust_shard_common::harness::celestial_time_from_epoch(
+                    &epoch_physics, locked.system_params.scale.time_scale,
+                );
                 locked.tick_count += 1;
                 PhysicsWorkspace {
                     system_params: &*sys_params_physics,
@@ -623,18 +628,17 @@ fn main() {
             let celestial_time = st.celestial_time;
 
             // Compute landed ship derived positions.
+            // The ship stays at its landing radial on the planet surface. Planet orbital
+            // motion is handled by planet_pos changing each tick. Planet spin rotation is
+            // NOT applied here — the ship is in the planet's rotating frame, so the surface
+            // radial is constant. Rotation becomes visible only after handoff to planet shard.
             let landed_updates: Vec<(u64, DVec3)> = soi_ships.iter().filter_map(|(ship_id, planet_index)| {
                 let ship = st.ships.get(ship_id)?;
                 if !ship.landed { return None; }
                 let planet = st.system_params.planets.get(*planet_index)?;
                 let planet_pos = st.planet_positions[*planet_index];
                 let contact_margin = ship.physical_properties.landing_gear_height + 0.5;
-                let landing_rot = compute_planet_rotation(planet, ship.landed_celestial_time);
-                let current_rot = compute_planet_rotation(planet, celestial_time);
-                let delta_rot = current_rot - landing_rot;
-                let spin_quat = DQuat::from_axis_angle(DVec3::Y, delta_rot);
-                let current_radial = (spin_quat * ship.landed_surface_radial).normalize();
-                let new_pos = planet_pos + current_radial * (planet.radius_m + contact_margin);
+                let new_pos = planet_pos + ship.landed_surface_radial * (planet.radius_m + contact_margin);
                 Some((*ship_id, new_pos))
             }).collect();
 
@@ -1420,45 +1424,47 @@ fn main() {
                 .map(|(id, addr, ship_id, _)| (*id, *addr, *ship_id))
                 .collect();
 
-            if hosted_ships.is_empty() { return; }
+            // Send scene + position updates only if we host ship shards.
+            if !hosted_ships.is_empty() {
+                let bodies = st.build_body_snapshots();
+                let observer_pos = st.ships.values().next()
+                    .map(|s| s.position).unwrap_or(DVec3::new(1e11, 0.0, 0.0));
+                let lighting = st.build_lighting(observer_pos);
 
-            // Build scene update.
-            let bodies = st.build_body_snapshots();
-            let observer_pos = st.ships.values().next()
-                .map(|s| s.position).unwrap_or(DVec3::new(1e11, 0.0, 0.0));
-            let lighting = st.build_lighting(observer_pos);
+                let scene = SystemSceneUpdateData {
+                    game_time: st.celestial_time,
+                    bodies,
+                    ships: vec![], // TODO: include other ships
+                    lighting,
+                };
 
-            let scene = SystemSceneUpdateData {
-                game_time: st.celestial_time,
-                bodies,
-                ships: vec![], // TODO: include other ships
-                lighting,
-            };
+                let scene_msg = ShardMsg::SystemSceneUpdate(scene);
 
-            let scene_msg = ShardMsg::SystemSceneUpdate(scene);
+                for &(shard_id, quic_addr, _) in &hosted_ships {
+                    let _ = quic_send_scene.try_send((shard_id, quic_addr, scene_msg.clone()));
+                }
 
-            for &(shard_id, quic_addr, _) in &hosted_ships {
-                let _ = quic_send_scene.try_send((shard_id, quic_addr, scene_msg.clone()));
-            }
-
-            // Send per-ship position updates to the CORRECT ship shard only.
-            for ship in st.ships.values() {
-                let target = hosted_ships.iter()
-                    .find(|(_, _, sid)| *sid == Some(ship.ship_id))
-                    .map(|&(sid, addr, _)| (sid, addr));
-                if let Some((sid, addr)) = target {
-                    let pos_msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
-                        ship_id: ship.ship_id,
-                        position: ship.position,
-                        velocity: ship.velocity,
-                        rotation: ship.rotation,
-                        angular_velocity: DVec3::ZERO,
-                    });
-                    let _ = quic_send_scene.try_send((sid, addr, pos_msg));
+                // Send per-ship position updates to the CORRECT ship shard only.
+                for ship in st.ships.values() {
+                    let target = hosted_ships.iter()
+                        .find(|(_, _, sid)| *sid == Some(ship.ship_id))
+                        .map(|&(sid, addr, _)| (sid, addr));
+                    if let Some((sid, addr)) = target {
+                        let pos_msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
+                            ship_id: ship.ship_id,
+                            position: ship.position,
+                            velocity: ship.velocity,
+                            rotation: ship.rotation,
+                            angular_velocity: DVec3::ZERO,
+                        });
+                        let _ = quic_send_scene.try_send((sid, addr, pos_msg));
+                    }
                 }
             }
 
-            // Send ShipNearbyInfo to planet shards for ships within their SOI.
+            // ALWAYS send ShipNearbyInfo to planet shards for ships in their SOI,
+            // regardless of whether any ship shards are hosted locally. This is what
+            // makes ships visible on planet surfaces after the player exits.
             for (&ship_id, &planet_index) in &st.in_soi {
                 let planet_seed = st.system_params.planets[planet_index].planet_seed;
                 let planet_shard = planet_shards.iter()
@@ -1466,8 +1472,10 @@ fn main() {
                     .map(|&(sid, addr, _)| (sid, addr));
 
                 if let (Some((psid, paddr)), Some(ship)) = (planet_shard, st.ships.get(&ship_id)) {
-                    let ship_shard_id = hosted_ships.first()
-                        .map(|&(sid, _, _)| sid)
+                    // Look up ship shard from the full registry snapshot (not just hosted_ships).
+                    let ship_shard_id = ship_shards.iter()
+                        .find(|(_, _, sid, _)| *sid == Some(ship_id))
+                        .map(|(id, _, _, _)| *id)
                         .unwrap_or(ShardId(0));
 
                     let nearby_msg = ShardMsg::ShipNearbyInfo(ShipNearbyInfoData {
@@ -1476,6 +1484,7 @@ fn main() {
                         position: ship.position,
                         rotation: ship.rotation,
                         velocity: ship.velocity,
+                        game_time: st.celestial_time,
                     });
                     let _ = quic_send_scene.try_send((psid, paddr, nearby_msg));
                 }

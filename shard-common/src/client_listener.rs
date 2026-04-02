@@ -73,16 +73,26 @@ impl ClientRegistry {
         }
     }
 
+    /// Remove a client from the registry (e.g., after ShardRedirect during handoff).
+    pub fn unregister(&mut self, session: &SessionToken) {
+        if let Some(entry) = self.clients.remove(session) {
+            info!(player = %entry.player_name, "client unregistered");
+        }
+    }
+
     /// Register a UDP address by matching against known clients.
     /// First client without a UDP addr gets it. If no clients yet,
     /// store as pending for later matching on register().
     pub fn discover_udp(&mut self, udp_addr: SocketAddr) {
-        // Check if already known.
-        if self.clients.values().any(|e| e.udp_addr == Some(udp_addr)) {
-            return;
+        // If a stale entry already has this address (reconnect from same endpoint),
+        // clear it so the new client can claim it.
+        for entry in self.clients.values_mut() {
+            if entry.udp_addr == Some(udp_addr) {
+                entry.udp_addr = None;
+            }
         }
 
-        // Try to match with an existing client.
+        // Assign to the first client without a UDP address.
         for entry in self.clients.values_mut() {
             if entry.udp_addr.is_none() {
                 entry.udp_addr = Some(udp_addr);

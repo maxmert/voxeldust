@@ -58,6 +58,8 @@ table PlayerHandoff {
     ship_system_position: Vec3d;
     /// Ship rotation at handoff time.
     ship_rotation: Quatd;
+    /// System shard celestial time for time synchronization.
+    game_time: float64;
 }
 
 table HandoffAccepted {
@@ -147,6 +149,7 @@ table ShipNearbyInfo {
     position: Vec3d;
     rotation: Quatd;
     velocity: Vec3d;
+    game_time: float64;
 }
 
 /// Snapshot of a celestial body's state for scene rendering.

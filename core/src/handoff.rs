@@ -64,6 +64,8 @@ pub struct PlayerHandoff {
     pub ship_system_position: Option<DVec3>,
     /// Ship's rotation at handoff time (for coordinate transform).
     pub ship_rotation: Option<DQuat>,
+    /// System shard's authoritative celestial time for time synchronization.
+    pub game_time: f64,
 }
 
 /// Context for handoffs between galaxy and system shards.

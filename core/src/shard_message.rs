@@ -110,6 +110,8 @@ pub struct ShipNearbyInfoData {
     pub position: DVec3,
     pub rotation: DQuat,
     pub velocity: DVec3,
+    /// System shard's authoritative celestial time for time synchronization.
+    pub game_time: f64,
 }
 
 /// Block edits affecting chunks on adjacent shard boundaries.
@@ -202,6 +204,7 @@ impl ShardMsg {
                         target_ship_shard_id: h.target_ship_shard_id.map(|s| s.0).unwrap_or(u64::MAX),
                         ship_system_position: ship_sys_pos.as_ref(),
                         ship_rotation: ship_rot.as_ref(),
+                        game_time: h.game_time,
                     },
                 );
 
@@ -459,6 +462,7 @@ impl ShardMsg {
                         position: Some(&pos),
                         rotation: Some(&rot),
                         velocity: Some(&vel),
+                        game_time: info.game_time,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -544,6 +548,7 @@ impl ShardMsg {
                     },
                     ship_system_position: h.ship_system_position().map(|p| from_fb_vec3d(p)),
                     ship_rotation: h.ship_rotation().map(|r| from_fb_quatd(r)),
+                    game_time: h.game_time(),
                 }))
             }
 
@@ -736,6 +741,7 @@ impl ShardMsg {
                     position: from_fb_vec3d(pos),
                     rotation: from_fb_quatd(rot),
                     velocity: from_fb_vec3d(vel),
+                    game_time: info.game_time(),
                 }))
             }
 
@@ -776,6 +782,7 @@ mod tests {
             target_ship_shard_id: None,
             ship_system_position: None,
             ship_rotation: None,
+            game_time: 0.0,
         }
     }
 

@@ -153,6 +153,13 @@ impl PlanetState {
 
         let system_params = system_seed.map(SystemParams::from_seed);
 
+        // Compute initial planet position at t=0 so handoff messages arriving
+        // before the first physics tick get correct planet-local transforms.
+        let planet_position_in_system = system_params.as_ref()
+            .and_then(|sys| sys.planets.get(planet_index as usize))
+            .map(|p| compute_planet_position(p, 0.0))
+            .unwrap_or(DVec3::ZERO);
+
         Self {
             shard_id, planet_seed, planet_radius, planet_mass, surface_gravity,
             system_seed, planet_index,
@@ -173,7 +180,7 @@ impl PlanetState {
             physics_time: 0.0,
             celestial_time: 0.0,
             tick_count: 0,
-            planet_position_in_system: DVec3::ZERO,
+            planet_position_in_system,
         }
     }
 
@@ -337,11 +344,11 @@ impl PlanetState {
             None
         };
 
-        // Nearby ships — convert from system-space to planet-local.
+        // Nearby ships — already in planet-local coordinates (converted at receipt time).
         let ships: Vec<ShipRenderData> = self.nearby_ships.values().map(|s| {
             ShipRenderData {
                 ship_id: s.ship_id,
-                position: s.position - self.planet_position_in_system,
+                position: s.position,
                 rotation: s.rotation,
                 is_own_ship: false,
             }
@@ -429,6 +436,7 @@ fn main() {
         let broadcast_tx = harness.broadcast_tx.clone();
         let quic_send_tx = harness.quic_send_tx.clone();
         let peer_registry = harness.peer_registry.clone();
+        let universe_epoch = harness.epoch_arc();
 
         // System 1: Drain connects — register + send JoinResponse.
         let state_connect = state.clone();
@@ -449,14 +457,24 @@ fn main() {
                 let sys_seed = st.system_seed.unwrap_or(0);
                 let planet_radius = st.planet_radius;
 
-                // If player was already spawned by handoff, use their position.
-                // Otherwise spawn at default surface position.
-                let spawn_pos = if let Some(existing) = st.players.get(&token) {
-                    existing.position
-                } else {
-                    let default_pos = DVec3::new(0.0, planet_radius + 2.0, 0.0);
-                    st.spawn_player(token, conn.player_name.clone());
-                    default_pos
+                // If player was already spawned by handoff, find by name and
+                // re-key from the handoff session token to the new connection token.
+                // The handoff and the TCP connect use different session tokens.
+                let spawn_pos = {
+                    let handoff_key = st.players.iter()
+                        .find(|(_, p)| p.player_name == conn.player_name)
+                        .map(|(k, _)| *k);
+                    if let Some(old_token) = handoff_key {
+                        let mut player = st.players.remove(&old_token).unwrap();
+                        let pos = player.position;
+                        player.session_token = token;
+                        st.players.insert(token, player);
+                        pos
+                    } else {
+                        let default_pos = DVec3::new(0.0, planet_radius + 2.0, 0.0);
+                        st.spawn_player(token, conn.player_name.clone());
+                        default_pos
+                    }
                 };
                 drop(st);
 
@@ -530,9 +548,21 @@ fn main() {
                 match msg {
                     ShardMsg::PlayerHandoff(h) => {
                         let mut st = state_quic.lock().unwrap();
+                        // Sync celestial time from system shard authority so planet
+                        // position is correct for the system-space → planet-local conversion.
+                        if h.game_time > st.celestial_time {
+                            st.celestial_time = h.game_time;
+                            st.compute_planet_system_position();
+                        }
                         // Use ship position if available (ship→planet exit), else player position.
+                        // Compute planet position at the handoff's game_time to match the
+                        // ship's system-space position (eliminates orbital offset from QUIC delay).
                         let reference_pos = h.ship_system_position.unwrap_or(h.position);
-                        let planet_local = reference_pos - st.planet_position_in_system;
+                        let planet_pos_at_handoff = st.system_params.as_ref()
+                            .and_then(|sys| sys.planets.get(st.planet_index as usize))
+                            .map(|p| compute_planet_position(p, h.game_time))
+                            .unwrap_or(st.planet_position_in_system);
+                        let planet_local = reference_pos - planet_pos_at_handoff;
                         let radial = planet_local.normalize();
                         let surface_pos = radial * (st.planet_radius + 2.0);
 
@@ -566,15 +596,29 @@ fn main() {
                     }
                     ShardMsg::ShipNearbyInfo(info) => {
                         let mut st = state_quic.lock().unwrap();
+                        // Sync celestial time from system shard authority.
+                        if info.game_time > st.celestial_time {
+                            st.celestial_time = info.game_time;
+                            st.compute_planet_system_position();
+                        }
                         if !st.nearby_ships.contains_key(&info.ship_id) {
                             info!(ship_id = info.ship_id,
                                 pos = format!("({:.0},{:.0},{:.0})", info.position.x, info.position.y, info.position.z),
                                 "new ship near planet");
                         }
+                        // Convert to planet-local using the planet position at the SAME
+                        // celestial time the ship position was computed. This eliminates
+                        // orbital offset from QUIC message delay (planet moves ~1380 km/s
+                        // in system-space at 12x time scale).
+                        let planet_pos_at_ship_time = st.system_params.as_ref()
+                            .and_then(|sys| sys.planets.get(st.planet_index as usize))
+                            .map(|p| compute_planet_position(p, info.game_time))
+                            .unwrap_or(st.planet_position_in_system);
+                        let planet_local_pos = info.position - planet_pos_at_ship_time;
                         st.nearby_ships.insert(info.ship_id, NearbyShip {
                             ship_id: info.ship_id,
                             ship_shard_id: info.ship_shard_id,
-                            position: info.position,
+                            position: planet_local_pos,
                             rotation: info.rotation,
                             velocity: info.velocity,
                         });
@@ -602,6 +646,11 @@ fn main() {
                                         if let Err(e) = reg.send_tcp(session, &redirect).await {
                                             tracing::warn!(%e, "failed to send ShardRedirect for re-entry");
                                         }
+                                    }
+                                    // Unregister AFTER the send completes so the TCP stream
+                                    // isn't dropped mid-flight.
+                                    if let Ok(mut reg) = cr.try_write() {
+                                        reg.unregister(&session);
                                     }
                                 });
                             }
@@ -632,11 +681,15 @@ fn main() {
 
         // System 4: Physics step.
         let state_physics = state.clone();
+        let epoch_physics = universe_epoch.clone();
         harness.add_system("physics_step", move || {
             let mut st = state_physics.lock().unwrap();
             st.physics_time += 0.05;
-            st.celestial_time += 0.05 * st.system_params.as_ref()
-                .map(|s| s.scale.time_scale).unwrap_or(1.0);
+            // Celestial time derived from universal epoch — matches system shard exactly.
+            st.celestial_time = voxeldust_shard_common::harness::celestial_time_from_epoch(
+                &epoch_physics,
+                st.system_params.as_ref().map(|s| s.scale.time_scale).unwrap_or(1.0),
+            );
             st.tick_count += 1;
             st.compute_planet_system_position();
             st.step();
@@ -659,10 +712,9 @@ fn main() {
                 let action_pressed = player.last_action == 3 && player.prev_action != 3;
                 if !action_pressed { continue; }
 
-                // Check proximity to each nearby ship (planet-local coords).
+                // Check proximity to each nearby ship (already planet-local).
                 for ship in st.nearby_ships.values() {
-                    let ship_planet_local = ship.position - st.planet_position_in_system;
-                    let dist = (player.position - ship_planet_local).length();
+                    let dist = (player.position - ship.position).length();
                     let interact_range = 10.0; // meters
 
                     if dist < interact_range {
@@ -707,6 +759,7 @@ fn main() {
                     target_ship_shard_id: Some(ship_shard_id),
                     ship_system_position: None,
                     ship_rotation: None,
+                    game_time: st.celestial_time,
                 };
 
                 // Send to system shard for routing to ship shard.

@@ -655,6 +655,11 @@ fn main() {
                                             tracing::warn!(%e, "failed to send ShardRedirect");
                                         }
                                     }
+                                    // Unregister AFTER the send completes so the TCP stream
+                                    // isn't dropped mid-flight.
+                                    if let Ok(mut reg) = cr.try_write() {
+                                        reg.unregister(&session);
+                                    }
                                 });
                             }
                         }
@@ -774,6 +779,7 @@ fn main() {
                                     target_ship_shard_id: None,
                                     ship_system_position: Some(st.ship_position),
                                     ship_rotation: Some(st.ship_rotation),
+                                    game_time: st.game_time,
                                 };
 
                                 // Send to system shard (host) via QUIC.

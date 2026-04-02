@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use clap::Parser;
 use tokio::sync::RwLock;
@@ -54,6 +55,16 @@ async fn run(config: OrchestratorConfig) {
         _ => Arc::new(LocalProvisioner::new()),
     };
 
+    // Universe epoch: the reference point for deterministic celestial time.
+    // All shards derive celestial_time = (now - epoch) * time_scale.
+    // For persistence across restarts, this would be stored in the registry DB.
+    // For now, epoch = orchestrator start time (resets each dev cycle).
+    let universe_epoch_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    info!(universe_epoch_ms, "universe epoch established");
+
     let cancel = CancellationToken::new();
 
     let http_registry = registry.clone();
@@ -61,7 +72,7 @@ async fn run(config: OrchestratorConfig) {
     let http_cancel = cancel.clone();
     let http_addr = config.http_addr;
     let http_handle = tokio::spawn(async move {
-        let app = build_router(http_registry, http_provisioner);
+        let app = build_router(http_registry, http_provisioner, universe_epoch_ms);
         let listener = tokio::net::TcpListener::bind(http_addr)
             .await
             .expect("failed to bind HTTP");

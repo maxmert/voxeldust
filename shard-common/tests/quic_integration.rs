@@ -31,6 +31,7 @@ fn make_handoff() -> PlayerHandoff {
         target_ship_shard_id: None,
         ship_system_position: None,
         ship_rotation: None,
+        game_time: 0.0,
     }
 }
 

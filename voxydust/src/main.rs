@@ -452,22 +452,6 @@ impl App {
                 if self.keys_held.contains(&KeyCode::KeyA) { movement[0] -= 1.0; }
             }
             // Diagnostic: log when WASD should produce movement
-            if self.frame_count % 120 == 0 && self.is_piloting {
-                let has_wasd = self.keys_held.contains(&KeyCode::KeyW)
-                    || self.keys_held.contains(&KeyCode::KeyA)
-                    || self.keys_held.contains(&KeyCode::KeyS)
-                    || self.keys_held.contains(&KeyCode::KeyD);
-                if has_wasd || movement.iter().any(|v| v.abs() > 0.01) {
-                    info!(w=self.keys_held.contains(&KeyCode::KeyW),
-                          a=self.keys_held.contains(&KeyCode::KeyA),
-                          s=self.keys_held.contains(&KeyCode::KeyS),
-                          d=self.keys_held.contains(&KeyCode::KeyD),
-                          engines_off=self.engines_off,
-                          movement_z=movement[2],
-                          "WASD diagnostic");
-                }
-            }
-
             let jump = self.keys_held.contains(&KeyCode::Space);
             let action = if self.engines_off { 5 } // engine cutoff signal
                 else if self.keys_held.contains(&KeyCode::KeyT) { 4 }
@@ -624,27 +608,44 @@ impl App {
                 object_count += 1;
             }
 
-            // Surface reference spots — spherical grid covering the entire planet.
-            // Uses latitude/longitude to place ship-sized markers on the sphere surface.
-            // Visible at all distances — provides visual reference for movement and orientation.
+            // Surface reference grid — ship-sized spots near the camera for movement feedback.
             for body in &ws.bodies {
                 if body.body_id == 0 { continue; } // skip star
-                if object_count + 100 >= MAX_OBJECTS { break; }
+                if object_count + 200 >= MAX_OBJECTS { break; }
 
                 let body_center = body.position;
                 let r = body.radius;
+                let to_cam = cam_system_pos - body_center;
+                let cam_dist = to_cam.length();
+                if cam_dist < 1.0 || cam_dist > r * 3.0 { continue; } // too close/far
 
-                // Spot angular spacing: size the spots relative to planet radius.
-                // Each spot subtends ~0.5 degrees of arc on the sphere.
-                let angle_step = 10.0_f64.to_radians(); // 10 degrees between spots
-                let spot_arc = r * 3.0_f64.to_radians(); // each spot covers ~3 degrees of arc
-                let lat_steps = (180.0 / 10.0) as i32; // -90 to +90 in 10-degree steps
-                let lon_steps = (360.0 / 10.0) as i32; // 0 to 360 in 10-degree steps
+                let altitude = cam_dist - r;
+                let cam_dir = to_cam / cam_dist;
 
-                for lat_i in -lat_steps/2..=lat_steps/2 {
-                    for lon_i in 0..lon_steps {
+                // Spot size: ship-length (8m). Grid spacing: 4x spot size for checkerboard density.
+                let spot_size = 8.0_f64; // meters — matches ship length
+                let grid_spacing = spot_size * 4.0; // 32m between grid lines
+                // Angular spacing on the sphere surface.
+                let angle_step = grid_spacing / r; // radians per grid cell
+
+                // Visible angular radius from camera's sub-surface point.
+                // At low altitude, show a wide patch. At high altitude, show more but
+                // limited by MAX_OBJECTS budget.
+                let visible_angle = (altitude / r).min(0.3).max(0.005); // radians
+                let half_steps = ((visible_angle / angle_step) as i32).min(30).max(3);
+
+                // Snap grid center to the nearest grid intersection so spots are
+                // fixed to the planet surface, not the camera. As the ship moves,
+                // spots stay put and new ones appear at the edges.
+                let cam_lat = cam_dir.y.asin();
+                let cam_lon = cam_dir.z.atan2(cam_dir.x);
+                let center_lat_i = (cam_lat / angle_step).round() as i32;
+                let center_lon_i = (cam_lon / angle_step).round() as i32;
+
+                for lat_i in (center_lat_i - half_steps)..=(center_lat_i + half_steps) {
+                    for lon_i in (center_lon_i - half_steps)..=(center_lon_i + half_steps) {
                         if object_count >= MAX_OBJECTS { break; }
-                        // Checkerboard pattern
+                        // Checkerboard: skip half the spots for visual clarity.
                         if (lat_i + lon_i) % 2 != 0 { continue; }
 
                         let lat = lat_i as f64 * angle_step;
@@ -657,21 +658,25 @@ impl App {
                             lat.sin(),
                             cos_lat * lon.sin(),
                         );
-                        let spot_pos = body_center + spot_dir * (r + 0.01); // 1cm above surface
+                        let spot_pos = body_center + spot_dir * (r + 0.02); // 2cm above surface
 
                         let offset = (spot_pos - cam_system_pos).as_vec3();
+                        let dist_to_spot = offset.length();
+                        // Cull spots behind the horizon or too far to see.
+                        if dist_to_spot > (altitude * 3.0) as f32 + 500.0 { continue; }
+
                         // Orient flat on surface.
                         let spot_up = spot_dir.as_vec3().normalize();
                         let spot_rot = Quat::from_rotation_arc(Vec3::Y, spot_up);
-                        // Scale spot to cover ~2 degrees of arc, thin disc on surface.
-                        let spot_render_size = (r * 2.0_f64.to_radians()) as f32;
+                        let spot_render = spot_size as f32;
                         let model = Mat4::from_translation(offset)
                             * Mat4::from_quat(spot_rot)
-                            * Mat4::from_scale(Vec3::new(spot_render_size, 0.01, spot_render_size));
+                            * Mat4::from_scale(Vec3::new(spot_render, 0.01, spot_render));
                         let mvp = vp * model;
                         let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
                         obj.mvp = mvp.to_cols_array_2d();
-                        let shade = if (lat_i.abs() + lon_i) % 4 == 0 { 0.7 } else { 0.35 };
+                        // Alternating bright/dim for depth perception.
+                        let shade = if (lat_i.abs() + lon_i.abs()) % 4 == 0 { 0.8 } else { 0.4 };
                         obj.color = [shade * body.color[0], shade * body.color[1], shade * body.color[2], 0.9];
                         uniform_data[object_count] = obj;
                         object_count += 1;
@@ -679,7 +684,6 @@ impl App {
                 }
             }
 
-            // Render nearby ships as box meshes (visible from planet surface).
             for ship in &ws.ships {
                 if object_count >= MAX_OBJECTS { break; }
                 let offset = (ship.position - cam_system_pos).as_vec3();
