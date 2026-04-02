@@ -29,6 +29,8 @@ pub struct ClientConnectEvent {
 /// Tracks all connected clients. Thread-safe for use across tick systems.
 pub struct ClientRegistry {
     clients: HashMap<SessionToken, ClientEntry>,
+    /// UDP addresses seen before any client registered (for late-join matching).
+    pending_udp: Vec<SocketAddr>,
 }
 
 struct ClientEntry {
@@ -37,13 +39,12 @@ struct ClientEntry {
     player_name: String,
 }
 
-/// UDP addresses seen before any client registered (for late-join matching).
-static PENDING_UDP_ADDRS: std::sync::Mutex<Vec<SocketAddr>> = std::sync::Mutex::new(Vec::new());
 
 impl ClientRegistry {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            pending_udp: Vec::new(),
         }
     }
 
@@ -55,14 +56,12 @@ impl ClientRegistry {
         });
 
         // Check if there are pending UDP addresses waiting to be matched.
-        if let Ok(mut pending) = PENDING_UDP_ADDRS.lock() {
-            if !pending.is_empty() {
-                let entry = self.clients.get_mut(&conn.session_token).unwrap();
-                if entry.udp_addr.is_none() {
-                    let addr = pending.remove(0);
-                    entry.udp_addr = Some(addr);
-                    info!(player = %entry.player_name, %addr, "matched pending UDP address on register");
-                }
+        if !self.pending_udp.is_empty() {
+            let entry = self.clients.get_mut(&conn.session_token).unwrap();
+            if entry.udp_addr.is_none() {
+                let addr = self.pending_udp.remove(0);
+                entry.udp_addr = Some(addr);
+                info!(player = %entry.player_name, %addr, "matched pending UDP address on register");
             }
         }
     }
@@ -101,12 +100,10 @@ impl ClientRegistry {
             }
         }
 
-        // No client to match — store as pending.
-        if let Ok(mut pending) = PENDING_UDP_ADDRS.lock() {
-            if !pending.contains(&udp_addr) {
-                debug!(%udp_addr, "storing pending UDP address (no client registered yet)");
-                pending.push(udp_addr);
-            }
+        // No client to match — store as pending (cap at 16 to prevent unbounded growth).
+        if self.pending_udp.len() < 16 && !self.pending_udp.contains(&udp_addr) {
+            debug!(%udp_addr, "storing pending UDP address (no client registered yet)");
+            self.pending_udp.push(udp_addr);
         }
     }
 
@@ -121,6 +118,11 @@ impl ClientRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.clients.is_empty()
+    }
+
+    /// Check if a client with the given session token is registered.
+    pub fn has_client(&self, token: &SessionToken) -> bool {
+        self.clients.contains_key(token)
     }
 
     /// Send a TCP message to a specific client.
@@ -182,6 +184,9 @@ async fn handle_client_connection(
     peer_addr: SocketAddr,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
 ) {
+    // Disable Nagle's algorithm for low-latency TCP messaging.
+    let _ = stream.set_nodelay(true);
+
     // Read 4-byte length prefix.
     let mut len_buf = [0u8; 4];
     if let Err(e) = stream.read_exact(&mut len_buf).await {
@@ -201,7 +206,14 @@ async fn handle_client_connection(
         return;
     }
 
-    match ClientMsg::deserialize(&buf) {
+    let decoded = match voxeldust_core::wire_codec::decode(&buf) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(%peer_addr, %e, "failed to decode wire message");
+            return;
+        }
+    };
+    match ClientMsg::deserialize(&decoded) {
         Ok(ClientMsg::Connect { player_name }) => {
             let token = SessionToken(rand_u64());
             info!(%peer_addr, %player_name, session_token = token.0, "client connected");
@@ -226,29 +238,31 @@ async fn handle_client_connection(
     }
 }
 
-/// Send a length-prefixed ServerMsg over a TCP stream.
+/// Send a length-prefixed ServerMsg over a TCP stream (with LZ4 compression).
 pub async fn send_tcp_msg(
     stream: &mut TcpStream,
     msg: &ServerMsg,
 ) -> Result<(), std::io::Error> {
     let data = msg.serialize();
-    let len_bytes = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len_bytes).await?;
-    stream.write_all(&data).await?;
+    let mut buf = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut buf);
+    stream.write_all(&buf).await?;
     stream.flush().await?;
     Ok(())
 }
 
 /// Broadcast a WorldState to all registered UDP clients.
+/// `packet_buf` is a reusable buffer to avoid per-broadcast heap allocation.
 pub async fn broadcast_world_state_udp(
     socket: &UdpSocket,
     registry: &RwLock<ClientRegistry>,
     world_state: &ServerMsg,
+    packet_buf: &mut Vec<u8>,
 ) {
     let data = world_state.serialize();
-    let mut packet = Vec::with_capacity(4 + data.len());
-    packet.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    packet.extend_from_slice(&data);
+    packet_buf.clear();
+    voxeldust_core::wire_codec::encode(&data, packet_buf);
+    let packet = &*packet_buf;
 
     let reg = registry.read().await;
     let addrs = reg.udp_addrs();
@@ -283,12 +297,16 @@ pub async fn run_udp_receiver(
                             reg.discover_udp(src);
                         }
 
-                        // Parse PlayerInput.
+                        // Parse PlayerInput (wire codec: length-prefixed with optional LZ4).
                         if len < 4 { continue; }
                         let msg_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
                         if len < 4 + msg_len { continue; }
 
-                        match ClientMsg::deserialize(&buf[4..4 + msg_len]) {
+                        let payload = match voxeldust_core::wire_codec::decode(&buf[4..4 + msg_len]) {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        match ClientMsg::deserialize(&payload) {
                             Ok(ClientMsg::PlayerInput(input)) => {
                                 let _ = input_tx.send((src, input));
                             }

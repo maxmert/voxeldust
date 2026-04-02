@@ -95,9 +95,14 @@ async fn send_multiple_messages_on_same_connection() {
                 .expect("accept timed out")
                 .expect("no incoming");
 
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                let _ = incoming.recv_loop(tx).await;
+            });
+
             let mut messages = Vec::new();
             for _ in 0..3 {
-                let msg = timeout(Duration::from_secs(5), incoming.recv())
+                let msg = timeout(Duration::from_secs(5), rx.recv())
                     .await
                     .expect("recv timed out")
                     .expect("recv failed");

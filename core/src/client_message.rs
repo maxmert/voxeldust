@@ -59,7 +59,7 @@ pub struct StarCatalogEntryData {
     pub luminosity: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlayerInputData {
     pub movement: [f32; 3],
     pub look_yaw: f32,
@@ -180,7 +180,7 @@ fn from_fb_quatd(q: &fb::Quatd) -> DQuat {
 
 impl ClientMsg {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut builder = FlatBufferBuilder::with_capacity(256);
+        let mut builder = crate::builder_pool::acquire(256);
 
         match self {
             ClientMsg::Connect { player_name } => {
@@ -251,7 +251,9 @@ impl ClientMsg {
             }
         }
 
-        builder.finished_data().to_vec()
+        let result = builder.finished_data().to_vec();
+        crate::builder_pool::release(builder);
+        result
     }
 
     pub fn deserialize(buf: &[u8]) -> Result<Self, MessageError> {
@@ -305,7 +307,7 @@ impl ClientMsg {
 
 impl ServerMsg {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut builder = FlatBufferBuilder::with_capacity(512);
+        let mut builder = crate::builder_pool::acquire(512);
 
         match self {
             ServerMsg::JoinResponse(data) => {
@@ -502,7 +504,9 @@ impl ServerMsg {
             }
         }
 
-        builder.finished_data().to_vec()
+        let result = builder.finished_data().to_vec();
+        crate::builder_pool::release(builder);
+        result
     }
 
     pub fn deserialize(buf: &[u8]) -> Result<Self, MessageError> {

@@ -121,6 +121,8 @@ pub async fn run_network(
         let mut cancel_input = cancel_tx.subscribe();
         let send_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+            let mut last_sent = empty_input();
+            let mut ticks_since_send: u32 = 0;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -130,8 +132,15 @@ pub async fn run_network(
                             while let Ok(i) = rx.try_recv() { latest = i; }
                             latest
                         };
-                        let pkt = build_input(&input);
-                        let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
+                        // Suppress unchanged input; send keepalive every 1s (20 ticks).
+                        if input != last_sent || ticks_since_send >= 20 {
+                            let pkt = build_input(&input);
+                            let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
+                            last_sent = input;
+                            ticks_since_send = 0;
+                        } else {
+                            ticks_since_send += 1;
+                        }
                     }
                     _ = cancel_input.recv() => { return; }
                 }
@@ -152,7 +161,11 @@ pub async fn run_network(
                                 if len < 4 { continue; }
                                 let msg_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
                                 if len < 4 + msg_len { continue; }
-                                if let Ok(ServerMsg::WorldState(ws)) = ServerMsg::deserialize(&buf[4..4 + msg_len]) {
+                                let decoded = match voxeldust_core::wire_codec::decode(&buf[4..4 + msg_len]) {
+                                    Ok(d) => d,
+                                    Err(_) => continue,
+                                };
+                                if let Ok(ServerMsg::WorldState(ws)) = ServerMsg::deserialize(&decoded) {
                                     let _ = event_tx_udp.send(NetEvent::WorldState(ws));
                                 }
                             }
@@ -258,9 +271,8 @@ pub async fn run_network(
 fn build_input(input: &PlayerInputData) -> Vec<u8> {
     let msg = ClientMsg::PlayerInput(input.clone());
     let data = msg.serialize();
-    let mut pkt = Vec::with_capacity(4 + data.len());
-    pkt.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    pkt.extend_from_slice(&data);
+    let mut pkt = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut pkt);
     pkt
 }
 
@@ -298,9 +310,9 @@ async fn connect_to_shard_full(
 
 async fn send_msg(stream: &mut TcpStream, msg: &ClientMsg) -> Result<(), std::io::Error> {
     let data = msg.serialize();
-    let len = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len).await?;
-    stream.write_all(&data).await?;
+    let mut buf = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut buf);
+    stream.write_all(&buf).await?;
     stream.flush().await?;
     Ok(())
 }
@@ -311,7 +323,9 @@ async fn recv_server_msg(stream: &mut TcpStream) -> Result<ServerMsg, Box<dyn st
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
-    Ok(ServerMsg::deserialize(&buf)?)
+    let decoded = voxeldust_core::wire_codec::decode(&buf)
+        .map_err(|e| format!("wire decode: {e}"))?;
+    Ok(ServerMsg::deserialize(&decoded)?)
 }
 
 fn empty_input() -> PlayerInputData {

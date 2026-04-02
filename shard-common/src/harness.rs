@@ -216,6 +216,7 @@ impl ShardHarness {
         let mut broadcast_rx = self.broadcast_rx.take().expect("broadcast_rx already taken");
         tokio::spawn(async move {
             info!("broadcast drainer task started");
+            let mut packet_buf = Vec::with_capacity(8192);
             loop {
                 tokio::select! {
                     _ = broadcast_cancel.cancelled() => return,
@@ -223,6 +224,7 @@ impl ShardHarness {
                         if let Some(msg) = msg {
                             client_listener::broadcast_world_state_udp(
                                 &broadcast_socket, &broadcast_registry, &msg,
+                                &mut packet_buf,
                             ).await;
                         } else {
                             return;
@@ -255,13 +257,10 @@ impl ShardHarness {
                             conn = transport.accept() => {
                                 if let Some(conn) = conn {
                                     let tx = quic_msg_tx.clone();
+                                    // Use recv_loop to handle persistent streams
+                                    // (multiple messages per uni stream).
                                     tokio::spawn(async move {
-                                        loop {
-                                            match conn.recv().await {
-                                                Ok(msg) => { let _ = tx.send(msg); }
-                                                Err(_) => return,
-                                            }
-                                        }
+                                        let _ = conn.recv_loop(tx).await;
                                     });
                                 }
                             }

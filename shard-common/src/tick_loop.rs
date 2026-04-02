@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
@@ -16,7 +17,7 @@ pub struct TickLoop {
     /// Last tick duration in milliseconds.
     pub last_tick_ms: f32,
     /// Rolling p99 tracker (stores last 100 tick durations).
-    tick_history: Vec<f32>,
+    tick_history: VecDeque<f32>,
 }
 
 impl TickLoop {
@@ -26,7 +27,7 @@ impl TickLoop {
             tick_interval: Duration::from_millis(50), // 20Hz
             tick_count: 0,
             last_tick_ms: 0.0,
-            tick_history: Vec::with_capacity(100),
+            tick_history: VecDeque::with_capacity(100),
         }
     }
 
@@ -55,9 +56,9 @@ impl TickLoop {
 
         // Track tick history for p99.
         if self.tick_history.len() >= 100 {
-            self.tick_history.remove(0);
+            self.tick_history.pop_front();
         }
-        self.tick_history.push(self.last_tick_ms);
+        self.tick_history.push_back(self.last_tick_ms);
 
         if self.last_tick_ms > self.tick_interval.as_secs_f32() * 1000.0 {
             warn!(
@@ -84,7 +85,7 @@ impl TickLoop {
         if self.tick_history.is_empty() {
             return 0.0;
         }
-        let mut sorted = self.tick_history.clone();
+        let mut sorted: Vec<f32> = self.tick_history.iter().copied().collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let idx = ((sorted.len() as f32) * 0.99).ceil() as usize;
         sorted[idx.min(sorted.len() - 1)]

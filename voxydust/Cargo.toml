@@ -22,3 +22,4 @@ egui-winit = { workspace = true }
 bytemuck = { workspace = true }
 flatbuffers = { workspace = true }
 pollster = "0.4"
+lz4_flex = { workspace = true }

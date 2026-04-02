@@ -210,7 +210,11 @@ impl ShipInteriorState {
         let mut s = Self {
             rigid_body_set, collider_set,
             gravity_sources: vec![GravitySource::default_floor_plates()],
-            integration_params: IntegrationParameters::default(),
+            integration_params: {
+                let mut p = IntegrationParameters::default();
+                p.dt = 0.05; // Match 20Hz tick rate
+                p
+            },
             physics_pipeline: PhysicsPipeline::new(),
             island_manager: IslandManager::new(),
             broad_phase: DefaultBroadPhase::new(),
@@ -416,7 +420,7 @@ fn main() {
         let orchestrator_url = args.orchestrator.clone();
         let system_seed_for_jr = args.system_seed;
         harness.add_system("drain_connects", move || {
-            while let Ok(event) = connect_rx.try_recv() {
+            for _ in 0..16 { let event = match connect_rx.try_recv() { Ok(e) => e, Err(_) => break };
                 let conn = event.connection;
                 let token = conn.session_token;
 
@@ -461,7 +465,7 @@ fn main() {
         // System 2: Drain PlayerInput from UDP.
         let state_input = state.clone();
         harness.add_system("drain_input", move || {
-            while let Ok((_src, input)) = input_rx.try_recv() {
+            for _ in 0..64 { let (_src, input) = match input_rx.try_recv() { Ok(e) => e, Err(_) => break };
                 let mut st = state_input.lock().unwrap();
                 st.prev_action = st.last_action;
                 st.last_action = input.action;
@@ -514,8 +518,7 @@ fn main() {
                     // WASD cancels autopilot above, so this always applies.
                     {
                         // Enforce tier restriction inside atmosphere.
-                        let in_atmosphere = if st.system_seed > 0 {
-                            let sys = voxeldust_core::system::SystemParams::from_seed(st.system_seed);
+                        let in_atmosphere = if let Some(ref sys) = st.cached_system_params {
                             // Check altitude vs closest planet from scene_bodies.
                             st.scene_bodies.iter().any(|b| {
                                 if b.body_id == 0 { return false; } // skip star
@@ -548,8 +551,7 @@ fn main() {
                         let engines_off = input.action == 5;
                         if in_atmosphere && st.autopilot_target_body_id.is_none() && !engines_off {
                             // Compute gravity from nearest planet.
-                            if st.system_seed > 0 {
-                                let sys = voxeldust_core::system::SystemParams::from_seed(st.system_seed);
+                            if let Some(ref sys) = st.cached_system_params {
                                 for b in &st.scene_bodies {
                                     if b.body_id == 0 { continue; }
                                     let pi = (b.body_id - 1) as usize;
@@ -615,7 +617,7 @@ fn main() {
         let peer_reg_quic = peer_registry.clone();
         let quic_send_quic = quic_send_tx.clone();
         harness.add_system("drain_quic", move || {
-            while let Ok(msg) = quic_msg_rx.try_recv() {
+            for _ in 0..32 { let msg = match quic_msg_rx.try_recv() { Ok(m) => m, Err(_) => break };
                 let mut st = state_quic.lock().unwrap();
                 match msg {
                     ShardMsg::SystemSceneUpdate(data) => {
@@ -752,9 +754,8 @@ fn main() {
 
                         if let Some(planet_body) = closest_planet {
                             let planet_index = (planet_body.body_id - 1) as usize;
-                            // Derive planet_seed from system_seed.
-                            let sys = voxeldust_core::system::SystemParams::from_seed(st.system_seed);
-                            if planet_index < sys.planets.len() {
+                            // Derive planet_seed from cached system params.
+                            if let Some(ref sys) = st.cached_system_params { if planet_index < sys.planets.len() {
                                 let planet_seed = sys.planets[planet_index].planet_seed;
 
                                 let h = handoff::PlayerHandoff {
@@ -788,7 +789,7 @@ fn main() {
                                 st.handoff_pending = true;
                                 st.pending_handoff_msg = Some(ShardMsg::PlayerHandoff(h));
                                 info!(planet_index, planet_seed, "exit door handoff initiated");
-                            }
+                            }}
                         } else {
                             info!("no nearby planet for exit handoff");
                         }

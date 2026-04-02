@@ -146,8 +146,11 @@ impl PlanetState {
         let rigid_body_set = RigidBodySet::new();
         let mut collider_set = ColliderSet::new();
 
+        // Terrain: member of GROUP_2, collides only with players (GROUP_1).
+        // This eliminates useless terrain-terrain broadphase pairs.
         let ground = ColliderBuilder::halfspace(nalgebra::Unit::new_normalize(vector![0.0, 1.0, 0.0]))
             .translation(vector![0.0, 0.0, 0.0])
+            .collision_groups(InteractionGroups::new(Group::GROUP_2, Group::GROUP_1))
             .build();
         let ground_handle = collider_set.insert(ground);
 
@@ -164,7 +167,11 @@ impl PlanetState {
             shard_id, planet_seed, planet_radius, planet_mass, surface_gravity,
             system_seed, planet_index,
             rigid_body_set, collider_set,
-            integration_params: IntegrationParameters::default(),
+            integration_params: {
+                let mut p = IntegrationParameters::default();
+                p.dt = 0.05; // Match 20Hz tick rate
+                p
+            },
             physics_pipeline: PhysicsPipeline::new(),
             island_manager: IslandManager::new(),
             broad_phase: DefaultBroadPhase::new(),
@@ -200,7 +207,10 @@ impl PlanetState {
             .lock_rotations()
             .build();
         let handle = self.rigid_body_set.insert(player_rb);
-        let player_collider = ColliderBuilder::capsule_y(0.6, 0.3).build();
+        // Players: member of GROUP_1, collide with other players (GROUP_1) + terrain (GROUP_2).
+        let player_collider = ColliderBuilder::capsule_y(0.6, 0.3)
+            .collision_groups(InteractionGroups::new(Group::GROUP_1, Group::GROUP_1 | Group::GROUP_2))
+            .build();
         self.collider_set.insert_with_parent(player_collider, handle, &mut self.rigid_body_set);
 
         let rapier_origin = DVec3::new(0.0, height, 0.0);
@@ -240,6 +250,11 @@ impl PlanetState {
 
             // Compute displacement in Rapier flat-space since last re-center.
             let delta = rapier_pos - player.rapier_origin;
+
+            // Skip expensive tangent frame recomputation for stationary players.
+            if delta.length_squared() < 1e-8 {
+                continue;
+            }
 
             // Map horizontal displacement (dx, dz) to sphere surface movement.
             let tangent_disp = player.tangent_frame.east * delta.x
@@ -442,7 +457,7 @@ fn main() {
         let state_connect = state.clone();
         let registry_connect = client_registry.clone();
         harness.add_system("drain_connects", move || {
-            while let Ok(event) = connect_rx.try_recv() {
+            for _ in 0..16 { let event = match connect_rx.try_recv() { Ok(e) => e, Err(_) => break };
                 let conn = event.connection;
                 let token = conn.session_token;
 
@@ -506,7 +521,7 @@ fn main() {
         // System 2: Drain PlayerInput — walk on surface.
         let state_input = state.clone();
         harness.add_system("drain_input", move || {
-            while let Ok((_src, input)) = input_rx.try_recv() {
+            for _ in 0..64 { let (_src, input) = match input_rx.try_recv() { Ok(e) => e, Err(_) => break };
                 let mut st = state_input.lock().unwrap();
 
                 // Apply to first player (simplified — multi-player needs routing by session).
@@ -519,19 +534,23 @@ fn main() {
                     });
 
                 if let Some((handle, yaw)) = player_info {
+                    let has_movement = input.movement[0].abs() > 0.001
+                        || input.movement[2].abs() > 0.001;
                     if let Some(body) = st.rigid_body_set.get_mut(handle) {
-                        let (sin_y, cos_y) = yaw.sin_cos();
-                        let fwd = Vec3::new(cos_y, 0.0, sin_y);
-                        let right = Vec3::new(-sin_y, 0.0, cos_y);
+                        if has_movement || input.jump {
+                            let (sin_y, cos_y) = yaw.sin_cos();
+                            let fwd = Vec3::new(cos_y, 0.0, sin_y);
+                            let right = Vec3::new(-sin_y, 0.0, cos_y);
 
-                        let move_vel = fwd * input.movement[2] * WALK_SPEED
-                            + right * input.movement[0] * WALK_SPEED;
+                            let move_vel = fwd * input.movement[2] * WALK_SPEED
+                                + right * input.movement[0] * WALK_SPEED;
 
-                        let current_vel = *body.linvel();
-                        body.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
+                            let current_vel = *body.linvel();
+                            body.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
 
-                        if input.jump && current_vel.y.abs() < 0.5 {
-                            body.apply_impulse(vector![0.0, JUMP_IMPULSE, 0.0], true);
+                            if input.jump && current_vel.y.abs() < 0.5 {
+                                body.apply_impulse(vector![0.0, JUMP_IMPULSE, 0.0], true);
+                            }
                         }
                     }
                 }
@@ -544,7 +563,7 @@ fn main() {
         let quic_send_quic = quic_send_tx.clone();
         let client_reg_quic = client_registry.clone();
         harness.add_system("drain_quic", move || {
-            while let Ok(msg) = quic_msg_rx.try_recv() {
+            for _ in 0..32 { let msg = match quic_msg_rx.try_recv() { Ok(m) => m, Err(_) => break };
                 match msg {
                     ShardMsg::PlayerHandoff(h) => {
                         let mut st = state_quic.lock().unwrap();
@@ -695,7 +714,52 @@ fn main() {
             st.step();
         });
 
-        // System 5: Ship proximity detection — player E-press near ship triggers re-entry.
+        // System 5: Disconnect cleanup — remove orphaned Rapier bodies for players whose
+        // TCP connection dropped without a handoff.
+        let state_disconnect = state.clone();
+        let registry_disconnect = client_registry.clone();
+        harness.add_system("drain_disconnects", move || {
+            let mut st = state_disconnect.lock().unwrap();
+            if st.tick_count % 40 != 0 { return; } // check every 2s
+
+            let connected_tokens: std::collections::HashSet<SessionToken> =
+                if let Ok(reg) = registry_disconnect.try_read() {
+                    // Build set of tokens that still have active connections.
+                    st.players.keys()
+                        .filter(|token| reg.has_client(token))
+                        .copied()
+                        .collect()
+                } else {
+                    return; // registry locked, try next tick
+                };
+
+            let orphaned: Vec<SessionToken> = st.players.keys()
+                .filter(|token| !connected_tokens.contains(token))
+                // Skip players with pending handoffs — they're mid-transition.
+                .filter(|token| !st.players[token].handoff_pending)
+                .copied()
+                .collect();
+
+            for token in orphaned {
+                if let Some(player) = st.players.remove(&token) {
+                    let PlanetState {
+                        ref mut rigid_body_set, ref mut island_manager,
+                        ref mut collider_set, ref mut impulse_joint_set,
+                        ref mut multibody_joint_set, ..
+                    } = *st;
+                    rigid_body_set.remove(
+                        player.body_handle,
+                        island_manager, collider_set,
+                        impulse_joint_set, multibody_joint_set,
+                        true,
+                    );
+                    info!(session = token.0, player = %player.player_name,
+                        "cleaned up disconnected player");
+                }
+            }
+        });
+
+        // System 6: Ship proximity detection — player E-press near ship triggers re-entry.
         let state_proximity = state.clone();
         let quic_send_proximity = quic_send_tx.clone();
         let peer_reg_proximity = peer_registry.clone();

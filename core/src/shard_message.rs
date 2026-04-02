@@ -153,7 +153,7 @@ fn from_fb_quatd(q: &fb::Quatd) -> DQuat {
 impl ShardMsg {
     /// Serialize this message into a FlatBuffer byte vector.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut builder = FlatBufferBuilder::with_capacity(512);
+        let mut builder = crate::builder_pool::acquire(512);
 
         match self {
             ShardMsg::PlayerHandoff(h) => {
@@ -476,7 +476,9 @@ impl ShardMsg {
             }
         }
 
-        builder.finished_data().to_vec()
+        let result = builder.finished_data().to_vec();
+        crate::builder_pool::release(builder);
+        result
     }
 
     /// Deserialize a FlatBuffer byte slice into a ShardMsg.

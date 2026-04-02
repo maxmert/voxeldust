@@ -43,11 +43,19 @@ pub enum TransportError {
     ReadToEnd(#[from] quinn::ReadToEndError),
 }
 
+/// A persistent connection + stream to a peer shard.
+struct PeerChannel {
+    conn: quinn::Connection,
+    /// Persistent unidirectional stream — reused across messages to avoid
+    /// ~100-200μs overhead of opening a new stream per message.
+    send_stream: Option<SendStream>,
+}
+
 /// Manages QUIC connections to peer shards.
 pub struct QuicTransport {
     endpoint: Endpoint,
     /// Active connections to peer shards, keyed by ShardId.
-    peers: Mutex<HashMap<ShardId, quinn::Connection>>,
+    peers: Mutex<HashMap<ShardId, PeerChannel>>,
     /// Per-peer circuit breakers.
     breakers: Mutex<HashMap<ShardId, CircuitBreaker>>,
 }
@@ -86,7 +94,7 @@ impl QuicTransport {
         self.endpoint.local_addr().unwrap()
     }
 
-    /// Send a message to a peer shard. Opens a new QUIC stream for each message.
+    /// Send a message to a peer shard. Reuses a persistent QUIC stream per peer.
     pub async fn send(
         &self,
         peer_id: ShardId,
@@ -104,20 +112,33 @@ impl QuicTransport {
         }
 
         let result = tokio::time::timeout(OPERATION_TIMEOUT, async {
-            let conn = self.get_or_connect(peer_id, peer_addr).await?;
-
             let data = msg.serialize();
             if data.len() > MAX_MESSAGE_SIZE {
                 return Err(TransportError::MessageTooLarge { size: data.len() });
             }
 
-            let mut send: SendStream = conn.open_uni().await?;
+            let mut peers = self.peers.lock().await;
+            let channel = self.get_or_connect_channel(&mut peers, peer_id, peer_addr).await?;
+
+            // Get or open a persistent send stream.
+            if channel.send_stream.is_none() {
+                channel.send_stream = Some(channel.conn.open_uni().await?);
+            }
+            let send = channel.send_stream.as_mut().unwrap();
 
             // Length-prefix: 4 bytes big-endian.
             let len_bytes = (data.len() as u32).to_be_bytes();
-            send.write_all(&len_bytes).await?;
-            send.write_all(&data).await?;
-            send.finish().map_err(|_| TransportError::Tls("stream already closed".into()))?;
+            let write_result = async {
+                send.write_all(&len_bytes).await?;
+                send.write_all(&data).await?;
+                Ok::<(), quinn::WriteError>(())
+            }.await;
+
+            if let Err(e) = write_result {
+                // Stream broke — discard it so next send reopens.
+                channel.send_stream = None;
+                return Err(TransportError::Write(e));
+            }
 
             Ok::<(), TransportError>(())
         })
@@ -163,31 +184,29 @@ impl QuicTransport {
             .close(quinn::VarInt::from_u32(0), b"shutdown");
     }
 
-    async fn get_or_connect(
+    async fn get_or_connect_channel<'a>(
         &self,
+        peers: &'a mut HashMap<ShardId, PeerChannel>,
         peer_id: ShardId,
         peer_addr: SocketAddr,
-    ) -> Result<quinn::Connection, TransportError> {
-        let mut peers = self.peers.lock().await;
-
-        // Return existing connection if it's still alive.
-        if let Some(conn) = peers.get(&peer_id) {
-            if conn.close_reason().is_none() {
-                return Ok(conn.clone());
-            }
+    ) -> Result<&'a mut PeerChannel, TransportError> {
+        // Check if existing connection is still alive.
+        let needs_reconnect = match peers.get(&peer_id) {
+            Some(ch) => ch.conn.close_reason().is_some(),
+            None => true,
+        };
+        if needs_reconnect {
             peers.remove(&peer_id);
+            // Open new connection.
+            debug!(%peer_id, %peer_addr, "connecting to peer shard");
+            let conn = self
+                .endpoint
+                .connect(peer_addr, "voxeldust-shard")?
+                .await?;
+            info!(%peer_id, %peer_addr, "connected to peer shard");
+            peers.insert(peer_id, PeerChannel { conn, send_stream: None });
         }
-
-        // Open new connection.
-        debug!(%peer_id, %peer_addr, "connecting to peer shard");
-        let conn = self
-            .endpoint
-            .connect(peer_addr, "voxeldust-shard")?
-            .await?;
-        info!(%peer_id, %peer_addr, "connected to peer shard");
-
-        peers.insert(peer_id, conn.clone());
-        Ok(conn)
+        Ok(peers.get_mut(&peer_id).unwrap())
     }
 
     async fn record_success(&self, peer_id: ShardId) {
@@ -217,12 +236,17 @@ pub struct IncomingConnection {
 }
 
 impl IncomingConnection {
-    /// Read the next message from this connection.
-    /// Each message arrives on its own unidirectional stream.
+    /// Accept a uni stream and read one length-prefixed message from it.
+    /// Called in a loop; each call accepts the next stream from this connection.
+    /// Supports both persistent streams (multiple messages per stream) and
+    /// one-shot streams (one message per stream) via the `recv_loop` helper.
     pub async fn recv(&self) -> Result<ShardMsg, TransportError> {
         let mut recv: RecvStream = self.connection.accept_uni().await?;
+        Self::read_one_message(&mut recv).await
+    }
 
-        // Read 4-byte length prefix.
+    /// Read a single length-prefixed message from a stream.
+    async fn read_one_message(recv: &mut RecvStream) -> Result<ShardMsg, TransportError> {
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
@@ -231,9 +255,34 @@ impl IncomingConnection {
             return Err(TransportError::MessageTooLarge { size: len });
         }
 
-        let data = recv.read_to_end(len).await?;
+        let mut data = vec![0u8; len];
+        recv.read_exact(&mut data).await?;
         let msg = ShardMsg::deserialize(&data)?;
         Ok(msg)
+    }
+
+    /// Accept streams and read multiple messages per stream, forwarding to a channel.
+    /// Handles persistent streams where a sender writes many length-prefixed messages
+    /// on a single uni stream.
+    pub async fn recv_loop(
+        self,
+        tx: tokio::sync::mpsc::UnboundedSender<ShardMsg>,
+    ) -> Result<(), TransportError> {
+        loop {
+            let mut recv: RecvStream = self.connection.accept_uni().await?;
+            let tx = tx.clone();
+            // Spawn a task per stream to read all messages from it.
+            tokio::spawn(async move {
+                loop {
+                    match Self::read_one_message(&mut recv).await {
+                        Ok(msg) => {
+                            if tx.send(msg).is_err() { return; }
+                        }
+                        Err(_) => return, // stream ended or error
+                    }
+                }
+            });
+        }
     }
 
     /// The remote address of this connection.

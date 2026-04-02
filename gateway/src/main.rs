@@ -87,7 +87,9 @@ async fn handle_client(
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
 
-    let msg = ClientMsg::deserialize(&buf)?;
+    let decoded = voxeldust_core::wire_codec::decode(&buf)
+        .map_err(|e| format!("wire decode: {e}"))?;
+    let msg = ClientMsg::deserialize(&decoded)?;
 
     let player_name = match msg {
         ClientMsg::Connect { ref player_name } => player_name.clone(),
@@ -150,9 +152,9 @@ async fn send_server_msg(
     msg: &ServerMsg,
 ) -> Result<(), std::io::Error> {
     let data = msg.serialize();
-    let len_bytes = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len_bytes).await?;
-    stream.write_all(&data).await?;
+    let mut buf = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut buf);
+    stream.write_all(&buf).await?;
     stream.flush().await?;
     Ok(())
 }

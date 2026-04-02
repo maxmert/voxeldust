@@ -323,7 +323,7 @@ fn main() {
         let state_connect = state.clone();
         let registry_connect = client_registry.clone();
         harness.add_system("drain_connects", move || {
-            while let Ok(event) = connect_rx.try_recv() {
+            for _ in 0..16 { let event = match connect_rx.try_recv() { Ok(e) => e, Err(_) => break };
                 let conn = event.connection;
                 let mut st = state_connect.lock().unwrap();
                 let ship_id = st.spawn_ship();
@@ -357,7 +357,7 @@ fn main() {
         let peer_reg_quic = peer_registry.clone();
         let quic_send_quic = quic_send_tx.clone();
         harness.add_system("drain_quic", move || {
-            while let Ok(msg) = quic_msg_rx.try_recv() {
+            for _ in 0..32 { let msg = match quic_msg_rx.try_recv() { Ok(m) => m, Err(_) => break };
                 match msg {
                     ShardMsg::ShipControlInput(ctrl) => {
                         let mut st = state_quic.lock().unwrap();
@@ -1257,7 +1257,7 @@ fn main() {
             if st.tick_count % 20 != 0 { return; } // check every second
 
             // Drain async planet provision results from the channel.
-            while let Ok((planet_seed, shard_id)) = provision_rx.try_recv() {
+            for _ in 0..16 { let (planet_seed, shard_id) = match provision_rx.try_recv() { Ok(e) => e, Err(_) => break };
                 st.provisioned_planets.insert(planet_seed, shard_id);
                 st.provisioning_in_flight.remove(&planet_seed);
                 info!(planet_seed, shard_id = shard_id.0, "planet shard provisioned");
