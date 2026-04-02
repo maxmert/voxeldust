@@ -104,4 +104,54 @@ mod tests {
         let decoded = decode(&buf[4..4 + len]).unwrap();
         assert_eq!(decoded, data);
     }
+
+    #[test]
+    fn below_threshold_never_compressed() {
+        // Data just under COMPRESS_THRESHOLD — must stay uncompressed even if compressible.
+        let data = vec![0u8; COMPRESS_THRESHOLD - 1];
+        let mut buf = Vec::new();
+        encode(&data, &mut buf);
+        assert_eq!(buf[4], 0u8); // flags = no compression
+    }
+
+    #[test]
+    fn at_threshold_may_compress() {
+        // Data exactly at COMPRESS_THRESHOLD and highly repetitive.
+        let data = vec![0u8; COMPRESS_THRESHOLD];
+        let mut buf = Vec::new();
+        encode(&data, &mut buf);
+        // Should compress (all zeros compress very well).
+        assert_eq!(buf[4] & FLAG_LZ4, FLAG_LZ4);
+        let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        let decoded = decode(&buf[4..4 + len]).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn empty_data_roundtrips() {
+        let data = b"";
+        let mut buf = Vec::new();
+        encode(data, &mut buf);
+        let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        let decoded = decode(&buf[4..4 + len]).unwrap();
+        assert_eq!(&decoded, data);
+    }
+
+    #[test]
+    fn decode_empty_payload_is_error() {
+        assert!(decode(&[]).is_err());
+    }
+
+    #[test]
+    fn buffer_reuse_works() {
+        let mut buf = Vec::new();
+        for i in 0..5 {
+            let data = vec![i as u8; 200];
+            buf.clear();
+            encode(&data, &mut buf);
+            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            let decoded = decode(&buf[4..4 + len]).unwrap();
+            assert_eq!(decoded, data);
+        }
+    }
 }

@@ -465,3 +465,78 @@ pub fn generate_box_mesh(width: f32, height: f32, length: f32) -> (Vec<[f32; 3]>
     ];
     (vertices, indices)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::{Mat4, Vec3};
+
+    fn test_frustum() -> FrustumPlanes {
+        // Camera at origin, looking down -Z, 90° FOV, 1:1 aspect.
+        let proj = Mat4::perspective_rh(90.0_f32.to_radians(), 1.0, 0.1, 1000.0);
+        let view = Mat4::look_to_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        FrustumPlanes::from_vp(&(proj * view))
+    }
+
+    #[test]
+    fn sphere_in_front_is_visible() {
+        let frustum = test_frustum();
+        // Sphere at z=-10 (in front of camera), radius 1.
+        assert!(frustum.contains_sphere(Vec3::new(0.0, 0.0, -10.0), 1.0));
+    }
+
+    #[test]
+    fn sphere_behind_camera_is_culled() {
+        let frustum = test_frustum();
+        // Sphere at z=+10 (behind camera), radius 1.
+        assert!(!frustum.contains_sphere(Vec3::new(0.0, 0.0, 10.0), 1.0));
+    }
+
+    #[test]
+    fn sphere_far_left_is_culled() {
+        let frustum = test_frustum();
+        // Sphere far to the left at z=-10, well outside 90° FOV.
+        assert!(!frustum.contains_sphere(Vec3::new(-50.0, 0.0, -10.0), 1.0));
+    }
+
+    #[test]
+    fn sphere_far_right_is_culled() {
+        let frustum = test_frustum();
+        assert!(!frustum.contains_sphere(Vec3::new(50.0, 0.0, -10.0), 1.0));
+    }
+
+    #[test]
+    fn sphere_above_is_culled() {
+        let frustum = test_frustum();
+        assert!(!frustum.contains_sphere(Vec3::new(0.0, 50.0, -10.0), 1.0));
+    }
+
+    #[test]
+    fn large_sphere_partially_in_view_is_visible() {
+        let frustum = test_frustum();
+        // Sphere center is outside left, but radius is large enough to overlap.
+        assert!(frustum.contains_sphere(Vec3::new(-12.0, 0.0, -10.0), 5.0));
+    }
+
+    #[test]
+    fn sphere_at_origin_is_visible() {
+        let frustum = test_frustum();
+        // Sphere at camera position — should be visible (camera is inside it).
+        assert!(frustum.contains_sphere(Vec3::ZERO, 5.0));
+    }
+
+    #[test]
+    fn sphere_beyond_far_plane_is_culled() {
+        let frustum = test_frustum();
+        // Sphere way past far plane (1000.0).
+        assert!(!frustum.contains_sphere(Vec3::new(0.0, 0.0, -2000.0), 1.0));
+    }
+
+    #[test]
+    fn sphere_on_edge_of_view_is_visible() {
+        let frustum = test_frustum();
+        // 90° FOV means at z=-10, the visible width is ~10 each side.
+        // Sphere at x=9 with radius 2 should still be partially visible.
+        assert!(frustum.contains_sphere(Vec3::new(9.0, 0.0, -10.0), 2.0));
+    }
+}

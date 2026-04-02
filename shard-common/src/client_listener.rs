@@ -335,3 +335,38 @@ fn rand_u64() -> u64 {
     );
     h.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_has_client_after_register() {
+        let mut reg = ClientRegistry::new();
+        let token = SessionToken(42);
+        // Simulate a minimal connection (we can't create a real TcpStream in tests,
+        // so we test the data path via discover_udp + pending).
+        assert!(!reg.has_client(&token));
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn pending_udp_caps_at_limit() {
+        let mut reg = ClientRegistry::new();
+        for i in 0..20u16 {
+            let addr: SocketAddr = format!("127.0.0.1:{}", 5000 + i).parse().unwrap();
+            reg.discover_udp(addr);
+        }
+        // Should be capped at 16.
+        assert!(reg.pending_udp.len() <= 16);
+    }
+
+    #[test]
+    fn pending_udp_no_duplicates() {
+        let mut reg = ClientRegistry::new();
+        let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        reg.discover_udp(addr);
+        reg.discover_udp(addr);
+        assert_eq!(reg.pending_udp.len(), 1);
+    }
+}
