@@ -179,6 +179,8 @@ pub async fn run_network(
 
         // TCP listener — monitors for ShardRedirect or ShardPreConnect.
         let event_tx_tcp = event_tx.clone();
+        let player_name_tcp = player_name.clone();
+        let cancel_tx_for_tcp = cancel_tx.clone();
         let (redirect_tx, mut redirect_rx) = mpsc::channel::<ShardRedirect>(1);
         let mut cancel_tcp = cancel_tx.subscribe();
         let tcp_handle = tokio::spawn(async move {
@@ -202,15 +204,69 @@ pub async fn run_network(
                             }
                             Ok(ServerMsg::ShardPreConnect(pc)) => {
                                 info!(shard_type = pc.shard_type, seed = pc.seed,
-                                    "received ShardPreConnect");
-                                let _ = event_tx_tcp.send(NetEvent::SecondaryConnected {
-                                    shard_type: pc.shard_type,
-                                    seed: pc.seed,
-                                    reference_position: pc.reference_position,
-                                    reference_rotation: pc.reference_rotation,
+                                    tcp = %pc.tcp_addr, udp = %pc.udp_addr,
+                                    "received ShardPreConnect — opening secondary connection");
+
+                                // Spawn secondary connection to the planet shard.
+                                // UDP-only: no TCP connect (that would trigger a player spawn
+                                // on the planet shard). All metadata comes from ShardPreConnect.
+                                let sec_event_tx = event_tx_tcp.clone();
+                                let mut sec_cancel = cancel_tx_for_tcp.subscribe();
+                                let sec_pc = pc;
+                                tokio::spawn(async move {
+                                    let sec_udp: SocketAddr = match sec_pc.udp_addr.parse() {
+                                        Ok(a) => a,
+                                        Err(e) => { warn!(%e, "bad ShardPreConnect udp addr"); return; }
+                                    };
+
+                                    let _ = sec_event_tx.send(NetEvent::SecondaryConnected {
+                                        shard_type: sec_pc.shard_type,
+                                        seed: sec_pc.seed,
+                                        reference_position: sec_pc.reference_position,
+                                        reference_rotation: sec_pc.reference_rotation,
+                                    });
+
+                                    // Open secondary UDP.
+                                    let udp = match UdpSocket::bind("0.0.0.0:0").await {
+                                        Ok(s) => s,
+                                        Err(e) => { warn!(%e, "secondary UDP bind failed"); return; }
+                                    };
+                                    let hello = build_input(&empty_input());
+                                    let _ = udp.send_to(&hello, sec_udp).await;
+                                    info!(%sec_udp, "secondary UDP hole-punch sent");
+
+                                    // Receive loop: forward WorldState as SecondaryWorldState.
+                                    let mut buf = vec![0u8; 65536];
+                                    loop {
+                                        tokio::select! {
+                                            result = udp.recv_from(&mut buf) => {
+                                                match result {
+                                                    Ok((len, _)) => {
+                                                        if len < 4 { continue; }
+                                                        let msg_len = u32::from_be_bytes(
+                                                            [buf[0], buf[1], buf[2], buf[3]]) as usize;
+                                                        if len < 4 + msg_len { continue; }
+                                                        let decoded = match voxeldust_core::wire_codec::decode(
+                                                            &buf[4..4 + msg_len]) {
+                                                            Ok(d) => d,
+                                                            Err(_) => continue,
+                                                        };
+                                                        if let Ok(ServerMsg::WorldState(ws)) =
+                                                            ServerMsg::deserialize(&decoded) {
+                                                            let _ = sec_event_tx.send(
+                                                                NetEvent::SecondaryWorldState(ws));
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(%e, "secondary UDP recv error");
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            _ = sec_cancel.recv() => { return; }
+                                        }
+                                    }
                                 });
-                                // TODO: open secondary UDP connection to pre-load WorldState.
-                                // For now, just notify the render thread.
                             }
                             Ok(_) => { /* ignore other TCP messages */ }
                             Err(e) => {

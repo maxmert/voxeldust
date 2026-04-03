@@ -44,13 +44,17 @@ struct App {
     net_event_rx: Option<mpsc::UnboundedReceiver<NetEvent>>,
     input_tx: Option<mpsc::UnboundedSender<PlayerInputData>>,
 
-    // Game state from server.
+    // Game state from server (primary shard).
     latest_world_state: Option<WorldStateData>,
     player_position: DVec3,
     player_velocity: DVec3,
     current_shard_type: u8,
     reference_position: DVec3,
     reference_rotation: DQuat,
+
+    // Secondary shard state (for dual-shard compositing during transitions).
+    secondary_world_state: Option<WorldStateData>,
+    secondary_shard_type: Option<u8>,
 
     // Camera (first-person, follows player position).
     camera_yaw: f64,
@@ -101,6 +105,8 @@ impl App {
             current_shard_type: 255,
             reference_position: DVec3::ZERO,
             reference_rotation: DQuat::IDENTITY,
+            secondary_world_state: None,
+            secondary_shard_type: None,
             camera_yaw: 0.0,
             camera_pitch: 0.0,
             pilot_yaw_rate: 0.0,
@@ -211,17 +217,30 @@ impl App {
                     }
                     NetEvent::SecondaryConnected { shard_type, seed, reference_position, reference_rotation } => {
                         let shard_name = match shard_type { 0 => "Planet", 2 => "Ship", _ => "?" };
-                        info!(shard_name, seed, "secondary shard pre-connected");
-                        // Store for future composite rendering.
-                        // TODO: generate terrain chunks for planet secondary.
+                        info!(shard_name, seed, "secondary shard connected for dual compositing");
+                        self.secondary_shard_type = Some(shard_type);
                     }
-                    NetEvent::SecondaryWorldState(_ws) => {
-                        // TODO: store for composite rendering alongside primary WorldState.
+                    NetEvent::SecondaryWorldState(ws) => {
+                        self.secondary_world_state = Some(ws);
                     }
                     NetEvent::Transitioning => {
                         info!("transitioning to new shard...");
-                        // Clear stale world state so we don't render old data.
-                        self.latest_world_state = None;
+                        if self.secondary_world_state.is_some() {
+                            // Seamless: promote secondary to primary.
+                            info!("seamless transition — secondary data available");
+                            self.latest_world_state = self.secondary_world_state.take();
+                            if let Some(st) = self.secondary_shard_type.take() {
+                                self.current_shard_type = st;
+                            }
+                            self.camera_yaw = -std::f64::consts::FRAC_PI_2;
+                            self.camera_pitch = 0.0;
+                            self.is_piloting = false;
+                        } else {
+                            // Hard transition: clear and reconnect.
+                            self.latest_world_state = None;
+                        }
+                        self.secondary_world_state = None;
+                        self.secondary_shard_type = None;
                     }
                 }
             }
@@ -326,6 +345,7 @@ impl App {
             &mut self.uniform_data,
             &cam,
             self.latest_world_state.as_ref(),
+            self.secondary_world_state.as_ref(),
             self.current_shard_type,
             self.player_position,
             self.player_velocity,

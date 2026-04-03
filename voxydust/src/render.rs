@@ -21,6 +21,7 @@ fn build_uniforms(
     uniform_data: &mut [ObjectUniforms],
     cam: &CameraParams,
     ws: Option<&WorldStateData>,
+    secondary_ws: Option<&WorldStateData>,
     current_shard_type: u8,
     player_position: DVec3,
     ship_rotation: DQuat,
@@ -33,6 +34,9 @@ fn build_uniforms(
     if let Some(ws) = ws {
         // Celestial bodies -- unified rendering for all shards.
         // Track which bodies the camera is inside (for inside-sphere pipeline).
+        // The primary always renders all celestial bodies (sphere + spots) — these are
+        // in sync with the camera's coordinate frame. The secondary shard contributes
+        // only surface-detail data (ships, future: terrain chunks) that the primary lacks.
         for body in &ws.bodies {
             if object_count >= MAX_OBJECTS { break; }
             let offset_f64 = body.position - cam.cam_system_pos;
@@ -224,6 +228,36 @@ fn build_uniforms(
         }
     }
 
+    // Secondary WorldState: render objects from the secondary shard for dual compositing.
+    // Used during ship→planet transition to show the planet surface through the ship door.
+    // Both WorldStates use system-space origins, so coordinate transform is:
+    //   object_system_pos = secondary_ws.origin + obj_local_pos
+    //   offset = object_system_pos - cam.cam_system_pos
+    if let Some(sec_ws) = secondary_ws {
+        // Secondary shard contributes surface-detail data that the primary doesn't have:
+        // ships on the planet surface, and (future) terrain chunks. Celestial body spheres
+        // and reference spots come from the primary (in sync with the camera frame,
+        // no timing jitter). When terrain is added, the secondary will provide terrain
+        // meshes that replace the primary's simplified sphere for the approached planet.
+
+        // Ships from secondary (e.g., landed ships on planet surface).
+        for ship in &sec_ws.ships {
+            if object_count >= MAX_OBJECTS { break; }
+            let ship_system_pos = sec_ws.origin + ship.position;
+            let offset = (ship_system_pos - cam.cam_system_pos).as_vec3();
+            let ship_rot = Mat4::from_quat(ship.rotation.as_quat());
+            let scale = Mat4::from_scale(Vec3::new(4.0, 3.0, 8.0));
+            let model = Mat4::from_translation(offset) * ship_rot * scale;
+            let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+            obj.mvp = (cam.vp * model).to_cols_array_2d();
+            obj.model = model.to_cols_array_2d();
+            obj.color = [0.3, 0.3, 0.35, 0.7];
+            obj.material = [0.8, 0.3, 0.0, 0.0];
+            uniform_data[object_count] = obj;
+            object_count += 1;
+        }
+    }
+
     RenderObjects {
         object_count,
         ship_interior_start,
@@ -293,6 +327,7 @@ pub fn render_frame(
     uniform_data: &mut [ObjectUniforms],
     cam: &CameraParams,
     latest_world_state: Option<&WorldStateData>,
+    secondary_world_state: Option<&WorldStateData>,
     current_shard_type: u8,
     player_position: DVec3,
     player_velocity: DVec3,
@@ -311,8 +346,8 @@ pub fn render_frame(
 
     // Build object uniforms.
     let ro = build_uniforms(
-        uniform_data, cam, latest_world_state, current_shard_type,
-        player_position, ship_rotation,
+        uniform_data, cam, latest_world_state, secondary_world_state,
+        current_shard_type, player_position, ship_rotation,
     );
 
     // Write scene lighting data from server WorldState.
@@ -371,8 +406,8 @@ pub fn render_frame(
     // -- Main pass --
     // Restore camera-space MVPs by re-running the uniform build.
     let ro = build_uniforms(
-        uniform_data, cam, latest_world_state, current_shard_type,
-        player_position, ship_rotation,
+        uniform_data, cam, latest_world_state, secondary_world_state,
+        current_shard_type, player_position, ship_rotation,
     );
 
     // Upload camera-space uniforms for the main pass.

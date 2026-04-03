@@ -162,6 +162,12 @@ struct ShipInteriorState {
     connected_player_name: Option<String>,
     /// True while a handoff is in-flight (block input processing).
     handoff_pending: bool,
+    /// True when the ship is on a planet surface (velocity near zero from system shard).
+    ship_landed: bool,
+    /// True when the ship is inside a planet's atmosphere (for ShardPreConnect trigger).
+    ship_in_atmosphere: bool,
+    /// True after ShardPreConnect has been sent for this atmosphere entry (prevent spam).
+    preconnect_sent: bool,
     /// System seed for planet seed derivation during handoff.
     system_seed: u64,
     /// Pending handoff message to send via QUIC (set by interaction, sent by pilot_send).
@@ -247,6 +253,9 @@ impl ShipInteriorState {
             connected_session: None,
             connected_player_name: None,
             handoff_pending: false,
+            ship_landed: false,
+            ship_in_atmosphere: false,
+            preconnect_sent: false,
             system_seed,
             pending_handoff_msg: None,
         };
@@ -632,6 +641,9 @@ fn main() {
                             st.ship_position = data.position;
                             st.ship_velocity = data.velocity;
                             st.ship_rotation = data.rotation;
+
+                            // Detect landed state: system shard zeros velocity on landing.
+                            st.ship_landed = data.velocity.length() < 0.5;
                         }
                     }
                     ShardMsg::HandoffAccepted(accepted) => {
@@ -707,6 +719,94 @@ fn main() {
                     _ => {}
                 }
             }
+        });
+
+        // System 3b: Send ShardPreConnect when ship enters a planet's atmosphere.
+        // Triggers early so the client can pre-connect to the planet shard and start
+        // receiving WorldState (surface data, lighting) before landing. This gives
+        // maximum pre-loading time for future terrain LOD systems.
+        let state_preconnect = state.clone();
+        let peer_reg_preconnect = peer_registry.clone();
+        let client_reg_preconnect = client_registry.clone();
+        harness.add_system("preconnect_check", move || {
+            let mut st = state_preconnect.lock().unwrap();
+            if st.preconnect_sent || st.connected_session.is_none() { return; }
+            if st.system_seed == 0 { return; }
+
+            // Check if ship is inside any planet's atmosphere.
+            let sys = match &st.cached_system_params {
+                Some(sys) => sys,
+                None => return,
+            };
+            let in_atmo_planet = st.scene_bodies.iter()
+                .filter(|b| b.body_id > 0)
+                .find_map(|b| {
+                    let pi = (b.body_id - 1) as usize;
+                    if pi >= sys.planets.len() { return None; }
+                    let alt = (st.ship_position - b.position).length() - sys.planets[pi].radius_m;
+                    if alt < sys.planets[pi].atmosphere.atmosphere_height
+                        && sys.planets[pi].atmosphere.has_atmosphere {
+                        Some(pi)
+                    } else {
+                        None
+                    }
+                });
+
+            // Track atmosphere transitions to reset preconnect on exit.
+            let was_in_atmo = st.ship_in_atmosphere;
+            st.ship_in_atmosphere = in_atmo_planet.is_some();
+            if was_in_atmo && !st.ship_in_atmosphere {
+                st.preconnect_sent = false; // Reset on atmosphere exit
+            }
+
+            let planet_index = match in_atmo_planet {
+                Some(idx) => idx,
+                None => return,
+            };
+
+            let planet_seed = match &st.cached_system_params {
+                Some(sys) if planet_index < sys.planets.len() => sys.planets[planet_index].planet_seed,
+                _ => return,
+            };
+
+            // Look up planet shard TCP/UDP from peer registry.
+            let planet_shard_info = if let Ok(reg) = peer_reg_preconnect.try_read() {
+                reg.find_by_type(ShardType::Planet).iter()
+                    .find(|s| s.planet_seed == Some(planet_seed))
+                    .map(|s| (s.endpoint.tcp_addr.to_string(), s.endpoint.udp_addr.to_string()))
+            } else {
+                None
+            };
+
+            let (tcp_addr, udp_addr) = match planet_shard_info {
+                Some(info) => info,
+                None => return, // Planet shard not yet provisioned
+            };
+
+            let session = st.connected_session.unwrap();
+            let pc = voxeldust_core::handoff::ShardPreConnect {
+                shard_type: 0, // Planet
+                tcp_addr: tcp_addr.clone(),
+                udp_addr: udp_addr.clone(),
+                seed: planet_seed,
+                planet_index: planet_index as u32,
+                reference_position: st.ship_position,
+                reference_rotation: DQuat::IDENTITY,
+            };
+
+            st.preconnect_sent = true;
+
+            let cr = client_reg_preconnect.clone();
+            let msg = ServerMsg::ShardPreConnect(pc);
+            tokio::spawn(async move {
+                if let Ok(reg) = cr.try_read() {
+                    if let Err(e) = reg.send_tcp(session, &msg).await {
+                        tracing::warn!(%e, "failed to send ShardPreConnect");
+                    }
+                }
+            });
+
+            info!(planet_seed, planet_index, "sent ShardPreConnect to client");
         });
 
         // System 4: Interaction — pilot seat + exit door.

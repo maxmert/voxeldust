@@ -26,9 +26,19 @@ pub struct ClientConnectEvent {
     pub connection: ClientConnection,
 }
 
-/// Tracks all connected clients. Thread-safe for use across tick systems.
+/// Tracks all connected clients and observers. Thread-safe for use across tick systems.
+///
+/// Two connection types:
+/// - **Client**: Full participant with TCP + UDP. Has a player entity, processes input,
+///   participates in handoffs. Created via TCP Connect message.
+/// - **Observer**: UDP-only spectator for dual-shard compositing. Receives WorldState
+///   broadcasts but has no player entity, no input, no handoff. Created when a secondary
+///   shard connection sends a UDP hole-punch without a preceding TCP connect.
 pub struct ClientRegistry {
     clients: HashMap<SessionToken, ClientEntry>,
+    /// UDP-only observers (secondary/spectator connections for dual-shard compositing).
+    /// These receive WorldState broadcasts but don't have player entities.
+    observers: Vec<SocketAddr>,
     /// UDP addresses seen before any client registered (for late-join matching).
     pending_udp: Vec<SocketAddr>,
 }
@@ -44,6 +54,7 @@ impl ClientRegistry {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            observers: Vec::new(),
             pending_udp: Vec::new(),
         }
     }
@@ -100,16 +111,35 @@ impl ClientRegistry {
             }
         }
 
-        // No client to match — store as pending (cap at 16 to prevent unbounded growth).
-        if self.pending_udp.len() < 16 && !self.pending_udp.contains(&udp_addr) {
-            debug!(%udp_addr, "storing pending UDP address (no client registered yet)");
-            self.pending_udp.push(udp_addr);
+        // No client to match. If there are no unmatched clients at all, this is likely
+        // an observer (secondary shard connection for dual compositing). Register as
+        // observer so it receives WorldState broadcasts without a player entity.
+        if self.clients.values().all(|e| e.udp_addr.is_some()) {
+            // All clients already have UDP — this is a new observer connection.
+            if !self.observers.contains(&udp_addr) {
+                info!(%udp_addr, "registered UDP observer (dual-shard compositing)");
+                self.observers.push(udp_addr);
+            }
+        } else {
+            // There's an unmatched client waiting — store as pending for late matching.
+            if self.pending_udp.len() < 16 && !self.pending_udp.contains(&udp_addr) {
+                debug!(%udp_addr, "storing pending UDP address (no client registered yet)");
+                self.pending_udp.push(udp_addr);
+            }
         }
     }
 
-    /// Get all UDP addresses for broadcasting.
+    /// Get all UDP addresses for broadcasting (clients + observers).
     pub fn udp_addrs(&self) -> Vec<SocketAddr> {
-        self.clients.values().filter_map(|e| e.udp_addr).collect()
+        let mut addrs: Vec<SocketAddr> = self.clients.values()
+            .filter_map(|e| e.udp_addr).collect();
+        addrs.extend_from_slice(&self.observers);
+        addrs
+    }
+
+    /// Remove an observer UDP address (e.g., when the secondary connection closes).
+    pub fn remove_observer(&mut self, addr: &SocketAddr) {
+        self.observers.retain(|a| a != addr);
     }
 
     pub fn len(&self) -> usize {
