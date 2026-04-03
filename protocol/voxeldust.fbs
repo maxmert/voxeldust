@@ -60,6 +60,10 @@ table PlayerHandoff {
     ship_rotation: Quatd;
     /// System shard celestial time for time synchronization.
     game_time: float64;
+    /// For system→galaxy warp: target star index (0xFFFFFFFF = not set).
+    warp_target_star_index: uint32 = 4294967295;
+    /// For system→galaxy warp: velocity in galaxy units/s.
+    warp_velocity: Vec3d;
 }
 
 table HandoffAccepted {
@@ -142,6 +146,14 @@ table AutopilotCommand {
     autopilot_mode: uint8;
 }
 
+/// Warp autopilot command sent from ship shard to system shard.
+table WarpAutopilotCommand {
+    ship_id: uint64;
+    /// Target star index in the galaxy. 0xFFFFFFFF = disengage warp.
+    target_star_index: uint32;
+    galaxy_seed: uint64;
+}
+
 /// Ship position/state sent from system shard to planet shards within SOI.
 table ShipNearbyInfo {
     ship_id: uint64;
@@ -203,6 +215,7 @@ union ShardPayload {
     SystemSceneUpdate,
     AutopilotCommand,
     ShipNearbyInfo,
+    WarpAutopilotCommand,
 }
 
 /// Root type for all inter-shard QUIC messages.
@@ -322,13 +335,25 @@ table ShardRedirectMsg {
 
 /// Pre-connect notification: shard tells client to open a secondary connection.
 table ShardPreConnect {
-    shard_type: uint8;         // 0=Planet, 2=Ship
+    shard_type: uint8;         // 0=Planet, 1=System, 2=Ship, 3=Galaxy
     tcp_addr: string;
     udp_addr: string;
-    seed: uint64;              // planet_seed or system_seed
+    seed: uint64;              // planet_seed, system_seed, or galaxy_seed
     planet_index: uint32;
     reference_position: Vec3d; // system-space position
     reference_rotation: Quatd;
+}
+
+/// World state for galaxy shard → client (warp travel).
+table GalaxyWorldState {
+    tick: uint64;
+    ship_position: Vec3d;      // in galaxy units
+    ship_velocity: Vec3d;      // in galaxy units/s
+    ship_rotation: Quatd;
+    warp_phase: uint8;         // FlightPhase as u8
+    eta_seconds: double;
+    origin_star_index: uint32;
+    target_star_index: uint32;
 }
 
 table DamageEvent {
@@ -353,6 +378,7 @@ union ServerPayload {
     PlayerDestroyed,
     StarCatalog,
     ShardPreConnect,
+    GalaxyWorldState,
 }
 
 /// Root type for server → client messages.

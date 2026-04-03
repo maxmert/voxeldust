@@ -12,6 +12,13 @@ use crate::system::{
 
 pub const SHIP_MASS: f64 = 10_000.0;
 
+/// Warp drive acceleration in galaxy units per second squared.
+/// 0.5 GU/s² = 500,000 blocks/s². Gives ~3.3 min for a 200 GU trip.
+pub const WARP_ACCELERATION_GU: f64 = 0.5;
+
+/// Maximum warp cruise speed in galaxy units per second.
+pub const WARP_MAX_SPEED_GU: f64 = 50.0;
+
 /// Engine tier definition. Two categories: maneuver (no dampening, low g)
 /// and high-thrust (inertial dampener active, extreme acceleration).
 #[derive(Debug, Clone, Copy)]
@@ -137,6 +144,8 @@ pub enum AutopilotMode {
     TakeoffSequence,
     /// From orbit: escape burn + resume interplanetary travel.
     DepartureSequence,
+    /// Interstellar warp to another star system.
+    WarpTravel,
 }
 
 impl AutopilotMode {
@@ -147,6 +156,7 @@ impl AutopilotMode {
             2 => Self::LandingSequence,
             3 => Self::TakeoffSequence,
             4 => Self::DepartureSequence,
+            5 => Self::WarpTravel,
             _ => Self::DirectApproach,
         }
     }
@@ -159,6 +169,7 @@ impl AutopilotMode {
             Self::LandingSequence => 2,
             Self::TakeoffSequence => 3,
             Self::DepartureSequence => 4,
+            Self::WarpTravel => 5,
         }
     }
 }
@@ -754,6 +765,18 @@ pub enum FlightPhase {
     AscentBurn,
     /// Prograde burn to exceed escape velocity.
     EscapeBurn,
+
+    // -- Interstellar warp --
+    /// Aligning ship heading toward target star direction.
+    WarpAlign,
+    /// Accelerating toward system SOI boundary (still in system shard).
+    WarpAccelerate,
+    /// Cruising at warp speed in interstellar space (galaxy shard).
+    WarpCruise,
+    /// Decelerating toward destination star SOI (galaxy shard).
+    WarpDecelerate,
+    /// Entering destination system SOI.
+    WarpArrival,
 }
 
 /// Orbital elements computed from a ship's state vector relative to a planet.

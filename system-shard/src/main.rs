@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use glam::{DQuat, DVec3};
-use tracing::info;
+use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, ServerMsg, WorldStateData,
@@ -20,6 +20,7 @@ use voxeldust_core::system::{
     compute_soi_radius, check_atmosphere, SystemParams,
 };
 use voxeldust_core::autopilot::{self, FlightPhase, GuidanceCommand};
+use voxeldust_core::handoff;
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{ShardHarness, ShardHarnessConfig};
 
@@ -44,6 +45,12 @@ struct Args {
     healthz_port: u16,
     #[arg(long)]
     advertise_host: Option<String>,
+    /// Galaxy seed for interstellar warp coordinate transforms.
+    #[arg(long, default_value = "0")]
+    galaxy_seed: u64,
+    /// Star index within the galaxy.
+    #[arg(long, default_value = "0")]
+    star_index: u32,
 }
 
 #[derive(Clone)]
@@ -62,6 +69,10 @@ struct AutopilotState {
     braking_committed: bool,
     /// Target orbit altitude (meters above surface). 0 = default.
     target_orbit_altitude: f64,
+    /// For warp: target star index in the galaxy.
+    warp_target_star_index: u32,
+    /// For warp: direction toward target star (system-space, normalized).
+    warp_direction: DVec3,
 }
 
 #[derive(Clone)]
@@ -130,10 +141,18 @@ struct SystemState {
     provisioning_in_flight: std::collections::HashSet<u64>,
     /// Pending handoffs being relayed: session_token → source shard id.
     pending_handoffs: HashMap<SessionToken, ShardId>,
+    /// Galaxy context for warp departure coordinate transforms.
+    galaxy_seed: u64,
+    star_index: u32,
+    star_position_gu: DVec3,
+    /// Galaxy shard already provisioned for this galaxy.
+    provisioned_galaxy: Option<ShardId>,
+    /// Whether galaxy shard is currently being provisioned.
+    galaxy_provisioning_in_flight: bool,
 }
 
 impl SystemState {
-    fn new(system_seed: u64, shard_id: ShardId) -> Self {
+    fn new(system_seed: u64, shard_id: ShardId, galaxy_seed: u64, star_index: u32) -> Self {
         let system_params = SystemParams::from_seed(system_seed);
         // Compute initial planet positions at t=0 so ships spawned before
         // the first physics tick get placed near actual planets, not the star.
@@ -158,6 +177,18 @@ impl SystemState {
             provisioned_planets: HashMap::new(),
             provisioning_in_flight: std::collections::HashSet::new(),
             pending_handoffs: HashMap::new(),
+            galaxy_seed,
+            star_index,
+            star_position_gu: if galaxy_seed != 0 {
+                let galaxy_map = voxeldust_core::galaxy::GalaxyMap::generate(galaxy_seed);
+                galaxy_map.get_star(star_index)
+                    .map(|s| s.position)
+                    .unwrap_or(DVec3::ZERO)
+            } else {
+                DVec3::ZERO
+            },
+            provisioned_galaxy: None,
+            galaxy_provisioning_in_flight: false,
         }
     }
 
@@ -283,13 +314,15 @@ fn main() {
         advertise_host: args.advertise_host,
     };
 
-    info!(shard_id = args.shard_id, system_seed = args.seed, "system shard starting");
+    info!(shard_id = args.shard_id, system_seed = args.seed,
+          galaxy_seed = args.galaxy_seed, star_index = args.star_index,
+          "system shard starting");
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
         let mut harness = ShardHarness::new(config);
 
-        let state = Arc::new(Mutex::new(SystemState::new(args.seed, shard_id)));
+        let state = Arc::new(Mutex::new(SystemState::new(args.seed, shard_id, args.galaxy_seed, args.star_index)));
         // Immutable system params shared with physics (avoids cloning every tick).
         let sys_params_arc = Arc::new(SystemParams::from_seed(args.seed));
         let client_registry = harness.client_registry.clone();
@@ -336,12 +369,13 @@ fn main() {
 
                 let tcp_stream = conn.tcp_stream.clone();
                 let game_time = st.celestial_time;
+                let galaxy_seed_jr = st.galaxy_seed;
                 tokio::spawn(async move {
                     let jr = ServerMsg::JoinResponse(JoinResponseData {
                         seed: system_seed, planet_radius: 0, player_id: token.0,
                         spawn_position: spawn_pos, spawn_rotation: DQuat::IDENTITY,
                         spawn_forward: DVec3::NEG_Z, session_token: token,
-                        shard_type: 1, galaxy_seed: 0, system_seed,
+                        shard_type: 1, galaxy_seed: galaxy_seed_jr, system_seed,
                         game_time, reference_position: DVec3::ZERO, reference_rotation: DQuat::IDENTITY,
                     });
                     let mut stream = tcp_stream.lock().await;
@@ -429,11 +463,69 @@ fn main() {
                                         estimated_tof,
                                         braking_committed: false,
                                         target_orbit_altitude: default_orbit_alt,
+                                        warp_target_star_index: 0,
+                                        warp_direction: DVec3::ZERO,
                                     });
                                     info!(ship_id = cmd.ship_id, planet = planet_index,
                                         tier = cmd.speed_tier, mode = ?mode,
                                         eta_s = estimated_tof as u64,
                                         "autopilot engaged");
+                                }
+                            }
+                        }
+                    }
+                    ShardMsg::WarpAutopilotCommand(cmd) => {
+                        let mut st = state_quic.lock().unwrap();
+                        if cmd.target_star_index == 0xFFFFFFFF {
+                            // Disengage warp.
+                            if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
+                                if matches!(ship.autopilot.as_ref().map(|a| a.mode),
+                                            Some(autopilot::AutopilotMode::WarpTravel)) {
+                                    ship.autopilot = None;
+                                    ship.thrust = DVec3::ZERO;
+                                    info!(ship_id = cmd.ship_id, "warp autopilot disengaged");
+                                }
+                            }
+                        } else {
+                            // Engage warp toward target star.
+                            // Compute direction from star to target in galaxy coords,
+                            // then convert to a system-space direction.
+                            let galaxy_seed_local = st.galaxy_seed;
+                            let star_pos_gu = st.star_position_gu;
+
+                            if galaxy_seed_local == 0 {
+                                warn!(ship_id = cmd.ship_id, "warp command received but system shard has no galaxy context (galaxy_seed=0)");
+                            }
+                            if galaxy_seed_local != 0 {
+                                let galaxy_map = voxeldust_core::galaxy::GalaxyMap::generate(galaxy_seed_local);
+                                if let Some(target_star) = galaxy_map.get_star(cmd.target_star_index) {
+                                    // Direction in GU (same as system-space direction, just scaled).
+                                    let dir_gu = (target_star.position - star_pos_gu).normalize();
+
+                                    let tick = st.tick_count;
+                                    let physics_time = st.physics_time;
+                                    if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
+                                        ship.autopilot = Some(AutopilotState {
+                                            mode: autopilot::AutopilotMode::WarpTravel,
+                                            phase: FlightPhase::WarpAlign,
+                                            target_planet_index: 0,
+                                            thrust_tier: 4, // Emergency tier for max accel
+                                            intercept_pos: DVec3::ZERO,
+                                            last_solve_tick: tick,
+                                            engage_time: physics_time,
+                                            estimated_tof: 0.0,
+                                            braking_committed: false,
+                                            target_orbit_altitude: 0.0,
+                                            warp_target_star_index: cmd.target_star_index,
+                                            warp_direction: dir_gu,
+                                        });
+                                        info!(
+                                            ship_id = cmd.ship_id,
+                                            target_star = cmd.target_star_index,
+                                            dir = format!("({:.3},{:.3},{:.3})", dir_gu.x, dir_gu.y, dir_gu.z),
+                                            "warp autopilot engaged"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -864,15 +956,82 @@ fn main() {
                                 dampener_active: false,
                             }
                         }
+                        // Warp align: rotate toward target star, begin thrusting once roughly aligned.
+                        // Smooth transition: partial thrust proportional to alignment.
+                        FlightPhase::WarpAlign => {
+                            let warp_dir = ap.warp_direction;
+                            let ship_fwd = ship.rotation * DVec3::NEG_Z;
+                            let alignment = ship_fwd.dot(warp_dir);
+                            // Transition to full warp acceleration when well aligned.
+                            let phase = if alignment > 0.95 {
+                                FlightPhase::WarpAccelerate
+                            } else {
+                                FlightPhase::WarpAlign
+                            };
+                            // Apply partial thrust proportional to alignment (smooth ramp, not a jump).
+                            // Warp departure acceleration: 10x Emergency tier for dramatic departure.
+                            // System SOI ~100M blocks; at 25 Mm/s² → boundary in ~3s.
+                            let warp_departure_accel = 25_000_000.0; // 25 Mm/s²
+                            let thrust_fraction = (alignment.max(0.0)).powi(4);
+                            GuidanceCommand {
+                                thrust_direction: warp_dir,
+                                thrust_magnitude: warp_departure_accel * ship.physical_properties.mass_kg * thrust_fraction,
+                                phase,
+                                completed: false,
+                                eta_real_seconds: 0.0,
+                                felt_g: 1.0,
+                                dampener_active: true,
+                            }
+                        }
+                        // Warp accelerate: full warp-drive acceleration toward system boundary.
+                        // 25 Mm/s² (10x Emergency tier, inertially dampened).
+                        // Visually dramatic: the star system recedes rapidly behind.
+                        FlightPhase::WarpAccelerate => {
+                            let warp_dir = ap.warp_direction;
+                            let warp_departure_accel = 25_000_000.0; // 25 Mm/s²
+                            GuidanceCommand {
+                                thrust_direction: warp_dir,
+                                thrust_magnitude: warp_departure_accel * ship.physical_properties.mass_kg,
+                                phase: FlightPhase::WarpAccelerate,
+                                completed: false,
+                                eta_real_seconds: 0.0,
+                                felt_g: 1.0,
+                                dampener_active: true,
+                            }
+                        }
+                        // Galaxy-shard-owned phases — should not be active on system shard.
+                        FlightPhase::WarpCruise | FlightPhase::WarpDecelerate
+                        | FlightPhase::WarpArrival => {
+                            GuidanceCommand {
+                                thrust_direction: DVec3::NEG_Z,
+                                thrust_magnitude: 0.0,
+                                phase: ap.phase,
+                                completed: true,
+                                eta_real_seconds: 0.0,
+                                felt_g: 0.0,
+                                dampener_active: false,
+                            }
+                        }
                     };
 
-                    // Check phase transitions (deterministic, shared with client).
-                    let new_phase = autopilot::check_phase_transition(
-                        ap.phase, ap.mode,
-                        ship.position, ship.velocity,
-                        planet_pos, planet_vel, planet, &sys.star,
-                        soi, ap.target_orbit_altitude, &ship.physical_properties,
-                    );
+                    // Check phase transitions.
+                    // For warp phases, the guidance command itself contains the correct
+                    // next phase (e.g. WarpAlign → WarpAccelerate when aligned).
+                    // For non-warp phases, use the deterministic check_phase_transition.
+                    let new_phase = if matches!(ap.phase,
+                        FlightPhase::WarpAlign | FlightPhase::WarpAccelerate
+                        | FlightPhase::WarpCruise | FlightPhase::WarpDecelerate
+                        | FlightPhase::WarpArrival)
+                    {
+                        guidance.phase
+                    } else {
+                        autopilot::check_phase_transition(
+                            ap.phase, ap.mode,
+                            ship.position, ship.velocity,
+                            planet_pos, planet_vel, planet, &sys.star,
+                            soi, ap.target_orbit_altitude, &ship.physical_properties,
+                        )
+                    };
 
                     Some((id, guidance, new_phase))
                 }).collect();
@@ -923,7 +1082,10 @@ fn main() {
                 let ramp = autopilot::thrust_ramp_factor(elapsed, tof, guidance.phase);
 
                 // Rotation: PD controller to align ship forward (-Z) with thrust direction.
-                if guidance.thrust_magnitude > 0.0 {
+                // Always active when autopilot provides a direction (including WarpAlign with zero thrust).
+                let needs_rotation = guidance.thrust_magnitude > 0.0
+                    || matches!(guidance.phase, FlightPhase::WarpAlign);
+                if needs_rotation {
                     let desired_fwd = thrust_dir;
                     let current_fwd = ship.rotation * DVec3::NEG_Z;
                     let cross = current_fwd.cross(desired_fwd);
@@ -941,11 +1103,16 @@ fn main() {
                     } else {
                         ship.torque = DVec3::ZERO;
                     }
+                }
 
-                    // Thrust: main drive fires along ship's -Z axis.
+                // Thrust: main drive fires along ship's -Z axis.
+                if guidance.thrust_magnitude > 0.0 {
                     let dot_align = ship.rotation.mul_vec3(DVec3::NEG_Z).dot(thrust_dir).clamp(-1.0, 1.0);
                     let thrust_scale = dot_align.max(0.0) * ramp;
                     ship.thrust = DVec3::new(0.0, 0.0, -guidance.thrust_magnitude * thrust_scale);
+                } else if needs_rotation {
+                    // Rotation-only phase (WarpAlign): zero thrust but keep torque from above.
+                    ship.thrust = DVec3::ZERO;
                 } else {
                     ship.thrust = DVec3::ZERO;
                     ship.torque = DVec3::ZERO;
@@ -1390,6 +1557,170 @@ fn main() {
                     }
                 }
                 st.in_soi.remove(&ship_id);
+            }
+        });
+
+        // System 4b: Warp boundary detection — handoff ships to galaxy shard.
+        let state_warp = state.clone();
+        let orch_url_warp = orchestrator_url.clone();
+        let http_warp = http_client.clone();
+        let quic_send_warp = quic_send_tx.clone();
+        let peer_reg_warp = peer_registry.clone();
+        let client_reg_warp = client_registry.clone();
+        harness.add_system("warp_boundary", move || {
+            let mut st = state_warp.lock().unwrap();
+            if st.tick_count % 10 != 0 { return; } // Check every 0.5s.
+            if st.galaxy_seed == 0 { return; } // No galaxy context.
+
+            // Compute system SOI boundary in blocks.
+            let galaxy_map = voxeldust_core::galaxy::GalaxyMap::generate(st.galaxy_seed);
+            let star_info = match galaxy_map.get_star(st.star_index) {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            let soi_blocks = voxeldust_core::galaxy::system_soi_radius(&star_info)
+                * voxeldust_core::galaxy::GALAXY_UNIT_IN_BLOCKS;
+            let preconnect_boundary = soi_blocks * 0.7;
+
+            // Collect departing ships.
+            struct WarpDeparture {
+                ship_id: u64,
+                session_token: SessionToken,
+                player_name: String,
+                position: DVec3,
+                velocity: DVec3,
+                rotation: DQuat,
+                target_star_index: u32,
+            }
+            let mut departures = Vec::new();
+            let mut preconnect_ships = Vec::new();
+
+            for ship in st.ships.values() {
+                let ap = match &ship.autopilot {
+                    Some(a) if a.mode == autopilot::AutopilotMode::WarpTravel => a,
+                    _ => continue,
+                };
+                if ap.phase != FlightPhase::WarpAccelerate { continue; }
+
+                let dist_from_star = ship.position.length();
+
+                // Send ShardPreConnect at 70% of SOI.
+                if dist_from_star > preconnect_boundary {
+                    preconnect_ships.push(ship.ship_id);
+                }
+
+                // Handoff at SOI boundary.
+                if dist_from_star > soi_blocks {
+                    departures.push(WarpDeparture {
+                        ship_id: ship.ship_id,
+                        session_token: SessionToken(ship.ship_id), // session = ship_id for system shard
+                        player_name: format!("ship-{}", ship.ship_id),
+                        position: ship.position,
+                        velocity: ship.velocity,
+                        rotation: ship.rotation,
+                        target_star_index: ap.warp_target_star_index,
+                    });
+                }
+            }
+
+            // PreConnect: provision galaxy shard and send ShardPreConnect.
+            if !preconnect_ships.is_empty() && st.provisioned_galaxy.is_none()
+                && !st.galaxy_provisioning_in_flight
+            {
+                st.galaxy_provisioning_in_flight = true;
+                let url = format!("{}/galaxy/{}", orch_url_warp, st.galaxy_seed);
+                let client = http_warp.clone();
+                let gs = st.galaxy_seed;
+                // We just need to trigger provisioning; the actual shard info comes from peer registry.
+                tokio::spawn(async move {
+                    match client.get(&url).send().await {
+                        Ok(resp) => {
+                            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                if let Some(id) = body.get("info").and_then(|i| i["id"].as_u64()) {
+                                    info!(galaxy_seed = gs, shard_id = id, "galaxy shard provisioned");
+                                }
+                            }
+                        }
+                        Err(e) => warn!(%e, "failed to provision galaxy shard"),
+                    }
+                });
+            }
+
+            // Process handoffs.
+            let shard_id = st.shard_id;
+            let galaxy_seed_local = st.galaxy_seed;
+            let star_index = st.star_index;
+            let star_pos_gu = st.star_position_gu;
+            let celestial_time = st.celestial_time;
+            let tick_count = st.tick_count;
+
+            for dep in departures {
+                // Convert position/velocity to galaxy units.
+                let pos_gu = voxeldust_core::galaxy::system_to_galaxy(star_pos_gu, dep.position);
+                let vel_gu = dep.velocity / voxeldust_core::galaxy::GALAXY_UNIT_IN_BLOCKS;
+
+                let handoff = handoff::PlayerHandoff {
+                    session_token: dep.session_token,
+                    player_name: dep.player_name.clone(),
+                    position: dep.position, // System-space position (galaxy shard will use galaxy_context to convert).
+                    velocity: dep.velocity,
+                    rotation: dep.rotation,
+                    forward: dep.rotation * DVec3::NEG_Z,
+                    fly_mode: false,
+                    speed_tier: 0,
+                    grounded: false,
+                    health: 100.0,
+                    shield: 100.0,
+                    source_shard: shard_id,
+                    source_tick: tick_count,
+                    target_star_index: None,
+                    galaxy_context: Some(handoff::GalaxyHandoffContext {
+                        galaxy_seed: galaxy_seed_local,
+                        star_index,
+                        star_position: star_pos_gu,
+                    }),
+                    target_planet_seed: None,
+                    target_planet_index: None,
+                    target_ship_id: None,
+                    target_ship_shard_id: None,
+                    ship_system_position: None,
+                    ship_rotation: None,
+                    game_time: celestial_time,
+                    warp_target_star_index: Some(dep.target_star_index),
+                    warp_velocity_gu: Some(vel_gu),
+                };
+
+                // Find galaxy shard in peer registry.
+                if let Ok(reg) = peer_reg_warp.try_read() {
+                    let galaxy_shards = reg.find_by_type(ShardType::Galaxy);
+                    if let Some(gs) = galaxy_shards.first() {
+                        let galaxy_shard_id = gs.id;
+                        let quic_addr = gs.endpoint.quic_addr;
+
+                        // Send handoff via QUIC.
+                        let _ = quic_send_warp.try_send((
+                            galaxy_shard_id, quic_addr,
+                            ShardMsg::PlayerHandoff(handoff),
+                        ));
+
+                        // Send ShardRedirect to client via the ship shard (not direct —
+                        // the player is connected to the ship shard, not the system shard).
+                        // For now, the ship shard will detect the warp departure via ShipPositionUpdate
+                        // stopping and handle the redirect. TODO: more direct approach.
+
+                        info!(
+                            ship_id = dep.ship_id,
+                            target_star = dep.target_star_index,
+                            pos_gu = format!("({:.2},{:.2},{:.2})", pos_gu.x, pos_gu.y, pos_gu.z),
+                            "warp departure — handoff to galaxy shard"
+                        );
+                    } else {
+                        warn!(ship_id = dep.ship_id, "no galaxy shard available for warp handoff");
+                    }
+                }
+
+                // Remove ship from system state.
+                st.ships.remove(&dep.ship_id);
             }
         });
 

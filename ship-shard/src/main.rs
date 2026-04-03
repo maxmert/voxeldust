@@ -46,6 +46,8 @@ struct Args {
     seed: u64,
     #[arg(long, default_value = "0")]
     system_seed: u64,
+    #[arg(long, default_value = "0")]
+    galaxy_seed: u64,
 }
 
 const SHIP_WIDTH: f32 = 4.0;
@@ -138,6 +140,7 @@ struct ShipInteriorState {
     last_scene_update_tick: u64,
     /// Cached system params for Keplerian planet extrapolation during QUIC stalls.
     cached_system_params: Option<voxeldust_core::system::SystemParams>,
+    galaxy_seed: u64,
 
     // Pilot thrust (accumulated from input, sent each tick, then reset)
     pilot_thrust: DVec3,
@@ -156,6 +159,10 @@ struct ShipInteriorState {
     // Autopilot
     autopilot_target_body_id: Option<u32>,
     pending_autopilot_cmd: Option<(u32, u8)>, // (target_body_id, speed_tier)
+
+    // Warp
+    warp_target_star_index: Option<u32>,
+    pending_warp_cmd: Option<u32>, // target_star_index (u32::MAX = disengage)
 
     // Connected player (for handoff)
     connected_session: Option<SessionToken>,
@@ -179,7 +186,7 @@ struct ShipInteriorState {
 }
 
 impl ShipInteriorState {
-    fn new(shard_id: ShardId, ship_id: u64, host_shard_id: Option<ShardId>, system_seed: u64) -> Self {
+    fn new(shard_id: ShardId, ship_id: u64, host_shard_id: Option<ShardId>, system_seed: u64, galaxy_seed: u64) -> Self {
         let mut rigid_body_set = RigidBodySet::new();
         let mut collider_set = ColliderSet::new();
 
@@ -271,6 +278,7 @@ impl ShipInteriorState {
             game_time: 0.0,
             last_scene_update_tick: 0,
             cached_system_params: None,
+            galaxy_seed,
             pilot_thrust: DVec3::ZERO,
             pilot_torque: DVec3::ZERO,
             shard_id, ship_id, host_shard_id,
@@ -279,6 +287,8 @@ impl ShipInteriorState {
             prev_action: 0,
             autopilot_target_body_id: None,
             pending_autopilot_cmd: None,
+            warp_target_star_index: None,
+            pending_warp_cmd: None,
             connected_session: None,
             connected_player_name: None,
             handoff_pending: false,
@@ -433,7 +443,7 @@ fn main() {
         let mut harness = ShardHarness::new(config);
 
         let state = Arc::new(Mutex::new(ShipInteriorState::new(
-            ShardId(args.shard_id), ship_id, host_shard_id, args.system_seed,
+            ShardId(args.shard_id), ship_id, host_shard_id, args.system_seed, args.galaxy_seed,
         )));
         let client_registry = harness.client_registry.clone();
 
@@ -477,6 +487,7 @@ fn main() {
                 let ship_rot = st.ship_rotation;
                 let game_time = st.game_time;
                 let ship_id = st.ship_id;
+                let galaxy_seed_jr = st.galaxy_seed;
 
                 tokio::spawn(async move {
                     let jr = ServerMsg::JoinResponse(JoinResponseData {
@@ -488,7 +499,7 @@ fn main() {
                         spawn_forward: DVec3::NEG_Z,
                         session_token: token,
                         shard_type: 2, // Ship
-                        galaxy_seed: 0,
+                        galaxy_seed: galaxy_seed_jr,
                         system_seed: system_seed_for_jr,
                         game_time,
                         reference_position: ship_pos,
@@ -539,6 +550,47 @@ fn main() {
                                 st.pending_autopilot_cmd = Some((body_id, input.speed_tier));
                                 info!(body_id, "autopilot engage requested");
                             }
+                        }
+                    }
+
+                    // Warp targeting (G key = action 6): select/cycle target star.
+                    // The client handles visual targeting; the ship shard mirrors
+                    // the selection so it knows which star to target on confirmation.
+                    let warp_pressed = input.action == 6 && st.prev_action != 6;
+                    if warp_pressed {
+                        let ship_fwd = st.ship_rotation * DVec3::NEG_Z;
+                        if let Some(ref sys) = st.cached_system_params {
+                            let galaxy_seed = st.galaxy_seed;
+                            if galaxy_seed != 0 {
+                                let galaxy_map = voxeldust_core::galaxy::GalaxyMap::generate(galaxy_seed);
+                                let current_star = galaxy_map.stars.iter()
+                                    .find(|s| s.system_seed == sys.system_seed);
+                                if let Some(cur) = current_star {
+                                    let cur_pos = cur.position;
+                                    let mut best: Option<(u32, f64)> = None;
+                                    for star in &galaxy_map.stars {
+                                        if star.index == cur.index { continue; }
+                                        let dir = (star.position - cur_pos).normalize();
+                                        let alignment = ship_fwd.dot(dir);
+                                        if alignment > best.map(|b| b.1).unwrap_or(0.3) {
+                                            best = Some((star.index, alignment));
+                                        }
+                                    }
+                                    if let Some((target_index, _)) = best {
+                                        st.warp_target_star_index = Some(target_index);
+                                        info!(target_star = target_index, "warp target selected");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Warp confirm (Enter = action 7): engage warp to targeted star.
+                    let warp_confirm = input.action == 7 && st.prev_action != 7;
+                    if warp_confirm {
+                        if let Some(target) = st.warp_target_star_index {
+                            st.pending_warp_cmd = Some(target);
+                            info!(target_star = target, "warp engage confirmed");
                         }
                     }
 
@@ -964,6 +1016,8 @@ fn main() {
                             ship_system_position: Some(st.ship_position),
                             ship_rotation: Some(st.ship_rotation),
                             game_time: st.game_time,
+                            warp_target_star_index: None,
+                            warp_velocity_gu: None,
                         };
                         st.handoff_pending = true;
                         st.pending_handoff_msg = Some(ShardMsg::PlayerHandoff(h));
@@ -998,6 +1052,18 @@ fn main() {
                                 autopilot_mode: 0,
                             });
                             let _ = quic_send_tx.try_send((host_id, addr, ap_msg));
+                        }
+
+                        // Always send pending warp command.
+                        if let Some(target_star) = st.pending_warp_cmd.take() {
+                            let warp_msg = ShardMsg::WarpAutopilotCommand(
+                                voxeldust_core::shard_message::WarpAutopilotCommandData {
+                                    ship_id: st.ship_id,
+                                    target_star_index: target_star,
+                                    galaxy_seed: st.galaxy_seed,
+                                },
+                            );
+                            let _ = quic_send_tx.try_send((host_id, addr, warp_msg));
                         }
 
                         // Thrust/torque only when piloting.

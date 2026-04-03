@@ -186,9 +186,19 @@ async fn find_planet_shard(
     }
 }
 
+/// Query params for system shard provisioning (galaxy context for warp).
+#[derive(serde::Deserialize)]
+struct SystemShardQuery {
+    #[serde(default)]
+    galaxy_seed: u64,
+    #[serde(default)]
+    star_index: u32,
+}
+
 async fn find_system_shard(
     State(state): State<Arc<AppState>>,
     Path(seed): Path<u64>,
+    axum::extract::Query(query): axum::extract::Query<SystemShardQuery>,
 ) -> Result<Json<ShardResponse>, StatusCode> {
     // Check if a Ready shard already exists for this system.
     {
@@ -204,13 +214,21 @@ async fn find_system_shard(
     }
 
     // No Ready shard — provision one.
-    info!(seed, "no system shard found, provisioning on demand");
+    info!(seed, galaxy_seed = query.galaxy_seed, star_index = query.star_index,
+          "no system shard found, provisioning on demand");
+    let mut args = vec![
+        "--seed".to_string(),
+        seed.to_string(),
+    ];
+    if query.galaxy_seed > 0 {
+        args.push("--galaxy-seed".to_string());
+        args.push(query.galaxy_seed.to_string());
+        args.push("--star-index".to_string());
+        args.push(query.star_index.to_string());
+    }
     let launch_config = LaunchConfig {
         binary: "system-shard".to_string(),
-        args: vec![
-            "--seed".to_string(),
-            seed.to_string(),
-        ],
+        args,
         shard_type: ShardType::System,
     };
 
@@ -252,10 +270,8 @@ async fn find_galaxy_shard(
     // No shard — provision one.
     info!(seed, "no galaxy shard found, provisioning on demand");
     let launch_config = LaunchConfig {
-        binary: "stub-shard".to_string(),
+        binary: "galaxy-shard".to_string(),
         args: vec![
-            "--shard-type".to_string(),
-            "galaxy".to_string(),
             "--seed".to_string(),
             seed.to_string(),
         ],
@@ -306,6 +322,12 @@ struct ProvisionShipRequest {
     /// System seed for deterministic system generation (passed to JoinResponse).
     #[serde(default)]
     system_seed: u64,
+    /// Galaxy seed for star field rendering and warp travel.
+    #[serde(default)]
+    galaxy_seed: u64,
+    /// Star index within the galaxy.
+    #[serde(default)]
+    star_index: u32,
 }
 
 /// Provision a new ship shard on demand.
@@ -339,6 +361,10 @@ async fn provision_ship_shard(
     if req.system_seed > 0 {
         args.push("--system-seed".to_string());
         args.push(req.system_seed.to_string());
+    }
+    if req.galaxy_seed > 0 {
+        args.push("--galaxy-seed".to_string());
+        args.push(req.galaxy_seed.to_string());
     }
     let launch_config = LaunchConfig {
         binary: "ship-shard".to_string(),

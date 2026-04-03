@@ -32,9 +32,14 @@ impl Router {
         &self,
         system_seed: u64,
         player_name: &str,
+        galaxy_seed: u64,
+        star_index: u32,
     ) -> Result<ShardInfo, Box<dyn std::error::Error>> {
-        // Step 1: Ensure system shard exists.
-        let system_url = format!("{}/system/{}", self.orchestrator_url, system_seed);
+        // Step 1: Ensure system shard exists (pass galaxy context for warp support).
+        let system_url = format!(
+            "{}/system/{}?galaxy_seed={}&star_index={}",
+            self.orchestrator_url, system_seed, galaxy_seed, star_index,
+        );
         let resp = self.client.get(&system_url).send().await?;
 
         let system_shard: ShardInfo = if resp.status().is_success() {
@@ -69,6 +74,8 @@ impl Router {
                 "ship_id": ship_id,
                 "host_shard_id": system_shard.id.0,
                 "system_seed": system_seed,
+                "galaxy_seed": galaxy_seed,
+                "star_index": star_index,
             }))
             .send()
             .await?;

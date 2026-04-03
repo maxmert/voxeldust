@@ -135,7 +135,7 @@ impl KubernetesProvisioner {
                         voxeldust_core::shard_types::ShardType::System => "voxeldust-system-shard:latest",
                         voxeldust_core::shard_types::ShardType::Planet => "voxeldust-planet-shard:latest",
                         voxeldust_core::shard_types::ShardType::Ship => "voxeldust-ship-shard:latest",
-                        _ => &self.config.shard_image, // galaxy, etc. fall back to stub
+                        voxeldust_core::shard_types::ShardType::Galaxy => "voxeldust-galaxy-shard:latest",
                     },
                     "imagePullPolicy": "Never",
                     "args": args,

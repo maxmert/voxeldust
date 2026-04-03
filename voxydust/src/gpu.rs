@@ -7,6 +7,7 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::mesh::IcoSphere;
+use crate::stars::{StarInstance, StarSceneUniforms, MAX_STAR_INSTANCES};
 
 pub const MAX_OBJECTS: usize = 2048;
 
@@ -124,6 +125,14 @@ pub struct GpuState {
     pub egui_ctx: egui::Context,
     pub egui_winit: egui_winit::State,
     pub egui_renderer: egui_wgpu::Renderer,
+
+    // Star field rendering.
+    pub star_pipeline: wgpu::RenderPipeline,
+    pub star_quad_vertex_buf: wgpu::Buffer,
+    pub star_quad_index_buf: wgpu::Buffer,
+    pub star_instance_buf: wgpu::Buffer,
+    pub star_scene_uniform_buf: wgpu::Buffer,
+    pub star_bind_group: wgpu::BindGroup,
 }
 
 /// Initialize GPU state: adapter, device, surface, pipelines, buffers, egui.
@@ -425,6 +434,152 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         usage: wgpu::BufferUsages::INDEX,
     });
 
+    // ---- Star field pipeline ----
+    let star_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("star_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("stars.wgsl").into()),
+    });
+
+    let star_scene_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("star_scene_uniforms"),
+        size: std::mem::size_of::<StarSceneUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let star_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("star_bind_group_layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<StarSceneUniforms>() as u64),
+            },
+            count: None,
+        }],
+    });
+
+    let star_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("star_bind_group"),
+        layout: &star_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: star_scene_uniform_buf.as_entire_binding(),
+        }],
+    });
+
+    let star_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("star_pipeline_layout"),
+        bind_group_layouts: &[&star_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let star_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("star_pipeline"),
+        layout: Some(&star_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &star_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[
+                // Per-vertex: quad corner position.
+                wgpu::VertexBufferLayout {
+                    array_stride: 8, // [f32; 2]
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                },
+                // Per-instance: star position + color.
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<StarInstance>() as u64, // 32 bytes
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 0,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                    ],
+                },
+            ],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &star_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None, // billboards face camera
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: depth_format,
+            depth_write_enabled: false, // stars don't write depth
+            depth_compare: wgpu::CompareFunction::Always, // always draw (behind everything)
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    // Star quad: 4 vertices for a unit billboard.
+    let star_quad_verts: [[f32; 2]; 4] = [
+        [-1.0, -1.0],
+        [ 1.0, -1.0],
+        [ 1.0,  1.0],
+        [-1.0,  1.0],
+    ];
+    let star_quad_idxs: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+    let star_quad_vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("star_quad_vb"),
+        contents: bytemuck::cast_slice(&star_quad_verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let star_quad_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("star_quad_ib"),
+        contents: bytemuck::cast_slice(&star_quad_idxs),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    // Pre-allocated instance buffer for up to MAX_STAR_INSTANCES stars.
+    let star_instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("star_instances"),
+        size: (std::mem::size_of::<StarInstance>() * MAX_STAR_INSTANCES) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     // egui.
     let egui_ctx = egui::Context::default();
     let egui_winit = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None);
@@ -440,6 +595,8 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         scene_lighting_buf, scene_bind_group,
         shadow_texture_view, shadow_bind_group,
         egui_ctx, egui_winit, egui_renderer,
+        star_pipeline, star_quad_vertex_buf, star_quad_index_buf,
+        star_instance_buf, star_scene_uniform_buf, star_bind_group,
     }
 }
 

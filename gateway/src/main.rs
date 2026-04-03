@@ -52,9 +52,10 @@ async fn run(config: GatewayConfig) {
                 // Derive the default system seed from universe hierarchy.
                 let galaxy_seed = derive_galaxy_seed(config.universe_seed, config.default_galaxy_index);
                 let default_system_seed = derive_system_seed(galaxy_seed, config.default_star_index);
+                let star_index = config.default_star_index;
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_client(stream, peer_addr, &router, &session_store, default_system_seed)
+                        handle_client(stream, peer_addr, &router, &session_store, default_system_seed, galaxy_seed, star_index)
                             .await
                     {
                         warn!(%peer_addr, %e, "client handling failed");
@@ -74,6 +75,8 @@ async fn handle_client(
     router: &ShardRouter,
     session_store: &SessionStore,
     default_system_seed: u64,
+    galaxy_seed: u64,
+    star_index: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Read length-prefixed ClientMessage.
     let mut len_buf = [0u8; 4];
@@ -119,7 +122,7 @@ async fn handle_client(
     }
 
     // Provision a ship shard for this player (ensures system shard exists too).
-    let shard_info = router.find_shard_for_player(default_system_seed, &player_name).await?;
+    let shard_info = router.find_shard_for_player(default_system_seed, &player_name, galaxy_seed, star_index).await?;
 
     // Generate session token.
     let session_token = SessionToken(rand_u64());

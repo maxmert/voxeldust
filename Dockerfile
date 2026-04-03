@@ -20,6 +20,7 @@ COPY planet-shard/ planet-shard/
 COPY e2e-tests/ e2e-tests/
 COPY protocol/ protocol/
 # voxydust: copy Cargo.toml + stub main so workspace resolves, but don't build it
+COPY galaxy-shard/ galaxy-shard/
 COPY voxydust/Cargo.toml voxydust/Cargo.toml
 RUN mkdir -p voxydust/src && echo "fn main() {}" > voxydust/src/main.rs
 
@@ -30,7 +31,8 @@ RUN cargo build --release \
     -p stub-shard \
     -p system-shard \
     -p ship-shard \
-    -p planet-shard
+    -p planet-shard \
+    -p galaxy-shard
 
 # ---- Orchestrator ----
 FROM debian:bookworm-slim AS orchestrator
@@ -67,3 +69,9 @@ FROM debian:bookworm-slim AS planet-shard
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/planet-shard /usr/local/bin/
 ENTRYPOINT ["planet-shard"]
+
+# ---- Galaxy Shard ----
+FROM debian:bookworm-slim AS galaxy-shard
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/galaxy-shard /usr/local/bin/
+ENTRYPOINT ["galaxy-shard"]

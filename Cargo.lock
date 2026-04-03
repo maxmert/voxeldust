@@ -1717,6 +1717,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-shard"
+version = "0.1.0"
+dependencies = [
+ "clap 4.6.0",
+ "glam 0.29.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "voxeldust-core",
+ "voxeldust-shard-common",
+]
+
+[[package]]
 name = "gateway"
 version = "0.1.0"
 dependencies = [

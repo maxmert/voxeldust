@@ -23,6 +23,7 @@ pub enum NetEvent {
         reference_rotation: DQuat,
         game_time: f64,
         system_seed: u64,
+        galaxy_seed: u64,
     },
     WorldState(WorldStateData),
     /// A secondary shard has been pre-connected for rendering.
@@ -96,6 +97,7 @@ pub async fn run_network(
             reference_rotation: jr.reference_rotation,
             game_time: jr.game_time,
             system_seed: jr.system_seed,
+            galaxy_seed: jr.galaxy_seed,
         });
 
         // Set up UDP for this shard.

@@ -25,6 +25,7 @@ pub enum ServerMsg {
     PlayerDestroyed(PlayerDestroyedData),
     StarCatalog(StarCatalogData),
     ShardPreConnect(handoff::ShardPreConnect),
+    GalaxyWorldState(GalaxyWorldStateData),
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +58,19 @@ pub struct StarCatalogEntryData {
     pub system_seed: u64,
     pub star_class: u8,
     pub luminosity: f32,
+}
+
+/// Galaxy shard world state sent to client during warp travel.
+#[derive(Debug, Clone)]
+pub struct GalaxyWorldStateData {
+    pub tick: u64,
+    pub ship_position: DVec3,   // in galaxy units
+    pub ship_velocity: DVec3,   // in galaxy units/s
+    pub ship_rotation: DQuat,
+    pub warp_phase: u8,         // FlightPhase as u8
+    pub eta_seconds: f64,
+    pub origin_star_index: u32,
+    pub target_star_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -502,6 +516,26 @@ impl ServerMsg {
                 });
                 builder.finish(msg, None);
             }
+            ServerMsg::GalaxyWorldState(data) => {
+                let pos = to_fb_vec3d(&data.ship_position);
+                let vel = to_fb_vec3d(&data.ship_velocity);
+                let rot = to_fb_quatd(&data.ship_rotation);
+                let gws = fb::GalaxyWorldState::create(&mut builder, &fb::GalaxyWorldStateArgs {
+                    tick: data.tick,
+                    ship_position: Some(&pos),
+                    ship_velocity: Some(&vel),
+                    ship_rotation: Some(&rot),
+                    warp_phase: data.warp_phase,
+                    eta_seconds: data.eta_seconds,
+                    origin_star_index: data.origin_star_index,
+                    target_star_index: data.target_star_index,
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::GalaxyWorldState,
+                    payload: Some(gws.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -683,6 +717,26 @@ impl ServerMsg {
                     planet_index: pc.planet_index(),
                     reference_position: from_fb_vec3d(ref_pos),
                     reference_rotation: from_fb_quatd(ref_rot),
+                }))
+            }
+            fb::ServerPayload::GalaxyWorldState => {
+                let gws = msg.payload_as_galaxy_world_state()
+                    .ok_or(MessageError::MissingField("GalaxyWorldState payload"))?;
+                let pos = gws.ship_position()
+                    .ok_or(MessageError::MissingField("ship_position"))?;
+                let vel = gws.ship_velocity()
+                    .ok_or(MessageError::MissingField("ship_velocity"))?;
+                let rot = gws.ship_rotation()
+                    .ok_or(MessageError::MissingField("ship_rotation"))?;
+                Ok(ServerMsg::GalaxyWorldState(GalaxyWorldStateData {
+                    tick: gws.tick(),
+                    ship_position: from_fb_vec3d(pos),
+                    ship_velocity: from_fb_vec3d(vel),
+                    ship_rotation: from_fb_quatd(rot),
+                    warp_phase: gws.warp_phase(),
+                    eta_seconds: gws.eta_seconds(),
+                    origin_star_index: gws.origin_star_index(),
+                    target_star_index: gws.target_star_index(),
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),

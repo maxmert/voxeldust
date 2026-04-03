@@ -21,6 +21,7 @@ pub enum ShardMsg {
     SystemSceneUpdate(SystemSceneUpdateData),
     AutopilotCommand(AutopilotCommandData),
     ShipNearbyInfo(ShipNearbyInfoData),
+    WarpAutopilotCommand(WarpAutopilotCommandData),
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +115,15 @@ pub struct ShipNearbyInfoData {
     pub game_time: f64,
 }
 
+/// Warp autopilot command sent from ship shard to system shard.
+#[derive(Debug, Clone)]
+pub struct WarpAutopilotCommandData {
+    pub ship_id: u64,
+    /// Target star index in the galaxy. `u32::MAX` = disengage warp.
+    pub target_star_index: u32,
+    pub galaxy_seed: u64,
+}
+
 /// Block edits affecting chunks on adjacent shard boundaries.
 #[derive(Debug, Clone)]
 pub struct CrossShardBlockEdits {
@@ -179,6 +189,7 @@ impl ShardMsg {
                 // Build optional ship position/rotation for ship→planet handoffs.
                 let ship_sys_pos = h.ship_system_position.as_ref().map(|p| to_fb_vec3d(p));
                 let ship_rot = h.ship_rotation.as_ref().map(|r| to_fb_quatd(r));
+                let warp_vel = h.warp_velocity_gu.as_ref().map(|v| to_fb_vec3d(v));
 
                 let handoff = fb::PlayerHandoff::create(
                     &mut builder,
@@ -205,6 +216,8 @@ impl ShardMsg {
                         ship_system_position: ship_sys_pos.as_ref(),
                         ship_rotation: ship_rot.as_ref(),
                         game_time: h.game_time,
+                        warp_target_star_index: h.warp_target_star_index.unwrap_or(0xFFFFFFFF),
+                        warp_velocity: warp_vel.as_ref(),
                     },
                 );
 
@@ -474,6 +487,25 @@ impl ShardMsg {
                 );
                 builder.finish(msg, None);
             }
+
+            ShardMsg::WarpAutopilotCommand(w) => {
+                let cmd = fb::WarpAutopilotCommand::create(
+                    &mut builder,
+                    &fb::WarpAutopilotCommandArgs {
+                        ship_id: w.ship_id,
+                        target_star_index: w.target_star_index,
+                        galaxy_seed: w.galaxy_seed,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::WarpAutopilotCommand,
+                        payload: Some(cmd.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -551,6 +583,11 @@ impl ShardMsg {
                     ship_system_position: h.ship_system_position().map(|p| from_fb_vec3d(p)),
                     ship_rotation: h.ship_rotation().map(|r| from_fb_quatd(r)),
                     game_time: h.game_time(),
+                    warp_target_star_index: {
+                        let idx = h.warp_target_star_index();
+                        if idx == 0xFFFFFFFF { None } else { Some(idx) }
+                    },
+                    warp_velocity_gu: h.warp_velocity().map(|v| from_fb_vec3d(v)),
                 }))
             }
 
@@ -747,6 +784,18 @@ impl ShardMsg {
                 }))
             }
 
+            fb::ShardPayload::WarpAutopilotCommand => {
+                let w = msg
+                    .payload_as_warp_autopilot_command()
+                    .ok_or(MessageError::MissingField("WarpAutopilotCommand payload"))?;
+
+                Ok(ShardMsg::WarpAutopilotCommand(WarpAutopilotCommandData {
+                    ship_id: w.ship_id(),
+                    target_star_index: w.target_star_index(),
+                    galaxy_seed: w.galaxy_seed(),
+                }))
+            }
+
             fb::ShardPayload::NONE => {
                 Err(MessageError::UnknownPayload(0))
             }
@@ -785,6 +834,8 @@ mod tests {
             ship_system_position: None,
             ship_rotation: None,
             game_time: 0.0,
+            warp_target_star_index: None,
+            warp_velocity_gu: None,
         }
     }
 

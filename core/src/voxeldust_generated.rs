@@ -13,10 +13,10 @@ pub mod protocol {
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 12;
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 13;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 13] = [
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 14] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -30,6 +30,7 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 13] = [
   ShardPayload::SystemSceneUpdate,
   ShardPayload::AutopilotCommand,
   ShardPayload::ShipNearbyInfo,
+  ShardPayload::WarpAutopilotCommand,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -50,9 +51,10 @@ impl ShardPayload {
   pub const SystemSceneUpdate: Self = Self(10);
   pub const AutopilotCommand: Self = Self(11);
   pub const ShipNearbyInfo: Self = Self(12);
+  pub const WarpAutopilotCommand: Self = Self(13);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 12;
+  pub const ENUM_MAX: u8 = 13;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -67,6 +69,7 @@ impl ShardPayload {
     Self::SystemSceneUpdate,
     Self::AutopilotCommand,
     Self::ShipNearbyInfo,
+    Self::WarpAutopilotCommand,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -84,6 +87,7 @@ impl ShardPayload {
       Self::SystemSceneUpdate => Some("SystemSceneUpdate"),
       Self::AutopilotCommand => Some("AutopilotCommand"),
       Self::ShipNearbyInfo => Some("ShipNearbyInfo"),
+      Self::WarpAutopilotCommand => Some("WarpAutopilotCommand"),
       _ => None,
     }
   }
@@ -143,10 +147,10 @@ pub struct ShardPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SERVER_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 8;
+pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 9;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 9] = [
+pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 10] = [
   ServerPayload::NONE,
   ServerPayload::JoinResponse,
   ServerPayload::WorldState,
@@ -156,6 +160,7 @@ pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 9] = [
   ServerPayload::PlayerDestroyed,
   ServerPayload::StarCatalog,
   ServerPayload::ShardPreConnect,
+  ServerPayload::GalaxyWorldState,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -172,9 +177,10 @@ impl ServerPayload {
   pub const PlayerDestroyed: Self = Self(6);
   pub const StarCatalog: Self = Self(7);
   pub const ShardPreConnect: Self = Self(8);
+  pub const GalaxyWorldState: Self = Self(9);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 8;
+  pub const ENUM_MAX: u8 = 9;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::JoinResponse,
@@ -185,6 +191,7 @@ impl ServerPayload {
     Self::PlayerDestroyed,
     Self::StarCatalog,
     Self::ShardPreConnect,
+    Self::GalaxyWorldState,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -198,6 +205,7 @@ impl ServerPayload {
       Self::PlayerDestroyed => Some("PlayerDestroyed"),
       Self::StarCatalog => Some("StarCatalog"),
       Self::ShardPreConnect => Some("ShardPreConnect"),
+      Self::GalaxyWorldState => Some("GalaxyWorldState"),
       _ => None,
     }
   }
@@ -867,6 +875,8 @@ impl<'a> PlayerHandoff<'a> {
   pub const VT_SHIP_SYSTEM_POSITION: ::flatbuffers::VOffsetT = 42;
   pub const VT_SHIP_ROTATION: ::flatbuffers::VOffsetT = 44;
   pub const VT_GAME_TIME: ::flatbuffers::VOffsetT = 46;
+  pub const VT_WARP_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 48;
+  pub const VT_WARP_VELOCITY: ::flatbuffers::VOffsetT = 50;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -885,6 +895,8 @@ impl<'a> PlayerHandoff<'a> {
     builder.add_source_tick(args.source_tick);
     builder.add_source_shard_id(args.source_shard_id);
     builder.add_session_token(args.session_token);
+    if let Some(x) = args.warp_velocity { builder.add_warp_velocity(x); }
+    builder.add_warp_target_star_index(args.warp_target_star_index);
     if let Some(x) = args.ship_rotation { builder.add_ship_rotation(x); }
     if let Some(x) = args.ship_system_position { builder.add_ship_system_position(x); }
     builder.add_target_planet_index(args.target_planet_index);
@@ -1067,6 +1079,22 @@ impl<'a> PlayerHandoff<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f64>(PlayerHandoff::VT_GAME_TIME, Some(0.0)).unwrap()}
   }
+  /// For system→galaxy warp: target star index (0xFFFFFFFF = not set).
+  #[inline]
+  pub fn warp_target_star_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(PlayerHandoff::VT_WARP_TARGET_STAR_INDEX, Some(4294967295)).unwrap()}
+  }
+  /// For system→galaxy warp: velocity in galaxy units/s.
+  #[inline]
+  pub fn warp_velocity(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(PlayerHandoff::VT_WARP_VELOCITY, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
@@ -1097,6 +1125,8 @@ impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
      .visit_field::<Vec3d>("ship_system_position", Self::VT_SHIP_SYSTEM_POSITION, false)?
      .visit_field::<Quatd>("ship_rotation", Self::VT_SHIP_ROTATION, false)?
      .visit_field::<f64>("game_time", Self::VT_GAME_TIME, false)?
+     .visit_field::<u32>("warp_target_star_index", Self::VT_WARP_TARGET_STAR_INDEX, false)?
+     .visit_field::<Vec3d>("warp_velocity", Self::VT_WARP_VELOCITY, false)?
      .finish();
     Ok(())
   }
@@ -1124,6 +1154,8 @@ pub struct PlayerHandoffArgs<'a> {
     pub ship_system_position: Option<&'a Vec3d>,
     pub ship_rotation: Option<&'a Quatd>,
     pub game_time: f64,
+    pub warp_target_star_index: u32,
+    pub warp_velocity: Option<&'a Vec3d>,
 }
 impl<'a> Default for PlayerHandoffArgs<'a> {
   #[inline]
@@ -1151,6 +1183,8 @@ impl<'a> Default for PlayerHandoffArgs<'a> {
       ship_system_position: None,
       ship_rotation: None,
       game_time: 0.0,
+      warp_target_star_index: 4294967295,
+      warp_velocity: None,
     }
   }
 }
@@ -1249,6 +1283,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerHandoffBuilder<'a, 'b, 
     self.fbb_.push_slot::<f64>(PlayerHandoff::VT_GAME_TIME, game_time, 0.0);
   }
   #[inline]
+  pub fn add_warp_target_star_index(&mut self, warp_target_star_index: u32) {
+    self.fbb_.push_slot::<u32>(PlayerHandoff::VT_WARP_TARGET_STAR_INDEX, warp_target_star_index, 4294967295);
+  }
+  #[inline]
+  pub fn add_warp_velocity(&mut self, warp_velocity: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(PlayerHandoff::VT_WARP_VELOCITY, warp_velocity);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerHandoffBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerHandoffBuilder {
@@ -1288,6 +1330,8 @@ impl ::core::fmt::Debug for PlayerHandoff<'_> {
       ds.field("ship_system_position", &self.ship_system_position());
       ds.field("ship_rotation", &self.ship_rotation());
       ds.field("game_time", &self.game_time());
+      ds.field("warp_target_star_index", &self.warp_target_star_index());
+      ds.field("warp_velocity", &self.warp_velocity());
       ds.finish()
   }
 }
@@ -2615,6 +2659,138 @@ impl ::core::fmt::Debug for AutopilotCommand<'_> {
       ds.finish()
   }
 }
+pub enum WarpAutopilotCommandOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Warp autopilot command sent from ship shard to system shard.
+pub struct WarpAutopilotCommand<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for WarpAutopilotCommand<'a> {
+  type Inner = WarpAutopilotCommand<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> WarpAutopilotCommand<'a> {
+  pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 6;
+  pub const VT_GALAXY_SEED: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    WarpAutopilotCommand { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args WarpAutopilotCommandArgs
+  ) -> ::flatbuffers::WIPOffset<WarpAutopilotCommand<'bldr>> {
+    let mut builder = WarpAutopilotCommandBuilder::new(_fbb);
+    builder.add_galaxy_seed(args.galaxy_seed);
+    builder.add_ship_id(args.ship_id);
+    builder.add_target_star_index(args.target_star_index);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(WarpAutopilotCommand::VT_SHIP_ID, Some(0)).unwrap()}
+  }
+  /// Target star index in the galaxy. 0xFFFFFFFF = disengage warp.
+  #[inline]
+  pub fn target_star_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(WarpAutopilotCommand::VT_TARGET_STAR_INDEX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn galaxy_seed(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(WarpAutopilotCommand::VT_GALAXY_SEED, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for WarpAutopilotCommand<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
+     .visit_field::<u32>("target_star_index", Self::VT_TARGET_STAR_INDEX, false)?
+     .visit_field::<u64>("galaxy_seed", Self::VT_GALAXY_SEED, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct WarpAutopilotCommandArgs {
+    pub ship_id: u64,
+    pub target_star_index: u32,
+    pub galaxy_seed: u64,
+}
+impl<'a> Default for WarpAutopilotCommandArgs {
+  #[inline]
+  fn default() -> Self {
+    WarpAutopilotCommandArgs {
+      ship_id: 0,
+      target_star_index: 0,
+      galaxy_seed: 0,
+    }
+  }
+}
+
+pub struct WarpAutopilotCommandBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WarpAutopilotCommandBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ship_id(&mut self, ship_id: u64) {
+    self.fbb_.push_slot::<u64>(WarpAutopilotCommand::VT_SHIP_ID, ship_id, 0);
+  }
+  #[inline]
+  pub fn add_target_star_index(&mut self, target_star_index: u32) {
+    self.fbb_.push_slot::<u32>(WarpAutopilotCommand::VT_TARGET_STAR_INDEX, target_star_index, 0);
+  }
+  #[inline]
+  pub fn add_galaxy_seed(&mut self, galaxy_seed: u64) {
+    self.fbb_.push_slot::<u64>(WarpAutopilotCommand::VT_GALAXY_SEED, galaxy_seed, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WarpAutopilotCommandBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    WarpAutopilotCommandBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<WarpAutopilotCommand<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for WarpAutopilotCommand<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("WarpAutopilotCommand");
+      ds.field("ship_id", &self.ship_id());
+      ds.field("target_star_index", &self.target_star_index());
+      ds.field("galaxy_seed", &self.galaxy_seed());
+      ds.finish()
+  }
+}
 pub enum ShipNearbyInfoOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -3688,6 +3864,21 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_warp_autopilot_command(&self) -> Option<WarpAutopilotCommand<'a>> {
+    if self.payload_type() == ShardPayload::WarpAutopilotCommand {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { WarpAutopilotCommand::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -3710,6 +3901,7 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::SystemSceneUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SystemSceneUpdate>>("ShardPayload::SystemSceneUpdate", pos),
           ShardPayload::AutopilotCommand => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<AutopilotCommand>>("ShardPayload::AutopilotCommand", pos),
           ShardPayload::ShipNearbyInfo => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipNearbyInfo>>("ShardPayload::ShipNearbyInfo", pos),
+          ShardPayload::WarpAutopilotCommand => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WarpAutopilotCommand>>("ShardPayload::WarpAutopilotCommand", pos),
           _ => Ok(()),
         }
      })?
@@ -3843,6 +4035,13 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::ShipNearbyInfo => {
           if let Some(x) = self.payload_as_ship_nearby_info() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::WarpAutopilotCommand => {
+          if let Some(x) = self.payload_as_warp_autopilot_command() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
@@ -6101,6 +6300,222 @@ impl ::core::fmt::Debug for ShardPreConnect<'_> {
       ds.finish()
   }
 }
+pub enum GalaxyWorldStateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// World state for galaxy shard → client (warp travel).
+pub struct GalaxyWorldState<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for GalaxyWorldState<'a> {
+  type Inner = GalaxyWorldState<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> GalaxyWorldState<'a> {
+  pub const VT_TICK: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SHIP_POSITION: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SHIP_VELOCITY: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SHIP_ROTATION: ::flatbuffers::VOffsetT = 10;
+  pub const VT_WARP_PHASE: ::flatbuffers::VOffsetT = 12;
+  pub const VT_ETA_SECONDS: ::flatbuffers::VOffsetT = 14;
+  pub const VT_ORIGIN_STAR_INDEX: ::flatbuffers::VOffsetT = 16;
+  pub const VT_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 18;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    GalaxyWorldState { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args GalaxyWorldStateArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<GalaxyWorldState<'bldr>> {
+    let mut builder = GalaxyWorldStateBuilder::new(_fbb);
+    builder.add_eta_seconds(args.eta_seconds);
+    builder.add_tick(args.tick);
+    builder.add_target_star_index(args.target_star_index);
+    builder.add_origin_star_index(args.origin_star_index);
+    if let Some(x) = args.ship_rotation { builder.add_ship_rotation(x); }
+    if let Some(x) = args.ship_velocity { builder.add_ship_velocity(x); }
+    if let Some(x) = args.ship_position { builder.add_ship_position(x); }
+    builder.add_warp_phase(args.warp_phase);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn tick(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(GalaxyWorldState::VT_TICK, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn ship_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(GalaxyWorldState::VT_SHIP_POSITION, None)}
+  }
+  #[inline]
+  pub fn ship_velocity(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(GalaxyWorldState::VT_SHIP_VELOCITY, None)}
+  }
+  #[inline]
+  pub fn ship_rotation(&self) -> Option<&'a Quatd> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Quatd>(GalaxyWorldState::VT_SHIP_ROTATION, None)}
+  }
+  #[inline]
+  pub fn warp_phase(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(GalaxyWorldState::VT_WARP_PHASE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn eta_seconds(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(GalaxyWorldState::VT_ETA_SECONDS, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn origin_star_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(GalaxyWorldState::VT_ORIGIN_STAR_INDEX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn target_star_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(GalaxyWorldState::VT_TARGET_STAR_INDEX, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for GalaxyWorldState<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("tick", Self::VT_TICK, false)?
+     .visit_field::<Vec3d>("ship_position", Self::VT_SHIP_POSITION, false)?
+     .visit_field::<Vec3d>("ship_velocity", Self::VT_SHIP_VELOCITY, false)?
+     .visit_field::<Quatd>("ship_rotation", Self::VT_SHIP_ROTATION, false)?
+     .visit_field::<u8>("warp_phase", Self::VT_WARP_PHASE, false)?
+     .visit_field::<f64>("eta_seconds", Self::VT_ETA_SECONDS, false)?
+     .visit_field::<u32>("origin_star_index", Self::VT_ORIGIN_STAR_INDEX, false)?
+     .visit_field::<u32>("target_star_index", Self::VT_TARGET_STAR_INDEX, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct GalaxyWorldStateArgs<'a> {
+    pub tick: u64,
+    pub ship_position: Option<&'a Vec3d>,
+    pub ship_velocity: Option<&'a Vec3d>,
+    pub ship_rotation: Option<&'a Quatd>,
+    pub warp_phase: u8,
+    pub eta_seconds: f64,
+    pub origin_star_index: u32,
+    pub target_star_index: u32,
+}
+impl<'a> Default for GalaxyWorldStateArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    GalaxyWorldStateArgs {
+      tick: 0,
+      ship_position: None,
+      ship_velocity: None,
+      ship_rotation: None,
+      warp_phase: 0,
+      eta_seconds: 0.0,
+      origin_star_index: 0,
+      target_star_index: 0,
+    }
+  }
+}
+
+pub struct GalaxyWorldStateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> GalaxyWorldStateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_tick(&mut self, tick: u64) {
+    self.fbb_.push_slot::<u64>(GalaxyWorldState::VT_TICK, tick, 0);
+  }
+  #[inline]
+  pub fn add_ship_position(&mut self, ship_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(GalaxyWorldState::VT_SHIP_POSITION, ship_position);
+  }
+  #[inline]
+  pub fn add_ship_velocity(&mut self, ship_velocity: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(GalaxyWorldState::VT_SHIP_VELOCITY, ship_velocity);
+  }
+  #[inline]
+  pub fn add_ship_rotation(&mut self, ship_rotation: &Quatd) {
+    self.fbb_.push_slot_always::<&Quatd>(GalaxyWorldState::VT_SHIP_ROTATION, ship_rotation);
+  }
+  #[inline]
+  pub fn add_warp_phase(&mut self, warp_phase: u8) {
+    self.fbb_.push_slot::<u8>(GalaxyWorldState::VT_WARP_PHASE, warp_phase, 0);
+  }
+  #[inline]
+  pub fn add_eta_seconds(&mut self, eta_seconds: f64) {
+    self.fbb_.push_slot::<f64>(GalaxyWorldState::VT_ETA_SECONDS, eta_seconds, 0.0);
+  }
+  #[inline]
+  pub fn add_origin_star_index(&mut self, origin_star_index: u32) {
+    self.fbb_.push_slot::<u32>(GalaxyWorldState::VT_ORIGIN_STAR_INDEX, origin_star_index, 0);
+  }
+  #[inline]
+  pub fn add_target_star_index(&mut self, target_star_index: u32) {
+    self.fbb_.push_slot::<u32>(GalaxyWorldState::VT_TARGET_STAR_INDEX, target_star_index, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> GalaxyWorldStateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    GalaxyWorldStateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<GalaxyWorldState<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for GalaxyWorldState<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("GalaxyWorldState");
+      ds.field("tick", &self.tick());
+      ds.field("ship_position", &self.ship_position());
+      ds.field("ship_velocity", &self.ship_velocity());
+      ds.field("ship_rotation", &self.ship_rotation());
+      ds.field("warp_phase", &self.warp_phase());
+      ds.field("eta_seconds", &self.eta_seconds());
+      ds.field("origin_star_index", &self.origin_star_index());
+      ds.field("target_star_index", &self.target_star_index());
+      ds.finish()
+  }
+}
 pub enum DamageEventOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -6548,6 +6963,21 @@ impl<'a> ServerMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_galaxy_world_state(&self) -> Option<GalaxyWorldState<'a>> {
+    if self.payload_type() == ServerPayload::GalaxyWorldState {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { GalaxyWorldState::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ServerMessage<'_> {
@@ -6566,6 +6996,7 @@ impl ::flatbuffers::Verifiable for ServerMessage<'_> {
           ServerPayload::PlayerDestroyed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerDestroyed>>("ServerPayload::PlayerDestroyed", pos),
           ServerPayload::StarCatalog => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<StarCatalog>>("ServerPayload::StarCatalog", pos),
           ServerPayload::ShardPreConnect => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShardPreConnect>>("ServerPayload::ShardPreConnect", pos),
+          ServerPayload::GalaxyWorldState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<GalaxyWorldState>>("ServerPayload::GalaxyWorldState", pos),
           _ => Ok(()),
         }
      })?
@@ -6671,6 +7102,13 @@ impl ::core::fmt::Debug for ServerMessage<'_> {
         },
         ServerPayload::ShardPreConnect => {
           if let Some(x) = self.payload_as_shard_pre_connect() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::GalaxyWorldState => {
+          if let Some(x) = self.payload_as_galaxy_world_state() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

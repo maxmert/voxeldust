@@ -416,6 +416,8 @@ pub fn render_frame(
     trajectory_plan: Option<&voxeldust_core::autopilot::TrajectoryPlan>,
     system_params: Option<&voxeldust_core::system::SystemParams>,
     frame_count: u64,
+    star_instance_count: u32,
+    warp_target_star: Option<hud::WarpTargetInfo>,
 ) {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -489,6 +491,35 @@ pub fn render_frame(
         }
     }
 
+    // -- Star pass (before main pass, additive blend, no depth write) --
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("stars"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view, resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.005, g: 0.005, b: 0.02, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &gpu.depth_view,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+
+        if star_instance_count > 0 {
+            pass.set_pipeline(&gpu.star_pipeline);
+            pass.set_bind_group(0, &gpu.star_bind_group, &[]);
+            pass.set_vertex_buffer(0, gpu.star_quad_vertex_buf.slice(..));
+            pass.set_vertex_buffer(1, gpu.star_instance_buf.slice(..));
+            pass.set_index_buffer(gpu.star_quad_index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..6, 0, 0..star_instance_count);
+        }
+    }
+
     // -- Main pass --
     // Restore camera-space MVPs by re-running the uniform build.
     let ro = build_uniforms(
@@ -507,13 +538,13 @@ pub fn render_frame(
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view, resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.005, g: 0.005, b: 0.02, a: 1.0 }),
+                    load: wgpu::LoadOp::Load, // preserve stars from previous pass
                     store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &gpu.depth_view,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
                 stencil_ops: None,
             }),
             ..Default::default()
@@ -601,6 +632,7 @@ pub fn render_frame(
         trajectory_plan,
         system_params,
         frame_count,
+        warp_target_star,
     };
     let full_output = hud::run_hud(gpu, window, &hud_ctx);
     hud::render_egui(gpu, &mut encoder, &view, full_output);

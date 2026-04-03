@@ -20,6 +20,17 @@ pub struct HudContext<'a> {
     pub trajectory_plan: Option<&'a voxeldust_core::autopilot::TrajectoryPlan>,
     pub system_params: Option<&'a voxeldust_core::system::SystemParams>,
     pub frame_count: u64,
+    pub warp_target_star: Option<WarpTargetInfo>,
+}
+
+/// Info about the currently targeted star for warp HUD.
+pub struct WarpTargetInfo {
+    pub star_index: u32,
+    pub star_class_name: &'static str,
+    pub distance_gu: f64,
+    pub luminosity: f32,
+    /// Direction to the star in system-space (for screen-space projection).
+    pub direction: DVec3,
 }
 
 /// Run the egui HUD pass: body labels, trajectory, info panel, crosshair.
@@ -37,6 +48,9 @@ pub fn run_hud(gpu: &mut GpuState, window: &winit::window::Window, ctx: &HudCont
 
         // Body labels.
         draw_body_labels(&painter, ctx, logical_w, logical_h);
+
+        // Warp target reticle (purple circle + label on targeted star).
+        draw_warp_target_reticle(&painter, ctx, logical_w, logical_h);
 
         // Autopilot trajectory line.
         draw_trajectory(&painter, ctx, logical_w, logical_h);
@@ -116,6 +130,69 @@ fn draw_body_labels(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, l
     }
 }
 
+fn draw_warp_target_reticle(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, logical_h: f32) {
+    let wt = match &ctx.warp_target_star {
+        Some(wt) => wt,
+        None => return,
+    };
+
+    // Project star direction to screen space.
+    // Stars are at infinity in skybox mode — use direction * large distance.
+    let dir = wt.direction.as_vec3();
+    let far_pos = dir * 500.0; // same distance as skybox in shader
+    let clip = ctx.vp * glam::Vec4::new(far_pos.x, far_pos.y, far_pos.z, 1.0);
+    if clip.w <= 0.0 { return; } // behind camera
+
+    let ndc_x = clip.x / clip.w;
+    let ndc_y = clip.y / clip.w;
+    if ndc_x.abs() > 1.5 || ndc_y.abs() > 1.5 { return; } // off screen
+    let sx = (ndc_x * 0.5 + 0.5) * logical_w;
+    let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * logical_h;
+
+    let purple = egui::Color32::from_rgb(180, 100, 255);
+
+    // Draw diamond reticle (4 lines forming a diamond shape).
+    let r = 18.0_f32;
+    let center = egui::pos2(sx, sy);
+    let stroke = egui::Stroke::new(1.5, purple);
+    painter.line_segment([egui::pos2(sx, sy - r), egui::pos2(sx + r, sy)], stroke);
+    painter.line_segment([egui::pos2(sx + r, sy), egui::pos2(sx, sy + r)], stroke);
+    painter.line_segment([egui::pos2(sx, sy + r), egui::pos2(sx - r, sy)], stroke);
+    painter.line_segment([egui::pos2(sx - r, sy), egui::pos2(sx, sy - r)], stroke);
+
+    // Corner brackets (outer, larger).
+    let br = 26.0_f32;
+    let bl = 8.0_f32; // bracket line length
+    let bracket_stroke = egui::Stroke::new(1.0, purple);
+    // Top-left bracket
+    painter.line_segment([egui::pos2(sx - br, sy - br), egui::pos2(sx - br + bl, sy - br)], bracket_stroke);
+    painter.line_segment([egui::pos2(sx - br, sy - br), egui::pos2(sx - br, sy - br + bl)], bracket_stroke);
+    // Top-right bracket
+    painter.line_segment([egui::pos2(sx + br, sy - br), egui::pos2(sx + br - bl, sy - br)], bracket_stroke);
+    painter.line_segment([egui::pos2(sx + br, sy - br), egui::pos2(sx + br, sy - br + bl)], bracket_stroke);
+    // Bottom-left bracket
+    painter.line_segment([egui::pos2(sx - br, sy + br), egui::pos2(sx - br + bl, sy + br)], bracket_stroke);
+    painter.line_segment([egui::pos2(sx - br, sy + br), egui::pos2(sx - br, sy + br - bl)], bracket_stroke);
+    // Bottom-right bracket
+    painter.line_segment([egui::pos2(sx + br, sy + br), egui::pos2(sx + br - bl, sy + br)], bracket_stroke);
+    painter.line_segment([egui::pos2(sx + br, sy + br), egui::pos2(sx + br, sy + br - bl)], bracket_stroke);
+
+    // Label: star class + distance.
+    let dist_text = if wt.distance_gu > 1000.0 { format!("{:.0} GU", wt.distance_gu) }
+        else { format!("{:.1} GU", wt.distance_gu) };
+    let eta = wt.distance_gu / 25.0;
+    let eta_text = if eta > 60.0 { format!("{:.0}m", eta / 60.0) }
+        else { format!("{:.0}s", eta) };
+    let label = format!("WARP: {} | {} | ~{}", wt.star_class_name, dist_text, eta_text);
+    painter.text(
+        egui::pos2(sx + br + 6.0, sy - 6.0),
+        egui::Align2::LEFT_CENTER,
+        &label,
+        egui::FontId::proportional(11.0),
+        purple,
+    );
+}
+
 fn draw_trajectory(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, logical_h: f32) {
     let plan = match ctx.trajectory_plan {
         Some(p) => p,
@@ -165,6 +242,10 @@ fn draw_trajectory(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, lo
                 FlightPhase::Landed => egui::Color32::from_rgb(100, 255, 100),
                 FlightPhase::Liftoff | FlightPhase::GravityTurn | FlightPhase::AscentBurn => egui::Color32::from_rgb(100, 255, 200),
                 FlightPhase::EscapeBurn => egui::Color32::from_rgb(200, 100, 255),
+                FlightPhase::WarpAlign | FlightPhase::WarpAccelerate => egui::Color32::from_rgb(150, 100, 255),
+                FlightPhase::WarpCruise => egui::Color32::from_rgb(100, 150, 255),
+                FlightPhase::WarpDecelerate => egui::Color32::from_rgb(100, 200, 255),
+                FlightPhase::WarpArrival => egui::Color32::from_rgb(100, 255, 200),
             };
 
             // Subdivide into 4 sub-segments for smoothness.
@@ -202,13 +283,16 @@ fn draw_trajectory(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, lo
 }
 
 fn draw_info_panel(ectx: &egui::Context, ctx: &HudContext) {
-    let shard_name = match ctx.current_shard_type { 0 => "Planet", 1 => "System", 2 => "Ship", _ => "?" };
+    let shard_name = match ctx.current_shard_type { 0 => "Planet", 1 => "System", 2 => "Ship", 3 => "Galaxy", _ => "?" };
     egui::Area::new(egui::Id::new("info")).fixed_pos(egui::pos2(10.0, 10.0)).show(ectx, |ui| {
         ui.style_mut().visuals.override_text_color = Some(egui::Color32::from_rgb(200, 200, 200));
         ui.label(format!("Shard: {} | Connected: {}", shard_name, ctx.connected));
 
         if ctx.current_shard_type == 2 {
             draw_ship_hud(ui, ctx);
+        } else if ctx.current_shard_type == 3 {
+            // Galaxy shard HUD — warp travel.
+            draw_galaxy_hud(ui, ctx);
         } else if ctx.current_shard_type == 0 {
             // Planet shard HUD.
             ui.label(format!("Pos: ({:.1}, {:.1}, {:.1})",
@@ -221,6 +305,19 @@ fn draw_info_panel(ectx: &egui::Context, ctx: &HudContext) {
             ui.label("WASD=move  Mouse=look");
         }
     });
+}
+
+fn draw_galaxy_hud(ui: &mut egui::Ui, ctx: &HudContext) {
+    ui.separator();
+    ui.colored_label(egui::Color32::from_rgb(150, 100, 255), "WARP TRAVEL");
+
+    let speed = ctx.player_velocity.length();
+    if speed > 0.01 {
+        ui.label(format!("Speed: {:.2} GU/s", speed));
+    }
+
+    ui.label(format!("Pos: ({:.1}, {:.1}, {:.1}) GU",
+        ctx.player_position.x, ctx.player_position.y, ctx.player_position.z));
 }
 
 fn draw_ship_hud(ui: &mut egui::Ui, ctx: &HudContext) {
@@ -323,8 +420,16 @@ fn draw_pilot_hud(ui: &mut egui::Ui, ctx: &HudContext, speed: f64) {
             ui.colored_label(egui::Color32::RED, "ENGINES OFF (X to restart)");
         }
         ui.label("WASD=thrust  E=exit seat  X=engine cutoff");
-        ui.label("T=autopilot | TT=orbit");
+        ui.label("T=autopilot | TT=orbit | G=warp target");
         ui.label(format!("Thrust: {} (1-5 to change)", tier_label));
+
+        // Warp target info (also shown in the reticle, but summary here too).
+        if let Some(ref wt) = ctx.warp_target_star {
+            ui.separator();
+            ui.colored_label(egui::Color32::from_rgb(180, 100, 255),
+                format!("WARP TARGET: Star #{}", wt.star_index));
+            ui.label("G=cycle | Enter=engage warp | Esc=cancel");
+        }
     }
 
     // Orbital elements display when near a planet.
@@ -355,6 +460,11 @@ fn draw_autopilot_active(
         FlightPhase::GravityTurn => "GRAVITY TURN",
         FlightPhase::AscentBurn => "ASCENT",
         FlightPhase::EscapeBurn => "ESCAPE",
+        FlightPhase::WarpAlign => "WARP ALIGN",
+        FlightPhase::WarpAccelerate => "WARP ACCEL",
+        FlightPhase::WarpCruise => "WARP CRUISE",
+        FlightPhase::WarpDecelerate => "WARP DECEL",
+        FlightPhase::WarpArrival => "WARP ARRIVAL",
     };
     let body_names_ap = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
     let target_name = body_names_ap.get(plan.target_planet_index + 1).unwrap_or(&"?");

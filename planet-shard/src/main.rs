@@ -823,6 +823,8 @@ fn main() {
                     ship_system_position: None,
                     ship_rotation: None,
                     game_time: st.celestial_time,
+                    warp_target_star_index: None,
+                    warp_velocity_gu: None,
                 };
 
                 // Send to system shard for routing to ship shard.

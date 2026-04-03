@@ -32,6 +32,8 @@ fn make_handoff() -> PlayerHandoff {
         ship_system_position: None,
         ship_rotation: None,
         game_time: 0.0,
+        warp_target_star_index: None,
+        warp_velocity_gu: None,
     }
 }
 

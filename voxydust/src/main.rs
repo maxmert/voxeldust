@@ -7,6 +7,7 @@ mod input;
 mod mesh;
 mod network;
 mod render;
+mod stars;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -89,6 +90,15 @@ struct App {
     uniform_data: Vec<ObjectUniforms>,
     /// Last frame timestamp for dt computation.
     last_frame_time: std::time::Instant,
+
+    // Star field.
+    star_field: Option<stars::StarField>,
+    galaxy_seed: u64,
+    system_seed: u64,
+    /// Client-side warp target star index (for targeting UI).
+    warp_target_star_index: Option<u32>,
+    /// Previous G-key state for rising edge detection.
+    prev_g_pressed: bool,
 }
 
 impl App {
@@ -126,7 +136,31 @@ impl App {
             trajectory_plan: None,
             uniform_data: vec![bytemuck::Zeroable::zeroed(); MAX_OBJECTS],
             last_frame_time: std::time::Instant::now(),
+            star_field: None,
+            galaxy_seed: 0,
+            system_seed: 0,
+            warp_target_star_index: None,
+            prev_g_pressed: false,
         }
+    }
+
+    fn build_warp_target_info(&self) -> Option<hud::WarpTargetInfo> {
+        let target_idx = self.warp_target_star_index?;
+        let sf = self.star_field.as_ref()?;
+        let star = sf.get_star(target_idx)?;
+        let current_star_pos = sf.current_star_index
+            .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
+            .map(|s| s.galaxy_position)
+            .unwrap_or(DVec3::ZERO);
+        let distance = (star.galaxy_position - current_star_pos).length();
+        let direction = (star.galaxy_position - current_star_pos).normalize();
+        Some(hud::WarpTargetInfo {
+            star_index: target_idx,
+            star_class_name: stars::star_class_name(star.star_class),
+            distance_gu: distance,
+            luminosity: star.luminosity,
+            direction,
+        })
     }
 
     fn init_gpu(&mut self, window: Arc<Window>) {
@@ -197,7 +231,7 @@ impl App {
                         }
                         self.latest_world_state = Some(ws);
                     }
-                    NetEvent::Connected { shard_type, reference_position, reference_rotation, system_seed, .. } => {
+                    NetEvent::Connected { shard_type, reference_position, reference_rotation, system_seed, galaxy_seed, .. } => {
                         self.current_shard_type = shard_type;
                         self.reference_position = reference_position;
                         self.reference_rotation = reference_rotation;
@@ -205,10 +239,18 @@ impl App {
                             self.ship_rotation = reference_rotation;
                         }
                         self.connected = true;
+                        self.system_seed = system_seed;
+                        self.galaxy_seed = galaxy_seed;
                         if system_seed > 0 {
                             self.system_params = Some(voxeldust_core::system::SystemParams::from_seed(system_seed));
                         }
-                        let shard_name = match shard_type { 0 => "Planet", 1 => "System", 2 => "Ship", _ => "?" };
+                        // Initialize star field from galaxy seed (deterministic, no network needed).
+                        if galaxy_seed > 0 && self.star_field.is_none() {
+                            info!(galaxy_seed, "generating star catalog");
+                            self.star_field = Some(stars::StarField::from_galaxy_seed(galaxy_seed, system_seed));
+                            info!(stars = self.star_field.as_ref().unwrap().catalog.len(), "star field ready");
+                        }
+                        let shard_name = match shard_type { 0 => "Planet", 1 => "System", 2 => "Ship", 3 => "Galaxy", _ => "?" };
                         info!(shard_name, "connected to shard");
                     }
                     NetEvent::Disconnected(reason) => {
@@ -343,6 +385,7 @@ impl App {
         self.poll_network();
         self.send_input_with_dt(dt);
         self.frame_count += 1;
+        let warp_target_info = self.build_warp_target_info();
 
         let gpu = match &mut self.gpu { Some(g) => g, None => return };
 
@@ -379,6 +422,42 @@ impl App {
 
         let window = self.window.as_ref().unwrap();
 
+        // Update star field and upload instances to GPU.
+        let star_instance_count = if let Some(ref mut sf) = self.star_field {
+            let skybox_mode = self.current_shard_type != 3; // galaxy shard = real positions
+            let current_star_pos = sf.current_star_index
+                .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
+                .map(|s| s.galaxy_position)
+                .unwrap_or(DVec3::ZERO);
+            let cam_galaxy_pos = current_star_pos; // In system shard, camera is at the star
+            sf.update_instances(current_star_pos, cam_galaxy_pos, skybox_mode, self.warp_target_star_index);
+            let count = sf.instances.len() as u32;
+            if count > 0 {
+                gpu.queue.write_buffer(
+                    &gpu.star_instance_buf,
+                    0,
+                    bytemuck::cast_slice(&sf.instances),
+                );
+                // Update star scene uniforms from camera params.
+                let cam_right = cam.cam_fwd.cross(cam.cam_up).normalize();
+                let star_uniforms = stars::StarSceneUniforms {
+                    view_proj: cam.vp.to_cols_array_2d(),
+                    camera_right: [cam_right.x, cam_right.y, cam_right.z, 0.0],
+                    camera_up: [cam.cam_up.x, cam.cam_up.y, cam.cam_up.z, 0.0],
+                    warp_velocity: [0.0, 0.0, 0.0, 0.0],
+                    render_mode: [if skybox_mode { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0],
+                };
+                gpu.queue.write_buffer(
+                    &gpu.star_scene_uniform_buf,
+                    0,
+                    bytemuck::bytes_of(&star_uniforms),
+                );
+            }
+            count
+        } else {
+            0
+        };
+
         render::render_frame(
             gpu,
             window,
@@ -398,6 +477,8 @@ impl App {
             self.trajectory_plan.as_ref(),
             self.system_params.as_ref(),
             self.frame_count,
+            star_instance_count,
+            warp_target_info,
         );
     }
 }
@@ -431,7 +512,8 @@ impl ApplicationHandler for App {
                     if event.state.is_pressed() {
                         self.keys_held.insert(key);
                         // Autopilot: double-tap T = orbit, single-tap T = direct approach.
-                        if key == KeyCode::KeyT && self.is_piloting {
+                        // Skip planet autopilot if a warp target is selected.
+                        if key == KeyCode::KeyT && self.is_piloting && self.warp_target_star_index.is_none() {
                             if self.autopilot_target.is_some() {
                                 // Disengage.
                                 self.autopilot_target = None;
@@ -464,6 +546,38 @@ impl ApplicationHandler for App {
                         if key == KeyCode::KeyX && self.is_piloting {
                             self.engines_off = !self.engines_off;
                             info!(engines_off = self.engines_off, "engine cutoff toggled");
+                        }
+                        // Enter key: confirm warp to targeted star.
+                        if key == KeyCode::Enter && self.is_piloting && self.warp_target_star_index.is_some() {
+                            info!(target = ?self.warp_target_star_index, "warp confirmed via Enter");
+                        }
+                        // Escape key: cancel warp target.
+                        if key == KeyCode::Escape && self.warp_target_star_index.is_some() {
+                            self.warp_target_star_index = None;
+                            info!("warp target cancelled");
+                        }
+                        // G key: cycle warp target star.
+                        if key == KeyCode::KeyG && self.is_piloting {
+                            if let Some(ref sf) = self.star_field {
+                                let current_star_pos = sf.current_star_index
+                                    .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
+                                    .map(|s| s.galaxy_position)
+                                    .unwrap_or(DVec3::ZERO);
+                                // Use ship rotation forward as targeting direction.
+                                let cam_fwd = self.ship_rotation * DVec3::NEG_Z;
+
+                                if let Some(current_target) = self.warp_target_star_index {
+                                    // Cycle to next star.
+                                    if let Some((next, _)) = sf.find_next_aligned_star(current_star_pos, cam_fwd, current_target) {
+                                        self.warp_target_star_index = Some(next);
+                                    }
+                                } else {
+                                    // First press: find best aligned star.
+                                    if let Some((idx, _)) = sf.find_aligned_star(current_star_pos, cam_fwd, 0.3) {
+                                        self.warp_target_star_index = Some(idx);
+                                    }
+                                }
+                            }
                         }
                         if key == KeyCode::Escape {
                             if self.mouse_grabbed {

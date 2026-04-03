@@ -30,6 +30,8 @@ pub fn send_input_with_dt(
         }
         let jump = keys_held.contains(&KeyCode::Space);
         let action = if engines_off { 5 } // engine cutoff signal
+            else if keys_held.contains(&KeyCode::Enter) { 7 } // warp confirm
+            else if keys_held.contains(&KeyCode::KeyG) { 6 } // warp target
             else if keys_held.contains(&KeyCode::KeyT) { 4 }
             else if keys_held.contains(&KeyCode::KeyE) { 3 }
             else { 0 };
