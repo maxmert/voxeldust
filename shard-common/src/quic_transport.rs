@@ -14,7 +14,9 @@ use voxeldust_core::shard_types::ShardId;
 use crate::circuit_breaker::CircuitBreaker;
 
 /// Timeout for QUIC connect and send operations.
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// 2 seconds is sufficient for intra-cluster communication; a peer that doesn't
+/// respond in 2 seconds is effectively dead for a 20Hz game loop.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum message size (64 KB).
 const MAX_MESSAGE_SIZE: usize = 65_536;
@@ -92,6 +94,13 @@ impl QuicTransport {
     /// Get the local address this transport is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.endpoint.local_addr().unwrap()
+    }
+
+    /// Get the underlying QUIC endpoint for direct per-peer connection management.
+    /// The Endpoint is thread-safe (`&self` for `connect()`). Per-peer tasks use this
+    /// to create independent connections without going through the shared peers mutex.
+    pub fn endpoint(&self) -> &quinn::Endpoint {
+        &self.endpoint
     }
 
     /// Send a message to a peer shard. Reuses a persistent QUIC stream per peer.

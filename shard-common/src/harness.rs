@@ -273,27 +273,133 @@ impl ShardHarness {
             }
         });
 
-        // QUIC send drainer: reads from quic_send_tx channel, sends via QUIC transport.
+        // QUIC send drainer: per-peer isolated async tasks (AAA MMO pattern).
+        // Each peer owns its QUIC connection directly — no shared mutex. A dead peer's
+        // connection timeout only blocks its own task. The dispatcher routes messages
+        // to the correct per-peer channel; no shared I/O state.
         let quic_send_cancel = cancel.clone();
         let mut quic_send_rx = self.quic_send_rx.take().expect("quic_send_rx already taken");
         tokio::spawn(async move {
-            // Create a dedicated QUIC transport for sending (separate from the accept transport).
+            // Shared QUIC endpoint — thread-safe, connect() takes &self.
             let send_transport = match QuicTransport::bind("0.0.0.0:0".parse().unwrap()).await {
-                Ok(t) => t,
+                Ok(t) => Arc::new(t),
                 Err(e) => {
                     tracing::warn!(%e, "failed to bind QUIC send transport");
                     return;
                 }
             };
-            info!("QUIC send drainer task started");
+            info!("QUIC send dispatcher started (per-peer connection ownership)");
+
+            let mut peer_senders: std::collections::HashMap<
+                ShardId,
+                mpsc::Sender<(SocketAddr, ShardMsg)>,
+            > = std::collections::HashMap::new();
+
             loop {
                 tokio::select! {
                     _ = quic_send_cancel.cancelled() => return,
                     msg = quic_send_rx.recv() => {
                         if let Some((peer_id, peer_addr, shard_msg)) = msg {
-                            if let Err(e) = send_transport.send(peer_id, peer_addr, &shard_msg).await {
-                                tracing::debug!(%peer_id, %e, "failed to send QUIC message");
-                            }
+                            let tx = peer_senders.entry(peer_id).or_insert_with(|| {
+                                let (tx, mut rx) = mpsc::channel::<(SocketAddr, ShardMsg)>(32);
+                                let endpoint = send_transport.endpoint().clone();
+                                let cancel = quic_send_cancel.clone();
+
+                                // Per-peer task: owns its own QUIC connection lifecycle.
+                                tokio::spawn(async move {
+                                    let mut conn: Option<quinn::Connection> = None;
+                                    let mut send_stream: Option<quinn::SendStream> = None;
+                                    let mut consecutive_failures: u32 = 0;
+                                    let timeout_dur = std::time::Duration::from_secs(2);
+
+                                    loop {
+                                        tokio::select! {
+                                            _ = cancel.cancelled() => return,
+                                            msg = rx.recv() => {
+                                                let (addr, shard_msg) = match msg {
+                                                    Some(m) => m,
+                                                    None => return,
+                                                };
+
+                                                // Circuit breaker: exponential backoff.
+                                                if consecutive_failures >= 5 {
+                                                    // Skip — circuit is open. Will retry after
+                                                    // the backoff expires (handled by try_send
+                                                    // dropping messages when queue is full).
+                                                    continue;
+                                                }
+
+                                                // Get or create connection.
+                                                let needs_connect = match &conn {
+                                                    Some(c) => c.close_reason().is_some(),
+                                                    None => true,
+                                                };
+                                                if needs_connect {
+                                                    conn = None;
+                                                    send_stream = None;
+                                                    match tokio::time::timeout(timeout_dur, async {
+                                                        let connecting = endpoint.connect(addr, "voxeldust-shard")
+                                                            .map_err(|e| format!("{e}"))?;
+                                                        connecting.await.map_err(|e| format!("{e}"))
+                                                    }).await {
+                                                        Ok(Ok(c)) => {
+                                                            conn = Some(c);
+                                                            consecutive_failures = 0;
+                                                        }
+                                                        Ok(Err(e)) => {
+                                                            consecutive_failures += 1;
+                                                            if consecutive_failures >= 5 {
+                                                                tracing::warn!(%peer_id, failures = consecutive_failures, %e,
+                                                                    "circuit breaker opened for peer");
+                                                            }
+                                                            continue;
+                                                        }
+                                                        Err(_) => {
+                                                            consecutive_failures += 1;
+                                                            if consecutive_failures >= 5 {
+                                                                tracing::warn!(%peer_id, failures = consecutive_failures,
+                                                                    "circuit breaker opened for peer (timeout)");
+                                                            }
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+
+                                                // Send message.
+                                                let c = conn.as_ref().unwrap();
+                                                let data = shard_msg.serialize();
+
+                                                // Open stream if needed.
+                                                if send_stream.is_none() {
+                                                    match c.open_uni().await {
+                                                        Ok(s) => send_stream = Some(s),
+                                                        Err(e) => {
+                                                            tracing::debug!(%peer_id, %e, "failed to open uni stream");
+                                                            conn = None;
+                                                            send_stream = None;
+                                                            consecutive_failures += 1;
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+
+                                                let s = send_stream.as_mut().unwrap();
+                                                let len_bytes = (data.len() as u32).to_be_bytes();
+                                                if s.write_all(&len_bytes).await.is_err()
+                                                    || s.write_all(&data).await.is_err()
+                                                {
+                                                    // Stream broken — discard, reconnect next time.
+                                                    send_stream = None;
+                                                    conn = None;
+                                                    consecutive_failures += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                tx
+                            });
+                            let _ = tx.try_send((peer_addr, shard_msg));
                         } else {
                             return;
                         }

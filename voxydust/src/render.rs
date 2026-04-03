@@ -13,6 +13,10 @@ struct RenderObjects {
     object_count: usize,
     ship_interior_start: usize,
     ship_interior_count: usize,
+    /// Uniform index of the cockpit window (glass, separate draw call). None if not in ship.
+    cockpit_window_index: Option<usize>,
+    /// Uniform indices of exterior ship boxes (rendered with ext_box mesh).
+    exterior_ship_boxes: Vec<usize>,
     inside_sphere_indices: Vec<usize>,
 }
 
@@ -29,6 +33,8 @@ fn build_uniforms(
     let mut object_count = 0usize;
     let mut ship_interior_start = 0usize;
     let mut ship_interior_count = 0usize;
+    let mut cockpit_window_index: Option<usize> = None;
+    let mut exterior_ship_boxes: Vec<usize> = Vec::new();
     let mut inside_sphere_indices: Vec<usize> = Vec::new();
 
     if let Some(ws) = ws {
@@ -144,29 +150,6 @@ fn build_uniforms(
             }
         }
 
-        for ship in &ws.ships {
-            if object_count >= MAX_OBJECTS { break; }
-            let offset = (ship.position - cam.cam_system_pos).as_vec3();
-            // Frustum cull ships (bounding sphere radius ~8m for ship length).
-            if !cam.frustum.contains_sphere(offset, 8.0) { continue; }
-            let ship_rot = Mat4::from_quat(ship.rotation.as_quat());
-            // Ship box: 4m wide, 3m tall, 8m long (same dimensions as interior).
-            let scale = Mat4::from_scale(Vec3::new(4.0, 3.0, 8.0));
-            let model = Mat4::from_translation(offset) * ship_rot * scale;
-            let mvp = cam.vp * model;
-            let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
-            obj.mvp = mvp.to_cols_array_2d();
-            obj.model = model.to_cols_array_2d();
-            obj.color = if ship.is_own_ship {
-                [0.4, 0.5, 0.6, 0.7] // own ship: lighter
-            } else {
-                [0.3, 0.3, 0.35, 0.7] // other ships
-            };
-            obj.material = [0.8, 0.3, 0.0, 0.0]; // metallic hull
-            uniform_data[object_count] = obj;
-            object_count += 1;
-        }
-
         // Ship interior (only when in ship shard).
         if current_shard_type == 2 {
             ship_interior_start = object_count;
@@ -195,6 +178,18 @@ fn build_uniforms(
                 obj.material = [0.6, 0.4, 0.0, 0.0]; // metallic interior
                 uniform_data[object_count] = obj;
                 ship_interior_count = 1;
+                object_count += 1;
+            }
+
+            // Cockpit window (glass front wall) — same transform, glass material.
+            if object_count < MAX_OBJECTS {
+                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                obj.mvp = mvp.to_cols_array_2d();
+                obj.model = model.to_cols_array_2d();
+                obj.color = [0.15, 0.18, 0.22, 0.4]; // dark tinted glass
+                obj.material = [0.1, 0.1, 1.0, 0.0]; // low metallic, smooth, glass=1.0
+                cockpit_window_index = Some(object_count);
+                uniform_data[object_count] = obj;
                 object_count += 1;
             }
 
@@ -228,6 +223,55 @@ fn build_uniforms(
         }
     }
 
+    // External ships from primary WorldState — rendered with exterior box mesh.
+    // Scaled 1.002x larger than interior so depth testing lets interior win where
+    // both exist, but exterior shows through windows/doors/gaps.
+    let ext_ship_scale = Mat4::from_scale(Vec3::splat(1.002));
+    if let Some(ws) = ws {
+        for ship in &ws.ships {
+            if object_count + 3 >= MAX_OBJECTS { break; }
+            let offset = (ship.position - cam.cam_system_pos).as_vec3();
+            if !cam.frustum.contains_sphere(offset, 8.0) { continue; }
+            let ship_rot_mat = Mat4::from_quat(ship.rotation.as_quat());
+
+            let model = Mat4::from_translation(offset) * ship_rot_mat * ext_ship_scale;
+            let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+            obj.mvp = (cam.vp * model).to_cols_array_2d();
+            obj.model = model.to_cols_array_2d();
+            obj.color = [0.3, 0.3, 0.35, 0.4];
+            obj.material = [0.8, 0.3, 0.0, 0.0];
+            exterior_ship_boxes.push(object_count);
+            uniform_data[object_count] = obj;
+            object_count += 1;
+
+            let seat_model = Mat4::from_translation(offset) * ship_rot_mat
+                * Mat4::from_translation(Vec3::new(0.0, 0.5, -3.0))
+                * Mat4::from_scale(Vec3::splat(0.3));
+            if object_count < MAX_OBJECTS {
+                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                obj.mvp = (cam.vp * seat_model).to_cols_array_2d();
+                obj.model = seat_model.to_cols_array_2d();
+                obj.color = [0.2, 0.5, 1.0, 1.0];
+                obj.material = [0.0, 0.5, 0.0, 0.0];
+                uniform_data[object_count] = obj;
+                object_count += 1;
+            }
+
+            let door_model = Mat4::from_translation(offset) * ship_rot_mat
+                * Mat4::from_translation(Vec3::new(2.0, 0.5, 0.0))
+                * Mat4::from_scale(Vec3::splat(0.3));
+            if object_count < MAX_OBJECTS {
+                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                obj.mvp = (cam.vp * door_model).to_cols_array_2d();
+                obj.model = door_model.to_cols_array_2d();
+                obj.color = [0.0, 1.0, 0.3, 1.0];
+                obj.material = [0.0, 0.5, 0.0, 0.0];
+                uniform_data[object_count] = obj;
+                object_count += 1;
+            }
+        }
+    }
+
     // Secondary WorldState: render objects from the secondary shard for dual compositing.
     // Used during ship→planet transition to show the planet surface through the ship door.
     // Both WorldStates use system-space origins, so coordinate transform is:
@@ -242,19 +286,49 @@ fn build_uniforms(
 
         // Ships from secondary (e.g., landed ships on planet surface).
         for ship in &sec_ws.ships {
-            if object_count >= MAX_OBJECTS { break; }
+            if object_count + 3 >= MAX_OBJECTS { break; }
             let ship_system_pos = sec_ws.origin + ship.position;
             let offset = (ship_system_pos - cam.cam_system_pos).as_vec3();
-            let ship_rot = Mat4::from_quat(ship.rotation.as_quat());
-            let scale = Mat4::from_scale(Vec3::new(4.0, 3.0, 8.0));
-            let model = Mat4::from_translation(offset) * ship_rot * scale;
+            if !cam.frustum.contains_sphere(offset, 8.0) { continue; }
+            let ship_rot_mat = Mat4::from_quat(ship.rotation.as_quat());
+
+            let model = Mat4::from_translation(offset) * ship_rot_mat * ext_ship_scale;
             let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
             obj.mvp = (cam.vp * model).to_cols_array_2d();
             obj.model = model.to_cols_array_2d();
-            obj.color = [0.3, 0.3, 0.35, 0.7];
+            obj.color = [0.3, 0.3, 0.35, 0.4];
             obj.material = [0.8, 0.3, 0.0, 0.0];
+            exterior_ship_boxes.push(object_count);
             uniform_data[object_count] = obj;
             object_count += 1;
+
+            // Seat marker.
+            let seat_model = Mat4::from_translation(offset) * ship_rot_mat
+                * Mat4::from_translation(Vec3::new(0.0, 0.5, -3.0))
+                * Mat4::from_scale(Vec3::splat(0.3));
+            if object_count < MAX_OBJECTS {
+                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                obj.mvp = (cam.vp * seat_model).to_cols_array_2d();
+                obj.model = seat_model.to_cols_array_2d();
+                obj.color = [0.2, 0.5, 1.0, 1.0];
+                obj.material = [0.0, 0.5, 0.0, 0.0];
+                uniform_data[object_count] = obj;
+                object_count += 1;
+            }
+
+            // Door marker.
+            let door_model = Mat4::from_translation(offset) * ship_rot_mat
+                * Mat4::from_translation(Vec3::new(2.0, 0.5, 0.0))
+                * Mat4::from_scale(Vec3::splat(0.3));
+            if object_count < MAX_OBJECTS {
+                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                obj.mvp = (cam.vp * door_model).to_cols_array_2d();
+                obj.model = door_model.to_cols_array_2d();
+                obj.color = [0.0, 1.0, 0.3, 1.0];
+                obj.material = [0.0, 0.5, 0.0, 0.0];
+                uniform_data[object_count] = obj;
+                object_count += 1;
+            }
         }
     }
 
@@ -262,6 +336,8 @@ fn build_uniforms(
         object_count,
         ship_interior_start,
         ship_interior_count,
+        cockpit_window_index,
+        exterior_ship_boxes,
         inside_sphere_indices,
     }
 }
@@ -394,12 +470,22 @@ pub fn render_frame(
             pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
         }
 
-        // Shadow for ship exterior boxes (ship_interior objects).
+        // Shadow for ship interior box.
         if ro.ship_interior_count > 0 {
             pass.set_vertex_buffer(0, gpu.box_vertex_buf.slice(..));
             pass.set_index_buffer(gpu.box_index_buf.slice(..), wgpu::IndexFormat::Uint32);
             pass.set_bind_group(0, &gpu.bind_group, &[(ro.ship_interior_start as u32) * 256]);
             pass.draw_indexed(0..gpu.box_index_count, 0, 0..1);
+        }
+
+        // Shadow for exterior ship boxes.
+        if !ro.exterior_ship_boxes.is_empty() {
+            pass.set_vertex_buffer(0, gpu.ext_box_vertex_buf.slice(..));
+            pass.set_index_buffer(gpu.ext_box_index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            for &idx in &ro.exterior_ship_boxes {
+                pass.set_bind_group(0, &gpu.bind_group, &[(idx as u32) * 256]);
+                pass.draw_indexed(0..gpu.ext_box_index_count, 0, 0..1);
+            }
         }
     }
 
@@ -456,20 +542,45 @@ pub fn render_frame(
         }
         pass.set_pipeline(&gpu.pipeline);
 
-        // Ship markers (seat + door spheres): indices ship_interior_start+1..object_count.
+        // Ship interior markers (seat + door spheres): 2 items after ship_interior_start.
         if ro.ship_interior_count > 0 {
-            for i in (ro.ship_interior_start + 1)..ro.object_count {
+            // Interior markers: seat at +2, door at +3 (cockpit window is at +1).
+            let markers_start = ro.ship_interior_start + 2;
+            let markers_end = (ro.ship_interior_start + 4).min(ro.object_count);
+            for i in markers_start..markers_end {
                 pass.set_bind_group(0, &gpu.bind_group, &[(i as u32) * 256]);
                 pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
             }
         }
 
-        // Draw ship interior box: index ship_interior_start.
+        // Draw ship interior box (inward normals, no backface culling).
         if ro.ship_interior_count > 0 {
+            pass.set_pipeline(&gpu.sphere_inside_pipeline); // no backface culling
             pass.set_vertex_buffer(0, gpu.box_vertex_buf.slice(..));
             pass.set_index_buffer(gpu.box_index_buf.slice(..), wgpu::IndexFormat::Uint32);
             pass.set_bind_group(0, &gpu.bind_group, &[(ro.ship_interior_start as u32) * 256]);
             pass.draw_indexed(0..gpu.box_index_count, 0, 0..1);
+        }
+
+        // Draw cockpit window (glass, screen-door transparency).
+        // Drawn AFTER opaque interior so dithered pixels reveal space behind.
+        if let Some(win_idx) = ro.cockpit_window_index {
+            pass.set_pipeline(&gpu.sphere_inside_pipeline); // no backface culling
+            pass.set_vertex_buffer(0, gpu.cockpit_vertex_buf.slice(..));
+            pass.set_index_buffer(gpu.cockpit_index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_bind_group(0, &gpu.bind_group, &[(win_idx as u32) * 256]);
+            pass.draw_indexed(0..gpu.cockpit_index_count, 0, 0..1);
+        }
+
+        // Draw exterior ship boxes (outward normals, normal backface culling).
+        if !ro.exterior_ship_boxes.is_empty() {
+            pass.set_pipeline(&gpu.pipeline);
+            pass.set_vertex_buffer(0, gpu.ext_box_vertex_buf.slice(..));
+            pass.set_index_buffer(gpu.ext_box_index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            for &idx in &ro.exterior_ship_boxes {
+                pass.set_bind_group(0, &gpu.bind_group, &[(idx as u32) * 256]);
+                pass.draw_indexed(0..gpu.ext_box_index_count, 0, 0..1);
+            }
         }
     }
 

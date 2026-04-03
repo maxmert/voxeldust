@@ -108,6 +108,12 @@ pub struct GpuState {
     pub box_vertex_buf: wgpu::Buffer,
     pub box_index_buf: wgpu::Buffer,
     pub box_index_count: u32,
+    pub cockpit_vertex_buf: wgpu::Buffer,
+    pub cockpit_index_buf: wgpu::Buffer,
+    pub cockpit_index_count: u32,
+    pub ext_box_vertex_buf: wgpu::Buffer,
+    pub ext_box_index_buf: wgpu::Buffer,
+    pub ext_box_index_count: u32,
     pub depth_view: wgpu::TextureView,
     pub uniform_buf: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -384,7 +390,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         usage: wgpu::BufferUsages::INDEX,
     });
 
-    // Box mesh (ship interior: 6 faces, 12 triangles).
+    // Box mesh — interior (inward normals, for first-person view inside ship).
     let (box_verts, box_idxs) = generate_box_mesh(4.0, 3.0, 8.0);
     let box_vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("box_vb"), contents: bytemuck::cast_slice(&box_verts),
@@ -392,6 +398,30 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
     });
     let box_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("box_ib"), contents: bytemuck::cast_slice(&box_idxs),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    // Cockpit window (glass front wall, separate from opaque box).
+    let (win_verts, win_idxs) = generate_cockpit_window(4.0, 3.0, 8.0);
+    let cockpit_vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("cockpit_vb"), contents: bytemuck::cast_slice(&win_verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let cockpit_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("cockpit_ib"), contents: bytemuck::cast_slice(&win_idxs),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    // Box mesh — exterior (outward normals, for third-person view of ship on surface).
+    let ext_box_idxs: Vec<u32> = box_idxs.chunks(3)
+        .flat_map(|tri| [tri[0], tri[2], tri[1]])
+        .collect();
+    let ext_box_vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("ext_box_vb"), contents: bytemuck::cast_slice(&box_verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let ext_box_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("ext_box_ib"), contents: bytemuck::cast_slice(&ext_box_idxs),
         usage: wgpu::BufferUsages::INDEX,
     });
 
@@ -404,6 +434,8 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         surface, device, queue, config, pipeline, sphere_inside_pipeline, shadow_pipeline,
         sphere_vertex_buf, sphere_index_buf, sphere_index_count: sphere.indices.len() as u32,
         box_vertex_buf, box_index_buf, box_index_count: box_idxs.len() as u32,
+        cockpit_vertex_buf, cockpit_index_buf, cockpit_index_count: win_idxs.len() as u32,
+        ext_box_vertex_buf, ext_box_index_buf, ext_box_index_count: ext_box_idxs.len() as u32,
         depth_view, uniform_buf, bind_group,
         scene_lighting_buf, scene_bind_group,
         shadow_texture_view, shadow_bind_group,
@@ -448,8 +480,7 @@ pub fn generate_box_mesh(width: f32, height: f32, length: f32) -> (Vec<[f32; 3]>
         [hw, dh, -dz], [hw, dh, dz], [hw, height, dz], [hw, height, -dz],        // 20-23
         // 24-27: Back wall (z=+hl)
         [-hw, 0.0, hl], [hw, 0.0, hl], [hw, height, hl], [-hw, height, hl],
-        // 28-31: Front wall (z=-hl) -- cockpit window
-        [-hw, 0.0, -hl], [hw, 0.0, -hl], [hw, height, -hl], [-hw, height, -hl],
+        // Front wall (cockpit window) is a SEPARATE mesh with glass material.
     ];
 
     // Inward-facing triangles (CW from outside = CCW from inside).
@@ -461,8 +492,20 @@ pub fn generate_box_mesh(width: f32, height: f32, length: f32) -> (Vec<[f32; 3]>
         16, 17, 18, 16, 18, 19, // right wall: right of door
         20, 21, 22, 20, 22, 23, // right wall: above door
         24, 25, 26, 24, 26, 27, // back wall
-        28, 30, 29, 28, 31, 30, // front wall (window)
     ];
+    (vertices, indices)
+}
+
+/// Generate cockpit window quad (front wall, z=-length/2, inward-facing).
+/// Rendered separately from the box mesh with a glass material.
+pub fn generate_cockpit_window(width: f32, height: f32, length: f32) -> (Vec<[f32; 3]>, Vec<u32>) {
+    let hw = width / 2.0;
+    let hl = length / 2.0;
+    let vertices = vec![
+        [-hw, 0.0, -hl], [hw, 0.0, -hl], [hw, height, -hl], [-hw, height, -hl],
+    ];
+    // Inward-facing (same winding as interior box).
+    let indices = vec![0, 2, 1, 0, 3, 2];
     (vertices, indices)
 }
 

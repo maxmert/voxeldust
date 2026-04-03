@@ -228,12 +228,52 @@ impl App {
                         if self.secondary_world_state.is_some() {
                             // Seamless: promote secondary to primary.
                             info!("seamless transition — secondary data available");
+
+                            // Convert camera yaw/pitch from ship frame to planet tangent
+                            // frame so the view direction is preserved across the transition.
+                            if self.current_shard_type == 2 {
+                                // Step 1: world-space forward from ship-local yaw/pitch.
+                                let sp = (self.camera_pitch as f32).sin() as f64;
+                                let cp = (self.camera_pitch as f32).cos() as f64;
+                                let sy = (self.camera_yaw as f32).sin() as f64;
+                                let cy = (self.camera_yaw as f32).cos() as f64;
+                                let local_fwd = DVec3::new(cy * cp, sp, sy * cp);
+                                let cam_fwd_world = (self.ship_rotation * local_fwd).normalize();
+
+                                // Step 2: planet tangent frame at player's position.
+                                // Use promoted WorldState's first player position (planet-local).
+                                let planet_pos = self.secondary_world_state.as_ref()
+                                    .and_then(|ws| ws.players.first())
+                                    .map(|p| p.position)
+                                    .unwrap_or(DVec3::Y);
+                                let up = planet_pos.normalize();
+                                let pole = DVec3::Y;
+                                let east_raw = pole.cross(up);
+                                let east = if east_raw.length_squared() > 1e-10 {
+                                    east_raw.normalize()
+                                } else {
+                                    DVec3::Z.cross(up).normalize()
+                                };
+                                let north = up.cross(east).normalize();
+
+                                // Step 3: project world forward onto tangent frame.
+                                let fwd_north = cam_fwd_world.dot(north);
+                                let fwd_up = cam_fwd_world.dot(up);
+                                let fwd_east = cam_fwd_world.dot(east);
+
+                                // Step 4: extract planet-frame yaw/pitch.
+                                self.camera_pitch = fwd_up.asin();
+                                self.camera_yaw = fwd_east.atan2(fwd_north);
+                                self.camera_pitch = self.camera_pitch.clamp(
+                                    -std::f64::consts::FRAC_PI_2 + 0.01,
+                                    std::f64::consts::FRAC_PI_2 - 0.01,
+                                );
+                            }
+
                             self.latest_world_state = self.secondary_world_state.take();
                             if let Some(st) = self.secondary_shard_type.take() {
                                 self.current_shard_type = st;
                             }
-                            self.camera_yaw = -std::f64::consts::FRAC_PI_2;
-                            self.camera_pitch = 0.0;
                             self.is_piloting = false;
                         } else {
                             // Hard transition: clear and reconnect.

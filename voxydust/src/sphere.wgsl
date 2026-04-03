@@ -84,6 +84,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let metallic = u.material.x;
     let roughness = max(u.material.y, 0.04); // clamp to avoid divide-by-zero
+    let glass = u.material.z;
+
+    // Glass material: screen-door transparency (discard checkerboard pattern).
+    // Renders every other pixel, letting the background show through.
+    if glass > 0.5 {
+        let screen_pos = vec2<i32>(in.clip_position.xy);
+        if (screen_pos.x + screen_pos.y) % 2 == 0 {
+            discard;
+        }
+    }
 
     let N = normalize(in.world_normal);
     let V = normalize(scene.camera_pos.xyz - in.world_pos);

@@ -162,6 +162,10 @@ struct ShipInteriorState {
     connected_player_name: Option<String>,
     /// True while a handoff is in-flight (block input processing).
     handoff_pending: bool,
+    /// Whether the exit door is open (blocker collider removed).
+    door_open: bool,
+    /// Handle to the door blocker collider (None when door is open).
+    door_blocker_handle: Option<ColliderHandle>,
     /// True when the ship is on a planet surface (velocity near zero from system shard).
     ship_landed: bool,
     /// True when the ship is inside a planet's atmosphere (for ShardPreConnect trigger).
@@ -192,9 +196,34 @@ impl ShipInteriorState {
             .translation(vector![-SHIP_WIDTH / 2.0 - WALL_THICKNESS, SHIP_HEIGHT / 2.0, 0.0]).build();
         collider_set.insert(left);
 
-        let right = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, SHIP_LENGTH / 2.0)
-            .translation(vector![SHIP_WIDTH / 2.0 + WALL_THICKNESS, SHIP_HEIGHT / 2.0, 0.0]).build();
-        collider_set.insert(right);
+        // Right wall: split around door opening (z: -0.6 to +0.6, y: 0 to 2.1).
+        // Matches the visual mesh gap in gpu.rs generate_box_mesh().
+        let door_half_z = 0.6_f32;
+        let door_height = 2.1_f32;
+        let right_x = SHIP_WIDTH / 2.0 + WALL_THICKNESS;
+
+        // Segment left of door (z: -SHIP_LENGTH/2 to -door_half_z)
+        let seg_len = (SHIP_LENGTH / 2.0 - door_half_z) / 2.0;
+        let seg_z = -(SHIP_LENGTH / 2.0 + door_half_z) / 2.0;
+        let right_left = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, seg_len)
+            .translation(vector![right_x, SHIP_HEIGHT / 2.0, seg_z]).build();
+        collider_set.insert(right_left);
+
+        // Segment right of door (z: +door_half_z to +SHIP_LENGTH/2)
+        let right_right = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, seg_len)
+            .translation(vector![right_x, SHIP_HEIGHT / 2.0, -seg_z]).build();
+        collider_set.insert(right_right);
+
+        // Segment above door (z: -door_half_z to +door_half_z, y: door_height to SHIP_HEIGHT)
+        let above_half_h = (SHIP_HEIGHT - door_height) / 2.0;
+        let right_above = ColliderBuilder::cuboid(WALL_THICKNESS, above_half_h, door_half_z)
+            .translation(vector![right_x, door_height + above_half_h, 0.0]).build();
+        collider_set.insert(right_above);
+
+        // Door blocker: fills the door gap. Removed when door opens, re-inserted when closed.
+        let door_blocker = ColliderBuilder::cuboid(WALL_THICKNESS, door_height / 2.0, door_half_z)
+            .translation(vector![right_x, door_height / 2.0, 0.0]).build();
+        let door_blocker_handle = collider_set.insert(door_blocker);
 
         let back = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, SHIP_HEIGHT / 2.0, WALL_THICKNESS)
             .translation(vector![0.0, SHIP_HEIGHT / 2.0, SHIP_LENGTH / 2.0 + WALL_THICKNESS]).build();
@@ -253,6 +282,8 @@ impl ShipInteriorState {
             connected_session: None,
             connected_player_name: None,
             handoff_pending: false,
+            door_open: false,
+            door_blocker_handle: Some(door_blocker_handle),
             ship_landed: false,
             ship_in_atmosphere: false,
             preconnect_sent: false,
@@ -643,7 +674,26 @@ fn main() {
                             st.ship_rotation = data.rotation;
 
                             // Detect landed state: system shard zeros velocity on landing.
+                            let was_landed = st.ship_landed;
                             st.ship_landed = data.velocity.length() < 0.5;
+
+                            // Auto-close door on takeoff.
+                            if was_landed && !st.ship_landed && st.door_open {
+                                st.door_open = false;
+                                let ShipInteriorState {
+                                    ref mut collider_set, ref mut island_manager,
+                                    ref mut rigid_body_set, ref mut door_blocker_handle, ..
+                                } = *st;
+                                if let Some(handle) = door_blocker_handle.take() {
+                                    collider_set.remove(handle, island_manager, rigid_body_set, true);
+                                }
+                                let right_x = SHIP_WIDTH / 2.0 + WALL_THICKNESS;
+                                let blocker = ColliderBuilder::cuboid(
+                                    WALL_THICKNESS, 2.1 / 2.0, 0.6,
+                                ).translation(vector![right_x, 2.1 / 2.0, 0.0]).build();
+                                *door_blocker_handle = Some(collider_set.insert(blocker));
+                                info!("door auto-closed on takeoff");
+                            }
                         }
                     }
                     ShardMsg::HandoffAccepted(accepted) => {
@@ -834,65 +884,90 @@ fn main() {
                     } else {
                         info!("exited pilot mode");
                     }
-                } else if dist_to_exit < INTERACT_DIST && !st.handoff_pending {
-                    // Exit door: initiate handoff to planet shard.
-                    if let (Some(session), Some(player_name)) =
-                        (st.connected_session, st.connected_player_name.clone())
-                    {
-                        // Compute player's system-space position.
-                        let player_local = DVec3::new(
-                            pos.x as f64, pos.y as f64, pos.z as f64,
-                        );
-                        let player_system_pos = st.ship_position + st.ship_rotation * player_local;
-
-                        // Find closest planet from scene_bodies (body_id > 0 = planets).
-                        let closest_planet = st.scene_bodies.iter()
-                            .filter(|b| b.body_id > 0)
-                            .min_by_key(|b| {
-                                ((b.position - st.ship_position).length() * 1000.0) as u64
-                            });
-
-                        if let Some(planet_body) = closest_planet {
-                            let planet_index = (planet_body.body_id - 1) as usize;
-                            // Derive planet_seed from cached system params.
-                            if let Some(ref sys) = st.cached_system_params { if planet_index < sys.planets.len() {
-                                let planet_seed = sys.planets[planet_index].planet_seed;
-
-                                let h = handoff::PlayerHandoff {
-                                    session_token: session,
-                                    player_name,
-                                    position: player_system_pos,
-                                    velocity: st.ship_velocity,
-                                    rotation: DQuat::IDENTITY,
-                                    forward: st.ship_rotation * DVec3::NEG_Z,
-                                    fly_mode: false,
-                                    speed_tier: 0,
-                                    grounded: false,
-                                    health: 100.0,
-                                    shield: 100.0,
-                                    source_shard: st.shard_id,
-                                    source_tick: st.tick_count,
-                                    target_star_index: None,
-                                    galaxy_context: None,
-                                    target_planet_seed: Some(planet_seed),
-                                    target_planet_index: Some(planet_index as u32),
-                                    target_ship_id: None,
-                                    target_ship_shard_id: None,
-                                    ship_system_position: Some(st.ship_position),
-                                    ship_rotation: Some(st.ship_rotation),
-                                    game_time: st.game_time,
-                                };
-
-                                // Send to system shard (host) via QUIC.
-                                // The actual send happens via the quic_send_tx channel
-                                // captured in the interaction closure.
-                                st.handoff_pending = true;
-                                st.pending_handoff_msg = Some(ShardMsg::PlayerHandoff(h));
-                                info!(planet_index, planet_seed, "exit door handoff initiated");
-                            }}
+                } else if dist_to_exit < INTERACT_DIST {
+                    // Exit door: toggle open/closed (only when landed).
+                    if st.ship_landed {
+                        st.door_open = !st.door_open;
+                        let opening = st.door_open;
+                        let ShipInteriorState {
+                            ref mut collider_set, ref mut island_manager,
+                            ref mut rigid_body_set, ref mut door_blocker_handle, ..
+                        } = *st;
+                        if opening {
+                            if let Some(handle) = door_blocker_handle.take() {
+                                collider_set.remove(handle, island_manager, rigid_body_set, true);
+                            }
+                            info!("exit door opened");
                         } else {
-                            info!("no nearby planet for exit handoff");
+                            let right_x = SHIP_WIDTH / 2.0 + WALL_THICKNESS;
+                            let blocker = ColliderBuilder::cuboid(
+                                WALL_THICKNESS, 2.1 / 2.0, 0.6,
+                            ).translation(vector![right_x, 2.1 / 2.0, 0.0]).build();
+                            *door_blocker_handle = Some(collider_set.insert(blocker));
+                            info!("exit door closed");
                         }
+                    }
+                }
+            }
+        });
+
+        // System 4b: Door threshold — auto-handoff when player walks outside.
+        let state_threshold = state.clone();
+        harness.add_system("door_threshold", move || {
+            let mut st = state_threshold.lock().unwrap();
+            if !st.door_open || st.handoff_pending { return; }
+
+            // Player crossed outside: ship-local X > SHIP_WIDTH/2 + margin.
+            let threshold_x = SHIP_WIDTH / 2.0 + 0.5;
+            if st.player_position.x <= threshold_x { return; }
+
+            // Auto-trigger handoff to planet shard (same logic as old E-key exit).
+            let (session, player_name) = match (st.connected_session, st.connected_player_name.clone()) {
+                (Some(s), Some(n)) => (s, n),
+                _ => return,
+            };
+
+            let player_local = DVec3::new(
+                st.player_position.x as f64, st.player_position.y as f64, st.player_position.z as f64,
+            );
+            let player_system_pos = st.ship_position + st.ship_rotation * player_local;
+
+            let closest_planet = st.scene_bodies.iter()
+                .filter(|b| b.body_id > 0)
+                .min_by_key(|b| ((b.position - st.ship_position).length() * 1000.0) as u64);
+
+            if let Some(planet_body) = closest_planet {
+                let planet_index = (planet_body.body_id - 1) as usize;
+                if let Some(ref sys) = st.cached_system_params {
+                    if planet_index < sys.planets.len() {
+                        let planet_seed = sys.planets[planet_index].planet_seed;
+                        let h = handoff::PlayerHandoff {
+                            session_token: session,
+                            player_name,
+                            position: player_system_pos,
+                            velocity: st.ship_velocity,
+                            rotation: DQuat::IDENTITY,
+                            forward: st.ship_rotation * DVec3::NEG_Z,
+                            fly_mode: false,
+                            speed_tier: 0,
+                            grounded: false,
+                            health: 100.0,
+                            shield: 100.0,
+                            source_shard: st.shard_id,
+                            source_tick: st.tick_count,
+                            target_star_index: None,
+                            galaxy_context: None,
+                            target_planet_seed: Some(planet_seed),
+                            target_planet_index: Some(planet_index as u32),
+                            target_ship_id: None,
+                            target_ship_shard_id: None,
+                            ship_system_position: Some(st.ship_position),
+                            ship_rotation: Some(st.ship_rotation),
+                            game_time: st.game_time,
+                        };
+                        st.handoff_pending = true;
+                        st.pending_handoff_msg = Some(ShardMsg::PlayerHandoff(h));
+                        info!(planet_index, planet_seed, "threshold crossing — auto-handoff initiated");
                     }
                 }
             }

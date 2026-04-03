@@ -538,9 +538,11 @@ fn main() {
                         || input.movement[2].abs() > 0.001;
                     if let Some(body) = st.rigid_body_set.get_mut(handle) {
                         if has_movement || input.jump {
+                            // Tangent-plane convention: yaw=0 faces north (+Z in Rapier),
+                            // yaw increases toward east (+X in Rapier).
                             let (sin_y, cos_y) = yaw.sin_cos();
-                            let fwd = Vec3::new(cos_y, 0.0, sin_y);
-                            let right = Vec3::new(-sin_y, 0.0, cos_y);
+                            let fwd = Vec3::new(sin_y, 0.0, cos_y);
+                            let right = Vec3::new(cos_y, 0.0, -sin_y);
 
                             let move_vel = fwd * input.movement[2] * WALK_SPEED
                                 + right * input.movement[0] * WALK_SPEED;
@@ -573,17 +575,14 @@ fn main() {
                             st.celestial_time = h.game_time;
                             st.compute_planet_system_position();
                         }
-                        // Use ship position if available (ship→planet exit), else player position.
-                        // Compute planet position at the handoff's game_time to match the
-                        // ship's system-space position (eliminates orbital offset from QUIC delay).
-                        let reference_pos = h.ship_system_position.unwrap_or(h.position);
+                        // Use the player's actual system-space position from the handoff.
+                        // This is where they were standing (door threshold, hatch, ramp, etc.)
+                        // — works for any exit point on any ship geometry.
                         let planet_pos_at_handoff = st.system_params.as_ref()
                             .and_then(|sys| sys.planets.get(st.planet_index as usize))
                             .map(|p| compute_planet_position(p, h.game_time))
                             .unwrap_or(st.planet_position_in_system);
-                        let planet_local = reference_pos - planet_pos_at_handoff;
-                        let radial = planet_local.normalize();
-                        let surface_pos = radial * (st.planet_radius + 2.0);
+                        let surface_pos = h.position - planet_pos_at_handoff;
 
                         info!(
                             player = %h.player_name,
