@@ -22,6 +22,7 @@ pub enum ShardMsg {
     AutopilotCommand(AutopilotCommandData),
     ShipNearbyInfo(ShipNearbyInfoData),
     WarpAutopilotCommand(WarpAutopilotCommandData),
+    HostSwitch(HostSwitchData),
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,20 @@ pub struct WarpAutopilotCommandData {
     /// Target star index in the galaxy. `u32::MAX` = disengage warp.
     pub target_star_index: u32,
     pub galaxy_seed: u64,
+}
+
+/// Host switch: tells a ship shard to change its physics host.
+/// Includes full endpoint info so the ship shard can send ShardPreConnect
+/// to its client for secondary UDP (dual-shard compositing).
+#[derive(Debug, Clone)]
+pub struct HostSwitchData {
+    pub ship_id: u64,
+    pub new_host_shard_id: ShardId,
+    pub new_host_quic_addr: String,
+    pub new_host_tcp_addr: String,
+    pub new_host_udp_addr: String,
+    pub new_host_shard_type: u8, // 1=System, 3=Galaxy
+    pub seed: u64,               // galaxy_seed or system_seed
 }
 
 /// Block edits affecting chunks on adjacent shard boundaries.
@@ -506,6 +521,32 @@ impl ShardMsg {
                 );
                 builder.finish(msg, None);
             }
+
+            ShardMsg::HostSwitch(h) => {
+                let quic_addr = builder.create_string(&h.new_host_quic_addr);
+                let tcp_addr = builder.create_string(&h.new_host_tcp_addr);
+                let udp_addr = builder.create_string(&h.new_host_udp_addr);
+                let hs = fb::HostSwitch::create(
+                    &mut builder,
+                    &fb::HostSwitchArgs {
+                        ship_id: h.ship_id,
+                        new_host_shard_id: h.new_host_shard_id.0,
+                        new_host_quic_addr: Some(quic_addr),
+                        new_host_tcp_addr: Some(tcp_addr),
+                        new_host_udp_addr: Some(udp_addr),
+                        new_host_shard_type: h.new_host_shard_type,
+                        seed: h.seed,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::HostSwitch,
+                        payload: Some(hs.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -793,6 +834,22 @@ impl ShardMsg {
                     ship_id: w.ship_id(),
                     target_star_index: w.target_star_index(),
                     galaxy_seed: w.galaxy_seed(),
+                }))
+            }
+
+            fb::ShardPayload::HostSwitch => {
+                let h = msg
+                    .payload_as_host_switch()
+                    .ok_or(MessageError::MissingField("HostSwitch payload"))?;
+
+                Ok(ShardMsg::HostSwitch(HostSwitchData {
+                    ship_id: h.ship_id(),
+                    new_host_shard_id: ShardId(h.new_host_shard_id()),
+                    new_host_quic_addr: h.new_host_quic_addr().unwrap_or("").to_string(),
+                    new_host_tcp_addr: h.new_host_tcp_addr().unwrap_or("").to_string(),
+                    new_host_udp_addr: h.new_host_udp_addr().unwrap_or("").to_string(),
+                    new_host_shard_type: h.new_host_shard_type(),
+                    seed: h.seed(),
                 }))
             }
 

@@ -72,15 +72,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Radial distance from quad center.
     let r = length(in.uv);
 
-    // Soft glow: bright core + diffuse halo.
-    let core_glow = exp(-r * r * 8.0);
-    let halo = 0.3 / (1.0 + r * r * 4.0);
-    let glow = core_glow + halo;
+    // Compact glow: visible core with small halo.
+    let core_glow = exp(-r * r * 12.0);
+    let halo = 0.15 / (1.0 + r * r * 8.0);
+    let glow = min(core_glow + halo, 1.0);
 
-    let alpha = glow * in.color.a;
+    // Scale for additive blending — bright star cores are visible while
+    // accumulated halos in the galactic plane create a Milky Way band.
+    let alpha = glow * in.color.a * 0.2;
 
-    // Discard nearly-invisible fragments.
-    if alpha < 0.005 { discard; }
+    if alpha < 0.002 { discard; }
 
     return vec4(in.color.rgb * alpha, alpha);
+}
+
+// --- Point rendering: 1 pixel per star, no billboard, no overdraw ---
+
+struct PointVertexInput {
+    @location(0) star_pos: vec4<f32>,    // xyz = direction, w = unused
+    @location(1) star_color: vec4<f32>,  // rgb = color, a = brightness
+}
+
+struct PointVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_point(in: PointVertexInput) -> PointVertexOutput {
+    var out: PointVertexOutput;
+    let world_pos = normalize(in.star_pos.xyz) * 500.0;
+    out.clip_position = scene.view_proj * vec4(world_pos, 1.0);
+    out.color = in.star_color;
+    return out;
+}
+
+@fragment
+fn fs_point(in: PointVertexOutput) -> @location(0) vec4<f32> {
+    // sqrt brightness curve: expands dim-to-mid range for visibility
+    // on high-DPI displays where single pixels are physically tiny.
+    let b = sqrt(in.color.a);
+    let rgb = in.color.rgb * b + vec3(b * 0.1);
+    return vec4(min(rgb, vec3(1.0)), 1.0);
 }

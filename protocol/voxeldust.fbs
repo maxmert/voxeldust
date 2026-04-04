@@ -146,6 +146,20 @@ table AutopilotCommand {
     autopilot_mode: uint8;
 }
 
+/// Host switch: tells a ship shard to change its physics host.
+/// Sent by system shard (departure) or galaxy shard (arrival).
+/// Includes full endpoint info for the ship shard to send ShardPreConnect
+/// to the client (secondary UDP for dual-shard compositing).
+table HostSwitch {
+    ship_id: uint64;
+    new_host_shard_id: uint64;
+    new_host_quic_addr: string;
+    new_host_tcp_addr: string;
+    new_host_udp_addr: string;
+    new_host_shard_type: uint8;   // 1=System, 3=Galaxy
+    seed: uint64;                 // galaxy_seed or system_seed
+}
+
 /// Warp autopilot command sent from ship shard to system shard.
 table WarpAutopilotCommand {
     ship_id: uint64;
@@ -216,6 +230,7 @@ union ShardPayload {
     AutopilotCommand,
     ShipNearbyInfo,
     WarpAutopilotCommand,
+    HostSwitch,
 }
 
 /// Root type for all inter-shard QUIC messages.

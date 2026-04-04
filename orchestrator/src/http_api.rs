@@ -257,13 +257,16 @@ async fn find_galaxy_shard(
     State(state): State<Arc<AppState>>,
     Path(seed): Path<u64>,
 ) -> Result<Json<ShardResponse>, StatusCode> {
-    // Check if a shard already exists for this galaxy.
+    // Check if a Ready shard already exists for this galaxy.
     {
         let reg = state.registry.read().await;
         if let Some(info) = reg.find_by_galaxy(seed) {
-            return Ok(Json(ShardResponse {
-                info: info.clone(),
-            }));
+            if info.state == ShardState::Ready {
+                return Ok(Json(ShardResponse {
+                    info: info.clone(),
+                }));
+            }
+            // Shard exists but not Ready (stopped/draining) — re-provision below.
         }
     }
 

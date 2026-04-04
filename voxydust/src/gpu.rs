@@ -128,6 +128,7 @@ pub struct GpuState {
 
     // Star field rendering.
     pub star_pipeline: wgpu::RenderPipeline,
+    pub star_point_pipeline: wgpu::RenderPipeline,
     pub star_quad_vertex_buf: wgpu::Buffer,
     pub star_quad_index_buf: wgpu::Buffer,
     pub star_instance_buf: wgpu::Buffer,
@@ -519,6 +520,9 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState {
+                    // Additive blending: each star adds light. Dense galactic
+                    // plane regions accumulate into a natural Milky Way band.
+                    // Fragment alpha is scaled low to prevent total saturation.
                     color: wgpu::BlendComponent {
                         src_factor: wgpu::BlendFactor::One,
                         dst_factor: wgpu::BlendFactor::One,
@@ -580,6 +584,61 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         mapped_at_creation: false,
     });
 
+    // Point-based star pipeline: 1 pixel per star, no billboard, no overdraw.
+    // Uses the same star_instance_buf but as per-vertex data with PointList topology.
+    let star_point_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("star_point_pipeline"),
+        layout: Some(&star_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &star_shader,
+            entry_point: Some("vs_point"),
+            buffers: &[
+                // Per-vertex: star position + color (same layout as instance data).
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<StarInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 1,
+                        },
+                    ],
+                },
+            ],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &star_shader,
+            entry_point: Some("fs_point"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::PointList,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: depth_format,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview: None,
+        cache: None,
+    });
+
     // egui.
     let egui_ctx = egui::Context::default();
     let egui_winit = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None);
@@ -595,7 +654,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         scene_lighting_buf, scene_bind_group,
         shadow_texture_view, shadow_bind_group,
         egui_ctx, egui_winit, egui_renderer,
-        star_pipeline, star_quad_vertex_buf, star_quad_index_buf,
+        star_pipeline, star_point_pipeline, star_quad_vertex_buf, star_quad_index_buf,
         star_instance_buf, star_scene_uniform_buf, star_bind_group,
     }
 }

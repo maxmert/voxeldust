@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use glam::{DQuat, DVec3, Vec3};
 use rapier3d::prelude::*;
-use tracing::info;
+use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData,
@@ -365,21 +365,33 @@ impl ShipInteriorState {
     }
 
     fn build_world_state(&self) -> WorldStateData {
-        let bodies: Vec<CelestialBodyData> = self.scene_bodies.iter().map(|b| {
-            CelestialBodyData {
-                body_id: b.body_id,
-                position: b.position,
-                radius: b.radius,
-                color: b.color,
-            }
-        }).collect();
+        // If scene data is stale (>1 second without update from host), clear bodies.
+        // This prevents rendering planets from a departed system after HostSwitch
+        // while waiting for the new host's scene updates to arrive.
+        let scene_stale = self.tick_count > self.last_scene_update_tick + 20;
+        let bodies: Vec<CelestialBodyData> = if scene_stale {
+            Vec::new()
+        } else {
+            self.scene_bodies.iter().map(|b| {
+                CelestialBodyData {
+                    body_id: b.body_id,
+                    position: b.position,
+                    radius: b.radius,
+                    color: b.color,
+                }
+            }).collect()
+        };
 
-        let lighting = self.scene_lighting.as_ref().map(|l| LightingData {
-            sun_direction: l.sun_direction,
-            sun_color: l.sun_color,
-            sun_intensity: l.sun_intensity,
-            ambient: l.ambient,
-        });
+        let lighting = if scene_stale {
+            None
+        } else {
+            self.scene_lighting.as_ref().map(|l| LightingData {
+                sun_direction: l.sun_direction,
+                sun_color: l.sun_color,
+                sun_intensity: l.sun_intensity,
+                ambient: l.ambient,
+            })
+        };
 
         WorldStateData {
             tick: self.tick_count,
@@ -815,6 +827,56 @@ fn main() {
                                 if let Some(addr) = reg.quic_addr(host_id) {
                                     let _ = quic_send_quic.send((host_id, addr, accepted_msg));
                                 }
+                            }
+                        }
+                    }
+                    ShardMsg::HostSwitch(data) => {
+                        if data.ship_id == st.ship_id {
+                            let new_host = data.new_host_shard_id;
+                            st.host_shard_id = Some(new_host);
+
+                            // Clear stale scene data from the departure host. The new
+                            // host will send its own SystemSceneUpdate. Until it arrives,
+                            // build_world_state returns None lighting so the client uses
+                            // a dim interstellar default instead of the old star's glare.
+                            st.scene_bodies.clear();
+                            st.scene_lighting = None;
+                            st.last_scene_update_tick = 0;
+
+                            info!(
+                                ship_id = st.ship_id,
+                                new_host = new_host.0,
+                                shard_type = data.new_host_shard_type,
+                                quic_addr = %data.new_host_quic_addr,
+                                "host switched — ship shard now reports to new host"
+                            );
+
+                            // Send ShardPreConnect to client so it opens a secondary
+                            // UDP connection to the new host (dual-shard compositing).
+                            if !data.new_host_udp_addr.is_empty() {
+                                let pc = ServerMsg::ShardPreConnect(handoff::ShardPreConnect {
+                                    shard_type: data.new_host_shard_type,
+                                    tcp_addr: data.new_host_tcp_addr.clone(),
+                                    udp_addr: data.new_host_udp_addr.clone(),
+                                    seed: data.seed,
+                                    planet_index: 0,
+                                    reference_position: DVec3::ZERO,
+                                    reference_rotation: DQuat::IDENTITY,
+                                });
+                                if let Some(session) = st.connected_session {
+                                    let cr = client_reg_quic.clone();
+                                    tokio::spawn(async move {
+                                        let reg = cr.read().await;
+                                        let _ = reg.send_tcp(session, &pc).await;
+                                    });
+                                    info!("sent ShardPreConnect to client for secondary UDP");
+                                }
+                            } else {
+                                warn!(
+                                    ship_id = st.ship_id,
+                                    shard_type = data.new_host_shard_type,
+                                    "HostSwitch has empty UDP address — ShardPreConnect NOT sent"
+                                );
                             }
                         }
                     }

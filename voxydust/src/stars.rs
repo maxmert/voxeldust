@@ -81,7 +81,7 @@ impl StarField {
         StarField {
             catalog,
             current_star_index,
-            instances: Vec::with_capacity(MAX_STAR_INSTANCES.min(100_000)),
+            instances: Vec::with_capacity(MAX_STAR_INSTANCES),
         }
     }
 
@@ -134,6 +134,15 @@ impl StarField {
         self.catalog.iter().find(|s| s.index == index)
     }
 
+    /// Update the current star system (e.g., after warp arrival).
+    /// The current star is excluded from star field rendering because
+    /// it's rendered as a celestial body by the main pipeline.
+    pub fn set_current_system_seed(&mut self, system_seed: u64) {
+        self.current_star_index = self.catalog.iter()
+            .find(|s| s.system_seed == system_seed)
+            .map(|s| s.index);
+    }
+
     /// Update star instances for rendering. Call once per frame.
     ///
     /// - `current_star_pos`: position of the current star system in galaxy units.
@@ -157,73 +166,49 @@ impl StarField {
 
             let is_targeted = targeted_star == Some(star.index);
 
-            if skybox_mode {
-                // Direction only: from current system to this star.
-                let dir = star.galaxy_position - current_star_pos;
-                let dist_sq = dir.length_squared();
-                if dist_sq < 1e-6 { continue; }
-                let dist = dist_sq.sqrt();
-                let dir_norm = dir / dist;
+            // Compute direction and distance from the reference position.
+            let ref_pos = if skybox_mode { current_star_pos } else { cam_galaxy_pos };
+            let offset = star.galaxy_position - ref_pos;
+            let dist_sq = offset.length_squared();
+            if dist_sq < 1e-6 { continue; }
+            let dist = dist_sq.sqrt();
+            let dir = offset / dist;
 
-                // Apparent magnitude using log scale (like real astronomy).
-                // Brighter stars and closer stars appear larger.
-                let flux = star.luminosity as f64 / dist_sq;
-                let mag = -2.5 * flux.max(1e-20).log10(); // apparent magnitude (lower = brighter)
+            // Apparent magnitude using log scale (like real astronomy).
+            let flux = star.luminosity as f64 / dist_sq;
+            let mag = -2.5 * flux.max(1e-20).log10();
 
-                // Convert magnitude to visual size: bright stars are large, dim ones small.
-                // Typical range: mag -5 (very bright) to mag 15 (very dim).
-                let size = if is_targeted {
-                    4.0_f32 // targeted star always large
-                } else {
-                    ((8.0 - mag as f32 * 0.4).clamp(0.5, 5.0))
-                };
-
-                let brightness = if is_targeted {
-                    1.0_f32
-                } else {
-                    ((6.0 - mag as f32 * 0.3).clamp(0.15, 1.0))
-                };
-
-                let color = if is_targeted {
-                    [1.0, 1.0, 1.0, brightness] // white highlight for target
-                } else {
-                    [star.color[0], star.color[1], star.color[2], brightness]
-                };
-
-                self.instances.push(StarInstance {
-                    position: [dir_norm.x as f32, dir_norm.y as f32, dir_norm.z as f32, size],
-                    color,
-                });
+            let brightness = if is_targeted {
+                1.0_f32
             } else {
-                // Galaxy mode: actual position relative to camera.
-                let offset = star.galaxy_position - cam_galaxy_pos;
-                let dist = offset.length();
-                if dist < 1e-6 { continue; }
-                if dist > 5000.0 { continue; }
+                (5.0 - mag as f32 * 0.25).clamp(0.1, 1.0)
+            };
 
-                let offset_f32 = offset.as_vec3();
-                let size = if is_targeted {
-                    8.0
-                } else {
-                    (star.luminosity.sqrt() / dist as f32 * 20.0).clamp(0.5, 15.0)
-                };
-                let brightness = if is_targeted {
-                    1.0
-                } else {
-                    (star.luminosity.sqrt() / dist as f32 * 2.0).clamp(0.1, 1.0)
-                };
-
-                let color = if is_targeted {
-                    [1.0, 1.0, 1.0, brightness]
-                } else {
-                    [star.color[0], star.color[1], star.color[2], brightness]
-                };
-
-                self.instances.push(StarInstance {
-                    position: [offset_f32.x, offset_f32.y, offset_f32.z, size],
-                    color,
-                });
+            // Skip very dim stars.
+            if !is_targeted && brightness < 0.12 {
+                continue;
             }
+
+            // Billboard size: visible multi-pixel glows. The additive blend
+            // shader scales alpha very low (×0.06), so overlap accumulates
+            // to a Milky Way band rather than saturating to white.
+            let size = if is_targeted {
+                4.0_f32
+            } else {
+                (4.0 - mag as f32 * 0.15).clamp(0.5, 3.0)
+            };
+
+            let color = if is_targeted {
+                [1.0, 1.0, 1.0, brightness]
+            } else {
+                [star.color[0], star.color[1], star.color[2], brightness]
+            };
+
+            let dir_f32 = dir.as_vec3();
+            self.instances.push(StarInstance {
+                position: [dir_f32.x as f32, dir_f32.y as f32, dir_f32.z as f32, size],
+                color,
+            });
 
             if self.instances.len() >= MAX_STAR_INSTANCES { break; }
         }

@@ -149,6 +149,8 @@ struct SystemState {
     provisioned_galaxy: Option<ShardId>,
     /// Whether galaxy shard is currently being provisioned.
     galaxy_provisioning_in_flight: bool,
+    /// Ships that have departed via warp (don't re-create in discover_ships).
+    departed_ships: std::collections::HashSet<u64>,
 }
 
 impl SystemState {
@@ -189,6 +191,7 @@ impl SystemState {
             },
             provisioned_galaxy: None,
             galaxy_provisioning_in_flight: false,
+            departed_ships: std::collections::HashSet::new(),
         }
     }
 
@@ -426,8 +429,17 @@ fn main() {
                         let mut st = state_quic.lock().unwrap();
                         if cmd.target_body_id == 0xFFFFFFFF {
                             if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
-                                ship.autopilot = None;
-                                info!(ship_id = cmd.ship_id, "autopilot disengaged");
+                                // Don't let planet autopilot disengage kill warp autopilot.
+                                let is_warp = ship.autopilot.as_ref()
+                                    .map(|ap| ap.mode == autopilot::AutopilotMode::WarpTravel)
+                                    .unwrap_or(false);
+                                if is_warp {
+                                    // Warp can only be disengaged via WarpAutopilotCommand(0xFFFFFFFF).
+                                    info!(ship_id = cmd.ship_id, "ignoring planet autopilot disengage during warp");
+                                } else {
+                                    ship.autopilot = None;
+                                    info!(ship_id = cmd.ship_id, "autopilot disengaged");
+                                }
                             }
                         } else {
                             let planet_index = (cmd.target_body_id - 1) as usize;
@@ -452,6 +464,13 @@ fn main() {
                                 let default_orbit_alt = (planet.radius_m * 0.01)
                                     .clamp(planet.atmosphere.atmosphere_height * 1.5, planet.radius_m * 0.1);
                                 if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
+                                    // Don't let planet autopilot override active warp.
+                                    let is_warp = ship.autopilot.as_ref()
+                                        .map(|ap| ap.mode == autopilot::AutopilotMode::WarpTravel)
+                                        .unwrap_or(false);
+                                    if is_warp {
+                                        info!(ship_id = cmd.ship_id, "ignoring planet autopilot engage during warp");
+                                    } else {
                                     ship.autopilot = Some(AutopilotState {
                                         mode,
                                         phase: FlightPhase::Accelerate,
@@ -470,6 +489,7 @@ fn main() {
                                         tier = cmd.speed_tier, mode = ?mode,
                                         eta_s = estimated_tof as u64,
                                         "autopilot engaged");
+                                    }
                                 }
                             }
                         }
@@ -505,6 +525,16 @@ fn main() {
                                     let tick = st.tick_count;
                                     let physics_time = st.physics_time;
                                     if let Some(ship) = st.ships.get_mut(&cmd.ship_id) {
+                                        // Don't reset if already warping to the same target.
+                                        let already_warping = ship.autopilot.as_ref()
+                                            .map(|ap| ap.mode == autopilot::AutopilotMode::WarpTravel
+                                                  && ap.warp_target_star_index == cmd.target_star_index)
+                                            .unwrap_or(false);
+                                        if already_warping {
+                                            info!(ship_id = cmd.ship_id, target_star = cmd.target_star_index,
+                                                  "warp already engaged for same target — ignoring duplicate");
+                                            continue;
+                                        }
                                         ship.autopilot = Some(AutopilotState {
                                             mode: autopilot::AutopilotMode::WarpTravel,
                                             phase: FlightPhase::WarpAlign,
@@ -611,6 +641,7 @@ fn main() {
                     // Check if we already track this ship.
                     if let Some(ship_id) = shard_info.ship_id {
                         if st.ships.contains_key(&ship_id) { continue; }
+                        if st.departed_ships.contains(&ship_id) { continue; }
 
                         // New ship — create entity at default position.
                         let start_pos = if !st.planet_positions.is_empty() {
@@ -769,6 +800,8 @@ fn main() {
             // when planet orbital velocity exceeds ship velocity.
             let ap_updates: Vec<(u64, DVec3, f64)> = st.ships.iter().filter_map(|(&id, ship)| {
                 if let Some(ref ap) = ship.autopilot {
+                    // Skip re-solve for warp ships — they don't use planet intercepts.
+                    if ap.mode == autopilot::AutopilotMode::WarpTravel { return None; }
                     // Don't re-solve while braking — ship is committed to its trajectory.
                     if tick - ap.last_solve_tick >= 20 && !ap.braking_committed {
                         if let Some((new_intercept, new_tof)) = autopilot::solve_intercept(
@@ -956,42 +989,27 @@ fn main() {
                                 dampener_active: false,
                             }
                         }
-                        // Warp align: rotate toward target star, begin thrusting once roughly aligned.
-                        // Smooth transition: partial thrust proportional to alignment.
-                        FlightPhase::WarpAlign => {
+                        // Warp align + accelerate: single continuous phase.
+                        // Rotation PD controller aligns ship toward target star.
+                        // Acceleration ramps exponentially so the star system visually
+                        // shrinks to a dot over ~20-30 seconds before galaxy handoff.
+                        // Starts at 1 Mm/s² (visible departure), doubles every 2 seconds.
+                        FlightPhase::WarpAlign | FlightPhase::WarpAccelerate => {
                             let warp_dir = ap.warp_direction;
-                            let ship_fwd = ship.rotation * DVec3::NEG_Z;
-                            let alignment = ship_fwd.dot(warp_dir);
-                            // Transition to full warp acceleration when well aligned.
-                            let phase = if alignment > 0.95 {
-                                FlightPhase::WarpAccelerate
-                            } else {
-                                FlightPhase::WarpAlign
-                            };
-                            // Apply partial thrust proportional to alignment (smooth ramp, not a jump).
-                            // Warp departure acceleration: 10x Emergency tier for dramatic departure.
-                            // System SOI ~100M blocks; at 25 Mm/s² → boundary in ~3s.
-                            let warp_departure_accel = 25_000_000.0; // 25 Mm/s²
-                            let thrust_fraction = (alignment.max(0.0)).powi(4);
+                            let elapsed = physics_time - ap.engage_time;
+
+                            // Exponential acceleration: 1 Mm/s² * 2^(elapsed/2)
+                            // t=0: 1 Mm/s², t=2: 2 Mm/s², t=4: 4 Mm/s², t=10: 32 Mm/s²
+                            // t=20: 1024 Mm/s² = 1 Gm/s². At this point the system
+                            // is a tiny dot and the ship is approaching the departure boundary.
+                            let base_accel = 1_000_000.0; // 1 Mm/s²
+                            let warp_accel = base_accel * (2.0_f64).powf(elapsed / 2.0);
+                            // Cap at 10 Gm/s² to prevent numerical issues.
+                            let warp_accel = warp_accel.min(10_000_000_000.0);
+
                             GuidanceCommand {
                                 thrust_direction: warp_dir,
-                                thrust_magnitude: warp_departure_accel * ship.physical_properties.mass_kg * thrust_fraction,
-                                phase,
-                                completed: false,
-                                eta_real_seconds: 0.0,
-                                felt_g: 1.0,
-                                dampener_active: true,
-                            }
-                        }
-                        // Warp accelerate: full warp-drive acceleration toward system boundary.
-                        // 25 Mm/s² (10x Emergency tier, inertially dampened).
-                        // Visually dramatic: the star system recedes rapidly behind.
-                        FlightPhase::WarpAccelerate => {
-                            let warp_dir = ap.warp_direction;
-                            let warp_departure_accel = 25_000_000.0; // 25 Mm/s²
-                            GuidanceCommand {
-                                thrust_direction: warp_dir,
-                                thrust_magnitude: warp_departure_accel * ship.physical_properties.mass_kg,
+                                thrust_magnitude: warp_accel * ship.physical_properties.mass_kg,
                                 phase: FlightPhase::WarpAccelerate,
                                 completed: false,
                                 eta_real_seconds: 0.0,
@@ -1561,92 +1579,164 @@ fn main() {
         });
 
         // System 4b: Warp boundary detection — handoff ships to galaxy shard.
+        //
+        // Two-phase approach:
+        // Phase A (preconnect boundary, 50% of departure): Provision galaxy shard.
+        // Phase B (departure boundary, 100%): Handoff to galaxy shard (only if provisioned).
+        //
+        // If galaxy shard not ready at departure: cap velocity, hold at boundary.
         let state_warp = state.clone();
         let orch_url_warp = orchestrator_url.clone();
         let http_warp = http_client.clone();
         let quic_send_warp = quic_send_tx.clone();
         let peer_reg_warp = peer_registry.clone();
-        let client_reg_warp = client_registry.clone();
+        // Channel for galaxy shard provisioning results.
+        let (galaxy_provision_tx, mut galaxy_provision_rx) =
+            tokio::sync::mpsc::channel::<ShardId>(4);
         harness.add_system("warp_boundary", move || {
             let mut st = state_warp.lock().unwrap();
-            if st.tick_count % 10 != 0 { return; } // Check every 0.5s.
-            if st.galaxy_seed == 0 { return; } // No galaxy context.
+            if st.tick_count % 10 != 0 { return; }
+            if st.galaxy_seed == 0 { return; }
 
-            // Compute system SOI boundary in blocks.
-            let galaxy_map = voxeldust_core::galaxy::GalaxyMap::generate(st.galaxy_seed);
-            let star_info = match galaxy_map.get_star(st.star_index) {
-                Some(s) => s.clone(),
-                None => return,
-            };
-            let soi_blocks = voxeldust_core::galaxy::system_soi_radius(&star_info)
-                * voxeldust_core::galaxy::GALAXY_UNIT_IN_BLOCKS;
-            let preconnect_boundary = soi_blocks * 0.7;
-
-            // Collect departing ships.
-            struct WarpDeparture {
-                ship_id: u64,
-                session_token: SessionToken,
-                player_name: String,
-                position: DVec3,
-                velocity: DVec3,
-                rotation: DQuat,
-                target_star_index: u32,
+            // Drain galaxy provisioning results.
+            while let Ok(galaxy_shard_id) = galaxy_provision_rx.try_recv() {
+                st.provisioned_galaxy = Some(galaxy_shard_id);
+                st.galaxy_provisioning_in_flight = false;
+                info!(shard_id = galaxy_shard_id.0, "galaxy shard provisioned and ready");
             }
-            let mut departures = Vec::new();
-            let mut preconnect_ships = Vec::new();
+
+            // Departure boundary: 20x outermost planet orbit.
+            let outermost_orbit = st.system_params.planets.iter()
+                .map(|p| p.orbital_elements.sma)
+                .fold(1.0e10_f64, f64::max);
+            let departure_boundary = outermost_orbit * 20.0;
+            let preconnect_boundary = departure_boundary * 0.5;
+
+            // Scan warp-accelerating ships.
+            let mut needs_provisioning = false;
+            let mut ready_departures: Vec<u64> = Vec::new();
 
             for ship in st.ships.values() {
                 let ap = match &ship.autopilot {
                     Some(a) if a.mode == autopilot::AutopilotMode::WarpTravel => a,
                     _ => continue,
                 };
-                if ap.phase != FlightPhase::WarpAccelerate { continue; }
 
-                let dist_from_star = ship.position.length();
+                let dist = ship.position.length();
 
-                // Send ShardPreConnect at 70% of SOI.
-                if dist_from_star > preconnect_boundary {
-                    preconnect_ships.push(ship.ship_id);
+                // Phase A: Trigger galaxy provisioning at preconnect boundary.
+                if dist > preconnect_boundary {
+                    needs_provisioning = true;
                 }
 
-                // Handoff at SOI boundary.
-                if dist_from_star > soi_blocks {
-                    departures.push(WarpDeparture {
-                        ship_id: ship.ship_id,
-                        session_token: SessionToken(ship.ship_id), // session = ship_id for system shard
-                        player_name: format!("ship-{}", ship.ship_id),
-                        position: ship.position,
-                        velocity: ship.velocity,
-                        rotation: ship.rotation,
-                        target_star_index: ap.warp_target_star_index,
-                    });
+                // Phase B: Departure at full boundary (only if galaxy shard ready).
+                if dist > departure_boundary {
+                    if st.provisioned_galaxy.is_some() {
+                        ready_departures.push(ship.ship_id);
+                    }
+                    // else: ship keeps flying but we'll cap velocity below.
                 }
             }
 
-            // PreConnect: provision galaxy shard and send ShardPreConnect.
-            if !preconnect_ships.is_empty() && st.provisioned_galaxy.is_none()
+            // Provision galaxy shard if needed and not already done.
+            if needs_provisioning && st.provisioned_galaxy.is_none()
                 && !st.galaxy_provisioning_in_flight
             {
                 st.galaxy_provisioning_in_flight = true;
                 let url = format!("{}/galaxy/{}", orch_url_warp, st.galaxy_seed);
                 let client = http_warp.clone();
-                let gs = st.galaxy_seed;
-                // We just need to trigger provisioning; the actual shard info comes from peer registry.
+                let tx = galaxy_provision_tx.clone();
+                let galaxy_seed_log = st.galaxy_seed;
                 tokio::spawn(async move {
+                    info!(galaxy_seed = galaxy_seed_log, %url, "sending galaxy provision request");
                     match client.get(&url).send().await {
                         Ok(resp) => {
-                            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                if let Some(id) = body.get("info").and_then(|i| i["id"].as_u64()) {
-                                    info!(galaxy_seed = gs, shard_id = id, "galaxy shard provisioned");
+                            let status = resp.status();
+                            info!(%status, "galaxy provision response received");
+                            if let Ok(body) = resp.text().await {
+                                info!(body_len = body.len(), "galaxy provision response body");
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                                    if let Some(id) = v.get("info").and_then(|i| i["id"].as_u64())
+                                        .or_else(|| v.get("id").and_then(|i| i.as_u64()))
+                                    {
+                                        info!(shard_id = id, "galaxy shard provisioned — sending result");
+                                        let _ = tx.send(ShardId(id)).await;
+                                    } else {
+                                        warn!("galaxy provision response has no shard id: {}", &body[..body.len().min(200)]);
+                                    }
+                                } else {
+                                    warn!("galaxy provision response not valid JSON: {}", &body[..body.len().min(200)]);
                                 }
                             }
                         }
-                        Err(e) => warn!(%e, "failed to provision galaxy shard"),
+                        Err(e) => warn!(%e, "failed to provision galaxy shard (HTTP error)"),
                     }
                 });
+                info!("provisioning galaxy shard for warp departure");
             }
 
-            // Process handoffs.
+            // Cap velocity for ships past boundary without a ready galaxy shard.
+            // They hold at the edge visually until the galaxy shard is provisioned.
+            let galaxy_ready = st.provisioned_galaxy.is_some();
+            if !galaxy_ready {
+                let max_boundary_speed = autopilot::WARP_MAX_SPEED_GU
+                    * voxeldust_core::galaxy::GALAXY_UNIT_IN_BLOCKS;
+                for ship in st.ships.values_mut() {
+                    let is_warp = ship.autopilot.as_ref()
+                        .map(|a| a.mode == autopilot::AutopilotMode::WarpTravel)
+                        .unwrap_or(false);
+                    if !is_warp { continue; }
+                    if ship.position.length() > departure_boundary {
+                        let speed = ship.velocity.length();
+                        if speed > max_boundary_speed {
+                            ship.velocity = ship.velocity.normalize() * max_boundary_speed;
+                        }
+                    }
+                }
+            }
+
+            // Process departures (galaxy shard is confirmed ready).
+            if ready_departures.is_empty() { return; }
+            let galaxy_shard_id = match st.provisioned_galaxy {
+                Some(id) => id,
+                None => return,
+            };
+
+            // Look up galaxy shard full endpoint once (QUIC + TCP + UDP).
+            // All three addresses come from the same PeerInfo to avoid TOCTOU
+            // between the handoff and the HostSwitch.
+            let galaxy_endpoint = if let Ok(reg) = peer_reg_warp.try_read() {
+                reg.get(galaxy_shard_id).map(|i| (
+                    i.endpoint.quic_addr,
+                    i.endpoint.tcp_addr.to_string(),
+                    i.endpoint.udp_addr.to_string(),
+                ))
+            } else {
+                None
+            };
+            let (galaxy_quic_addr, galaxy_tcp, galaxy_udp) = match galaxy_endpoint {
+                Some(ep) => ep,
+                None => {
+                    warn!("galaxy shard provisioned but not in peer registry yet");
+                    return;
+                }
+            };
+            if galaxy_tcp.is_empty() || galaxy_udp.is_empty() {
+                warn!(galaxy_shard = galaxy_shard_id.0,
+                      "galaxy shard has empty TCP/UDP address — deferring warp departure");
+                return;
+            }
+
+            // Look up ship shards for HostSwitch messages.
+            let ship_shards: Vec<(ShardId, std::net::SocketAddr, Option<u64>)> =
+                if let Ok(reg) = peer_reg_warp.try_read() {
+                    reg.find_by_type(ShardType::Ship).iter()
+                        .map(|s| (s.id, s.endpoint.quic_addr, s.ship_id))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
             let shard_id = st.shard_id;
             let galaxy_seed_local = st.galaxy_seed;
             let star_index = st.star_index;
@@ -1654,18 +1744,33 @@ fn main() {
             let celestial_time = st.celestial_time;
             let tick_count = st.tick_count;
 
-            for dep in departures {
-                // Convert position/velocity to galaxy units.
-                let pos_gu = voxeldust_core::galaxy::system_to_galaxy(star_pos_gu, dep.position);
-                let vel_gu = dep.velocity / voxeldust_core::galaxy::GALAXY_UNIT_IN_BLOCKS;
+            for ship_id in ready_departures {
+                let ship = match st.ships.get(&ship_id) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let ap = match &ship.autopilot {
+                    Some(a) => a,
+                    None => continue,
+                };
 
-                let handoff = handoff::PlayerHandoff {
-                    session_token: dep.session_token,
-                    player_name: dep.player_name.clone(),
-                    position: dep.position, // System-space position (galaxy shard will use galaxy_context to convert).
-                    velocity: dep.velocity,
-                    rotation: dep.rotation,
-                    forward: dep.rotation * DVec3::NEG_Z,
+                let vel_gu = ship.velocity / voxeldust_core::galaxy::GALAXY_UNIT_IN_BLOCKS;
+                let pos_gu = voxeldust_core::galaxy::system_to_galaxy(star_pos_gu, ship.position);
+
+                // Resolve this ship's shard ID for the handoff.
+                let ship_shard_entry = ship_shards.iter()
+                    .find(|(_, _, sid)| *sid == Some(ship_id));
+
+                // 1. Send PlayerHandoff to galaxy shard.
+                // Include target_ship_shard_id so the galaxy shard can send
+                // SystemSceneUpdate immediately without a peer registry lookup.
+                let player_handoff = handoff::PlayerHandoff {
+                    session_token: SessionToken(ship.ship_id),
+                    player_name: format!("ship-{}", ship.ship_id),
+                    position: ship.position,
+                    velocity: ship.velocity,
+                    rotation: ship.rotation,
+                    forward: ship.rotation * DVec3::NEG_Z,
                     fly_mode: false,
                     speed_tier: 0,
                     grounded: false,
@@ -1682,45 +1787,47 @@ fn main() {
                     target_planet_seed: None,
                     target_planet_index: None,
                     target_ship_id: None,
-                    target_ship_shard_id: None,
+                    target_ship_shard_id: ship_shard_entry.map(|(id, _, _)| *id),
                     ship_system_position: None,
                     ship_rotation: None,
                     game_time: celestial_time,
-                    warp_target_star_index: Some(dep.target_star_index),
+                    warp_target_star_index: Some(ap.warp_target_star_index),
                     warp_velocity_gu: Some(vel_gu),
                 };
+                let _ = quic_send_warp.try_send((
+                    galaxy_shard_id, galaxy_quic_addr,
+                    ShardMsg::PlayerHandoff(player_handoff),
+                ));
 
-                // Find galaxy shard in peer registry.
-                if let Ok(reg) = peer_reg_warp.try_read() {
-                    let galaxy_shards = reg.find_by_type(ShardType::Galaxy);
-                    if let Some(gs) = galaxy_shards.first() {
-                        let galaxy_shard_id = gs.id;
-                        let quic_addr = gs.endpoint.quic_addr;
-
-                        // Send handoff via QUIC.
-                        let _ = quic_send_warp.try_send((
-                            galaxy_shard_id, quic_addr,
-                            ShardMsg::PlayerHandoff(handoff),
-                        ));
-
-                        // Send ShardRedirect to client via the ship shard (not direct —
-                        // the player is connected to the ship shard, not the system shard).
-                        // For now, the ship shard will detect the warp departure via ShipPositionUpdate
-                        // stopping and handle the redirect. TODO: more direct approach.
-
-                        info!(
-                            ship_id = dep.ship_id,
-                            target_star = dep.target_star_index,
-                            pos_gu = format!("({:.2},{:.2},{:.2})", pos_gu.x, pos_gu.y, pos_gu.z),
-                            "warp departure — handoff to galaxy shard"
-                        );
-                    } else {
-                        warn!(ship_id = dep.ship_id, "no galaxy shard available for warp handoff");
-                    }
+                // 2. Send HostSwitch to ship shard — switch host from system to galaxy.
+                //    The ship shard will start sending ShipControlInput to the galaxy shard.
+                //    Player stays in the cockpit, no reconnection needed.
+                if let Some((ship_shard_id, ship_quic_addr, _)) = ship_shard_entry
+                {
+                    let host_switch = ShardMsg::HostSwitch(
+                        voxeldust_core::shard_message::HostSwitchData {
+                            ship_id,
+                            new_host_shard_id: galaxy_shard_id,
+                            new_host_quic_addr: galaxy_quic_addr.to_string(),
+                            new_host_tcp_addr: galaxy_tcp.clone(),
+                            new_host_udp_addr: galaxy_udp.clone(),
+                            new_host_shard_type: 3, // Galaxy
+                            seed: galaxy_seed_local,
+                        },
+                    );
+                    let _ = quic_send_warp.try_send((*ship_shard_id, *ship_quic_addr, host_switch));
+                    info!(ship_id, new_host = galaxy_shard_id.0, "sent HostSwitch to ship shard");
                 }
 
-                // Remove ship from system state.
-                st.ships.remove(&dep.ship_id);
+                // 3. Mark as departed and remove from system.
+                st.departed_ships.insert(ship_id);
+                st.ships.remove(&ship_id);
+
+                info!(
+                    ship_id,
+                    pos_gu = format!("({:.1},{:.1},{:.1})", pos_gu.x, pos_gu.y, pos_gu.z),
+                    "warp departure — handoff to galaxy shard complete"
+                );
             }
         });
 

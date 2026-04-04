@@ -13,10 +13,10 @@ pub mod protocol {
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 13;
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 14;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 14] = [
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 15] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -31,6 +31,7 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 14] = [
   ShardPayload::AutopilotCommand,
   ShardPayload::ShipNearbyInfo,
   ShardPayload::WarpAutopilotCommand,
+  ShardPayload::HostSwitch,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -52,9 +53,10 @@ impl ShardPayload {
   pub const AutopilotCommand: Self = Self(11);
   pub const ShipNearbyInfo: Self = Self(12);
   pub const WarpAutopilotCommand: Self = Self(13);
+  pub const HostSwitch: Self = Self(14);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 13;
+  pub const ENUM_MAX: u8 = 14;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -70,6 +72,7 @@ impl ShardPayload {
     Self::AutopilotCommand,
     Self::ShipNearbyInfo,
     Self::WarpAutopilotCommand,
+    Self::HostSwitch,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -88,6 +91,7 @@ impl ShardPayload {
       Self::AutopilotCommand => Some("AutopilotCommand"),
       Self::ShipNearbyInfo => Some("ShipNearbyInfo"),
       Self::WarpAutopilotCommand => Some("WarpAutopilotCommand"),
+      Self::HostSwitch => Some("HostSwitch"),
       _ => None,
     }
   }
@@ -2659,6 +2663,208 @@ impl ::core::fmt::Debug for AutopilotCommand<'_> {
       ds.finish()
   }
 }
+pub enum HostSwitchOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Host switch: tells a ship shard to change its physics host.
+/// Sent by system shard (departure) or galaxy shard (arrival).
+/// Includes full endpoint info for the ship shard to send ShardPreConnect
+/// to the client (secondary UDP for dual-shard compositing).
+pub struct HostSwitch<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for HostSwitch<'a> {
+  type Inner = HostSwitch<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> HostSwitch<'a> {
+  pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_NEW_HOST_SHARD_ID: ::flatbuffers::VOffsetT = 6;
+  pub const VT_NEW_HOST_QUIC_ADDR: ::flatbuffers::VOffsetT = 8;
+  pub const VT_NEW_HOST_TCP_ADDR: ::flatbuffers::VOffsetT = 10;
+  pub const VT_NEW_HOST_UDP_ADDR: ::flatbuffers::VOffsetT = 12;
+  pub const VT_NEW_HOST_SHARD_TYPE: ::flatbuffers::VOffsetT = 14;
+  pub const VT_SEED: ::flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    HostSwitch { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args HostSwitchArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<HostSwitch<'bldr>> {
+    let mut builder = HostSwitchBuilder::new(_fbb);
+    builder.add_seed(args.seed);
+    builder.add_new_host_shard_id(args.new_host_shard_id);
+    builder.add_ship_id(args.ship_id);
+    if let Some(x) = args.new_host_udp_addr { builder.add_new_host_udp_addr(x); }
+    if let Some(x) = args.new_host_tcp_addr { builder.add_new_host_tcp_addr(x); }
+    if let Some(x) = args.new_host_quic_addr { builder.add_new_host_quic_addr(x); }
+    builder.add_new_host_shard_type(args.new_host_shard_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(HostSwitch::VT_SHIP_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn new_host_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(HostSwitch::VT_NEW_HOST_SHARD_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn new_host_quic_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HostSwitch::VT_NEW_HOST_QUIC_ADDR, None)}
+  }
+  #[inline]
+  pub fn new_host_tcp_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HostSwitch::VT_NEW_HOST_TCP_ADDR, None)}
+  }
+  #[inline]
+  pub fn new_host_udp_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HostSwitch::VT_NEW_HOST_UDP_ADDR, None)}
+  }
+  #[inline]
+  pub fn new_host_shard_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(HostSwitch::VT_NEW_HOST_SHARD_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn seed(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(HostSwitch::VT_SEED, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for HostSwitch<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
+     .visit_field::<u64>("new_host_shard_id", Self::VT_NEW_HOST_SHARD_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("new_host_quic_addr", Self::VT_NEW_HOST_QUIC_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("new_host_tcp_addr", Self::VT_NEW_HOST_TCP_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("new_host_udp_addr", Self::VT_NEW_HOST_UDP_ADDR, false)?
+     .visit_field::<u8>("new_host_shard_type", Self::VT_NEW_HOST_SHARD_TYPE, false)?
+     .visit_field::<u64>("seed", Self::VT_SEED, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct HostSwitchArgs<'a> {
+    pub ship_id: u64,
+    pub new_host_shard_id: u64,
+    pub new_host_quic_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub new_host_tcp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub new_host_udp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub new_host_shard_type: u8,
+    pub seed: u64,
+}
+impl<'a> Default for HostSwitchArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    HostSwitchArgs {
+      ship_id: 0,
+      new_host_shard_id: 0,
+      new_host_quic_addr: None,
+      new_host_tcp_addr: None,
+      new_host_udp_addr: None,
+      new_host_shard_type: 0,
+      seed: 0,
+    }
+  }
+}
+
+pub struct HostSwitchBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HostSwitchBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ship_id(&mut self, ship_id: u64) {
+    self.fbb_.push_slot::<u64>(HostSwitch::VT_SHIP_ID, ship_id, 0);
+  }
+  #[inline]
+  pub fn add_new_host_shard_id(&mut self, new_host_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(HostSwitch::VT_NEW_HOST_SHARD_ID, new_host_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_new_host_quic_addr(&mut self, new_host_quic_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HostSwitch::VT_NEW_HOST_QUIC_ADDR, new_host_quic_addr);
+  }
+  #[inline]
+  pub fn add_new_host_tcp_addr(&mut self, new_host_tcp_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HostSwitch::VT_NEW_HOST_TCP_ADDR, new_host_tcp_addr);
+  }
+  #[inline]
+  pub fn add_new_host_udp_addr(&mut self, new_host_udp_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HostSwitch::VT_NEW_HOST_UDP_ADDR, new_host_udp_addr);
+  }
+  #[inline]
+  pub fn add_new_host_shard_type(&mut self, new_host_shard_type: u8) {
+    self.fbb_.push_slot::<u8>(HostSwitch::VT_NEW_HOST_SHARD_TYPE, new_host_shard_type, 0);
+  }
+  #[inline]
+  pub fn add_seed(&mut self, seed: u64) {
+    self.fbb_.push_slot::<u64>(HostSwitch::VT_SEED, seed, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HostSwitchBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    HostSwitchBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<HostSwitch<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for HostSwitch<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("HostSwitch");
+      ds.field("ship_id", &self.ship_id());
+      ds.field("new_host_shard_id", &self.new_host_shard_id());
+      ds.field("new_host_quic_addr", &self.new_host_quic_addr());
+      ds.field("new_host_tcp_addr", &self.new_host_tcp_addr());
+      ds.field("new_host_udp_addr", &self.new_host_udp_addr());
+      ds.field("new_host_shard_type", &self.new_host_shard_type());
+      ds.field("seed", &self.seed());
+      ds.finish()
+  }
+}
 pub enum WarpAutopilotCommandOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -3879,6 +4085,21 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_host_switch(&self) -> Option<HostSwitch<'a>> {
+    if self.payload_type() == ShardPayload::HostSwitch {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { HostSwitch::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -3902,6 +4123,7 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::AutopilotCommand => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<AutopilotCommand>>("ShardPayload::AutopilotCommand", pos),
           ShardPayload::ShipNearbyInfo => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipNearbyInfo>>("ShardPayload::ShipNearbyInfo", pos),
           ShardPayload::WarpAutopilotCommand => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WarpAutopilotCommand>>("ShardPayload::WarpAutopilotCommand", pos),
+          ShardPayload::HostSwitch => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<HostSwitch>>("ShardPayload::HostSwitch", pos),
           _ => Ok(()),
         }
      })?
@@ -4042,6 +4264,13 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::WarpAutopilotCommand => {
           if let Some(x) = self.payload_as_warp_autopilot_command() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::HostSwitch => {
+          if let Some(x) = self.payload_as_host_switch() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

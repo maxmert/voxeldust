@@ -385,12 +385,15 @@ fn build_scene_lighting(ws: Option<&WorldStateData>) -> SceneLighting {
 }
 
 fn default_scene_lighting() -> SceneLighting {
-    let dir = Vec3::new(0.182, 0.607, 0.303);
+    // Dim interstellar ambient — used as fallback when no host is sending
+    // scene updates (e.g., during warp HostSwitch gap before galaxy shard
+    // scene data arrives). Must not be bright white.
+    let dir = Vec3::new(0.0, -1.0, 0.0);
     let light_vp = compute_light_vp(dir);
     SceneLighting {
-        sun_direction: [0.182, 0.607, 0.303, 0.0], // normalize(0.3, 1.0, 0.5)
-        sun_color: [1.0, 1.0, 1.0, 1.0],
-        ambient: [0.1, 0.0, 0.0, 0.0],
+        sun_direction: [0.0, -1.0, 0.0, 0.0],
+        sun_color: [0.4, 0.4, 0.5, 0.15],
+        ambient: [0.06, 0.0, 0.0, 0.0],
         camera_pos: [0.0, 0.0, 0.0, 0.0],
         light_vp: light_vp.to_cols_array_2d(),
     }

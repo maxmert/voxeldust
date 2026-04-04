@@ -35,6 +35,8 @@ pub enum NetEvent {
     },
     /// WorldState from a secondary shard (for composite rendering).
     SecondaryWorldState(WorldStateData),
+    /// Galaxy world state from secondary UDP (warp travel position for star parallax).
+    GalaxyWorldState(voxeldust_core::client_message::GalaxyWorldStateData),
     /// Primary shard is changing (ShardRedirect received).
     Transitioning,
     Disconnected(String),
@@ -253,10 +255,16 @@ pub async fn run_network(
                                                             Ok(d) => d,
                                                             Err(_) => continue,
                                                         };
-                                                        if let Ok(ServerMsg::WorldState(ws)) =
-                                                            ServerMsg::deserialize(&decoded) {
-                                                            let _ = sec_event_tx.send(
-                                                                NetEvent::SecondaryWorldState(ws));
+                                                        match ServerMsg::deserialize(&decoded) {
+                                                            Ok(ServerMsg::WorldState(ws)) => {
+                                                                let _ = sec_event_tx.send(
+                                                                    NetEvent::SecondaryWorldState(ws));
+                                                            }
+                                                            Ok(ServerMsg::GalaxyWorldState(gws)) => {
+                                                                let _ = sec_event_tx.send(
+                                                                    NetEvent::GalaxyWorldState(gws));
+                                                            }
+                                                            _ => {}
                                                         }
                                                     }
                                                     Err(e) => {

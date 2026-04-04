@@ -97,6 +97,12 @@ struct App {
     system_seed: u64,
     /// Client-side warp target star index (for targeting UI).
     warp_target_star_index: Option<u32>,
+    /// Ship's galaxy position during warp (from secondary UDP to galaxy shard).
+    /// When Some, star field switches to galaxy mode for real parallax.
+    warp_galaxy_position: Option<DVec3>,
+    /// Ship's galaxy-frame rotation during warp (facing target star).
+    /// Used to build a dedicated view-projection for the star pass.
+    warp_galaxy_rotation: Option<DQuat>,
     /// Previous G-key state for rising edge detection.
     prev_g_pressed: bool,
 }
@@ -140,6 +146,8 @@ impl App {
             galaxy_seed: 0,
             system_seed: 0,
             warp_target_star_index: None,
+            warp_galaxy_position: None,
+            warp_galaxy_rotation: None,
             prev_g_pressed: false,
         }
     }
@@ -148,12 +156,27 @@ impl App {
         let target_idx = self.warp_target_star_index?;
         let sf = self.star_field.as_ref()?;
         let star = sf.get_star(target_idx)?;
-        let current_star_pos = sf.current_star_index
-            .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
-            .map(|s| s.galaxy_position)
-            .unwrap_or(DVec3::ZERO);
-        let distance = (star.galaxy_position - current_star_pos).length();
-        let direction = (star.galaxy_position - current_star_pos).normalize();
+
+        // Reference position: warp camera position during warp, current star otherwise.
+        let ref_pos = self.warp_galaxy_position.unwrap_or_else(|| {
+            sf.current_star_index
+                .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
+                .map(|s| s.galaxy_position)
+                .unwrap_or(DVec3::ZERO)
+        });
+        let distance = (star.galaxy_position - ref_pos).length();
+        let galaxy_dir = (star.galaxy_position - ref_pos).normalize();
+
+        // During warp the star VP uses galaxy-frame coordinates but the HUD
+        // projects through the main camera VP (ship/world space). Transform
+        // the galaxy direction to ship-local so the reticle aligns with
+        // the star's actual screen position.
+        let direction = if let Some(warp_rot) = self.warp_galaxy_rotation {
+            warp_rot.inverse() * galaxy_dir
+        } else {
+            galaxy_dir
+        };
+
         Some(hud::WarpTargetInfo {
             star_index: target_idx,
             star_class_name: stars::star_class_name(star.star_class),
@@ -191,7 +214,16 @@ impl App {
         if let Some(rx) = &mut self.net_event_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
-                    NetEvent::WorldState(ws) => {
+                    NetEvent::WorldState(mut ws) => {
+                        // During warp the galaxy shard is the authority for the
+                        // scene — the ship shard should send empty bodies.  Stale
+                        // SystemSceneUpdate messages from the old system shard can
+                        // leak through QUIC queues and briefly restore celestial
+                        // bodies. Drop them on the client so they never render.
+                        if self.warp_galaxy_position.is_some() {
+                            ws.bodies.clear();
+                        }
+
                         // Update player position from server.
                         if let Some(p) = ws.players.first() {
                             self.player_position = p.position;
@@ -241,6 +273,11 @@ impl App {
                         self.connected = true;
                         self.system_seed = system_seed;
                         self.galaxy_seed = galaxy_seed;
+
+                        // Clear warp state on any new shard connection.
+                        self.warp_galaxy_position = None;
+                        self.warp_galaxy_rotation = None;
+                        self.warp_target_star_index = None;
                         if system_seed > 0 {
                             self.system_params = Some(voxeldust_core::system::SystemParams::from_seed(system_seed));
                         }
@@ -250,6 +287,12 @@ impl App {
                             self.star_field = Some(stars::StarField::from_galaxy_seed(galaxy_seed, system_seed));
                             info!(stars = self.star_field.as_ref().unwrap().catalog.len(), "star field ready");
                         }
+                        // Restore star field's current star exclusion after warp arrival.
+                        if system_seed > 0 {
+                            if let Some(ref mut sf) = self.star_field {
+                                sf.set_current_system_seed(system_seed);
+                            }
+                        }
                         let shard_name = match shard_type { 0 => "Planet", 1 => "System", 2 => "Ship", 3 => "Galaxy", _ => "?" };
                         info!(shard_name, "connected to shard");
                     }
@@ -258,15 +301,56 @@ impl App {
                         self.connected = false;
                     }
                     NetEvent::SecondaryConnected { shard_type, seed, reference_position, reference_rotation } => {
-                        let shard_name = match shard_type { 0 => "Planet", 2 => "Ship", _ => "?" };
-                        info!(shard_name, seed, "secondary shard connected for dual compositing");
+                        let shard_name = match shard_type { 0 => "Planet", 2 => "Ship", 3 => "Galaxy", _ => "?" };
+                        info!(shard_name, seed, shard_type, "secondary shard connected for dual compositing");
                         self.secondary_shard_type = Some(shard_type);
+
+                        if shard_type == 3 {
+                            // Galaxy secondary: entering warp. The departure star is no
+                            // longer rendered as a celestial body (bodies will be empty),
+                            // so stop excluding it from the star field.
+                            if let Some(ref mut sf) = self.star_field {
+                                sf.current_star_index = None;
+                            }
+                        } else if self.warp_galaxy_position.is_some() {
+                            // Non-galaxy secondary while warp is active: warp has ended,
+                            // ship arrived at destination system. Clear warp state so the
+                            // star field returns to skybox mode and bodies render normally.
+                            info!("warp ended — arrived at destination system");
+                            self.warp_galaxy_position = None;
+                            self.warp_galaxy_rotation = None;
+                            self.warp_target_star_index = None;
+                            if seed > 0 {
+                                if let Some(ref mut sf) = self.star_field {
+                                    sf.set_current_system_seed(seed);
+                                }
+                            }
+                        }
                     }
                     NetEvent::SecondaryWorldState(ws) => {
                         self.secondary_world_state = Some(ws);
                     }
+                    NetEvent::GalaxyWorldState(gws) => {
+                        // Galaxy shard sends ship's galaxy position + rotation via secondary UDP.
+                        // Used to build a dedicated star view-projection for parallax.
+                        let was_none = self.warp_galaxy_position.is_none();
+                        self.warp_galaxy_position = Some(gws.ship_position);
+                        self.warp_galaxy_rotation = Some(gws.ship_rotation);
+                        if was_none {
+                            info!(
+                                pos = format!("({:.1},{:.1},{:.1})", gws.ship_position.x, gws.ship_position.y, gws.ship_position.z),
+                                "first GalaxyWorldState received — switching to galaxy star mode"
+                            );
+                        }
+                    }
                     NetEvent::Transitioning => {
                         info!("transitioning to new shard...");
+
+                        // Clear warp state — warp travel is over.
+                        self.warp_galaxy_position = None;
+                        self.warp_galaxy_rotation = None;
+                        self.warp_target_star_index = None;
+
                         if self.secondary_world_state.is_some() {
                             // Seamless: promote secondary to primary.
                             info!("seamless transition — secondary data available");
@@ -352,7 +436,12 @@ impl App {
     }
 
     /// Check for double-tap T timeout — if 400ms elapsed since first tap, engage DirectApproach.
+    /// Skipped when warp target is active (warp takes priority over planet autopilot).
     fn check_autopilot_tap_timeout(&mut self) {
+        if self.warp_target_star_index.is_some() {
+            self.last_t_press = None; // Clear stale T-press when warp is active.
+            return;
+        }
         if let Some(press_time) = self.last_t_press {
             if press_time.elapsed() >= std::time::Duration::from_millis(400) {
                 self.last_t_press = None;
@@ -424,29 +513,82 @@ impl App {
 
         // Update star field and upload instances to GPU.
         let star_instance_count = if let Some(ref mut sf) = self.star_field {
-            let skybox_mode = self.current_shard_type != 3; // galaxy shard = real positions
+            // During warp: galaxy mode with real ship position (parallax).
+            // Otherwise: skybox mode (directions at infinity, no parallax).
+            let skybox_mode = self.warp_galaxy_position.is_none();
             let current_star_pos = sf.current_star_index
                 .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
                 .map(|s| s.galaxy_position)
                 .unwrap_or(DVec3::ZERO);
-            let cam_galaxy_pos = current_star_pos; // In system shard, camera is at the star
+            let cam_galaxy_pos = self.warp_galaxy_position.unwrap_or(current_star_pos);
             sf.update_instances(current_star_pos, cam_galaxy_pos, skybox_mode, self.warp_target_star_index);
             let count = sf.instances.len() as u32;
+            // DEBUG: log star mode + position during warp
+            if self.frame_count % 120 == 0 && self.secondary_shard_type == Some(3) {
+                if let Some(pos) = self.warp_galaxy_position {
+                    tracing::info!(
+                        star_count = count, skybox_mode,
+                        pos = format!("({:.2},{:.2},{:.2})", pos.x, pos.y, pos.z),
+                        "warp star field status"
+                    );
+                }
+            }
             if count > 0 {
                 gpu.queue.write_buffer(
                     &gpu.star_instance_buf,
                     0,
                     bytemuck::cast_slice(&sf.instances),
                 );
-                // Update star scene uniforms from camera params.
-                let cam_right = cam.cam_fwd.cross(cam.cam_up).normalize();
-                let star_uniforms = stars::StarSceneUniforms {
-                    view_proj: cam.vp.to_cols_array_2d(),
-                    camera_right: [cam_right.x, cam_right.y, cam_right.z, 0.0],
-                    camera_up: [cam.cam_up.x, cam.cam_up.y, cam.cam_up.z, 0.0],
-                    warp_velocity: [0.0, 0.0, 0.0, 0.0],
-                    render_mode: [if skybox_mode { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0],
+
+                // Compute star scene uniforms.
+                // During warp: dedicated galaxy-frame view-projection so stars
+                // appear at correct positions relative to the cockpit.
+                // Normal flight: use the main camera's view-projection (skybox).
+                let star_uniforms = if let Some(warp_rot) = self.warp_galaxy_rotation {
+                    // Galaxy-frame view: ship faces target star via warp_rotation.
+                    // When piloting, camera is locked to ship heading (NEG_Z) —
+                    // the star VP must match so the target star appears centered
+                    // through the cockpit. When walking, use free yaw/pitch.
+                    let local_look = if self.is_piloting {
+                        glam::DVec3::NEG_Z
+                    } else {
+                        let (sy, cy) = (self.camera_yaw as f32).sin_cos();
+                        let (sp, cp) = (self.camera_pitch as f32).sin_cos();
+                        glam::DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64)
+                    };
+                    let galaxy_fwd = (warp_rot * local_look).normalize().as_vec3();
+                    let galaxy_up = (warp_rot * DVec3::Y).normalize().as_vec3();
+                    let galaxy_right = galaxy_fwd.cross(galaxy_up).normalize();
+                    let corrected_up = galaxy_right.cross(galaxy_fwd).normalize();
+
+                    let aspect = gpu.config.width as f32 / gpu.config.height as f32;
+                    let star_view = glam::Mat4::look_to_rh(
+                        glam::Vec3::ZERO, galaxy_fwd, corrected_up,
+                    );
+                    let star_proj = glam::Mat4::perspective_infinite_reverse_rh(
+                        70.0_f32.to_radians(), aspect, 0.1,
+                    );
+                    let star_vp = star_proj * star_view;
+
+                    stars::StarSceneUniforms {
+                        view_proj: star_vp.to_cols_array_2d(),
+                        camera_right: [galaxy_right.x, galaxy_right.y, galaxy_right.z, 0.0],
+                        camera_up: [corrected_up.x, corrected_up.y, corrected_up.z, 0.0],
+                        warp_velocity: [0.0, 0.0, 0.0, 0.0],
+                        render_mode: [0.0, 0.0, 0.0, 0.0], // skybox mode (directions at 500 units)
+                    }
+                } else {
+                    // Normal flight: use main camera's view-projection.
+                    let cam_right = cam.cam_fwd.cross(cam.cam_up).normalize();
+                    stars::StarSceneUniforms {
+                        view_proj: cam.vp.to_cols_array_2d(),
+                        camera_right: [cam_right.x, cam_right.y, cam_right.z, 0.0],
+                        camera_up: [cam.cam_up.x, cam.cam_up.y, cam.cam_up.z, 0.0],
+                        warp_velocity: [0.0, 0.0, 0.0, 0.0],
+                        render_mode: [0.0, 0.0, 0.0, 0.0], // skybox mode
+                    }
                 };
+
                 gpu.queue.write_buffer(
                     &gpu.star_scene_uniform_buf,
                     0,
