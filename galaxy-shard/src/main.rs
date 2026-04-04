@@ -274,14 +274,10 @@ fn main() {
                         // departure (where stars were at infinity = no parallax).
                         let initial_velocity = DVec3::ZERO;
 
-                        // Compute rotation facing the target star (ship -Z = forward).
-                        // This ensures the target star is visible through the cockpit
-                        // after the shard transition — no 180° flip.
-                        let warp_rotation = if to_target.length_squared() > 0.5 {
-                            DQuat::from_rotation_arc(DVec3::NEG_Z, to_target)
-                        } else {
-                            h.rotation // fallback if target is at same position
-                        };
+                        // Use the ship's actual rotation from the handoff.
+                        // The WarpAlign phase in the system shard already aligned
+                        // the ship toward the target star before departure.
+                        let warp_rotation = h.rotation;
 
                         // Initial distance for journey fraction tracking.
                         let initial_distance = (target_pos - position_gu).length();
@@ -503,16 +499,11 @@ fn main() {
                     _ => {}
                 }
 
-                // Update rotation to face toward target star.
-                // Ship's local -Z axis = forward. rotation * NEG_Z = world forward.
-                let target_star_pos = galaxy_map_arc.get_star(ship.target_star_index)
-                    .map(|s| s.position);
-                if let Some(tp) = target_star_pos {
-                    let to_target = (tp - ship.position_gu).normalize();
-                    if to_target.length_squared() > 0.5 {
-                        ship.rotation = DQuat::from_rotation_arc(DVec3::NEG_Z, to_target);
-                    }
-                }
+                // Rotation: preserve the handoff rotation from WarpAlign.
+                // The ship was already aligned toward the target in the system
+                // shard. During warp travel the direction to target barely
+                // changes (a few degrees across the galaxy), so snapping the
+                // rotation every tick would cause visual jumps on the client.
             }
 
             // Writeback.
@@ -572,10 +563,18 @@ fn main() {
 
                 let distance = (ship.position_gu - target_star.position).length();
                 let soi = system_outer_radius(target_star);
+                let speed = ship.velocity_gu.length();
 
-                // PreConnect when approaching (5× SOI — early enough to provision
-                // the destination system before the ship arrives at 3× SOI).
-                if distance < soi * 5.0 && !ship.preconnect_sent {
+                // The speed cap (sqrt(2ad)*0.95) asymptotically approaches the
+                // target but never reaches it. Detect "effectively arrived" when
+                // the ship has slowed to near-stop in WarpCruise.
+                let effectively_arrived = speed < 2.0
+                    && ship.warp_phase == FlightPhase::WarpCruise;
+
+                // Provision when approaching (5× SOI or effectively arrived).
+                let needs_provision = (distance < soi * 5.0 || effectively_arrived)
+                    && !ship.preconnect_sent;
+                if needs_provision {
                     if let Some(&dest_shard_id) = st.provisioned_systems.get(&ship.target_star_index) {
                         actions.push(SoiAction::SendPreConnect {
                             ship_id: ship.ship_id,
@@ -591,13 +590,18 @@ fn main() {
                     }
                 }
 
-                // Ship entered SOI proximity — handoff. Use 3× SOI to account
-                // for the braking margin (deceleration trigger uses 2× SOI offset,
-                // so the ship stops ~2× SOI from the star).
-                if distance < soi * 3.0 && ship.velocity_gu.length() < 1.0 {
+                // Handoff when within SOI proximity or effectively arrived and stopped.
+                let ready_for_handoff = (distance < soi * 3.0 && speed < 1.0)
+                    || (effectively_arrived && speed < 0.5);
+                if ready_for_handoff {
                     if let Some(&dest_shard_id) = st.provisioned_systems.get(&ship.target_star_index) {
-                        let system_pos = galaxy_to_system(target_star.position, ship.position_gu);
-                        let system_vel = ship.velocity_gu * GALAXY_UNIT_IN_BLOCKS;
+                        // The galaxy shard doesn't know the destination system's real
+                        // size (planet orbits). Send the ship's forward direction as a
+                        // hint — the destination system shard computes the actual arrival
+                        // position from its own SystemParams.
+                        let ship_forward = ship.rotation * DVec3::NEG_Z;
+                        let system_pos = ship_forward; // unit vector hint, not a position
+                        let system_vel = DVec3::ZERO;  // system shard computes speed
                         actions.push(SoiAction::Handoff {
                             ship_id: ship.ship_id,
                             dest_shard: dest_shard_id,
@@ -609,7 +613,8 @@ fn main() {
                             target_star_index: ship.target_star_index,
                             star_position: target_star.position,
                         });
-                        arrived_ships.push(ship.ship_id);
+                        // Don't add to arrived_ships here — Phase 2 adds it
+                        // only after the handoff is successfully sent.
                     }
                 }
             }
@@ -656,15 +661,19 @@ fn main() {
                             match client.get(&url).send().await {
                                 Ok(resp) => {
                                     if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                        if let Some(info) = body.get("info") {
-                                            let sid = info["id"].as_u64().unwrap_or(0);
-                                            let tcp: SocketAddr = info["endpoint"]["tcp_addr"]
+                                        // ShardResponse uses #[serde(flatten)] — fields
+                                        // are at the top level, not nested under "info".
+                                        let sid = body["id"].as_u64().unwrap_or(0);
+                                        if sid > 0 {
+                                            let tcp: SocketAddr = body["endpoint"]["tcp_addr"]
                                                 .as_str().unwrap_or("127.0.0.1:9777")
                                                 .parse().unwrap_or_else(|_| "127.0.0.1:9777".parse().unwrap());
-                                            let udp: SocketAddr = info["endpoint"]["udp_addr"]
+                                            let udp: SocketAddr = body["endpoint"]["udp_addr"]
                                                 .as_str().unwrap_or("127.0.0.1:9778")
                                                 .parse().unwrap_or_else(|_| "127.0.0.1:9778".parse().unwrap());
                                             let _ = tx.send((star_index, ShardId(sid), tcp, udp)).await;
+                                        } else {
+                                            warn!(star_index, "provision response missing shard id");
                                         }
                                     }
                                 }
@@ -709,14 +718,28 @@ fn main() {
                         };
 
                         // 1. Send PlayerHandoff to destination system shard.
-                        if let Ok(reg) = peer_reg_soi.try_read() {
+                        let handoff_sent = if let Ok(reg) = peer_reg_soi.try_read() {
                             if let Some(peer_info) = reg.get(dest_shard) {
                                 let _ = quic_send_soi.try_send((
                                     dest_shard, peer_info.endpoint.quic_addr,
                                     ShardMsg::PlayerHandoff(handoff),
                                 ));
+                                true
+                            } else {
+                                warn!(dest = dest_shard.0, "destination system shard not in peer registry — handoff dropped");
+                                false
                             }
+                        } else {
+                            warn!("peer registry lock failed during warp arrival handoff");
+                            false
+                        };
+                        if !handoff_sent {
+                            // Don't remove ship — retry next SOI detection tick.
+                            continue;
                         }
+
+                        // Handoff successfully sent — mark ship for removal.
+                        arrived_ships.push(ship_id);
 
                         // 2. Send HostSwitch to ship shard — switch host from galaxy
                         //    to the destination system shard. The ship shard relays a
@@ -871,15 +894,13 @@ fn main() {
 
                 // Per-ship position update — ship shard tracks position for WorldState.
                 // Position = ZERO because body positions are already ship-relative.
-                // Rotation = IDENTITY — the ship's internal rotation must not change
-                // during warp. The galaxy-frame rotation is applied to the SCENE BODIES
-                // (star positions), not to the ship itself. Changing ship_rotation would
-                // break the camera-interior cancellation and point the player at a wall.
+                // Rotation = galaxy-frame rotation so the client's main camera and
+                // star VP agree on the view direction (both use ship.rotation).
                 let pos_update = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
                     ship_id: ship.ship_id,
                     position: DVec3::ZERO,
                     velocity: ship.velocity_gu * GALAXY_UNIT_IN_BLOCKS,
-                    rotation: DQuat::IDENTITY,
+                    rotation: ship.rotation,
                     angular_velocity: DVec3::ZERO,
                 });
                 let _ = quic_send_scene.try_send((shard_id, quic_addr, pos_update));

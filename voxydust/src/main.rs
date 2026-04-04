@@ -167,15 +167,12 @@ impl App {
         let distance = (star.galaxy_position - ref_pos).length();
         let galaxy_dir = (star.galaxy_position - ref_pos).normalize();
 
-        // During warp the star VP uses galaxy-frame coordinates but the HUD
-        // projects through the main camera VP (ship/world space). Transform
-        // the galaxy direction to ship-local so the reticle aligns with
-        // the star's actual screen position.
-        let direction = if let Some(warp_rot) = self.warp_galaxy_rotation {
-            warp_rot.inverse() * galaxy_dir
-        } else {
-            galaxy_dir
-        };
+        // galaxy_dir is in galaxy/world space. The main camera VP already
+        // transforms from world space to screen space (including ship_rotation
+        // which equals warp_galaxy_rotation during warp). No extra transform
+        // needed — projecting galaxy_dir through ctx.vp gives the correct
+        // screen position in both warp and normal flight.
+        let direction = galaxy_dir;
 
         Some(hud::WarpTargetInfo {
             star_index: target_idx,

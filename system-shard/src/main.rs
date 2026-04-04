@@ -151,6 +151,11 @@ struct SystemState {
     galaxy_provisioning_in_flight: bool,
     /// Ships that have departed via warp (don't re-create in discover_ships).
     departed_ships: std::collections::HashSet<u64>,
+    /// Pending warp arrivals: handoff data stored until discover_ships creates the ship.
+    pending_warp_arrivals: HashMap<u64, handoff::PlayerHandoff>,
+    /// Ships that arrived via warp handoff — exempt from stale-entity cleanup
+    /// because the peer registry still shows their old host.
+    warp_arrived_ships: std::collections::HashSet<u64>,
 }
 
 impl SystemState {
@@ -192,6 +197,8 @@ impl SystemState {
             provisioned_galaxy: None,
             galaxy_provisioning_in_flight: false,
             departed_ships: std::collections::HashSet::new(),
+            pending_warp_arrivals: HashMap::new(),
+            warp_arrived_ships: std::collections::HashSet::new(),
         }
     }
 
@@ -604,6 +611,109 @@ fn main() {
                                         "forwarded player handoff to ship shard");
                                 }
                             }
+                        } else if handoff.target_star_index.is_some() || handoff.galaxy_context.is_some() {
+                            // Galaxy → System warp arrival. Compute position from real
+                            // system data — the galaxy shard doesn't know planet orbits.
+                            let ship_id = handoff.session_token.0;
+
+                            // Ship forward = departure→arrival direction (from WarpAlign).
+                            let ship_forward = handoff.forward.normalize();
+                            let outermost_orbit = st.system_params.planets.iter()
+                                .map(|p| p.orbital_elements.sma)
+                                .fold(st.system_params.scale.base_sma, f64::max);
+                            let arrival_distance = outermost_orbit * 15.0;
+
+                            // Simulate the departure exponential acceleration to find the
+                            // exact speed a ship would have at arrival_distance. This
+                            // ensures the arrival entry speed matches the departure exit
+                            // speed for this system's actual size.
+                            let base_accel = 1_000_000.0_f64; // 1 Mm/s² (same as WarpAccelerate)
+                            let tau = 2.0_f64;
+                            let dt_sim = 0.05_f64;
+                            let accel_cap = 10_000_000_000.0_f64;
+                            let mut sim_v = 0.0_f64;
+                            let mut sim_d = 0.0_f64;
+                            let mut sim_t = 0.0_f64;
+                            while sim_d < arrival_distance && sim_t < 60.0 {
+                                let a = (base_accel * (2.0_f64).powf(sim_t / tau)).min(accel_cap);
+                                sim_v += a * dt_sim;
+                                sim_d += sim_v * dt_sim;
+                                sim_t += dt_sim;
+                            }
+                            let entry_speed = sim_v;
+
+                            // Cubic ease-out stopping: speed(t) = v₀ * (1 - t/T)³
+                            // Distance = v₀ * T / 4, so T = 4 * d_braking / v₀.
+                            // Stop at the median planet orbit — puts the ship squarely
+                            // inside the system, with planets visible at various distances.
+                            let mut orbit_smas: Vec<f64> = st.system_params.planets.iter()
+                                .map(|p| p.orbital_elements.sma)
+                                .collect();
+                            orbit_smas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                            let stop_distance = if orbit_smas.is_empty() {
+                                outermost_orbit * 0.5
+                            } else {
+                                orbit_smas[orbit_smas.len() / 2]
+                            };
+                            let d_braking = (arrival_distance - stop_distance).max(arrival_distance * 0.5);
+                            let total_time = 4.0 * d_braking / entry_speed;
+
+                            let start_pos = -ship_forward * arrival_distance;
+                            let start_vel = ship_forward * entry_speed;
+                            let start_rot = handoff.rotation;
+
+                            let warp_arrival_autopilot = Some(AutopilotState {
+                                mode: autopilot::AutopilotMode::WarpTravel,
+                                phase: FlightPhase::WarpArrival,
+                                target_planet_index: 0,
+                                thrust_tier: 4,
+                                intercept_pos: DVec3::ZERO,
+                                last_solve_tick: st.tick_count,
+                                engage_time: st.physics_time,
+                                estimated_tof: total_time,
+                                braking_committed: false,
+                                target_orbit_altitude: entry_speed, // reuse field for entry speed
+                                warp_target_star_index: 0,
+                                warp_direction: ship_forward,
+                            });
+
+                            if let Some(ship) = st.ships.get_mut(&ship_id) {
+                                ship.position = start_pos;
+                                ship.velocity = start_vel;
+                                ship.rotation = start_rot;
+                                ship.autopilot = warp_arrival_autopilot.clone();
+                                info!(ship_id,
+                                    pos = format!("({:.0},{:.0},{:.0})", start_pos.x, start_pos.y, start_pos.z),
+                                    dist = format!("{:.0} m", arrival_distance),
+                                    speed = format!("{:.0} Gm/s", entry_speed / 1e9),
+                                    "warp arrival — updated existing ship");
+                            } else {
+                                // Create ship directly from handoff data.
+                                st.ships.insert(ship_id, ShipState {
+                                    ship_id,
+                                    position: start_pos,
+                                    velocity: start_vel,
+                                    rotation: start_rot,
+                                    angular_velocity: DVec3::ZERO,
+                                    thrust: DVec3::ZERO,
+                                    torque: DVec3::ZERO,
+                                    autopilot: warp_arrival_autopilot,
+                                    physical_properties: autopilot::ShipPhysicalProperties::starter_ship(),
+                                    thermal_energy: 0.0,
+                                    landed: false,
+                                    landed_planet_index: None,
+                                    landed_surface_radial: DVec3::ZERO,
+                                    landed_celestial_time: 0.0,
+                                    landing_zone_ticks: 0,
+                                });
+                                // Exempt from stale-entity cleanup until peer registry updates.
+                                st.warp_arrived_ships.insert(ship_id);
+                                info!(ship_id,
+                                    pos = format!("({:.0},{:.0},{:.0})", start_pos.x, start_pos.y, start_pos.z),
+                                    dist = format!("{:.0} m", arrival_distance),
+                                    vel = format!("{:.0} m/s", start_vel.length()),
+                                    "warp arrival — created ship from handoff");
+                            }
                         } else {
                             tracing::warn!("received PlayerHandoff with no target");
                         }
@@ -651,18 +761,28 @@ fn main() {
                         if st.ships.contains_key(&ship_id) { continue; }
                         if st.departed_ships.contains(&ship_id) { continue; }
 
-                        // New ship — create entity at default position.
-                        let start_pos = if !st.planet_positions.is_empty() {
-                            st.planet_positions[0] + DVec3::new(st.system_params.scale.spawn_offset, 0.0, 0.0)
-                        } else {
-                            DVec3::new(st.system_params.scale.fallback_spawn_distance, 0.0, 0.0)
-                        };
+                        // Use pending warp arrival position if available,
+                        // otherwise default position near the first planet.
+                        let (start_pos, start_vel, start_rot) =
+                            if let Some(arrival) = st.pending_warp_arrivals.remove(&ship_id) {
+                                info!(ship_id,
+                                    pos = format!("({:.0},{:.0},{:.0})", arrival.position.x, arrival.position.y, arrival.position.z),
+                                    "creating ship from warp arrival handoff");
+                                (arrival.position, arrival.velocity, arrival.rotation)
+                            } else {
+                                let pos = if !st.planet_positions.is_empty() {
+                                    st.planet_positions[0] + DVec3::new(st.system_params.scale.spawn_offset, 0.0, 0.0)
+                                } else {
+                                    DVec3::new(st.system_params.scale.fallback_spawn_distance, 0.0, 0.0)
+                                };
+                                (pos, DVec3::ZERO, DQuat::IDENTITY)
+                            };
 
                         st.ships.insert(ship_id, ShipState {
                             ship_id,
                             position: start_pos,
-                            velocity: DVec3::ZERO,
-                            rotation: DQuat::IDENTITY,
+                            velocity: start_vel,
+                            rotation: start_rot,
                             angular_velocity: DVec3::ZERO,
                             thrust: DVec3::ZERO,
                             torque: DVec3::ZERO,
@@ -695,13 +815,17 @@ fn main() {
                 }
 
                 // Clean up stale ship entities whose shard no longer exists in peer registry.
+                // Ships created from warp arrival handoffs are exempt — their ship shard's
+                // peer registry entry still shows the old host (galaxy shard), so they
+                // wouldn't appear in active_ship_ids. They're valid and must not be removed.
                 let active_ship_ids: std::collections::HashSet<u64> = reg.find_by_type(ShardType::Ship)
                     .iter()
                     .filter(|s| s.host_shard_id == Some(st.shard_id))
                     .filter_map(|s| s.ship_id)
                     .collect();
                 let stale: Vec<u64> = st.ships.keys()
-                    .filter(|id| !active_ship_ids.contains(id))
+                    .filter(|id| !active_ship_ids.contains(id)
+                        && !st.warp_arrived_ships.contains(id))
                     .copied()
                     .collect();
                 for id in stale {
@@ -1042,9 +1166,32 @@ fn main() {
                                 dampener_active: true,
                             }
                         }
+                        // Warp arrival: cubic ease-out deceleration.
+                        // speed(t) = v₀ * (1 - t/T)³ where T = 4*d_braking/v₀.
+                        // Derived from real system size and simulated departure speed.
+                        FlightPhase::WarpArrival => {
+                            let elapsed = physics_time - ap.engage_time;
+                            let total_time = ap.estimated_tof;
+                            let fraction = (elapsed / total_time).clamp(0.0, 1.0);
+
+                            let speed = ship.velocity.length();
+                            let completed = fraction >= 1.0 || speed < 1_000_000.0;
+
+                            // Thrust magnitude doesn't matter for WarpArrival (velocity
+                            // is set directly in the thrust application code). Pass a
+                            // non-zero value to signal the deceleration is active.
+                            GuidanceCommand {
+                                thrust_direction: -ap.warp_direction,
+                                thrust_magnitude: if completed { 0.0 } else { 1.0 },
+                                phase: if completed { FlightPhase::Arrived } else { FlightPhase::WarpArrival },
+                                completed,
+                                eta_real_seconds: (total_time - elapsed).max(0.0),
+                                felt_g: 1.0,
+                                dampener_active: true,
+                            }
+                        }
                         // Galaxy-shard-owned phases — should not be active on system shard.
-                        FlightPhase::WarpCruise | FlightPhase::WarpDecelerate
-                        | FlightPhase::WarpArrival => {
+                        FlightPhase::WarpCruise | FlightPhase::WarpDecelerate => {
                             GuidanceCommand {
                                 thrust_direction: DVec3::NEG_Z,
                                 thrust_magnitude: 0.0,
@@ -1172,7 +1319,27 @@ fn main() {
                 }
 
                 // Thrust: main drive fires along ship's -Z axis.
-                if guidance.thrust_magnitude > 0.0 {
+                // WarpArrival is special: deceleration is applied directly to velocity
+                // (not through the engine) so the ship doesn't need to flip 180°.
+                let is_warp_arrival = ship.autopilot.as_ref()
+                    .map(|a| a.phase == FlightPhase::WarpArrival)
+                    .unwrap_or(false);
+                if is_warp_arrival && guidance.thrust_magnitude > 0.0 {
+                    // Cubic ease-out: speed(t) = v₀ * (1 - t/T)³.
+                    // Set velocity directly to the target speed from the profile.
+                    if let Some(ref ap) = ship.autopilot {
+                        let elapsed = physics_time - ap.engage_time;
+                        let total_time = ap.estimated_tof;
+                        let v0 = ap.target_orbit_altitude; // entry speed stored here
+                        let fraction = (elapsed / total_time).clamp(0.0, 1.0);
+                        let target_speed = v0 * (1.0 - fraction).powi(3);
+                        if ship.velocity.length() > 1.0 {
+                            ship.velocity = ship.velocity.normalize() * target_speed.max(0.0);
+                        }
+                    }
+                    ship.thrust = DVec3::ZERO;
+                    ship.torque = DVec3::ZERO;
+                } else if guidance.thrust_magnitude > 0.0 {
                     let dot_align = ship.rotation.mul_vec3(DVec3::NEG_Z).dot(thrust_dir).clamp(-1.0, 1.0);
                     let thrust_scale = dot_align.max(0.0) * ramp;
                     ship.thrust = DVec3::new(0.0, 0.0, -guidance.thrust_magnitude * thrust_scale);
@@ -1907,9 +2074,13 @@ fn main() {
 
             let st = state_scene.lock().unwrap();
 
-            // Filter to ship shards hosted by this system shard.
+            // Filter to ship shards hosted by this system shard, OR whose ship_id
+            // is tracked in st.ships (warp arrivals may have stale peer registry host).
             let hosted_ships: Vec<(ShardId, SocketAddr, Option<u64>)> = ship_shards.iter()
-                .filter(|(_, _, _, host)| *host == Some(st.shard_id))
+                .filter(|(_, _, ship_id, host)| {
+                    *host == Some(st.shard_id)
+                    || ship_id.map(|id| st.ships.contains_key(&id)).unwrap_or(false)
+                })
                 .map(|(id, addr, ship_id, _)| (*id, *addr, *ship_id))
                 .collect();
 

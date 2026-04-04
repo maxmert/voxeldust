@@ -138,6 +138,9 @@ struct ShipInteriorState {
     game_time: f64,
     /// Tick when last SystemSceneUpdate arrived via QUIC.
     last_scene_update_tick: u64,
+    /// Tick when last HostSwitch was processed. SystemSceneUpdate messages
+    /// arriving within 40 ticks of a HostSwitch are ignored (stale QUIC drain).
+    host_switch_tick: u64,
     /// Cached system params for Keplerian planet extrapolation during QUIC stalls.
     cached_system_params: Option<voxeldust_core::system::SystemParams>,
     galaxy_seed: u64,
@@ -277,6 +280,7 @@ impl ShipInteriorState {
             scene_lighting: None,
             game_time: 0.0,
             last_scene_update_tick: 0,
+            host_switch_tick: 0,
             cached_system_params: None,
             galaxy_seed,
             pilot_thrust: DVec3::ZERO,
@@ -765,6 +769,13 @@ fn main() {
                 let mut st = state_quic.lock().unwrap();
                 match msg {
                     ShardMsg::SystemSceneUpdate(data) => {
+                        // Ignore stale updates from the old host during the 2-second
+                        // grace period after a HostSwitch. Prevents the old system
+                        // shard's bright star lighting from overwriting the galaxy
+                        // shard's dim interstellar lighting, which causes blinking.
+                        if st.host_switch_tick > 0 && st.tick_count < st.host_switch_tick + 40 {
+                            continue;
+                        }
                         st.scene_bodies = data.bodies;
                         st.scene_lighting = Some(data.lighting);
                         st.game_time = data.game_time;
@@ -875,13 +886,18 @@ fn main() {
                             let new_host = data.new_host_shard_id;
                             st.host_shard_id = Some(new_host);
 
-                            // Clear stale scene data from the departure host. The new
-                            // host will send its own SystemSceneUpdate. Until it arrives,
-                            // build_world_state returns None lighting so the client uses
-                            // a dim interstellar default instead of the old star's glare.
+                            // Clear stale scene data and set interstellar lighting.
+                            // Mark the HostSwitch tick so the SystemSceneUpdate handler
+                            // ignores stale messages from the old host for 2 seconds.
                             st.scene_bodies.clear();
-                            st.scene_lighting = None;
-                            st.last_scene_update_tick = 0;
+                            st.scene_lighting = Some(LightingInfoData {
+                                sun_direction: DVec3::new(0.0, -1.0, 0.0),
+                                sun_color: [0.5, 0.5, 0.6],
+                                sun_intensity: 0.2,
+                                ambient: 0.08,
+                            });
+                            st.last_scene_update_tick = st.tick_count;
+                            st.host_switch_tick = st.tick_count;
 
                             info!(
                                 ship_id = st.ship_id,
