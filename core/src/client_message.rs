@@ -103,6 +103,8 @@ pub struct WorldStateData {
     pub ships: Vec<ShipRenderData>,
     pub lighting: Option<LightingData>,
     pub game_time: f64,
+    /// Server-authoritative warp target star index (0xFFFFFFFF = none).
+    pub warp_target_star_index: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +431,7 @@ impl ServerMsg {
                     ships: Some(ships_vec),
                     lighting: lighting_fb,
                     game_time: data.game_time,
+                    warp_target_star_index: data.warp_target_star_index,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::WorldState,
@@ -649,6 +652,7 @@ impl ServerMsg {
                     ships,
                     lighting,
                     game_time: ws.game_time(),
+                    warp_target_star_index: ws.warp_target_star_index(),
                 }))
             }
             fb::ServerPayload::ChunkBlockMods => {

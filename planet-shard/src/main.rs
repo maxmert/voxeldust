@@ -376,6 +376,7 @@ impl PlanetState {
             ships,
             lighting,
             game_time: self.celestial_time,
+            warp_target_star_index: 0xFFFFFFFF,
         }
     }
 }

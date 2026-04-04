@@ -5448,6 +5448,7 @@ impl<'a> WorldState<'a> {
   pub const VT_SHIPS: ::flatbuffers::VOffsetT = 12;
   pub const VT_LIGHTING: ::flatbuffers::VOffsetT = 14;
   pub const VT_GAME_TIME: ::flatbuffers::VOffsetT = 16;
+  pub const VT_WARP_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5461,6 +5462,7 @@ impl<'a> WorldState<'a> {
     let mut builder = WorldStateBuilder::new(_fbb);
     builder.add_game_time(args.game_time);
     builder.add_tick(args.tick);
+    builder.add_warp_target_star_index(args.warp_target_star_index);
     if let Some(x) = args.lighting { builder.add_lighting(x); }
     if let Some(x) = args.ships { builder.add_ships(x); }
     if let Some(x) = args.bodies { builder.add_bodies(x); }
@@ -5519,6 +5521,13 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f64>(WorldState::VT_GAME_TIME, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn warp_target_star_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(WorldState::VT_WARP_TARGET_STAR_INDEX, Some(4294967295)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for WorldState<'_> {
@@ -5534,6 +5543,7 @@ impl ::flatbuffers::Verifiable for WorldState<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ShipSnapshotEntry>>>>("ships", Self::VT_SHIPS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<LightingInfoMsg>>("lighting", Self::VT_LIGHTING, false)?
      .visit_field::<f64>("game_time", Self::VT_GAME_TIME, false)?
+     .visit_field::<u32>("warp_target_star_index", Self::VT_WARP_TARGET_STAR_INDEX, false)?
      .finish();
     Ok(())
   }
@@ -5546,6 +5556,7 @@ pub struct WorldStateArgs<'a> {
     pub ships: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ShipSnapshotEntry<'a>>>>>,
     pub lighting: Option<::flatbuffers::WIPOffset<LightingInfoMsg<'a>>>,
     pub game_time: f64,
+    pub warp_target_star_index: u32,
 }
 impl<'a> Default for WorldStateArgs<'a> {
   #[inline]
@@ -5558,6 +5569,7 @@ impl<'a> Default for WorldStateArgs<'a> {
       ships: None,
       lighting: None,
       game_time: 0.0,
+      warp_target_star_index: 4294967295,
     }
   }
 }
@@ -5596,6 +5608,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WorldStateBuilder<'a, 'b, A> 
     self.fbb_.push_slot::<f64>(WorldState::VT_GAME_TIME, game_time, 0.0);
   }
   #[inline]
+  pub fn add_warp_target_star_index(&mut self, warp_target_star_index: u32) {
+    self.fbb_.push_slot::<u32>(WorldState::VT_WARP_TARGET_STAR_INDEX, warp_target_star_index, 4294967295);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WorldStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     WorldStateBuilder {
@@ -5620,6 +5636,7 @@ impl ::core::fmt::Debug for WorldState<'_> {
       ds.field("ships", &self.ships());
       ds.field("lighting", &self.lighting());
       ds.field("game_time", &self.game_time());
+      ds.field("warp_target_star_index", &self.warp_target_star_index());
       ds.finish()
   }
 }

@@ -450,37 +450,36 @@ fn main() {
 
                 match ship.warp_phase {
                     FlightPhase::WarpCruise => {
-                        // Accelerate toward target, clamped to max speed.
+                        // Accelerate toward target.
                         let accel = direction * WARP_ACCELERATION_GU;
                         ship.velocity_gu += accel * DT;
+
+                        // Cap speed so the ship can always stop before the target.
+                        // max_safe_speed² / (2a) = distance → max_safe_speed = sqrt(2ad).
+                        // 0.95× safety margin absorbs discrete time-step error.
+                        let max_safe_speed =
+                            (distance * 2.0 * WARP_ACCELERATION_GU).sqrt() * 0.95;
+                        let effective_max = max_safe_speed.min(WARP_MAX_SPEED_GU);
                         let speed = ship.velocity_gu.length();
-                        if speed > WARP_MAX_SPEED_GU {
+                        if speed > effective_max {
                             ship.velocity_gu =
-                                ship.velocity_gu.normalize() * WARP_MAX_SPEED_GU;
+                                ship.velocity_gu.normalize() * effective_max;
                         }
+                        let speed = ship.velocity_gu.length();
+
                         ship.position_gu +=
                             ship.velocity_gu * DT + 0.5 * accel * DT * DT;
 
-                        // Transition to decelerate when:
-                        // 1. We've traveled at least 50% of the journey (prevents
-                        //    premature deceleration from high entry velocity).
-                        // 2. Remaining distance < braking distance + SOI margin.
-                        let journey_fraction = if ship.initial_distance_gu > 1.0 {
-                            1.0 - (distance / ship.initial_distance_gu)
-                        } else {
-                            1.0
-                        };
+                        // Begin braking when remaining distance ≤ braking distance.
                         let braking_dist =
                             speed * speed / (2.0 * WARP_ACCELERATION_GU);
-                        if journey_fraction > 0.5
-                            && distance < braking_dist + target_soi * 2.0
-                        {
+                        if distance < braking_dist {
                             ship.warp_phase = FlightPhase::WarpDecelerate;
                             info!(
                                 ship_id = ship.ship_id,
                                 distance = format!("{:.1} GU", distance),
                                 speed = format!("{:.2} GU/s", speed),
-                                journey = format!("{:.0}%", journey_fraction * 100.0),
+                                braking = format!("{:.1} GU", braking_dist),
                                 "warp deceleration started"
                             );
                         }
@@ -648,7 +647,8 @@ fn main() {
                         }
                     }
                     SoiAction::Provision { star_index, system_seed } => {
-                        let url = format!("{}/system/{}", orch_url_soi, system_seed);
+                        let url = format!("{}/system/{}?galaxy_seed={}&star_index={}",
+                            orch_url_soi, system_seed, galaxy_seed_local, star_index);
                         let tx = provision_tx_soi.clone();
                         let client = http_soi.clone();
                         st.provisioning_in_flight.insert(star_index);

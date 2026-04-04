@@ -311,6 +311,7 @@ table WorldState {
     ships: [ShipSnapshotEntry];
     lighting: LightingInfoMsg;
     game_time: double;
+    warp_target_star_index: uint32 = 4294967295;
 }
 
 table BlockMod {

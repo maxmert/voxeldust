@@ -224,6 +224,16 @@ impl App {
                             ws.bodies.clear();
                         }
 
+                        // Server-authoritative warp target: ship shard tells client
+                        // which star is selected (0xFFFFFFFF = none).
+                        if ws.warp_target_star_index != 0xFFFFFFFF {
+                            self.warp_target_star_index = Some(ws.warp_target_star_index);
+                        } else if self.warp_galaxy_position.is_none() {
+                            // Only clear target when not in warp (during warp,
+                            // the galaxy shard doesn't send this field).
+                            self.warp_target_star_index = None;
+                        }
+
                         // Update player position from server.
                         if let Some(p) = ws.players.first() {
                             self.player_position = p.position;
@@ -698,29 +708,9 @@ impl ApplicationHandler for App {
                             self.warp_target_star_index = None;
                             info!("warp target cancelled");
                         }
-                        // G key: cycle warp target star.
-                        if key == KeyCode::KeyG && self.is_piloting {
-                            if let Some(ref sf) = self.star_field {
-                                let current_star_pos = sf.current_star_index
-                                    .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
-                                    .map(|s| s.galaxy_position)
-                                    .unwrap_or(DVec3::ZERO);
-                                // Use ship rotation forward as targeting direction.
-                                let cam_fwd = self.ship_rotation * DVec3::NEG_Z;
-
-                                if let Some(current_target) = self.warp_target_star_index {
-                                    // Cycle to next star.
-                                    if let Some((next, _)) = sf.find_next_aligned_star(current_star_pos, cam_fwd, current_target) {
-                                        self.warp_target_star_index = Some(next);
-                                    }
-                                } else {
-                                    // First press: find best aligned star.
-                                    if let Some((idx, _)) = sf.find_aligned_star(current_star_pos, cam_fwd, 0.3) {
-                                        self.warp_target_star_index = Some(idx);
-                                    }
-                                }
-                            }
-                        }
+                        // G key: warp target cycling is server-authoritative.
+                        // The ship shard handles action=6 and sends the selected
+                        // star index via WorldState.warp_target_star_index.
                         if key == KeyCode::Escape {
                             if self.mouse_grabbed {
                                 if let Some(ref w) = self.window {

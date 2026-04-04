@@ -281,6 +281,7 @@ impl SystemState {
                 sun_intensity: lighting.sun_intensity, ambient: lighting.ambient,
             }),
             game_time: self.celestial_time,
+            warp_target_star_index: 0xFFFFFFFF,
         }
     }
 }
@@ -414,7 +415,14 @@ fn main() {
                                 }
                             }
                             ship.thrust = ctrl.thrust;
-                            ship.torque = ctrl.torque;
+                            // During warp, the autopilot controls rotation exclusively.
+                            // Pilot torque would fight the PD alignment controller.
+                            let is_warp = ship.autopilot.as_ref()
+                                .map(|a| a.mode == autopilot::AutopilotMode::WarpTravel)
+                                .unwrap_or(false);
+                            if !is_warp {
+                                ship.torque = ctrl.torque;
+                            }
                             if st.tick_count % 100 == 0 {
                                 info!(ship_id = ctrl.ship_id,
                                     thrust = format!("({:.0},{:.0},{:.0})", ctrl.thrust.x, ctrl.thrust.y, ctrl.thrust.z),
@@ -989,12 +997,29 @@ fn main() {
                                 dampener_active: false,
                             }
                         }
-                        // Warp align + accelerate: single continuous phase.
-                        // Rotation PD controller aligns ship toward target star.
-                        // Acceleration ramps exponentially so the star system visually
-                        // shrinks to a dot over ~20-30 seconds before galaxy handoff.
-                        // Starts at 1 Mm/s² (visible departure), doubles every 2 seconds.
-                        FlightPhase::WarpAlign | FlightPhase::WarpAccelerate => {
+                        // Warp align: rotate to face target star with ZERO thrust.
+                        // The PD rotation controller (below) aligns the ship.
+                        // Transition to WarpAccelerate once aligned within ~5°.
+                        FlightPhase::WarpAlign => {
+                            let warp_dir = ap.warp_direction;
+                            let current_fwd = ship.rotation * DVec3::NEG_Z;
+                            let dot = current_fwd.dot(warp_dir).clamp(-1.0, 1.0);
+                            let aligned = dot > 0.996; // cos(5°) ≈ 0.996
+
+                            GuidanceCommand {
+                                thrust_direction: warp_dir,
+                                thrust_magnitude: 0.0,
+                                phase: if aligned { FlightPhase::WarpAccelerate } else { FlightPhase::WarpAlign },
+                                completed: false,
+                                eta_real_seconds: 0.0,
+                                felt_g: 0.0,
+                                dampener_active: true,
+                            }
+                        }
+                        // Warp accelerate: exponential thrust toward target star.
+                        // Ramps so the star system visually shrinks to a dot over
+                        // ~20-30 seconds before galaxy handoff.
+                        FlightPhase::WarpAccelerate => {
                             let warp_dir = ap.warp_direction;
                             let elapsed = physics_time - ap.engage_time;
 
@@ -1060,6 +1085,13 @@ fn main() {
                 // Apply phase transition.
                 if let Some(ref mut ap) = ship.autopilot {
                     if *new_phase != ap.phase {
+                        // Reset engage_time when alignment completes so the
+                        // exponential acceleration ramp starts from t=0.
+                        if ap.phase == FlightPhase::WarpAlign
+                            && *new_phase == FlightPhase::WarpAccelerate
+                        {
+                            ap.engage_time = st.physics_time;
+                        }
                         info!(ship_id, old = ?ap.phase, new = ?new_phase, "flight phase transition");
                         ap.phase = *new_phase;
                     }
@@ -1106,20 +1138,36 @@ fn main() {
                 if needs_rotation {
                     let desired_fwd = thrust_dir;
                     let current_fwd = ship.rotation * DVec3::NEG_Z;
-                    let cross = current_fwd.cross(desired_fwd);
+                    let mut cross = current_fwd.cross(desired_fwd);
                     let dot_align = current_fwd.dot(desired_fwd).clamp(-1.0, 1.0);
                     let angle = dot_align.acos();
 
+                    // Handle near-antiparallel case: when the ship faces ~opposite
+                    // the target, the cross product is near-zero and can't determine
+                    // a rotation axis. Pick an arbitrary perpendicular axis (ship up).
+                    if angle > 0.1 && cross.length() < 1e-4 {
+                        let ship_up = ship.rotation * DVec3::Y;
+                        cross = ship_up;
+                    }
+
                     if angle > 0.001 && cross.length() > 1e-8 {
                         let axis = cross.normalize();
-                        let p_gain = 2.0;
+                        let p_gain = 3.0;
                         let target_omega = axis * (angle * p_gain).min(MAX_ANGULAR_VELOCITY);
                         let world_omega = ship.rotation * ship.angular_velocity;
                         let error = target_omega - world_omega;
-                        let local_error = ship.rotation.inverse() * error;
-                        ship.torque = local_error.clamp_length_max(1.0);
+                        let d_gain = 1.5;
+                        let local_error = ship.rotation.inverse() * (error * d_gain);
+                        ship.torque = local_error.clamp_length_max(2.0);
                     } else {
-                        ship.torque = DVec3::ZERO;
+                        // Nearly aligned — actively brake angular velocity.
+                        let world_omega = ship.rotation * ship.angular_velocity;
+                        if world_omega.length() > 0.01 {
+                            let brake = ship.rotation.inverse() * (-world_omega * 2.0);
+                            ship.torque = brake.clamp_length_max(1.0);
+                        } else {
+                            ship.torque = DVec3::ZERO;
+                        }
                     }
                 }
 
@@ -1283,7 +1331,10 @@ fn main() {
                 let ang_accel = diff.clamp_length_max(ANGULAR_ACCEL_RATE * DT);
                 ship.angular_velocity += ang_accel;
 
-                if ship.torque.length_squared() < 0.001 {
+                let is_warp_rotation = ship.autopilot.as_ref()
+                    .map(|a| a.mode == autopilot::AutopilotMode::WarpTravel)
+                    .unwrap_or(false);
+                if ship.torque.length_squared() < 0.001 && !is_warp_rotation {
                     ship.angular_velocity *= 0.95;
                     if ship.angular_velocity.length_squared() < 1e-6 {
                         ship.angular_velocity = DVec3::ZERO;

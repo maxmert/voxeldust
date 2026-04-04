@@ -413,6 +413,7 @@ impl ShipInteriorState {
             ships: vec![],
             lighting,
             game_time: self.game_time,
+            warp_target_star_index: self.warp_target_star_index.unwrap_or(0xFFFFFFFF),
         }
     }
 }
@@ -568,6 +569,8 @@ fn main() {
                     // Warp targeting (G key = action 6): select/cycle target star.
                     // The client handles visual targeting; the ship shard mirrors
                     // the selection so it knows which star to target on confirmation.
+                    // Warp target cycling (G = action 6): server-authoritative.
+                    // First press: best-aligned star. Subsequent: cycle to next.
                     let warp_pressed = input.action == 6 && st.prev_action != 6;
                     if warp_pressed {
                         let ship_fwd = st.ship_rotation * DVec3::NEG_Z;
@@ -579,18 +582,55 @@ fn main() {
                                     .find(|s| s.system_seed == sys.system_seed);
                                 if let Some(cur) = current_star {
                                     let cur_pos = cur.position;
-                                    let mut best: Option<(u32, f64)> = None;
-                                    for star in &galaxy_map.stars {
-                                        if star.index == cur.index { continue; }
-                                        let dir = (star.position - cur_pos).normalize();
-                                        let alignment = ship_fwd.dot(dir);
-                                        if alignment > best.map(|b| b.1).unwrap_or(0.3) {
-                                            best = Some((star.index, alignment));
+
+                                    if let Some(current_target) = st.warp_target_star_index {
+                                        // Cycle: find next-best aligned star after current target.
+                                        let current_dot = galaxy_map.stars.iter()
+                                            .find(|s| s.index == current_target)
+                                            .map(|s| ship_fwd.dot((s.position - cur_pos).normalize()))
+                                            .unwrap_or(1.0);
+
+                                        let mut best: Option<(u32, f64)> = None;
+                                        for star in &galaxy_map.stars {
+                                            if star.index == cur.index || star.index == current_target { continue; }
+                                            let dir = (star.position - cur_pos).normalize();
+                                            let dot = ship_fwd.dot(dir);
+                                            if dot < current_dot && dot > 0.3 {
+                                                if dot > best.map(|b| b.1).unwrap_or(0.3) {
+                                                    best = Some((star.index, dot));
+                                                }
+                                            }
                                         }
-                                    }
-                                    if let Some((target_index, _)) = best {
-                                        st.warp_target_star_index = Some(target_index);
-                                        info!(target_star = target_index, "warp target selected");
+                                        // Wrap around if no next candidate.
+                                        if best.is_none() {
+                                            for star in &galaxy_map.stars {
+                                                if star.index == cur.index { continue; }
+                                                let dir = (star.position - cur_pos).normalize();
+                                                let dot = ship_fwd.dot(dir);
+                                                if dot > best.map(|b| b.1).unwrap_or(0.3) {
+                                                    best = Some((star.index, dot));
+                                                }
+                                            }
+                                        }
+                                        if let Some((idx, _)) = best {
+                                            st.warp_target_star_index = Some(idx);
+                                            info!(target_star = idx, "warp target cycled");
+                                        }
+                                    } else {
+                                        // First press: find best-aligned star.
+                                        let mut best: Option<(u32, f64)> = None;
+                                        for star in &galaxy_map.stars {
+                                            if star.index == cur.index { continue; }
+                                            let dir = (star.position - cur_pos).normalize();
+                                            let alignment = ship_fwd.dot(dir);
+                                            if alignment > best.map(|b| b.1).unwrap_or(0.3) {
+                                                best = Some((star.index, alignment));
+                                            }
+                                        }
+                                        if let Some((target_index, _)) = best {
+                                            st.warp_target_star_index = Some(target_index);
+                                            info!(target_star = target_index, "warp target selected");
+                                        }
                                     }
                                 }
                             }
