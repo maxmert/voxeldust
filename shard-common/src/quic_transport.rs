@@ -294,6 +294,39 @@ impl IncomingConnection {
         }
     }
 
+    /// Receive loop that reads the sender's ShardId header from each stream
+    /// and attaches it to every message. Provides cryptographic-strength source
+    /// identification (the sender writes its ID, not derived from network address).
+    pub async fn recv_loop_sourced(
+        self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::harness::QueuedShardMsg>,
+    ) -> Result<(), TransportError> {
+        use voxeldust_core::shard_types::ShardId;
+        loop {
+            let mut recv: RecvStream = self.connection.accept_uni().await?;
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                // Read the 8-byte shard ID header written by the sender.
+                let mut id_buf = [0u8; 8];
+                if recv.read_exact(&mut id_buf).await.is_err() {
+                    return;
+                }
+                let source_shard_id = ShardId(u64::from_be_bytes(id_buf));
+
+                loop {
+                    match Self::read_one_message(&mut recv).await {
+                        Ok(msg) => {
+                            if tx.send(crate::harness::QueuedShardMsg { source_shard_id, msg }).is_err() {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+    }
+
     /// The remote address of this connection.
     pub fn remote_addr(&self) -> SocketAddr {
         self.connection.remote_address()

@@ -229,11 +229,11 @@ fn main() {
         let peer_reg_scene_quic = peer_registry.clone();
         harness.add_system("drain_quic", move || {
             for _ in 0..32 {
-                let msg = match quic_msg_rx.try_recv() {
-                    Ok(m) => m,
+                let queued = match quic_msg_rx.try_recv() {
+                    Ok(q) => q,
                     Err(_) => break,
                 };
-                match msg {
+                match queued.msg {
                     ShardMsg::PlayerHandoff(h) => {
                         let mut st = state_quic.lock().unwrap();
 

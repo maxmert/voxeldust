@@ -141,6 +141,8 @@ struct ShipInteriorState {
     /// Tick when last HostSwitch was processed. SystemSceneUpdate messages
     /// arriving within 40 ticks of a HostSwitch are ignored (stale QUIC drain).
     host_switch_tick: u64,
+    /// Authorized QUIC peers for scene data. Updated on HostSwitch.
+    authorized_peers: voxeldust_shard_common::authorized_peers::AuthorizedPeers,
     /// Cached system params for Keplerian planet extrapolation during QUIC stalls.
     cached_system_params: Option<voxeldust_core::system::SystemParams>,
     galaxy_seed: u64,
@@ -281,6 +283,7 @@ impl ShipInteriorState {
             game_time: 0.0,
             last_scene_update_tick: 0,
             host_switch_tick: 0,
+            authorized_peers: Default::default(),
             cached_system_params: None,
             galaxy_seed,
             pilot_thrust: DVec3::ZERO,
@@ -765,15 +768,12 @@ fn main() {
         let peer_reg_quic = peer_registry.clone();
         let quic_send_quic = quic_send_tx.clone();
         harness.add_system("drain_quic", move || {
-            for _ in 0..32 { let msg = match quic_msg_rx.try_recv() { Ok(m) => m, Err(_) => break };
+            for _ in 0..32 { let queued = match quic_msg_rx.try_recv() { Ok(q) => q, Err(_) => break };
                 let mut st = state_quic.lock().unwrap();
-                match msg {
+                match queued.msg {
                     ShardMsg::SystemSceneUpdate(data) => {
-                        // Ignore stale updates from the old host during the 2-second
-                        // grace period after a HostSwitch. Prevents the old system
-                        // shard's bright star lighting from overwriting the galaxy
-                        // shard's dim interstellar lighting, which causes blinking.
-                        if st.host_switch_tick > 0 && st.tick_count < st.host_switch_tick + 40 {
+                        // Only accept scene updates from the authorized host shard.
+                        if !st.authorized_peers.is_authorized(queued.source_shard_id) {
                             continue;
                         }
                         st.scene_bodies = data.bodies;
@@ -782,7 +782,10 @@ fn main() {
                         st.last_scene_update_tick = st.tick_count;
                     }
                     ShardMsg::ShipPositionUpdate(data) => {
-                        // Only accept position updates for THIS ship — ignore other ships' updates.
+                        // Only accept from the authorized host shard + for THIS ship.
+                        if !st.authorized_peers.is_authorized(queued.source_shard_id) {
+                            continue;
+                        }
                         if data.ship_id == st.ship_id {
                             st.ship_position = data.position;
                             st.ship_velocity = data.velocity;
@@ -886,9 +889,12 @@ fn main() {
                             let new_host = data.new_host_shard_id;
                             st.host_shard_id = Some(new_host);
 
+                            // Authorize the new host shard by ID. Only scene data
+                            // from this shard will be accepted — stale messages
+                            // from the old host are rejected immediately.
+                            st.authorized_peers.set_host(new_host);
+
                             // Clear stale scene data and set interstellar lighting.
-                            // Mark the HostSwitch tick so the SystemSceneUpdate handler
-                            // ignores stale messages from the old host for 2 seconds.
                             st.scene_bodies.clear();
                             st.scene_lighting = Some(LightingInfoData {
                                 sun_direction: DVec3::new(0.0, -1.0, 0.0),

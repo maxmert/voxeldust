@@ -566,8 +566,8 @@ fn main() {
         let quic_send_quic = quic_send_tx.clone();
         let client_reg_quic = client_registry.clone();
         harness.add_system("drain_quic", move || {
-            for _ in 0..32 { let msg = match quic_msg_rx.try_recv() { Ok(m) => m, Err(_) => break };
-                match msg {
+            for _ in 0..32 { let queued = match quic_msg_rx.try_recv() { Ok(q) => q, Err(_) => break };
+                match queued.msg {
                     ShardMsg::PlayerHandoff(h) => {
                         let mut st = state_quic.lock().unwrap();
                         // Sync celestial time from system shard authority so planet

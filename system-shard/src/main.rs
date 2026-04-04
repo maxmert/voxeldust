@@ -402,8 +402,8 @@ fn main() {
         let peer_reg_quic = peer_registry.clone();
         let quic_send_quic = quic_send_tx.clone();
         harness.add_system("drain_quic", move || {
-            for _ in 0..32 { let msg = match quic_msg_rx.try_recv() { Ok(m) => m, Err(_) => break };
-                match msg {
+            for _ in 0..32 { let queued = match quic_msg_rx.try_recv() { Ok(q) => q, Err(_) => break };
+                match queued.msg {
                     ShardMsg::ShipControlInput(ctrl) => {
                         let mut st = state_quic.lock().unwrap();
                         // Pre-extract gravity for takeoff check (avoids borrow conflict).

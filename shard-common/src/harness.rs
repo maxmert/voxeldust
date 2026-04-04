@@ -12,6 +12,17 @@ use voxeldust_core::shard_types::{ShardId, ShardInfo, ShardState, ShardType};
 use voxeldust_core::client_message::{PlayerInputData, ServerMsg};
 use voxeldust_core::shard_message::ShardMsg;
 
+/// QUIC message with verified source shard identification.
+/// The sender writes its ShardId as a header on each QUIC stream.
+/// The receiver reads it and attaches to every message. This is
+/// immune to ephemeral port mismatches and race conditions.
+pub struct QueuedShardMsg {
+    /// The shard that sent this message (from the stream identity header).
+    pub source_shard_id: ShardId,
+    /// The deserialized shard message.
+    pub msg: ShardMsg,
+}
+
 use crate::client_listener::{self, ClientConnectEvent, ClientRegistry};
 use crate::heartbeat_sender;
 use crate::healthz;
@@ -74,8 +85,8 @@ pub struct ShardHarness {
     pub client_registry: Arc<RwLock<ClientRegistry>>,
     /// Incoming PlayerInput from UDP clients.
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
-    /// Incoming inter-shard messages from QUIC.
-    pub quic_msg_rx: mpsc::UnboundedReceiver<ShardMsg>,
+    /// Incoming inter-shard messages from QUIC (with source peer address).
+    pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Channel to send WorldState for UDP broadcast (bounded for backpressure).
     pub broadcast_tx: mpsc::Sender<ServerMsg>,
     /// Channel to send QUIC messages to other shards (bounded for backpressure).
@@ -85,7 +96,7 @@ pub struct ShardHarness {
     quic_send_rx: Option<mpsc::Receiver<(ShardId, std::net::SocketAddr, ShardMsg)>>,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
-    quic_msg_tx: mpsc::UnboundedSender<ShardMsg>,
+    quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
 
@@ -257,10 +268,8 @@ impl ShardHarness {
                             conn = transport.accept() => {
                                 if let Some(conn) = conn {
                                     let tx = quic_msg_tx.clone();
-                                    // Use recv_loop to handle persistent streams
-                                    // (multiple messages per uni stream).
                                     tokio::spawn(async move {
-                                        let _ = conn.recv_loop(tx).await;
+                                        let _ = conn.recv_loop_sourced(tx).await;
                                     });
                                 }
                             }
@@ -279,6 +288,7 @@ impl ShardHarness {
         // to the correct per-peer channel; no shared I/O state.
         let quic_send_cancel = cancel.clone();
         let mut quic_send_rx = self.quic_send_rx.take().expect("quic_send_rx already taken");
+        let local_shard_id = self.config.shard_id;
         tokio::spawn(async move {
             // Shared QUIC endpoint — thread-safe, connect() takes &self.
             let send_transport = match QuicTransport::bind("0.0.0.0:0".parse().unwrap()).await {
@@ -369,10 +379,19 @@ impl ShardHarness {
                                                 let c = conn.as_ref().unwrap();
                                                 let data = shard_msg.serialize();
 
-                                                // Open stream if needed.
+                                                // Open stream if needed. Write shard ID header
+                                                // so the receiver knows who sent these messages.
                                                 if send_stream.is_none() {
                                                     match c.open_uni().await {
-                                                        Ok(s) => send_stream = Some(s),
+                                                        Ok(mut s) => {
+                                                            let id_bytes = local_shard_id.0.to_be_bytes();
+                                                            if s.write_all(&id_bytes).await.is_err() {
+                                                                conn = None;
+                                                                consecutive_failures += 1;
+                                                                continue;
+                                                            }
+                                                            send_stream = Some(s);
+                                                        }
                                                         Err(e) => {
                                                             tracing::debug!(%peer_id, %e, "failed to open uni stream");
                                                             conn = None;
