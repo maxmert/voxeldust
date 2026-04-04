@@ -338,8 +338,13 @@ impl App {
                         self.secondary_world_state = Some(ws);
                     }
                     NetEvent::GalaxyWorldState(gws) => {
-                        // Galaxy shard sends ship's galaxy position + rotation via secondary UDP.
-                        // Used to build a dedicated star view-projection for parallax.
+                        // Only process while a galaxy secondary is the active type.
+                        // After arrival, SecondaryConnected(type=1) changes the type
+                        // to System, but stale GalaxyWorldState events may still be
+                        // in the channel from before the galaxy secondary was cancelled.
+                        if self.secondary_shard_type != Some(3) {
+                            continue;
+                        }
                         let was_none = self.warp_galaxy_position.is_none();
                         self.warp_galaxy_position = Some(gws.ship_position);
                         self.warp_galaxy_rotation = Some(gws.ship_rotation);

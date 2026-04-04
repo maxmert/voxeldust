@@ -191,11 +191,18 @@ pub async fn run_network(
             let mut stream = tcp_stream;
             let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(60));
             keepalive_interval.tick().await; // skip first immediate tick
+
+            // Active secondary connections keyed by shard type. At most ONE
+            // secondary per type exists at a time. When a new ShardPreConnect
+            // arrives for the same type, the old is cancelled before the new starts.
+            // Supports concurrent secondaries of DIFFERENT types (triple-shard).
+            let mut active_secondaries: std::collections::HashMap<
+                u8, tokio::sync::broadcast::Sender<()>
+            > = std::collections::HashMap::new();
+
             loop {
                 tokio::select! {
                     _ = keepalive_interval.tick() => {
-                        // Send a tiny TCP message to prevent proxy idle timeout.
-                        // A zero-length frame is ignored by the server's message parser.
                         let _ = stream.write_all(&0u32.to_be_bytes()).await;
                         let _ = stream.flush().await;
                     }
@@ -203,6 +210,11 @@ pub async fn run_network(
                         match result {
                             Ok(ServerMsg::ShardRedirect(r)) => {
                                 info!(target_tcp = %r.target_tcp_addr, "received ShardRedirect");
+                                // Cancel ALL active secondaries on primary transition.
+                                for (st, cancel) in active_secondaries.drain() {
+                                    let _ = cancel.send(());
+                                    info!(shard_type = st, "cancelled secondary on ShardRedirect");
+                                }
                                 let _ = redirect_tx.send(r).await;
                                 return;
                             }
@@ -211,11 +223,20 @@ pub async fn run_network(
                                     tcp = %pc.tcp_addr, udp = %pc.udp_addr,
                                     "received ShardPreConnect — opening secondary connection");
 
-                                // Spawn secondary connection to the planet shard.
-                                // UDP-only: no TCP connect (that would trigger a player spawn
-                                // on the planet shard). All metadata comes from ShardPreConnect.
+                                // Cancel existing secondary of the SAME shard type.
+                                // Different types coexist (triple-shard compositing).
+                                if let Some(old_cancel) = active_secondaries.remove(&pc.shard_type) {
+                                    let _ = old_cancel.send(());
+                                    info!(shard_type = pc.shard_type, "cancelled old secondary for replacement");
+                                }
+
+                                // Dedicated cancel token for this secondary.
+                                let (sec_cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+                                active_secondaries.insert(pc.shard_type, sec_cancel_tx.clone());
+
                                 let sec_event_tx = event_tx_tcp.clone();
-                                let mut sec_cancel = cancel_tx_for_tcp.subscribe();
+                                let mut sec_cancel_own = sec_cancel_tx.subscribe();
+                                let mut sec_cancel_primary = cancel_tx_for_tcp.subscribe();
                                 let sec_pc = pc;
                                 tokio::spawn(async move {
                                     let sec_udp: SocketAddr = match sec_pc.udp_addr.parse() {
@@ -239,7 +260,7 @@ pub async fn run_network(
                                     let _ = udp.send_to(&hello, sec_udp).await;
                                     info!(%sec_udp, "secondary UDP hole-punch sent");
 
-                                    // Receive loop: forward WorldState as SecondaryWorldState.
+                                    // Receive loop.
                                     let mut buf = vec![0u8; 65536];
                                     loop {
                                         tokio::select! {
@@ -273,7 +294,11 @@ pub async fn run_network(
                                                     }
                                                 }
                                             }
-                                            _ = sec_cancel.recv() => { return; }
+                                            _ = sec_cancel_own.recv() => {
+                                                info!("secondary connection cancelled (replaced)");
+                                                return;
+                                            }
+                                            _ = sec_cancel_primary.recv() => { return; }
                                         }
                                     }
                                 });

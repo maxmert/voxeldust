@@ -1324,17 +1324,19 @@ fn main() {
                 let is_warp_arrival = ship.autopilot.as_ref()
                     .map(|a| a.phase == FlightPhase::WarpArrival)
                     .unwrap_or(false);
-                if is_warp_arrival && guidance.thrust_magnitude > 0.0 {
+                if is_warp_arrival {
                     // Cubic ease-out: speed(t) = v₀ * (1 - t/T)³.
-                    // Set velocity directly to the target speed from the profile.
+                    // Always applied (even on completion tick) so velocity reaches 0.
                     if let Some(ref ap) = ship.autopilot {
                         let elapsed = physics_time - ap.engage_time;
                         let total_time = ap.estimated_tof;
                         let v0 = ap.target_orbit_altitude; // entry speed stored here
                         let fraction = (elapsed / total_time).clamp(0.0, 1.0);
                         let target_speed = v0 * (1.0 - fraction).powi(3);
-                        if ship.velocity.length() > 1.0 {
-                            ship.velocity = ship.velocity.normalize() * target_speed.max(0.0);
+                        if target_speed < 1_000_000.0 || fraction >= 1.0 {
+                            ship.velocity = DVec3::ZERO;
+                        } else if ship.velocity.length() > 1.0 {
+                            ship.velocity = ship.velocity.normalize() * target_speed;
                         }
                     }
                     ship.thrust = DVec3::ZERO;
