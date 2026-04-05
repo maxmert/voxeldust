@@ -49,6 +49,12 @@ struct App {
     latest_world_state: Option<WorldStateData>,
     player_position: DVec3,
     player_velocity: DVec3,
+    // Smooth walking: extrapolate position between 20Hz server updates.
+    prev_server_position: DVec3,
+    walk_velocity: DVec3,
+    last_server_update_time: std::time::Instant,
+    render_position: DVec3,
+    has_prev_server_pos: bool,
     current_shard_type: u8,
     reference_position: DVec3,
     reference_rotation: DQuat,
@@ -118,6 +124,11 @@ impl App {
             latest_world_state: None,
             player_position: DVec3::new(0.0, 1.0, 0.0),
             player_velocity: DVec3::ZERO,
+            prev_server_position: DVec3::ZERO,
+            walk_velocity: DVec3::ZERO,
+            last_server_update_time: std::time::Instant::now(),
+            render_position: DVec3::new(0.0, 1.0, 0.0),
+            has_prev_server_pos: false,
             current_shard_type: 255,
             reference_position: DVec3::ZERO,
             reference_rotation: DQuat::IDENTITY,
@@ -233,7 +244,30 @@ impl App {
 
                         // Update player position from server.
                         if let Some(p) = ws.players.first() {
-                            self.player_position = p.position;
+                            // Derive walking velocity from position deltas for
+                            // smooth inter-tick extrapolation on the client.
+                            let new_pos = p.position;
+                            let now_ws = std::time::Instant::now();
+                            if self.has_prev_server_pos {
+                                let elapsed = (now_ws - self.last_server_update_time).as_secs_f64();
+                                if elapsed > 0.01 && elapsed < 0.15 {
+                                    self.walk_velocity = (new_pos - self.prev_server_position) / elapsed;
+                                } else {
+                                    self.walk_velocity = DVec3::ZERO;
+                                }
+                            } else {
+                                self.walk_velocity = DVec3::ZERO;
+                                self.has_prev_server_pos = true;
+                            }
+                            self.prev_server_position = new_pos;
+                            self.last_server_update_time = now_ws;
+                            // Only snap render_position on large corrections (teleport/shard change).
+                            // Small corrections are handled by per-frame lerp for smoothness.
+                            if (new_pos - self.render_position).length() > 2.0 {
+                                self.render_position = new_pos;
+                            }
+
+                            self.player_position = new_pos;
                             self.player_velocity = p.velocity;
                             let was_piloting = self.is_piloting;
                             self.is_piloting = !p.grounded;
@@ -258,11 +292,13 @@ impl App {
                             }
 
                             // Pilot → walk transition: reset camera to ship-local forward.
+                            // Autopilot continues running on the system shard — preserve
+                            // local tracking so the HUD can display it when re-entering.
                             if was_piloting && !self.is_piloting {
                                 self.camera_yaw = -std::f64::consts::FRAC_PI_2;
                                 self.camera_pitch = 0.0;
-                                self.autopilot_target = None;
-                                self.trajectory_plan = None;
+                                self.has_prev_server_pos = false;
+                                self.walk_velocity = DVec3::ZERO;
                             }
                         }
                         if self.latest_world_state.is_none() {
@@ -280,6 +316,8 @@ impl App {
                         self.connected = true;
                         self.system_seed = system_seed;
                         self.galaxy_seed = galaxy_seed;
+                        self.has_prev_server_pos = false;
+                        self.walk_velocity = DVec3::ZERO;
 
                         // Clear warp state on any new shard connection.
                         self.warp_galaxy_position = None;
@@ -357,6 +395,8 @@ impl App {
                     }
                     NetEvent::Transitioning => {
                         info!("transitioning to new shard...");
+                        self.has_prev_server_pos = false;
+                        self.walk_velocity = DVec3::ZERO;
 
                         // Clear warp state — warp travel is over.
                         self.warp_galaxy_position = None;
@@ -486,13 +526,25 @@ impl App {
         self.poll_network();
         self.send_input_with_dt(dt);
         self.frame_count += 1;
+
+        // Smooth render position: lerp toward extrapolated target each frame.
+        // This handles start/stop transitions gracefully — no snapping.
+        if !self.is_piloting {
+            let elapsed = (now - self.last_server_update_time).as_secs_f64();
+            let clamped = elapsed.min(0.06);
+            let target = self.player_position + self.walk_velocity * clamped;
+            // Exponential smoothing: converges ~90% within 2 server ticks (100ms).
+            let blend = 1.0 - (-20.0 * dt).exp();
+            self.render_position = self.render_position + (target - self.render_position) * blend;
+        }
+
         let warp_target_info = self.build_warp_target_info();
 
         let gpu = match &mut self.gpu { Some(g) => g, None => return };
 
         // Compute camera.
         let cam = camera::compute_camera(
-            self.player_position,
+            self.render_position,
             self.camera_yaw,
             self.camera_pitch,
             self.is_piloting,
@@ -512,9 +564,10 @@ impl App {
             {
                 let ship_pos = ws.origin;
                 let ship_vel = self.player_velocity;
+                let ship_props = voxeldust_core::autopilot::ShipPhysicalProperties::starter_ship();
                 self.trajectory_plan = voxeldust_core::autopilot::plan_trajectory(
                     ship_pos, ship_vel, target_idx, system,
-                    ws.game_time, self.selected_thrust_tier, 200,
+                    ws.game_time, &ship_props, self.selected_thrust_tier, 200,
                 );
             } else if self.autopilot_target.is_none() {
                 self.trajectory_plan = None;
@@ -620,7 +673,7 @@ impl App {
             self.latest_world_state.as_ref(),
             self.secondary_world_state.as_ref(),
             self.current_shard_type,
-            self.player_position,
+            self.render_position,
             self.player_velocity,
             self.ship_rotation,
             self.is_piloting,

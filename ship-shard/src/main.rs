@@ -147,6 +147,9 @@ struct ShipInteriorState {
     cached_system_params: Option<voxeldust_core::system::SystemParams>,
     galaxy_seed: u64,
 
+    /// Ship physical properties (mass, thrust, drag). Per-ship, derived from block composition.
+    ship_props: voxeldust_core::autopilot::ShipPhysicalProperties,
+
     // Pilot thrust (accumulated from input, sent each tick, then reset)
     pilot_thrust: DVec3,
     pilot_torque: DVec3,
@@ -286,6 +289,7 @@ impl ShipInteriorState {
             authorized_peers: Default::default(),
             cached_system_params: None,
             galaxy_seed,
+            ship_props: voxeldust_core::autopilot::ShipPhysicalProperties::starter_ship(),
             pilot_thrust: DVec3::ZERO,
             pilot_torque: DVec3::ZERO,
             shard_id, ship_id, host_shard_id,
@@ -399,6 +403,25 @@ impl ShipInteriorState {
                 ambient: l.ambient,
             })
         };
+
+        // Diagnostic: log ship-to-planet distance as seen by the ship shard.
+        if self.tick_count % 20 == 0 && !self.scene_bodies.is_empty() {
+            let nearest = self.scene_bodies.iter().filter(|b| b.body_id > 0).min_by_key(|b| {
+                ((self.ship_position - b.position).length() * 1000.0) as u64
+            });
+            if let Some(body) = nearest {
+                let dist = (self.ship_position - body.position).length();
+                let stale_ticks = self.tick_count.saturating_sub(self.last_scene_update_tick);
+                tracing::warn!(
+                    dist = format!("{:.0}", dist),
+                    stale = stale_ticks,
+                    body_id = body.body_id,
+                    ship_pos = format!("({:.0},{:.0},{:.0})", self.ship_position.x, self.ship_position.y, self.ship_position.z),
+                    body_pos = format!("({:.0},{:.0},{:.0})", body.position.x, body.position.y, body.position.z),
+                    "SHIP-SHARD planet distance diagnostic"
+                );
+            }
+        }
 
         WorldStateData {
             tick: self.tick_count,
@@ -683,7 +706,7 @@ fn main() {
                         let effective_tier = voxeldust_core::autopilot::effective_tier(
                             input.speed_tier, in_atmosphere);
                         let et = voxeldust_core::autopilot::engine_tier(effective_tier);
-                        let tier_thrust = et.acceleration * voxeldust_core::autopilot::SHIP_MASS;
+                        let tier_thrust = et.thrust_force_n * st.ship_props.thrust_multiplier;
                         st.pilot_thrust = DVec3::new(
                             input.movement[0] as f64 * tier_thrust,
                             input.movement[1] as f64 * tier_thrust,
@@ -718,7 +741,7 @@ fn main() {
                                         // Hover thrust: negate gravity in ship-local frame.
                                         if input.movement[1].abs() < 0.01 {
                                             let grav_local = st.ship_rotation.inverse() * (-grav_world);
-                                            let hover = grav_local * voxeldust_core::autopilot::SHIP_MASS;
+                                            let hover = grav_local * st.ship_props.mass_kg;
                                             st.pilot_thrust += DVec3::new(hover.x, hover.y, hover.z);
                                         }
 
@@ -727,10 +750,10 @@ fn main() {
                                             || input.movement[1].abs() > 0.01
                                             || input.movement[2].abs() > 0.01;
                                         if !has_input {
-                                            let max_accel = et.acceleration;
+                                            let max_accel = st.ship_props.engine_acceleration(effective_tier);
                                             let damping_rate = (max_accel * 0.1).min(5.0);
                                             let vel_local = st.ship_rotation.inverse() * st.ship_velocity;
-                                            let damping = -vel_local * damping_rate * voxeldust_core::autopilot::SHIP_MASS;
+                                            let damping = -vel_local * damping_rate * st.ship_props.mass_kg;
                                             let max_damp = tier_thrust * 0.5;
                                             let damping_clamped = damping.clamp_length_max(max_damp);
                                             st.pilot_thrust += DVec3::new(damping_clamped.x, damping_clamped.y, damping_clamped.z);

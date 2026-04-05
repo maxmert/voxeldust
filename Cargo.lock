@@ -1953,6 +1953,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "gooding-lambert"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abc139469912a8e85640ff5d93682b23c38f843028d46fae3f1909f1b44500c1"
+
+[[package]]
 name = "gpu-alloc"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6423,6 +6429,7 @@ dependencies = [
  "brahe",
  "flatbuffers",
  "glam 0.29.3",
+ "gooding-lambert",
  "lz4_flex",
  "nalgebra 0.34.1",
  "serde",

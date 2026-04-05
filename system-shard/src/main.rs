@@ -60,6 +60,9 @@ struct AutopilotState {
     target_planet_index: usize,
     thrust_tier: u8,
     intercept_pos: DVec3,
+    /// Planet velocity at predicted arrival time (real-time m/s).
+    /// Ship brakes relative to this velocity, not absolute zero.
+    target_arrival_vel: DVec3,
     last_solve_tick: u64,
     /// Physics time when autopilot was engaged (for thrust ramp).
     engage_time: f64,
@@ -116,11 +119,8 @@ struct PhysicsWorkspace<'a> {
     tick_count: u64,
 }
 
-/// Maximum angular velocity (rad/s). ~30 deg/s — gameplay-appropriate for a small ship.
-/// Star Citizen uses similar rates for medium fighters.
-const MAX_ANGULAR_VELOCITY: f64 = 0.52;
-/// Angular acceleration rate (rad/s²). Reaches max angular velocity in ~0.5 seconds.
-const ANGULAR_ACCEL_RATE: f64 = 1.0;
+/// Physics tick interval (seconds). Matches core::autopilot::PHYSICS_DT.
+const DT: f64 = autopilot::PHYSICS_DT;
 
 struct SystemState {
     system_params: SystemParams,
@@ -293,8 +293,6 @@ impl SystemState {
     }
 }
 
-const DT: f64 = 0.05;
-
 fn main() {
     let args = Args::parse();
 
@@ -465,12 +463,15 @@ fn main() {
                                     ship.position, ship.velocity,
                                     &st.system_params.planets[planet_index],
                                     &st.system_params.star,
+                                    &st.system_params,
+                                    &st.planet_positions,
                                     st.celestial_time,
                                     st.system_params.scale.time_scale,
+                                    &ship.physical_properties,
                                     cmd.speed_tier,
                                 )
                             });
-                            if let Some((intercept_pos, estimated_tof)) = solve_result {
+                            if let Some(sol) = solve_result {
                                 let tick = st.tick_count;
                                 let physics_time = st.physics_time;
                                 let mode = autopilot::AutopilotMode::from_u8(cmd.autopilot_mode);
@@ -491,10 +492,11 @@ fn main() {
                                         phase: FlightPhase::Accelerate,
                                         target_planet_index: planet_index,
                                         thrust_tier: cmd.speed_tier,
-                                        intercept_pos,
+                                        intercept_pos: sol.intercept_pos,
+                                        target_arrival_vel: sol.arrival_planet_vel,
                                         last_solve_tick: tick,
                                         engage_time: physics_time,
-                                        estimated_tof,
+                                        estimated_tof: sol.tof_real_seconds,
                                         braking_committed: false,
                                         target_orbit_altitude: default_orbit_alt,
                                         warp_target_star_index: 0,
@@ -502,7 +504,7 @@ fn main() {
                                     });
                                     info!(ship_id = cmd.ship_id, planet = planet_index,
                                         tier = cmd.speed_tier, mode = ?mode,
-                                        eta_s = estimated_tof as u64,
+                                        eta_s = sol.tof_real_seconds as u64,
                                         "autopilot engaged");
                                     }
                                 }
@@ -556,6 +558,7 @@ fn main() {
                                             target_planet_index: 0,
                                             thrust_tier: 4, // Emergency tier for max accel
                                             intercept_pos: DVec3::ZERO,
+                                            target_arrival_vel: DVec3::ZERO,
                                             last_solve_tick: tick,
                                             engage_time: physics_time,
                                             estimated_tof: 0.0,
@@ -668,6 +671,7 @@ fn main() {
                                 target_planet_index: 0,
                                 thrust_tier: 4,
                                 intercept_pos: DVec3::ZERO,
+                                target_arrival_vel: DVec3::ZERO,
                                 last_solve_tick: st.tick_count,
                                 engage_time: st.physics_time,
                                 estimated_tof: total_time,
@@ -882,6 +886,32 @@ fn main() {
                 .map(|(&sid, &pi)| (sid, pi)).collect();
             let celestial_time = st.celestial_time;
 
+            // Diagnostic: if there are ships but none in SOI, log nearest planet distance.
+            if soi_ships.is_empty() && !st.ships.is_empty() && st.tick_count % 40 == 0 {
+                let diag: Vec<(u64, usize, f64, f64, f64)> = st.ships.iter().map(|(&sid, ship)| {
+                    let mut nearest_dist = f64::MAX;
+                    let mut nearest_soi = 0.0;
+                    let mut nearest_idx = 0usize;
+                    for (i, planet) in st.system_params.planets.iter().enumerate() {
+                        let d = (ship.position - st.planet_positions[i]).length();
+                        if d < nearest_dist {
+                            nearest_dist = d;
+                            nearest_soi = compute_soi_radius(planet, &st.system_params.star);
+                            nearest_idx = i;
+                        }
+                    }
+                    (sid, nearest_idx, nearest_dist, nearest_soi, ship.velocity.length())
+                }).collect();
+                for (sid, pidx, dist, soi, vel) in diag {
+                    warn!(ship_id = sid, planet = pidx,
+                        dist = format!("{:.0}", dist),
+                        soi = format!("{:.0}", soi),
+                        ratio = format!("{:.2}", dist / soi),
+                        vel = format!("{:.0}", vel),
+                        "NOT in SOI — nearest planet");
+                }
+            }
+
             // Compute landed ship derived positions.
             // The ship stays at its landing radial on the planet surface. Planet orbital
             // motion is handled by planet_pos changing each tick. Planet spin rotation is
@@ -908,15 +938,32 @@ fn main() {
 
             // Co-move FLYING (non-landed) ships inside SOI with their parent planet.
             // Pre-compute deltas to avoid borrow conflicts.
-            let co_move_deltas: Vec<(u64, DVec3)> = soi_ships.iter().filter_map(|(ship_id, planet_index)| {
+            let co_move_deltas: Vec<(u64, usize, DVec3)> = soi_ships.iter().filter_map(|(ship_id, planet_index)| {
                 let ship = st.ships.get(ship_id)?;
                 if ship.landed { return None; }
                 let delta = st.planet_positions[*planet_index] - old_planet_positions[*planet_index];
-                Some((*ship_id, delta))
+                Some((*ship_id, *planet_index, delta))
             }).collect();
-            for (ship_id, delta_pos) in co_move_deltas {
+            for &(ship_id, planet_idx, delta_pos) in &co_move_deltas {
                 if let Some(ship) = st.ships.get_mut(&ship_id) {
                     ship.position += delta_pos;
+                }
+            }
+            // Diagnostic: log distance to planet for ships in SOI every second.
+            if st.tick_count % 20 == 0 {
+                for &(ship_id, planet_idx, delta_pos) in &co_move_deltas {
+                    if let Some(ship) = st.ships.get(&ship_id) {
+                        let dist = (ship.position - st.planet_positions[planet_idx]).length();
+                        let soi = compute_soi_radius(
+                            &st.system_params.planets[planet_idx], &st.system_params.star,
+                        );
+                        warn!(ship_id, planet_idx,
+                            dist = format!("{:.0}", dist),
+                            soi = format!("{:.0}", soi),
+                            delta = format!("{:.0}", delta_pos.length()),
+                            vel = format!("{:.0}", ship.velocity.length()),
+                            "SOI co-move diagnostic");
+                    }
                 }
             }
 
@@ -928,41 +975,36 @@ fn main() {
             let tick = st.tick_count;
 
             // Re-solve autopilot intercepts every 20 ticks (~1 second).
-            // Smoothed update: blend toward new intercept to prevent oscillation
-            // when planet orbital velocity exceeds ship velocity.
-            let ap_updates: Vec<(u64, DVec3, f64)> = st.ships.iter().filter_map(|(&id, ship)| {
+            // Deadband update: only apply when shift exceeds 0.5% of remaining distance.
+            let ap_updates: Vec<(u64, autopilot::InterceptSolution)> = st.ships.iter().filter_map(|(&id, ship)| {
                 if let Some(ref ap) = ship.autopilot {
                     // Skip re-solve for warp ships — they don't use planet intercepts.
                     if ap.mode == autopilot::AutopilotMode::WarpTravel { return None; }
                     // Don't re-solve while braking — ship is committed to its trajectory.
                     if tick - ap.last_solve_tick >= 20 && !ap.braking_committed {
-                        if let Some((new_intercept, new_tof)) = autopilot::solve_intercept(
+                        if let Some(new_sol) = autopilot::solve_intercept(
                             ship.position, ship.velocity,
                             &sys.planets[ap.target_planet_index],
-                            &sys.star, ct, sys.scale.time_scale, ap.thrust_tier,
+                            &sys.star, sys, pp, ct, sys.scale.time_scale,
+                            &ship.physical_properties, ap.thrust_tier,
                         ) {
-                            return Some((id, new_intercept, new_tof));
+                            return Some((id, new_sol));
                         }
                     }
                 }
                 None
             }).collect();
 
-            for (sid, new_intercept, new_tof) in ap_updates {
+            for (sid, new_sol) in ap_updates {
                 if let Some(ship) = st.ships.get_mut(&sid) {
                     if let Some(ref mut ap) = ship.autopilot {
-                        let old_dist = (ship.position - ap.intercept_pos).length();
-                        let shift = (new_intercept - ap.intercept_pos).length();
-                        let relative_shift = shift / old_dist.max(1.0);
-                        if relative_shift > 0.1 {
-                            // Large correction: blend at 30%
-                            ap.intercept_pos = ap.intercept_pos.lerp(new_intercept, 0.3);
-                        } else if relative_shift > 0.02 {
-                            // Small correction: blend at 10%
-                            ap.intercept_pos = ap.intercept_pos.lerp(new_intercept, 0.1);
+                        let shift = (new_sol.intercept_pos - ap.intercept_pos).length();
+                        let dist = (ship.position - ap.intercept_pos).length().max(1.0);
+                        if shift / dist > 0.005 {
+                            ap.intercept_pos = new_sol.intercept_pos;
+                            ap.target_arrival_vel = new_sol.arrival_planet_vel;
                         }
-                        // <2% shift: keep current intercept (stable enough)
-                        ap.estimated_tof = new_tof;
+                        ap.estimated_tof = new_sol.tof_real_seconds;
                         ap.last_solve_tick = tick;
                     }
                 }
@@ -995,25 +1037,146 @@ fn main() {
                         alt < planet.atmosphere.atmosphere_height && planet.atmosphere.has_atmosphere
                     };
                     let effective_tier = autopilot::effective_tier(ap.thrust_tier, in_atmo);
-                    let engine_accel = autopilot::engine_tier(effective_tier).acceleration;
+                    let engine_accel = ship.physical_properties.engine_acceleration(effective_tier);
+                    let thrust_force = autopilot::engine_tier(effective_tier).thrust_force_n
+                        * ship.physical_properties.thrust_multiplier;
 
                     // Phase-aware guidance dispatch.
                     let guidance = match ap.phase {
-                        // Interplanetary phases: existing brachistochrone guidance.
-                        FlightPhase::Accelerate | FlightPhase::Brake | FlightPhase::Flip => {
-                            autopilot::compute_guidance(
+                        // Interplanetary acceleration: brachistochrone guidance with velocity matching.
+                        FlightPhase::Accelerate => {
+                            let g = autopilot::compute_guidance(
                                 ship.position, ship.velocity,
-                                ap.intercept_pos, ap.target_planet_index,
-                                sys, pp, ct, effective_tier,
-                            )
+                                ap.intercept_pos, ap.target_arrival_vel,
+                                ap.target_planet_index,
+                                sys, pp, ct, &ship.physical_properties, effective_tier,
+                                false,
+                            );
+                            // Diagnostic: log stopping distance check every second.
+                            if tick % 20 == 0 {
+                                let d = (ap.intercept_pos - ship.position).length();
+                                let vc = ship.velocity.dot((ap.intercept_pos - ship.position).normalize_or_zero());
+                                let rv = (ship.velocity - ap.target_arrival_vel).length();
+                                warn!(ship_id = id,
+                                    d_int = format!("{:.0}", d),
+                                    v_close = format!("{:.0}", vc),
+                                    speed = format!("{:.0}", rv),
+                                    phase = ?g.phase,
+                                    flip = g.requires_flip,
+                                    "ACCEL_DIAG");
+                            }
+                            g
                         }
-                        // SOI approach: continue braking toward planet.
+                        // Brake: two modes depending on relative speed.
+                        // 1. High rel_speed: retrograde thrust to kill velocity excess.
+                        // 2. Low rel_speed (velocity matched): thrust toward planet to
+                        //    close the final distance and enter the SOI. Without this,
+                        //    the ship coasts in a straight line while the planet curves
+                        //    along its orbit — they diverge ("planet escapes").
+                        FlightPhase::Brake => {
+                            // Use CURRENT planet velocity, not the frozen target_arrival_vel.
+                            // The planet keeps orbiting during the braking burn — if we use
+                            // the stale velocity from intercept solve time, the retrograde
+                            // direction drifts and the ship doesn't actually slow down.
+                            let rel_vel = ship.velocity - planet_vel;
+                            let rel_speed = rel_vel.length();
+                            // Threshold: half escape velocity at the SOI boundary.
+                            // Below this, the ship is on a bound trajectory — safe to approach gently.
+                            let v_esc_soi = autopilot::escape_velocity(planet, soi - planet.radius_m);
+
+                            if rel_speed > v_esc_soi * 0.5 {
+                                // Kill relative velocity — pure retrograde.
+                                GuidanceCommand {
+                                    thrust_direction: -rel_vel.normalize(),
+                                    thrust_magnitude: thrust_force,
+                                    phase: FlightPhase::Brake,
+                                    completed: false,
+                                    eta_real_seconds: if engine_accel > 0.0 { rel_speed / engine_accel } else { 0.0 },
+                                    felt_g: autopilot::engine_tier(effective_tier).felt_g,
+                                    dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                                    requires_flip: false,
+                                }
+                            } else {
+                                // Velocity matched — close the remaining distance to the SOI.
+                                // Use gentle thrust (Maneuver tier) to avoid oscillating between
+                                // "accelerate toward planet" and "brake because too fast".
+                                let to_planet = (planet_pos - ship.position).normalize_or_zero();
+                                let gentle_thrust = autopilot::engine_tier(0).thrust_force_n
+                                    * ship.physical_properties.thrust_multiplier;
+                                GuidanceCommand {
+                                    thrust_direction: to_planet,
+                                    thrust_magnitude: gentle_thrust,
+                                    phase: FlightPhase::Brake,
+                                    completed: false,
+                                    eta_real_seconds: 0.0,
+                                    felt_g: autopilot::engine_tier(0).felt_g,
+                                    dampener_active: false,
+                                    requires_flip: false,
+                                }
+                            }
+                        }
+                        // Flip: coasting while rotating 180° to face retrograde relative
+                        // to the CURRENT planet velocity. Zero thrust during rotation.
+                        FlightPhase::Flip => {
+                            let rel_vel = ship.velocity - planet_vel;
+                            let retrograde = if rel_vel.length() > 0.1 {
+                                -rel_vel.normalize()
+                            } else {
+                                -ship.velocity.normalize_or_zero()
+                            };
+                            GuidanceCommand {
+                                thrust_direction: retrograde,
+                                thrust_magnitude: 0.0,
+                                phase: FlightPhase::Flip,
+                                completed: false,
+                                eta_real_seconds: 0.0,
+                                felt_g: 0.0,
+                                dampener_active: false,
+                                requires_flip: false,
+                            }
+                        }
+                        // SOI approach: retrograde braking if too fast, gravity coast otherwise.
+                        // Velocity is already planet-relative (patched conics).
+                        // Do NOT use compute_guidance here — it does a brachistochrone dive
+                        // toward the planet center which crashes the ship at full thrust.
                         FlightPhase::SoiApproach => {
-                            autopilot::compute_guidance(
-                                ship.position, ship.velocity,
-                                planet_pos, ap.target_planet_index,
-                                sys, pp, ct, effective_tier,
-                            )
+                            let rel_pos = ship.position - planet_pos;
+                            let altitude = rel_pos.length() - planet.radius_m;
+                            let speed = ship.velocity.length();
+                            let v_esc = autopilot::escape_velocity(planet, altitude);
+
+                            if speed > v_esc * 0.7 {
+                                // Too fast for capture — brake retrograde until bound.
+                                let v_circ_target = autopilot::circular_orbit_velocity(
+                                    planet, ap.target_orbit_altitude,
+                                );
+                                GuidanceCommand {
+                                    thrust_direction: -ship.velocity.normalize_or_zero(),
+                                    thrust_magnitude: thrust_force,
+                                    phase: FlightPhase::SoiApproach,
+                                    completed: false,
+                                    eta_real_seconds: if engine_accel > 0.0 {
+                                        (speed - v_circ_target).max(0.0) / engine_accel
+                                    } else { 0.0 },
+                                    felt_g: autopilot::engine_tier(effective_tier).felt_g,
+                                    dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                                    requires_flip: false,
+                                }
+                            } else {
+                                // Captured — coast inward under gravity. Zero thrust.
+                                // Planet gravity pulls ship toward target orbit altitude,
+                                // where check_phase_transition triggers CircularizeBurn.
+                                GuidanceCommand {
+                                    thrust_direction: DVec3::NEG_Z,
+                                    thrust_magnitude: 0.0,
+                                    phase: FlightPhase::SoiApproach,
+                                    completed: false,
+                                    eta_real_seconds: 0.0,
+                                    felt_g: 0.0,
+                                    dampener_active: false,
+                                    requires_flip: false,
+                                }
+                            }
                         }
                         // Circularize / ascent burn: prograde/retrograde burn.
                         FlightPhase::CircularizeBurn | FlightPhase::AscentBurn => {
@@ -1024,12 +1187,13 @@ fn main() {
                             );
                             GuidanceCommand {
                                 thrust_direction: burn_dir,
-                                thrust_magnitude: if dv > 1.0 { engine_accel * ship.physical_properties.mass_kg } else { 0.0 },
+                                thrust_magnitude: if dv > 1.0 { thrust_force } else { 0.0 },
                                 phase: ap.phase,
                                 completed: dv < 1.0,
                                 eta_real_seconds: dv / engine_accel,
                                 felt_g: autopilot::engine_tier(effective_tier).felt_g,
                                 dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                                requires_flip: false,
                             }
                         }
                         // Stable orbit: no thrust.
@@ -1042,6 +1206,7 @@ fn main() {
                                 eta_real_seconds: 0.0,
                                 felt_g: 0.0,
                                 dampener_active: false,
+                                requires_flip: false,
                             }
                         }
                         // Deorbit burn: retrograde.
@@ -1056,12 +1221,13 @@ fn main() {
                             };
                             GuidanceCommand {
                                 thrust_direction: -prograde,
-                                thrust_magnitude: engine_accel * ship.physical_properties.mass_kg,
+                                thrust_magnitude: thrust_force,
                                 phase: FlightPhase::DeorbitBurn,
                                 completed: false,
                                 eta_real_seconds: 0.0,
                                 felt_g: autopilot::engine_tier(effective_tier).felt_g,
                                 dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                                requires_flip: false,
                             }
                         }
                         // Atmospheric entry / terminal descent / landing: use landing guidance.
@@ -1081,6 +1247,7 @@ fn main() {
                                 eta_real_seconds: 0.0,
                                 felt_g: 0.0,
                                 dampener_active: false,
+                                requires_flip: false,
                             }
                         }
                         // Liftoff / gravity turn / ascent: use takeoff guidance.
@@ -1102,12 +1269,13 @@ fn main() {
                             };
                             GuidanceCommand {
                                 thrust_direction: prograde,
-                                thrust_magnitude: engine_accel * ship.physical_properties.mass_kg,
+                                thrust_magnitude: thrust_force,
                                 phase: FlightPhase::EscapeBurn,
                                 completed: (ship.position - planet_pos).length() > soi,
                                 eta_real_seconds: 0.0,
                                 felt_g: autopilot::engine_tier(effective_tier).felt_g,
                                 dampener_active: autopilot::engine_tier(effective_tier).dampened,
+                                requires_flip: false,
                             }
                         }
                         FlightPhase::Arrived => {
@@ -1119,6 +1287,7 @@ fn main() {
                                 eta_real_seconds: 0.0,
                                 felt_g: 0.0,
                                 dampener_active: false,
+                                requires_flip: false,
                             }
                         }
                         // Warp align: rotate to face target star with ZERO thrust.
@@ -1138,6 +1307,7 @@ fn main() {
                                 eta_real_seconds: 0.0,
                                 felt_g: 0.0,
                                 dampener_active: true,
+                                requires_flip: false,
                             }
                         }
                         // Warp accelerate: exponential thrust toward target star.
@@ -1164,6 +1334,7 @@ fn main() {
                                 eta_real_seconds: 0.0,
                                 felt_g: 1.0,
                                 dampener_active: true,
+                                requires_flip: false,
                             }
                         }
                         // Warp arrival: cubic ease-out deceleration.
@@ -1188,6 +1359,7 @@ fn main() {
                                 eta_real_seconds: (total_time - elapsed).max(0.0),
                                 felt_g: 1.0,
                                 dampener_active: true,
+                                requires_flip: false,
                             }
                         }
                         // Galaxy-shard-owned phases — should not be active on system shard.
@@ -1200,6 +1372,7 @@ fn main() {
                                 eta_real_seconds: 0.0,
                                 felt_g: 0.0,
                                 dampener_active: false,
+                                requires_flip: false,
                             }
                         }
                     };
@@ -1270,11 +1443,37 @@ fn main() {
                     }
                 }
 
-                // Sticky brake for interplanetary phases.
+                // Flip phase: when guidance signals requires_flip and ship is still
+                // in Accelerate, transition to Flip. Ship coasts (zero thrust) while
+                // the rotation controller turns 180°. Once aligned with retrograde
+                // (within ~15°), transition to Brake.
                 if let Some(ref mut ap) = ship.autopilot {
                     if matches!(ap.phase, FlightPhase::Accelerate | FlightPhase::Brake | FlightPhase::Flip) {
-                        if guidance.phase == FlightPhase::Brake && !ap.braking_committed {
+                        // Accelerate → Flip: guidance says we need to start braking.
+                        // Set braking_committed immediately — once the ship decides to flip,
+                        // it's committed to the trajectory. Re-solve must stop so the
+                        // intercept point doesn't shift during the flip coast.
+                        if guidance.requires_flip && ap.phase == FlightPhase::Accelerate {
+                            ap.phase = FlightPhase::Flip;
                             ap.braking_committed = true;
+                            info!(ship_id, "autopilot: Accelerate → Flip (braking committed)");
+                        }
+                        // Flip → Brake: ship has rotated to face relative retrograde.
+                        if ap.phase == FlightPhase::Flip {
+                            let fwd = ship.rotation * DVec3::NEG_Z;
+                            // Use current planet velocity, not frozen target_arrival_vel.
+                            let current_planet_vel = pv[ap.target_planet_index];
+                            let rel_vel = ship.velocity - current_planet_vel;
+                            let retrograde = if rel_vel.length() > 0.1 {
+                                -rel_vel.normalize()
+                            } else {
+                                -ship.velocity.normalize_or_zero()
+                            };
+                            // cos(15°) ≈ 0.966 — aligned enough to start thrusting retrograde.
+                            if fwd.dot(retrograde) > 0.966 {
+                                ap.phase = FlightPhase::Brake;
+                                info!(ship_id, "autopilot: Flip → Brake (aligned)");
+                            }
                         }
                     }
                 }
@@ -1287,9 +1486,9 @@ fn main() {
                 let ramp = autopilot::thrust_ramp_factor(elapsed, tof, guidance.phase);
 
                 // Rotation: PD controller to align ship forward (-Z) with thrust direction.
-                // Always active when autopilot provides a direction (including WarpAlign with zero thrust).
+                // Active when thrusting, during Flip (rotating 180° to retrograde), or WarpAlign.
                 let needs_rotation = guidance.thrust_magnitude > 0.0
-                    || matches!(guidance.phase, FlightPhase::WarpAlign);
+                    || matches!(guidance.phase, FlightPhase::WarpAlign | FlightPhase::Flip);
                 if needs_rotation {
                     let desired_fwd = thrust_dir;
                     let current_fwd = ship.rotation * DVec3::NEG_Z;
@@ -1308,7 +1507,8 @@ fn main() {
                     if angle > 0.001 && cross.length() > 1e-8 {
                         let axis = cross.normalize();
                         let p_gain = 3.0;
-                        let target_omega = axis * (angle * p_gain).min(MAX_ANGULAR_VELOCITY);
+                        let max_ang_vel = ship.physical_properties.max_angular_velocity();
+                        let target_omega = axis * (angle * p_gain).min(max_ang_vel);
                         let world_omega = ship.rotation * ship.angular_velocity;
                         let error = target_omega - world_omega;
                         let d_gain = 1.5;
@@ -1498,14 +1698,16 @@ fn main() {
                 }
 
                 // Standard angular velocity control (works for both manual and autopilot torque).
+                let max_ang_vel = ship.physical_properties.max_angular_velocity();
+                let ang_accel_rate = ship.physical_properties.angular_acceleration();
                 let target_angular_vel = DVec3::new(
-                    ship.torque.x.clamp(-1.0, 1.0) * MAX_ANGULAR_VELOCITY,
-                    ship.torque.y.clamp(-1.0, 1.0) * MAX_ANGULAR_VELOCITY,
-                    ship.torque.z.clamp(-1.0, 1.0) * MAX_ANGULAR_VELOCITY,
+                    ship.torque.x.clamp(-1.0, 1.0) * max_ang_vel,
+                    ship.torque.y.clamp(-1.0, 1.0) * max_ang_vel,
+                    ship.torque.z.clamp(-1.0, 1.0) * max_ang_vel,
                 );
 
                 let diff = target_angular_vel - ship.angular_velocity;
-                let ang_accel = diff.clamp_length_max(ANGULAR_ACCEL_RATE * DT);
+                let ang_accel = diff.clamp_length_max(ang_accel_rate * DT);
                 ship.angular_velocity += ang_accel;
 
                 let is_warp_rotation = ship.autopilot.as_ref()
@@ -1660,23 +1862,17 @@ fn main() {
         });
 
         // System 4: SOI detection + planet shard provisioning.
-        // Tracks ships entering/leaving planet SOIs and provisions planet shards.
+        // Runs AFTER physics so it uses fresh planet positions/velocities from this tick.
+        // SOI boundary detection runs EVERY TICK for immediate frame conversion.
+        // Planet shard provisioning runs every 20 ticks (async HTTP, not latency-sensitive).
         let state_soi = state.clone();
         let orchestrator_url_soi = orchestrator_url.clone();
         let provision_tx_soi = provision_tx.clone();
         let http_client_soi = http_client.clone();
         harness.add_system("soi_detection", move || {
             let mut st = state_soi.lock().unwrap();
-            if st.tick_count % 20 != 0 { return; } // check every second
 
-            // Drain async planet provision results from the channel.
-            for _ in 0..16 { let (planet_seed, shard_id) = match provision_rx.try_recv() { Ok(e) => e, Err(_) => break };
-                st.provisioned_planets.insert(planet_seed, shard_id);
-                st.provisioning_in_flight.remove(&planet_seed);
-                info!(planet_seed, shard_id = shard_id.0, "planet shard provisioned");
-            }
-
-            // Check each ship against each planet SOI.
+            // === EVERY TICK: SOI boundary detection + frame conversion ===
             let mut soi_entries: Vec<(u64, usize)> = Vec::new();
             let mut soi_exits: Vec<u64> = Vec::new();
 
@@ -1694,29 +1890,70 @@ fn main() {
                     }
                 }
                 if !found_soi && st.in_soi.contains_key(&ship.ship_id) {
-                    soi_exits.push(ship.ship_id);
+                    // Hysteresis: require 2% overshoot beyond SOI radius to prevent
+                    // frame-conversion ping-pong at the boundary.
+                    let planet_idx = st.in_soi[&ship.ship_id];
+                    let dist_exit = (ship.position - st.planet_positions[planet_idx]).length();
+                    let soi_exit = compute_soi_radius(
+                        &st.system_params.planets[planet_idx], &st.system_params.star,
+                    );
+                    if dist_exit > soi_exit * 1.02 {
+                        soi_exits.push(ship.ship_id);
+                    }
                 }
             }
 
             // Process SOI entries — patched conics: convert to planet-relative frame.
-            // Subtract planet's real-time velocity so the ship has planet-relative velocity.
-            // The co-movement system (above) keeps the ship's position tracking the planet.
-            for (ship_id, planet_index) in soi_entries {
-                st.in_soi.insert(ship_id, planet_index);
-                let planet = &st.system_params.planets[planet_index];
-                let planet_seed = planet.planet_seed;
-
-                let planet_real_vel = st.planet_velocities[planet_index];
-                if let Some(ship) = st.ships.get_mut(&ship_id) {
+            for (ship_id, planet_index) in &soi_entries {
+                st.in_soi.insert(*ship_id, *planet_index);
+                let planet_real_vel = st.planet_velocities[*planet_index];
+                if let Some(ship) = st.ships.get_mut(ship_id) {
                     let rel_speed_before = (ship.velocity - planet_real_vel).length();
-                    ship.velocity -= planet_real_vel; // convert to planet-relative frame
+                    ship.velocity -= planet_real_vel;
+                    let planet_seed = st.system_params.planets[*planet_index].planet_seed;
                     info!(ship_id, planet_index, planet_seed,
                         planet_vel_mag = format!("{:.0}", planet_real_vel.length()),
                         rel_speed = format!("{:.0}", rel_speed_before),
                         "ship entered planet SOI — converted to planet-relative frame");
                 }
+            }
 
-                // Provision planet shard if not already provisioned or in-flight.
+            // Process SOI exits — patched conics: convert back to system-absolute frame.
+            for ship_id in &soi_exits {
+                if let Some(&planet_index) = st.in_soi.get(ship_id) {
+                    let planet_real_vel = st.planet_velocities[planet_index];
+                    let planet_pos_exit = st.planet_positions[planet_index];
+                    let soi_exit_r = compute_soi_radius(
+                        &st.system_params.planets[planet_index], &st.system_params.star,
+                    );
+                    if let Some(ship) = st.ships.get_mut(ship_id) {
+                        let dist = (ship.position - planet_pos_exit).length();
+                        ship.velocity += planet_real_vel;
+                        warn!(ship_id, planet_index,
+                            dist = format!("{:.0}", dist),
+                            soi = format!("{:.0}", soi_exit_r),
+                            vel = format!("{:.0}", ship.velocity.length()),
+                            "ship LEFT planet SOI — converted to system frame");
+                    }
+                }
+                st.in_soi.remove(ship_id);
+            }
+
+            // === EVERY 20 TICKS: planet shard provisioning (async HTTP) ===
+            if st.tick_count % 20 != 0 { return; }
+
+            // Drain async planet provision results from the channel.
+            for _ in 0..16 { let (planet_seed, shard_id) = match provision_rx.try_recv() { Ok(e) => e, Err(_) => break };
+                st.provisioned_planets.insert(planet_seed, shard_id);
+                st.provisioning_in_flight.remove(&planet_seed);
+                info!(planet_seed, shard_id = shard_id.0, "planet shard provisioned");
+            }
+
+            // Provision planet shards for all ships in SOI.
+            let soi_planet_indices: Vec<usize> = st.in_soi.values().copied().collect();
+            for planet_index in soi_planet_indices {
+                let planet = &st.system_params.planets[planet_index];
+                let planet_seed = planet.planet_seed;
                 if !st.provisioned_planets.contains_key(&planet_seed)
                     && !st.provisioning_in_flight.contains(&planet_seed) {
                     st.provisioning_in_flight.insert(planet_seed);
@@ -1748,65 +1985,12 @@ fn main() {
                             }
                         }
                     });
-                }
-            }
-
-            // Provision planet shards for all ships in SOI (catches pre-registered spawns).
-            // This runs every SOI check tick and is idempotent — only provisions if not yet in map.
-            let soi_planet_indices: Vec<usize> = st.in_soi.values().copied().collect();
-            for planet_index in soi_planet_indices {
-                let planet = &st.system_params.planets[planet_index];
-                let planet_seed = planet.planet_seed;
-                if !st.provisioned_planets.contains_key(&planet_seed)
-                    && !st.provisioning_in_flight.contains(&planet_seed) {
-                    st.provisioning_in_flight.insert(planet_seed);
-                    let url = orchestrator_url_soi.clone();
-                    let system_seed = st.system_params.system_seed;
-                    let tx = provision_tx_soi.clone();
-                    let client = http_client_soi.clone();
-                    tokio::spawn(async move {
-                        let endpoint = format!(
-                            "{}/planet/{}?system_seed={}&planet_index={}",
-                            url, planet_seed, system_seed, planet_index
-                        );
-                        match client.get(&endpoint).send().await {
-                            Ok(resp) if resp.status().is_success() => {
-                                if let Ok(body) = resp.text().await {
-                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                                        if let Some(id) = v.get("shards").and_then(|s| s.get(0)).and_then(|s| s.get("id")).and_then(|v| v.as_u64()) {
-                                            let _ = tx.try_send((planet_seed, ShardId(id)));
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(resp) => {
-                                tracing::warn!(status = %resp.status(), planet_seed,
-                                    "failed to provision planet shard (from SOI check)");
-                            }
-                            Err(e) => {
-                                tracing::warn!(%e, planet_seed,
-                                    "planet shard provision request failed (from SOI check)");
-                            }
-                        }
-                    });
                     info!(planet_seed, planet_index, "provisioning planet shard for ship in SOI");
                 }
             }
-
-            // Process SOI exits — patched conics: convert back to system-absolute frame.
-            for ship_id in soi_exits {
-                if let Some(&planet_index) = st.in_soi.get(&ship_id) {
-                    let planet_real_vel = st.planet_velocities[planet_index];
-                    if let Some(ship) = st.ships.get_mut(&ship_id) {
-                        ship.velocity += planet_real_vel; // convert back to system frame
-                        info!(ship_id, "ship left planet SOI — converted to system frame");
-                    }
-                }
-                st.in_soi.remove(&ship_id);
-            }
         });
 
-        // System 4b: Warp boundary detection — handoff ships to galaxy shard.
+        // System 5: Warp boundary detection — handoff ships to galaxy shard.
         //
         // Two-phase approach:
         // Phase A (preconnect boundary, 50% of departure): Provision galaxy shard.

@@ -38,6 +38,7 @@ redb = "2"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 brahe = "1.2"
+gooding-lambert = "0.2"
 nalgebra = "0.34"
 rapier3d = "0.22"
 wgpu = "23"

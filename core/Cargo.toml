@@ -11,3 +11,4 @@ thiserror = { workspace = true }
 brahe = { workspace = true }
 nalgebra = { workspace = true }
 lz4_flex = { workspace = true }
+gooding-lambert = { workspace = true }
