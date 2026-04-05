@@ -1215,10 +1215,18 @@ fn main() {
                     {
                         guidance.phase
                     } else {
+                        // Inside SOI, ship.velocity is already planet-relative
+                        // (frame conversion at SOI entry subtracted planet_vel).
+                        // Pass ZERO so check_phase_transition doesn't double-subtract.
+                        let phase_vel = if st.in_soi.contains_key(&id) {
+                            DVec3::ZERO
+                        } else {
+                            planet_vel
+                        };
                         autopilot::check_phase_transition(
                             ap.phase, ap.mode,
                             ship.position, ship.velocity,
-                            planet_pos, planet_vel, planet, &sys.star,
+                            planet_pos, phase_vel, planet, &sys.star,
                             soi, ap.target_orbit_altitude, &ship.physical_properties,
                         )
                     };

@@ -876,6 +876,7 @@ mod tests {
                 ambient: 0.08,
             }),
             game_time: 42.0,
+            warp_target_star_index: 0,
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();

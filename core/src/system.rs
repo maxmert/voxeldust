@@ -72,11 +72,11 @@ pub struct CelestialScaleConfig {
 
 impl CelestialScaleConfig {
     pub const GAMEPLAY: Self = Self {
-        time_scale: 12.0,
+        time_scale: 1.0,
         base_sma: 1.0e10,
         spawn_offset: 2.0e7,
         fallback_spawn_distance: 2.0e8,
-        rotation_period_range: (60_000.0, 120_000.0), // ~1.4-2.8 real hours at 12x
+        rotation_period_range: (3_600.0, 14_400.0), // 1-4 real hours per planet day
     };
 
     pub const REALISTIC: Self = Self {
@@ -994,7 +994,7 @@ mod tests {
     fn scale_config_switchable() {
         // Verify both configs have sane values
         assert_eq!(CelestialScaleConfig::REALISTIC.time_scale, 1.0);
-        assert!(CelestialScaleConfig::GAMEPLAY.time_scale > 1.0);
+        assert_eq!(CelestialScaleConfig::GAMEPLAY.time_scale, 1.0);
         assert!(CelestialScaleConfig::GAMEPLAY.base_sma < CelestialScaleConfig::REALISTIC.base_sma);
     }
 

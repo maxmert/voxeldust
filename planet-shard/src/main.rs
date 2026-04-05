@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use glam::{DQuat, DVec3, Vec3};
 use rapier3d::prelude::*;
-use tracing::info;
+use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData,
@@ -567,6 +567,7 @@ fn main() {
         let client_reg_quic = client_registry.clone();
         harness.add_system("drain_quic", move || {
             for _ in 0..32 { let queued = match quic_msg_rx.try_recv() { Ok(q) => q, Err(_) => break };
+                let msg_source = queued.source_shard_id;
                 match queued.msg {
                     ShardMsg::PlayerHandoff(h) => {
                         let mut st = state_quic.lock().unwrap();
@@ -593,23 +594,24 @@ fn main() {
 
                         st.spawn_player_at(h.session_token, h.player_name.clone(), surface_pos);
 
-                        // Send HandoffAccepted back to system shard (which relays to source).
+                        // Send HandoffAccepted back to the system shard that relayed
+                        // the handoff. With multiple system shards (post-warp), only
+                        // the relaying one has the pending_handoffs entry to route it
+                        // back to the ship shard. msg_source identifies it via the
+                        // QUIC identity header.
                         let shard_id = st.shard_id;
                         let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
                             session_token: h.session_token,
                             target_shard: shard_id,
                         });
-                        // Send to source shard via the system shard (host).
-                        // The system shard relays based on pending_handoffs.
-                        let source = h.source_shard;
+                        let relay_shard = msg_source;
                         drop(st);
                         if let Ok(reg) = peer_reg_quic.try_read() {
-                            // Find the system shard to relay through.
-                            let system_shard = reg.find_by_type(ShardType::System).first()
-                                .map(|s| (s.id, s.endpoint.quic_addr));
-                            if let Some((sid, addr)) = system_shard {
-                                let _ = quic_send_quic.try_send((sid, addr, accepted));
-                                info!(target = sid.0, "sent HandoffAccepted to system shard");
+                            if let Some(addr) = reg.quic_addr(relay_shard) {
+                                let _ = quic_send_quic.try_send((relay_shard, addr, accepted));
+                                info!(target = relay_shard.0, "sent HandoffAccepted to relay system shard");
+                            } else {
+                                warn!(target = relay_shard.0, "relay system shard not in peer registry");
                             }
                         }
                     }
