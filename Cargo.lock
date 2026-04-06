@@ -695,6 +695,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "binary-greedy-meshing"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fc5ce373faa78fdfa1eb43b2647b596ac6273fc6183d364803d20107b152af1"
+
+[[package]]
 name = "bindgen"
 version = "0.60.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6852,6 +6858,7 @@ name = "voxeldust-core"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "binary-greedy-meshing",
  "brahe",
  "flatbuffers",
  "glam 0.29.3",

@@ -122,6 +122,12 @@ pub struct GpuState {
     pub scene_bind_group: wgpu::BindGroup,
     pub shadow_texture_view: wgpu::TextureView,
     pub shadow_bind_group: wgpu::BindGroup,
+
+    // Bind group layouts — stored for creating additional pipelines (block renderer).
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub scene_bind_group_layout: wgpu::BindGroupLayout,
+    pub shadow_bind_group_layout: wgpu::BindGroupLayout,
+
     pub egui_ctx: egui::Context,
     pub egui_winit: egui_winit::State,
     pub egui_renderer: egui_wgpu::Renderer,
@@ -653,6 +659,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         depth_view, uniform_buf, bind_group,
         scene_lighting_buf, scene_bind_group,
         shadow_texture_view, shadow_bind_group,
+        bind_group_layout, scene_bind_group_layout, shadow_bind_group_layout,
         egui_ctx, egui_winit, egui_renderer,
         star_pipeline, star_point_pipeline, star_quad_vertex_buf, star_quad_index_buf,
         star_instance_buf, star_scene_uniform_buf, star_bind_group,

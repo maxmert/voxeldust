@@ -358,6 +358,33 @@ table BlockEditRequest {
     block_type: uint16;
 }
 
+/// Generic chunk address using signed 32-bit Cartesian coordinates.
+/// Works for both ship grids (direct IVec3) and planets (derived from cubic sphere).
+/// This is the unified address format used by ChunkSnapshot and ChunkDelta.
+struct ChunkAddr {
+    x: int32;
+    y: int32;
+    z: int32;
+}
+
+/// Full chunk snapshot — lz4-compressed block data + metadata.
+/// Sent on initial connection and periodic resync. Replaces the chunk entirely.
+table ChunkSnapshot {
+    addr: ChunkAddr;
+    seq: uint64;
+    /// lz4-compressed chunk data (palette + indices + metadata).
+    /// Decompresses to the format produced by core::block::serialization.
+    data: [uint8];
+}
+
+/// Incremental block changes to a chunk (generic, shard-type agnostic).
+/// Sent when blocks are placed, broken, or modified by gameplay systems.
+table ChunkDelta {
+    addr: ChunkAddr;
+    seq: uint64;
+    mods: [BlockMod];
+}
+
 table ShardRedirectMsg {
     session_token: uint64;
     target_tcp_addr: string;
@@ -411,6 +438,8 @@ union ServerPayload {
     StarCatalog,
     ShardPreConnect,
     GalaxyWorldState,
+    ChunkSnapshot,
+    ChunkDelta,
 }
 
 /// Root type for server → client messages.

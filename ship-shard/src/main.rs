@@ -8,6 +8,9 @@ use rapier3d::prelude::*;
 use tracing::{info, warn};
 
 use voxeldust_core::autopilot::{self, ShipPhysicalProperties};
+use voxeldust_core::block::{
+    self, BlockId, BlockRegistry, ShipGrid, StarterShipLayout, build_starter_ship,
+};
 use voxeldust_core::shard_message::AutopilotSnapshotData;
 use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData, ServerMsg,
@@ -64,16 +67,8 @@ struct Args {
 // Constants
 // ---------------------------------------------------------------------------
 
-const SHIP_WIDTH: f32 = 4.0;
-const SHIP_LENGTH: f32 = 8.0;
-const SHIP_HEIGHT: f32 = 3.0;
-const WALL_THICKNESS: f32 = 0.1;
 const WALK_SPEED: f32 = 4.0;
 const JUMP_IMPULSE: f32 = 5.0;
-
-// Interaction points (ship-local coordinates).
-const PILOT_SEAT: Vec3 = Vec3::new(0.0, 0.5, -3.0);
-const EXIT_DOOR: Vec3 = Vec3::new(2.0, 0.5, 0.0);
 const INTERACT_DIST: f32 = 1.5;
 
 // ---------------------------------------------------------------------------
@@ -205,11 +200,76 @@ struct ConnectedPlayer {
     handoff_pending: bool,
 }
 
-/// Door state.
+/// Ship voxel grid — the block-based ship structure.
 #[derive(Resource)]
-struct DoorState {
+struct ShipGridResource(ShipGrid);
+
+/// Block registry — static block property table.
+#[derive(Resource)]
+struct BlockRegistryResource(BlockRegistry);
+
+/// A single interactable block discovered from the ShipGrid.
+#[derive(Clone, Debug)]
+struct InteractableBlock {
+    /// Block type.
+    block_id: BlockId,
+    /// World-space block position (center of block) in ship-local coordinates.
+    position: Vec3,
+    /// World-space integer position for block operations.
+    world_pos: glam::IVec3,
+}
+
+/// All interactable blocks discovered from the ShipGrid.
+/// Rebuilt whenever the ship structure changes (block placed/broken).
+/// Supports multiple cockpits, multiple doors, etc.
+#[derive(Resource)]
+struct InteractionPoints {
+    /// All cockpit blocks. Player interacts with the nearest one.
+    cockpits: Vec<InteractableBlock>,
+    /// All door blocks. Player interacts with the nearest one.
+    doors: Vec<InteractableBlock>,
+    /// Dirty flag — set when blocks change, triggers rescan.
+    dirty: bool,
+}
+
+/// Handles of per-chunk compound colliders. Keyed by chunk key.
+/// When blocks change in a chunk, we remove the old collider and insert a new one.
+#[derive(Resource, Default)]
+struct ChunkColliderHandles(std::collections::HashMap<glam::IVec3, ColliderHandle>);
+
+/// Per-door runtime state.
+#[derive(Clone, Debug)]
+struct DoorInstance {
+    /// Whether this door is currently open.
     open: bool,
+    /// Rapier collider handle for the door blocker (present when closed).
     blocker_handle: Option<ColliderHandle>,
+    /// Ship-local position of the door block center.
+    position: Vec3,
+    /// World-space integer coordinates for block operations.
+    world_pos: glam::IVec3,
+}
+
+/// All door states in the ship. Supports multiple doors.
+/// Indexed in parallel with `InteractionPoints::doors`.
+#[derive(Resource, Default)]
+struct DoorStates {
+    doors: Vec<DoorInstance>,
+}
+
+/// Tight bounding box of all solid blocks in the ship.
+/// Used for hull boundary exit detection — if the player leaves this volume
+/// (with a small margin), they've exited the ship through a gap/hatch.
+/// Recomputed when blocks change.
+#[derive(Resource)]
+struct ShipHullBounds {
+    /// Min corner of the solid block AABB (world-space block coords).
+    min: glam::IVec3,
+    /// Max corner of the solid block AABB (world-space block coords).
+    max: glam::IVec3,
+    /// Margin in blocks beyond the hull before triggering exit (accounts for
+    /// the player standing just outside a hatch without triggering handoff).
+    margin: f32,
 }
 
 /// Atmosphere tracking for ShardPreConnect.
@@ -336,9 +396,10 @@ fn drain_quic(
     mut autopilot: ResMut<AutopilotState>,
     mut connected: ResMut<ConnectedPlayer>,
     mut landing: ResMut<LandingState>,
-    mut door: ResMut<DoorState>,
+    mut door_states: ResMut<DoorStates>,
     mut rapier: ResMut<RapierContext>,
     mut warp: ResMut<WarpTargetState>,
+    interaction_pts: Res<InteractionPoints>,
     body_handle: Res<PlayerBodyHandle>,
     mut player_pos: ResMut<PlayerPosition>,
     mut pilot_mode: ResMut<PilotMode>,
@@ -375,24 +436,12 @@ fn drain_quic(
                 let was_landed = landing.landed;
                 landing.landed = data.velocity.length() < 0.5;
 
-                // Auto-close door on takeoff.
-                if was_landed && !landing.landed && door.open {
-                    door.open = false;
-                    let ctx = &mut *rapier;
-                    if let Some(handle) = door.blocker_handle.take() {
-                        ctx.collider_set.remove(
-                            handle,
-                            &mut ctx.island_manager,
-                            &mut ctx.rigid_body_set,
-                            true,
-                        );
+                // Auto-close all open doors on takeoff (state tracking only).
+                if was_landed && !landing.landed {
+                    for door in &mut door_states.doors {
+                        door.open = false;
                     }
-                    let right_x = SHIP_WIDTH / 2.0 + WALL_THICKNESS;
-                    let blocker = ColliderBuilder::cuboid(WALL_THICKNESS, 2.1 / 2.0, 0.6)
-                        .translation(vector![right_x, 2.1 / 2.0, 0.0])
-                        .build();
-                    door.blocker_handle = Some(ctx.collider_set.insert(blocker));
-                    info!("door auto-closed on takeoff");
+                    info!("all doors auto-closed on takeoff");
                 }
             }
             ShardMsg::HandoffAccepted(accepted) => {
@@ -444,15 +493,19 @@ fn drain_quic(
                 connected.handoff_pending = false;
                 pilot_mode.0 = false;
 
-                // Spawn player at EXIT_DOOR interior position.
+                // Spawn player at the first door (or a safe fallback).
+                let door_spawn = interaction_pts.doors
+                    .first()
+                    .map(|d| d.position)
+                    .unwrap_or(Vec3::new(0.0, 1.5, 0.0));
                 if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
                     body.set_translation(
-                        vector![EXIT_DOOR.x, EXIT_DOOR.y, EXIT_DOOR.z],
+                        vector![door_spawn.x, door_spawn.y, door_spawn.z],
                         true,
                     );
                     body.set_linvel(vector![0.0, 0.0, 0.0], true);
                 }
-                player_pos.0 = EXIT_DOOR;
+                player_pos.0 = door_spawn;
 
                 // Send HandoffAccepted back to host shard.
                 let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
@@ -539,6 +592,7 @@ fn process_connects(
     exterior: Res<ShipExterior>,
     config: Res<ShipConfig>,
     scene: Res<SceneCache>,
+    ship_grid: Res<ShipGridResource>,
 ) {
     for event in events.read() {
         connected.session = Some(event.session_token);
@@ -553,6 +607,27 @@ fn process_connects(
         let ship_id = config.ship_id;
         let galaxy_seed = config.galaxy_seed;
         let system_seed = config.system_seed;
+
+        // Serialize all chunk snapshots for the initial sync.
+        // Done synchronously on the ECS thread because ShipGrid is small
+        // (starter ship is 1-2 chunks). For large ships/stations, this would
+        // be moved to a background task with a read snapshot.
+        let mut chunk_snapshots: Vec<ServerMsg> = Vec::new();
+        for (chunk_key, chunk) in ship_grid.0.iter_chunks() {
+            if chunk.is_empty() {
+                continue;
+            }
+            let compressed = block::serialize_chunk(chunk);
+            chunk_snapshots.push(ServerMsg::ChunkSnapshot(
+                voxeldust_core::client_message::ChunkSnapshotData {
+                    chunk_x: chunk_key.x,
+                    chunk_y: chunk_key.y,
+                    chunk_z: chunk_key.z,
+                    seq: chunk.edit_seq(),
+                    data: compressed,
+                },
+            ));
+        }
 
         tokio::spawn(async move {
             let jr = ServerMsg::JoinResponse(JoinResponseData {
@@ -572,6 +647,12 @@ fn process_connects(
             });
             let mut stream = tcp_stream.lock().await;
             let _ = client_listener::send_tcp_msg(&mut *stream, &jr).await;
+
+            // Send all chunk snapshots immediately after JoinResponse.
+            for snapshot_msg in &chunk_snapshots {
+                let _ = client_listener::send_tcp_msg(&mut *stream, snapshot_msg).await;
+            }
+            info!(chunks = chunk_snapshots.len(), "sent initial chunk snapshots to client");
         });
     }
 }
@@ -950,11 +1031,10 @@ fn preconnect_check(
 fn interaction(
     actions: Res<InputActions>,
     player_pos: Res<PlayerPosition>,
+    interaction_pts: Res<InteractionPoints>,
     mut pilot_mode: ResMut<PilotMode>,
     mut rapier: ResMut<RapierContext>,
     body_handle: Res<PlayerBodyHandle>,
-    landing: Res<LandingState>,
-    mut door: ResMut<DoorState>,
 ) {
     let action_pressed = actions.current == 3 && actions.previous != 3;
     if !action_pressed {
@@ -962,47 +1042,29 @@ fn interaction(
     }
 
     let pos = player_pos.0;
-    let dist_to_seat = (pos - PILOT_SEAT).length();
-    let dist_to_exit = (pos - EXIT_DOOR).length();
 
-    if dist_to_seat < INTERACT_DIST {
-        pilot_mode.0 = !pilot_mode.0;
-        if pilot_mode.0 {
-            if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
-                body.set_linvel(vector![0.0, 0.0, 0.0], true);
+    // Check nearest cockpit.
+    if let Some((_idx, dist, _cockpit)) = nearest_interactable(&interaction_pts.cockpits, pos) {
+        if dist < INTERACT_DIST {
+            pilot_mode.0 = !pilot_mode.0;
+            if pilot_mode.0 {
+                if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
+                    body.set_linvel(vector![0.0, 0.0, 0.0], true);
+                }
+                info!("entered pilot mode");
+            } else {
+                info!("exited pilot mode");
             }
-            info!("entered pilot mode");
-        } else {
-            info!("exited pilot mode");
-        }
-    } else if dist_to_exit < INTERACT_DIST && landing.landed {
-        door.open = !door.open;
-        let opening = door.open;
-        let ctx = &mut *rapier;
-        if opening {
-            if let Some(handle) = door.blocker_handle.take() {
-                ctx.collider_set.remove(
-                    handle,
-                    &mut ctx.island_manager,
-                    &mut ctx.rigid_body_set,
-                    true,
-                );
-            }
-            info!("exit door opened");
-        } else {
-            let right_x = SHIP_WIDTH / 2.0 + WALL_THICKNESS;
-            let blocker = ColliderBuilder::cuboid(WALL_THICKNESS, 2.1 / 2.0, 0.6)
-                .translation(vector![right_x, 2.1 / 2.0, 0.0])
-                .build();
-            door.blocker_handle = Some(ctx.collider_set.insert(blocker));
-            info!("exit door closed");
         }
     }
 }
 
-fn door_threshold(
+/// Detect when the player has left the ship's hull volume and trigger
+/// handoff to the nearest planet shard. Works for any ship shape — checks
+/// the player's position against the tight bounding box of all solid blocks.
+fn hull_exit_check(
     player_pos: Res<PlayerPosition>,
-    door: Res<DoorState>,
+    hull_bounds: Res<ShipHullBounds>,
     mut connected: ResMut<ConnectedPlayer>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
@@ -1011,12 +1073,21 @@ fn door_threshold(
     tick: Res<ecs::TickCounter>,
     mut pending: ResMut<PendingMessages>,
 ) {
-    if !door.open || connected.handoff_pending {
+    if connected.handoff_pending {
         return;
     }
 
-    let threshold_x = SHIP_WIDTH / 2.0 + 0.5;
-    if player_pos.0.x <= threshold_x {
+    // Check if the player is outside the ship's solid block bounding box.
+    let pos = player_pos.0;
+    let margin = hull_bounds.margin;
+    let inside = pos.x >= hull_bounds.min.x as f32 - margin
+        && pos.x <= hull_bounds.max.x as f32 + 1.0 + margin
+        && pos.y >= hull_bounds.min.y as f32 - margin
+        && pos.y <= hull_bounds.max.y as f32 + 1.0 + margin
+        && pos.z >= hull_bounds.min.z as f32 - margin
+        && pos.z <= hull_bounds.max.z as f32 + 1.0 + margin;
+
+    if inside {
         return;
     }
 
@@ -1337,6 +1408,92 @@ fn log_state(
 // App construction
 // ---------------------------------------------------------------------------
 
+/// Build a Rapier compound collider from all solid blocks in a ShipGrid chunk.
+///
+/// Each solid block becomes a unit cube (half-extent 0.5) positioned at
+/// the block's center in ship-local coordinates.
+fn build_chunk_collider(
+    grid: &ShipGrid,
+    chunk_key: glam::IVec3,
+    registry: &BlockRegistry,
+) -> Option<Collider> {
+    let shapes = grid.chunk_collider_shapes(chunk_key, glam::Vec3::ZERO, registry);
+    if shapes.is_empty() {
+        return None;
+    }
+
+    let compound_shapes: Vec<(Isometry<f32>, SharedShape)> = shapes
+        .iter()
+        .map(|&(pos, he)| {
+            let iso = Isometry::translation(pos.x, pos.y, pos.z);
+            let shape = SharedShape::cuboid(he.x, he.y, he.z);
+            (iso, shape)
+        })
+        .collect();
+
+    Some(ColliderBuilder::compound(compound_shapes).build())
+}
+
+/// Scan the ShipGrid for all interactable blocks (cockpits, doors, etc.).
+///
+/// Called at startup and whenever blocks change. Returns the full set of
+/// interaction points — supporting any number of cockpits and doors.
+fn scan_interactable_blocks(grid: &ShipGrid) -> InteractionPoints {
+    let cs = block::CHUNK_SIZE as i32;
+    let mut cockpits = Vec::new();
+    let mut doors = Vec::new();
+
+    for (chunk_key, chunk) in grid.iter_chunks() {
+        if chunk.is_empty() {
+            continue;
+        }
+        let chunk_origin = glam::IVec3::new(
+            chunk_key.x * cs,
+            chunk_key.y * cs,
+            chunk_key.z * cs,
+        );
+
+        for x in 0..block::CHUNK_SIZE as u8 {
+            for y in 0..block::CHUNK_SIZE as u8 {
+                for z in 0..block::CHUNK_SIZE as u8 {
+                    let id = chunk.get_block(x, y, z);
+                    if id == BlockId::COCKPIT || id == BlockId::DOOR {
+                        let wp = chunk_origin + glam::IVec3::new(x as i32, y as i32, z as i32);
+                        let block = InteractableBlock {
+                            block_id: id,
+                            position: Vec3::new(wp.x as f32 + 0.5, wp.y as f32 + 0.5, wp.z as f32 + 0.5),
+                            world_pos: wp,
+                        };
+                        match id {
+                            BlockId::COCKPIT => cockpits.push(block),
+                            BlockId::DOOR => doors.push(block),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    InteractionPoints {
+        cockpits,
+        doors,
+        dirty: false,
+    }
+}
+
+/// Find the nearest interactable block of a given type to the player.
+fn nearest_interactable<'a>(
+    blocks: &'a [InteractableBlock],
+    player_pos: Vec3,
+) -> Option<(usize, f32, &'a InteractableBlock)> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (i, (b.position - player_pos).length(), b))
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+}
+
 fn build_ship_interior(
     shard_id: ShardId,
     ship_id: u64,
@@ -1347,75 +1504,46 @@ fn build_ship_interior(
     let mut rigid_body_set = RigidBodySet::new();
     let mut collider_set = ColliderSet::new();
 
-    // Ship interior colliders.
-    let floor = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, WALL_THICKNESS, SHIP_LENGTH / 2.0)
-        .translation(vector![0.0, -WALL_THICKNESS, 0.0])
-        .build();
-    collider_set.insert(floor);
+    // Build the ship from blocks.
+    let registry = BlockRegistry::new();
+    let layout = StarterShipLayout::default_starter();
+    let grid = build_starter_ship(&layout);
 
-    let ceiling = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, WALL_THICKNESS, SHIP_LENGTH / 2.0)
-        .translation(vector![0.0, SHIP_HEIGHT + WALL_THICKNESS, 0.0])
-        .build();
-    collider_set.insert(ceiling);
+    // Generate Rapier colliders from each chunk's solid blocks.
+    let mut chunk_collider_handles = std::collections::HashMap::new();
+    for chunk_key in grid.chunk_keys() {
+        if let Some(collider) = build_chunk_collider(&grid, chunk_key, &registry) {
+            let handle = collider_set.insert(collider);
+            chunk_collider_handles.insert(chunk_key, handle);
+        }
+    }
 
-    let left = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, SHIP_LENGTH / 2.0)
-        .translation(vector![
-            -SHIP_WIDTH / 2.0 - WALL_THICKNESS,
-            SHIP_HEIGHT / 2.0,
-            0.0
-        ])
-        .build();
-    collider_set.insert(left);
+    // Scan for all interactable blocks (cockpits, doors).
+    let interaction_points = scan_interactable_blocks(&grid);
 
-    // Right wall: split around door opening.
-    let door_half_z = 0.6_f32;
-    let door_height = 2.1_f32;
-    let right_x = SHIP_WIDTH / 2.0 + WALL_THICKNESS;
+    // Create door blocker colliders for each door block.
+    let mut door_instances: Vec<DoorInstance> = Vec::new();
+    for door_block in &interaction_points.doors {
+        let dp = door_block.position;
+        let blocker = ColliderBuilder::cuboid(0.5, 0.5, 0.5)
+            .translation(vector![dp.x, dp.y, dp.z])
+            .build();
+        let handle = collider_set.insert(blocker);
+        door_instances.push(DoorInstance {
+            open: false,
+            blocker_handle: Some(handle),
+            position: dp,
+            world_pos: door_block.world_pos,
+        });
+    }
 
-    let seg_len = (SHIP_LENGTH / 2.0 - door_half_z) / 2.0;
-    let seg_z = -(SHIP_LENGTH / 2.0 + door_half_z) / 2.0;
-    let right_left = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, seg_len)
-        .translation(vector![right_x, SHIP_HEIGHT / 2.0, seg_z])
-        .build();
-    collider_set.insert(right_left);
-
-    let right_right = ColliderBuilder::cuboid(WALL_THICKNESS, SHIP_HEIGHT / 2.0, seg_len)
-        .translation(vector![right_x, SHIP_HEIGHT / 2.0, -seg_z])
-        .build();
-    collider_set.insert(right_right);
-
-    let above_half_h = (SHIP_HEIGHT - door_height) / 2.0;
-    let right_above = ColliderBuilder::cuboid(WALL_THICKNESS, above_half_h, door_half_z)
-        .translation(vector![right_x, door_height + above_half_h, 0.0])
-        .build();
-    collider_set.insert(right_above);
-
-    let door_blocker = ColliderBuilder::cuboid(WALL_THICKNESS, door_height / 2.0, door_half_z)
-        .translation(vector![right_x, door_height / 2.0, 0.0])
-        .build();
-    let door_blocker_handle = collider_set.insert(door_blocker);
-
-    let back = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, SHIP_HEIGHT / 2.0, WALL_THICKNESS)
-        .translation(vector![
-            0.0,
-            SHIP_HEIGHT / 2.0,
-            SHIP_LENGTH / 2.0 + WALL_THICKNESS
-        ])
-        .build();
-    collider_set.insert(back);
-
-    let front = ColliderBuilder::cuboid(SHIP_WIDTH / 2.0, SHIP_HEIGHT / 2.0, WALL_THICKNESS)
-        .translation(vector![
-            0.0,
-            SHIP_HEIGHT / 2.0,
-            -SHIP_LENGTH / 2.0 - WALL_THICKNESS
-        ])
-        .build();
-    collider_set.insert(front);
-
-    // Player capsule.
+    // Player capsule — spawn near the first cockpit (or safe fallback).
+    let spawn_pos = interaction_points.cockpits
+        .first()
+        .map(|c| Vec3::new(c.position.x, c.position.y + 0.5, c.position.z + 1.0))
+        .unwrap_or(Vec3::new(0.0, 1.5, 0.0));
     let player_rb = RigidBodyBuilder::dynamic()
-        .translation(vector![0.0, 1.0, 0.0])
+        .translation(vector![spawn_pos.x, spawn_pos.y, spawn_pos.z])
         .lock_rotations()
         .build();
     let player_handle = rigid_body_set.insert(player_rb);
@@ -1507,20 +1635,32 @@ fn build_ship_interior(
             None
         },
     ));
+    // Compute tight hull bounding box for exit detection.
+    let hull_bounds = match grid.bounding_box() {
+        Some((min, max)) => ShipHullBounds { min, max, margin: 2.0 },
+        None => ShipHullBounds {
+            min: glam::IVec3::ZERO,
+            max: glam::IVec3::ZERO,
+            margin: 2.0,
+        },
+    };
+
+    app.insert_resource(ShipGridResource(grid));
+    app.insert_resource(BlockRegistryResource(registry));
+    app.insert_resource(interaction_points);
+    app.insert_resource(hull_bounds);
+    app.insert_resource(ChunkColliderHandles(chunk_collider_handles));
     app.insert_resource(ShipProps(ShipPhysicalProperties::starter_ship()));
     app.insert_resource(PilotAccumulator::default());
     app.insert_resource(AutopilotState::default());
     app.insert_resource(WarpTargetState::default());
     app.insert_resource(ConnectedPlayer::default());
-    app.insert_resource(DoorState {
-        open: false,
-        blocker_handle: Some(door_blocker_handle),
-    });
+    app.insert_resource(DoorStates { doors: door_instances });
     app.insert_resource(AtmosphereState::default());
     app.insert_resource(LandingState::default());
     app.insert_resource(PendingMessages::default());
     app.insert_resource(PlayerBodyHandle(player_handle));
-    app.insert_resource(PlayerPosition(Vec3::new(0.0, 1.0, 0.0)));
+    app.insert_resource(PlayerPosition(spawn_pos));
     app.insert_resource(PlayerYaw(0.0));
     app.insert_resource(PilotMode(false));
     app.insert_resource(GravityEnabled(true));
@@ -1567,7 +1707,7 @@ fn build_ship_interior(
     // Interaction: seat, door, threshold.
     app.add_systems(
         Update,
-        (interaction, door_threshold).chain().in_set(ShipSet::Interaction),
+        (interaction, hull_exit_check).chain().in_set(ShipSet::Interaction),
     );
 
     // Send: QUIC messages to host shard.

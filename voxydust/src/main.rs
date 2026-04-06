@@ -4,6 +4,7 @@
 //! GPU state (GpuState, Window, uniform_data) stays outside the World because
 //! egui_winit::State is !Send.
 
+mod block_render;
 mod camera;
 mod gpu;
 mod hud;
@@ -78,6 +79,25 @@ struct ConnectionInfo {
 struct ServerWorldState {
     latest: Option<WorldStateData>,
     secondary: Option<WorldStateData>,
+}
+
+/// Client-side chunk cache for block data received from the server.
+/// Multi-source: supports simultaneous ship + planet chunks during transitions.
+#[derive(Resource)]
+struct ClientChunkCacheRes {
+    cache: voxeldust_core::block::client_chunks::ClientChunkCache,
+    /// Source ID for the current primary shard connection.
+    /// Set when a new shard connection provides chunk data.
+    primary_source: Option<voxeldust_core::block::client_chunks::ChunkSourceId>,
+}
+
+impl std::ops::Deref for ClientChunkCacheRes {
+    type Target = voxeldust_core::block::client_chunks::ClientChunkCache;
+    fn deref(&self) -> &Self::Target { &self.cache }
+}
+
+impl std::ops::DerefMut for ClientChunkCacheRes {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.cache }
 }
 
 #[derive(Resource)]
@@ -265,6 +285,7 @@ fn poll_network(
     mut warp: ResMut<ClientWarp>,
     mut sf_res: ResMut<StarFieldRes>,
     mut sys_params: ResMut<SystemParamsCache>,
+    mut chunk_cache: ResMut<ClientChunkCacheRes>,
     ft: Res<FrameTime>,
 ) {
     let rx = match net.event_rx.as_mut() {
@@ -453,10 +474,52 @@ fn poll_network(
                     }
                 }
             }
+            NetEvent::ChunkSnapshot(cs) => {
+                // Ensure we have a source for the current primary shard.
+                if chunk_cache.primary_source.is_none() {
+                    let new_source = chunk_cache.cache.add_source();
+                    chunk_cache.primary_source = Some(new_source);
+                    info!(source = new_source.0, "created chunk source for primary shard");
+                }
+                let source = chunk_cache.primary_source.unwrap();
+                let chunk_pos = glam::IVec3::new(cs.chunk_x, cs.chunk_y, cs.chunk_z);
+                match chunk_cache.insert_snapshot(source, chunk_pos, cs.seq, &cs.data) {
+                    Ok(()) => {
+                        info!(
+                            chunk = %chunk_pos,
+                            data_len = cs.data.len(),
+                            total_chunks = chunk_cache.total_chunk_count(),
+                            "received chunk snapshot"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "failed to insert chunk snapshot");
+                    }
+                }
+            }
+            NetEvent::ChunkDelta(cd) => {
+                if let Some(source) = chunk_cache.primary_source {
+                    let chunk_pos = glam::IVec3::new(cd.chunk_x, cd.chunk_y, cd.chunk_z);
+                    let edits: Vec<_> = cd.mods.iter()
+                        .map(|m| (m.bx, m.by, m.bz, voxeldust_core::block::BlockId::from_u16(m.block_type)))
+                        .collect();
+                    chunk_cache.apply_delta(source, chunk_pos, cd.seq, &edits);
+                }
+            }
             NetEvent::Transitioning => {
                 info!("transitioning to new shard...");
                 smooth.has_prev_server_pos = false;
                 smooth.walk_velocity = DVec3::ZERO;
+
+                // Transition to new shard: the OLD source's chunks remain in the
+                // cache (e.g., ship chunks stay visible as exterior after exiting).
+                // A new source will be created when the new shard starts sending data.
+                // The old source is removed later when its chunks are no longer needed
+                // (out of render range, or explicitly cleaned up).
+                //
+                // For now, we keep the old source and create a fresh one for the new shard.
+                // TODO: implement distance-based cleanup of old sources.
+                chunk_cache.primary_source = None;
 
                 // Clear warp state — warp travel is over.
                 warp.galaxy_position = None;
@@ -714,6 +777,7 @@ struct ClientApp {
     // GPU state kept outside World (egui_winit::State is !Send).
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
+    block_renderer: Option<block_render::BlockRenderer>,
     uniform_data: Vec<ObjectUniforms>,
     args: Args,
 }
@@ -783,6 +847,10 @@ impl ClientApp {
         ecs_app.insert_resource(TrajectoryWorker::spawn());
         ecs_app.insert_resource(StarFieldRes(None));
         ecs_app.insert_resource(SystemParamsCache(None));
+        ecs_app.insert_resource(ClientChunkCacheRes {
+            cache: voxeldust_core::block::client_chunks::ClientChunkCache::new(),
+            primary_source: None,
+        });
         ecs_app.insert_resource(FrameTime {
             count: 0,
             last_time: Instant::now(),
@@ -815,6 +883,7 @@ impl ClientApp {
             ecs_app,
             window: None,
             gpu: None,
+            block_renderer: None,
             uniform_data: vec![bytemuck::Zeroable::zeroed(); MAX_OBJECTS],
             args,
         }
@@ -822,6 +891,15 @@ impl ClientApp {
 
     fn init_gpu(&mut self, window: Arc<Window>) {
         let gpu_state = gpu::init_gpu(window.clone());
+        // Create the block renderer now that we have GPU state.
+        let br = block_render::BlockRenderer::new(
+            &gpu_state.device,
+            gpu_state.config.format,
+            &gpu_state.bind_group_layout,
+            &gpu_state.scene_bind_group_layout,
+            &gpu_state.shadow_bind_group_layout,
+        );
+        self.block_renderer = Some(br);
         self.window = Some(window);
         self.gpu = Some(gpu_state);
     }
@@ -1021,6 +1099,47 @@ impl ClientApp {
             }
         };
 
+        // Process dirty chunks: generate meshes and upload to GPU.
+        // This bridges the ECS chunk cache (populated by poll_network) with
+        // the GPU block renderer (consumed by render_frame).
+        if let Some(ref mut br) = self.block_renderer {
+            let world_mut = self.ecs_app.world_mut();
+            let mut chunk_cache = world_mut.resource_mut::<ClientChunkCacheRes>();
+            let registry = voxeldust_core::block::BlockRegistry::new();
+
+            // Clean up GPU buffers for removed sources.
+            for source in chunk_cache.drain_removed_sources() {
+                br.remove_source(source);
+            }
+
+            // Process newly dirty chunks (source-aware keys).
+            if chunk_cache.has_dirty() {
+                let dirty_keys = chunk_cache.drain_dirty();
+                for dk in dirty_keys {
+                    if let Some(chunk) = chunk_cache.get_chunk(dk.source, dk.chunk) {
+                        let neighbors = chunk_cache.get_neighbors(dk.source, dk.chunk);
+                        let mesh = block_render::generate_chunk_gpu_mesh(
+                            chunk, &neighbors, &registry, false,
+                        );
+                        tracing::info!(
+                            chunk = %dk.chunk,
+                            vertices = mesh.vertices.len(),
+                            indices = mesh.indices.len(),
+                            empty = mesh.is_empty(),
+                            "meshed chunk for GPU"
+                        );
+                        br.upload_chunk_mesh(&gpu.device, dk, &mesh);
+                    } else {
+                        br.remove_chunk_mesh(dk);
+                    }
+                }
+                tracing::info!(
+                    total_gpu_chunks = br.total_chunk_count(),
+                    "block renderer chunk update complete"
+                );
+            }
+        }
+
         // Re-read resources for render_frame call.
         let world = self.ecs_app.world();
         let ws = world.resource::<ServerWorldState>();
@@ -1049,6 +1168,7 @@ impl ClientApp {
             frame_count,
             star_instance_count,
             warp_target_info,
+            self.block_renderer.as_ref(),
         );
     }
 }

@@ -26,6 +26,10 @@ pub enum ServerMsg {
     StarCatalog(StarCatalogData),
     ShardPreConnect(handoff::ShardPreConnect),
     GalaxyWorldState(GalaxyWorldStateData),
+    /// Full chunk snapshot (lz4-compressed). Sent on initial connection.
+    ChunkSnapshot(ChunkSnapshotData),
+    /// Incremental block changes to a chunk. Shard-type agnostic.
+    ChunkDelta(ChunkDeltaData),
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +167,39 @@ pub struct BlockModData {
     pub by: u8,
     pub bz: u8,
     pub block_type: u16,
+}
+
+/// Full chunk snapshot for initial sync. Shard-type agnostic addressing via IVec3.
+///
+/// Used by both ship shards (Cartesian chunks) and planet shards (cubic sphere chunks
+/// mapped to IVec3). The `data` field is the lz4-compressed output of
+/// `core::block::serialization::serialize_chunk()`.
+#[derive(Debug, Clone)]
+pub struct ChunkSnapshotData {
+    /// Chunk address in unified Cartesian coordinates.
+    pub chunk_x: i32,
+    pub chunk_y: i32,
+    pub chunk_z: i32,
+    /// Monotonic edit sequence for ordering.
+    pub seq: u64,
+    /// lz4-compressed chunk data (palette + indices + metadata).
+    pub data: Vec<u8>,
+}
+
+/// Incremental block changes to a chunk. Shard-type agnostic.
+///
+/// Replaces the planet-specific `ChunkBlockMods` for new code paths.
+/// Both ship and planet shards use this message format.
+#[derive(Debug, Clone)]
+pub struct ChunkDeltaData {
+    /// Chunk address in unified Cartesian coordinates.
+    pub chunk_x: i32,
+    pub chunk_y: i32,
+    pub chunk_z: i32,
+    /// Monotonic edit sequence for ordering.
+    pub seq: u64,
+    /// Block modifications within this chunk.
+    pub mods: Vec<BlockModData>,
 }
 
 #[derive(Debug, Clone)]
@@ -565,6 +602,39 @@ impl ServerMsg {
                 });
                 builder.finish(msg, None);
             }
+            ServerMsg::ChunkSnapshot(data) => {
+                let addr = fb::ChunkAddr::new(data.chunk_x, data.chunk_y, data.chunk_z);
+                let payload_data = builder.create_vector(&data.data);
+                let cs = fb::ChunkSnapshot::create(&mut builder, &fb::ChunkSnapshotArgs {
+                    addr: Some(&addr),
+                    seq: data.seq,
+                    data: Some(payload_data),
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::ChunkSnapshot,
+                    payload: Some(cs.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
+            ServerMsg::ChunkDelta(data) => {
+                let addr = fb::ChunkAddr::new(data.chunk_x, data.chunk_y, data.chunk_z);
+                let mods: Vec<_> = data.mods.iter().map(|m| {
+                    fb::BlockMod::create(&mut builder, &fb::BlockModArgs {
+                        bx: m.bx, by: m.by, bz: m.bz, block_type: m.block_type,
+                    })
+                }).collect();
+                let mods_vec = builder.create_vector(&mods);
+                let cd = fb::ChunkDelta::create(&mut builder, &fb::ChunkDeltaArgs {
+                    addr: Some(&addr),
+                    seq: data.seq,
+                    mods: Some(mods_vec),
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::ChunkDelta,
+                    payload: Some(cd.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -784,6 +854,36 @@ impl ServerMsg {
                     eta_seconds: gws.eta_seconds(),
                     origin_star_index: gws.origin_star_index(),
                     target_star_index: gws.target_star_index(),
+                }))
+            }
+            fb::ServerPayload::ChunkSnapshot => {
+                let cs = msg.payload_as_chunk_snapshot()
+                    .ok_or(MessageError::MissingField("ChunkSnapshot payload"))?;
+                let addr = cs.addr().ok_or(MessageError::MissingField("ChunkSnapshot addr"))?;
+                let data = cs.data().map(|v| v.iter().collect::<Vec<u8>>()).unwrap_or_default();
+                Ok(ServerMsg::ChunkSnapshot(ChunkSnapshotData {
+                    chunk_x: addr.x(),
+                    chunk_y: addr.y(),
+                    chunk_z: addr.z(),
+                    seq: cs.seq(),
+                    data,
+                }))
+            }
+            fb::ServerPayload::ChunkDelta => {
+                let cd = msg.payload_as_chunk_delta()
+                    .ok_or(MessageError::MissingField("ChunkDelta payload"))?;
+                let addr = cd.addr().ok_or(MessageError::MissingField("ChunkDelta addr"))?;
+                let mods = cd.mods().map(|v| {
+                    v.iter().map(|m| BlockModData {
+                        bx: m.bx(), by: m.by(), bz: m.bz(), block_type: m.block_type(),
+                    }).collect()
+                }).unwrap_or_default();
+                Ok(ServerMsg::ChunkDelta(ChunkDeltaData {
+                    chunk_x: addr.x(),
+                    chunk_y: addr.y(),
+                    chunk_z: addr.z(),
+                    seq: cd.seq(),
+                    mods,
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),

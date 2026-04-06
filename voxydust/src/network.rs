@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
-    ClientMsg, PlayerInputData, ServerMsg, WorldStateData,
+    ChunkDeltaData, ChunkSnapshotData, ClientMsg, PlayerInputData, ServerMsg, WorldStateData,
 };
 use voxeldust_core::handoff::{ShardPreConnect, ShardRedirect};
 
@@ -37,6 +37,10 @@ pub enum NetEvent {
     SecondaryWorldState(WorldStateData),
     /// Galaxy world state from secondary UDP (warp travel position for star parallax).
     GalaxyWorldState(voxeldust_core::client_message::GalaxyWorldStateData),
+    /// Full chunk snapshot received (initial sync or resync).
+    ChunkSnapshot(ChunkSnapshotData),
+    /// Incremental block changes to a chunk.
+    ChunkDelta(ChunkDeltaData),
     /// Primary shard is changing (ShardRedirect received).
     Transitioning,
     Disconnected(String),
@@ -302,6 +306,12 @@ pub async fn run_network(
                                         }
                                     }
                                 });
+                            }
+                            Ok(ServerMsg::ChunkSnapshot(cs)) => {
+                                let _ = event_tx_tcp.send(NetEvent::ChunkSnapshot(cs));
+                            }
+                            Ok(ServerMsg::ChunkDelta(cd)) => {
+                                let _ = event_tx_tcp.send(NetEvent::ChunkDelta(cd));
                             }
                             Ok(_) => { /* ignore other TCP messages */ }
                             Err(e) => {

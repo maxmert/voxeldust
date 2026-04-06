@@ -151,10 +151,10 @@ pub struct ShardPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SERVER_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 9;
+pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 11;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 10] = [
+pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 12] = [
   ServerPayload::NONE,
   ServerPayload::JoinResponse,
   ServerPayload::WorldState,
@@ -165,6 +165,8 @@ pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 10] = [
   ServerPayload::StarCatalog,
   ServerPayload::ShardPreConnect,
   ServerPayload::GalaxyWorldState,
+  ServerPayload::ChunkSnapshot,
+  ServerPayload::ChunkDelta,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -182,9 +184,11 @@ impl ServerPayload {
   pub const StarCatalog: Self = Self(7);
   pub const ShardPreConnect: Self = Self(8);
   pub const GalaxyWorldState: Self = Self(9);
+  pub const ChunkSnapshot: Self = Self(10);
+  pub const ChunkDelta: Self = Self(11);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 9;
+  pub const ENUM_MAX: u8 = 11;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::JoinResponse,
@@ -196,6 +200,8 @@ impl ServerPayload {
     Self::StarCatalog,
     Self::ShardPreConnect,
     Self::GalaxyWorldState,
+    Self::ChunkSnapshot,
+    Self::ChunkDelta,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -210,6 +216,8 @@ impl ServerPayload {
       Self::StarCatalog => Some("StarCatalog"),
       Self::ShardPreConnect => Some("ShardPreConnect"),
       Self::GalaxyWorldState => Some("GalaxyWorldState"),
+      Self::ChunkSnapshot => Some("ChunkSnapshot"),
+      Self::ChunkDelta => Some("ChunkDelta"),
       _ => None,
     }
   }
@@ -704,6 +712,168 @@ impl<'a> Quatd {
         &x_le as *const _ as *const u8,
         self.0[24..].as_mut_ptr(),
         ::core::mem::size_of::<<f64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
+/// Generic chunk address using signed 32-bit Cartesian coordinates.
+/// Works for both ship grids (direct IVec3) and planets (derived from cubic sphere).
+/// This is the unified address format used by ChunkSnapshot and ChunkDelta.
+// struct ChunkAddr, aligned to 4
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct ChunkAddr(pub [u8; 12]);
+impl Default for ChunkAddr { 
+  fn default() -> Self { 
+    Self([0; 12])
+  }
+}
+impl ::core::fmt::Debug for ChunkAddr {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("ChunkAddr")
+      .field("x", &self.x())
+      .field("y", &self.y())
+      .field("z", &self.z())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for ChunkAddr {}
+impl<'a> ::flatbuffers::Follow<'a> for ChunkAddr {
+  type Inner = &'a ChunkAddr;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a ChunkAddr>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a ChunkAddr {
+  type Inner = &'a ChunkAddr;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<ChunkAddr>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for ChunkAddr {
+    type Output = ChunkAddr;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const ChunkAddr as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(4)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for ChunkAddr {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> ChunkAddr {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    x: i32,
+    y: i32,
+    z: i32,
+  ) -> Self {
+    let mut s = Self([0; 12]);
+    s.set_x(x);
+    s.set_y(y);
+    s.set_z(z);
+    s
+  }
+
+  pub fn x(&self) -> i32 {
+    let mut mem = ::core::mem::MaybeUninit::<<i32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<i32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_x(&mut self, x: i32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<i32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn y(&self) -> i32 {
+    let mut mem = ::core::mem::MaybeUninit::<<i32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[4..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<i32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_y(&mut self, x: i32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[4..].as_mut_ptr(),
+        ::core::mem::size_of::<<i32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn z(&self) -> i32 {
+    let mut mem = ::core::mem::MaybeUninit::<<i32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<i32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_z(&mut self, x: i32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        ::core::mem::size_of::<<i32 as ::flatbuffers::EndianScalar>::Scalar>(),
       );
     }
   }
@@ -6484,6 +6654,272 @@ impl ::core::fmt::Debug for BlockEditRequest<'_> {
       ds.finish()
   }
 }
+pub enum ChunkSnapshotOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Full chunk snapshot — lz4-compressed block data + metadata.
+/// Sent on initial connection and periodic resync. Replaces the chunk entirely.
+pub struct ChunkSnapshot<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ChunkSnapshot<'a> {
+  type Inner = ChunkSnapshot<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ChunkSnapshot<'a> {
+  pub const VT_ADDR: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SEQ: ::flatbuffers::VOffsetT = 6;
+  pub const VT_DATA: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ChunkSnapshot { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ChunkSnapshotArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ChunkSnapshot<'bldr>> {
+    let mut builder = ChunkSnapshotBuilder::new(_fbb);
+    builder.add_seq(args.seq);
+    if let Some(x) = args.data { builder.add_data(x); }
+    if let Some(x) = args.addr { builder.add_addr(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn addr(&self) -> Option<&'a ChunkAddr> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<ChunkAddr>(ChunkSnapshot::VT_ADDR, None)}
+  }
+  #[inline]
+  pub fn seq(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ChunkSnapshot::VT_SEQ, Some(0)).unwrap()}
+  }
+  /// lz4-compressed chunk data (palette + indices + metadata).
+  /// Decompresses to the format produced by core::block::serialization.
+  #[inline]
+  pub fn data(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(ChunkSnapshot::VT_DATA, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ChunkSnapshot<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<ChunkAddr>("addr", Self::VT_ADDR, false)?
+     .visit_field::<u64>("seq", Self::VT_SEQ, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("data", Self::VT_DATA, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ChunkSnapshotArgs<'a> {
+    pub addr: Option<&'a ChunkAddr>,
+    pub seq: u64,
+    pub data: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+}
+impl<'a> Default for ChunkSnapshotArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ChunkSnapshotArgs {
+      addr: None,
+      seq: 0,
+      data: None,
+    }
+  }
+}
+
+pub struct ChunkSnapshotBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ChunkSnapshotBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_addr(&mut self, addr: &ChunkAddr) {
+    self.fbb_.push_slot_always::<&ChunkAddr>(ChunkSnapshot::VT_ADDR, addr);
+  }
+  #[inline]
+  pub fn add_seq(&mut self, seq: u64) {
+    self.fbb_.push_slot::<u64>(ChunkSnapshot::VT_SEQ, seq, 0);
+  }
+  #[inline]
+  pub fn add_data(&mut self, data: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkSnapshot::VT_DATA, data);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ChunkSnapshotBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ChunkSnapshotBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ChunkSnapshot<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ChunkSnapshot<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ChunkSnapshot");
+      ds.field("addr", &self.addr());
+      ds.field("seq", &self.seq());
+      ds.field("data", &self.data());
+      ds.finish()
+  }
+}
+pub enum ChunkDeltaOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Incremental block changes to a chunk (generic, shard-type agnostic).
+/// Sent when blocks are placed, broken, or modified by gameplay systems.
+pub struct ChunkDelta<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ChunkDelta<'a> {
+  type Inner = ChunkDelta<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ChunkDelta<'a> {
+  pub const VT_ADDR: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SEQ: ::flatbuffers::VOffsetT = 6;
+  pub const VT_MODS: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ChunkDelta { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ChunkDeltaArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ChunkDelta<'bldr>> {
+    let mut builder = ChunkDeltaBuilder::new(_fbb);
+    builder.add_seq(args.seq);
+    if let Some(x) = args.mods { builder.add_mods(x); }
+    if let Some(x) = args.addr { builder.add_addr(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn addr(&self) -> Option<&'a ChunkAddr> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<ChunkAddr>(ChunkDelta::VT_ADDR, None)}
+  }
+  #[inline]
+  pub fn seq(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ChunkDelta::VT_SEQ, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn mods(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BlockMod<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BlockMod>>>>(ChunkDelta::VT_MODS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ChunkDelta<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<ChunkAddr>("addr", Self::VT_ADDR, false)?
+     .visit_field::<u64>("seq", Self::VT_SEQ, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<BlockMod>>>>("mods", Self::VT_MODS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ChunkDeltaArgs<'a> {
+    pub addr: Option<&'a ChunkAddr>,
+    pub seq: u64,
+    pub mods: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BlockMod<'a>>>>>,
+}
+impl<'a> Default for ChunkDeltaArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ChunkDeltaArgs {
+      addr: None,
+      seq: 0,
+      mods: None,
+    }
+  }
+}
+
+pub struct ChunkDeltaBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ChunkDeltaBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_addr(&mut self, addr: &ChunkAddr) {
+    self.fbb_.push_slot_always::<&ChunkAddr>(ChunkDelta::VT_ADDR, addr);
+  }
+  #[inline]
+  pub fn add_seq(&mut self, seq: u64) {
+    self.fbb_.push_slot::<u64>(ChunkDelta::VT_SEQ, seq, 0);
+  }
+  #[inline]
+  pub fn add_mods(&mut self, mods: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<BlockMod<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkDelta::VT_MODS, mods);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ChunkDeltaBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ChunkDeltaBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ChunkDelta<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ChunkDelta<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ChunkDelta");
+      ds.field("addr", &self.addr());
+      ds.field("seq", &self.seq());
+      ds.field("mods", &self.mods());
+      ds.finish()
+  }
+}
 pub enum ShardRedirectMsgOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -7508,6 +7944,36 @@ impl<'a> ServerMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_chunk_snapshot(&self) -> Option<ChunkSnapshot<'a>> {
+    if self.payload_type() == ServerPayload::ChunkSnapshot {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ChunkSnapshot::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_chunk_delta(&self) -> Option<ChunkDelta<'a>> {
+    if self.payload_type() == ServerPayload::ChunkDelta {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ChunkDelta::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ServerMessage<'_> {
@@ -7527,6 +7993,8 @@ impl ::flatbuffers::Verifiable for ServerMessage<'_> {
           ServerPayload::StarCatalog => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<StarCatalog>>("ServerPayload::StarCatalog", pos),
           ServerPayload::ShardPreConnect => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShardPreConnect>>("ServerPayload::ShardPreConnect", pos),
           ServerPayload::GalaxyWorldState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<GalaxyWorldState>>("ServerPayload::GalaxyWorldState", pos),
+          ServerPayload::ChunkSnapshot => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChunkSnapshot>>("ServerPayload::ChunkSnapshot", pos),
+          ServerPayload::ChunkDelta => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChunkDelta>>("ServerPayload::ChunkDelta", pos),
           _ => Ok(()),
         }
      })?
@@ -7639,6 +8107,20 @@ impl ::core::fmt::Debug for ServerMessage<'_> {
         },
         ServerPayload::GalaxyWorldState => {
           if let Some(x) = self.payload_as_galaxy_world_state() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::ChunkSnapshot => {
+          if let Some(x) = self.payload_as_chunk_snapshot() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::ChunkDelta => {
+          if let Some(x) = self.payload_as_chunk_delta() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
