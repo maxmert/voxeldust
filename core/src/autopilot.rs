@@ -695,20 +695,20 @@ pub fn check_phase_transition(
     let speed = rel_vel.length();
 
     match current_phase {
-        FlightPhase::Brake | FlightPhase::Arrived => {
+        FlightPhase::Brake => {
             if dist < soi_radius {
-                match mode {
-                    AutopilotMode::OrbitInsertion | AutopilotMode::LandingSequence => FlightPhase::SoiApproach,
-                    _ => FlightPhase::Arrived,
-                }
+                // All modes decelerate inside SOI before disengaging.
+                FlightPhase::SoiApproach
             } else {
                 current_phase
             }
         }
+        FlightPhase::Arrived => {
+            // Terminal state — autopilot disengages here. No further transitions.
+            current_phase
+        }
         FlightPhase::SoiApproach => {
             let v_circ = circular_orbit_velocity(planet, altitude);
-            // Circularize at whatever altitude the ship is when speed is manageable.
-            // Ship establishes a high orbit first, then DeorbitBurn descends to target.
             if speed < v_circ * 2.0 {
                 FlightPhase::CircularizeBurn
             } else {
@@ -813,10 +813,21 @@ pub fn max_tier_in_atmosphere() -> u8 {
     1 // Impulse
 }
 
-/// Clamp a requested engine tier based on whether the ship is in atmosphere.
-pub fn effective_tier(requested: u8, in_atmosphere: bool) -> u8 {
+/// Maximum engine tier allowed inside a planet's SOI (outside atmosphere).
+/// Tiers 0-2 (Maneuver/Impulse/Cruise) are safe at orbital scales.
+/// Long Range and Emergency reach interplanetary speeds in seconds — blocked in SOI.
+pub fn max_tier_in_soi() -> u8 {
+    2 // Cruise
+}
+
+/// Clamp a requested engine tier based on environment.
+/// Atmosphere restricts most (tier 1), SOI restricts moderately (tier 2),
+/// interplanetary allows all tiers.
+pub fn effective_tier(requested: u8, in_atmosphere: bool, in_soi: bool) -> u8 {
     if in_atmosphere {
         requested.min(max_tier_in_atmosphere())
+    } else if in_soi {
+        requested.min(max_tier_in_soi())
     } else {
         requested
     }
@@ -895,6 +906,63 @@ pub enum FlightPhase {
     WarpDecelerate,
     /// Entering destination system SOI.
     WarpArrival,
+}
+
+impl FlightPhase {
+    /// Convert from wire format (u8).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Accelerate,
+            1 => Self::Flip,
+            2 => Self::Brake,
+            3 => Self::Arrived,
+            4 => Self::SoiApproach,
+            5 => Self::CircularizeBurn,
+            6 => Self::StableOrbit,
+            7 => Self::DeorbitBurn,
+            8 => Self::AtmosphericEntry,
+            9 => Self::TerminalDescent,
+            10 => Self::Landing,
+            11 => Self::Landed,
+            12 => Self::Liftoff,
+            13 => Self::GravityTurn,
+            14 => Self::AscentBurn,
+            15 => Self::EscapeBurn,
+            16 => Self::WarpAlign,
+            17 => Self::WarpAccelerate,
+            18 => Self::WarpCruise,
+            19 => Self::WarpDecelerate,
+            20 => Self::WarpArrival,
+            _ => Self::Accelerate,
+        }
+    }
+
+    /// Convert to wire format (u8).
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Accelerate => 0,
+            Self::Flip => 1,
+            Self::Brake => 2,
+            Self::Arrived => 3,
+            Self::SoiApproach => 4,
+            Self::CircularizeBurn => 5,
+            Self::StableOrbit => 6,
+            Self::DeorbitBurn => 7,
+            Self::AtmosphericEntry => 8,
+            Self::TerminalDescent => 9,
+            Self::Landing => 10,
+            Self::Landed => 11,
+            Self::Liftoff => 12,
+            Self::GravityTurn => 13,
+            Self::AscentBurn => 14,
+            Self::EscapeBurn => 15,
+            Self::WarpAlign => 16,
+            Self::WarpAccelerate => 17,
+            Self::WarpCruise => 18,
+            Self::WarpDecelerate => 19,
+            Self::WarpArrival => 20,
+        }
+    }
 }
 
 /// Orbital elements computed from a ship's state vector relative to a planet.
@@ -1469,9 +1537,18 @@ pub fn plan_trajectory(
     }
 
     // Forward simulate.
-    // Simulate slightly beyond ETA to ensure we capture arrival.
-    let sim_dt_real = (eta_real * 1.2 / sample_count as f64).max(0.1);
-    let sim_dt_celestial = sim_dt_real * system.scale.time_scale;
+    // Use a fine integration timestep for accurate flip detection, but only
+    // record every Nth step for rendering. Cap total steps to keep computation
+    // bounded (~6Hz on client). For long flights (>500s ETA), use a larger dt
+    // that still matches the stopping-distance sensitivity.
+    const MAX_SIM_STEPS: usize = 10_000;
+    let total_sim_time = eta_real * 1.2;
+    let fine_dt = (total_sim_time / MAX_SIM_STEPS as f64).max(PHYSICS_DT);
+    let fine_dt_celestial = fine_dt * system.scale.time_scale;
+    let total_steps = (total_sim_time / fine_dt).ceil() as usize;
+    let record_every = (total_steps / sample_count).max(1);
+    // Re-solve intercept every ~1 second of sim time.
+    let resolve_every = (1.0 / fine_dt).ceil() as usize;
 
     let mut pos = ship_pos;
     let mut vel = ship_vel;
@@ -1479,9 +1556,12 @@ pub fn plan_trajectory(
     let mut points = Vec::with_capacity(sample_count);
     let mut flip_index = 0;
     let mut found_flip = false;
+    let mut current_intercept = intercept_pos;
+    let mut current_target_vel = target_vel;
 
-    for i in 0..sample_count {
-        // Planet positions at this simulation time.
+    for step in 0..total_steps {
+        let is_sample = step % record_every == 0;
+
         let planet_positions: Vec<DVec3> = system
             .planets
             .iter()
@@ -1503,52 +1583,54 @@ pub fn plan_trajectory(
         }
 
         // Re-solve intercept periodically during simulation for accuracy.
-        let (current_intercept, current_target_vel) = if i % 20 == 0 {
-            solve_intercept(
+        if step % resolve_every == 0 {
+            if let Some(s) = solve_intercept(
                 pos, vel, planet, star, system, &planet_positions,
                 ct, system.scale.time_scale, ship_props, thrust_tier,
-            )
-            .map(|s| (s.intercept_pos, s.arrival_planet_vel))
-            .unwrap_or((intercept_pos, target_vel))
-        } else {
-            (intercept_pos, target_vel)
-        };
+            ) {
+                current_intercept = s.intercept_pos;
+                current_target_vel = s.arrival_planet_vel;
+            }
+        }
 
-        // Guidance at this point (interplanetary — not inside SOI).
         let guidance = compute_guidance(
             pos, vel, current_intercept, current_target_vel, target_planet_index,
             system, &planet_positions, ct, ship_props, thrust_tier, false,
         );
 
         if !found_flip && guidance.phase == FlightPhase::Brake {
-            flip_index = i;
+            // Always record the flip point for accurate marker placement.
+            points.push(TrajectoryPoint {
+                position: pos,
+                velocity: vel,
+                phase: FlightPhase::Flip,
+                time: ct,
+            });
+            flip_index = points.len() - 1;
             found_flip = true;
+        } else if is_sample {
+            points.push(TrajectoryPoint {
+                position: pos,
+                velocity: vel,
+                phase: guidance.phase,
+                time: ct,
+            });
         }
 
-        points.push(TrajectoryPoint {
-            position: pos,
-            velocity: vel,
-            phase: guidance.phase,
-            time: ct,
-        });
-
-        if guidance.completed {
+        if points.len() >= sample_count || guidance.completed {
             break;
         }
 
-        // Integrate (true Velocity Verlet / Störmer-Verlet).
-        // Two-evaluation for symplectic energy conservation.
+        // Integrate (Velocity Verlet) at fine timestep.
         let gravity_old = compute_gravity_acceleration(
             pos, star, &system.planets, &planet_positions, ct,
         );
         let thrust_accel = guidance.thrust_direction * (guidance.thrust_magnitude / ship_props.mass_kg);
         let accel_old = gravity_old + thrust_accel;
 
-        // Advance position.
-        pos += vel * sim_dt_real + 0.5 * accel_old * sim_dt_real * sim_dt_real;
-        ct += sim_dt_celestial;
+        pos += vel * fine_dt + 0.5 * accel_old * fine_dt * fine_dt;
+        ct += fine_dt_celestial;
 
-        // Recompute gravity at new position and new time (planets have moved).
         let planet_positions_new: Vec<DVec3> = system
             .planets
             .iter()
@@ -1559,8 +1641,7 @@ pub fn plan_trajectory(
         );
         let accel_new = gravity_new + thrust_accel;
 
-        // Advance velocity with average acceleration.
-        vel += 0.5 * (accel_old + accel_new) * sim_dt_real;
+        vel += 0.5 * (accel_old + accel_new) * fine_dt;
     }
 
     if points.is_empty() {
@@ -1582,6 +1663,226 @@ pub fn plan_trajectory(
     Some(TrajectoryPlan {
         points,
         current_phase: initial_guidance.phase,
+        eta_real_seconds: eta_real,
+        intercept_position: intercept_pos,
+        thrust_direction: initial_guidance.thrust_direction,
+        thrust_magnitude: initial_guidance.thrust_magnitude,
+        flip_index,
+        target_planet_index,
+        target_soi_radius: soi,
+        felt_g: et.felt_g,
+        dampener_active: et.dampened,
+        engine_tier_name: et.name,
+    })
+}
+
+/// Server-authoritative seed for trajectory planning.
+/// When the client receives this from the server, it uses the server's intercept
+/// solution and phase instead of computing its own.
+#[derive(Debug, Clone)]
+pub struct AutopilotSeed {
+    pub intercept_pos: DVec3,
+    pub target_arrival_vel: DVec3,
+    pub phase: FlightPhase,
+    pub braking_committed: bool,
+}
+
+/// Like `plan_trajectory`, but seeded with server-authoritative autopilot state.
+/// Uses the server's intercept solution and starting phase instead of solving locally.
+pub fn plan_trajectory_seeded(
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    target_planet_index: usize,
+    system: &SystemParams,
+    celestial_time: f64,
+    ship_props: &ShipPhysicalProperties,
+    thrust_tier: u8,
+    sample_count: usize,
+    seed: &AutopilotSeed,
+) -> Option<TrajectoryPlan> {
+    if target_planet_index >= system.planets.len() {
+        return None;
+    }
+
+    let planet = &system.planets[target_planet_index];
+    let star = &system.star;
+    let soi = compute_soi_radius(planet, star);
+
+    let intercept_pos = seed.intercept_pos;
+    let target_vel = seed.target_arrival_vel;
+
+    // If already arrived/post-SOI, return minimal plan with server phase.
+    let post_soi = matches!(
+        seed.phase,
+        FlightPhase::Arrived | FlightPhase::SoiApproach | FlightPhase::CircularizeBurn
+        | FlightPhase::StableOrbit | FlightPhase::DeorbitBurn | FlightPhase::AtmosphericEntry
+        | FlightPhase::TerminalDescent | FlightPhase::Landing | FlightPhase::Landed
+    );
+    if post_soi {
+        let et = engine_tier(thrust_tier);
+        return Some(TrajectoryPlan {
+            points: vec![],
+            current_phase: seed.phase,
+            eta_real_seconds: 0.0,
+            intercept_position: intercept_pos,
+            thrust_direction: DVec3::NEG_Z,
+            thrust_magnitude: 0.0,
+            flip_index: 0,
+            target_planet_index,
+            target_soi_radius: soi,
+            felt_g: 0.0,
+            dampener_active: et.dampened,
+            engine_tier_name: et.name,
+        });
+    }
+
+    // Compute ETA from server intercept for simulation duration.
+    let dist = (intercept_pos - ship_pos).length();
+    let closing = ship_vel.dot((intercept_pos - ship_pos).normalize_or_zero()).max(1.0);
+    let eta_real = (dist / closing).min(86400.0); // cap at 1 day
+
+    if eta_real <= 0.0 {
+        let et = engine_tier(thrust_tier);
+        return Some(TrajectoryPlan {
+            points: vec![],
+            current_phase: FlightPhase::Arrived,
+            eta_real_seconds: 0.0,
+            intercept_position: intercept_pos,
+            thrust_direction: DVec3::NEG_Z,
+            thrust_magnitude: 0.0,
+            flip_index: 0,
+            target_planet_index,
+            target_soi_radius: soi,
+            felt_g: 0.0,
+            dampener_active: engine_tier(thrust_tier).dampened,
+            engine_tier_name: engine_tier(thrust_tier).name,
+        });
+    }
+
+    // Forward simulate using the server's intercept solution.
+    // Use a fine integration timestep for accurate flip detection, but only
+    // record every Nth step for rendering. Cap total steps for performance.
+    const MAX_SIM_STEPS: usize = 10_000;
+    let total_sim_time = eta_real * 1.2;
+    let fine_dt = (total_sim_time / MAX_SIM_STEPS as f64).max(PHYSICS_DT);
+    let fine_dt_celestial = fine_dt * system.scale.time_scale;
+    let total_steps = (total_sim_time / fine_dt).ceil() as usize;
+    let record_every = (total_steps / sample_count).max(1);
+
+    let mut pos = ship_pos;
+    let mut vel = ship_vel;
+    let mut ct = celestial_time;
+    let mut points = Vec::with_capacity(sample_count);
+    // If server says we're already past Accelerate, the flip has already happened.
+    let already_past_flip = !matches!(seed.phase, FlightPhase::Accelerate);
+    let mut flip_index = if already_past_flip { usize::MAX } else { 0 };
+    let mut found_flip = already_past_flip;
+
+    for step in 0..total_steps {
+        let is_sample = step % record_every == 0;
+
+        let planet_positions: Vec<DVec3> = system
+            .planets
+            .iter()
+            .map(|p| compute_planet_position(p, ct))
+            .collect();
+
+        let planet_pos = planet_positions[target_planet_index];
+        let dist_to_planet = (pos - planet_pos).length();
+
+        if dist_to_planet <= soi {
+            points.push(TrajectoryPoint {
+                position: pos,
+                velocity: vel,
+                phase: FlightPhase::Arrived,
+                time: ct,
+            });
+            break;
+        }
+
+        // Use the server's intercept — no re-solve.
+        let guidance = compute_guidance(
+            pos, vel, intercept_pos, target_vel, target_planet_index,
+            system, &planet_positions, ct, ship_props, thrust_tier, false,
+        );
+
+        // Respect braking commitment from server.
+        let effective_phase = if seed.braking_committed && guidance.phase == FlightPhase::Accelerate {
+            FlightPhase::Brake
+        } else {
+            guidance.phase
+        };
+
+        if !found_flip && effective_phase == FlightPhase::Brake {
+            // Always record the flip point as a sample for accurate marker placement.
+            points.push(TrajectoryPoint {
+                position: pos,
+                velocity: vel,
+                phase: FlightPhase::Flip,
+                time: ct,
+            });
+            flip_index = points.len() - 1;
+            found_flip = true;
+        } else if is_sample {
+            points.push(TrajectoryPoint {
+                position: pos,
+                velocity: vel,
+                phase: effective_phase,
+                time: ct,
+            });
+        }
+
+        if points.len() >= sample_count || guidance.completed {
+            break;
+        }
+
+        // Integrate (Velocity Verlet) at fine timestep.
+        let gravity_old = compute_gravity_acceleration(
+            pos, star, &system.planets, &planet_positions, ct,
+        );
+        let thrust_dir = if seed.braking_committed && guidance.phase == FlightPhase::Accelerate {
+            let rel_vel = vel - target_vel;
+            if rel_vel.length() > 0.1 { -rel_vel.normalize() } else { guidance.thrust_direction }
+        } else {
+            guidance.thrust_direction
+        };
+        let thrust_accel = thrust_dir * (guidance.thrust_magnitude / ship_props.mass_kg);
+        let accel_old = gravity_old + thrust_accel;
+
+        pos += vel * fine_dt + 0.5 * accel_old * fine_dt * fine_dt;
+        ct += fine_dt_celestial;
+
+        let planet_positions_new: Vec<DVec3> = system
+            .planets
+            .iter()
+            .map(|p| compute_planet_position(p, ct))
+            .collect();
+        let gravity_new = compute_gravity_acceleration(
+            pos, star, &system.planets, &planet_positions_new, ct,
+        );
+        let accel_new = gravity_new + thrust_accel;
+
+        vel += 0.5 * (accel_old + accel_new) * fine_dt;
+    }
+
+    if points.is_empty() {
+        return None;
+    }
+
+    let planet_positions_now: Vec<DVec3> = system
+        .planets
+        .iter()
+        .map(|p| compute_planet_position(p, celestial_time))
+        .collect();
+    let initial_guidance = compute_guidance(
+        ship_pos, ship_vel, intercept_pos, target_vel, target_planet_index,
+        system, &planet_positions_now, celestial_time, ship_props, thrust_tier, false,
+    );
+
+    let et = engine_tier(thrust_tier);
+    Some(TrajectoryPlan {
+        points,
+        current_phase: seed.phase,
         eta_real_seconds: eta_real,
         intercept_position: intercept_pos,
         thrust_direction: initial_guidance.thrust_direction,
@@ -2133,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_transition_direct_approach_arrives() {
+    fn phase_transition_direct_approach_decelerates_in_soi() {
         let sys = test_system();
         let planet = &sys.planets[0];
         let props = ShipPhysicalProperties::starter_ship();
@@ -2141,12 +2442,13 @@ mod tests {
         let soi = compute_soi_radius(planet, &sys.star);
         let ship_pos = planet_pos + DVec3::new(soi * 0.5, 0.0, 0.0);
 
+        // All modes (including DirectApproach) decelerate inside SOI before disengaging.
         let phase = check_phase_transition(
             FlightPhase::Brake, AutopilotMode::DirectApproach,
             ship_pos, DVec3::ZERO, planet_pos, DVec3::ZERO, planet, &sys.star,
             soi, 100_000.0, &props,
         );
-        assert_eq!(phase, FlightPhase::Arrived, "DirectApproach should arrive, not orbit");
+        assert_eq!(phase, FlightPhase::SoiApproach, "DirectApproach should decelerate in SOI first");
     }
 
     #[test]

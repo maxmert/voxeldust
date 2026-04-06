@@ -86,6 +86,8 @@ struct App {
     autopilot_target: Option<usize>,
     selected_thrust_tier: u8,
     trajectory_plan: Option<voxeldust_core::autopilot::TrajectoryPlan>,
+    /// Server-authoritative autopilot state (from WorldState).
+    server_autopilot: Option<voxeldust_core::shard_message::AutopilotSnapshotData>,
     /// Timestamp of last T key press (for double-tap orbit detection).
     last_t_press: Option<std::time::Instant>,
     /// Engine cutoff — when true, no thrust or gravity compensation is sent. Toggle with X.
@@ -151,6 +153,7 @@ impl App {
             engines_off: false,
             autopilot_mode: voxeldust_core::autopilot::AutopilotMode::DirectApproach,
             trajectory_plan: None,
+            server_autopilot: None,
             uniform_data: vec![bytemuck::Zeroable::zeroed(); MAX_OBJECTS],
             last_frame_time: std::time::Instant::now(),
             star_field: None,
@@ -301,6 +304,13 @@ impl App {
                                 self.walk_velocity = DVec3::ZERO;
                             }
                         }
+                        // Extract server-authoritative autopilot state.
+                        self.server_autopilot = ws.autopilot.clone();
+                        if let Some(ref ap) = self.server_autopilot {
+                            if ap.target_planet_index != 0xFFFFFFFF {
+                                self.autopilot_target = Some(ap.target_planet_index as usize);
+                            }
+                        }
                         if self.latest_world_state.is_none() {
                             info!(bodies = ws.bodies.len(), tick = ws.tick, "first WorldState");
                         }
@@ -351,12 +361,9 @@ impl App {
                         self.secondary_shard_type = Some(shard_type);
 
                         if shard_type == 3 {
-                            // Galaxy secondary: entering warp. The departure star is no
-                            // longer rendered as a celestial body (bodies will be empty),
-                            // so stop excluding it from the star field.
-                            if let Some(ref mut sf) = self.star_field {
-                                sf.current_star_index = None;
-                            }
+                            // Galaxy secondary: entering warp. Keep current_star_index
+                            // until the first GalaxyWorldState arrives so the star field
+                            // reference position stays correct during the gap.
                         } else if self.warp_galaxy_position.is_some() {
                             // Non-galaxy secondary while warp is active: warp has ended,
                             // ship arrived at destination system. Clear warp state so the
@@ -391,6 +398,11 @@ impl App {
                                 pos = format!("({:.1},{:.1},{:.1})", gws.ship_position.x, gws.ship_position.y, gws.ship_position.z),
                                 "first GalaxyWorldState received — switching to galaxy star mode"
                             );
+                            // Now that galaxy mode is active, stop excluding the departure
+                            // star so it appears as a dot in the galaxy-scale star field.
+                            if let Some(ref mut sf) = self.star_field {
+                                sf.current_star_index = None;
+                            }
                         }
                     }
                     NetEvent::Transitioning => {
@@ -565,10 +577,24 @@ impl App {
                 let ship_pos = ws.origin;
                 let ship_vel = self.player_velocity;
                 let ship_props = voxeldust_core::autopilot::ShipPhysicalProperties::starter_ship();
-                self.trajectory_plan = voxeldust_core::autopilot::plan_trajectory(
-                    ship_pos, ship_vel, target_idx, system,
-                    ws.game_time, &ship_props, self.selected_thrust_tier, 200,
-                );
+                // Use server-authoritative autopilot state when available.
+                if let Some(ref ap) = self.server_autopilot {
+                    let seed = voxeldust_core::autopilot::AutopilotSeed {
+                        intercept_pos: ap.intercept_pos,
+                        target_arrival_vel: ap.target_arrival_vel,
+                        phase: voxeldust_core::autopilot::FlightPhase::from_u8(ap.phase),
+                        braking_committed: ap.braking_committed,
+                    };
+                    self.trajectory_plan = voxeldust_core::autopilot::plan_trajectory_seeded(
+                        ship_pos, ship_vel, target_idx, system,
+                        ws.game_time, &ship_props, ap.thrust_tier, 200, &seed,
+                    );
+                } else {
+                    self.trajectory_plan = voxeldust_core::autopilot::plan_trajectory(
+                        ship_pos, ship_vel, target_idx, system,
+                        ws.game_time, &ship_props, self.selected_thrust_tier, 200,
+                    );
+                }
             } else if self.autopilot_target.is_none() {
                 self.trajectory_plan = None;
             }
@@ -682,6 +708,7 @@ impl App {
             self.engines_off,
             self.autopilot_target,
             self.trajectory_plan.as_ref(),
+            self.server_autopilot.as_ref(),
             self.system_params.as_ref(),
             self.frame_count,
             star_instance_count,

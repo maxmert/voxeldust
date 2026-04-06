@@ -66,6 +66,7 @@ pub fn send_input_with_dt(
             look_pitch,
             jump,
             fly_toggle: false,
+            orbit_stabilizer_toggle: false,
             speed_tier: *selected_thrust_tier,
             action,
             block_type: 0,

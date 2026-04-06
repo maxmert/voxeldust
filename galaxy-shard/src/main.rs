@@ -902,6 +902,7 @@ fn main() {
                     velocity: ship.velocity_gu * GALAXY_UNIT_IN_BLOCKS,
                     rotation: ship.rotation,
                     angular_velocity: DVec3::ZERO,
+                    autopilot: None,
                 });
                 let _ = quic_send_scene.try_send((shard_id, quic_addr, pos_update));
             }

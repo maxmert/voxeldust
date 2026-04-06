@@ -11,8 +11,8 @@ use voxeldust_core::client_message::{
     ServerMsg, ShipRenderData, WorldStateData,
 };
 use voxeldust_core::shard_message::{
-    AutopilotCommandData, CelestialBodySnapshotData, LightingInfoData, ShardMsg,
-    ShipControlInput, ShipSnapshotEntryData,
+    AutopilotCommandData, AutopilotSnapshotData, CelestialBodySnapshotData,
+    LightingInfoData, ShardMsg, ShipControlInput, ShipSnapshotEntryData,
 };
 use voxeldust_core::handoff;
 use voxeldust_core::shard_types::{ShardId, ShardType, SessionToken};
@@ -167,6 +167,8 @@ struct ShipInteriorState {
     // Autopilot
     autopilot_target_body_id: Option<u32>,
     pending_autopilot_cmd: Option<(u32, u8)>, // (target_body_id, speed_tier)
+    /// Server-authoritative autopilot state from system shard.
+    autopilot_snapshot: Option<AutopilotSnapshotData>,
 
     // Warp
     warp_target_star_index: Option<u32>,
@@ -298,6 +300,7 @@ impl ShipInteriorState {
             prev_action: 0,
             autopilot_target_body_id: None,
             pending_autopilot_cmd: None,
+            autopilot_snapshot: None,
             warp_target_star_index: None,
             pending_warp_cmd: None,
             connected_session: None,
@@ -444,6 +447,7 @@ impl ShipInteriorState {
             lighting,
             game_time: self.game_time,
             warp_target_star_index: self.warp_target_star_index.unwrap_or(0xFFFFFFFF),
+            autopilot: self.autopilot_snapshot.clone(),
         }
     }
 }
@@ -704,7 +708,7 @@ fn main() {
                             })
                         } else { false };
                         let effective_tier = voxeldust_core::autopilot::effective_tier(
-                            input.speed_tier, in_atmosphere);
+                            input.speed_tier, in_atmosphere, false);
                         let et = voxeldust_core::autopilot::engine_tier(effective_tier);
                         let tier_thrust = et.thrust_force_n * st.ship_props.thrust_multiplier;
                         st.pilot_thrust = DVec3::new(
@@ -813,6 +817,7 @@ fn main() {
                             st.ship_position = data.position;
                             st.ship_velocity = data.velocity;
                             st.ship_rotation = data.rotation;
+                            st.autopilot_snapshot = data.autopilot;
 
                             // Detect landed state: system shard zeros velocity on landing.
                             let was_landed = st.ship_landed;
@@ -927,6 +932,12 @@ fn main() {
                             });
                             st.last_scene_update_tick = st.tick_count;
                             st.host_switch_tick = st.tick_count;
+
+                            // Warp complete — clear warp target when switching
+                            // to a non-galaxy host (arrival at destination system).
+                            if data.new_host_shard_type != 3 {
+                                st.warp_target_star_index = None;
+                            }
 
                             info!(
                                 ship_id = st.ship_id,

@@ -10,8 +10,8 @@ use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, ServerMsg, WorldStateData,
 };
 use voxeldust_core::shard_message::{
-    CelestialBodySnapshotData, LightingInfoData, ShardMsg, ShipNearbyInfoData,
-    ShipPositionUpdate, ShipSnapshotEntryData, SystemSceneUpdateData,
+    AutopilotSnapshotData, CelestialBodySnapshotData, LightingInfoData, ShardMsg,
+    ShipNearbyInfoData, ShipPositionUpdate, ShipSnapshotEntryData, SystemSceneUpdateData,
 };
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{
@@ -103,6 +103,9 @@ struct ShipState {
     landed_celestial_time: f64,
     /// Consecutive ticks the ship has been in the landing zone (debounce for landing detection).
     landing_zone_ticks: u32,
+    /// Orbit Stabilizer: when enabled, SOI entry zeros planet-relative velocity
+    /// instead of raw frame conversion. Pilot-toggleable. Default: true.
+    orbit_stabilizer: bool,
 }
 
 /// Local workspace for the physics system. Holds mutable data extracted from
@@ -226,6 +229,7 @@ impl SystemState {
             landed_surface_radial: DVec3::ZERO,
             landed_celestial_time: 0.0,
             landing_zone_ticks: 0,
+            orbit_stabilizer: true,
         });
         // Pre-register in SOI if spawning inside one.
         // Velocity is already zero (planet-relative) — skip the patched conics entry impulse.
@@ -289,6 +293,7 @@ impl SystemState {
             }),
             game_time: self.celestial_time,
             warp_target_star_index: 0xFFFFFFFF,
+            autopilot: None,
         }
     }
 }
@@ -592,9 +597,15 @@ fn main() {
                                 if let Ok(reg) = peer_reg_quic.try_read() {
                                     if let Some(addr) = reg.quic_addr(planet_shard_id) {
                                         let msg = ShardMsg::PlayerHandoff(handoff);
-                                        let _ = quic_send_quic.try_send((planet_shard_id, addr, msg));
-                                        info!(planet_seed, target = planet_shard_id.0,
-                                            "forwarded player handoff to planet shard");
+                                        match quic_send_quic.try_send((planet_shard_id, addr, msg)) {
+                                            Ok(()) => info!(planet_seed, target = planet_shard_id.0,
+                                                "forwarded player handoff to planet shard"),
+                                            Err(e) => tracing::error!(planet_seed, target = planet_shard_id.0,
+                                                %e, "failed to queue player handoff to planet shard"),
+                                        }
+                                    } else {
+                                        tracing::warn!(planet_seed, target = planet_shard_id.0,
+                                            "no QUIC address for planet shard in peer registry");
                                     }
                                 }
                             } else {
@@ -609,9 +620,12 @@ fn main() {
                                     .map(|s| (s.id, s.endpoint.quic_addr));
                                 if let Some((sid, addr)) = ship_shard {
                                     let msg = ShardMsg::PlayerHandoff(handoff);
-                                    let _ = quic_send_quic.try_send((sid, addr, msg));
-                                    info!(ship_id, target = sid.0,
-                                        "forwarded player handoff to ship shard");
+                                    match quic_send_quic.try_send((sid, addr, msg)) {
+                                        Ok(()) => info!(ship_id, target = sid.0,
+                                            "forwarded player handoff to ship shard"),
+                                        Err(e) => tracing::error!(ship_id, target = sid.0,
+                                            %e, "failed to queue player handoff to ship shard"),
+                                    }
                                 }
                             }
                         } else if handoff.target_star_index.is_some() || handoff.galaxy_context.is_some() {
@@ -709,6 +723,7 @@ fn main() {
                                     landed_surface_radial: DVec3::ZERO,
                                     landed_celestial_time: 0.0,
                                     landing_zone_ticks: 0,
+                                    orbit_stabilizer: true,
                                 });
                                 // Exempt from stale-entity cleanup until peer registry updates.
                                 st.warp_arrived_ships.insert(ship_id);
@@ -730,9 +745,12 @@ fn main() {
                             if let Ok(reg) = peer_reg_quic.try_read() {
                                 if let Some(addr) = reg.quic_addr(source_shard) {
                                     let msg = ShardMsg::HandoffAccepted(accepted);
-                                    let _ = quic_send_quic.try_send((source_shard, addr, msg));
-                                    info!(target = source_shard.0,
-                                        "relayed HandoffAccepted to source shard");
+                                    match quic_send_quic.try_send((source_shard, addr, msg)) {
+                                        Ok(()) => info!(target = source_shard.0,
+                                            "relayed HandoffAccepted to source shard"),
+                                        Err(e) => tracing::error!(target: "system_shard", source = source_shard.0,
+                                            %e, "failed to queue HandoffAccepted relay"),
+                                    }
                                 }
                             }
                         }
@@ -798,6 +816,7 @@ fn main() {
                             landed_surface_radial: DVec3::ZERO,
                             landed_celestial_time: 0.0,
                             landing_zone_ticks: 0,
+                            orbit_stabilizer: true,
                         });
 
                         // Pre-register in SOI if spawning inside one.
@@ -1031,12 +1050,13 @@ fn main() {
                     let planet_vel = pv[planet_idx];
                     let soi = compute_soi_radius(planet, &sys.star);
 
-                    // Enforce tier restriction in atmosphere.
+                    // Enforce tier restriction in atmosphere and SOI.
                     let in_atmo = {
                         let alt = (ship.position - planet_pos).length() - planet.radius_m;
                         alt < planet.atmosphere.atmosphere_height && planet.atmosphere.has_atmosphere
                     };
-                    let effective_tier = autopilot::effective_tier(ap.thrust_tier, in_atmo);
+                    let in_soi = st.in_soi.contains_key(&id);
+                    let effective_tier = autopilot::effective_tier(ap.thrust_tier, in_atmo, in_soi);
                     let engine_accel = ship.physical_properties.engine_acceleration(effective_tier);
                     let thrust_force = autopilot::engine_tier(effective_tier).thrust_force_n
                         * ship.physical_properties.thrust_multiplier;
@@ -1429,7 +1449,10 @@ fn main() {
                 if guidance.completed {
                     let should_disengage = if let Some(ref ap) = ship.autopilot {
                         matches!(ap.phase, FlightPhase::Arrived | FlightPhase::Landed)
-                            || (ap.phase == FlightPhase::StableOrbit && ap.mode == autopilot::AutopilotMode::OrbitInsertion)
+                            || (ap.phase == FlightPhase::StableOrbit
+                                && matches!(ap.mode,
+                                    autopilot::AutopilotMode::OrbitInsertion
+                                    | autopilot::AutopilotMode::DirectApproach))
                     } else {
                         true
                     };
@@ -1906,15 +1929,43 @@ fn main() {
             // Process SOI entries — patched conics: convert to planet-relative frame.
             for (ship_id, planet_index) in &soi_entries {
                 st.in_soi.insert(*ship_id, *planet_index);
+                // Pre-extract immutable data to avoid borrow conflicts with ships.get_mut.
                 let planet_real_vel = st.planet_velocities[*planet_index];
+                let planet_pos = st.planet_positions[*planet_index];
+                let planet_radius = st.system_params.planets[*planet_index].radius_m;
+                let planet_gm = st.system_params.planets[*planet_index].gm;
+                let planet_seed = st.system_params.planets[*planet_index].planet_seed;
+
                 if let Some(ship) = st.ships.get_mut(ship_id) {
                     let rel_speed_before = (ship.velocity - planet_real_vel).length();
+
+                    // Frame conversion: absolute → planet-relative.
                     ship.velocity -= planet_real_vel;
-                    let planet_seed = st.system_params.planets[*planet_index].planet_seed;
-                    info!(ship_id, planet_index, planet_seed,
-                        planet_vel_mag = format!("{:.0}", planet_real_vel.length()),
-                        rel_speed = format!("{:.0}", rel_speed_before),
-                        "ship entered planet SOI — converted to planet-relative frame");
+
+                    if ship.orbit_stabilizer {
+                        // Orbit Stabilizer ON: keep only the radial (toward-planet)
+                        // velocity component. Discards the ~73 km/s tangential from
+                        // the planet's orbital motion. Ship heads straight at the planet.
+                        let to_planet = (planet_pos - ship.position).normalize_or_zero();
+                        let radial_speed = ship.velocity.dot(to_planet);
+                        // Minimum inward speed: 30% of escape velocity at SOI boundary.
+                        // Derived from planet GM and distance — not a magic number.
+                        let altitude = (ship.position - planet_pos).length() - planet_radius;
+                        let v_esc = (2.0 * planet_gm / (planet_radius + altitude)).sqrt();
+                        let approach_speed = radial_speed.max(v_esc * 0.3);
+                        ship.velocity = to_planet * approach_speed;
+                        info!(ship_id, planet_index, planet_seed,
+                            planet_vel_mag = format!("{:.0}", planet_real_vel.length()),
+                            rel_speed = format!("{:.0}", rel_speed_before),
+                            approach = format!("{:.0}", approach_speed),
+                            "ship entered planet SOI — orbit stabilizer: radial approach");
+                    } else {
+                        // Orbit Stabilizer OFF: realistic patched conics (already converted).
+                        info!(ship_id, planet_index, planet_seed,
+                            planet_vel_mag = format!("{:.0}", planet_real_vel.length()),
+                            rel_speed = format!("{:.0}", rel_speed_before),
+                            "ship entered planet SOI — patched conics frame conversion");
+                    }
                 }
             }
 
@@ -2304,12 +2355,26 @@ fn main() {
                         .find(|(_, _, sid)| *sid == Some(ship.ship_id))
                         .map(|&(sid, addr, _)| (sid, addr));
                     if let Some((sid, addr)) = target {
+                        let ap_snapshot = ship.autopilot.as_ref().map(|ap| {
+                            AutopilotSnapshotData {
+                                phase: ap.phase.to_u8(),
+                                mode: ap.mode.to_u8(),
+                                target_planet_index: ap.target_planet_index as u32,
+                                thrust_tier: ap.thrust_tier,
+                                intercept_pos: ap.intercept_pos,
+                                target_arrival_vel: ap.target_arrival_vel,
+                                braking_committed: ap.braking_committed,
+                                eta_real_seconds: ap.estimated_tof,
+                                target_orbit_altitude: ap.target_orbit_altitude,
+                            }
+                        });
                         let pos_msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
                             ship_id: ship.ship_id,
                             position: ship.position,
                             velocity: ship.velocity,
                             rotation: ship.rotation,
                             angular_velocity: DVec3::ZERO,
+                            autopilot: ap_snapshot,
                         });
                         let _ = quic_send_scene.try_send((sid, addr, pos_msg));
                     }

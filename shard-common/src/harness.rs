@@ -319,7 +319,7 @@ impl ShardHarness {
                                 tokio::spawn(async move {
                                     let mut conn: Option<quinn::Connection> = None;
                                     let mut send_stream: Option<quinn::SendStream> = None;
-                                    let mut consecutive_failures: u32 = 0;
+                                    let mut breaker = crate::circuit_breaker::CircuitBreaker::new();
                                     let timeout_dur = std::time::Duration::from_secs(2);
 
                                     loop {
@@ -331,11 +331,8 @@ impl ShardHarness {
                                                     None => return,
                                                 };
 
-                                                // Circuit breaker: exponential backoff.
-                                                if consecutive_failures >= 5 {
-                                                    // Skip — circuit is open. Will retry after
-                                                    // the backoff expires (handled by try_send
-                                                    // dropping messages when queue is full).
+                                                // Circuit breaker with half-open recovery.
+                                                if !breaker.allow_request() {
                                                     continue;
                                                 }
 
@@ -353,21 +350,26 @@ impl ShardHarness {
                                                         connecting.await.map_err(|e| format!("{e}"))
                                                     }).await {
                                                         Ok(Ok(c)) => {
+                                                            if breaker.consecutive_failures() > 0 {
+                                                                tracing::info!(%peer_id,
+                                                                    "QUIC connection recovered after {} failures",
+                                                                    breaker.consecutive_failures());
+                                                            }
                                                             conn = Some(c);
-                                                            consecutive_failures = 0;
+                                                            breaker.record_success();
                                                         }
                                                         Ok(Err(e)) => {
-                                                            consecutive_failures += 1;
-                                                            if consecutive_failures >= 5 {
-                                                                tracing::warn!(%peer_id, failures = consecutive_failures, %e,
+                                                            breaker.record_failure();
+                                                            if breaker.consecutive_failures() == 5 {
+                                                                tracing::warn!(%peer_id, %e,
                                                                     "circuit breaker opened for peer");
                                                             }
                                                             continue;
                                                         }
                                                         Err(_) => {
-                                                            consecutive_failures += 1;
-                                                            if consecutive_failures >= 5 {
-                                                                tracing::warn!(%peer_id, failures = consecutive_failures,
+                                                            breaker.record_failure();
+                                                            if breaker.consecutive_failures() == 5 {
+                                                                tracing::warn!(%peer_id,
                                                                     "circuit breaker opened for peer (timeout)");
                                                             }
                                                             continue;
@@ -387,7 +389,7 @@ impl ShardHarness {
                                                             let id_bytes = local_shard_id.0.to_be_bytes();
                                                             if s.write_all(&id_bytes).await.is_err() {
                                                                 conn = None;
-                                                                consecutive_failures += 1;
+                                                                breaker.record_failure();
                                                                 continue;
                                                             }
                                                             send_stream = Some(s);
@@ -396,7 +398,7 @@ impl ShardHarness {
                                                             tracing::debug!(%peer_id, %e, "failed to open uni stream");
                                                             conn = None;
                                                             send_stream = None;
-                                                            consecutive_failures += 1;
+                                                            breaker.record_failure();
                                                             continue;
                                                         }
                                                     }
@@ -410,7 +412,9 @@ impl ShardHarness {
                                                     // Stream broken — discard, reconnect next time.
                                                     send_stream = None;
                                                     conn = None;
-                                                    consecutive_failures += 1;
+                                                    breaker.record_failure();
+                                                } else {
+                                                    breaker.record_success();
                                                 }
                                             }
                                         }

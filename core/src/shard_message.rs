@@ -39,6 +39,20 @@ pub struct MergeDirective {
     pub sectors: Vec<u8>,
 }
 
+/// Server-authoritative autopilot state snapshot sent alongside ship position.
+#[derive(Debug, Clone)]
+pub struct AutopilotSnapshotData {
+    pub phase: u8,
+    pub mode: u8,
+    pub target_planet_index: u32,
+    pub thrust_tier: u8,
+    pub intercept_pos: DVec3,
+    pub target_arrival_vel: DVec3,
+    pub braking_committed: bool,
+    pub eta_real_seconds: f64,
+    pub target_orbit_altitude: f64,
+}
+
 /// Ship exterior state synced from ship shard to system shard (and vice versa).
 #[derive(Debug, Clone)]
 pub struct ShipPositionUpdate {
@@ -47,6 +61,7 @@ pub struct ShipPositionUpdate {
     pub velocity: DVec3,
     pub rotation: DQuat,
     pub angular_velocity: DVec3,
+    pub autopilot: Option<AutopilotSnapshotData>,
 }
 
 /// Pilot control input sent from ship shard to system shard.
@@ -355,6 +370,24 @@ impl ShardMsg {
                 let vel = to_fb_vec3d(&s.velocity);
                 let rot = to_fb_quatd(&s.rotation);
                 let ang = to_fb_vec3d(&s.angular_velocity);
+                let ap_offset = s.autopilot.as_ref().map(|ap| {
+                    let ip = to_fb_vec3d(&ap.intercept_pos);
+                    let av = to_fb_vec3d(&ap.target_arrival_vel);
+                    fb::AutopilotSnapshot::create(
+                        &mut builder,
+                        &fb::AutopilotSnapshotArgs {
+                            phase: ap.phase,
+                            mode: ap.mode,
+                            target_planet_index: ap.target_planet_index,
+                            thrust_tier: ap.thrust_tier,
+                            intercept_pos: Some(&ip),
+                            target_arrival_vel: Some(&av),
+                            braking_committed: ap.braking_committed,
+                            eta_real_seconds: ap.eta_real_seconds,
+                            target_orbit_altitude: ap.target_orbit_altitude,
+                        },
+                    )
+                });
                 let update = fb::ShipPositionUpdate::create(
                     &mut builder,
                     &fb::ShipPositionUpdateArgs {
@@ -363,6 +396,7 @@ impl ShardMsg {
                         velocity: Some(&vel),
                         rotation: Some(&rot),
                         angular_velocity: Some(&ang),
+                        autopilot: ap_offset,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -720,12 +754,29 @@ impl ShardMsg {
                 let rot = s.rotation().ok_or(MessageError::MissingField("rotation"))?;
                 let ang = s.angular_velocity().ok_or(MessageError::MissingField("angular_velocity"))?;
 
+                let autopilot = s.autopilot().map(|ap| {
+                    let ip = ap.intercept_pos().map(|v| from_fb_vec3d(v)).unwrap_or(DVec3::ZERO);
+                    let av = ap.target_arrival_vel().map(|v| from_fb_vec3d(v)).unwrap_or(DVec3::ZERO);
+                    AutopilotSnapshotData {
+                        phase: ap.phase(),
+                        mode: ap.mode(),
+                        target_planet_index: ap.target_planet_index(),
+                        thrust_tier: ap.thrust_tier(),
+                        intercept_pos: ip,
+                        target_arrival_vel: av,
+                        braking_committed: ap.braking_committed(),
+                        eta_real_seconds: ap.eta_real_seconds(),
+                        target_orbit_altitude: ap.target_orbit_altitude(),
+                    }
+                });
+
                 Ok(ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
                     ship_id: s.ship_id(),
                     position: from_fb_vec3d(pos),
                     velocity: from_fb_vec3d(vel),
                     rotation: from_fb_quatd(rot),
                     angular_velocity: from_fb_vec3d(ang),
+                    autopilot,
                 }))
             }
 
@@ -1025,6 +1076,7 @@ mod tests {
             velocity: DVec3::new(10.0, 0.0, -5.0),
             rotation: DQuat::from_xyzw(0.0, 0.0, 0.707, 0.707),
             angular_velocity: DVec3::new(0.0, 0.1, 0.0),
+            autopilot: None,
         });
         let bytes = msg.serialize();
         let decoded = ShardMsg::deserialize(&bytes).unwrap();
@@ -1034,6 +1086,47 @@ mod tests {
             assert!((s.position.x - 1000.0).abs() < 1e-10);
             assert!((s.velocity.z - (-5.0)).abs() < 1e-10);
             assert!((s.angular_velocity.y - 0.1).abs() < 1e-10);
+            assert!(s.autopilot.is_none());
+        } else {
+            panic!("expected ShipPositionUpdate");
+        }
+    }
+
+    #[test]
+    fn roundtrip_ship_position_update_with_autopilot() {
+        let msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
+            ship_id: 99,
+            position: DVec3::new(1e9, 2e9, 3e9),
+            velocity: DVec3::new(5000.0, 0.0, -3000.0),
+            rotation: DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+            autopilot: Some(AutopilotSnapshotData {
+                phase: 2, // Brake
+                mode: 1,  // OrbitInsertion
+                target_planet_index: 3,
+                thrust_tier: 2,
+                intercept_pos: DVec3::new(4e9, 5e9, 6e9),
+                target_arrival_vel: DVec3::new(100.0, 200.0, 300.0),
+                braking_committed: true,
+                eta_real_seconds: 120.5,
+                target_orbit_altitude: 50000.0,
+            }),
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+
+        if let ShardMsg::ShipPositionUpdate(s) = decoded {
+            assert_eq!(s.ship_id, 99);
+            let ap = s.autopilot.unwrap();
+            assert_eq!(ap.phase, 2);
+            assert_eq!(ap.mode, 1);
+            assert_eq!(ap.target_planet_index, 3);
+            assert_eq!(ap.thrust_tier, 2);
+            assert!((ap.intercept_pos.x - 4e9).abs() < 1e-3);
+            assert!((ap.target_arrival_vel.y - 200.0).abs() < 1e-10);
+            assert!(ap.braking_committed);
+            assert!((ap.eta_real_seconds - 120.5).abs() < 1e-10);
+            assert!((ap.target_orbit_altitude - 50000.0).abs() < 1e-10);
         } else {
             panic!("expected ShipPositionUpdate");
         }

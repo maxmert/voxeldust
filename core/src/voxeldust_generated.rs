@@ -2176,6 +2176,239 @@ impl ::core::fmt::Debug for CrossShardBlockEdits<'_> {
       ds.finish()
   }
 }
+pub enum AutopilotSnapshotOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Server-authoritative autopilot state snapshot.
+pub struct AutopilotSnapshot<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for AutopilotSnapshot<'a> {
+  type Inner = AutopilotSnapshot<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> AutopilotSnapshot<'a> {
+  pub const VT_PHASE: ::flatbuffers::VOffsetT = 4;
+  pub const VT_MODE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_TARGET_PLANET_INDEX: ::flatbuffers::VOffsetT = 8;
+  pub const VT_THRUST_TIER: ::flatbuffers::VOffsetT = 10;
+  pub const VT_INTERCEPT_POS: ::flatbuffers::VOffsetT = 12;
+  pub const VT_TARGET_ARRIVAL_VEL: ::flatbuffers::VOffsetT = 14;
+  pub const VT_BRAKING_COMMITTED: ::flatbuffers::VOffsetT = 16;
+  pub const VT_ETA_REAL_SECONDS: ::flatbuffers::VOffsetT = 18;
+  pub const VT_TARGET_ORBIT_ALTITUDE: ::flatbuffers::VOffsetT = 20;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    AutopilotSnapshot { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args AutopilotSnapshotArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<AutopilotSnapshot<'bldr>> {
+    let mut builder = AutopilotSnapshotBuilder::new(_fbb);
+    builder.add_target_orbit_altitude(args.target_orbit_altitude);
+    builder.add_eta_real_seconds(args.eta_real_seconds);
+    if let Some(x) = args.target_arrival_vel { builder.add_target_arrival_vel(x); }
+    if let Some(x) = args.intercept_pos { builder.add_intercept_pos(x); }
+    builder.add_target_planet_index(args.target_planet_index);
+    builder.add_braking_committed(args.braking_committed);
+    builder.add_thrust_tier(args.thrust_tier);
+    builder.add_mode(args.mode);
+    builder.add_phase(args.phase);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn phase(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(AutopilotSnapshot::VT_PHASE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn mode(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(AutopilotSnapshot::VT_MODE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn target_planet_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(AutopilotSnapshot::VT_TARGET_PLANET_INDEX, Some(4294967295)).unwrap()}
+  }
+  #[inline]
+  pub fn thrust_tier(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(AutopilotSnapshot::VT_THRUST_TIER, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn intercept_pos(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(AutopilotSnapshot::VT_INTERCEPT_POS, None)}
+  }
+  #[inline]
+  pub fn target_arrival_vel(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(AutopilotSnapshot::VT_TARGET_ARRIVAL_VEL, None)}
+  }
+  #[inline]
+  pub fn braking_committed(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(AutopilotSnapshot::VT_BRAKING_COMMITTED, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn eta_real_seconds(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(AutopilotSnapshot::VT_ETA_REAL_SECONDS, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn target_orbit_altitude(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(AutopilotSnapshot::VT_TARGET_ORBIT_ALTITUDE, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for AutopilotSnapshot<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u8>("phase", Self::VT_PHASE, false)?
+     .visit_field::<u8>("mode", Self::VT_MODE, false)?
+     .visit_field::<u32>("target_planet_index", Self::VT_TARGET_PLANET_INDEX, false)?
+     .visit_field::<u8>("thrust_tier", Self::VT_THRUST_TIER, false)?
+     .visit_field::<Vec3d>("intercept_pos", Self::VT_INTERCEPT_POS, false)?
+     .visit_field::<Vec3d>("target_arrival_vel", Self::VT_TARGET_ARRIVAL_VEL, false)?
+     .visit_field::<bool>("braking_committed", Self::VT_BRAKING_COMMITTED, false)?
+     .visit_field::<f64>("eta_real_seconds", Self::VT_ETA_REAL_SECONDS, false)?
+     .visit_field::<f64>("target_orbit_altitude", Self::VT_TARGET_ORBIT_ALTITUDE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct AutopilotSnapshotArgs<'a> {
+    pub phase: u8,
+    pub mode: u8,
+    pub target_planet_index: u32,
+    pub thrust_tier: u8,
+    pub intercept_pos: Option<&'a Vec3d>,
+    pub target_arrival_vel: Option<&'a Vec3d>,
+    pub braking_committed: bool,
+    pub eta_real_seconds: f64,
+    pub target_orbit_altitude: f64,
+}
+impl<'a> Default for AutopilotSnapshotArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    AutopilotSnapshotArgs {
+      phase: 0,
+      mode: 0,
+      target_planet_index: 4294967295,
+      thrust_tier: 0,
+      intercept_pos: None,
+      target_arrival_vel: None,
+      braking_committed: false,
+      eta_real_seconds: 0.0,
+      target_orbit_altitude: 0.0,
+    }
+  }
+}
+
+pub struct AutopilotSnapshotBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AutopilotSnapshotBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_phase(&mut self, phase: u8) {
+    self.fbb_.push_slot::<u8>(AutopilotSnapshot::VT_PHASE, phase, 0);
+  }
+  #[inline]
+  pub fn add_mode(&mut self, mode: u8) {
+    self.fbb_.push_slot::<u8>(AutopilotSnapshot::VT_MODE, mode, 0);
+  }
+  #[inline]
+  pub fn add_target_planet_index(&mut self, target_planet_index: u32) {
+    self.fbb_.push_slot::<u32>(AutopilotSnapshot::VT_TARGET_PLANET_INDEX, target_planet_index, 4294967295);
+  }
+  #[inline]
+  pub fn add_thrust_tier(&mut self, thrust_tier: u8) {
+    self.fbb_.push_slot::<u8>(AutopilotSnapshot::VT_THRUST_TIER, thrust_tier, 0);
+  }
+  #[inline]
+  pub fn add_intercept_pos(&mut self, intercept_pos: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(AutopilotSnapshot::VT_INTERCEPT_POS, intercept_pos);
+  }
+  #[inline]
+  pub fn add_target_arrival_vel(&mut self, target_arrival_vel: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(AutopilotSnapshot::VT_TARGET_ARRIVAL_VEL, target_arrival_vel);
+  }
+  #[inline]
+  pub fn add_braking_committed(&mut self, braking_committed: bool) {
+    self.fbb_.push_slot::<bool>(AutopilotSnapshot::VT_BRAKING_COMMITTED, braking_committed, false);
+  }
+  #[inline]
+  pub fn add_eta_real_seconds(&mut self, eta_real_seconds: f64) {
+    self.fbb_.push_slot::<f64>(AutopilotSnapshot::VT_ETA_REAL_SECONDS, eta_real_seconds, 0.0);
+  }
+  #[inline]
+  pub fn add_target_orbit_altitude(&mut self, target_orbit_altitude: f64) {
+    self.fbb_.push_slot::<f64>(AutopilotSnapshot::VT_TARGET_ORBIT_ALTITUDE, target_orbit_altitude, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> AutopilotSnapshotBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    AutopilotSnapshotBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<AutopilotSnapshot<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for AutopilotSnapshot<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("AutopilotSnapshot");
+      ds.field("phase", &self.phase());
+      ds.field("mode", &self.mode());
+      ds.field("target_planet_index", &self.target_planet_index());
+      ds.field("thrust_tier", &self.thrust_tier());
+      ds.field("intercept_pos", &self.intercept_pos());
+      ds.field("target_arrival_vel", &self.target_arrival_vel());
+      ds.field("braking_committed", &self.braking_committed());
+      ds.field("eta_real_seconds", &self.eta_real_seconds());
+      ds.field("target_orbit_altitude", &self.target_orbit_altitude());
+      ds.finish()
+  }
+}
 pub enum ShipPositionUpdateOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -2197,6 +2430,7 @@ impl<'a> ShipPositionUpdate<'a> {
   pub const VT_VELOCITY: ::flatbuffers::VOffsetT = 8;
   pub const VT_ROTATION: ::flatbuffers::VOffsetT = 10;
   pub const VT_ANGULAR_VELOCITY: ::flatbuffers::VOffsetT = 12;
+  pub const VT_AUTOPILOT: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2209,6 +2443,7 @@ impl<'a> ShipPositionUpdate<'a> {
   ) -> ::flatbuffers::WIPOffset<ShipPositionUpdate<'bldr>> {
     let mut builder = ShipPositionUpdateBuilder::new(_fbb);
     builder.add_ship_id(args.ship_id);
+    if let Some(x) = args.autopilot { builder.add_autopilot(x); }
     if let Some(x) = args.angular_velocity { builder.add_angular_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.velocity { builder.add_velocity(x); }
@@ -2252,6 +2487,13 @@ impl<'a> ShipPositionUpdate<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Vec3d>(ShipPositionUpdate::VT_ANGULAR_VELOCITY, None)}
   }
+  #[inline]
+  pub fn autopilot(&self) -> Option<AutopilotSnapshot<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>(ShipPositionUpdate::VT_AUTOPILOT, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ShipPositionUpdate<'_> {
@@ -2265,6 +2507,7 @@ impl ::flatbuffers::Verifiable for ShipPositionUpdate<'_> {
      .visit_field::<Vec3d>("velocity", Self::VT_VELOCITY, false)?
      .visit_field::<Quatd>("rotation", Self::VT_ROTATION, false)?
      .visit_field::<Vec3d>("angular_velocity", Self::VT_ANGULAR_VELOCITY, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>("autopilot", Self::VT_AUTOPILOT, false)?
      .finish();
     Ok(())
   }
@@ -2275,6 +2518,7 @@ pub struct ShipPositionUpdateArgs<'a> {
     pub velocity: Option<&'a Vec3d>,
     pub rotation: Option<&'a Quatd>,
     pub angular_velocity: Option<&'a Vec3d>,
+    pub autopilot: Option<::flatbuffers::WIPOffset<AutopilotSnapshot<'a>>>,
 }
 impl<'a> Default for ShipPositionUpdateArgs<'a> {
   #[inline]
@@ -2285,6 +2529,7 @@ impl<'a> Default for ShipPositionUpdateArgs<'a> {
       velocity: None,
       rotation: None,
       angular_velocity: None,
+      autopilot: None,
     }
   }
 }
@@ -2315,6 +2560,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipPositionUpdateBuilder<'a,
     self.fbb_.push_slot_always::<&Vec3d>(ShipPositionUpdate::VT_ANGULAR_VELOCITY, angular_velocity);
   }
   #[inline]
+  pub fn add_autopilot(&mut self, autopilot: ::flatbuffers::WIPOffset<AutopilotSnapshot<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AutopilotSnapshot>>(ShipPositionUpdate::VT_AUTOPILOT, autopilot);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipPositionUpdateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ShipPositionUpdateBuilder {
@@ -2337,6 +2586,7 @@ impl ::core::fmt::Debug for ShipPositionUpdate<'_> {
       ds.field("velocity", &self.velocity());
       ds.field("rotation", &self.rotation());
       ds.field("angular_velocity", &self.angular_velocity());
+      ds.field("autopilot", &self.autopilot());
       ds.finish()
   }
 }
@@ -4984,10 +5234,11 @@ impl<'a> PlayerInput<'a> {
   pub const VT_LOOK_PITCH: ::flatbuffers::VOffsetT = 12;
   pub const VT_JUMP: ::flatbuffers::VOffsetT = 14;
   pub const VT_FLY_TOGGLE: ::flatbuffers::VOffsetT = 16;
-  pub const VT_SPEED_TIER: ::flatbuffers::VOffsetT = 18;
-  pub const VT_ACTION: ::flatbuffers::VOffsetT = 20;
-  pub const VT_BLOCK_TYPE: ::flatbuffers::VOffsetT = 22;
-  pub const VT_TICK: ::flatbuffers::VOffsetT = 24;
+  pub const VT_ORBIT_STABILIZER_TOGGLE: ::flatbuffers::VOffsetT = 18;
+  pub const VT_SPEED_TIER: ::flatbuffers::VOffsetT = 20;
+  pub const VT_ACTION: ::flatbuffers::VOffsetT = 22;
+  pub const VT_BLOCK_TYPE: ::flatbuffers::VOffsetT = 24;
+  pub const VT_TICK: ::flatbuffers::VOffsetT = 26;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5008,6 +5259,7 @@ impl<'a> PlayerInput<'a> {
     builder.add_block_type(args.block_type);
     builder.add_action(args.action);
     builder.add_speed_tier(args.speed_tier);
+    builder.add_orbit_stabilizer_toggle(args.orbit_stabilizer_toggle);
     builder.add_fly_toggle(args.fly_toggle);
     builder.add_jump(args.jump);
     builder.finish()
@@ -5064,6 +5316,13 @@ impl<'a> PlayerInput<'a> {
     unsafe { self._tab.get::<bool>(PlayerInput::VT_FLY_TOGGLE, Some(false)).unwrap()}
   }
   #[inline]
+  pub fn orbit_stabilizer_toggle(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerInput::VT_ORBIT_STABILIZER_TOGGLE, Some(false)).unwrap()}
+  }
+  #[inline]
   pub fn speed_tier(&self) -> u8 {
     // Safety:
     // Created from valid Table for this object
@@ -5106,6 +5365,7 @@ impl ::flatbuffers::Verifiable for PlayerInput<'_> {
      .visit_field::<f32>("look_pitch", Self::VT_LOOK_PITCH, false)?
      .visit_field::<bool>("jump", Self::VT_JUMP, false)?
      .visit_field::<bool>("fly_toggle", Self::VT_FLY_TOGGLE, false)?
+     .visit_field::<bool>("orbit_stabilizer_toggle", Self::VT_ORBIT_STABILIZER_TOGGLE, false)?
      .visit_field::<u8>("speed_tier", Self::VT_SPEED_TIER, false)?
      .visit_field::<u8>("action", Self::VT_ACTION, false)?
      .visit_field::<u16>("block_type", Self::VT_BLOCK_TYPE, false)?
@@ -5122,6 +5382,7 @@ pub struct PlayerInputArgs {
     pub look_pitch: f32,
     pub jump: bool,
     pub fly_toggle: bool,
+    pub orbit_stabilizer_toggle: bool,
     pub speed_tier: u8,
     pub action: u8,
     pub block_type: u16,
@@ -5138,6 +5399,7 @@ impl<'a> Default for PlayerInputArgs {
       look_pitch: 0.0,
       jump: false,
       fly_toggle: false,
+      orbit_stabilizer_toggle: false,
       speed_tier: 0,
       action: 0,
       block_type: 0,
@@ -5180,6 +5442,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerInputBuilder<'a, 'b, A>
     self.fbb_.push_slot::<bool>(PlayerInput::VT_FLY_TOGGLE, fly_toggle, false);
   }
   #[inline]
+  pub fn add_orbit_stabilizer_toggle(&mut self, orbit_stabilizer_toggle: bool) {
+    self.fbb_.push_slot::<bool>(PlayerInput::VT_ORBIT_STABILIZER_TOGGLE, orbit_stabilizer_toggle, false);
+  }
+  #[inline]
   pub fn add_speed_tier(&mut self, speed_tier: u8) {
     self.fbb_.push_slot::<u8>(PlayerInput::VT_SPEED_TIER, speed_tier, 0);
   }
@@ -5220,6 +5486,7 @@ impl ::core::fmt::Debug for PlayerInput<'_> {
       ds.field("look_pitch", &self.look_pitch());
       ds.field("jump", &self.jump());
       ds.field("fly_toggle", &self.fly_toggle());
+      ds.field("orbit_stabilizer_toggle", &self.orbit_stabilizer_toggle());
       ds.field("speed_tier", &self.speed_tier());
       ds.field("action", &self.action());
       ds.field("block_type", &self.block_type());
@@ -5449,6 +5716,7 @@ impl<'a> WorldState<'a> {
   pub const VT_LIGHTING: ::flatbuffers::VOffsetT = 14;
   pub const VT_GAME_TIME: ::flatbuffers::VOffsetT = 16;
   pub const VT_WARP_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 18;
+  pub const VT_AUTOPILOT: ::flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5462,6 +5730,7 @@ impl<'a> WorldState<'a> {
     let mut builder = WorldStateBuilder::new(_fbb);
     builder.add_game_time(args.game_time);
     builder.add_tick(args.tick);
+    if let Some(x) = args.autopilot { builder.add_autopilot(x); }
     builder.add_warp_target_star_index(args.warp_target_star_index);
     if let Some(x) = args.lighting { builder.add_lighting(x); }
     if let Some(x) = args.ships { builder.add_ships(x); }
@@ -5528,6 +5797,13 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(WorldState::VT_WARP_TARGET_STAR_INDEX, Some(4294967295)).unwrap()}
   }
+  #[inline]
+  pub fn autopilot(&self) -> Option<AutopilotSnapshot<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>(WorldState::VT_AUTOPILOT, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for WorldState<'_> {
@@ -5544,6 +5820,7 @@ impl ::flatbuffers::Verifiable for WorldState<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<LightingInfoMsg>>("lighting", Self::VT_LIGHTING, false)?
      .visit_field::<f64>("game_time", Self::VT_GAME_TIME, false)?
      .visit_field::<u32>("warp_target_star_index", Self::VT_WARP_TARGET_STAR_INDEX, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>("autopilot", Self::VT_AUTOPILOT, false)?
      .finish();
     Ok(())
   }
@@ -5557,6 +5834,7 @@ pub struct WorldStateArgs<'a> {
     pub lighting: Option<::flatbuffers::WIPOffset<LightingInfoMsg<'a>>>,
     pub game_time: f64,
     pub warp_target_star_index: u32,
+    pub autopilot: Option<::flatbuffers::WIPOffset<AutopilotSnapshot<'a>>>,
 }
 impl<'a> Default for WorldStateArgs<'a> {
   #[inline]
@@ -5570,6 +5848,7 @@ impl<'a> Default for WorldStateArgs<'a> {
       lighting: None,
       game_time: 0.0,
       warp_target_star_index: 4294967295,
+      autopilot: None,
     }
   }
 }
@@ -5612,6 +5891,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WorldStateBuilder<'a, 'b, A> 
     self.fbb_.push_slot::<u32>(WorldState::VT_WARP_TARGET_STAR_INDEX, warp_target_star_index, 4294967295);
   }
   #[inline]
+  pub fn add_autopilot(&mut self, autopilot: ::flatbuffers::WIPOffset<AutopilotSnapshot<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AutopilotSnapshot>>(WorldState::VT_AUTOPILOT, autopilot);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WorldStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     WorldStateBuilder {
@@ -5637,6 +5920,7 @@ impl ::core::fmt::Debug for WorldState<'_> {
       ds.field("lighting", &self.lighting());
       ds.field("game_time", &self.game_time());
       ds.field("warp_target_star_index", &self.warp_target_star_index());
+      ds.field("autopilot", &self.autopilot());
       ds.finish()
   }
 }

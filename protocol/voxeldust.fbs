@@ -111,12 +111,26 @@ table CrossShardBlockEdits {
     seq: uint64;
 }
 
+/// Server-authoritative autopilot state snapshot.
+table AutopilotSnapshot {
+    phase: uint8;                     // FlightPhase as u8
+    mode: uint8;                      // AutopilotMode as u8
+    target_planet_index: uint32 = 4294967295;
+    thrust_tier: uint8;
+    intercept_pos: Vec3d;
+    target_arrival_vel: Vec3d;
+    braking_committed: bool;
+    eta_real_seconds: double;
+    target_orbit_altitude: double;
+}
+
 table ShipPositionUpdate {
     ship_id: uint64;
     position: Vec3d;
     velocity: Vec3d;
     rotation: Quatd;
     angular_velocity: Vec3d;
+    autopilot: AutopilotSnapshot;
 }
 
 /// Pilot control input sent from ship shard to system shard.
@@ -287,6 +301,7 @@ table PlayerInput {
     look_pitch: float;
     jump: bool;
     fly_toggle: bool;
+    orbit_stabilizer_toggle: bool;
     speed_tier: uint8;
     action: uint8; // 0=none, 1=break, 2=place
     block_type: uint16;
@@ -312,6 +327,7 @@ table WorldState {
     lighting: LightingInfoMsg;
     game_time: double;
     warp_target_star_index: uint32 = 4294967295;
+    autopilot: AutopilotSnapshot;
 }
 
 table BlockMod {

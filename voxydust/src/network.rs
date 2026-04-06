@@ -426,6 +426,7 @@ fn empty_input() -> PlayerInputData {
         look_pitch: 0.0,
         jump: false,
         fly_toggle: false,
+        orbit_stabilizer_toggle: false,
         speed_tier: 0,
         action: 0,
         block_type: 0,

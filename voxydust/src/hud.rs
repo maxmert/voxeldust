@@ -18,6 +18,7 @@ pub struct HudContext<'a> {
     pub engines_off: bool,
     pub autopilot_target: Option<usize>,
     pub trajectory_plan: Option<&'a voxeldust_core::autopilot::TrajectoryPlan>,
+    pub server_autopilot: Option<&'a voxeldust_core::shard_message::AutopilotSnapshotData>,
     pub system_params: Option<&'a voxeldust_core::system::SystemParams>,
     pub frame_count: u64,
     pub warp_target_star: Option<WarpTargetInfo>,
@@ -474,7 +475,11 @@ fn draw_autopilot_active(
     let dampener_str = if plan.dampener_active { "DAMPENER ON" } else { "" };
     ui.label(format!("{} | Felt: {:.1}g {}", tier_label, plan.felt_g, dampener_str));
 
-    let eta = plan.eta_real_seconds;
+    // Prefer server-authoritative ETA when available.
+    let eta = ctx.server_autopilot
+        .map(|ap| ap.eta_real_seconds)
+        .filter(|&e| e > 0.0)
+        .unwrap_or(plan.eta_real_seconds);
     let eta_text = if eta > 3600.0 { format!("ETA: {:.1}h", eta / 3600.0) }
         else if eta > 60.0 { format!("ETA: {:.0}m {:.0}s", (eta / 60.0).floor(), eta % 60.0) }
         else { format!("ETA: {:.1}s", eta) };
