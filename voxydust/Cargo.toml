@@ -23,3 +23,5 @@ bytemuck = { workspace = true }
 flatbuffers = { workspace = true }
 pollster = "0.4"
 lz4_flex = { workspace = true }
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

@@ -1,3 +1,4 @@
+pub mod ecs;
 pub mod builder_pool;
 pub mod wire_codec;
 pub mod shard_types;

@@ -1,24 +1,28 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use bevy_app::prelude::*;
+use bevy_ecs::prelude::*;
 use clap::Parser;
 use glam::{DQuat, DVec3, Vec3};
 use rapier3d::prelude::*;
 use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
-    CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData,
-    ServerMsg, ShipRenderData, WorldStateData,
+    CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData, ServerMsg,
+    ShipRenderData, WorldStateData,
 };
+use voxeldust_core::ecs;
 use voxeldust_core::handoff;
 use voxeldust_core::shard_message::{ShardMsg, ShipNearbyInfoData};
-use voxeldust_core::shard_types::{ShardId, ShardType, SessionToken};
-use voxeldust_core::system::{
-    compute_lighting, compute_planet_position, SystemParams,
-};
+use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
+use voxeldust_core::system::{compute_lighting, compute_planet_position, SystemParams};
 use voxeldust_shard_common::client_listener;
-use voxeldust_shard_common::harness::{ShardHarness, ShardHarnessConfig};
+use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
 #[command(name = "planet-shard", about = "Voxeldust planet shard — surface physics")]
@@ -47,23 +51,39 @@ struct Args {
     advertise_host: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 const G: f64 = 6.674e-11;
 const WALK_SPEED: f32 = 4.0;
 const JUMP_IMPULSE: f32 = 5.0;
 
-/// Orthonormal frame tangent to the planet sphere at a point.
-/// Maps Rapier flat-space axes to planet-local directions:
-/// Rapier X → east, Rapier Y → up (radial outward), Rapier Z → north.
+// ---------------------------------------------------------------------------
+// Components (planet-shard-specific, on player entities)
+// ---------------------------------------------------------------------------
+
+/// Marker for a player entity on this planet.
+#[derive(Component)]
+struct PlanetPlayer;
+
+/// Rapier rigid body handle for this player.
+#[derive(Component)]
+struct PlayerBody(RigidBodyHandle);
+
+/// Planet-local position (vector from planet center).
+#[derive(Component)]
+struct PlanetPosition(DVec3);
+
+/// Orthonormal frame tangent to the sphere at the player's position.
+#[derive(Component)]
 struct TangentFrame {
-    up: DVec3,    // radial outward from planet center
-    north: DVec3, // tangent toward geographic north pole
-    east: DVec3,  // tangent, perpendicular to up and north (right-hand rule)
+    up: DVec3,
+    north: DVec3,
+    east: DVec3,
 }
 
 impl TangentFrame {
-    /// Build a tangent frame from a radial direction.
-    /// Uses geographic north pole (Y-axis) as reference for north/east directions.
-    /// Falls back to Z-axis at the poles where the cross product degenerates.
     fn from_up(up: DVec3) -> Self {
         let up = up.normalize();
         let pole = DVec3::Y;
@@ -71,7 +91,6 @@ impl TangentFrame {
         let east = if east_raw.length_squared() > 1e-10 {
             east_raw.normalize()
         } else {
-            // At or near poles: use Z-axis as fallback reference
             DVec3::Z.cross(up).normalize()
         };
         let north = up.cross(east).normalize();
@@ -79,41 +98,64 @@ impl TangentFrame {
     }
 }
 
-struct PlayerOnPlanet {
-    session_token: SessionToken,
-    player_name: String,
-    body_handle: RigidBodyHandle,
-    /// Position in planet-local spherical coordinates (vector from planet center).
-    position: DVec3,
-    /// Tangent frame at the player's current position on the sphere.
-    tangent_frame: TangentFrame,
-    /// Rapier flat-space position at last re-center (for computing per-tick delta).
-    rapier_origin: DVec3,
-    yaw: f32,
-    last_action: u8,
-    prev_action: u8,
-    handoff_pending: bool,
+/// Rapier flat-space position at last re-center.
+#[derive(Component)]
+struct RapierOrigin(DVec3);
+
+/// Player yaw on the surface.
+#[derive(Component)]
+struct PlayerYaw(f32);
+
+/// Player session token.
+#[derive(Component)]
+struct SessionId(SessionToken);
+
+/// Player name.
+#[derive(Component)]
+struct Name(String);
+
+/// Input action state for edge detection.
+#[derive(Component)]
+struct ActionState {
+    current: u8,
+    previous: u8,
 }
 
-/// Ship near the planet surface, tracked for rendering and re-entry detection.
-struct NearbyShip {
-    ship_id: u64,
-    ship_shard_id: ShardId,
-    position: DVec3,    // system-space
-    rotation: DQuat,
-    velocity: DVec3,
-}
+/// Marks a player as having a pending handoff.
+#[derive(Component)]
+struct HandoffPending;
 
-struct PlanetState {
-    shard_id: ShardId,
-    planet_seed: u64,
-    planet_radius: f64,
-    planet_mass: f64,
-    surface_gravity: f64,
-    system_seed: Option<u64>,
-    planet_index: u32,
+// ---------------------------------------------------------------------------
+// Components for nearby ships
+// ---------------------------------------------------------------------------
 
-    // Rapier physics
+/// Marker for a nearby ship entity.
+#[derive(Component)]
+struct NearbyShip;
+
+/// Ship identifier.
+#[derive(Component)]
+struct NearbyShipId(u64);
+
+/// Ship's shard for handoff routing.
+#[derive(Component)]
+struct NearbyShipShard(ShardId);
+
+/// Ship position in planet-local coordinates.
+#[derive(Component)]
+struct ShipPosition(DVec3);
+
+/// Ship rotation.
+#[derive(Component)]
+struct ShipRotation(DQuat);
+
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+/// Rapier 3D physics context.
+#[derive(Resource)]
+struct RapierContext {
     rigid_body_set: RigidBodySet,
     collider_set: ColliderSet,
     integration_params: IntegrationParameters,
@@ -125,262 +167,1061 @@ struct PlanetState {
     multibody_joint_set: MultibodyJointSet,
     ccd_solver: CCDSolver,
     query_pipeline: QueryPipeline,
-    ground_collider: Option<ColliderHandle>,
-
-    players: HashMap<SessionToken, PlayerOnPlanet>,
-    /// Ships near this planet's surface (from system shard ShipNearbyInfo).
-    nearby_ships: HashMap<u64, NearbyShip>,
-
-    // System context
-    system_params: Option<SystemParams>,
-    physics_time: f64,
-    celestial_time: f64,
-    tick_count: u64,
-    planet_position_in_system: DVec3,
 }
 
-impl PlanetState {
-    fn new(shard_id: ShardId, planet_seed: u64, planet_radius: f64, planet_mass: f64, system_seed: Option<u64>, planet_index: u32) -> Self {
-        let surface_gravity = G * planet_mass / (planet_radius * planet_radius);
+/// Planet configuration (immutable after init).
+#[derive(Resource)]
+#[allow(dead_code)]
+struct PlanetConfig {
+    shard_id: ShardId,
+    planet_seed: u64,
+    planet_radius: f64,
+    planet_mass: f64,
+    surface_gravity: f64,
+    system_seed: Option<u64>,
+    planet_index: u32,
+}
 
-        let rigid_body_set = RigidBodySet::new();
-        let mut collider_set = ColliderSet::new();
+/// System parameters for orbital computation.
+#[derive(Resource)]
+struct SystemParamsRes(Option<SystemParams>);
 
-        // Terrain: member of GROUP_2, collides only with players (GROUP_1).
-        // This eliminates useless terrain-terrain broadphase pairs.
-        let ground = ColliderBuilder::halfspace(nalgebra::Unit::new_normalize(vector![0.0, 1.0, 0.0]))
-            .translation(vector![0.0, 0.0, 0.0])
-            .collision_groups(InteractionGroups::new(Group::GROUP_2, Group::GROUP_1))
-            .build();
-        let ground_handle = collider_set.insert(ground);
+/// Planet position in system-space (updated each tick from Keplerian orbit).
+#[derive(Resource)]
+struct PlanetPositionInSystem(DVec3);
 
-        let system_params = system_seed.map(SystemParams::from_seed);
+/// Celestial time derived from epoch (matches system shard).
+#[derive(Resource, Default)]
+struct CelestialTimeRes(f64);
 
-        // Compute initial planet position at t=0 so handoff messages arriving
-        // before the first physics tick get correct planet-local transforms.
-        let planet_position_in_system = system_params.as_ref()
-            .and_then(|sys| sys.planets.get(planet_index as usize))
-            .map(|p| compute_planet_position(p, 0.0))
-            .unwrap_or(DVec3::ZERO);
+/// Physics simulation time.
+#[derive(Resource, Default)]
+struct PhysicsTimeRes(f64);
 
-        Self {
-            shard_id, planet_seed, planet_radius, planet_mass, surface_gravity,
-            system_seed, planet_index,
-            rigid_body_set, collider_set,
-            integration_params: {
-                let mut p = IntegrationParameters::default();
-                p.dt = 0.05; // Match 20Hz tick rate
-                p
-            },
-            physics_pipeline: PhysicsPipeline::new(),
-            island_manager: IslandManager::new(),
-            broad_phase: DefaultBroadPhase::new(),
-            narrow_phase: NarrowPhase::new(),
-            impulse_joint_set: ImpulseJointSet::new(),
-            multibody_joint_set: MultibodyJointSet::new(),
-            ccd_solver: CCDSolver::new(),
-            query_pipeline: QueryPipeline::new(),
-            ground_collider: Some(ground_handle),
-            players: HashMap::new(),
-            nearby_ships: HashMap::new(),
-            system_params,
-            physics_time: 0.0,
-            celestial_time: 0.0,
-            tick_count: 0,
-            planet_position_in_system,
+/// Universe epoch for deterministic celestial time.
+#[derive(Resource)]
+struct UniverseEpoch(Arc<std::sync::atomic::AtomicU64>);
+
+/// Entity index: session_token → Entity for O(1) lookup.
+#[derive(Resource, Default)]
+struct PlayerEntityIndex(HashMap<SessionToken, Entity>);
+
+/// Entity index: ship_id → Entity for nearby ships.
+#[derive(Resource, Default)]
+struct ShipEntityIndex(HashMap<u64, Entity>);
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+
+/// A new TCP client connected.
+#[derive(Message)]
+struct ClientConnectedMsg {
+    session_token: SessionToken,
+    player_name: String,
+    tcp_stream: Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+}
+
+/// Player input from UDP.
+#[derive(Message)]
+struct PlayerInputMsg {
+    session: SessionToken,
+    input: voxeldust_core::client_message::PlayerInputData,
+}
+
+/// Player handoff from system shard.
+#[derive(Message)]
+struct InboundHandoffMsg {
+    handoff: handoff::PlayerHandoff,
+    relay_shard: ShardId,
+}
+
+/// Ship nearby info from system shard.
+#[derive(Message)]
+struct ShipNearbyMsg(ShipNearbyInfoData);
+
+/// HandoffAccepted from ship shard (player re-entering ship).
+#[derive(Message)]
+struct HandoffAcceptedMsg {
+    session: SessionToken,
+    target_shard: ShardId,
+}
+
+
+// ---------------------------------------------------------------------------
+// System Sets
+// ---------------------------------------------------------------------------
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+enum PlanetSet {
+    Bridge,
+    Spawn,
+    Input,
+    Physics,
+    Detection,
+    Broadcast,
+    Diagnostics,
+}
+
+// ---------------------------------------------------------------------------
+// Bridge systems
+// ---------------------------------------------------------------------------
+
+fn drain_connects(
+    mut bridge: ResMut<NetworkBridge>,
+    mut events: MessageWriter<ClientConnectedMsg>,
+) {
+    for _ in 0..16 {
+        let event = match bridge.connect_rx.try_recv() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+        let conn = event.connection;
+        if let Ok(mut reg) = bridge.client_registry.try_write() {
+            reg.register(&conn);
         }
-    }
-
-    fn spawn_player(&mut self, session_token: SessionToken, name: String) {
-        self.spawn_player_at(session_token, name, DVec3::new(0.0, self.planet_radius + 2.0, 0.0));
-    }
-
-    /// Spawn a player at a specific planet-local position (vector from planet center).
-    /// Builds a tangent frame at this position and places the Rapier body at (0, height, 0).
-    fn spawn_player_at(&mut self, session_token: SessionToken, name: String, planet_local_pos: DVec3) {
-        let radial = planet_local_pos.normalize();
-        let height = (planet_local_pos.length() - self.planet_radius).max(0.5);
-        let frame = TangentFrame::from_up(radial);
-
-        let player_rb = RigidBodyBuilder::dynamic()
-            .translation(vector![0.0, height as f32, 0.0])
-            .lock_rotations()
-            .build();
-        let handle = self.rigid_body_set.insert(player_rb);
-        // Players: member of GROUP_1, collide with other players (GROUP_1) + terrain (GROUP_2).
-        let player_collider = ColliderBuilder::capsule_y(0.6, 0.3)
-            .collision_groups(InteractionGroups::new(Group::GROUP_1, Group::GROUP_1 | Group::GROUP_2))
-            .build();
-        self.collider_set.insert_with_parent(player_collider, handle, &mut self.rigid_body_set);
-
-        let rapier_origin = DVec3::new(0.0, height, 0.0);
-
-        self.players.insert(session_token, PlayerOnPlanet {
-            session_token, player_name: name,
-            body_handle: handle,
-            position: planet_local_pos,
-            tangent_frame: frame,
-            rapier_origin,
-            yaw: 0.0,
-            last_action: 0,
-            prev_action: 0,
-            handoff_pending: false,
+        info!(player = %conn.player_name, session = conn.session_token.0, "player connected to planet");
+        events.write(ClientConnectedMsg {
+            session_token: conn.session_token,
+            player_name: conn.player_name.clone(),
+            tcp_stream: conn.tcp_stream.clone(),
         });
     }
+}
 
-    fn step(&mut self) {
-        let gravity = vector![0.0, -(self.surface_gravity as f32), 0.0];
+fn drain_input(
+    mut bridge: ResMut<NetworkBridge>,
+    mut events: MessageWriter<PlayerInputMsg>,
+    player_index: Res<PlayerEntityIndex>,
+) {
+    for _ in 0..64 {
+        let (_src, input) = match bridge.input_rx.try_recv() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+        // Route to first player (same as original — multi-player session routing
+        // needs UDP addr→session mapping, which will come with proper multi-player).
+        if let Some((&session, _)) = player_index.0.iter().next() {
+            events.write(PlayerInputMsg { session, input });
+        }
+    }
+}
 
-        self.physics_pipeline.step(
-            &gravity, &self.integration_params,
-            &mut self.island_manager, &mut self.broad_phase, &mut self.narrow_phase,
-            &mut self.rigid_body_set, &mut self.collider_set,
-            &mut self.impulse_joint_set, &mut self.multibody_joint_set,
-            &mut self.ccd_solver, Some(&mut self.query_pipeline), &(), &(),
+fn drain_quic(
+    mut bridge: ResMut<NetworkBridge>,
+    mut handoff_events: MessageWriter<InboundHandoffMsg>,
+    mut ship_nearby_events: MessageWriter<ShipNearbyMsg>,
+    mut accepted_events: MessageWriter<HandoffAcceptedMsg>,
+    mut celestial_time: ResMut<CelestialTimeRes>,
+    mut planet_pos: ResMut<PlanetPositionInSystem>,
+    sys_params: Res<SystemParamsRes>,
+    config: Res<PlanetConfig>,
+) {
+    for _ in 0..32 {
+        let queued = match bridge.quic_msg_rx.try_recv() {
+            Ok(q) => q,
+            Err(_) => break,
+        };
+        match queued.msg {
+            ShardMsg::PlayerHandoff(h) => {
+                // Sync celestial time from system shard authority.
+                if h.game_time > celestial_time.0 {
+                    celestial_time.0 = h.game_time;
+                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos);
+                }
+                handoff_events.write(InboundHandoffMsg {
+                    handoff: h,
+                    relay_shard: queued.source_shard_id,
+                });
+            }
+            ShardMsg::ShipNearbyInfo(info) => {
+                if info.game_time > celestial_time.0 {
+                    celestial_time.0 = info.game_time;
+                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos);
+                }
+                ship_nearby_events.write(ShipNearbyMsg(info));
+            }
+            ShardMsg::HandoffAccepted(accepted) => {
+                accepted_events.write(HandoffAcceptedMsg {
+                    session: accepted.session_token,
+                    target_shard: accepted.target_shard,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn update_planet_position(
+    sys_params: &Option<SystemParams>,
+    planet_index: u32,
+    celestial_time: f64,
+    planet_pos: &mut PlanetPositionInSystem,
+) {
+    if let Some(sys) = sys_params {
+        if let Some(planet) = sys.planets.get(planet_index as usize) {
+            planet_pos.0 = compute_planet_position(planet, celestial_time);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spawn / process events
+// ---------------------------------------------------------------------------
+
+fn process_connects(
+    mut commands: Commands,
+    mut events: MessageReader<ClientConnectedMsg>,
+    mut rapier: ResMut<RapierContext>,
+    config: Res<PlanetConfig>,
+    planet_pos: Res<PlanetPositionInSystem>,
+    celestial_time: Res<CelestialTimeRes>,
+    mut player_index: ResMut<PlayerEntityIndex>,
+    players: Query<(Entity, &SessionId, &Name, &PlanetPosition)>,
+) {
+    for event in events.read() {
+        let token = event.session_token;
+        let tcp_stream = event.tcp_stream.clone();
+        let sys_seed = config.system_seed.unwrap_or(0);
+        let game_time = celestial_time.0;
+        let planet_pos_val = planet_pos.0;
+
+        // Check if player was already spawned by handoff (re-key by name).
+        let existing = players.iter().find(|(_, _, name, _)| name.0 == event.player_name);
+
+        let spawn_pos = if let Some((entity, old_session, _, pos)) = existing {
+            let spawn = pos.0;
+            // Re-key: remove old index entry, update session component.
+            player_index.0.remove(&old_session.0);
+            commands.entity(entity).insert(SessionId(token));
+            player_index.0.insert(token, entity);
+            spawn
+        } else {
+            // New player — spawn at default position.
+            let default_pos = DVec3::new(0.0, config.planet_radius + 2.0, 0.0);
+            let entity = spawn_player(
+                &mut commands,
+                &mut rapier,
+                config.planet_radius,
+                token,
+                event.player_name.clone(),
+                default_pos,
+            );
+            player_index.0.insert(token, entity);
+            default_pos
+        };
+
+        info!(player = %event.player_name, session = token.0, "player spawned on planet");
+
+        tokio::spawn(async move {
+            let jr = ServerMsg::JoinResponse(JoinResponseData {
+                seed: 0,
+                planet_radius: 0,
+                player_id: token.0,
+                spawn_position: spawn_pos,
+                spawn_rotation: DQuat::IDENTITY,
+                spawn_forward: DVec3::NEG_Z,
+                session_token: token,
+                shard_type: 0, // Planet
+                galaxy_seed: 0,
+                system_seed: sys_seed,
+                game_time,
+                reference_position: planet_pos_val,
+                reference_rotation: DQuat::IDENTITY,
+            });
+            let mut stream = tcp_stream.lock().await;
+            let _ = client_listener::send_tcp_msg(&mut *stream, &jr).await;
+        });
+    }
+}
+
+fn spawn_player(
+    commands: &mut Commands,
+    rapier: &mut RapierContext,
+    planet_radius: f64,
+    session_token: SessionToken,
+    name: String,
+    planet_local_pos: DVec3,
+) -> Entity {
+    let radial = planet_local_pos.normalize();
+    let height = (planet_local_pos.length() - planet_radius).max(0.5);
+    let frame = TangentFrame::from_up(radial);
+
+    let player_rb = RigidBodyBuilder::dynamic()
+        .translation(vector![0.0, height as f32, 0.0])
+        .lock_rotations()
+        .build();
+    let handle = rapier.rigid_body_set.insert(player_rb);
+    let player_collider = ColliderBuilder::capsule_y(0.6, 0.3)
+        .collision_groups(InteractionGroups::new(
+            Group::GROUP_1,
+            Group::GROUP_1 | Group::GROUP_2,
+        ))
+        .build();
+    rapier.collider_set.insert_with_parent(
+        player_collider,
+        handle,
+        &mut rapier.rigid_body_set,
+    );
+
+    commands
+        .spawn((
+            PlanetPlayer,
+            PlayerBody(handle),
+            PlanetPosition(planet_local_pos),
+            frame,
+            RapierOrigin(DVec3::new(0.0, height, 0.0)),
+            PlayerYaw(0.0),
+            SessionId(session_token),
+            Name(name),
+            ActionState {
+                current: 0,
+                previous: 0,
+            },
+        ))
+        .id()
+}
+
+fn process_handoffs(
+    mut commands: Commands,
+    mut events: MessageReader<InboundHandoffMsg>,
+    mut rapier: ResMut<RapierContext>,
+    config: Res<PlanetConfig>,
+    sys_params: Res<SystemParamsRes>,
+    planet_pos: Res<PlanetPositionInSystem>,
+    mut player_index: ResMut<PlayerEntityIndex>,
+    bridge: Res<NetworkBridge>,
+) {
+    for event in events.read() {
+        let h = &event.handoff;
+
+        // Compute planet position at handoff time for accurate system→planet-local conversion.
+        let planet_pos_at_handoff = sys_params
+            .0
+            .as_ref()
+            .and_then(|sys| sys.planets.get(config.planet_index as usize))
+            .map(|p| compute_planet_position(p, h.game_time))
+            .unwrap_or(planet_pos.0);
+        let surface_pos = h.position - planet_pos_at_handoff;
+
+        info!(
+            player = %h.player_name,
+            session = h.session_token.0,
+            "received player handoff, spawning at ship location on surface"
         );
 
-        let planet_radius = self.planet_radius;
-        for player in self.players.values_mut() {
-            let body = match self.rigid_body_set.get_mut(player.body_handle) {
-                Some(b) => b,
-                None => continue,
-            };
-            let t = body.translation();
-            let rapier_pos = DVec3::new(t.x as f64, t.y as f64, t.z as f64);
+        let entity = spawn_player(
+            &mut commands,
+            &mut rapier,
+            config.planet_radius,
+            h.session_token,
+            h.player_name.clone(),
+            surface_pos,
+        );
+        player_index.0.insert(h.session_token, entity);
 
-            // Compute displacement in Rapier flat-space since last re-center.
-            let delta = rapier_pos - player.rapier_origin;
-
-            // Skip expensive tangent frame recomputation for stationary players.
-            if delta.length_squared() < 1e-8 {
-                continue;
-            }
-
-            // Map horizontal displacement (dx, dz) to sphere surface movement.
-            let tangent_disp = player.tangent_frame.east * delta.x
-                             + player.tangent_frame.north * delta.z;
-            let horiz_dist = tangent_disp.length();
-
-            // Rotate the radial direction along the sphere by the movement angle.
-            let new_up = if horiz_dist > 1e-12 {
-                let tangent_dir = tangent_disp / horiz_dist;
-                let angle = horiz_dist / planet_radius;
-                (player.tangent_frame.up * angle.cos() + tangent_dir * angle.sin()).normalize()
+        // Send HandoffAccepted back to the relay system shard.
+        let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
+            session_token: h.session_token,
+            target_shard: config.shard_id,
+        });
+        let relay_shard = event.relay_shard;
+        if let Ok(reg) = bridge.peer_registry.try_read() {
+            if let Some(addr) = reg.quic_addr(relay_shard) {
+                let _ = bridge
+                    .quic_send_tx
+                    .try_send((relay_shard, addr, accepted));
+                info!(
+                    target = relay_shard.0,
+                    "sent HandoffAccepted to relay system shard"
+                );
             } else {
-                player.tangent_frame.up
-            };
-
-            // Height above surface from Rapier Y (absolute, not delta).
-            let height = rapier_pos.y as f64;
-
-            // Re-center Rapier body to (0, Y, 0) — prevents f32 drift.
-            // Transform velocity from OLD tangent frame to world, then into NEW frame.
-            let vel = body.linvel();
-            let old_frame = &player.tangent_frame; // still the old frame
-            let vel_world = old_frame.east * vel.x as f64
-                          + old_frame.up * vel.y as f64
-                          + old_frame.north * vel.z as f64;
-
-            // Now update to new frame.
-            player.position = new_up * (planet_radius + height);
-            player.tangent_frame = TangentFrame::from_up(new_up);
-
-            // Decompose world velocity into new frame.
-            let new_vx = vel_world.dot(player.tangent_frame.east) as f32;
-            let new_vy = vel_world.dot(player.tangent_frame.up) as f32;
-            let new_vz = vel_world.dot(player.tangent_frame.north) as f32;
-            body.set_translation(vector![0.0, t.y, 0.0], true);
-            body.set_linvel(vector![new_vx, new_vy, new_vz], true);
-
-            player.rapier_origin = DVec3::new(0.0, height, 0.0);
-        }
-    }
-
-    fn compute_planet_system_position(&mut self) {
-        if let Some(ref sys) = self.system_params {
-            if let Some(planet) = sys.planets.get(self.planet_index as usize) {
-                self.planet_position_in_system = compute_planet_position(planet, self.celestial_time);
+                warn!(
+                    target = relay_shard.0,
+                    "relay system shard not in peer registry"
+                );
             }
         }
     }
+}
 
-    fn build_world_state(&self) -> WorldStateData {
-        // Player positions.
-        let players: Vec<PlayerSnapshotData> = self.players.values().map(|p| {
-            PlayerSnapshotData {
-                player_id: p.session_token.0,
-                position: p.position,
-                rotation: DQuat::IDENTITY,
-                velocity: DVec3::ZERO,
-                grounded: true,
-                health: 100.0,
-                shield: 100.0,
+fn process_ship_nearby(
+    mut commands: Commands,
+    mut events: MessageReader<ShipNearbyMsg>,
+    sys_params: Res<SystemParamsRes>,
+    config: Res<PlanetConfig>,
+    mut ship_index: ResMut<ShipEntityIndex>,
+    mut existing_ships: Query<(&NearbyShipId, &mut ShipPosition, &mut ShipRotation)>,
+) {
+    for event in events.read() {
+        let info = &event.0;
+
+        // Convert to planet-local using planet position at the ship's celestial time.
+        let planet_pos_at_ship_time = sys_params
+            .0
+            .as_ref()
+            .and_then(|sys| sys.planets.get(config.planet_index as usize))
+            .map(|p| compute_planet_position(p, info.game_time))
+            .unwrap_or(DVec3::ZERO);
+        let planet_local_pos = info.position - planet_pos_at_ship_time;
+
+        if let Some(&entity) = ship_index.0.get(&info.ship_id) {
+            // Update existing ship entity.
+            if let Ok((_, mut pos, mut rot)) = existing_ships.get_mut(entity) {
+                pos.0 = planet_local_pos;
+                rot.0 = info.rotation;
             }
-        }).collect();
+        } else {
+            // Spawn new nearby ship entity.
+            info!(
+                ship_id = info.ship_id,
+                pos = format!(
+                    "({:.0},{:.0},{:.0})",
+                    info.position.x, info.position.y, info.position.z
+                ),
+                "new ship near planet"
+            );
+            let entity = commands
+                .spawn((
+                    NearbyShip,
+                    NearbyShipId(info.ship_id),
+                    NearbyShipShard(info.ship_shard_id),
+                    ShipPosition(planet_local_pos),
+                    ShipRotation(info.rotation),
+                ))
+                .id();
+            ship_index.0.insert(info.ship_id, entity);
+        }
+    }
+}
 
-        // Sky bodies — compute from system params, transform to planet-local frame.
-        let mut bodies = Vec::new();
-        if let Some(ref sys) = self.system_params {
-            // Star: in planet-local frame, star is at -planet_position.
-            bodies.push(CelestialBodyData {
-                body_id: 0,
-                position: -self.planet_position_in_system,
-                radius: sys.star.radius_m,
-                color: sys.star.color,
-            });
+fn process_handoff_accepted(
+    mut commands: Commands,
+    mut events: MessageReader<HandoffAcceptedMsg>,
+    mut rapier: ResMut<RapierContext>,
+    bridge: Res<NetworkBridge>,
+    player_index: Res<PlayerEntityIndex>,
+    players: Query<&PlayerBody, With<PlanetPlayer>>,
+) {
+    for event in events.read() {
+        let session = event.session;
+        let target_shard = event.target_shard;
+        info!(
+            session = session.0,
+            target = target_shard.0,
+            "received HandoffAccepted for ship re-entry"
+        );
 
-            // Other planets.
-            for (i, planet) in sys.planets.iter().enumerate() {
-                let planet_sys_pos = compute_planet_position(planet, self.celestial_time);
-                bodies.push(CelestialBodyData {
-                    body_id: (i + 1) as u32,
-                    position: planet_sys_pos - self.planet_position_in_system,
-                    radius: planet.radius_m,
-                    color: planet.color,
+        // Send ShardRedirect to client.
+        if let Ok(reg) = bridge.peer_registry.try_read() {
+            if let Some(peer_info) = reg.get(target_shard) {
+                let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
+                    session_token: session,
+                    target_tcp_addr: peer_info.endpoint.tcp_addr.to_string(),
+                    target_udp_addr: peer_info.endpoint.udp_addr.to_string(),
+                    shard_id: target_shard,
+                });
+                let cr = bridge.client_registry.clone();
+                tokio::spawn(async move {
+                    if let Ok(reg) = cr.try_read() {
+                        if let Err(e) = reg.send_tcp(session, &redirect).await {
+                            tracing::warn!(%e, "failed to send ShardRedirect for re-entry");
+                        }
+                    }
+                    if let Ok(mut reg) = cr.try_write() {
+                        reg.unregister(&session);
+                    }
                 });
             }
         }
 
-        // Lighting from star.
-        let first_player_pos = self.players.values().next()
-            .map(|p| p.position)
-            .unwrap_or(DVec3::new(0.0, self.planet_radius + 2.0, 0.0));
-
-        let lighting = if let Some(ref sys) = self.system_params {
-            let star_dir_from_surface = (-self.planet_position_in_system - first_player_pos).normalize();
-            let l = compute_lighting(self.planet_position_in_system + first_player_pos, &sys.star);
-            Some(LightingData {
-                sun_direction: star_dir_from_surface,
-                sun_color: l.sun_color,
-                sun_intensity: l.sun_intensity,
-                ambient: l.ambient,
-            })
-        } else {
-            None
-        };
-
-        // Nearby ships — already in planet-local coordinates (converted at receipt time).
-        let ships: Vec<ShipRenderData> = self.nearby_ships.values().map(|s| {
-            ShipRenderData {
-                ship_id: s.ship_id,
-                position: s.position,
-                rotation: s.rotation,
-                is_own_ship: false,
+        // Remove player entity and Rapier body.
+        if let Some(&entity) = player_index.0.get(&session) {
+            if let Ok(body) = players.get(entity) {
+                let ctx = &mut *rapier;
+                ctx.rigid_body_set.remove(
+                    body.0,
+                    &mut ctx.island_manager,
+                    &mut ctx.collider_set,
+                    &mut ctx.impulse_joint_set,
+                    &mut ctx.multibody_joint_set,
+                    true,
+                );
             }
-        }).collect();
-
-        WorldStateData {
-            tick: self.tick_count,
-            origin: self.planet_position_in_system,
-            players, bodies,
-            ships,
-            lighting,
-            game_time: self.celestial_time,
-            warp_target_star_index: 0xFFFFFFFF,
-            autopilot: None,
+            commands.entity(entity).despawn();
+            info!(session = session.0, "player removed from planet (re-entry)");
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+fn process_input(
+    mut events: MessageReader<PlayerInputMsg>,
+    player_index: Res<PlayerEntityIndex>,
+    mut players: Query<(&PlayerBody, &mut PlayerYaw, &mut ActionState), With<PlanetPlayer>>,
+    mut rapier: ResMut<RapierContext>,
+) {
+    for event in events.read() {
+        let entity = match player_index.0.get(&event.session) {
+            Some(&e) => e,
+            None => continue,
+        };
+        let Ok((body, mut yaw, mut actions)) = players.get_mut(entity) else {
+            continue;
+        };
+
+        actions.previous = actions.current;
+        actions.current = event.input.action;
+        yaw.0 = event.input.look_yaw;
+
+        let has_movement = event.input.movement[0].abs() > 0.001
+            || event.input.movement[2].abs() > 0.001;
+
+        if let Some(rb) = rapier.rigid_body_set.get_mut(body.0) {
+            if has_movement || event.input.jump {
+                let (sin_y, cos_y) = yaw.0.sin_cos();
+                let fwd = Vec3::new(sin_y, 0.0, cos_y);
+                let right = Vec3::new(cos_y, 0.0, -sin_y);
+
+                let move_vel = fwd * event.input.movement[2] * WALK_SPEED
+                    + right * event.input.movement[0] * WALK_SPEED;
+
+                let current_vel = *rb.linvel();
+                rb.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
+
+                if event.input.jump && current_vel.y.abs() < 0.5 {
+                    rb.apply_impulse(vector![0.0, JUMP_IMPULSE, 0.0], true);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Physics
+// ---------------------------------------------------------------------------
+
+fn physics_step(
+    mut rapier: ResMut<RapierContext>,
+    config: Res<PlanetConfig>,
+    mut physics_time: ResMut<PhysicsTimeRes>,
+    mut celestial_time: ResMut<CelestialTimeRes>,
+    mut tick: ResMut<ecs::TickCounter>,
+    sys_params: Res<SystemParamsRes>,
+    mut planet_pos: ResMut<PlanetPositionInSystem>,
+    epoch: Res<UniverseEpoch>,
+) {
+    physics_time.0 += 0.05;
+    celestial_time.0 = voxeldust_shard_common::harness::celestial_time_from_epoch(
+        &epoch.0,
+        sys_params.0.as_ref().map(|s| s.scale.time_scale).unwrap_or(1.0),
+    );
+    tick.0 += 1;
+
+    // Update planet position from Keplerian orbit.
+    update_planet_position(
+        &sys_params.0,
+        config.planet_index,
+        celestial_time.0,
+        &mut planet_pos,
+    );
+
+    // Step Rapier with surface gravity.
+    let gravity = vector![0.0, -(config.surface_gravity as f32), 0.0];
+    let ctx = &mut *rapier;
+    ctx.physics_pipeline.step(
+        &gravity,
+        &ctx.integration_params,
+        &mut ctx.island_manager,
+        &mut ctx.broad_phase,
+        &mut ctx.narrow_phase,
+        &mut ctx.rigid_body_set,
+        &mut ctx.collider_set,
+        &mut ctx.impulse_joint_set,
+        &mut ctx.multibody_joint_set,
+        &mut ctx.ccd_solver,
+        Some(&mut ctx.query_pipeline),
+        &(),
+        &(),
+    );
+}
+
+/// Tangent frame sync: maps Rapier flat-space deltas to sphere surface movement.
+/// Re-centers bodies to prevent f32 drift, recomputes tangent frames.
+fn tangent_frame_sync(
+    mut rapier: ResMut<RapierContext>,
+    config: Res<PlanetConfig>,
+    mut players: Query<
+        (
+            &PlayerBody,
+            &mut PlanetPosition,
+            &mut TangentFrame,
+            &mut RapierOrigin,
+        ),
+        With<PlanetPlayer>,
+    >,
+) {
+    let planet_radius = config.planet_radius;
+
+    for (body_comp, mut position, mut frame, mut rapier_origin) in &mut players {
+        let body = match rapier.rigid_body_set.get_mut(body_comp.0) {
+            Some(b) => b,
+            None => continue,
+        };
+        let t = body.translation();
+        let rapier_pos = DVec3::new(t.x as f64, t.y as f64, t.z as f64);
+
+        let delta = rapier_pos - rapier_origin.0;
+        if delta.length_squared() < 1e-8 {
+            continue;
+        }
+
+        // Map horizontal displacement to sphere surface movement.
+        let tangent_disp = frame.east * delta.x + frame.north * delta.z;
+        let horiz_dist = tangent_disp.length();
+
+        let new_up = if horiz_dist > 1e-12 {
+            let tangent_dir = tangent_disp / horiz_dist;
+            let angle = horiz_dist / planet_radius;
+            (frame.up * angle.cos() + tangent_dir * angle.sin()).normalize()
+        } else {
+            frame.up
+        };
+
+        let height = rapier_pos.y as f64;
+
+        // Transform velocity from old frame to world, then into new frame.
+        let vel = body.linvel();
+        let vel_world = frame.east * vel.x as f64
+            + frame.up * vel.y as f64
+            + frame.north * vel.z as f64;
+
+        // Update to new frame.
+        position.0 = new_up * (planet_radius + height);
+        *frame = TangentFrame::from_up(new_up);
+
+        let new_vx = vel_world.dot(frame.east) as f32;
+        let new_vy = vel_world.dot(frame.up) as f32;
+        let new_vz = vel_world.dot(frame.north) as f32;
+        body.set_translation(vector![0.0, t.y, 0.0], true);
+        body.set_linvel(vector![new_vx, new_vy, new_vz], true);
+
+        rapier_origin.0 = DVec3::new(0.0, height, 0.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detection: ship proximity, disconnect cleanup
+// ---------------------------------------------------------------------------
+
+fn ship_proximity(
+    tick: Res<ecs::TickCounter>,
+    config: Res<PlanetConfig>,
+    planet_pos: Res<PlanetPositionInSystem>,
+    celestial_time: Res<CelestialTimeRes>,
+    players: Query<
+        (Entity, &SessionId, &Name, &PlanetPosition, &ActionState, Has<HandoffPending>),
+        With<PlanetPlayer>,
+    >,
+    ships: Query<(&NearbyShipId, &NearbyShipShard, &ShipPosition), With<NearbyShip>>,
+    bridge: Res<NetworkBridge>,
+    mut commands: Commands,
+) {
+    if tick.0 % 10 != 0 {
+        return;
+    }
+
+    for (entity, session_id, name, pos, actions, has_handoff) in &players {
+        if has_handoff {
+            continue;
+        }
+        let action_pressed = actions.current == 3 && actions.previous != 3;
+        if !action_pressed {
+            continue;
+        }
+
+        for (ship_id, ship_shard, ship_pos) in &ships {
+            let dist = (pos.0 - ship_pos.0).length();
+            if dist >= 10.0 {
+                continue;
+            }
+
+            let player_system = pos.0 + planet_pos.0;
+
+            let h = handoff::PlayerHandoff {
+                session_token: session_id.0,
+                player_name: name.0.clone(),
+                position: player_system,
+                velocity: DVec3::ZERO,
+                rotation: DQuat::IDENTITY,
+                forward: DVec3::NEG_Z,
+                fly_mode: false,
+                speed_tier: 0,
+                grounded: true,
+                health: 100.0,
+                shield: 100.0,
+                source_shard: config.shard_id,
+                source_tick: tick.0,
+                target_star_index: None,
+                galaxy_context: None,
+                target_planet_seed: None,
+                target_planet_index: None,
+                target_ship_id: Some(ship_id.0),
+                target_ship_shard_id: Some(ship_shard.0),
+                ship_system_position: None,
+                ship_rotation: None,
+                game_time: celestial_time.0,
+                warp_target_star_index: None,
+                warp_velocity_gu: None,
+            };
+
+            // Mark player as pending handoff.
+            commands.entity(entity).insert(HandoffPending);
+
+            // Send to system shard for routing to ship shard.
+            if let Ok(reg) = bridge.peer_registry.try_read() {
+                let system_shard = reg
+                    .find_by_type(ShardType::System)
+                    .first()
+                    .map(|s| (s.id, s.endpoint.quic_addr));
+                if let Some((sid, addr)) = system_shard {
+                    let _ = bridge
+                        .quic_send_tx
+                        .try_send((sid, addr, ShardMsg::PlayerHandoff(h)));
+                    info!(
+                        session = session_id.0.0,
+                        ship_id = ship_id.0,
+                        "ship re-entry handoff initiated"
+                    );
+                }
+            }
+            break;
+        }
+    }
+}
+
+fn disconnect_cleanup(
+    mut commands: Commands,
+    tick: Res<ecs::TickCounter>,
+    bridge: Res<NetworkBridge>,
+    mut rapier: ResMut<RapierContext>,
+    mut player_index: ResMut<PlayerEntityIndex>,
+    players: Query<(Entity, &SessionId, &PlayerBody, &Name, Has<HandoffPending>), With<PlanetPlayer>>,
+) {
+    if tick.0 % 40 != 0 {
+        return;
+    }
+
+    let connected_tokens: std::collections::HashSet<SessionToken> =
+        if let Ok(reg) = bridge.client_registry.try_read() {
+            players
+                .iter()
+                .filter(|(_, sid, _, _, _)| reg.has_client(&sid.0))
+                .map(|(_, sid, _, _, _)| sid.0)
+                .collect()
+        } else {
+            return;
+        };
+
+    let orphaned: Vec<(Entity, SessionToken, RigidBodyHandle, String)> = players
+        .iter()
+        .filter(|(_, sid, _, _, has_handoff)| {
+            !connected_tokens.contains(&sid.0) && !has_handoff
+        })
+        .map(|(entity, sid, body, name, _)| (entity, sid.0, body.0, name.0.clone()))
+        .collect();
+
+    for (entity, token, body_handle, player_name) in orphaned {
+        let ctx = &mut *rapier;
+        ctx.rigid_body_set.remove(
+            body_handle,
+            &mut ctx.island_manager,
+            &mut ctx.collider_set,
+            &mut ctx.impulse_joint_set,
+            &mut ctx.multibody_joint_set,
+            true,
+        );
+        player_index.0.remove(&token);
+        commands.entity(entity).despawn();
+        info!(
+            session = token.0,
+            player = %player_name,
+            "cleaned up disconnected player"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast
+// ---------------------------------------------------------------------------
+
+fn broadcast_world_state(
+    players: Query<(&SessionId, &PlanetPosition), With<PlanetPlayer>>,
+    ships: Query<(&NearbyShipId, &ShipPosition, &ShipRotation), With<NearbyShip>>,
+    config: Res<PlanetConfig>,
+    sys_params: Res<SystemParamsRes>,
+    planet_pos: Res<PlanetPositionInSystem>,
+    celestial_time: Res<CelestialTimeRes>,
+    tick: Res<ecs::TickCounter>,
+    bridge: Res<NetworkBridge>,
+) {
+    let player_snapshots: Vec<PlayerSnapshotData> = players
+        .iter()
+        .map(|(sid, pos)| PlayerSnapshotData {
+            player_id: sid.0.0,
+            position: pos.0,
+            rotation: DQuat::IDENTITY,
+            velocity: DVec3::ZERO,
+            grounded: true,
+            health: 100.0,
+            shield: 100.0,
+        })
+        .collect();
+
+    // Sky bodies from system params.
+    let mut bodies = Vec::new();
+    if let Some(ref sys) = sys_params.0 {
+        bodies.push(CelestialBodyData {
+            body_id: 0,
+            position: -planet_pos.0,
+            radius: sys.star.radius_m,
+            color: sys.star.color,
+        });
+        for (i, planet) in sys.planets.iter().enumerate() {
+            let planet_sys_pos = compute_planet_position(planet, celestial_time.0);
+            bodies.push(CelestialBodyData {
+                body_id: (i + 1) as u32,
+                position: planet_sys_pos - planet_pos.0,
+                radius: planet.radius_m,
+                color: planet.color,
+            });
+        }
+    }
+
+    // Lighting from star.
+    let first_player_pos = players
+        .iter()
+        .next()
+        .map(|(_, p)| p.0)
+        .unwrap_or(DVec3::new(0.0, config.planet_radius + 2.0, 0.0));
+
+    let lighting = if let Some(ref sys) = sys_params.0 {
+        let star_dir = (-planet_pos.0 - first_player_pos).normalize();
+        let l = compute_lighting(planet_pos.0 + first_player_pos, &sys.star);
+        Some(LightingData {
+            sun_direction: star_dir,
+            sun_color: l.sun_color,
+            sun_intensity: l.sun_intensity,
+            ambient: l.ambient,
+        })
+    } else {
+        None
+    };
+
+    let ship_renders: Vec<ShipRenderData> = ships
+        .iter()
+        .map(|(id, pos, rot)| ShipRenderData {
+            ship_id: id.0,
+            position: pos.0,
+            rotation: rot.0,
+            is_own_ship: false,
+        })
+        .collect();
+
+    let ws = ServerMsg::WorldState(WorldStateData {
+        tick: tick.0,
+        origin: planet_pos.0,
+        players: player_snapshots,
+        bodies,
+        ships: ship_renders,
+        lighting,
+        game_time: celestial_time.0,
+        warp_target_star_index: 0xFFFFFFFF,
+        autopilot: None,
+    });
+    let _ = bridge.broadcast_tx.try_send(ws);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+fn log_state(
+    players: Query<&PlanetPlayer>,
+    config: Res<PlanetConfig>,
+    physics_time: Res<PhysicsTimeRes>,
+    celestial_time: Res<CelestialTimeRes>,
+    tick: Res<ecs::TickCounter>,
+) {
+    if tick.0 % 100 != 0 || tick.0 == 0 {
+        return;
+    }
+    info!(
+        physics_time = format!("{:.1}s", physics_time.0),
+        celestial_time = format!("{:.1}s", celestial_time.0),
+        players = players.iter().count(),
+        surface_g = format!("{:.2} m/s²", config.surface_gravity),
+        "planet state"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// App construction
+// ---------------------------------------------------------------------------
+
+fn build_app(
+    shard_id: ShardId,
+    planet_seed: u64,
+    planet_radius: f64,
+    planet_mass: f64,
+    system_seed: Option<u64>,
+    planet_index: u32,
+    universe_epoch: Arc<std::sync::atomic::AtomicU64>,
+) -> App {
+    let surface_gravity = G * planet_mass / (planet_radius * planet_radius);
+
+    let rigid_body_set = RigidBodySet::new();
+    let mut collider_set = ColliderSet::new();
+
+    // Ground: halfspace at Y=0.
+    let ground = ColliderBuilder::halfspace(nalgebra::Unit::new_normalize(vector![0.0, 1.0, 0.0]))
+        .translation(vector![0.0, 0.0, 0.0])
+        .collision_groups(InteractionGroups::new(Group::GROUP_2, Group::GROUP_1))
+        .build();
+    collider_set.insert(ground);
+
+    let system_params = system_seed.map(SystemParams::from_seed);
+    let planet_position_in_system = system_params
+        .as_ref()
+        .and_then(|sys| sys.planets.get(planet_index as usize))
+        .map(|p| compute_planet_position(p, 0.0))
+        .unwrap_or(DVec3::ZERO);
+
+    let mut app = App::new();
+
+    app.insert_resource(RapierContext {
+        rigid_body_set,
+        collider_set,
+        integration_params: {
+            let mut p = IntegrationParameters::default();
+            p.dt = 0.05;
+            p
+        },
+        physics_pipeline: PhysicsPipeline::new(),
+        island_manager: IslandManager::new(),
+        broad_phase: DefaultBroadPhase::new(),
+        narrow_phase: NarrowPhase::new(),
+        impulse_joint_set: ImpulseJointSet::new(),
+        multibody_joint_set: MultibodyJointSet::new(),
+        ccd_solver: CCDSolver::new(),
+        query_pipeline: QueryPipeline::new(),
+    });
+    app.insert_resource(PlanetConfig {
+        shard_id,
+        planet_seed,
+        planet_radius,
+        planet_mass,
+        surface_gravity,
+        system_seed,
+        planet_index,
+    });
+    app.insert_resource(SystemParamsRes(system_params));
+    app.insert_resource(PlanetPositionInSystem(planet_position_in_system));
+    app.insert_resource(CelestialTimeRes::default());
+    app.insert_resource(PhysicsTimeRes::default());
+    app.insert_resource(ecs::TickCounter::default());
+    app.insert_resource(UniverseEpoch(universe_epoch));
+    app.insert_resource(PlayerEntityIndex::default());
+    app.insert_resource(ShipEntityIndex::default());
+
+    // Messages.
+    app.add_message::<ClientConnectedMsg>();
+    app.add_message::<PlayerInputMsg>();
+    app.add_message::<InboundHandoffMsg>();
+    app.add_message::<ShipNearbyMsg>();
+    app.add_message::<HandoffAcceptedMsg>();
+
+    // System ordering.
+    app.configure_sets(
+        Update,
+        (
+            PlanetSet::Bridge,
+            PlanetSet::Spawn,
+            PlanetSet::Input,
+            PlanetSet::Physics,
+            PlanetSet::Detection,
+            PlanetSet::Broadcast,
+            PlanetSet::Diagnostics,
+        )
+            .chain(),
+    );
+
+    // Bridge.
+    app.add_systems(
+        Update,
+        (drain_connects, drain_input, drain_quic).in_set(PlanetSet::Bridge),
+    );
+
+    // Spawn.
+    app.add_systems(
+        Update,
+        (
+            process_connects,
+            process_handoffs,
+            process_ship_nearby,
+            process_handoff_accepted,
+        )
+            .in_set(PlanetSet::Spawn),
+    );
+
+    // apply_deferred so newly spawned entities are visible to Input/Physics.
+    app.add_systems(
+        Update,
+        bevy_ecs::schedule::ApplyDeferred
+            .after(PlanetSet::Spawn)
+            .before(PlanetSet::Input),
+    );
+
+    // Input.
+    app.add_systems(Update, process_input.in_set(PlanetSet::Input));
+
+    // Physics.
+    app.add_systems(
+        Update,
+        (physics_step, tangent_frame_sync)
+            .chain()
+            .in_set(PlanetSet::Physics),
+    );
+
+    // Detection.
+    app.add_systems(
+        Update,
+        (ship_proximity, disconnect_cleanup).in_set(PlanetSet::Detection),
+    );
+
+    // apply_deferred so despawned entities don't appear in broadcast.
+    app.add_systems(
+        Update,
+        bevy_ecs::schedule::ApplyDeferred
+            .after(PlanetSet::Detection)
+            .before(PlanetSet::Broadcast),
+    );
+
+    // Broadcast.
+    app.add_systems(Update, broadcast_world_state.in_set(PlanetSet::Broadcast));
+
+    // Diagnostics.
+    app.add_systems(Update, log_state.in_set(PlanetSet::Diagnostics));
+
+    app
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 fn main() {
     let args = Args::parse();
@@ -422,450 +1263,28 @@ fn main() {
     };
 
     info!(
-        shard_id = args.shard_id, planet_seed = args.seed,
+        shard_id = args.shard_id,
+        planet_seed = args.seed,
         radius_km = planet_radius / 1000.0,
         surface_g = format!("{:.2}", G * planet_mass / (planet_radius * planet_radius)),
         "planet shard starting"
     );
 
-    let system_seed = args.system_seed;
-    let planet_index = args.planet_index;
-
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
-        let mut harness = ShardHarness::new(config);
-
-        let state = Arc::new(Mutex::new(
-            PlanetState::new(ShardId(args.shard_id), args.seed, planet_radius, planet_mass, system_seed, planet_index)
-        ));
-        let client_registry = harness.client_registry.clone();
-
-        // Take channels.
-        let mut connect_rx = std::mem::replace(
-            &mut harness.connect_rx, tokio::sync::mpsc::unbounded_channel().1,
-        );
-        let mut input_rx = std::mem::replace(
-            &mut harness.input_rx, tokio::sync::mpsc::unbounded_channel().1,
-        );
-        let mut quic_msg_rx = std::mem::replace(
-            &mut harness.quic_msg_rx, tokio::sync::mpsc::unbounded_channel().1,
-        );
-        let broadcast_tx = harness.broadcast_tx.clone();
-        let quic_send_tx = harness.quic_send_tx.clone();
-        let peer_registry = harness.peer_registry.clone();
+        let harness = ShardHarness::new(config);
         let universe_epoch = harness.epoch_arc();
+        let app = build_app(
+            ShardId(args.shard_id),
+            args.seed,
+            planet_radius,
+            planet_mass,
+            args.system_seed,
+            args.planet_index,
+            universe_epoch,
+        );
 
-        // System 1: Drain connects — register + send JoinResponse.
-        let state_connect = state.clone();
-        let registry_connect = client_registry.clone();
-        harness.add_system("drain_connects", move || {
-            for _ in 0..16 { let event = match connect_rx.try_recv() { Ok(e) => e, Err(_) => break };
-                let conn = event.connection;
-                let token = conn.session_token;
-
-                if let Ok(mut reg) = registry_connect.try_write() {
-                    reg.register(&conn);
-                }
-
-                let mut st = state_connect.lock().unwrap();
-                let tcp_stream = conn.tcp_stream.clone();
-                let game_time = st.celestial_time;
-                let planet_pos = st.planet_position_in_system;
-                let sys_seed = st.system_seed.unwrap_or(0);
-                let planet_radius = st.planet_radius;
-
-                // If player was already spawned by handoff, find by name and
-                // re-key from the handoff session token to the new connection token.
-                // The handoff and the TCP connect use different session tokens.
-                let spawn_pos = {
-                    let handoff_key = st.players.iter()
-                        .find(|(_, p)| p.player_name == conn.player_name)
-                        .map(|(k, _)| *k);
-                    if let Some(old_token) = handoff_key {
-                        let mut player = st.players.remove(&old_token).unwrap();
-                        let pos = player.position;
-                        player.session_token = token;
-                        st.players.insert(token, player);
-                        pos
-                    } else {
-                        let default_pos = DVec3::new(0.0, planet_radius + 2.0, 0.0);
-                        st.spawn_player(token, conn.player_name.clone());
-                        default_pos
-                    }
-                };
-                drop(st);
-
-                // Send spawn position in planet-local coordinates.
-                // The client uses reference_position (planet system pos) to compute absolute coords.
-                let spawn_local = spawn_pos; // already planet-local
-
-                tokio::spawn(async move {
-                    let jr = ServerMsg::JoinResponse(JoinResponseData {
-                        seed: 0, planet_radius: 0, player_id: token.0,
-                        spawn_position: spawn_local,
-                        spawn_rotation: DQuat::IDENTITY,
-                        spawn_forward: DVec3::NEG_Z,
-                        session_token: token,
-                        shard_type: 0, // Planet
-                        galaxy_seed: 0, system_seed: sys_seed,
-                        game_time,
-                        reference_position: planet_pos,
-                        reference_rotation: DQuat::IDENTITY,
-                    });
-                    let mut stream = tcp_stream.lock().await;
-                    let _ = client_listener::send_tcp_msg(&mut stream, &jr).await;
-                });
-
-                info!(player = %conn.player_name, session = token.0, "player spawned on planet");
-            }
-        });
-
-        // System 2: Drain PlayerInput — walk on surface.
-        let state_input = state.clone();
-        harness.add_system("drain_input", move || {
-            for _ in 0..64 { let (_src, input) = match input_rx.try_recv() { Ok(e) => e, Err(_) => break };
-                let mut st = state_input.lock().unwrap();
-
-                // Apply to first player (simplified — multi-player needs routing by session).
-                let player_info: Option<(RigidBodyHandle, f32)> = st.players.values_mut().next()
-                    .map(|p| {
-                        p.prev_action = p.last_action;
-                        p.last_action = input.action;
-                        p.yaw = input.look_yaw;
-                        (p.body_handle, p.yaw)
-                    });
-
-                if let Some((handle, yaw)) = player_info {
-                    let has_movement = input.movement[0].abs() > 0.001
-                        || input.movement[2].abs() > 0.001;
-                    if let Some(body) = st.rigid_body_set.get_mut(handle) {
-                        if has_movement || input.jump {
-                            // Tangent-plane convention: yaw=0 faces north (+Z in Rapier),
-                            // yaw increases toward east (+X in Rapier).
-                            let (sin_y, cos_y) = yaw.sin_cos();
-                            let fwd = Vec3::new(sin_y, 0.0, cos_y);
-                            let right = Vec3::new(cos_y, 0.0, -sin_y);
-
-                            let move_vel = fwd * input.movement[2] * WALK_SPEED
-                                + right * input.movement[0] * WALK_SPEED;
-
-                            let current_vel = *body.linvel();
-                            body.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
-
-                            if input.jump && current_vel.y.abs() < 0.5 {
-                                body.apply_impulse(vector![0.0, JUMP_IMPULSE, 0.0], true);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // System 3: Drain QUIC — receive PlayerHandoff, ShipNearbyInfo, HandoffAccepted.
-        let state_quic = state.clone();
-        let peer_reg_quic = peer_registry.clone();
-        let quic_send_quic = quic_send_tx.clone();
-        let client_reg_quic = client_registry.clone();
-        harness.add_system("drain_quic", move || {
-            for _ in 0..32 { let queued = match quic_msg_rx.try_recv() { Ok(q) => q, Err(_) => break };
-                let msg_source = queued.source_shard_id;
-                match queued.msg {
-                    ShardMsg::PlayerHandoff(h) => {
-                        let mut st = state_quic.lock().unwrap();
-                        // Sync celestial time from system shard authority so planet
-                        // position is correct for the system-space → planet-local conversion.
-                        if h.game_time > st.celestial_time {
-                            st.celestial_time = h.game_time;
-                            st.compute_planet_system_position();
-                        }
-                        // Use the player's actual system-space position from the handoff.
-                        // This is where they were standing (door threshold, hatch, ramp, etc.)
-                        // — works for any exit point on any ship geometry.
-                        let planet_pos_at_handoff = st.system_params.as_ref()
-                            .and_then(|sys| sys.planets.get(st.planet_index as usize))
-                            .map(|p| compute_planet_position(p, h.game_time))
-                            .unwrap_or(st.planet_position_in_system);
-                        let surface_pos = h.position - planet_pos_at_handoff;
-
-                        info!(
-                            player = %h.player_name,
-                            session = h.session_token.0,
-                            "received player handoff, spawning at ship location on surface"
-                        );
-
-                        st.spawn_player_at(h.session_token, h.player_name.clone(), surface_pos);
-
-                        // Send HandoffAccepted back to the system shard that relayed
-                        // the handoff. With multiple system shards (post-warp), only
-                        // the relaying one has the pending_handoffs entry to route it
-                        // back to the ship shard. msg_source identifies it via the
-                        // QUIC identity header.
-                        let shard_id = st.shard_id;
-                        let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
-                            session_token: h.session_token,
-                            target_shard: shard_id,
-                        });
-                        let relay_shard = msg_source;
-                        drop(st);
-                        if let Ok(reg) = peer_reg_quic.try_read() {
-                            if let Some(addr) = reg.quic_addr(relay_shard) {
-                                let _ = quic_send_quic.try_send((relay_shard, addr, accepted));
-                                info!(target = relay_shard.0, "sent HandoffAccepted to relay system shard");
-                            } else {
-                                warn!(target = relay_shard.0, "relay system shard not in peer registry");
-                            }
-                        }
-                    }
-                    ShardMsg::ShipNearbyInfo(info) => {
-                        let mut st = state_quic.lock().unwrap();
-                        // Sync celestial time from system shard authority.
-                        if info.game_time > st.celestial_time {
-                            st.celestial_time = info.game_time;
-                            st.compute_planet_system_position();
-                        }
-                        if !st.nearby_ships.contains_key(&info.ship_id) {
-                            info!(ship_id = info.ship_id,
-                                pos = format!("({:.0},{:.0},{:.0})", info.position.x, info.position.y, info.position.z),
-                                "new ship near planet");
-                        }
-                        // Convert to planet-local using the planet position at the SAME
-                        // celestial time the ship position was computed. This eliminates
-                        // orbital offset from QUIC message delay (planet moves ~1380 km/s
-                        // in system-space at 12x time scale).
-                        let planet_pos_at_ship_time = st.system_params.as_ref()
-                            .and_then(|sys| sys.planets.get(st.planet_index as usize))
-                            .map(|p| compute_planet_position(p, info.game_time))
-                            .unwrap_or(st.planet_position_in_system);
-                        let planet_local_pos = info.position - planet_pos_at_ship_time;
-                        st.nearby_ships.insert(info.ship_id, NearbyShip {
-                            ship_id: info.ship_id,
-                            ship_shard_id: info.ship_shard_id,
-                            position: planet_local_pos,
-                            rotation: info.rotation,
-                            velocity: info.velocity,
-                        });
-                    }
-                    ShardMsg::HandoffAccepted(accepted) => {
-                        // Ship shard accepted re-entry. Send ShardRedirect to client.
-                        let st = state_quic.lock().unwrap();
-                        let session = accepted.session_token;
-                        let target_shard = accepted.target_shard;
-                        info!(session = session.0, target = target_shard.0,
-                            "received HandoffAccepted for ship re-entry");
-
-                        drop(st);
-                        if let Ok(reg) = peer_reg_quic.try_read() {
-                            if let Some(info) = reg.get(target_shard) {
-                                let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
-                                    session_token: session,
-                                    target_tcp_addr: info.endpoint.tcp_addr.to_string(),
-                                    target_udp_addr: info.endpoint.udp_addr.to_string(),
-                                    shard_id: target_shard,
-                                });
-                                let cr = client_reg_quic.clone();
-                                tokio::spawn(async move {
-                                    if let Ok(reg) = cr.try_read() {
-                                        if let Err(e) = reg.send_tcp(session, &redirect).await {
-                                            tracing::warn!(%e, "failed to send ShardRedirect for re-entry");
-                                        }
-                                    }
-                                    // Unregister AFTER the send completes so the TCP stream
-                                    // isn't dropped mid-flight.
-                                    if let Ok(mut reg) = cr.try_write() {
-                                        reg.unregister(&session);
-                                    }
-                                });
-                            }
-                        }
-
-                        // Remove player from planet state.
-                        let mut st = state_quic.lock().unwrap();
-                        if let Some(player) = st.players.remove(&session) {
-                            // Remove physics body via destructured borrows.
-                            let PlanetState {
-                                ref mut rigid_body_set, ref mut island_manager,
-                                ref mut collider_set, ref mut impulse_joint_set,
-                                ref mut multibody_joint_set, ..
-                            } = *st;
-                            rigid_body_set.remove(
-                                player.body_handle,
-                                island_manager, collider_set,
-                                impulse_joint_set, multibody_joint_set,
-                                true,
-                            );
-                            info!(session = session.0, "player removed from planet (re-entry)");
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        // System 4: Physics step.
-        let state_physics = state.clone();
-        let epoch_physics = universe_epoch.clone();
-        harness.add_system("physics_step", move || {
-            let mut st = state_physics.lock().unwrap();
-            st.physics_time += 0.05;
-            // Celestial time derived from universal epoch — matches system shard exactly.
-            st.celestial_time = voxeldust_shard_common::harness::celestial_time_from_epoch(
-                &epoch_physics,
-                st.system_params.as_ref().map(|s| s.scale.time_scale).unwrap_or(1.0),
-            );
-            st.tick_count += 1;
-            st.compute_planet_system_position();
-            st.step();
-        });
-
-        // System 5: Disconnect cleanup — remove orphaned Rapier bodies for players whose
-        // TCP connection dropped without a handoff.
-        let state_disconnect = state.clone();
-        let registry_disconnect = client_registry.clone();
-        harness.add_system("drain_disconnects", move || {
-            let mut st = state_disconnect.lock().unwrap();
-            if st.tick_count % 40 != 0 { return; } // check every 2s
-
-            let connected_tokens: std::collections::HashSet<SessionToken> =
-                if let Ok(reg) = registry_disconnect.try_read() {
-                    // Build set of tokens that still have active connections.
-                    st.players.keys()
-                        .filter(|token| reg.has_client(token))
-                        .copied()
-                        .collect()
-                } else {
-                    return; // registry locked, try next tick
-                };
-
-            let orphaned: Vec<SessionToken> = st.players.keys()
-                .filter(|token| !connected_tokens.contains(token))
-                // Skip players with pending handoffs — they're mid-transition.
-                .filter(|token| !st.players[token].handoff_pending)
-                .copied()
-                .collect();
-
-            for token in orphaned {
-                if let Some(player) = st.players.remove(&token) {
-                    let PlanetState {
-                        ref mut rigid_body_set, ref mut island_manager,
-                        ref mut collider_set, ref mut impulse_joint_set,
-                        ref mut multibody_joint_set, ..
-                    } = *st;
-                    rigid_body_set.remove(
-                        player.body_handle,
-                        island_manager, collider_set,
-                        impulse_joint_set, multibody_joint_set,
-                        true,
-                    );
-                    info!(session = token.0, player = %player.player_name,
-                        "cleaned up disconnected player");
-                }
-            }
-        });
-
-        // System 6: Ship proximity detection — player E-press near ship triggers re-entry.
-        let state_proximity = state.clone();
-        let quic_send_proximity = quic_send_tx.clone();
-        let peer_reg_proximity = peer_registry.clone();
-        harness.add_system("ship_proximity", move || {
-            let mut st = state_proximity.lock().unwrap();
-            if st.tick_count % 10 != 0 { return; } // check every 0.5s
-
-            // Collect re-entry handoff requests (can't mutate while iterating).
-            let mut handoff_requests: Vec<(SessionToken, String, DVec3, u64, ShardId)> = Vec::new();
-
-            for player in st.players.values() {
-                if player.handoff_pending { continue; }
-                // E key rising edge (action 3).
-                let action_pressed = player.last_action == 3 && player.prev_action != 3;
-                if !action_pressed { continue; }
-
-                // Check proximity to each nearby ship (already planet-local).
-                for ship in st.nearby_ships.values() {
-                    let dist = (player.position - ship.position).length();
-                    let interact_range = 10.0; // meters
-
-                    if dist < interact_range {
-                        let player_system = player.position + st.planet_position_in_system;
-                        handoff_requests.push((
-                            player.session_token,
-                            player.player_name.clone(),
-                            player_system,
-                            ship.ship_id,
-                            ship.ship_shard_id,
-                        ));
-                        break;
-                    }
-                }
-            }
-
-            // Process handoff requests.
-            for (session, name, system_pos, ship_id, ship_shard_id) in handoff_requests {
-                if let Some(player) = st.players.get_mut(&session) {
-                    player.handoff_pending = true;
-                }
-
-                let h = handoff::PlayerHandoff {
-                    session_token: session,
-                    player_name: name,
-                    position: system_pos,
-                    velocity: DVec3::ZERO,
-                    rotation: DQuat::IDENTITY,
-                    forward: DVec3::NEG_Z,
-                    fly_mode: false,
-                    speed_tier: 0,
-                    grounded: true,
-                    health: 100.0,
-                    shield: 100.0,
-                    source_shard: st.shard_id,
-                    source_tick: st.tick_count,
-                    target_star_index: None,
-                    galaxy_context: None,
-                    target_planet_seed: None,
-                    target_planet_index: None,
-                    target_ship_id: Some(ship_id),
-                    target_ship_shard_id: Some(ship_shard_id),
-                    ship_system_position: None,
-                    ship_rotation: None,
-                    game_time: st.celestial_time,
-                    warp_target_star_index: None,
-                    warp_velocity_gu: None,
-                };
-
-                // Send to system shard for routing to ship shard.
-                if let Ok(reg) = peer_reg_proximity.try_read() {
-                    let system_shard = reg.find_by_type(ShardType::System).first()
-                        .map(|s| (s.id, s.endpoint.quic_addr));
-                    if let Some((sid, addr)) = system_shard {
-                        let _ = quic_send_proximity.try_send((sid, addr, ShardMsg::PlayerHandoff(h)));
-                        info!(session = session.0, ship_id, "ship re-entry handoff initiated");
-                    }
-                }
-            }
-        });
-
-        // System 6: Broadcast WorldState.
-        let state_broadcast = state.clone();
-        harness.add_system("broadcast", move || {
-            let st = state_broadcast.lock().unwrap();
-            let ws = ServerMsg::WorldState(st.build_world_state());
-            let _ = broadcast_tx.try_send(ws);
-        });
-
-        // System 6: Periodic log.
-        let state_log = state.clone();
-        harness.add_system("log_state", move || {
-            let st = state_log.lock().unwrap();
-            if st.tick_count % 100 == 0 && st.tick_count > 0 {
-                info!(
-                    physics_time = format!("{:.1}s", st.physics_time),
-                    celestial_time = format!("{:.1}s", st.celestial_time),
-                    players = st.players.len(),
-                    surface_g = format!("{:.2} m/s²", st.surface_gravity),
-                    "planet state"
-                );
-            }
-        });
-
-        harness.run().await;
+        info!("planet shard ECS app built, starting harness");
+        harness.run_ecs(app).await;
     });
 }

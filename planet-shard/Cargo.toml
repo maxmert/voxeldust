@@ -16,3 +16,5 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 glam = { workspace = true }
 rapier3d = { workspace = true }
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

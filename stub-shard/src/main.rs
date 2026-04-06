@@ -1,58 +1,46 @@
-use std::net::SocketAddr;
-
+use bevy_app::prelude::*;
+use bevy_ecs::prelude::*;
 use clap::Parser;
 use tracing::info;
 
 use voxeldust_core::shard_types::{ShardId, ShardType};
-use voxeldust_shard_common::harness::{ShardHarness, ShardHarnessConfig};
+use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "stub-shard", about = "Voxeldust stub shard for testing")]
 struct Args {
-    /// Unique shard identifier.
     #[arg(long)]
     shard_id: u64,
-
-    /// Shard type: "planet" or "system".
     #[arg(long, default_value = "planet")]
     shard_type: String,
-
-    /// Planet or system seed.
     #[arg(long, default_value = "42")]
     seed: u64,
-
-    /// Orchestrator HTTP URL.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     orchestrator: String,
-
-    /// Orchestrator heartbeat UDP address (host:port, supports DNS names).
     #[arg(long, default_value = "127.0.0.1:9090")]
     orchestrator_heartbeat: String,
-
-    /// TCP port for client connections.
     #[arg(long, default_value = "7777")]
     tcp_port: u16,
-
-    /// UDP port for fast messages.
     #[arg(long, default_value = "7778")]
     udp_port: u16,
-
-    /// QUIC port for inter-shard communication.
     #[arg(long, default_value = "7779")]
     quic_port: u16,
-
-    /// Healthz HTTP port.
     #[arg(long, default_value = "8081")]
     healthz_port: u16,
-
-    /// Host to advertise to orchestrator (overrides bind address in endpoints).
-    /// Set to 127.0.0.1 in K8s with hostNetwork for k3d port mapping.
     #[arg(long)]
     advertise_host: Option<String>,
-
-    /// For ship shards: the shard ID managing this ship's exterior.
     #[arg(long)]
     host_shard: Option<u64>,
+}
+
+fn drain_connects(mut bridge: ResMut<NetworkBridge>) {
+    while let Ok(event) = bridge.connect_rx.try_recv() {
+        info!(
+            player = %event.connection.player_name,
+            session = event.connection.session_token.0,
+            "player connected (stub: no game logic)"
+        );
+    }
 }
 
 fn main() {
@@ -110,24 +98,11 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
-        let mut harness = ShardHarness::new(config);
+        let harness = ShardHarness::new(config);
 
-        // Add a minimal tick system that drains connect events.
-        let mut connect_rx = std::mem::replace(
-            &mut harness.connect_rx,
-            tokio::sync::mpsc::unbounded_channel().1,
-        );
+        let mut app = App::new();
+        app.add_systems(Update, drain_connects);
 
-        harness.add_system("drain_connects", move || {
-            while let Ok(event) = connect_rx.try_recv() {
-                info!(
-                    player = %event.connection.player_name,
-                    session = event.connection.session_token.0,
-                    "player connected (stub: no game logic)"
-                );
-            }
-        });
-
-        harness.run().await;
+        harness.run_ecs(app).await;
     });
 }

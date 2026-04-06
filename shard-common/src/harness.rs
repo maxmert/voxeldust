@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use bevy_app::App;
+use bevy_ecs::prelude::*;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -29,7 +31,30 @@ use crate::healthz;
 use crate::peer_registry::PeerShardRegistry;
 use crate::quic_transport::QuicTransport;
 use crate::shutdown;
-use crate::tick_loop::TickLoop;
+
+/// ECS resource wrapping all async networking channels.
+///
+/// Bridge systems drain the receivers at the start of each tick, converting
+/// messages into ECS events. Send channels are used by broadcast/QUIC systems.
+#[derive(Resource)]
+pub struct NetworkBridge {
+    /// Incoming TCP client connections.
+    pub connect_rx: mpsc::UnboundedReceiver<ClientConnectEvent>,
+    /// Incoming player input from UDP.
+    pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
+    /// Incoming inter-shard messages from QUIC.
+    pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
+    /// Send WorldState for UDP broadcast.
+    pub broadcast_tx: mpsc::Sender<ServerMsg>,
+    /// Send QUIC messages to other shards.
+    pub quic_send_tx: mpsc::Sender<(ShardId, SocketAddr, ShardMsg)>,
+    /// Client registry (TCP + UDP connections).
+    pub client_registry: Arc<RwLock<ClientRegistry>>,
+    /// Peer shard registry (discovery).
+    pub peer_registry: Arc<RwLock<PeerShardRegistry>>,
+    /// Universe epoch in Unix milliseconds (for deterministic celestial_time).
+    pub universe_epoch_ms: Arc<AtomicU64>,
+}
 
 /// Compute deterministic celestial time from the universal epoch.
 /// All shards derive the same value from wall clock — no sync messages needed.
@@ -75,7 +100,6 @@ pub struct ShardHarnessConfig {
 /// The reusable shard skeleton. Every shard type embeds this.
 pub struct ShardHarness {
     pub config: ShardHarnessConfig,
-    pub tick_loop: TickLoop,
     pub peer_registry: Arc<RwLock<PeerShardRegistry>>,
     /// Universe epoch in Unix milliseconds (from orchestrator). Shared with tick
     /// closures via Arc so they can compute deterministic celestial_time.
@@ -117,7 +141,6 @@ impl ShardHarness {
 
         Self {
             config,
-            tick_loop: TickLoop::new(),
             peer_registry: Arc::new(RwLock::new(PeerShardRegistry::new())),
             universe_epoch_ms: Arc::new(AtomicU64::new(now_unix_ms)),
             connect_rx,
@@ -135,11 +158,6 @@ impl ShardHarness {
         }
     }
 
-    /// Register a system to run each tick.
-    pub fn add_system(&mut self, name: impl Into<String>, func: impl FnMut() + Send + 'static) {
-        self.tick_loop.add_system(name, func);
-    }
-
     /// Get the shared universe epoch Arc (for tick closures to capture).
     pub fn epoch_arc(&self) -> Arc<AtomicU64> {
         self.universe_epoch_ms.clone()
@@ -150,16 +168,14 @@ impl ShardHarness {
         self.cancel.clone()
     }
 
-    /// Run the harness: starts background tasks, enters tick loop.
-    /// Returns when shutdown signal is received.
-    pub async fn run(mut self) {
+    /// Spawn all background networking tasks (TCP, UDP, QUIC, healthz, heartbeat, etc.).
+    /// Called by `run_ecs()` before entering the tick loop.
+    async fn start_networking(&mut self) {
         let shard_id = self.config.shard_id;
-        info!(shard_id = %shard_id, shard_type = %self.config.shard_type, "shard harness starting");
 
         // Register with orchestrator.
         self.register_with_orchestrator().await;
 
-        // Start background tasks.
         let cancel = self.cancel.clone();
 
         // Healthz server.
@@ -180,10 +196,6 @@ impl ShardHarness {
         // Heartbeat sender.
         let hb_cancel = cancel.clone();
         let hb_addr = self.config.orchestrator_heartbeat_addr.clone();
-        let tick_loop_ref = &self.tick_loop as *const TickLoop;
-        // Safety: tick_loop lives as long as the harness, and the metrics_fn
-        // only reads tick_ms/p99 which are updated on the same task.
-        // For a proper impl we'd use Arc<Mutex<>>, but for now send static metrics.
         let shard_id_for_hb = shard_id;
         tokio::spawn(async move {
             heartbeat_sender::run_heartbeat_sender(
@@ -430,10 +442,64 @@ impl ShardHarness {
                 }
             }
         });
+    }
 
-        // Main tick loop.
+    /// Run the harness with a bevy_ecs App.
+    ///
+    /// The shard builds its `App` with systems and resources, then passes it here.
+    /// This method:
+    /// 1. Spawns all networking background tasks
+    /// 2. Inserts a `NetworkBridge` resource into the App with all mpsc channels
+    /// 3. Drives `app.update()` at 20Hz (50ms tick interval) with per-tick diagnostics
+    ///
+    /// The shard's bevy systems drain the `NetworkBridge` channels at the start
+    /// of each tick, converting async messages into ECS events.
+    pub async fn run_ecs(mut self, mut app: App) {
+        let shard_id = self.config.shard_id;
+        info!(shard_id = %shard_id, shard_type = %self.config.shard_type, "shard harness starting");
+
+        self.start_networking().await;
+
+        // Capture deregistration info before moving receivers out of self.
+        let deregister_info = ShardInfo {
+            id: self.config.shard_id,
+            shard_type: self.config.shard_type,
+            state: ShardState::Stopped,
+            endpoint: self.build_endpoint(),
+            planet_seed: self.config.planet_seed,
+            sectors: None,
+            system_seed: self.config.system_seed,
+            ship_id: self.config.ship_id,
+            galaxy_seed: self.config.galaxy_seed,
+            host_shard_id: self.config.host_shard_id,
+            launch_args: vec![],
+        };
+        let deregister_url = format!("{}/register", self.config.orchestrator_url);
+
+        // Move networking channels into the App as a Resource.
+        // After this, self's receivers are consumed (they were UnboundedReceivers,
+        // which don't impl Clone — ownership transfers to the ECS world).
+        let bridge = NetworkBridge {
+            connect_rx: self.connect_rx,
+            input_rx: self.input_rx,
+            quic_msg_rx: self.quic_msg_rx,
+            broadcast_tx: self.broadcast_tx.clone(),
+            quic_send_tx: self.quic_send_tx.clone(),
+            client_registry: self.client_registry.clone(),
+            peer_registry: self.peer_registry.clone(),
+            universe_epoch_ms: self.universe_epoch_ms.clone(),
+        };
+        app.insert_resource(bridge);
+
+        // Main tick loop — drives bevy App at 20Hz with per-tick timing diagnostics.
+        let cancel = self.cancel.clone();
+        let tick_interval = Duration::from_millis(50); // 20Hz
+        let budget_ms = tick_interval.as_secs_f32() * 1000.0;
         info!(shard_id = %shard_id, "entering tick loop (20Hz)");
-        let mut interval = tokio::time::interval(self.tick_loop.interval());
+        let mut interval = tokio::time::interval(tick_interval);
+        let mut tick_count: u64 = 0;
+        let mut tick_history: std::collections::VecDeque<f32> =
+            std::collections::VecDeque::with_capacity(100);
 
         loop {
             tokio::select! {
@@ -442,13 +508,37 @@ impl ShardHarness {
                     break;
                 }
                 _ = interval.tick() => {
-                    self.tick_loop.tick();
+                    let tick_start = std::time::Instant::now();
+                    app.update();
+                    let elapsed_ms = tick_start.elapsed().as_secs_f32() * 1000.0;
+                    tick_count += 1;
+
+                    // Rolling p99 tracker (last 100 ticks).
+                    if tick_history.len() >= 100 {
+                        tick_history.pop_front();
+                    }
+                    tick_history.push_back(elapsed_ms);
+
+                    if elapsed_ms > budget_ms {
+                        tracing::warn!(
+                            tick = tick_count,
+                            elapsed_ms = format!("{:.2}", elapsed_ms),
+                            budget_ms = format!("{:.2}", budget_ms),
+                            "tick exceeded budget"
+                        );
+                    }
+
+                    tracing::debug!(
+                        tick = tick_count,
+                        elapsed_us = tick_start.elapsed().as_micros(),
+                        "tick"
+                    );
                 }
             }
         }
 
         // Deregister from orchestrator.
-        self.deregister_from_orchestrator().await;
+        let _ = reqwest::Client::new().post(&deregister_url).json(&deregister_info).send().await;
         info!(shard_id = %shard_id, "shard stopped");
     }
 

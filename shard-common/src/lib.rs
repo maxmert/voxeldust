@@ -1,7 +1,6 @@
 pub mod quic_transport;
 pub mod circuit_breaker;
 pub mod harness;
-pub mod tick_loop;
 pub mod peer_registry;
 pub mod heartbeat_sender;
 pub mod client_listener;
