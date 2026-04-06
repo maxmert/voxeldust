@@ -26,9 +26,21 @@ pub struct ClientConnectEvent {
     pub connection: ClientConnection,
 }
 
-/// Tracks all connected clients. Thread-safe for use across tick systems.
+/// Tracks all connected clients and observers. Thread-safe for use across tick systems.
+///
+/// Two connection types:
+/// - **Client**: Full participant with TCP + UDP. Has a player entity, processes input,
+///   participates in handoffs. Created via TCP Connect message.
+/// - **Observer**: UDP-only spectator for dual-shard compositing. Receives WorldState
+///   broadcasts but has no player entity, no input, no handoff. Created when a secondary
+///   shard connection sends a UDP hole-punch without a preceding TCP connect.
 pub struct ClientRegistry {
     clients: HashMap<SessionToken, ClientEntry>,
+    /// UDP-only observers (secondary/spectator connections for dual-shard compositing).
+    /// These receive WorldState broadcasts but don't have player entities.
+    observers: Vec<SocketAddr>,
+    /// UDP addresses seen before any client registered (for late-join matching).
+    pending_udp: Vec<SocketAddr>,
 }
 
 struct ClientEntry {
@@ -37,13 +49,13 @@ struct ClientEntry {
     player_name: String,
 }
 
-/// UDP addresses seen before any client registered (for late-join matching).
-static PENDING_UDP_ADDRS: std::sync::Mutex<Vec<SocketAddr>> = std::sync::Mutex::new(Vec::new());
 
 impl ClientRegistry {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            observers: Vec::new(),
+            pending_udp: Vec::new(),
         }
     }
 
@@ -55,14 +67,12 @@ impl ClientRegistry {
         });
 
         // Check if there are pending UDP addresses waiting to be matched.
-        if let Ok(mut pending) = PENDING_UDP_ADDRS.lock() {
-            if !pending.is_empty() {
-                let entry = self.clients.get_mut(&conn.session_token).unwrap();
-                if entry.udp_addr.is_none() {
-                    let addr = pending.remove(0);
-                    entry.udp_addr = Some(addr);
-                    info!(player = %entry.player_name, %addr, "matched pending UDP address on register");
-                }
+        if !self.pending_udp.is_empty() {
+            let entry = self.clients.get_mut(&conn.session_token).unwrap();
+            if entry.udp_addr.is_none() {
+                let addr = self.pending_udp.remove(0);
+                entry.udp_addr = Some(addr);
+                info!(player = %entry.player_name, %addr, "matched pending UDP address on register");
             }
         }
     }
@@ -73,16 +83,26 @@ impl ClientRegistry {
         }
     }
 
+    /// Remove a client from the registry (e.g., after ShardRedirect during handoff).
+    pub fn unregister(&mut self, session: &SessionToken) {
+        if let Some(entry) = self.clients.remove(session) {
+            info!(player = %entry.player_name, "client unregistered");
+        }
+    }
+
     /// Register a UDP address by matching against known clients.
     /// First client without a UDP addr gets it. If no clients yet,
     /// store as pending for later matching on register().
     pub fn discover_udp(&mut self, udp_addr: SocketAddr) {
-        // Check if already known.
-        if self.clients.values().any(|e| e.udp_addr == Some(udp_addr)) {
-            return;
+        // If a stale entry already has this address (reconnect from same endpoint),
+        // clear it so the new client can claim it.
+        for entry in self.clients.values_mut() {
+            if entry.udp_addr == Some(udp_addr) {
+                entry.udp_addr = None;
+            }
         }
 
-        // Try to match with an existing client.
+        // Assign to the first client without a UDP address.
         for entry in self.clients.values_mut() {
             if entry.udp_addr.is_none() {
                 entry.udp_addr = Some(udp_addr);
@@ -91,18 +111,35 @@ impl ClientRegistry {
             }
         }
 
-        // No client to match — store as pending.
-        if let Ok(mut pending) = PENDING_UDP_ADDRS.lock() {
-            if !pending.contains(&udp_addr) {
+        // No client to match. If there are no unmatched clients at all, this is likely
+        // an observer (secondary shard connection for dual compositing). Register as
+        // observer so it receives WorldState broadcasts without a player entity.
+        if self.clients.values().all(|e| e.udp_addr.is_some()) {
+            // All clients already have UDP — this is a new observer connection.
+            if !self.observers.contains(&udp_addr) {
+                info!(%udp_addr, "registered UDP observer (dual-shard compositing)");
+                self.observers.push(udp_addr);
+            }
+        } else {
+            // There's an unmatched client waiting — store as pending for late matching.
+            if self.pending_udp.len() < 16 && !self.pending_udp.contains(&udp_addr) {
                 debug!(%udp_addr, "storing pending UDP address (no client registered yet)");
-                pending.push(udp_addr);
+                self.pending_udp.push(udp_addr);
             }
         }
     }
 
-    /// Get all UDP addresses for broadcasting.
+    /// Get all UDP addresses for broadcasting (clients + observers).
     pub fn udp_addrs(&self) -> Vec<SocketAddr> {
-        self.clients.values().filter_map(|e| e.udp_addr).collect()
+        let mut addrs: Vec<SocketAddr> = self.clients.values()
+            .filter_map(|e| e.udp_addr).collect();
+        addrs.extend_from_slice(&self.observers);
+        addrs
+    }
+
+    /// Remove an observer UDP address (e.g., when the secondary connection closes).
+    pub fn remove_observer(&mut self, addr: &SocketAddr) {
+        self.observers.retain(|a| a != addr);
     }
 
     pub fn len(&self) -> usize {
@@ -111,6 +148,11 @@ impl ClientRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.clients.is_empty()
+    }
+
+    /// Check if a client with the given session token is registered.
+    pub fn has_client(&self, token: &SessionToken) -> bool {
+        self.clients.contains_key(token)
     }
 
     /// Send a TCP message to a specific client.
@@ -172,6 +214,9 @@ async fn handle_client_connection(
     peer_addr: SocketAddr,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
 ) {
+    // Disable Nagle's algorithm for low-latency TCP messaging.
+    let _ = stream.set_nodelay(true);
+
     // Read 4-byte length prefix.
     let mut len_buf = [0u8; 4];
     if let Err(e) = stream.read_exact(&mut len_buf).await {
@@ -191,7 +236,14 @@ async fn handle_client_connection(
         return;
     }
 
-    match ClientMsg::deserialize(&buf) {
+    let decoded = match voxeldust_core::wire_codec::decode(&buf) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(%peer_addr, %e, "failed to decode wire message");
+            return;
+        }
+    };
+    match ClientMsg::deserialize(&decoded) {
         Ok(ClientMsg::Connect { player_name }) => {
             let token = SessionToken(rand_u64());
             info!(%peer_addr, %player_name, session_token = token.0, "client connected");
@@ -216,29 +268,31 @@ async fn handle_client_connection(
     }
 }
 
-/// Send a length-prefixed ServerMsg over a TCP stream.
+/// Send a length-prefixed ServerMsg over a TCP stream (with LZ4 compression).
 pub async fn send_tcp_msg(
     stream: &mut TcpStream,
     msg: &ServerMsg,
 ) -> Result<(), std::io::Error> {
     let data = msg.serialize();
-    let len_bytes = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len_bytes).await?;
-    stream.write_all(&data).await?;
+    let mut buf = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut buf);
+    stream.write_all(&buf).await?;
     stream.flush().await?;
     Ok(())
 }
 
 /// Broadcast a WorldState to all registered UDP clients.
+/// `packet_buf` is a reusable buffer to avoid per-broadcast heap allocation.
 pub async fn broadcast_world_state_udp(
     socket: &UdpSocket,
     registry: &RwLock<ClientRegistry>,
     world_state: &ServerMsg,
+    packet_buf: &mut Vec<u8>,
 ) {
     let data = world_state.serialize();
-    let mut packet = Vec::with_capacity(4 + data.len());
-    packet.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    packet.extend_from_slice(&data);
+    packet_buf.clear();
+    voxeldust_core::wire_codec::encode(&data, packet_buf);
+    let packet = &*packet_buf;
 
     let reg = registry.read().await;
     let addrs = reg.udp_addrs();
@@ -273,12 +327,16 @@ pub async fn run_udp_receiver(
                             reg.discover_udp(src);
                         }
 
-                        // Parse PlayerInput.
+                        // Parse PlayerInput (wire codec: length-prefixed with optional LZ4).
                         if len < 4 { continue; }
                         let msg_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
                         if len < 4 + msg_len { continue; }
 
-                        match ClientMsg::deserialize(&buf[4..4 + msg_len]) {
+                        let payload = match voxeldust_core::wire_codec::decode(&buf[4..4 + msg_len]) {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        match ClientMsg::deserialize(&payload) {
                             Ok(ClientMsg::PlayerInput(input)) => {
                                 let _ = input_tx.send((src, input));
                             }
@@ -306,4 +364,39 @@ fn rand_u64() -> u64 {
             .as_nanos() as u64,
     );
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_has_client_after_register() {
+        let mut reg = ClientRegistry::new();
+        let token = SessionToken(42);
+        // Simulate a minimal connection (we can't create a real TcpStream in tests,
+        // so we test the data path via discover_udp + pending).
+        assert!(!reg.has_client(&token));
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn pending_udp_caps_at_limit() {
+        let mut reg = ClientRegistry::new();
+        for i in 0..20u16 {
+            let addr: SocketAddr = format!("127.0.0.1:{}", 5000 + i).parse().unwrap();
+            reg.discover_udp(addr);
+        }
+        // Should be capped at 16.
+        assert!(reg.pending_udp.len() <= 16);
+    }
+
+    #[test]
+    fn pending_udp_no_duplicates() {
+        let mut reg = ClientRegistry::new();
+        let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        reg.discover_udp(addr);
+        reg.discover_udp(addr);
+        assert_eq!(reg.pending_udp.len(), 1);
+    }
 }

@@ -20,3 +20,4 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 flatbuffers = { workspace = true }
+lz4_flex = { workspace = true }

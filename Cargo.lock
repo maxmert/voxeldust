@@ -1717,6 +1717,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-shard"
+version = "0.1.0"
+dependencies = [
+ "clap 4.6.0",
+ "glam 0.29.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "voxeldust-core",
+ "voxeldust-shard-common",
+]
+
+[[package]]
 name = "gateway"
 version = "0.1.0"
 dependencies = [
@@ -1935,6 +1951,12 @@ checksum = "2c4ee00b289aba7a9e5306d57c2d05499b2e5dc427f84ac708bd2c090212cf3e"
 dependencies = [
  "gl_generator",
 ]
+
+[[package]]
+name = "gooding-lambert"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abc139469912a8e85640ff5d93682b23c38f843028d46fae3f1909f1b44500c1"
 
 [[package]]
 name = "gpu-alloc"
@@ -2901,6 +2923,15 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "malloc_buf"
@@ -6224,6 +6255,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
+
+[[package]]
 name = "type-map"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6392,6 +6429,8 @@ dependencies = [
  "brahe",
  "flatbuffers",
  "glam 0.29.3",
+ "gooding-lambert",
+ "lz4_flex",
  "nalgebra 0.34.1",
  "serde",
  "thiserror 2.0.18",
@@ -6404,6 +6443,7 @@ dependencies = [
  "axum",
  "flatbuffers",
  "glam 0.29.3",
+ "lz4_flex",
  "quinn",
  "rcgen",
  "reqwest",
@@ -6428,6 +6468,7 @@ dependencies = [
  "egui-winit",
  "flatbuffers",
  "glam 0.29.3",
+ "lz4_flex",
  "pollster",
  "tokio",
  "tracing",

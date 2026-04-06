@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use voxeldust_core::shard_types::{ShardEndpoint, ShardId, ShardInfo, ShardType};
+use voxeldust_core::shard_types::{ShardEndpoint, ShardId, ShardInfo, ShardState, ShardType};
 
 /// Cached registry of peer shard endpoints, refreshed periodically
 /// from the orchestrator.
@@ -21,9 +21,14 @@ impl PeerShardRegistry {
     }
 
     /// Update the registry with a fresh list of shards from the orchestrator.
+    /// Only includes live shards (not Stopped/Draining) to prevent stale entries
+    /// from previous sessions triggering dead QUIC connections.
     pub fn update(&mut self, shards: Vec<ShardInfo>) {
         self.peers.clear();
         for info in shards {
+            if info.state == ShardState::Stopped || info.state == ShardState::Draining {
+                continue;
+            }
             self.peers.insert(info.id, PeerEntry { info });
         }
     }

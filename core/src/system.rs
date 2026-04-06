@@ -2,13 +2,53 @@
 ///
 /// Uses the brahe crate (MIT) for Kepler equation solving and
 /// orbital element → Cartesian state conversion.
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 use serde::{Deserialize, Serialize};
 
 use crate::seed::{derive_seed, seed_to_f64, seed_to_range, seed_to_u32};
 
 /// Gravitational constant in m³/(kg·s²).
 pub const G: f64 = 6.674e-11;
+
+/// Normalize an angle to [0, TAU). Rust's `%` on f64 can return negative values.
+fn normalize_angle(angle: f64) -> f64 {
+    let a = angle % std::f64::consts::TAU;
+    if a < 0.0 { a + std::f64::consts::TAU } else { a }
+}
+
+/// Solve Kepler's equation: M = E - e*sin(E) for E, given M and e.
+/// Newton-Raphson with guaranteed convergence for e < 1.
+/// Returns eccentric anomaly in radians.
+fn solve_kepler(mean_anomaly: f64, eccentricity: f64) -> f64 {
+    let m = normalize_angle(mean_anomaly);
+    let e = eccentricity;
+
+    // Initial guess: E = M + e*sin(M) (good for low eccentricity).
+    let mut ea = m + e * m.sin();
+
+    // Newton-Raphson: f(E) = E - e*sin(E) - M, f'(E) = 1 - e*cos(E).
+    for _ in 0..50 {
+        let sin_ea = ea.sin();
+        let cos_ea = ea.cos();
+        let f = ea - e * sin_ea - m;
+        let fp = 1.0 - e * cos_ea;
+        if fp.abs() < 1e-15 { break; } // degenerate
+        let delta = f / fp;
+        ea -= delta;
+        if delta.abs() < 1e-12 { break; } // converged
+    }
+    ea
+}
+
+/// Compute true anomaly from eccentric anomaly and eccentricity.
+fn eccentric_to_true_anomaly(ecc_anomaly: f64, eccentricity: f64) -> f64 {
+    let e = eccentricity;
+    let half_e = ecc_anomaly / 2.0;
+    // ν = 2 * atan2(sqrt(1+e) * sin(E/2), sqrt(1-e) * cos(E/2))
+    let y = (1.0 + e).sqrt() * half_e.sin();
+    let x = (1.0 - e).sqrt() * half_e.cos();
+    2.0 * y.atan2(x)
+}
 
 /// Hill sphere SOI factor: r_soi = a * (m_planet / m_star)^(2/5).
 pub const SOI_EXPONENT: f64 = 0.4; // 2/5
@@ -32,11 +72,11 @@ pub struct CelestialScaleConfig {
 
 impl CelestialScaleConfig {
     pub const GAMEPLAY: Self = Self {
-        time_scale: 12.0,
+        time_scale: 1.0,
         base_sma: 1.0e10,
         spawn_offset: 2.0e7,
         fallback_spawn_distance: 2.0e8,
-        rotation_period_range: (60_000.0, 120_000.0), // ~1.4-2.8 real hours at 12x
+        rotation_period_range: (3_600.0, 14_400.0), // 1-4 real hours per planet day
     };
 
     pub const REALISTIC: Self = Self {
@@ -79,6 +119,30 @@ pub struct StarParams {
     pub gm: f64,
 }
 
+/// Atmosphere parameters for a planet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AtmosphereParams {
+    /// Whether this planet has a significant atmosphere.
+    pub has_atmosphere: bool,
+    /// Height above surface where density is effectively zero (meters).
+    pub atmosphere_height: f64,
+    /// Atmospheric density at sea level (kg/m³). Earth: ~1.225.
+    pub sea_level_density: f64,
+    /// Scale height — density halves every H*ln(2) meters. Earth: ~8500 m.
+    pub scale_height: f64,
+}
+
+impl AtmosphereParams {
+    /// Compute atmospheric density at a given altitude above the surface.
+    /// Returns 0.0 if above atmosphere_height or if planet has no atmosphere.
+    pub fn density_at_altitude(&self, altitude: f64) -> f64 {
+        if !self.has_atmosphere || altitude > self.atmosphere_height || altitude < 0.0 {
+            return 0.0;
+        }
+        self.sea_level_density * (-altitude / self.scale_height).exp()
+    }
+}
+
 /// Parameters for a planet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanetParams {
@@ -94,6 +158,10 @@ pub struct PlanetParams {
     pub period: f64,
     /// Sidereal rotation period in celestial seconds (for day/night cycle).
     pub rotation_period: f64,
+    /// Surface gravity (m/s²). Cached from GM/r².
+    pub surface_gravity: f64,
+    /// Atmosphere parameters.
+    pub atmosphere: AtmosphereParams,
 }
 
 /// Complete star system parameters, generated deterministically from a seed.
@@ -207,6 +275,34 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
         SCALE.rotation_period_range.1,
     );
 
+    let surface_gravity = gm / (radius_m * radius_m);
+
+    // Atmosphere: planets >= 0.3 Earth masses (1.79e24 kg) generally have atmosphere.
+    // ~10% of eligible planets are airless (seed-based).
+    let earth_mass = 5.972e24;
+    let atmo_eligible = mass_kg >= 0.3 * earth_mass;
+    let atmo_seed_roll = seed_to_range(derive_seed(planet_seed, 10), 0.0, 1.0);
+    let has_atmosphere = atmo_eligible && atmo_seed_roll > 0.1;
+
+    let atmosphere = if has_atmosphere {
+        let scale_height = radius_m * seed_to_range(derive_seed(planet_seed, 11), 0.0008, 0.002);
+        let sea_level_density = seed_to_range(derive_seed(planet_seed, 12), 0.3, 3.0);
+        let atmo_height_factor = seed_to_range(derive_seed(planet_seed, 13), 5.0, 8.0);
+        AtmosphereParams {
+            has_atmosphere: true,
+            atmosphere_height: scale_height * atmo_height_factor,
+            sea_level_density,
+            scale_height,
+        }
+    } else {
+        AtmosphereParams {
+            has_atmosphere: false,
+            atmosphere_height: 0.0,
+            sea_level_density: 0.0,
+            scale_height: 1.0, // avoid div-by-zero
+        }
+    };
+
     PlanetParams {
         index,
         planet_seed,
@@ -224,59 +320,113 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
         gm,
         period,
         rotation_period,
+        surface_gravity,
+        atmosphere,
     }
 }
 
-/// Compute a planet's 3D position at a given time using Kepler's equation.
-/// Uses brahe for mean→eccentric anomaly conversion.
-pub fn compute_planet_position(planet: &PlanetParams, time_s: f64) -> DVec3 {
+/// Compute a planet's full Cartesian state (position + velocity) at a given time.
+///
+/// Position uses brahe's Kepler solver + orbital element → Cartesian conversion.
+/// Velocity is computed manually with the correct star GM (brahe hardcodes GM_EARTH
+/// which is wrong for our procedural stars).
+///
+/// `star_gm` is the gravitational parameter of the central star (G * star_mass).
+pub fn compute_planet_state(planet: &PlanetParams, star_gm: f64, time_s: f64) -> (DVec3, DVec3) {
     let oe = &planet.orbital_elements;
 
     // Mean anomaly at time t.
     let mean_motion = std::f64::consts::TAU / planet.period;
-    let mean_anomaly = (oe.mean_anomaly_epoch + mean_motion * time_s) % std::f64::consts::TAU;
+    let mean_anomaly = normalize_angle(oe.mean_anomaly_epoch + mean_motion * time_s);
 
     use brahe::constants::units::AngleFormat;
 
-    // Solve Kepler's equation: M = E - e*sin(E) → find E.
-    let ecc_anomaly = brahe::orbits::keplerian::anomaly_mean_to_eccentric(
-        mean_anomaly,
-        oe.eccentricity,
-        AngleFormat::Radians,
-    )
-    .expect("Kepler equation failed to converge");
-
-    // Eccentric anomaly → true anomaly.
-    let true_anomaly = brahe::orbits::keplerian::anomaly_eccentric_to_true(
-        ecc_anomaly,
-        oe.eccentricity,
-        AngleFormat::Radians,
-    );
-
-    // Convert Keplerian elements to Cartesian position using brahe.
-    // brahe expects: [sma, ecc, inc, raan, aop, true_anomaly] in radians.
+    // --- Position: use brahe's state_koe_to_eci with MEAN_ANOMALY (not true anomaly). ---
+    // Brahe internally solves M → E → ν → position. Passing mean_anomaly is the correct API usage.
     let koe = nalgebra::SVector::<f64, 6>::new(
-        oe.sma,
-        oe.eccentricity,
-        oe.inclination,
-        oe.raan,
-        oe.arg_periapsis,
-        true_anomaly,
+        oe.sma, oe.eccentricity, oe.inclination, oe.raan, oe.arg_periapsis,
+        mean_anomaly, // CORRECT: 6th element is mean anomaly for state_koe_to_eci
+    );
+    let state = brahe::coordinates::cartesian::state_koe_to_eci(koe, AngleFormat::Radians);
+    let position = DVec3::new(state[0], state[1], state[2]);
+
+    // --- Velocity: compute with correct star GM (brahe hardcodes GM_EARTH). ---
+    // Solve Kepler ourselves for E → ν, then compute velocity in perifocal frame.
+    let ecc_anomaly = solve_kepler(mean_anomaly, oe.eccentricity);
+    let true_anomaly = eccentric_to_true_anomaly(ecc_anomaly, oe.eccentricity);
+
+    // --- Perifocal (PQW) frame vectors ---
+    // P = periapsis direction, Q = 90° ahead in orbit plane.
+    let e = oe.eccentricity;
+    let i = oe.inclination;
+    let raan = oe.raan;
+    let omega = oe.arg_periapsis;
+
+    let p_vec = DVec3::new(
+        omega.cos() * raan.cos() - omega.sin() * i.cos() * raan.sin(),
+        omega.cos() * raan.sin() + omega.sin() * i.cos() * raan.cos(),
+        omega.sin() * i.sin(),
+    );
+    let q_vec = DVec3::new(
+        -omega.sin() * raan.cos() - omega.cos() * i.cos() * raan.sin(),
+        -omega.sin() * raan.sin() + omega.cos() * i.cos() * raan.cos(),
+        omega.cos() * i.sin(),
     );
 
-    let state = brahe::coordinates::cartesian::state_koe_to_eci(
-        koe,
-        AngleFormat::Radians,
-    );
+    // --- Velocity with correct star GM ---
+    // v_perifocal = sqrt(GM/p) * [-sin(ν) * P + (e + cos(ν)) * Q]
+    // where p = a(1-e²) is the semi-latus rectum, ν = true anomaly.
+    let p_slr = oe.sma * (1.0 - e * e); // semi-latus rectum
+    let sqrt_gm_over_p = (star_gm / p_slr).sqrt();
+    let v_p = -true_anomaly.sin() * sqrt_gm_over_p;
+    let v_q = (e + true_anomaly.cos()) * sqrt_gm_over_p;
+    let velocity = p_vec * v_p + q_vec * v_q;
 
-    // state = [x, y, z, vx, vy, vz] — we only need position.
+    (position, velocity)
+}
+
+/// Compute a planet's 3D position at a given time.
+/// Uses brahe's state_koe_to_eci with mean_anomaly (correct 6th element).
+pub fn compute_planet_position(planet: &PlanetParams, time_s: f64) -> DVec3 {
+    let oe = &planet.orbital_elements;
+    let mean_motion = std::f64::consts::TAU / planet.period;
+    let mean_anomaly = normalize_angle(oe.mean_anomaly_epoch + mean_motion * time_s);
+
+    use brahe::constants::units::AngleFormat;
+    let koe = nalgebra::SVector::<f64, 6>::new(
+        oe.sma, oe.eccentricity, oe.inclination, oe.raan, oe.arg_periapsis,
+        mean_anomaly, // CORRECT: brahe expects mean anomaly, solves Kepler internally
+    );
+    let state = brahe::coordinates::cartesian::state_koe_to_eci(koe, AngleFormat::Radians);
     DVec3::new(state[0], state[1], state[2])
+}
+
+/// Compute a planet's orbital velocity at a given time (m/s per celestial second).
+/// Uses the correct star GM (not brahe's hardcoded GM_EARTH).
+///
+/// NOTE: This returns dPosition/dCelestialTime. For real-space velocity (m/s per
+/// real second), multiply by `time_scale` or use `compute_planet_velocity_realtime`.
+pub fn compute_planet_velocity(planet: &PlanetParams, star_gm: f64, time_s: f64) -> DVec3 {
+    compute_planet_state(planet, star_gm, time_s).1
+}
+
+/// Compute a planet's velocity in real-time system-space coordinates (m/s per real second).
+///
+/// Accounts for celestial time scale: `real_vel = celestial_vel × time_scale`.
+/// Use this for reference frame conversions (patched conics SOI transitions).
+pub fn compute_planet_velocity_realtime(
+    planet: &PlanetParams,
+    star_gm: f64,
+    celestial_time: f64,
+    time_scale: f64,
+) -> DVec3 {
+    compute_planet_velocity(planet, star_gm, celestial_time) * time_scale
 }
 
 /// Compute a planet's rotation angle at a given celestial time.
 /// Returns angle in radians [0, TAU).
 pub fn compute_planet_rotation(planet: &PlanetParams, celestial_time_s: f64) -> f64 {
-    (std::f64::consts::TAU * celestial_time_s / planet.rotation_period) % std::f64::consts::TAU
+    normalize_angle(std::f64::consts::TAU * celestial_time_s / planet.rotation_period)
 }
 
 /// Compute gravitational acceleration at a position from all bodies.
@@ -313,6 +463,354 @@ pub fn compute_gravity_acceleration(
 /// Uses Hill sphere approximation: r_soi = a * (m_planet / m_star)^(2/5).
 pub fn compute_soi_radius(planet: &PlanetParams, star: &StarParams) -> f64 {
     planet.orbital_elements.sma * (planet.mass_kg / star.mass_kg).powf(SOI_EXPONENT)
+}
+
+/// Check if a position is within any planet's atmosphere.
+/// Returns `Some((planet_index, altitude_above_surface))` if inside, `None` otherwise.
+pub fn check_atmosphere(
+    position: DVec3,
+    planets: &[PlanetParams],
+    planet_positions: &[DVec3],
+) -> Option<(usize, f64)> {
+    for (i, (planet, &planet_pos)) in planets.iter().zip(planet_positions.iter()).enumerate() {
+        if !planet.atmosphere.has_atmosphere {
+            continue;
+        }
+        let dist = (position - planet_pos).length();
+        let altitude = dist - planet.radius_m;
+        if altitude < planet.atmosphere.atmosphere_height && altitude >= 0.0 {
+            return Some((i, altitude));
+        }
+    }
+    None
+}
+
+/// Compute atmospheric drag acceleration on a ship.
+///
+/// Uses the standard drag formula: `a = -0.5 * Cd * (A/m) * ρ * |v|² * v_hat`
+/// All ship properties come from the entity, not hardcoded constants.
+///
+/// `dt` is used for stability clamping (prevents velocity reversal in one tick).
+pub fn compute_atmospheric_drag(
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    planet_pos: DVec3,
+    planet: &PlanetParams,
+    ship_mass: f64,
+    ship_cross_section: f64,
+    ship_drag_coeff: f64,
+    dt: f64,
+) -> DVec3 {
+    if !planet.atmosphere.has_atmosphere {
+        return DVec3::ZERO;
+    }
+    let dist = (ship_pos - planet_pos).length();
+    let altitude = dist - planet.radius_m;
+    let density = planet.atmosphere.density_at_altitude(altitude);
+    if density <= 0.0 {
+        return DVec3::ZERO;
+    }
+
+    let speed = ship_vel.length();
+    if speed < 0.01 {
+        return DVec3::ZERO;
+    }
+
+    // F_drag = 0.5 * rho * v^2 * Cd * A
+    let drag_force = 0.5 * density * speed * speed * ship_drag_coeff * ship_cross_section;
+    let drag_accel = drag_force / ship_mass;
+
+    // Stability clamp: don't decelerate more than 50% of speed in one tick.
+    let max_decel = 0.5 * speed / dt;
+    let clamped = drag_accel.min(max_decel);
+
+    // Drag opposes velocity.
+    let v_hat = ship_vel / speed;
+    -v_hat * clamped
+}
+
+// ---------------------------------------------------------------------------
+// Orientation-dependent aerodynamics
+// ---------------------------------------------------------------------------
+
+use crate::autopilot::ShipPhysicalProperties;
+
+/// Compute orientation-dependent effective cross-section and drag coefficient.
+///
+/// Projects the velocity vector into the ship's local frame, then weights
+/// per-axis cross-sections and Cd values by direction cosines.
+/// Returns `(effective_area_m2, effective_cd)`.
+pub fn compute_effective_drag_area(
+    ship_rotation: DQuat,
+    velocity: DVec3,
+    props: &ShipPhysicalProperties,
+) -> (f64, f64) {
+    let speed = velocity.length();
+    if speed < 0.01 {
+        return (props.cross_section_front, props.cd_front);
+    }
+
+    // Velocity direction in ship-local frame
+    let v_local = ship_rotation.inverse() * (velocity / speed);
+
+    // Direction cosines (absolute values)
+    let ax = v_local.x.abs(); // side contribution
+    let ay = v_local.y.abs(); // top/bottom contribution
+    let az = v_local.z.abs(); // front/back contribution
+
+    let area = ax * props.cross_section_side
+             + ay * props.cross_section_top
+             + az * props.cross_section_front;
+
+    let cd = ax * props.cd_side
+           + ay * props.cd_top
+           + az * props.cd_front;
+
+    (area, cd)
+}
+
+/// Compute aerodynamic lift force as acceleration (m/s²).
+///
+/// Uses flat-plate Newtonian model: `Cl = Cl_max * sin(2*alpha)`.
+/// Boxy ships have low Cl_max (~0.6 vs 1.5+ for airfoils).
+/// Lift is perpendicular to velocity in the plane of velocity and ship's up vector.
+pub fn compute_aerodynamic_lift(
+    ship_rotation: DQuat,
+    velocity: DVec3,
+    density: f64,
+    props: &ShipPhysicalProperties,
+) -> DVec3 {
+    let speed = velocity.length();
+    if speed < 1.0 || density < 1e-6 {
+        return DVec3::ZERO;
+    }
+
+    let v_hat = velocity / speed;
+
+    // Velocity in ship-local frame for angle-of-attack computation
+    let v_local = ship_rotation.inverse() * v_hat;
+    // AoA in pitch plane (Y-Z plane of ship).
+    // Positive AoA = nose above velocity (airflow from below = lift upward).
+    // Negate v_local.y because downward velocity component means positive AoA.
+    let alpha = (-v_local.y).atan2(-v_local.z);
+
+    const CL_MAX: f64 = 0.6; // boxy ship
+    let cl = CL_MAX * (2.0 * alpha).sin();
+
+    // Lift direction: component of ship_up perpendicular to velocity
+    let ship_up = ship_rotation * DVec3::Y;
+    let lift_dir_raw = ship_up - v_hat * ship_up.dot(v_hat);
+    let lift_dir_len = lift_dir_raw.length();
+    if lift_dir_len < 1e-8 {
+        return DVec3::ZERO;
+    }
+    let lift_dir = lift_dir_raw / lift_dir_len;
+
+    // L = 0.5 * rho * v^2 * Cl * A_ref
+    let lift_force = 0.5 * density * speed * speed * cl * props.cross_section_top;
+    let lift_accel = lift_force / props.mass_kg;
+
+    lift_dir * lift_accel
+}
+
+/// Compute aerodynamic weathercock torque (world-space, in N*m).
+///
+/// The center of pressure (CoP) behind the center of mass creates a restoring
+/// torque that aligns the ship nose-first into the airflow. Includes angular
+/// velocity damping to prevent oscillation.
+///
+/// Returns world-space torque vector.
+pub fn compute_aerodynamic_torque(
+    ship_rotation: DQuat,
+    velocity: DVec3,
+    angular_velocity: DVec3,
+    density: f64,
+    props: &ShipPhysicalProperties,
+) -> DVec3 {
+    let speed = velocity.length();
+    if speed < 5.0 || density < 1e-6 {
+        return DVec3::ZERO;
+    }
+
+    // Velocity in ship-local frame
+    let v_hat_local = ship_rotation.inverse() * (velocity / speed);
+
+    // Lateral components (deviation from nose-first)
+    let lateral_x = v_hat_local.x; // sideslip
+    let lateral_y = v_hat_local.y; // angle of attack
+
+    // Dynamic pressure
+    let q = 0.5 * density * speed * speed;
+
+    // Restoring torque: lateral aero force at CoP creates moment about CoM.
+    // Torque about Y (yaw) from sideslip:
+    let yaw_torque = -q * props.cd_side * props.cross_section_side
+                     * lateral_x * props.cop_offset_z;
+    // Torque about X (pitch) from AoA:
+    let pitch_torque = q * props.cd_top * props.cross_section_top
+                       * lateral_y * props.cop_offset_z;
+
+    let torque_local = DVec3::new(pitch_torque, yaw_torque, 0.0);
+
+    // Angular damping: resists rotation in atmosphere (prevents oscillation).
+    let (ix, iy, _iz) = props.moment_of_inertia();
+    let ang_vel_local = ship_rotation.inverse() * angular_velocity;
+    let damping_factor = density * speed * props.cop_offset_z.abs()
+                        * props.cross_section_side.max(props.cross_section_top);
+    let damping_local = DVec3::new(
+        -ang_vel_local.x * damping_factor * 0.5,
+        -ang_vel_local.y * damping_factor * 0.5,
+        -ang_vel_local.z * damping_factor * 0.1, // less roll damping
+    );
+
+    // Clamp total torque to prevent angular velocity reversal in one tick.
+    // Max angular acceleration: 5.2 rad/s² (half of max_angular_velocity / DT).
+    let max_ang_accel = 5.2;
+    let total_local = torque_local + damping_local;
+    let clamped = DVec3::new(
+        total_local.x.clamp(-max_ang_accel * ix, max_ang_accel * ix),
+        total_local.y.clamp(-max_ang_accel * iy, max_ang_accel * iy),
+        total_local.z, // roll is small, no clamp needed
+    );
+
+    ship_rotation * clamped
+}
+
+/// Sutton-Graves constant for N₂/O₂ atmospheres (SI units).
+const SUTTON_GRAVES_K: f64 = 1.7415e-4;
+
+/// Compute re-entry heating and thermal damage.
+///
+/// Uses Sutton-Graves stagnation point heat flux: `q = k * sqrt(rho/r_nose) * v³`.
+/// Returns `(heat_flux_w_m2, thermal_damage_this_tick)`.
+pub fn compute_reentry_heating(
+    speed: f64,
+    density: f64,
+    props: &ShipPhysicalProperties,
+    thermal_energy: &mut f64,
+    dt: f64,
+) -> (f64, f64) {
+    if density < 1e-8 || speed < 100.0 {
+        // Radiative cooling only (slow exponential decay)
+        *thermal_energy = (*thermal_energy - *thermal_energy * 0.02 * dt).max(0.0);
+        return (0.0, 0.0);
+    }
+
+    // Stagnation point heat flux
+    let q_stag = SUTTON_GRAVES_K * (density / props.nose_radius_m).sqrt() * speed.powi(3);
+
+    // Total heating power on front face (40% average factor vs stagnation peak)
+    let heating_power = q_stag * props.cross_section_front * 0.4;
+
+    // Radiative cooling: proportional to stored energy^(4/3)
+    let energy_fraction = *thermal_energy / props.thermal_capacity_j.max(1.0);
+    let cooling_power = props.thermal_emissivity * 50.0 * energy_fraction.powf(1.33)
+                       * props.cross_section_front * 1000.0;
+
+    // Net energy change
+    let net_power = heating_power - cooling_power;
+    *thermal_energy = (*thermal_energy + net_power * dt).max(0.0);
+
+    // Damage: excess energy above capacity
+    let damage = if *thermal_energy > props.thermal_capacity_j {
+        let excess = *thermal_energy - props.thermal_capacity_j;
+        *thermal_energy = props.thermal_capacity_j;
+        excess / 1e7 // 1 HP per 10 MJ excess
+    } else {
+        0.0
+    };
+
+    (q_stag, damage)
+}
+
+/// Complete aerodynamic computation result for one ship in one tick.
+#[derive(Debug, Clone)]
+pub struct AerodynamicsResult {
+    /// Drag acceleration (m/s², opposes velocity).
+    pub drag_accel: DVec3,
+    /// Lift acceleration (m/s², perpendicular to velocity).
+    pub lift_accel: DVec3,
+    /// Aerodynamic torque (N*m, world-space).
+    pub aero_torque: DVec3,
+    /// Stagnation point heat flux (W/m²).
+    pub heat_flux: f64,
+    /// Thermal damage this tick (HP).
+    pub thermal_damage: f64,
+    /// Atmospheric density at ship position (kg/m³).
+    pub density: f64,
+    /// Altitude above planet surface (meters).
+    pub altitude: f64,
+}
+
+impl AerodynamicsResult {
+    pub const ZERO: Self = Self {
+        drag_accel: DVec3::ZERO,
+        lift_accel: DVec3::ZERO,
+        aero_torque: DVec3::ZERO,
+        heat_flux: 0.0,
+        thermal_damage: 0.0,
+        density: 0.0,
+        altitude: f64::INFINITY,
+    };
+}
+
+/// Compute all aerodynamic effects for one ship in one tick.
+///
+/// Single density lookup, then drag (orientation-dependent), lift, torque, and heating.
+/// Works identically for manual flight and autopilot.
+pub fn compute_full_aerodynamics(
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    ship_rotation: DQuat,
+    angular_velocity: DVec3,
+    planet_pos: DVec3,
+    planet: &PlanetParams,
+    props: &ShipPhysicalProperties,
+    thermal_energy: &mut f64,
+    dt: f64,
+) -> AerodynamicsResult {
+    if !planet.atmosphere.has_atmosphere {
+        return AerodynamicsResult::ZERO;
+    }
+
+    let dist = (ship_pos - planet_pos).length();
+    let altitude = dist - planet.radius_m;
+    let density = planet.atmosphere.density_at_altitude(altitude);
+
+    if density < 1e-10 {
+        // No atmosphere — only radiative cooling
+        *thermal_energy = (*thermal_energy * (-0.02 * dt).exp()).max(0.0);
+        return AerodynamicsResult { altitude, ..AerodynamicsResult::ZERO };
+    }
+
+    let speed = ship_vel.length();
+    if speed < 0.01 {
+        return AerodynamicsResult { density, altitude, ..AerodynamicsResult::ZERO };
+    }
+
+    // 1. Orientation-dependent drag
+    let (eff_area, eff_cd) = compute_effective_drag_area(ship_rotation, ship_vel, props);
+    let drag_force = 0.5 * density * speed * speed * eff_cd * eff_area;
+    let drag_accel_mag = (drag_force / props.mass_kg).min(0.5 * speed / dt); // stability clamp
+    let drag_accel = -(ship_vel / speed) * drag_accel_mag;
+
+    // 2. Lift
+    let lift_accel = compute_aerodynamic_lift(ship_rotation, ship_vel, density, props);
+
+    // 3. Torque (weathercock + damping)
+    let aero_torque = compute_aerodynamic_torque(
+        ship_rotation, ship_vel, angular_velocity, density, props,
+    );
+
+    // 4. Re-entry heating
+    let (heat_flux, thermal_damage) = compute_reentry_heating(
+        speed, density, props, thermal_energy, dt,
+    );
+
+    AerodynamicsResult {
+        drag_accel, lift_accel, aero_torque,
+        heat_flux, thermal_damage, density, altitude,
+    }
 }
 
 /// Compute the sun direction from an observer position.
@@ -496,7 +994,7 @@ mod tests {
     fn scale_config_switchable() {
         // Verify both configs have sane values
         assert_eq!(CelestialScaleConfig::REALISTIC.time_scale, 1.0);
-        assert!(CelestialScaleConfig::GAMEPLAY.time_scale > 1.0);
+        assert_eq!(CelestialScaleConfig::GAMEPLAY.time_scale, 1.0);
         assert!(CelestialScaleConfig::GAMEPLAY.base_sma < CelestialScaleConfig::REALISTIC.base_sma);
     }
 
@@ -512,5 +1010,122 @@ mod tests {
         let accel = compute_gravity_acceleration(pos, &sys.star, &sys.planets, &positions, 0.0);
         // Primary gravity should point toward origin (star dominates at this distance).
         assert!(accel.x < 0.0, "gravity should point toward star");
+    }
+
+    // -- Aerodynamics tests --
+
+    #[test]
+    fn effective_drag_area_nose_first() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let props = ShipPhysicalProperties::starter_ship();
+        let rotation = DQuat::IDENTITY;
+        // Velocity along -Z (ship's forward axis)
+        let vel = DVec3::new(0.0, 0.0, -100.0);
+        let (area, cd) = compute_effective_drag_area(rotation, vel, &props);
+        assert!((area - props.cross_section_front).abs() < 0.1,
+            "nose-first area should be front cross-section, got {area}");
+        assert!((cd - props.cd_front).abs() < 0.01,
+            "nose-first Cd should be cd_front, got {cd}");
+    }
+
+    #[test]
+    fn effective_drag_area_broadside() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let props = ShipPhysicalProperties::starter_ship();
+        let rotation = DQuat::IDENTITY;
+        // Velocity along +X (broadside)
+        let vel = DVec3::new(100.0, 0.0, 0.0);
+        let (area, cd) = compute_effective_drag_area(rotation, vel, &props);
+        assert!((area - props.cross_section_side).abs() < 0.1,
+            "broadside area should be side cross-section, got {area}");
+        assert!((cd - props.cd_side).abs() < 0.01,
+            "broadside Cd should be cd_side, got {cd}");
+    }
+
+    #[test]
+    fn drag_nose_vs_broadside_ratio() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let props = ShipPhysicalProperties::starter_ship();
+        let rotation = DQuat::IDENTITY;
+        let (area_nose, cd_nose) = compute_effective_drag_area(
+            rotation, DVec3::new(0.0, 0.0, -100.0), &props);
+        let (area_side, cd_side) = compute_effective_drag_area(
+            rotation, DVec3::new(100.0, 0.0, 0.0), &props);
+        let drag_ratio = (area_nose * cd_nose) / (area_side * cd_side);
+        assert!(drag_ratio < 0.35, "nose drag should be ~30% of broadside, got {:.1}%", drag_ratio * 100.0);
+        assert!(drag_ratio > 0.25, "nose drag ratio too low: {:.1}%", drag_ratio * 100.0);
+    }
+
+    #[test]
+    fn lift_zero_at_zero_aoa() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let props = ShipPhysicalProperties::starter_ship();
+        let rotation = DQuat::IDENTITY;
+        // Velocity exactly along ship's forward (-Z): zero angle of attack
+        let vel = DVec3::new(0.0, 0.0, -300.0);
+        let lift = compute_aerodynamic_lift(rotation, vel, 1.225, &props);
+        assert!(lift.length() < 0.1, "lift should be ~0 at zero AoA, got {}", lift.length());
+    }
+
+    #[test]
+    fn lift_nonzero_at_angle_of_attack() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let props = ShipPhysicalProperties::starter_ship();
+        let rotation = DQuat::IDENTITY;
+        // Velocity at ~20 degrees below ship's forward
+        let speed = 300.0;
+        let alpha = 20.0_f64.to_radians();
+        let vel = DVec3::new(0.0, -speed * alpha.sin(), -speed * alpha.cos());
+        let lift = compute_aerodynamic_lift(rotation, vel, 1.225, &props);
+        assert!(lift.length() > 10.0, "lift should be significant at 20 deg AoA, got {}", lift.length());
+        // Lift should be mostly upward (positive Y)
+        assert!(lift.y > 0.0, "lift should be upward");
+    }
+
+    #[test]
+    fn aero_torque_restoring() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let props = ShipPhysicalProperties::starter_ship();
+        let rotation = DQuat::IDENTITY;
+        // Velocity at angle to ship: flow coming from +X (sideslip)
+        let vel = DVec3::new(200.0, 0.0, -200.0); // 45 degree sideslip
+        let ang_vel = DVec3::ZERO;
+        let torque = compute_aerodynamic_torque(rotation, vel, ang_vel, 1.225, &props);
+        // Torque should try to yaw the ship to face the velocity (restoring)
+        assert!(torque.length() > 100.0, "torque should be significant for 45 deg sideslip");
+    }
+
+    #[test]
+    fn full_aerodynamics_no_atmosphere() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let sys = SystemParams::from_seed(42);
+        let props = ShipPhysicalProperties::starter_ship();
+        // Create a planet with no atmosphere
+        let mut planet = sys.planets[0].clone();
+        planet.atmosphere.has_atmosphere = false;
+        let mut thermal = 0.0;
+        let result = compute_full_aerodynamics(
+            DVec3::new(planet.radius_m + 1000.0, 0.0, 0.0),
+            DVec3::new(0.0, 0.0, -1000.0),
+            DQuat::IDENTITY, DVec3::ZERO,
+            DVec3::ZERO, &planet, &props, &mut thermal, 0.05,
+        );
+        assert!(result.drag_accel.length() < 1e-10, "no drag without atmosphere");
+        assert!(result.lift_accel.length() < 1e-10, "no lift without atmosphere");
+    }
+
+    #[test]
+    fn reentry_heating_accumulates() {
+        use crate::autopilot::ShipPhysicalProperties;
+        let props = ShipPhysicalProperties::starter_ship();
+        let mut thermal_energy = 0.0;
+        let density = 0.001; // ~50 km altitude in Earth atmosphere
+        let speed = 7000.0; // orbital velocity
+
+        let (flux, _damage) = compute_reentry_heating(speed, density, &props, &mut thermal_energy, 0.05);
+
+        assert!(flux > 1e5, "heat flux should be substantial at orbital speed, got {flux:.0}");
+        assert!(thermal_energy > 0.0, "thermal energy should accumulate");
+        assert!(thermal_energy < props.thermal_capacity_j, "should not exceed capacity in one tick");
     }
 }

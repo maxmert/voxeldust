@@ -3,7 +3,7 @@ use glam::{DQuat, DVec3};
 
 use crate::handoff::{self, ShardRedirect};
 use crate::protocol_generated as fb;
-use crate::shard_message::MessageError;
+use crate::shard_message::{AutopilotSnapshotData, MessageError};
 use crate::shard_types::{SessionToken, ShardId};
 
 /// Client → server messages.
@@ -25,6 +25,7 @@ pub enum ServerMsg {
     PlayerDestroyed(PlayerDestroyedData),
     StarCatalog(StarCatalogData),
     ShardPreConnect(handoff::ShardPreConnect),
+    GalaxyWorldState(GalaxyWorldStateData),
 }
 
 #[derive(Debug, Clone)]
@@ -59,13 +60,28 @@ pub struct StarCatalogEntryData {
     pub luminosity: f32,
 }
 
+/// Galaxy shard world state sent to client during warp travel.
 #[derive(Debug, Clone)]
+pub struct GalaxyWorldStateData {
+    pub tick: u64,
+    pub ship_position: DVec3,   // in galaxy units
+    pub ship_velocity: DVec3,   // in galaxy units/s
+    pub ship_rotation: DQuat,
+    pub warp_phase: u8,         // FlightPhase as u8
+    pub eta_seconds: f64,
+    pub origin_star_index: u32,
+    pub target_star_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlayerInputData {
     pub movement: [f32; 3],
     pub look_yaw: f32,
     pub look_pitch: f32,
     pub jump: bool,
     pub fly_toggle: bool,
+    /// Toggle orbit stabilizer: when true, SOI entry zeros planet-relative velocity.
+    pub orbit_stabilizer_toggle: bool,
     pub speed_tier: u8,
     pub action: u8,
     pub block_type: u16,
@@ -89,6 +105,10 @@ pub struct WorldStateData {
     pub ships: Vec<ShipRenderData>,
     pub lighting: Option<LightingData>,
     pub game_time: f64,
+    /// Server-authoritative warp target star index (0xFFFFFFFF = none).
+    pub warp_target_star_index: u32,
+    /// Server-authoritative autopilot state (None = autopilot inactive).
+    pub autopilot: Option<AutopilotSnapshotData>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,7 +200,7 @@ fn from_fb_quatd(q: &fb::Quatd) -> DQuat {
 
 impl ClientMsg {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut builder = FlatBufferBuilder::with_capacity(256);
+        let mut builder = crate::builder_pool::acquire(256);
 
         match self {
             ClientMsg::Connect { player_name } => {
@@ -211,6 +231,7 @@ impl ClientMsg {
                         look_pitch: data.look_pitch,
                         jump: data.jump,
                         fly_toggle: data.fly_toggle,
+                        orbit_stabilizer_toggle: data.orbit_stabilizer_toggle,
                         speed_tier: data.speed_tier,
                         action: data.action,
                         block_type: data.block_type,
@@ -251,7 +272,9 @@ impl ClientMsg {
             }
         }
 
-        builder.finished_data().to_vec()
+        let result = builder.finished_data().to_vec();
+        crate::builder_pool::release(builder);
+        result
     }
 
     pub fn deserialize(buf: &[u8]) -> Result<Self, MessageError> {
@@ -280,6 +303,7 @@ impl ClientMsg {
                     look_pitch: p.look_pitch(),
                     jump: p.jump(),
                     fly_toggle: p.fly_toggle(),
+                    orbit_stabilizer_toggle: p.orbit_stabilizer_toggle(),
                     speed_tier: p.speed_tier(),
                     action: p.action(),
                     block_type: p.block_type(),
@@ -305,7 +329,7 @@ impl ClientMsg {
 
 impl ServerMsg {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut builder = FlatBufferBuilder::with_capacity(512);
+        let mut builder = crate::builder_pool::acquire(512);
 
         match self {
             ServerMsg::JoinResponse(data) => {
@@ -405,6 +429,25 @@ impl ServerMsg {
                     })
                 });
 
+                let ap_offset = data.autopilot.as_ref().map(|ap| {
+                    let ip = to_fb_vec3d(&ap.intercept_pos);
+                    let av = to_fb_vec3d(&ap.target_arrival_vel);
+                    fb::AutopilotSnapshot::create(
+                        &mut builder,
+                        &fb::AutopilotSnapshotArgs {
+                            phase: ap.phase,
+                            mode: ap.mode,
+                            target_planet_index: ap.target_planet_index,
+                            thrust_tier: ap.thrust_tier,
+                            intercept_pos: Some(&ip),
+                            target_arrival_vel: Some(&av),
+                            braking_committed: ap.braking_committed,
+                            eta_real_seconds: ap.eta_real_seconds,
+                            target_orbit_altitude: ap.target_orbit_altitude,
+                        },
+                    )
+                });
+
                 let ws = fb::WorldState::create(&mut builder, &fb::WorldStateArgs {
                     tick: data.tick,
                     origin: Some(&origin),
@@ -413,6 +456,8 @@ impl ServerMsg {
                     ships: Some(ships_vec),
                     lighting: lighting_fb,
                     game_time: data.game_time,
+                    warp_target_star_index: data.warp_target_star_index,
+                    autopilot: ap_offset,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::WorldState,
@@ -500,9 +545,31 @@ impl ServerMsg {
                 });
                 builder.finish(msg, None);
             }
+            ServerMsg::GalaxyWorldState(data) => {
+                let pos = to_fb_vec3d(&data.ship_position);
+                let vel = to_fb_vec3d(&data.ship_velocity);
+                let rot = to_fb_quatd(&data.ship_rotation);
+                let gws = fb::GalaxyWorldState::create(&mut builder, &fb::GalaxyWorldStateArgs {
+                    tick: data.tick,
+                    ship_position: Some(&pos),
+                    ship_velocity: Some(&vel),
+                    ship_rotation: Some(&rot),
+                    warp_phase: data.warp_phase,
+                    eta_seconds: data.eta_seconds,
+                    origin_star_index: data.origin_star_index,
+                    target_star_index: data.target_star_index,
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::GalaxyWorldState,
+                    payload: Some(gws.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
-        builder.finished_data().to_vec()
+        let result = builder.finished_data().to_vec();
+        crate::builder_pool::release(builder);
+        result
     }
 
     pub fn deserialize(buf: &[u8]) -> Result<Self, MessageError> {
@@ -603,6 +670,22 @@ impl ServerMsg {
                     }
                 });
 
+                let autopilot = ws.autopilot().map(|ap| {
+                    let ip = ap.intercept_pos().map(|v| from_fb_vec3d(v)).unwrap_or(DVec3::ZERO);
+                    let av = ap.target_arrival_vel().map(|v| from_fb_vec3d(v)).unwrap_or(DVec3::ZERO);
+                    AutopilotSnapshotData {
+                        phase: ap.phase(),
+                        mode: ap.mode(),
+                        target_planet_index: ap.target_planet_index(),
+                        thrust_tier: ap.thrust_tier(),
+                        intercept_pos: ip,
+                        target_arrival_vel: av,
+                        braking_committed: ap.braking_committed(),
+                        eta_real_seconds: ap.eta_real_seconds(),
+                        target_orbit_altitude: ap.target_orbit_altitude(),
+                    }
+                });
+
                 Ok(ServerMsg::WorldState(WorldStateData {
                     tick: ws.tick(),
                     origin: from_fb_vec3d(origin),
@@ -611,6 +694,8 @@ impl ServerMsg {
                     ships,
                     lighting,
                     game_time: ws.game_time(),
+                    warp_target_star_index: ws.warp_target_star_index(),
+                    autopilot,
                 }))
             }
             fb::ServerPayload::ChunkBlockMods => {
@@ -679,6 +764,26 @@ impl ServerMsg {
                     planet_index: pc.planet_index(),
                     reference_position: from_fb_vec3d(ref_pos),
                     reference_rotation: from_fb_quatd(ref_rot),
+                }))
+            }
+            fb::ServerPayload::GalaxyWorldState => {
+                let gws = msg.payload_as_galaxy_world_state()
+                    .ok_or(MessageError::MissingField("GalaxyWorldState payload"))?;
+                let pos = gws.ship_position()
+                    .ok_or(MessageError::MissingField("ship_position"))?;
+                let vel = gws.ship_velocity()
+                    .ok_or(MessageError::MissingField("ship_velocity"))?;
+                let rot = gws.ship_rotation()
+                    .ok_or(MessageError::MissingField("ship_rotation"))?;
+                Ok(ServerMsg::GalaxyWorldState(GalaxyWorldStateData {
+                    tick: gws.tick(),
+                    ship_position: from_fb_vec3d(pos),
+                    ship_velocity: from_fb_vec3d(vel),
+                    ship_rotation: from_fb_quatd(rot),
+                    warp_phase: gws.warp_phase(),
+                    eta_seconds: gws.eta_seconds(),
+                    origin_star_index: gws.origin_star_index(),
+                    target_star_index: gws.target_star_index(),
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),
@@ -771,6 +876,7 @@ mod tests {
             look_pitch: -0.5,
             jump: true,
             fly_toggle: false,
+            orbit_stabilizer_toggle: false,
             speed_tier: 2,
             action: 1,
             block_type: 3,
@@ -814,6 +920,8 @@ mod tests {
                 ambient: 0.08,
             }),
             game_time: 42.0,
+            warp_target_star_index: 0,
+            autopilot: None,
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();
@@ -822,6 +930,7 @@ mod tests {
             assert_eq!(ws.players.len(), 1);
             assert_eq!(ws.players[0].player_id, 1);
             assert!((ws.players[0].health - 95.0).abs() < 1e-5);
+            assert!(ws.autopilot.is_none());
         } else {
             panic!("expected WorldState");
         }

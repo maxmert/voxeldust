@@ -22,10 +22,10 @@ pub const NUM_ARMS: u32 = 4;
 pub const SPIRAL_TIGHTNESS: f64 = 0.0004;
 
 /// Minimum stars per galaxy.
-pub const MIN_STARS: u32 = 200;
+pub const MIN_STARS: u32 = 50_000;
 
 /// Maximum stars per galaxy.
-pub const MAX_STARS: u32 = 2000;
+pub const MAX_STARS: u32 = 100_000;
 
 /// Base SOI radius in galaxy units.
 pub const BASE_SOI_RADIUS: f64 = 100.0;
@@ -83,6 +83,19 @@ impl StarClass {
             StarClass::G => 4,
             StarClass::K => 5,
             StarClass::M => 6,
+        }
+    }
+
+    /// RGB color for rendering, based on stellar effective temperature.
+    pub fn color(&self) -> [f32; 3] {
+        match self {
+            StarClass::O => [0.62, 0.69, 1.0],   // 30000K+ blue
+            StarClass::B => [0.70, 0.78, 1.0],   // 10000-30000K blue-white
+            StarClass::A => [0.84, 0.88, 1.0],   // 7500-10000K white
+            StarClass::F => [0.97, 0.96, 0.95],  // 6000-7500K yellow-white
+            StarClass::G => [1.0, 0.94, 0.80],   // 5200-6000K yellow (Sol)
+            StarClass::K => [1.0, 0.78, 0.50],   // 3700-5200K orange
+            StarClass::M => [1.0, 0.55, 0.35],   // 2400-3700K red
         }
     }
 }
@@ -171,6 +184,13 @@ pub fn system_soi_radius(star: &StarInfo) -> f64 {
     BASE_SOI_RADIUS + star.luminosity * SOI_LUMINOSITY_SCALE
 }
 
+/// Outer boundary radius of a star system in GU.
+/// Ships beyond this radius transition to interstellar space.
+/// 80% of SOI — leaves a transition buffer zone at the edge.
+pub fn system_outer_radius(star: &StarInfo) -> f64 {
+    system_soi_radius(star) * 0.8
+}
+
 /// Convert a system-local position (in blocks) to galaxy coordinates (in GU).
 pub fn system_to_galaxy(star_position: DVec3, system_pos: DVec3) -> DVec3 {
     star_position + system_pos / GALAXY_UNIT_IN_BLOCKS
@@ -248,7 +268,7 @@ mod tests {
         for seed in 0..20 {
             let count = star_count(seed);
             assert!(
-                count >= MIN_STARS && count < MAX_STARS,
+                count >= MIN_STARS && count <= MAX_STARS,
                 "star count {count} out of range for seed {seed}"
             );
         }

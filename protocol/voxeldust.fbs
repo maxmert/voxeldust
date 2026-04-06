@@ -58,6 +58,12 @@ table PlayerHandoff {
     ship_system_position: Vec3d;
     /// Ship rotation at handoff time.
     ship_rotation: Quatd;
+    /// System shard celestial time for time synchronization.
+    game_time: float64;
+    /// For system→galaxy warp: target star index (0xFFFFFFFF = not set).
+    warp_target_star_index: uint32 = 4294967295;
+    /// For system→galaxy warp: velocity in galaxy units/s.
+    warp_velocity: Vec3d;
 }
 
 table HandoffAccepted {
@@ -105,12 +111,26 @@ table CrossShardBlockEdits {
     seq: uint64;
 }
 
+/// Server-authoritative autopilot state snapshot.
+table AutopilotSnapshot {
+    phase: uint8;                     // FlightPhase as u8
+    mode: uint8;                      // AutopilotMode as u8
+    target_planet_index: uint32 = 4294967295;
+    thrust_tier: uint8;
+    intercept_pos: Vec3d;
+    target_arrival_vel: Vec3d;
+    braking_committed: bool;
+    eta_real_seconds: double;
+    target_orbit_altitude: double;
+}
+
 table ShipPositionUpdate {
     ship_id: uint64;
     position: Vec3d;
     velocity: Vec3d;
     rotation: Quatd;
     angular_velocity: Vec3d;
+    autopilot: AutopilotSnapshot;
 }
 
 /// Pilot control input sent from ship shard to system shard.
@@ -134,8 +154,32 @@ table AutopilotCommand {
     /// Target body id: 0 = star, 1..N = planets.
     /// 0xFFFFFFFF = disengage autopilot.
     target_body_id: uint32;
-    /// Speed tier (0=maneuver, 1=1g, 2=3g, 3=6g).
+    /// Speed tier (0=maneuver, 1=impulse, 2=cruise, 3=long_range, 4=emergency).
     speed_tier: uint8;
+    /// Autopilot mode: 0=DirectApproach, 1=OrbitInsertion, 2=Landing, 3=Takeoff, 4=Departure.
+    autopilot_mode: uint8;
+}
+
+/// Host switch: tells a ship shard to change its physics host.
+/// Sent by system shard (departure) or galaxy shard (arrival).
+/// Includes full endpoint info for the ship shard to send ShardPreConnect
+/// to the client (secondary UDP for dual-shard compositing).
+table HostSwitch {
+    ship_id: uint64;
+    new_host_shard_id: uint64;
+    new_host_quic_addr: string;
+    new_host_tcp_addr: string;
+    new_host_udp_addr: string;
+    new_host_shard_type: uint8;   // 1=System, 3=Galaxy
+    seed: uint64;                 // galaxy_seed or system_seed
+}
+
+/// Warp autopilot command sent from ship shard to system shard.
+table WarpAutopilotCommand {
+    ship_id: uint64;
+    /// Target star index in the galaxy. 0xFFFFFFFF = disengage warp.
+    target_star_index: uint32;
+    galaxy_seed: uint64;
 }
 
 /// Ship position/state sent from system shard to planet shards within SOI.
@@ -145,6 +189,7 @@ table ShipNearbyInfo {
     position: Vec3d;
     rotation: Quatd;
     velocity: Vec3d;
+    game_time: float64;
 }
 
 /// Snapshot of a celestial body's state for scene rendering.
@@ -198,6 +243,8 @@ union ShardPayload {
     SystemSceneUpdate,
     AutopilotCommand,
     ShipNearbyInfo,
+    WarpAutopilotCommand,
+    HostSwitch,
 }
 
 /// Root type for all inter-shard QUIC messages.
@@ -254,6 +301,7 @@ table PlayerInput {
     look_pitch: float;
     jump: bool;
     fly_toggle: bool;
+    orbit_stabilizer_toggle: bool;
     speed_tier: uint8;
     action: uint8; // 0=none, 1=break, 2=place
     block_type: uint16;
@@ -278,6 +326,8 @@ table WorldState {
     ships: [ShipSnapshotEntry];
     lighting: LightingInfoMsg;
     game_time: double;
+    warp_target_star_index: uint32 = 4294967295;
+    autopilot: AutopilotSnapshot;
 }
 
 table BlockMod {
@@ -317,13 +367,25 @@ table ShardRedirectMsg {
 
 /// Pre-connect notification: shard tells client to open a secondary connection.
 table ShardPreConnect {
-    shard_type: uint8;         // 0=Planet, 2=Ship
+    shard_type: uint8;         // 0=Planet, 1=System, 2=Ship, 3=Galaxy
     tcp_addr: string;
     udp_addr: string;
-    seed: uint64;              // planet_seed or system_seed
+    seed: uint64;              // planet_seed, system_seed, or galaxy_seed
     planet_index: uint32;
     reference_position: Vec3d; // system-space position
     reference_rotation: Quatd;
+}
+
+/// World state for galaxy shard → client (warp travel).
+table GalaxyWorldState {
+    tick: uint64;
+    ship_position: Vec3d;      // in galaxy units
+    ship_velocity: Vec3d;      // in galaxy units/s
+    ship_rotation: Quatd;
+    warp_phase: uint8;         // FlightPhase as u8
+    eta_seconds: double;
+    origin_star_index: uint32;
+    target_star_index: uint32;
 }
 
 table DamageEvent {
@@ -348,6 +410,7 @@ union ServerPayload {
     PlayerDestroyed,
     StarCatalog,
     ShardPreConnect,
+    GalaxyWorldState,
 }
 
 /// Root type for server → client messages.

@@ -21,6 +21,8 @@ pub enum ShardMsg {
     SystemSceneUpdate(SystemSceneUpdateData),
     AutopilotCommand(AutopilotCommandData),
     ShipNearbyInfo(ShipNearbyInfoData),
+    WarpAutopilotCommand(WarpAutopilotCommandData),
+    HostSwitch(HostSwitchData),
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,20 @@ pub struct MergeDirective {
     pub sectors: Vec<u8>,
 }
 
+/// Server-authoritative autopilot state snapshot sent alongside ship position.
+#[derive(Debug, Clone)]
+pub struct AutopilotSnapshotData {
+    pub phase: u8,
+    pub mode: u8,
+    pub target_planet_index: u32,
+    pub thrust_tier: u8,
+    pub intercept_pos: DVec3,
+    pub target_arrival_vel: DVec3,
+    pub braking_committed: bool,
+    pub eta_real_seconds: f64,
+    pub target_orbit_altitude: f64,
+}
+
 /// Ship exterior state synced from ship shard to system shard (and vice versa).
 #[derive(Debug, Clone)]
 pub struct ShipPositionUpdate {
@@ -45,6 +61,7 @@ pub struct ShipPositionUpdate {
     pub velocity: DVec3,
     pub rotation: DQuat,
     pub angular_velocity: DVec3,
+    pub autopilot: Option<AutopilotSnapshotData>,
 }
 
 /// Pilot control input sent from ship shard to system shard.
@@ -96,8 +113,10 @@ pub struct AutopilotCommandData {
     pub ship_id: u64,
     /// Target body id: 1..N = planets. 0xFFFFFFFF = disengage.
     pub target_body_id: u32,
-    /// Speed tier (0-3).
+    /// Speed tier (0-4).
     pub speed_tier: u8,
+    /// Autopilot mode: 0=DirectApproach, 1=OrbitInsertion, 2=Landing, 3=Takeoff, 4=Departure.
+    pub autopilot_mode: u8,
 }
 
 /// Ship position/state sent from system shard to planet shards within SOI.
@@ -108,6 +127,31 @@ pub struct ShipNearbyInfoData {
     pub position: DVec3,
     pub rotation: DQuat,
     pub velocity: DVec3,
+    /// System shard's authoritative celestial time for time synchronization.
+    pub game_time: f64,
+}
+
+/// Warp autopilot command sent from ship shard to system shard.
+#[derive(Debug, Clone)]
+pub struct WarpAutopilotCommandData {
+    pub ship_id: u64,
+    /// Target star index in the galaxy. `u32::MAX` = disengage warp.
+    pub target_star_index: u32,
+    pub galaxy_seed: u64,
+}
+
+/// Host switch: tells a ship shard to change its physics host.
+/// Includes full endpoint info so the ship shard can send ShardPreConnect
+/// to its client for secondary UDP (dual-shard compositing).
+#[derive(Debug, Clone)]
+pub struct HostSwitchData {
+    pub ship_id: u64,
+    pub new_host_shard_id: ShardId,
+    pub new_host_quic_addr: String,
+    pub new_host_tcp_addr: String,
+    pub new_host_udp_addr: String,
+    pub new_host_shard_type: u8, // 1=System, 3=Galaxy
+    pub seed: u64,               // galaxy_seed or system_seed
 }
 
 /// Block edits affecting chunks on adjacent shard boundaries.
@@ -149,7 +193,7 @@ fn from_fb_quatd(q: &fb::Quatd) -> DQuat {
 impl ShardMsg {
     /// Serialize this message into a FlatBuffer byte vector.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut builder = FlatBufferBuilder::with_capacity(512);
+        let mut builder = crate::builder_pool::acquire(512);
 
         match self {
             ShardMsg::PlayerHandoff(h) => {
@@ -175,6 +219,7 @@ impl ShardMsg {
                 // Build optional ship position/rotation for ship→planet handoffs.
                 let ship_sys_pos = h.ship_system_position.as_ref().map(|p| to_fb_vec3d(p));
                 let ship_rot = h.ship_rotation.as_ref().map(|r| to_fb_quatd(r));
+                let warp_vel = h.warp_velocity_gu.as_ref().map(|v| to_fb_vec3d(v));
 
                 let handoff = fb::PlayerHandoff::create(
                     &mut builder,
@@ -200,6 +245,9 @@ impl ShardMsg {
                         target_ship_shard_id: h.target_ship_shard_id.map(|s| s.0).unwrap_or(u64::MAX),
                         ship_system_position: ship_sys_pos.as_ref(),
                         ship_rotation: ship_rot.as_ref(),
+                        game_time: h.game_time,
+                        warp_target_star_index: h.warp_target_star_index.unwrap_or(0xFFFFFFFF),
+                        warp_velocity: warp_vel.as_ref(),
                     },
                 );
 
@@ -322,6 +370,24 @@ impl ShardMsg {
                 let vel = to_fb_vec3d(&s.velocity);
                 let rot = to_fb_quatd(&s.rotation);
                 let ang = to_fb_vec3d(&s.angular_velocity);
+                let ap_offset = s.autopilot.as_ref().map(|ap| {
+                    let ip = to_fb_vec3d(&ap.intercept_pos);
+                    let av = to_fb_vec3d(&ap.target_arrival_vel);
+                    fb::AutopilotSnapshot::create(
+                        &mut builder,
+                        &fb::AutopilotSnapshotArgs {
+                            phase: ap.phase,
+                            mode: ap.mode,
+                            target_planet_index: ap.target_planet_index,
+                            thrust_tier: ap.thrust_tier,
+                            intercept_pos: Some(&ip),
+                            target_arrival_vel: Some(&av),
+                            braking_committed: ap.braking_committed,
+                            eta_real_seconds: ap.eta_real_seconds,
+                            target_orbit_altitude: ap.target_orbit_altitude,
+                        },
+                    )
+                });
                 let update = fb::ShipPositionUpdate::create(
                     &mut builder,
                     &fb::ShipPositionUpdateArgs {
@@ -330,6 +396,7 @@ impl ShardMsg {
                         velocity: Some(&vel),
                         rotation: Some(&rot),
                         angular_velocity: Some(&ang),
+                        autopilot: ap_offset,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -393,6 +460,7 @@ impl ShardMsg {
                         ship_id: a.ship_id,
                         target_body_id: a.target_body_id,
                         speed_tier: a.speed_tier,
+                        autopilot_mode: a.autopilot_mode,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -456,6 +524,7 @@ impl ShardMsg {
                         position: Some(&pos),
                         rotation: Some(&rot),
                         velocity: Some(&vel),
+                        game_time: info.game_time,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -467,9 +536,56 @@ impl ShardMsg {
                 );
                 builder.finish(msg, None);
             }
+
+            ShardMsg::WarpAutopilotCommand(w) => {
+                let cmd = fb::WarpAutopilotCommand::create(
+                    &mut builder,
+                    &fb::WarpAutopilotCommandArgs {
+                        ship_id: w.ship_id,
+                        target_star_index: w.target_star_index,
+                        galaxy_seed: w.galaxy_seed,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::WarpAutopilotCommand,
+                        payload: Some(cmd.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+
+            ShardMsg::HostSwitch(h) => {
+                let quic_addr = builder.create_string(&h.new_host_quic_addr);
+                let tcp_addr = builder.create_string(&h.new_host_tcp_addr);
+                let udp_addr = builder.create_string(&h.new_host_udp_addr);
+                let hs = fb::HostSwitch::create(
+                    &mut builder,
+                    &fb::HostSwitchArgs {
+                        ship_id: h.ship_id,
+                        new_host_shard_id: h.new_host_shard_id.0,
+                        new_host_quic_addr: Some(quic_addr),
+                        new_host_tcp_addr: Some(tcp_addr),
+                        new_host_udp_addr: Some(udp_addr),
+                        new_host_shard_type: h.new_host_shard_type,
+                        seed: h.seed,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::HostSwitch,
+                        payload: Some(hs.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
-        builder.finished_data().to_vec()
+        let result = builder.finished_data().to_vec();
+        crate::builder_pool::release(builder);
+        result
     }
 
     /// Deserialize a FlatBuffer byte slice into a ShardMsg.
@@ -541,6 +657,12 @@ impl ShardMsg {
                     },
                     ship_system_position: h.ship_system_position().map(|p| from_fb_vec3d(p)),
                     ship_rotation: h.ship_rotation().map(|r| from_fb_quatd(r)),
+                    game_time: h.game_time(),
+                    warp_target_star_index: {
+                        let idx = h.warp_target_star_index();
+                        if idx == 0xFFFFFFFF { None } else { Some(idx) }
+                    },
+                    warp_velocity_gu: h.warp_velocity().map(|v| from_fb_vec3d(v)),
                 }))
             }
 
@@ -632,12 +754,29 @@ impl ShardMsg {
                 let rot = s.rotation().ok_or(MessageError::MissingField("rotation"))?;
                 let ang = s.angular_velocity().ok_or(MessageError::MissingField("angular_velocity"))?;
 
+                let autopilot = s.autopilot().map(|ap| {
+                    let ip = ap.intercept_pos().map(|v| from_fb_vec3d(v)).unwrap_or(DVec3::ZERO);
+                    let av = ap.target_arrival_vel().map(|v| from_fb_vec3d(v)).unwrap_or(DVec3::ZERO);
+                    AutopilotSnapshotData {
+                        phase: ap.phase(),
+                        mode: ap.mode(),
+                        target_planet_index: ap.target_planet_index(),
+                        thrust_tier: ap.thrust_tier(),
+                        intercept_pos: ip,
+                        target_arrival_vel: av,
+                        braking_committed: ap.braking_committed(),
+                        eta_real_seconds: ap.eta_real_seconds(),
+                        target_orbit_altitude: ap.target_orbit_altitude(),
+                    }
+                });
+
                 Ok(ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
                     ship_id: s.ship_id(),
                     position: from_fb_vec3d(pos),
                     velocity: from_fb_vec3d(vel),
                     rotation: from_fb_quatd(rot),
                     angular_velocity: from_fb_vec3d(ang),
+                    autopilot,
                 }))
             }
 
@@ -715,6 +854,7 @@ impl ShardMsg {
                     ship_id: a.ship_id(),
                     target_body_id: a.target_body_id(),
                     speed_tier: a.speed_tier(),
+                    autopilot_mode: a.autopilot_mode(),
                 }))
             }
 
@@ -732,6 +872,35 @@ impl ShardMsg {
                     position: from_fb_vec3d(pos),
                     rotation: from_fb_quatd(rot),
                     velocity: from_fb_vec3d(vel),
+                    game_time: info.game_time(),
+                }))
+            }
+
+            fb::ShardPayload::WarpAutopilotCommand => {
+                let w = msg
+                    .payload_as_warp_autopilot_command()
+                    .ok_or(MessageError::MissingField("WarpAutopilotCommand payload"))?;
+
+                Ok(ShardMsg::WarpAutopilotCommand(WarpAutopilotCommandData {
+                    ship_id: w.ship_id(),
+                    target_star_index: w.target_star_index(),
+                    galaxy_seed: w.galaxy_seed(),
+                }))
+            }
+
+            fb::ShardPayload::HostSwitch => {
+                let h = msg
+                    .payload_as_host_switch()
+                    .ok_or(MessageError::MissingField("HostSwitch payload"))?;
+
+                Ok(ShardMsg::HostSwitch(HostSwitchData {
+                    ship_id: h.ship_id(),
+                    new_host_shard_id: ShardId(h.new_host_shard_id()),
+                    new_host_quic_addr: h.new_host_quic_addr().unwrap_or("").to_string(),
+                    new_host_tcp_addr: h.new_host_tcp_addr().unwrap_or("").to_string(),
+                    new_host_udp_addr: h.new_host_udp_addr().unwrap_or("").to_string(),
+                    new_host_shard_type: h.new_host_shard_type(),
+                    seed: h.seed(),
                 }))
             }
 
@@ -772,6 +941,9 @@ mod tests {
             target_ship_shard_id: None,
             ship_system_position: None,
             ship_rotation: None,
+            game_time: 0.0,
+            warp_target_star_index: None,
+            warp_velocity_gu: None,
         }
     }
 
@@ -904,6 +1076,7 @@ mod tests {
             velocity: DVec3::new(10.0, 0.0, -5.0),
             rotation: DQuat::from_xyzw(0.0, 0.0, 0.707, 0.707),
             angular_velocity: DVec3::new(0.0, 0.1, 0.0),
+            autopilot: None,
         });
         let bytes = msg.serialize();
         let decoded = ShardMsg::deserialize(&bytes).unwrap();
@@ -913,6 +1086,47 @@ mod tests {
             assert!((s.position.x - 1000.0).abs() < 1e-10);
             assert!((s.velocity.z - (-5.0)).abs() < 1e-10);
             assert!((s.angular_velocity.y - 0.1).abs() < 1e-10);
+            assert!(s.autopilot.is_none());
+        } else {
+            panic!("expected ShipPositionUpdate");
+        }
+    }
+
+    #[test]
+    fn roundtrip_ship_position_update_with_autopilot() {
+        let msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
+            ship_id: 99,
+            position: DVec3::new(1e9, 2e9, 3e9),
+            velocity: DVec3::new(5000.0, 0.0, -3000.0),
+            rotation: DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+            autopilot: Some(AutopilotSnapshotData {
+                phase: 2, // Brake
+                mode: 1,  // OrbitInsertion
+                target_planet_index: 3,
+                thrust_tier: 2,
+                intercept_pos: DVec3::new(4e9, 5e9, 6e9),
+                target_arrival_vel: DVec3::new(100.0, 200.0, 300.0),
+                braking_committed: true,
+                eta_real_seconds: 120.5,
+                target_orbit_altitude: 50000.0,
+            }),
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+
+        if let ShardMsg::ShipPositionUpdate(s) = decoded {
+            assert_eq!(s.ship_id, 99);
+            let ap = s.autopilot.unwrap();
+            assert_eq!(ap.phase, 2);
+            assert_eq!(ap.mode, 1);
+            assert_eq!(ap.target_planet_index, 3);
+            assert_eq!(ap.thrust_tier, 2);
+            assert!((ap.intercept_pos.x - 4e9).abs() < 1e-3);
+            assert!((ap.target_arrival_vel.y - 200.0).abs() < 1e-10);
+            assert!(ap.braking_committed);
+            assert!((ap.eta_real_seconds - 120.5).abs() < 1e-10);
+            assert!((ap.target_orbit_altitude - 50000.0).abs() < 1e-10);
         } else {
             panic!("expected ShipPositionUpdate");
         }

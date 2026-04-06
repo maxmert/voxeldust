@@ -64,6 +64,14 @@ pub struct PlayerHandoff {
     pub ship_system_position: Option<DVec3>,
     /// Ship's rotation at handoff time (for coordinate transform).
     pub ship_rotation: Option<DQuat>,
+    /// System shard's authoritative celestial time for time synchronization.
+    pub game_time: f64,
+
+    // -- Warp handoff context --
+    /// For system→galaxy warp: target star index in the galaxy.
+    pub warp_target_star_index: Option<u32>,
+    /// For system→galaxy warp: current warp velocity in GU/s.
+    pub warp_velocity_gu: Option<DVec3>,
 }
 
 /// Context for handoffs between galaxy and system shards.

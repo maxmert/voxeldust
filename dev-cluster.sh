@@ -25,6 +25,7 @@ case "${1:-up}" in
     docker build --target system-shard -t voxeldust-system-shard:latest "$SCRIPT_DIR"
     docker build --target ship-shard -t voxeldust-ship-shard:latest "$SCRIPT_DIR"
     docker build --target planet-shard -t voxeldust-planet-shard:latest "$SCRIPT_DIR"
+    docker build --target galaxy-shard -t voxeldust-galaxy-shard:latest "$SCRIPT_DIR"
 
     echo "==> Importing images into k3d..."
     k3d image import \
@@ -34,6 +35,7 @@ case "${1:-up}" in
       voxeldust-system-shard:latest \
       voxeldust-ship-shard:latest \
       voxeldust-planet-shard:latest \
+      voxeldust-galaxy-shard:latest \
       -c "$CLUSTER_NAME"
 
     echo "==> Applying K8s manifests..."
@@ -72,6 +74,7 @@ case "${1:-up}" in
     docker build --target system-shard -t voxeldust-system-shard:latest "$SCRIPT_DIR"
     docker build --target ship-shard -t voxeldust-ship-shard:latest "$SCRIPT_DIR"
     docker build --target planet-shard -t voxeldust-planet-shard:latest "$SCRIPT_DIR"
+    docker build --target galaxy-shard -t voxeldust-galaxy-shard:latest "$SCRIPT_DIR"
 
     echo "==> Importing images into k3d..."
     k3d image import \
@@ -81,6 +84,7 @@ case "${1:-up}" in
       voxeldust-system-shard:latest \
       voxeldust-ship-shard:latest \
       voxeldust-planet-shard:latest \
+      voxeldust-galaxy-shard:latest \
       -c "$CLUSTER_NAME"
 
     echo "==> Restarting deployments..."

@@ -23,6 +23,7 @@ pub enum NetEvent {
         reference_rotation: DQuat,
         game_time: f64,
         system_seed: u64,
+        galaxy_seed: u64,
     },
     WorldState(WorldStateData),
     /// A secondary shard has been pre-connected for rendering.
@@ -34,6 +35,8 @@ pub enum NetEvent {
     },
     /// WorldState from a secondary shard (for composite rendering).
     SecondaryWorldState(WorldStateData),
+    /// Galaxy world state from secondary UDP (warp travel position for star parallax).
+    GalaxyWorldState(voxeldust_core::client_message::GalaxyWorldStateData),
     /// Primary shard is changing (ShardRedirect received).
     Transitioning,
     Disconnected(String),
@@ -96,6 +99,7 @@ pub async fn run_network(
             reference_rotation: jr.reference_rotation,
             game_time: jr.game_time,
             system_seed: jr.system_seed,
+            galaxy_seed: jr.galaxy_seed,
         });
 
         // Set up UDP for this shard.
@@ -121,6 +125,8 @@ pub async fn run_network(
         let mut cancel_input = cancel_tx.subscribe();
         let send_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+            let mut last_sent = empty_input();
+            let mut ticks_since_send: u32 = 0;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -130,8 +136,15 @@ pub async fn run_network(
                             while let Ok(i) = rx.try_recv() { latest = i; }
                             latest
                         };
-                        let pkt = build_input(&input);
-                        let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
+                        // Suppress unchanged input; send keepalive every 1s (20 ticks).
+                        if input != last_sent || ticks_since_send >= 20 {
+                            let pkt = build_input(&input);
+                            let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
+                            last_sent = input;
+                            ticks_since_send = 0;
+                        } else {
+                            ticks_since_send += 1;
+                        }
                     }
                     _ = cancel_input.recv() => { return; }
                 }
@@ -152,7 +165,11 @@ pub async fn run_network(
                                 if len < 4 { continue; }
                                 let msg_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
                                 if len < 4 + msg_len { continue; }
-                                if let Ok(ServerMsg::WorldState(ws)) = ServerMsg::deserialize(&buf[4..4 + msg_len]) {
+                                let decoded = match voxeldust_core::wire_codec::decode(&buf[4..4 + msg_len]) {
+                                    Ok(d) => d,
+                                    Err(_) => continue,
+                                };
+                                if let Ok(ServerMsg::WorldState(ws)) = ServerMsg::deserialize(&decoded) {
                                     let _ = event_tx_udp.send(NetEvent::WorldState(ws));
                                 }
                             }
@@ -166,30 +183,125 @@ pub async fn run_network(
 
         // TCP listener — monitors for ShardRedirect or ShardPreConnect.
         let event_tx_tcp = event_tx.clone();
+        let player_name_tcp = player_name.clone();
+        let cancel_tx_for_tcp = cancel_tx.clone();
         let (redirect_tx, mut redirect_rx) = mpsc::channel::<ShardRedirect>(1);
         let mut cancel_tcp = cancel_tx.subscribe();
         let tcp_handle = tokio::spawn(async move {
             let mut stream = tcp_stream;
+            let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            keepalive_interval.tick().await; // skip first immediate tick
+
+            // Active secondary connections keyed by shard type. At most ONE
+            // secondary per type exists at a time. When a new ShardPreConnect
+            // arrives for the same type, the old is cancelled before the new starts.
+            // Supports concurrent secondaries of DIFFERENT types (triple-shard).
+            let mut active_secondaries: std::collections::HashMap<
+                u8, tokio::sync::broadcast::Sender<()>
+            > = std::collections::HashMap::new();
+
             loop {
                 tokio::select! {
+                    _ = keepalive_interval.tick() => {
+                        let _ = stream.write_all(&0u32.to_be_bytes()).await;
+                        let _ = stream.flush().await;
+                    }
                     result = recv_server_msg(&mut stream) => {
                         match result {
                             Ok(ServerMsg::ShardRedirect(r)) => {
                                 info!(target_tcp = %r.target_tcp_addr, "received ShardRedirect");
+                                // Cancel ALL active secondaries on primary transition.
+                                for (st, cancel) in active_secondaries.drain() {
+                                    let _ = cancel.send(());
+                                    info!(shard_type = st, "cancelled secondary on ShardRedirect");
+                                }
                                 let _ = redirect_tx.send(r).await;
                                 return;
                             }
                             Ok(ServerMsg::ShardPreConnect(pc)) => {
                                 info!(shard_type = pc.shard_type, seed = pc.seed,
-                                    "received ShardPreConnect");
-                                let _ = event_tx_tcp.send(NetEvent::SecondaryConnected {
-                                    shard_type: pc.shard_type,
-                                    seed: pc.seed,
-                                    reference_position: pc.reference_position,
-                                    reference_rotation: pc.reference_rotation,
+                                    tcp = %pc.tcp_addr, udp = %pc.udp_addr,
+                                    "received ShardPreConnect — opening secondary connection");
+
+                                // Cancel existing secondary of the SAME shard type.
+                                // Different types coexist (triple-shard compositing).
+                                if let Some(old_cancel) = active_secondaries.remove(&pc.shard_type) {
+                                    let _ = old_cancel.send(());
+                                    info!(shard_type = pc.shard_type, "cancelled old secondary for replacement");
+                                }
+
+                                // Dedicated cancel token for this secondary.
+                                let (sec_cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+                                active_secondaries.insert(pc.shard_type, sec_cancel_tx.clone());
+
+                                let sec_event_tx = event_tx_tcp.clone();
+                                let mut sec_cancel_own = sec_cancel_tx.subscribe();
+                                let mut sec_cancel_primary = cancel_tx_for_tcp.subscribe();
+                                let sec_pc = pc;
+                                tokio::spawn(async move {
+                                    let sec_udp: SocketAddr = match sec_pc.udp_addr.parse() {
+                                        Ok(a) => a,
+                                        Err(e) => { warn!(%e, "bad ShardPreConnect udp addr"); return; }
+                                    };
+
+                                    let _ = sec_event_tx.send(NetEvent::SecondaryConnected {
+                                        shard_type: sec_pc.shard_type,
+                                        seed: sec_pc.seed,
+                                        reference_position: sec_pc.reference_position,
+                                        reference_rotation: sec_pc.reference_rotation,
+                                    });
+
+                                    // Open secondary UDP.
+                                    let udp = match UdpSocket::bind("0.0.0.0:0").await {
+                                        Ok(s) => s,
+                                        Err(e) => { warn!(%e, "secondary UDP bind failed"); return; }
+                                    };
+                                    let hello = build_input(&empty_input());
+                                    let _ = udp.send_to(&hello, sec_udp).await;
+                                    info!(%sec_udp, "secondary UDP hole-punch sent");
+
+                                    // Receive loop.
+                                    let mut buf = vec![0u8; 65536];
+                                    loop {
+                                        tokio::select! {
+                                            result = udp.recv_from(&mut buf) => {
+                                                match result {
+                                                    Ok((len, _)) => {
+                                                        if len < 4 { continue; }
+                                                        let msg_len = u32::from_be_bytes(
+                                                            [buf[0], buf[1], buf[2], buf[3]]) as usize;
+                                                        if len < 4 + msg_len { continue; }
+                                                        let decoded = match voxeldust_core::wire_codec::decode(
+                                                            &buf[4..4 + msg_len]) {
+                                                            Ok(d) => d,
+                                                            Err(_) => continue,
+                                                        };
+                                                        match ServerMsg::deserialize(&decoded) {
+                                                            Ok(ServerMsg::WorldState(ws)) => {
+                                                                let _ = sec_event_tx.send(
+                                                                    NetEvent::SecondaryWorldState(ws));
+                                                            }
+                                                            Ok(ServerMsg::GalaxyWorldState(gws)) => {
+                                                                let _ = sec_event_tx.send(
+                                                                    NetEvent::GalaxyWorldState(gws));
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(%e, "secondary UDP recv error");
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            _ = sec_cancel_own.recv() => {
+                                                info!("secondary connection cancelled (replaced)");
+                                                return;
+                                            }
+                                            _ = sec_cancel_primary.recv() => { return; }
+                                        }
+                                    }
                                 });
-                                // TODO: open secondary UDP connection to pre-load WorldState.
-                                // For now, just notify the render thread.
                             }
                             Ok(_) => { /* ignore other TCP messages */ }
                             Err(e) => {
@@ -250,9 +362,8 @@ pub async fn run_network(
 fn build_input(input: &PlayerInputData) -> Vec<u8> {
     let msg = ClientMsg::PlayerInput(input.clone());
     let data = msg.serialize();
-    let mut pkt = Vec::with_capacity(4 + data.len());
-    pkt.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    pkt.extend_from_slice(&data);
+    let mut pkt = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut pkt);
     pkt
 }
 
@@ -276,6 +387,10 @@ async fn connect_to_shard_full(
     player_name: &str,
 ) -> Result<(TcpStream, voxeldust_core::client_message::JoinResponseData), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(addr).await?;
+
+    // Set TCP nodelay for low latency.
+    let _ = stream.set_nodelay(true);
+
     send_msg(&mut stream, &ClientMsg::Connect { player_name: player_name.to_string() }).await?;
     let response = recv_server_msg(&mut stream).await?;
     match response {
@@ -286,9 +401,9 @@ async fn connect_to_shard_full(
 
 async fn send_msg(stream: &mut TcpStream, msg: &ClientMsg) -> Result<(), std::io::Error> {
     let data = msg.serialize();
-    let len = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len).await?;
-    stream.write_all(&data).await?;
+    let mut buf = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut buf);
+    stream.write_all(&buf).await?;
     stream.flush().await?;
     Ok(())
 }
@@ -299,7 +414,9 @@ async fn recv_server_msg(stream: &mut TcpStream) -> Result<ServerMsg, Box<dyn st
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
-    Ok(ServerMsg::deserialize(&buf)?)
+    let decoded = voxeldust_core::wire_codec::decode(&buf)
+        .map_err(|e| format!("wire decode: {e}"))?;
+    Ok(ServerMsg::deserialize(&decoded)?)
 }
 
 fn empty_input() -> PlayerInputData {
@@ -309,6 +426,7 @@ fn empty_input() -> PlayerInputData {
         look_pitch: 0.0,
         jump: false,
         fly_toggle: false,
+        orbit_stabilizer_toggle: false,
         speed_tier: 0,
         action: 0,
         block_type: 0,

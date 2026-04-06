@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -11,6 +12,17 @@ use voxeldust_core::shard_types::{ShardId, ShardInfo, ShardState, ShardType};
 use voxeldust_core::client_message::{PlayerInputData, ServerMsg};
 use voxeldust_core::shard_message::ShardMsg;
 
+/// QUIC message with verified source shard identification.
+/// The sender writes its ShardId as a header on each QUIC stream.
+/// The receiver reads it and attaches to every message. This is
+/// immune to ephemeral port mismatches and race conditions.
+pub struct QueuedShardMsg {
+    /// The shard that sent this message (from the stream identity header).
+    pub source_shard_id: ShardId,
+    /// The deserialized shard message.
+    pub msg: ShardMsg,
+}
+
 use crate::client_listener::{self, ClientConnectEvent, ClientRegistry};
 use crate::heartbeat_sender;
 use crate::healthz;
@@ -18,6 +30,19 @@ use crate::peer_registry::PeerShardRegistry;
 use crate::quic_transport::QuicTransport;
 use crate::shutdown;
 use crate::tick_loop::TickLoop;
+
+/// Compute deterministic celestial time from the universal epoch.
+/// All shards derive the same value from wall clock — no sync messages needed.
+/// `epoch` is the shared universe epoch Arc (from `harness.epoch_arc()`).
+pub fn celestial_time_from_epoch(epoch: &AtomicU64, time_scale: f64) -> f64 {
+    let epoch_ms = epoch.load(Ordering::Relaxed);
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let elapsed_ms = now_ms.saturating_sub(epoch_ms);
+    (elapsed_ms as f64 / 1000.0) * time_scale
+}
 
 /// Configuration for a shard harness.
 #[derive(Debug, Clone)]
@@ -52,23 +77,26 @@ pub struct ShardHarness {
     pub config: ShardHarnessConfig,
     pub tick_loop: TickLoop,
     pub peer_registry: Arc<RwLock<PeerShardRegistry>>,
+    /// Universe epoch in Unix milliseconds (from orchestrator). Shared with tick
+    /// closures via Arc so they can compute deterministic celestial_time.
+    pub universe_epoch_ms: Arc<AtomicU64>,
     pub connect_rx: mpsc::UnboundedReceiver<ClientConnectEvent>,
     /// Client registry for tracking TCP + UDP connections.
     pub client_registry: Arc<RwLock<ClientRegistry>>,
     /// Incoming PlayerInput from UDP clients.
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
-    /// Incoming inter-shard messages from QUIC.
-    pub quic_msg_rx: mpsc::UnboundedReceiver<ShardMsg>,
-    /// Channel to send WorldState for UDP broadcast (sync-safe for tick closures).
-    pub broadcast_tx: mpsc::UnboundedSender<ServerMsg>,
-    /// Channel to send QUIC messages to other shards (sync-safe for tick closures).
+    /// Incoming inter-shard messages from QUIC (with source peer address).
+    pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
+    /// Channel to send WorldState for UDP broadcast (bounded for backpressure).
+    pub broadcast_tx: mpsc::Sender<ServerMsg>,
+    /// Channel to send QUIC messages to other shards (bounded for backpressure).
     /// Each message is (target_shard_id, target_quic_addr, message).
-    pub quic_send_tx: mpsc::UnboundedSender<(ShardId, std::net::SocketAddr, ShardMsg)>,
-    broadcast_rx: Option<mpsc::UnboundedReceiver<ServerMsg>>,
-    quic_send_rx: Option<mpsc::UnboundedReceiver<(ShardId, std::net::SocketAddr, ShardMsg)>>,
+    pub quic_send_tx: mpsc::Sender<(ShardId, std::net::SocketAddr, ShardMsg)>,
+    broadcast_rx: Option<mpsc::Receiver<ServerMsg>>,
+    quic_send_rx: Option<mpsc::Receiver<(ShardId, std::net::SocketAddr, ShardMsg)>>,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
-    quic_msg_tx: mpsc::UnboundedSender<ShardMsg>,
+    quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
 
@@ -77,13 +105,21 @@ impl ShardHarness {
         let (connect_tx, connect_rx) = mpsc::unbounded_channel();
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
-        let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
-        let (quic_send_tx, quic_send_rx) = mpsc::unbounded_channel();
+        let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
+        let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
+
+        // Default epoch: current wall clock (celestial_time starts at 0).
+        // Overwritten with the orchestrator's epoch during registration.
+        let now_unix_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
 
         Self {
             config,
             tick_loop: TickLoop::new(),
             peer_registry: Arc::new(RwLock::new(PeerShardRegistry::new())),
+            universe_epoch_ms: Arc::new(AtomicU64::new(now_unix_ms)),
             connect_rx,
             client_registry: Arc::new(RwLock::new(ClientRegistry::new())),
             input_rx,
@@ -102,6 +138,11 @@ impl ShardHarness {
     /// Register a system to run each tick.
     pub fn add_system(&mut self, name: impl Into<String>, func: impl FnMut() + Send + 'static) {
         self.tick_loop.add_system(name, func);
+    }
+
+    /// Get the shared universe epoch Arc (for tick closures to capture).
+    pub fn epoch_arc(&self) -> Arc<AtomicU64> {
+        self.universe_epoch_ms.clone()
     }
 
     /// Get the cancellation token (for external shutdown triggers).
@@ -186,6 +227,7 @@ impl ShardHarness {
         let mut broadcast_rx = self.broadcast_rx.take().expect("broadcast_rx already taken");
         tokio::spawn(async move {
             info!("broadcast drainer task started");
+            let mut packet_buf = Vec::with_capacity(8192);
             loop {
                 tokio::select! {
                     _ = broadcast_cancel.cancelled() => return,
@@ -193,6 +235,7 @@ impl ShardHarness {
                         if let Some(msg) = msg {
                             client_listener::broadcast_world_state_udp(
                                 &broadcast_socket, &broadcast_registry, &msg,
+                                &mut packet_buf,
                             ).await;
                         } else {
                             return;
@@ -226,12 +269,7 @@ impl ShardHarness {
                                 if let Some(conn) = conn {
                                     let tx = quic_msg_tx.clone();
                                     tokio::spawn(async move {
-                                        loop {
-                                            match conn.recv().await {
-                                                Ok(msg) => { let _ = tx.send(msg); }
-                                                Err(_) => return,
-                                            }
-                                        }
+                                        let _ = conn.recv_loop_sourced(tx).await;
                                     });
                                 }
                             }
@@ -244,27 +282,147 @@ impl ShardHarness {
             }
         });
 
-        // QUIC send drainer: reads from quic_send_tx channel, sends via QUIC transport.
+        // QUIC send drainer: per-peer isolated async tasks (AAA MMO pattern).
+        // Each peer owns its QUIC connection directly — no shared mutex. A dead peer's
+        // connection timeout only blocks its own task. The dispatcher routes messages
+        // to the correct per-peer channel; no shared I/O state.
         let quic_send_cancel = cancel.clone();
         let mut quic_send_rx = self.quic_send_rx.take().expect("quic_send_rx already taken");
+        let local_shard_id = self.config.shard_id;
         tokio::spawn(async move {
-            // Create a dedicated QUIC transport for sending (separate from the accept transport).
+            // Shared QUIC endpoint — thread-safe, connect() takes &self.
             let send_transport = match QuicTransport::bind("0.0.0.0:0".parse().unwrap()).await {
-                Ok(t) => t,
+                Ok(t) => Arc::new(t),
                 Err(e) => {
                     tracing::warn!(%e, "failed to bind QUIC send transport");
                     return;
                 }
             };
-            info!("QUIC send drainer task started");
+            info!("QUIC send dispatcher started (per-peer connection ownership)");
+
+            let mut peer_senders: std::collections::HashMap<
+                ShardId,
+                mpsc::Sender<(SocketAddr, ShardMsg)>,
+            > = std::collections::HashMap::new();
+
             loop {
                 tokio::select! {
                     _ = quic_send_cancel.cancelled() => return,
                     msg = quic_send_rx.recv() => {
                         if let Some((peer_id, peer_addr, shard_msg)) = msg {
-                            if let Err(e) = send_transport.send(peer_id, peer_addr, &shard_msg).await {
-                                tracing::debug!(%peer_id, %e, "failed to send QUIC message");
-                            }
+                            let tx = peer_senders.entry(peer_id).or_insert_with(|| {
+                                let (tx, mut rx) = mpsc::channel::<(SocketAddr, ShardMsg)>(32);
+                                let endpoint = send_transport.endpoint().clone();
+                                let cancel = quic_send_cancel.clone();
+
+                                // Per-peer task: owns its own QUIC connection lifecycle.
+                                tokio::spawn(async move {
+                                    let mut conn: Option<quinn::Connection> = None;
+                                    let mut send_stream: Option<quinn::SendStream> = None;
+                                    let mut breaker = crate::circuit_breaker::CircuitBreaker::new();
+                                    let timeout_dur = std::time::Duration::from_secs(2);
+
+                                    loop {
+                                        tokio::select! {
+                                            _ = cancel.cancelled() => return,
+                                            msg = rx.recv() => {
+                                                let (addr, shard_msg) = match msg {
+                                                    Some(m) => m,
+                                                    None => return,
+                                                };
+
+                                                // Circuit breaker with half-open recovery.
+                                                if !breaker.allow_request() {
+                                                    continue;
+                                                }
+
+                                                // Get or create connection.
+                                                let needs_connect = match &conn {
+                                                    Some(c) => c.close_reason().is_some(),
+                                                    None => true,
+                                                };
+                                                if needs_connect {
+                                                    conn = None;
+                                                    send_stream = None;
+                                                    match tokio::time::timeout(timeout_dur, async {
+                                                        let connecting = endpoint.connect(addr, "voxeldust-shard")
+                                                            .map_err(|e| format!("{e}"))?;
+                                                        connecting.await.map_err(|e| format!("{e}"))
+                                                    }).await {
+                                                        Ok(Ok(c)) => {
+                                                            if breaker.consecutive_failures() > 0 {
+                                                                tracing::info!(%peer_id,
+                                                                    "QUIC connection recovered after {} failures",
+                                                                    breaker.consecutive_failures());
+                                                            }
+                                                            conn = Some(c);
+                                                            breaker.record_success();
+                                                        }
+                                                        Ok(Err(e)) => {
+                                                            breaker.record_failure();
+                                                            if breaker.consecutive_failures() == 5 {
+                                                                tracing::warn!(%peer_id, %e,
+                                                                    "circuit breaker opened for peer");
+                                                            }
+                                                            continue;
+                                                        }
+                                                        Err(_) => {
+                                                            breaker.record_failure();
+                                                            if breaker.consecutive_failures() == 5 {
+                                                                tracing::warn!(%peer_id,
+                                                                    "circuit breaker opened for peer (timeout)");
+                                                            }
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+
+                                                // Send message.
+                                                let c = conn.as_ref().unwrap();
+                                                let data = shard_msg.serialize();
+
+                                                // Open stream if needed. Write shard ID header
+                                                // so the receiver knows who sent these messages.
+                                                if send_stream.is_none() {
+                                                    match c.open_uni().await {
+                                                        Ok(mut s) => {
+                                                            let id_bytes = local_shard_id.0.to_be_bytes();
+                                                            if s.write_all(&id_bytes).await.is_err() {
+                                                                conn = None;
+                                                                breaker.record_failure();
+                                                                continue;
+                                                            }
+                                                            send_stream = Some(s);
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::debug!(%peer_id, %e, "failed to open uni stream");
+                                                            conn = None;
+                                                            send_stream = None;
+                                                            breaker.record_failure();
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+
+                                                let s = send_stream.as_mut().unwrap();
+                                                let len_bytes = (data.len() as u32).to_be_bytes();
+                                                if s.write_all(&len_bytes).await.is_err()
+                                                    || s.write_all(&data).await.is_err()
+                                                {
+                                                    // Stream broken — discard, reconnect next time.
+                                                    send_stream = None;
+                                                    conn = None;
+                                                    breaker.record_failure();
+                                                } else {
+                                                    breaker.record_success();
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                tx
+                            });
+                            let _ = tx.try_send((peer_addr, shard_msg));
                         } else {
                             return;
                         }
@@ -332,7 +490,18 @@ impl ShardHarness {
         let url = format!("{}/register", self.config.orchestrator_url);
         match reqwest::Client::new().post(&url).json(&info).send().await {
             Ok(resp) if resp.status().is_success() => {
-                info!(shard_id = %self.config.shard_id, "registered with orchestrator");
+                // Parse universe epoch from orchestrator response.
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(epoch_ms) = body.get("universe_epoch_ms").and_then(|v| v.as_u64()) {
+                        self.universe_epoch_ms.store(epoch_ms, Ordering::Relaxed);
+                        info!(shard_id = %self.config.shard_id, universe_epoch_ms = epoch_ms,
+                            "registered with orchestrator (epoch synced)");
+                    } else {
+                        info!(shard_id = %self.config.shard_id, "registered with orchestrator");
+                    }
+                } else {
+                    info!(shard_id = %self.config.shard_id, "registered with orchestrator");
+                }
             }
             Ok(resp) => {
                 tracing::warn!(

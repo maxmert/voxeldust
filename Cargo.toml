@@ -10,6 +10,7 @@ members = [
     "system-shard",
     "ship-shard",
     "planet-shard",
+    "galaxy-shard",
     "voxydust",
 ]
 
@@ -37,6 +38,7 @@ redb = "2"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 brahe = "1.2"
+gooding-lambert = "0.2"
 nalgebra = "0.34"
 rapier3d = "0.22"
 wgpu = "23"
@@ -45,6 +47,7 @@ egui = "0.30"
 egui-wgpu = "0.30"
 egui-winit = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
+lz4_flex = "0.11"
 
 [profile.dev.package.noise]
 opt-level = 3

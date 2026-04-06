@@ -8,3 +8,4 @@ pub mod client_listener;
 pub mod healthz;
 pub mod shutdown;
 pub mod handoff_pipeline;
+pub mod authorized_peers;

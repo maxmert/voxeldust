@@ -15,7 +15,7 @@ async fn start_test_orchestrator() -> (String, Arc<RwLock<orchestrator::registry
     let registry = Arc::new(RwLock::new(registry));
     let provisioner = Arc::new(orchestrator::provisioner::LocalProvisioner::new());
 
-    let app = orchestrator::http_api::build_router(registry.clone(), provisioner);
+    let app = orchestrator::http_api::build_router(registry.clone(), provisioner, 1000000);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
