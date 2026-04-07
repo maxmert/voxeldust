@@ -21,3 +21,4 @@ bevy_app = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+redb = { workspace = true }

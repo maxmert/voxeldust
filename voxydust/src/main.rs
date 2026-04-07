@@ -62,6 +62,46 @@ struct Args {
 struct NetworkChannels {
     event_rx: Option<mpsc::UnboundedReceiver<NetEvent>>,
     input_tx: Option<mpsc::UnboundedSender<PlayerInputData>>,
+    block_edit_tx: Option<mpsc::UnboundedSender<voxeldust_core::client_message::BlockEditData>>,
+}
+
+/// Block type selection hotbar. Keys 1-9 select the active slot (when not piloting).
+#[derive(Resource)]
+struct BlockHotbar {
+    selected_slot: usize,
+    slots: [voxeldust_core::block::BlockId; 9],
+}
+
+impl Default for BlockHotbar {
+    fn default() -> Self {
+        use voxeldust_core::block::BlockId;
+        Self {
+            selected_slot: 0,
+            slots: [
+                BlockId::HULL_STANDARD,
+                BlockId::HULL_LIGHT,
+                BlockId::HULL_HEAVY,
+                BlockId::HULL_ARMORED,
+                BlockId::WINDOW,
+                BlockId::STONE,
+                BlockId::DIRT,
+                BlockId::SAND,
+                BlockId::GRASS,
+            ],
+        }
+    }
+}
+
+impl BlockHotbar {
+    fn selected_block(&self) -> voxeldust_core::block::BlockId {
+        self.slots[self.selected_slot]
+    }
+}
+
+/// Currently targeted block (client-side prediction raycast, updated each frame).
+#[derive(Resource, Default)]
+struct BlockTarget {
+    hit: Option<voxeldust_core::block::raycast::BlockHit>,
 }
 
 #[derive(Resource)]
@@ -790,7 +830,10 @@ impl ClientApp {
         ecs_app.insert_resource(NetworkChannels {
             event_rx: None,
             input_tx: None,
+            block_edit_tx: None,
         });
+        ecs_app.insert_resource(BlockHotbar::default());
+        ecs_app.insert_resource(BlockTarget::default());
         ecs_app.insert_resource(ConnectionInfo {
             connected: false,
             current_shard_type: 255,
@@ -907,7 +950,9 @@ impl ClientApp {
     fn start_networking(&mut self) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (block_edit_tx, block_edit_rx) = mpsc::unbounded_channel();
         let input_rx = Arc::new(tokio::sync::Mutex::new(input_rx));
+        let block_edit_rx = Arc::new(tokio::sync::Mutex::new(block_edit_rx));
 
         let gateway = self.args.gateway;
         let name = self.args.name.clone();
@@ -915,13 +960,14 @@ impl ClientApp {
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(network::run_network(gateway, name, event_tx, input_rx, direct));
+            rt.block_on(network::run_network(gateway, name, event_tx, input_rx, block_edit_rx, direct));
         });
 
         let world = self.ecs_app.world_mut();
         let mut net = world.resource_mut::<NetworkChannels>();
         net.event_rx = Some(event_rx);
         net.input_tx = Some(input_tx);
+        net.block_edit_tx = Some(block_edit_tx);
     }
 
     fn render(&mut self) {
@@ -1140,6 +1186,42 @@ impl ClientApp {
             }
         }
 
+        // Client-side block targeting raycast (for highlight).
+        // Only when walking inside a ship shard (not piloting).
+        if current_shard_type == 2 && !is_piloting {
+            let world_mut = self.ecs_app.world_mut();
+            let chunk_cache = world_mut.resource::<ClientChunkCacheRes>();
+            let registry = voxeldust_core::block::BlockRegistry::new();
+            let source = chunk_cache.primary_source;
+
+            let eye = glam::Vec3::new(
+                render_position.x as f32 + 0.0,
+                render_position.y as f32 + gpu::EYE_HEIGHT as f32,
+                render_position.z as f32 + 0.0,
+            );
+            let (sy, cy) = (cam_yaw as f32).sin_cos();
+            let (sp, cp) = (cam_pitch as f32).sin_cos();
+            let look = glam::Vec3::new(cy * cp, sp, sy * cp);
+
+            let hit = if let Some(src) = source {
+                voxeldust_core::block::raycast::raycast(eye, look, 8.0, |x, y, z| {
+                    let (chunk_key, lx, ly, lz) =
+                        voxeldust_core::block::ShipGrid::world_to_chunk(x, y, z);
+                    chunk_cache
+                        .get_chunk(src, chunk_key)
+                        .map(|c| registry.is_solid(c.get_block(lx, ly, lz)))
+                        .unwrap_or(false)
+                })
+            } else {
+                None
+            };
+
+            world_mut.resource_mut::<BlockTarget>().hit = hit;
+        } else {
+            let world_mut = self.ecs_app.world_mut();
+            world_mut.resource_mut::<BlockTarget>().hit = None;
+        }
+
         // Re-read resources for render_frame call.
         let world = self.ecs_app.world();
         let ws = world.resource::<ServerWorldState>();
@@ -1169,6 +1251,7 @@ impl ClientApp {
             star_instance_count,
             warp_target_info,
             self.block_renderer.as_ref(),
+            world.resource::<BlockTarget>().hit.as_ref(),
         );
     }
 }
@@ -1313,6 +1396,26 @@ impl ApplicationHandler for ClientApp {
                             info!(engines_off = flight.engines_off, "engine cutoff toggled");
                         }
 
+                        // Block hotbar selection (1-9) — only when NOT piloting.
+                        if !is_piloting {
+                            let slot = match key {
+                                KeyCode::Digit1 => Some(0),
+                                KeyCode::Digit2 => Some(1),
+                                KeyCode::Digit3 => Some(2),
+                                KeyCode::Digit4 => Some(3),
+                                KeyCode::Digit5 => Some(4),
+                                KeyCode::Digit6 => Some(5),
+                                KeyCode::Digit7 => Some(6),
+                                KeyCode::Digit8 => Some(7),
+                                KeyCode::Digit9 => Some(8),
+                                _ => None,
+                            };
+                            if let Some(s) = slot {
+                                let mut hotbar = world.resource_mut::<BlockHotbar>();
+                                hotbar.selected_slot = s;
+                            }
+                        }
+
                         // Enter key: confirm warp to targeted star.
                         if key == KeyCode::Enter && is_piloting && warp_target.is_some() {
                             info!(target = ?warp_target, "warp confirmed via Enter");
@@ -1349,13 +1452,66 @@ impl ApplicationHandler for ClientApp {
             WindowEvent::MouseInput { state, button, .. } => {
                 let world = self.ecs_app.world_mut();
                 let mouse_grabbed = world.resource::<KeyboardState>().mouse_grabbed;
-                if state.is_pressed() && button == winit::event::MouseButton::Left && !mouse_grabbed {
-                    if let Some(ref w) = self.window {
-                        if w.set_cursor_grab(CursorGrabMode::Locked).is_err() {
-                            let _ = w.set_cursor_grab(CursorGrabMode::Confined);
+
+                if !mouse_grabbed {
+                    // Not grabbed yet — LMB grabs the cursor.
+                    if state.is_pressed() && button == winit::event::MouseButton::Left {
+                        if let Some(ref w) = self.window {
+                            if w.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+                                let _ = w.set_cursor_grab(CursorGrabMode::Confined);
+                            }
+                            w.set_cursor_visible(false);
+                            world.resource_mut::<KeyboardState>().mouse_grabbed = true;
                         }
-                        w.set_cursor_visible(false);
-                        world.resource_mut::<KeyboardState>().mouse_grabbed = true;
+                    }
+                } else if state.is_pressed() {
+                    // Mouse is grabbed — handle block editing.
+                    let is_piloting = world.resource::<LocalPlayer>().is_piloting;
+                    let shard_type = world.resource::<ConnectionInfo>().current_shard_type;
+
+                    // Block editing only when walking (not piloting) on a ship shard.
+                    if !is_piloting && shard_type == 2 {
+                        let action = match button {
+                            winit::event::MouseButton::Left => 1u8,   // break
+                            winit::event::MouseButton::Right => 2u8,  // place
+                            _ => 0u8,
+                        };
+                        if action > 0 {
+                            let player = world.resource::<LocalPlayer>();
+                            let smooth = world.resource::<RenderSmoothing>();
+                            let cam_ctrl = world.resource::<CameraControl>();
+                            let hotbar = world.resource::<BlockHotbar>();
+
+                            // Compute eye and look in ship-local coordinates.
+                            let eye = smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+
+                            // Ship-local look direction from yaw/pitch.
+                            let (sy, cy) = (cam_ctrl.yaw as f32).sin_cos();
+                            let (sp, cp) = (cam_ctrl.pitch as f32).sin_cos();
+                            let look = DVec3::new(
+                                (cy * cp) as f64,
+                                sp as f64,
+                                (sy * cp) as f64,
+                            );
+
+                            let block_type = if action == 2 {
+                                hotbar.selected_block().as_u16()
+                            } else {
+                                0
+                            };
+
+                            let edit = voxeldust_core::client_message::BlockEditData {
+                                action,
+                                eye,
+                                look,
+                                block_type,
+                            };
+
+                            let net = world.resource::<NetworkChannels>();
+                            if let Some(ref tx) = net.block_edit_tx {
+                                let _ = tx.send(edit);
+                            }
+                        }
                     }
                 }
             }

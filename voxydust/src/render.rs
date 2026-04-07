@@ -279,6 +279,7 @@ pub fn render_frame(
     star_instance_count: u32,
     warp_target_star: Option<hud::WarpTargetInfo>,
     block_renderer: Option<&BlockRenderer>,
+    block_target: Option<&voxeldust_core::block::raycast::BlockHit>,
 ) {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -471,9 +472,51 @@ pub fn render_frame(
                 }
             }
         }
+
+        // Block highlight: render a translucent cube at the targeted block.
+        if let Some(target) = block_target {
+            if current_shard_type == 2 && !ro.block_ships.is_empty() {
+                let base_transform = ro.block_ships[0].base_transform;
+
+                // Block center in ship-local space.
+                let block_center = Vec3::new(
+                    target.world_pos.x as f32 + 0.5,
+                    target.world_pos.y as f32 + 0.5,
+                    target.world_pos.z as f32 + 0.5,
+                );
+                let model = base_transform
+                    * Mat4::from_translation(block_center)
+                    * Mat4::from_scale(Vec3::splat(0.505)); // slightly larger than 0.5 half-extent
+                let mvp = cam.vp * model;
+
+                // Use a uniform slot after all block chunks.
+                let highlight_idx = ro.block_uniform_start + 64; // safe margin
+                if highlight_idx < MAX_OBJECTS {
+                    let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                    obj.mvp = mvp.to_cols_array_2d();
+                    obj.model = model.to_cols_array_2d();
+                    obj.color = [0.8, 0.9, 1.0, 0.0]; // bright white-blue
+                    obj.material = [0.0, 0.3, 1.0, 0.0]; // glass = 1.0 (screen-door transparency)
+                    uniform_data[highlight_idx] = obj;
+                    gpu.queue.write_buffer(
+                        &gpu.uniform_buf,
+                        (highlight_idx as u64) * 256,
+                        bytemuck::bytes_of(&uniform_data[highlight_idx]),
+                    );
+
+                    // Draw as sphere with inside pipeline (no backface culling).
+                    pass.set_pipeline(&gpu.sphere_inside_pipeline);
+                    pass.set_bind_group(1, &gpu.scene_bind_group, &[]);
+                    pass.set_bind_group(2, &gpu.shadow_bind_group, &[]);
+                    pass.set_vertex_buffer(0, gpu.sphere_vertex_buf.slice(..));
+                    pass.set_index_buffer(gpu.sphere_index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_bind_group(0, &gpu.bind_group, &[(highlight_idx as u32) * 256]);
+                    pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
+                }
+            }
+        }
     }
 
-    // Compute autopilot trajectory for HUD (done in main.rs before calling render_frame).
     // egui HUD.
     let hud_ctx = HudContext {
         latest_world_state,

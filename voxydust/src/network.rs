@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
-    ChunkDeltaData, ChunkSnapshotData, ClientMsg, PlayerInputData, ServerMsg, WorldStateData,
+    BlockEditData, ChunkDeltaData, ChunkSnapshotData, ClientMsg, PlayerInputData, ServerMsg,
+    WorldStateData,
 };
 use voxeldust_core::handoff::{ShardPreConnect, ShardRedirect};
 
@@ -52,6 +53,7 @@ pub async fn run_network(
     player_name: String,
     event_tx: mpsc::UnboundedSender<NetEvent>,
     input_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<PlayerInputData>>>,
+    block_edit_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<BlockEditData>>>,
     direct: Option<String>,
 ) {
     // Resolve initial shard addresses (via gateway or direct).
@@ -123,9 +125,10 @@ pub async fn run_network(
         // Channel to signal shutdown to child tasks.
         let (cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
-        // Input sender task (20Hz).
+        // Input sender task (20Hz) + block edit sender (immediate).
         let udp_send = udp.clone();
         let input_rx_clone = input_rx.clone();
+        let block_edit_rx_clone = block_edit_rx.clone();
         let mut cancel_input = cancel_tx.subscribe();
         let send_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -148,6 +151,15 @@ pub async fn run_network(
                             ticks_since_send = 0;
                         } else {
                             ticks_since_send += 1;
+                        }
+
+                        // Drain and send any pending block edit requests (immediate, not rate-limited).
+                        {
+                            let mut rx = block_edit_rx_clone.lock().await;
+                            while let Ok(edit) = rx.try_recv() {
+                                let pkt = build_block_edit(&edit);
+                                let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
+                            }
                         }
                     }
                     _ = cancel_input.recv() => { return; }
@@ -371,6 +383,14 @@ pub async fn run_network(
 
 fn build_input(input: &PlayerInputData) -> Vec<u8> {
     let msg = ClientMsg::PlayerInput(input.clone());
+    let data = msg.serialize();
+    let mut pkt = Vec::new();
+    voxeldust_core::wire_codec::encode(&data, &mut pkt);
+    pkt
+}
+
+fn build_block_edit(edit: &BlockEditData) -> Vec<u8> {
+    let msg = ClientMsg::BlockEditRequest(edit.clone());
     let data = msg.serialize();
     let mut pkt = Vec::new();
     voxeldust_core::wire_codec::encode(&data, &mut pkt);

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use voxeldust_core::client_message::{ClientMsg, PlayerInputData, ServerMsg};
+use voxeldust_core::client_message::{BlockEditData, ClientMsg, PlayerInputData, ServerMsg};
 use voxeldust_core::shard_types::SessionToken;
 
 /// A persistent client connection (TCP stream kept alive).
@@ -306,11 +306,13 @@ pub async fn broadcast_world_state_udp(
     }
 }
 
-/// Run UDP receiver loop: reads PlayerInput packets and discovers client UDP addresses.
+/// Run UDP receiver loop: reads PlayerInput and BlockEditRequest packets,
+/// discovers client UDP addresses.
 pub async fn run_udp_receiver(
     socket: Arc<UdpSocket>,
     registry: Arc<RwLock<ClientRegistry>>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
+    block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
     cancel: CancellationToken,
 ) {
     let mut buf = vec![0u8; 65536];
@@ -339,6 +341,9 @@ pub async fn run_udp_receiver(
                         match ClientMsg::deserialize(&payload) {
                             Ok(ClientMsg::PlayerInput(input)) => {
                                 let _ = input_tx.send((src, input));
+                            }
+                            Ok(ClientMsg::BlockEditRequest(edit)) => {
+                                let _ = block_edit_tx.send(edit);
                             }
                             _ => {}
                         }

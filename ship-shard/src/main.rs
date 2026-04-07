@@ -9,12 +9,14 @@ use tracing::{info, warn};
 
 use voxeldust_core::autopilot::{self, ShipPhysicalProperties};
 use voxeldust_core::block::{
-    self, BlockId, BlockRegistry, ShipGrid, StarterShipLayout, build_starter_ship,
+    self, BlockId, BlockRegistry, DamageResult, ShipGrid, StarterShipLayout, build_starter_ship,
+    edit_pipeline::{self, BlockEditQueue, BlockEdit, EditSource},
+    raycast,
 };
 use voxeldust_core::shard_message::AutopilotSnapshotData;
 use voxeldust_core::client_message::{
-    CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData, ServerMsg,
-    WorldStateData,
+    BlockEditData, CelestialBodyData, ChunkDeltaData, JoinResponseData, LightingData,
+    PlayerSnapshotData, ServerMsg, WorldStateData,
 };
 use voxeldust_core::ecs;
 use voxeldust_core::handoff;
@@ -334,6 +336,11 @@ struct PlayerInputMsg {
     input: voxeldust_core::client_message::PlayerInputData,
 }
 
+#[derive(Message)]
+struct BlockEditMsg {
+    edit: BlockEditData,
+}
+
 // ---------------------------------------------------------------------------
 // System Sets
 // ---------------------------------------------------------------------------
@@ -342,6 +349,7 @@ struct PlayerInputMsg {
 enum ShipSet {
     Bridge,
     Input,
+    BlockEdit,
     Physics,
     Interaction,
     Send,
@@ -1405,6 +1413,395 @@ fn log_state(
 }
 
 // ---------------------------------------------------------------------------
+// Block persistence (redb)
+// ---------------------------------------------------------------------------
+
+/// Ship block persistence — saves modified chunks to an embedded database.
+///
+/// Chunks are marked dirty by `apply_block_edits`. Every `SAVE_INTERVAL_TICKS`
+/// ticks, all dirty chunks are batch-written to redb. On startup, if a database
+/// file exists, chunks are loaded from it instead of using `build_starter_ship`.
+#[derive(Resource)]
+struct ShipPersistence {
+    db: redb::Database,
+    /// Chunks modified since the last save.
+    pending_saves: std::collections::HashSet<glam::IVec3>,
+    /// Tick counter at last save.
+    last_save_tick: u64,
+}
+
+/// Save interval: every 60 ticks (3 seconds at 20Hz).
+const SAVE_INTERVAL_TICKS: u64 = 60;
+
+/// redb table definition for ship chunk data.
+const SHIP_CHUNKS_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("ship_chunks");
+
+/// Encode a chunk key as bytes for redb key.
+fn chunk_key_bytes(key: glam::IVec3) -> [u8; 12] {
+    let mut buf = [0u8; 12];
+    buf[0..4].copy_from_slice(&key.x.to_le_bytes());
+    buf[4..8].copy_from_slice(&key.y.to_le_bytes());
+    buf[8..12].copy_from_slice(&key.z.to_le_bytes());
+    buf
+}
+
+/// Decode a chunk key from redb bytes.
+fn chunk_key_from_bytes(buf: &[u8]) -> glam::IVec3 {
+    glam::IVec3::new(
+        i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+        i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+        i32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+    )
+}
+
+/// Load a ShipGrid from the redb database. Returns None if the database is empty.
+fn load_grid_from_db(db: &redb::Database) -> Option<ShipGrid> {
+    let txn = db.begin_read().ok()?;
+    let table = txn.open_table(SHIP_CHUNKS_TABLE).ok()?;
+
+    let mut grid = ShipGrid::new();
+    let mut count = 0usize;
+
+    let mut iter = table.range::<&[u8]>(..).ok()?;
+    while let Some(entry) = iter.next() {
+        let (key, value) = match entry {
+            Ok(kv) => kv,
+            Err(_) => continue,
+        };
+        let key_bytes = key.value();
+        if key_bytes.len() < 12 {
+            continue;
+        }
+        let chunk_key = chunk_key_from_bytes(key_bytes);
+        match block::deserialize_chunk(value.value()) {
+            Ok(chunk) => {
+                grid.insert_chunk(chunk_key, chunk);
+                count += 1;
+            }
+            Err(e) => {
+                warn!("failed to load chunk {chunk_key}: {e}");
+            }
+        }
+    }
+
+    if count > 0 {
+        info!(chunks = count, "loaded ship grid from persistence");
+        Some(grid)
+    } else {
+        None
+    }
+}
+
+/// Save dirty chunks to the database.
+fn save_dirty_chunks(
+    db: &redb::Database,
+    grid: &ShipGrid,
+    pending: &mut std::collections::HashSet<glam::IVec3>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+
+    let txn = match db.begin_write() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("redb write transaction failed: {e}");
+            return;
+        }
+    };
+
+    {
+        let mut table = match txn.open_table(SHIP_CHUNKS_TABLE) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("redb open table failed: {e}");
+                return;
+            }
+        };
+
+        for &chunk_key in pending.iter() {
+            let key_bytes = chunk_key_bytes(chunk_key);
+            if let Some(chunk) = grid.get_chunk(chunk_key) {
+                let data = block::serialize_chunk(chunk);
+                let _ = table.insert(key_bytes.as_slice(), data.as_slice());
+            }
+        }
+    }
+
+    if let Err(e) = txn.commit() {
+        warn!("redb commit failed: {e}");
+        return;
+    }
+
+    let count = pending.len();
+    pending.clear();
+    info!(chunks = count, "persisted dirty chunks");
+}
+
+/// System: periodically save dirty chunks to redb.
+fn persist_chunks(
+    grid: Res<ShipGridResource>,
+    mut persistence: ResMut<ShipPersistence>,
+    tick: Res<ecs::TickCounter>,
+) {
+    if tick.0 < persistence.last_save_tick + SAVE_INTERVAL_TICKS {
+        return;
+    }
+    persistence.last_save_tick = tick.0;
+
+    // Destructure to satisfy the borrow checker — db is borrowed immutably,
+    // pending_saves is borrowed mutably, from the same struct.
+    let ShipPersistence { ref db, ref mut pending_saves, .. } = *persistence;
+    save_dirty_chunks(db, &grid.0, pending_saves);
+}
+
+// ---------------------------------------------------------------------------
+// Block edit systems
+// ---------------------------------------------------------------------------
+
+/// Bridge system: drain BlockEditRequest messages from the UDP channel.
+fn drain_block_edits(
+    mut bridge: ResMut<NetworkBridge>,
+    mut events: MessageWriter<BlockEditMsg>,
+) {
+    for _ in 0..64 {
+        let edit = match bridge.block_edit_rx.try_recv() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+        events.write(BlockEditMsg { edit });
+    }
+}
+
+/// Damage amount per player hit. Higher-tier tools would increase this.
+const PLAYER_BREAK_DAMAGE: u16 = 20;
+
+/// Maximum raycast distance for block editing (in blocks).
+const BLOCK_EDIT_RANGE: f32 = 8.0;
+
+/// Producer system: processes player BlockEditRequests.
+/// Performs server-authoritative raycast, applies progressive damage for breaking,
+/// and pushes resulting edits into the generic BlockEditQueue.
+fn produce_player_edits(
+    mut events: MessageReader<BlockEditMsg>,
+    mut queue: ResMut<BlockEditQueue>,
+    mut grid: ResMut<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    connected: Res<ConnectedPlayer>,
+    player_pos: Res<PlayerPosition>,
+) {
+    if connected.session.is_none() || connected.handoff_pending {
+        return;
+    }
+    let session = connected.session.unwrap();
+
+    for event in events.read() {
+        let edit = &event.edit;
+        let eye = glam::Vec3::new(edit.eye.x as f32, edit.eye.y as f32, edit.eye.z as f32);
+        let look = glam::Vec3::new(edit.look.x as f32, edit.look.y as f32, edit.look.z as f32);
+
+        // Validate: player eye position should be close to their actual position
+        // (anti-cheat: don't allow editing from arbitrary positions).
+        let eye_to_player = (eye - player_pos.0).length();
+        if eye_to_player > 3.0 {
+            warn!("block edit rejected: eye position too far from player ({:.1}m)", eye_to_player);
+            continue;
+        }
+
+        // Server-authoritative raycast against the ShipGrid.
+        let hit = raycast::raycast(eye, look, BLOCK_EDIT_RANGE, |x, y, z| {
+            registry.0.is_solid(grid.0.get_block(x, y, z))
+        });
+
+        let hit = match hit {
+            Some(h) => h,
+            None => continue, // ray didn't hit anything
+        };
+
+        match edit.action {
+            1 => {
+                // Break: apply progressive damage.
+                let result = grid.0.damage_block(
+                    hit.world_pos.x,
+                    hit.world_pos.y,
+                    hit.world_pos.z,
+                    PLAYER_BREAK_DAMAGE,
+                    &registry.0,
+                );
+                match result {
+                    DamageResult::Broken => {
+                        // Block destroyed — push to edit queue for pipeline processing.
+                        queue.push(BlockEdit {
+                            pos: hit.world_pos,
+                            new_block: BlockId::AIR,
+                            source: EditSource::Player(session),
+                        });
+                        // Clear metadata (damage state) for the broken block.
+                        grid.0.remove_meta(
+                            hit.world_pos.x,
+                            hit.world_pos.y,
+                            hit.world_pos.z,
+                        );
+                    }
+                    DamageResult::Damaged { stage } => {
+                        // Block took damage but didn't break.
+                        // TODO: send damage stage to client for crack overlay rendering.
+                        info!(
+                            block = ?hit.world_pos,
+                            stage,
+                            "block damaged"
+                        );
+                    }
+                    DamageResult::NoEffect => {}
+                }
+            }
+            2 => {
+                // Place: put a new block on the face adjacent to the hit.
+                let target = hit.world_pos + hit.face_normal;
+
+                // Validate: target must be air.
+                if !grid.0.get_block(target.x, target.y, target.z).is_air() {
+                    continue;
+                }
+
+                // Validate: don't place inside the player's bounding box.
+                // Player capsule is ~0.6 radius, ~1.8 tall. Check if the target
+                // block overlaps the player position.
+                let block_center = glam::Vec3::new(
+                    target.x as f32 + 0.5,
+                    target.y as f32 + 0.5,
+                    target.z as f32 + 0.5,
+                );
+                let dx = (block_center.x - player_pos.0.x).abs();
+                let dz = (block_center.z - player_pos.0.z).abs();
+                let dy_low = block_center.y - player_pos.0.y; // relative Y
+                // Player occupies roughly x±0.5, z±0.5, y-0.1 to y+1.7
+                if dx < 1.0 && dz < 1.0 && dy_low > -0.6 && dy_low < 2.2 {
+                    continue; // would place inside the player
+                }
+
+                // Validate: block type is a real block, not air.
+                let block_type = BlockId::from_u16(edit.block_type);
+                if block_type.is_air() {
+                    continue;
+                }
+
+                queue.push(BlockEdit {
+                    pos: target,
+                    new_block: block_type,
+                    source: EditSource::Player(session),
+                });
+            }
+            _ => {} // unknown action
+        }
+    }
+}
+
+/// Rebuild a single chunk's Rapier collider from the current ShipGrid state.
+fn rebuild_chunk_collider(
+    grid: &ShipGrid,
+    chunk_key: glam::IVec3,
+    registry: &BlockRegistry,
+    rapier: &mut RapierContext,
+    collider_handles: &mut ChunkColliderHandles,
+) {
+    // Remove old collider for this chunk.
+    if let Some(old_handle) = collider_handles.0.remove(&chunk_key) {
+        rapier.collider_set.remove(
+            old_handle,
+            &mut rapier.island_manager,
+            &mut rapier.rigid_body_set,
+            true,
+        );
+    }
+    // Build and insert new collider.
+    if let Some(collider) = build_chunk_collider(grid, chunk_key, registry) {
+        let handle = rapier.collider_set.insert(collider);
+        collider_handles.0.insert(chunk_key, handle);
+    }
+}
+
+/// Apply system: drains the BlockEditQueue, applies edits via the core pipeline,
+/// then handles all shard-specific side effects.
+fn apply_block_edits(
+    mut queue: ResMut<BlockEditQueue>,
+    mut grid: ResMut<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    mut rapier: ResMut<RapierContext>,
+    mut collider_handles: ResMut<ChunkColliderHandles>,
+    mut hull_bounds: ResMut<ShipHullBounds>,
+    mut interaction_pts: ResMut<InteractionPoints>,
+    connected: Res<ConnectedPlayer>,
+    bridge: Res<NetworkBridge>,
+    mut persistence: Option<ResMut<ShipPersistence>>,
+) {
+    let edits = queue.drain_all();
+    if edits.is_empty() {
+        return;
+    }
+
+    // 1. Core: apply edits to grid (pure function, no side effects).
+    let result = edit_pipeline::apply_edits_to_grid(&mut grid.0, &edits, &registry.0);
+
+    if result.applied_count == 0 {
+        return;
+    }
+
+    // 2. Shard-specific: rebuild chunk colliders for all dirty chunks.
+    for &chunk_key in result.dirty_chunks.keys() {
+        rebuild_chunk_collider(&grid.0, chunk_key, &registry.0, &mut rapier, &mut collider_handles);
+    }
+
+    // 2b. Mark dirty chunks for persistence.
+    if let Some(ref mut persist) = persistence {
+        for &chunk_key in result.dirty_chunks.keys() {
+            persist.pending_saves.insert(chunk_key);
+        }
+    }
+
+    // 3. Shard-specific: update hull bounds if solidity changed.
+    if result.solidity_changed {
+        if let Some((min, max)) = grid.0.bounding_box() {
+            hull_bounds.min = min;
+            hull_bounds.max = max;
+        }
+    }
+
+    // 4. Shard-specific: rescan interactable blocks if needed.
+    if result.interactables_changed {
+        *interaction_pts = scan_interactable_blocks(&grid.0);
+    }
+
+    // 5. Broadcast ChunkDeltas to all connected clients (one per dirty chunk).
+    if let Some(session) = connected.session {
+        for (chunk_key, mods) in &result.dirty_chunks {
+            let seq = grid.0.get_chunk_mut(*chunk_key)
+                .map(|c| c.next_edit_seq())
+                .unwrap_or(1);
+            let delta = ServerMsg::ChunkDelta(ChunkDeltaData {
+                chunk_x: chunk_key.x,
+                chunk_y: chunk_key.y,
+                chunk_z: chunk_key.z,
+                seq,
+                mods: mods.clone(),
+            });
+            let cr = bridge.client_registry.clone();
+            tokio::spawn(async move {
+                if let Ok(reg) = cr.try_read() {
+                    let _ = reg.send_tcp(session, &delta).await;
+                }
+            });
+        }
+    }
+
+    info!(
+        applied = result.applied_count,
+        dirty_chunks = result.dirty_chunks.len(),
+        "block edits applied"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // App construction
 // ---------------------------------------------------------------------------
 
@@ -1504,10 +1901,51 @@ fn build_ship_interior(
     let mut rigid_body_set = RigidBodySet::new();
     let mut collider_set = ColliderSet::new();
 
-    // Build the ship from blocks.
+    // Initialize block persistence and load ship data.
+    let db_path = format!("/tmp/voxeldust-ship-{ship_id}.redb");
+    let db = redb::Database::create(&db_path)
+        .unwrap_or_else(|e| panic!("failed to create redb at {db_path}: {e}"));
+    let ship_persistence = ShipPersistence {
+        db,
+        pending_saves: std::collections::HashSet::new(),
+        last_save_tick: 0,
+    };
+
+    // Try to load saved ship data. Fall back to starter ship if no saved data.
     let registry = BlockRegistry::new();
-    let layout = StarterShipLayout::default_starter();
-    let grid = build_starter_ship(&layout);
+    let loaded = load_grid_from_db(&ship_persistence.db);
+    let grid = match loaded {
+        Some(saved_grid) => {
+            info!(
+                blocks = saved_grid.total_block_count(),
+                chunks = saved_grid.chunk_count(),
+                "loaded ship from persistence"
+            );
+            saved_grid
+        }
+        None => {
+            let layout = StarterShipLayout::default_starter();
+            let starter = build_starter_ship(&layout);
+            // Save the starter ship to persistence so it's there on next restart.
+            let chunk_keys: Vec<glam::IVec3> = starter.chunk_keys().collect();
+            {
+                let txn = ship_persistence.db.begin_write().expect("redb write");
+                {
+                    let mut table = txn.open_table(SHIP_CHUNKS_TABLE).expect("redb table");
+                    for &chunk_key in &chunk_keys {
+                        if let Some(chunk) = starter.get_chunk(chunk_key) {
+                            let key_bytes = chunk_key_bytes(chunk_key);
+                            let data = block::serialize_chunk(chunk);
+                            let _ = table.insert(key_bytes.as_slice(), data.as_slice());
+                        }
+                    }
+                }
+                let _ = txn.commit();
+            }
+            info!("built starter ship and saved to persistence");
+            starter
+        }
+    };
 
     // Generate Rapier colliders from each chunk's solid blocks.
     let mut chunk_collider_handles = std::collections::HashMap::new();
@@ -1666,10 +2104,13 @@ fn build_ship_interior(
     app.insert_resource(GravityEnabled(true));
     app.insert_resource(InputActions::default());
     app.insert_resource(ecs::TickCounter::default());
+    app.insert_resource(BlockEditQueue::default());
+    app.insert_resource(ship_persistence);
 
     // Messages.
     app.add_message::<ClientConnectedMsg>();
     app.add_message::<PlayerInputMsg>();
+    app.add_message::<BlockEditMsg>();
 
     // System ordering.
     app.configure_sets(
@@ -1677,6 +2118,7 @@ fn build_ship_interior(
         (
             ShipSet::Bridge,
             ShipSet::Input,
+            ShipSet::BlockEdit,
             ShipSet::Physics,
             ShipSet::Interaction,
             ShipSet::Send,
@@ -1689,13 +2131,19 @@ fn build_ship_interior(
     // Bridge: drain async channels.
     app.add_systems(
         Update,
-        (drain_connects, drain_input, drain_quic).in_set(ShipSet::Bridge),
+        (drain_connects, drain_input, drain_block_edits, drain_quic).in_set(ShipSet::Bridge),
     );
 
     // Input: process connects, player input, preconnect.
     app.add_systems(
         Update,
         (process_connects, process_input, preconnect_check).in_set(ShipSet::Input),
+    );
+
+    // Block editing: produce edits from player input, then apply all queued edits.
+    app.add_systems(
+        Update,
+        (produce_player_edits, apply_block_edits).chain().in_set(ShipSet::BlockEdit),
     );
 
     // Physics.
@@ -1717,7 +2165,7 @@ fn build_ship_interior(
     app.add_systems(Update, broadcast_world_state.in_set(ShipSet::Broadcast));
 
     // Diagnostics.
-    app.add_systems(Update, log_state.in_set(ShipSet::Diagnostics));
+    app.add_systems(Update, (persist_chunks, log_state).in_set(ShipSet::Diagnostics));
 
     app
 }

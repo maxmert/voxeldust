@@ -5837,6 +5837,7 @@ dependencies = [
  "clap 4.6.0",
  "glam 0.29.3",
  "rapier3d",
+ "redb",
  "reqwest",
  "serde",
  "serde_json",
