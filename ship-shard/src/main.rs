@@ -1733,7 +1733,7 @@ fn produce_player_edits(
                     source: EditSource::Player(session),
                 });
             }
-            action @ 3..=9 => {
+            action @ (3..=7 | 9) => {
                 // Interaction: raycast to find targeted functional block,
                 // look up its kind, check interaction schema, dispatch.
                 if let Some(&entity) = block_index.0.get(&hit.world_pos) {

@@ -22,6 +22,8 @@ pub struct HudContext<'a> {
     pub system_params: Option<&'a voxeldust_core::system::SystemParams>,
     pub frame_count: u64,
     pub warp_target_star: Option<WarpTargetInfo>,
+    /// Functional block indicators: (ship-local position, kind, letter).
+    pub block_indicators: &'a [(glam::Vec3, u8, char)],
 }
 
 /// Info about the currently targeted star for warp HUD.
@@ -69,6 +71,11 @@ pub fn run_hud(
         // Autopilot trajectory line.
         draw_trajectory(&painter, ctx, logical_w, logical_h);
 
+        // Block status indicators (functional blocks).
+        if config_state.is_none() {
+            draw_block_indicators(&painter, ctx, logical_w, logical_h);
+        }
+
         // Info panel.
         draw_info_panel(ectx, ctx);
 
@@ -77,8 +84,8 @@ pub fn run_hud(
             panel_action = draw_block_config_panel(ectx, config);
         }
 
-        // Crosshair (only when config panel is closed).
-        if matches!(panel_action, ConfigPanelAction::None) {
+        // Crosshair (only when config panel is not visible).
+        if config_state.is_none() {
             let center = egui::pos2(logical_w / 2.0, logical_h / 2.0);
             painter.circle_stroke(center, 3.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(200, 200, 200, 100)));
         }
@@ -149,6 +156,56 @@ fn draw_body_labels(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, l
             painter.circle_stroke(egui::pos2(sx, sy), cr, egui::Stroke::new(1.0, color));
             painter.text(egui::pos2(sx + cr + 4.0, sy - 6.0), egui::Align2::LEFT_CENTER, &label, egui::FontId::proportional(11.0), color);
         }
+    }
+}
+
+/// Draw small status indicators on functional blocks visible within ~15m.
+fn draw_block_indicators(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, logical_h: f32) {
+    if ctx.current_shard_type != 2 || ctx.is_piloting {
+        return; // Only show when walking inside a ship.
+    }
+
+    let accent = egui::Color32::from_rgba_unmultiplied(60, 200, 255, 160);
+    let glow = egui::Color32::from_rgba_unmultiplied(60, 200, 255, 40);
+
+    for &(block_pos, kind, letter) in ctx.block_indicators {
+        // block_pos is ship-local. For the VP projection we need camera-relative offset.
+        // In floating-origin, camera is at origin, so offset = block_pos - render_position.
+        // But render_position was already subtracted during camera computation,
+        // so we need the offset from the camera position (which is at origin in view space).
+        // The VP matrix expects positions relative to the camera.
+        let offset = block_pos - ctx.player_position.as_vec3();
+        let dist = offset.length();
+
+        // Distance cull: only show within 15m.
+        if dist > 15.0 || dist < 0.5 {
+            continue;
+        }
+
+        // Project to screen.
+        let clip = ctx.vp * glam::Vec4::new(offset.x, offset.y, offset.z, 1.0);
+        if clip.w <= 0.0 { continue; } // Behind camera.
+        let ndc_x = clip.x / clip.w;
+        let ndc_y = clip.y / clip.w;
+        if ndc_x.abs() > 1.1 || ndc_y.abs() > 1.1 { continue; } // Off screen.
+        let sx = (ndc_x * 0.5 + 0.5) * logical_w;
+        let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * logical_h;
+
+        // Scale indicator size by distance (larger when closer).
+        let size = (6.0 / dist).clamp(3.0, 12.0);
+
+        // Glow halo.
+        painter.circle_filled(egui::pos2(sx, sy), size + 3.0, glow);
+        // Indicator dot.
+        painter.circle_filled(egui::pos2(sx, sy), size, accent);
+        // Kind letter.
+        painter.text(
+            egui::pos2(sx, sy),
+            egui::Align2::CENTER_CENTER,
+            letter.to_string(),
+            egui::FontId::proportional(size * 1.5),
+            egui::Color32::from_rgb(10, 20, 40),
+        );
     }
 }
 
@@ -587,6 +644,7 @@ fn catmull_rom(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t
 // Block signal config panel
 // ---------------------------------------------------------------------------
 
+use voxeldust_core::signal::components::SeatControl;
 use voxeldust_core::signal::config::BlockSignalConfig;
 use voxeldust_core::signal::types::SignalProperty;
 
@@ -601,6 +659,18 @@ const SIGNAL_PROPERTY_NAMES: &[(&str, SignalProperty)] = &[
     ("SwitchState", SignalProperty::SwitchState),
 ];
 
+fn functional_kind_name(kind: u8) -> &'static str {
+    // Must match the enum discriminant order in registry.rs.
+    const NAMES: &[(u8, &str)] = &[
+        (0, "Thruster"), (1, "Reactor"), (2, "Battery"), (3, "Solar Panel"),
+        (4, "Power Conduit"), (5, "Seat"), (6, "Gravity Gen"), (7, "Shield Emitter"),
+        (8, "Shield Gen"), (9, "Air Compressor"), (10, "Antenna"), (11, "Rotor"),
+        (12, "Piston"), (13, "Rail"), (14, "Rail Junction"), (15, "Rail Signal"),
+        (16, "Signal Converter"), (17, "Sensor"), (18, "Computer"),
+    ];
+    NAMES.iter().find(|(k, _)| *k == kind).map(|(_, n)| *n).unwrap_or("Unknown")
+}
+
 fn property_name(prop: SignalProperty) -> &'static str {
     SIGNAL_PROPERTY_NAMES.iter()
         .find(|(_, p)| *p == prop)
@@ -608,41 +678,165 @@ fn property_name(prop: SignalProperty) -> &'static str {
         .unwrap_or("Unknown")
 }
 
+/// Text input for signal channel names with inline autocomplete from available channels.
+fn channel_name_input(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    channel_name: &mut String,
+    available_channels: &[String],
+) {
+    let response = ui.add(
+        egui::TextEdit::singleline(channel_name)
+            .desired_width(120.0)
+            .id(egui::Id::new(id_salt)),
+    );
+
+    // When focused and typing, show matching suggestions as clickable labels below.
+    if response.has_focus() && !channel_name.is_empty() {
+        let query = channel_name.to_lowercase();
+        let mut shown = 0;
+        for ch in available_channels {
+            if ch.to_lowercase().contains(&query) && ch.as_str() != channel_name.as_str() {
+                if ui.small_button(
+                    egui::RichText::new(format!("  {ch}"))
+                        .color(egui::Color32::from_rgb(100, 180, 240))
+                        .size(10.0),
+                ).clicked() {
+                    *channel_name = ch.clone();
+                }
+                shown += 1;
+                if shown >= 5 { break; }
+            }
+        }
+    }
+}
+
 fn draw_block_config_panel(
     ectx: &egui::Context,
     config: &mut BlockSignalConfig,
 ) -> ConfigPanelAction {
     let mut action = ConfigPanelAction::None;
-    let kind_name = format!("Block Config (kind {})", config.kind);
 
-    egui::Window::new(&kind_name)
-        .collapsible(false)
-        .resizable(true)
-        .default_width(400.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    let kind_label = functional_kind_name(config.kind);
+
+    let screen = ectx.screen_rect();
+    let accent = egui::Color32::from_rgba_unmultiplied(60, 180, 255, 180);
+    let accent_dim = egui::Color32::from_rgba_unmultiplied(60, 180, 255, 40);
+
+    // Dim the game world behind the panel (vignette effect).
+    let bg_layer = egui::LayerId::new(egui::Order::Background, egui::Id::new("config_bg_dim"));
+    let bg_painter = ectx.layer_painter(bg_layer);
+    bg_painter.rect_filled(screen, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 120));
+
+    // Panel dimensions — fit within the block face projection.
+    // Camera is 1m from a 1m×1m face at 70° vertical FOV.
+    // Block face angular size: 2*atan(0.5/1.0) ≈ 53° → covers 53/70 ≈ 75% of screen height.
+    // Use 65% with inner padding so content stays within the face edges.
+    let face_frac = 0.65;
+    let panel_h = (screen.height() * face_frac).min(screen.height() - 40.0);
+    let panel_w = panel_h.min(screen.width() * face_frac); // keep roughly square like the face
+    let panel_x = (screen.width() - panel_w) / 2.0;
+    let panel_y = (screen.height() - panel_h) / 2.0;
+    let panel_rect = egui::Rect::from_min_size(
+        egui::pos2(screen.left() + panel_x, screen.top() + panel_y),
+        egui::vec2(panel_w, panel_h),
+    );
+
+    // Draw AR frame: corner brackets around the panel (like a HUD targeting reticle).
+    let frame_layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("config_frame"));
+    let frame_painter = ectx.layer_painter(frame_layer);
+    let corner_len = 20.0;
+    let bracket_stroke = egui::Stroke::new(2.0, accent);
+    let r = panel_rect.expand(6.0);
+    // Top-left
+    frame_painter.line_segment([r.left_top(), egui::pos2(r.left() + corner_len, r.top())], bracket_stroke);
+    frame_painter.line_segment([r.left_top(), egui::pos2(r.left(), r.top() + corner_len)], bracket_stroke);
+    // Top-right
+    frame_painter.line_segment([r.right_top(), egui::pos2(r.right() - corner_len, r.top())], bracket_stroke);
+    frame_painter.line_segment([r.right_top(), egui::pos2(r.right(), r.top() + corner_len)], bracket_stroke);
+    // Bottom-left
+    frame_painter.line_segment([r.left_bottom(), egui::pos2(r.left() + corner_len, r.bottom())], bracket_stroke);
+    frame_painter.line_segment([r.left_bottom(), egui::pos2(r.left(), r.bottom() - corner_len)], bracket_stroke);
+    // Bottom-right
+    frame_painter.line_segment([r.right_bottom(), egui::pos2(r.right() - corner_len, r.bottom())], bracket_stroke);
+    frame_painter.line_segment([r.right_bottom(), egui::pos2(r.right(), r.bottom() - corner_len)], bracket_stroke);
+
+    // Subtle horizontal scanlines across the panel area (holographic effect).
+    let scanline_color = egui::Color32::from_rgba_unmultiplied(60, 180, 255, 8);
+    let mut y = panel_rect.top();
+    while y < panel_rect.bottom() {
+        frame_painter.line_segment(
+            [egui::pos2(panel_rect.left(), y), egui::pos2(panel_rect.right(), y)],
+            egui::Stroke::new(1.0, scanline_color),
+        );
+        y += 4.0;
+    }
+
+    // Panel content frame.
+    let panel_frame = egui::Frame::default()
+        .fill(egui::Color32::from_rgba_unmultiplied(5, 15, 30, 210))
+        .stroke(egui::Stroke::new(1.0, accent_dim))
+        .rounding(4.0)
+        .inner_margin(egui::Margin::same(16.0));
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::none())
         .show(ectx, |ui| {
-            ui.label(format!(
-                "Position: ({}, {}, {})",
-                config.block_pos.x, config.block_pos.y, config.block_pos.z
-            ));
-            ui.separator();
+            ui.allocate_ui_at_rect(panel_rect, |ui| {
+                    panel_frame.show(ui, |ui| {
+                        // AR title with accent color.
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("// SIGNAL CONFIG — {}", kind_label))
+                                    .color(egui::Color32::from_rgb(60, 200, 255))
+                                    .size(16.0)
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button(
+                                    egui::RichText::new("X")
+                                        .color(egui::Color32::from_rgb(255, 100, 100))
+                                        .strong(),
+                                ).clicked() {
+                                    action = ConfigPanelAction::Close;
+                                }
+                            });
+                        });
+
+                        ui.add_space(4.0);
+                        // Thin accent separator.
+                        let rect = ui.available_rect_before_wrap();
+                        ui.painter().line_segment(
+                            [egui::pos2(rect.left(), rect.top()), egui::pos2(rect.right(), rect.top())],
+                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 80)),
+                        );
+                        ui.add_space(6.0);
+
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "POS [{}, {}, {}]",
+                                config.block_pos.x, config.block_pos.y, config.block_pos.z
+                            ))
+                            .color(egui::Color32::from_rgb(140, 160, 180))
+                            .size(11.0),
+                        );
+                        ui.add_space(8.0);
 
             // --- Publish Bindings ---
-            egui::CollapsingHeader::new("Publish Channels")
+            let accent = egui::Color32::from_rgb(60, 200, 255);
+            let dim_text = egui::Color32::from_rgb(160, 180, 200);
+
+            egui::CollapsingHeader::new(
+                egui::RichText::new("PUBLISH CHANNELS").color(accent).size(13.0),
+            )
                 .default_open(true)
                 .show(ui, |ui| {
                     let mut remove_idx = None;
                     for (i, binding) in config.publish_bindings.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label("Channel:");
-                            egui::ComboBox::from_id_salt(format!("pub_ch_{i}"))
-                                .selected_text(&binding.channel_name)
-                                .show_ui(ui, |ui| {
-                                    for ch in &config.available_channels {
-                                        ui.selectable_value(&mut binding.channel_name, ch.clone(), ch);
-                                    }
-                                });
-                            ui.label("Property:");
+                            ui.label(egui::RichText::new("CH").color(dim_text).size(11.0));
+                            channel_name_input(ui, &format!("pub_ch_{i}"), &mut binding.channel_name, &config.available_channels);
+                            ui.label(egui::RichText::new("PROP").color(dim_text).size(11.0));
                             egui::ComboBox::from_id_salt(format!("pub_prop_{i}"))
                                 .selected_text(property_name(binding.property))
                                 .show_ui(ui, |ui| {
@@ -650,7 +844,7 @@ fn draw_block_config_panel(
                                         ui.selectable_value(&mut binding.property, prop, name);
                                     }
                                 });
-                            if ui.small_button("−").clicked() {
+                            if ui.small_button(egui::RichText::new("-").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
                                 remove_idx = Some(i);
                             }
                         });
@@ -658,7 +852,7 @@ fn draw_block_config_panel(
                     if let Some(idx) = remove_idx {
                         config.publish_bindings.remove(idx);
                     }
-                    if ui.button("+ Add Publish Binding").clicked() {
+                    if ui.button(egui::RichText::new("+ Add Publish").color(accent)).clicked() {
                         config.publish_bindings.push(
                             voxeldust_core::signal::components::PublishBinding {
                                 channel_name: "new-channel".into(),
@@ -668,22 +862,20 @@ fn draw_block_config_panel(
                     }
                 });
 
+            ui.add_space(4.0);
+
             // --- Subscribe Bindings ---
-            egui::CollapsingHeader::new("Subscribe Channels")
+            egui::CollapsingHeader::new(
+                egui::RichText::new("SUBSCRIBE CHANNELS").color(accent).size(13.0),
+            )
                 .default_open(true)
                 .show(ui, |ui| {
                     let mut remove_idx = None;
                     for (i, binding) in config.subscribe_bindings.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label("Channel:");
-                            egui::ComboBox::from_id_salt(format!("sub_ch_{i}"))
-                                .selected_text(&binding.channel_name)
-                                .show_ui(ui, |ui| {
-                                    for ch in &config.available_channels {
-                                        ui.selectable_value(&mut binding.channel_name, ch.clone(), ch);
-                                    }
-                                });
-                            ui.label("Property:");
+                            ui.label(egui::RichText::new("CH").color(dim_text).size(11.0));
+                            channel_name_input(ui, &format!("sub_ch_{i}"), &mut binding.channel_name, &config.available_channels);
+                            ui.label(egui::RichText::new("PROP").color(dim_text).size(11.0));
                             egui::ComboBox::from_id_salt(format!("sub_prop_{i}"))
                                 .selected_text(property_name(binding.property))
                                 .show_ui(ui, |ui| {
@@ -691,7 +883,7 @@ fn draw_block_config_panel(
                                         ui.selectable_value(&mut binding.property, prop, name);
                                     }
                                 });
-                            if ui.small_button("−").clicked() {
+                            if ui.small_button(egui::RichText::new("-").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
                                 remove_idx = Some(i);
                             }
                         });
@@ -699,7 +891,7 @@ fn draw_block_config_panel(
                     if let Some(idx) = remove_idx {
                         config.subscribe_bindings.remove(idx);
                     }
-                    if ui.button("+ Add Subscribe Binding").clicked() {
+                    if ui.button(egui::RichText::new("+ Add Subscribe").color(accent)).clicked() {
                         config.subscribe_bindings.push(
                             voxeldust_core::signal::components::SubscribeBinding {
                                 channel_name: "new-channel".into(),
@@ -709,23 +901,27 @@ fn draw_block_config_panel(
                     }
                 });
 
-            // --- Converter Rules (only show if block has rules or is a converter) ---
+            ui.add_space(4.0);
+
+            // --- Converter Rules ---
             if !config.converter_rules.is_empty() || config.kind == voxeldust_core::block::FunctionalBlockKind::SignalConverter as u8 {
-                egui::CollapsingHeader::new("Converter Rules")
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("CONVERTER RULES").color(accent).size(13.0),
+                )
                     .default_open(true)
                     .show(ui, |ui| {
                         let mut remove_idx = None;
                         for (i, rule) in config.converter_rules.iter_mut().enumerate() {
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label("IF");
+                                    ui.label(egui::RichText::new("IF").color(egui::Color32::from_rgb(255, 200, 60)).strong());
                                     ui.text_edit_singleline(&mut rule.input_channel);
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label("THEN →");
+                                    ui.label(egui::RichText::new("THEN").color(egui::Color32::from_rgb(100, 255, 100)).strong());
                                     ui.text_edit_singleline(&mut rule.output_channel);
                                 });
-                                if ui.small_button("− Remove Rule").clicked() {
+                                if ui.small_button(egui::RichText::new("- Remove").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
                                     remove_idx = Some(i);
                                 }
                             });
@@ -733,7 +929,7 @@ fn draw_block_config_panel(
                         if let Some(idx) = remove_idx {
                             config.converter_rules.remove(idx);
                         }
-                        if ui.button("+ Add Rule").clicked() {
+                        if ui.button(egui::RichText::new("+ Add Rule").color(accent)).clicked() {
                             config.converter_rules.push(
                                 voxeldust_core::signal::converter::SignalRule {
                                     input_channel: "input".into(),
@@ -746,37 +942,89 @@ fn draw_block_config_panel(
                     });
             }
 
-            // --- Seat Mappings (only show for seats) ---
-            if !config.seat_mappings.is_empty() {
-                egui::CollapsingHeader::new("Seat Input Mappings")
+            ui.add_space(4.0);
+
+            // --- Seat Mappings ---
+            if !config.seat_mappings.is_empty() || config.kind == voxeldust_core::block::FunctionalBlockKind::Seat as u8 {
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("SEAT CONTROL MAPPINGS").color(accent).size(13.0),
+                )
                     .default_open(true)
                     .show(ui, |ui| {
+                        let mut remove_idx = None;
                         for (i, mapping) in config.seat_mappings.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
-                                ui.label(&mapping.input_name);
-                                ui.label("→");
-                                egui::ComboBox::from_id_salt(format!("seat_ch_{i}"))
-                                    .selected_text(&mapping.channel_name)
+                                // Control dropdown.
+                                egui::ComboBox::from_id_salt(format!("seat_ctrl_{i}"))
+                                    .selected_text(mapping.control.label())
+                                    .width(120.0)
                                     .show_ui(ui, |ui| {
-                                        for ch in &config.available_channels {
-                                            ui.selectable_value(&mut mapping.channel_name, ch.clone(), ch);
+                                        for &ctrl in SeatControl::available_for_kind(
+                                            voxeldust_core::block::FunctionalBlockKind::Seat,
+                                        ) {
+                                            ui.selectable_value(&mut mapping.control, ctrl, ctrl.label());
                                         }
                                     });
+                                ui.label(egui::RichText::new("->").color(accent));
+                                // Channel name (free text).
+                                channel_name_input(ui, &format!("seat_ch_{i}"), &mut mapping.channel_name, &config.available_channels);
+                                // Property dropdown.
+                                egui::ComboBox::from_id_salt(format!("seat_prop_{i}"))
+                                    .selected_text(property_name(mapping.property))
+                                    .width(80.0)
+                                    .show_ui(ui, |ui| {
+                                        for &(name, prop) in SIGNAL_PROPERTY_NAMES {
+                                            ui.selectable_value(&mut mapping.property, prop, name);
+                                        }
+                                    });
+                                if ui.small_button(egui::RichText::new("-").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
+                                    remove_idx = Some(i);
+                                }
                             });
+                        }
+                        if let Some(idx) = remove_idx {
+                            config.seat_mappings.remove(idx);
+                        }
+                        if ui.button(egui::RichText::new("+ Add Binding").color(accent)).clicked() {
+                            config.seat_mappings.push(
+                                voxeldust_core::signal::components::SeatInputBinding {
+                                    control: SeatControl::ThrustForward,
+                                    channel_name: "new-channel".into(),
+                                    property: SignalProperty::Throttle,
+                                },
+                            );
                         }
                     });
             }
 
-            ui.separator();
+            ui.add_space(12.0);
+            // Bottom accent line.
+            let rect = ui.available_rect_before_wrap();
+            ui.painter().line_segment(
+                [egui::pos2(rect.left(), rect.top()), egui::pos2(rect.right(), rect.top())],
+                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 80)),
+            );
+            ui.add_space(8.0);
+
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                let save_btn = egui::Button::new(
+                    egui::RichText::new("SAVE").color(egui::Color32::from_rgb(60, 255, 120)).strong(),
+                );
+                if ui.add(save_btn).clicked() {
                     action = ConfigPanelAction::Save;
                 }
-                if ui.button("Cancel").clicked() {
+                ui.add_space(12.0);
+                let cancel_btn = egui::Button::new(
+                    egui::RichText::new("CANCEL").color(egui::Color32::from_rgb(200, 200, 200)),
+                );
+                if ui.add(cancel_btn).clicked() {
                     action = ConfigPanelAction::Close;
                 }
             });
-        });
+                    }); // panel_frame
+                },
+            ); // allocate_ui_at_rect
+        }); // CentralPanel
 
     action
 }

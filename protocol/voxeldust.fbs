@@ -478,9 +478,9 @@ table SignalRuleFB {
     expression_value2: float; // for Clamp max
 }
 
-/// Seat input → channel mapping.
+/// Seat control → channel mapping.
 table SeatBindingFB {
-    input_name: string;
+    control: uint8;       // SeatControl enum discriminant
     channel_name: string;
     property: uint8;
 }

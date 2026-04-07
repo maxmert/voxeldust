@@ -6,6 +6,7 @@
 
 mod block_render;
 mod camera;
+mod events;
 mod gpu;
 mod hud;
 mod input;
@@ -21,6 +22,7 @@ use std::time::Instant;
 
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::SystemParam;
 use clap::Parser;
 use glam::{DQuat, DVec3};
 use tokio::sync::mpsc;
@@ -104,14 +106,101 @@ struct BlockTarget {
     hit: Option<voxeldust_core::block::raycast::BlockHit>,
 }
 
-/// State for the block signal config UI panel.
+/// Client-side index of functional block positions. Updated only when chunks change.
+/// Maps world position → (kind, display letter). Typically <100 entries on a ship.
+#[derive(Resource, Default)]
+struct ClientBlockIndex {
+    entries: Vec<(glam::Vec3, u8, char)>,
+}
+
+impl ClientBlockIndex {
+    /// Rebuild the index by scanning all loaded chunks for functional blocks.
+    /// Called only when chunks are dirty (new snapshot or delta applied).
+    fn rebuild(
+        &mut self,
+        cache: &voxeldust_core::block::client_chunks::ClientChunkCache,
+        source: voxeldust_core::block::client_chunks::ChunkSourceId,
+        registry: &voxeldust_core::block::BlockRegistry,
+    ) {
+        self.entries.clear();
+        let chunk_keys: Vec<_> = cache.source_chunk_keys(source).collect();
+        for chunk_key in chunk_keys {
+            let chunk = match cache.get_chunk(source, chunk_key) {
+                Some(c) => c,
+                None => continue,
+            };
+            for bx in 0u8..62 {
+                for by in 0u8..62 {
+                    for bz in 0u8..62 {
+                        let block_id = chunk.get_block(bx, by, bz);
+                        if block_id.is_air() { continue; }
+                        if let Some(kind) = registry.functional_kind(block_id) {
+                            let wx = chunk_key.x * 62 + bx as i32;
+                            let wy = chunk_key.y * 62 + by as i32;
+                            let wz = chunk_key.z * 62 + bz as i32;
+                            let pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                            let letter = match kind {
+                                voxeldust_core::block::FunctionalBlockKind::Thruster => 'T',
+                                voxeldust_core::block::FunctionalBlockKind::Reactor => 'R',
+                                voxeldust_core::block::FunctionalBlockKind::Seat => 'S',
+                                voxeldust_core::block::FunctionalBlockKind::Battery => 'B',
+                                voxeldust_core::block::FunctionalBlockKind::SignalConverter => 'C',
+                                voxeldust_core::block::FunctionalBlockKind::Antenna => 'A',
+                                _ => 'F',
+                            };
+                            self.entries.push((pos, kind as u8, letter));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// AR interaction phase: animating in, interactive, animating out.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+enum ConfigPanelPhase {
+    #[default]
+    Closed,
+    /// Camera is lerping toward the block face.
+    AnimatingIn { progress: f32 },
+    /// Camera is at the block, cursor is free, UI is interactive.
+    Interactive,
+    /// Camera is lerping back to where the player was looking.
+    AnimatingOut { progress: f32 },
+}
+
+/// State for the block signal config UI panel (SC-style AR interaction).
 #[derive(Resource, Default)]
 struct BlockConfigUIState {
     /// Currently open config (None = UI closed).
     open_config: Option<voxeldust_core::signal::config::BlockSignalConfig>,
     /// Whether the config panel is open (suppresses game input).
     is_open: bool,
+    /// Current AR interaction phase.
+    phase: ConfigPanelPhase,
+    /// Saved camera yaw/pitch before entering config mode (ship-local).
+    saved_yaw: f64,
+    saved_pitch: f64,
+    /// Target yaw/pitch to face the block.
+    target_yaw: f64,
+    target_pitch: f64,
+    /// Block world position (ship-local) being configured.
+    block_world_pos: glam::IVec3,
+    /// Direction from eye to block (ship-local, normalized). Used for camera zoom offset.
+    zoom_direction: DVec3,
+    /// Distance from eye to block center.
+    zoom_distance: f64,
 }
+
+/// Camera position offset applied during config panel zoom animation.
+/// Ship-local offset added to the render position before camera computation.
+#[derive(Resource, Default)]
+struct CameraZoomOffset {
+    offset: DVec3,
+}
+
+const CONFIG_ANIM_DURATION: f32 = 0.35; // seconds for camera transition
 
 #[derive(Resource)]
 struct ConnectionInfo {
@@ -335,8 +424,8 @@ fn poll_network(
     mut sf_res: ResMut<StarFieldRes>,
     mut sys_params: ResMut<SystemParamsCache>,
     mut chunk_cache: ResMut<ClientChunkCacheRes>,
-    mut config_ui: ResMut<BlockConfigUIState>,
     ft: Res<FrameTime>,
+    mut config_open_msgs: MessageWriter<events::ConfigPanelOpenMsg>,
 ) {
     let rx = match net.event_rx.as_mut() {
         Some(rx) => rx,
@@ -525,9 +614,8 @@ fn poll_network(
                 }
             }
             NetEvent::BlockConfigState(config) => {
-                info!(block = ?config.block_pos, "received block config from server");
-                config_ui.open_config = Some(config);
-                config_ui.is_open = true;
+                info!(block = ?config.block_pos, "received BlockConfigState — writing ConfigPanelOpenMsg");
+                config_open_msgs.write(events::ConfigPanelOpenMsg { config });
             }
             NetEvent::ChunkSnapshot(cs) => {
                 // Ensure we have a source for the current primary shard.
@@ -849,7 +937,11 @@ impl ClientApp {
         });
         ecs_app.insert_resource(BlockHotbar::default());
         ecs_app.insert_resource(BlockTarget::default());
+        ecs_app.insert_resource(ClientBlockIndex::default());
         ecs_app.insert_resource(BlockConfigUIState::default());
+        ecs_app.insert_resource(events::InputContext::default());
+        ecs_app.insert_resource(events::RawInputBuffer::default());
+        ecs_app.insert_resource(CameraZoomOffset::default());
         ecs_app.insert_resource(ConnectionInfo {
             connected: false,
             current_shard_type: 255,
@@ -930,10 +1022,26 @@ impl ClientApp {
                 .chain(),
         );
 
+        // Register messages.
+        ecs_app.add_message::<events::KeyPressedMsg>();
+        ecs_app.add_message::<events::KeyReleasedMsg>();
+        ecs_app.add_message::<events::MouseButtonMsg>();
+        ecs_app.add_message::<events::MouseMotionMsg>();
+        ecs_app.add_message::<events::CursorGrabRequest>();
+        ecs_app.add_message::<events::ConfigPanelCloseMsg>();
+        ecs_app.add_message::<events::ConfigPanelOpenMsg>();
+
         // Register systems.
         ecs_app.add_systems(Update, update_frame_time.in_set(ClientSet::FrameTime));
         ecs_app.add_systems(Update, poll_network.in_set(ClientSet::Network));
-        ecs_app.add_systems(Update, send_input_system.in_set(ClientSet::Input));
+        ecs_app.add_systems(Update, (
+            bridge_raw_input_system,
+            interpret_camera_system,
+            interpret_key_system,
+            interpret_mouse_system,
+            tick_config_panel_system,
+        ).chain().in_set(ClientSet::Input));
+        ecs_app.add_systems(Update, send_input_system.after(ClientSet::Input).in_set(ClientSet::Smooth));
         ecs_app.add_systems(Update, smooth_render_position.in_set(ClientSet::Smooth));
         ecs_app.add_systems(Update, check_autopilot_timeout.in_set(ClientSet::AutopilotTimeout));
         ecs_app.add_systems(Update, compute_trajectory.in_set(ClientSet::Trajectory));
@@ -990,6 +1098,9 @@ impl ClientApp {
         // Run all ECS systems (frame time, network, input, smoothing, autopilot, trajectory).
         self.ecs_app.update();
 
+        // Apply cursor grab/ungrab requests from ECS messages (needs !Send Window).
+        self.apply_cursor_changes();
+
         let gpu = match &mut self.gpu { Some(g) => g, None => return };
 
         // Extract all scalar/Copy values from resources in a scoped block so
@@ -1029,9 +1140,20 @@ impl ClientApp {
 
             let warp_target_info = build_warp_target_info(warp, sf_res);
 
+            // Apply config panel zoom offset to camera position.
+            let zoom = world.resource::<CameraZoomOffset>();
+            let cam_position = smooth.render_position + zoom.offset;
+            if zoom.offset.length_squared() > 0.001 {
+                info!(
+                    ox = zoom.offset.x, oy = zoom.offset.y, oz = zoom.offset.z,
+                    len = zoom.offset.length(),
+                    "applying camera zoom offset",
+                );
+            }
+
             // Compute camera.
             let cam = camera::compute_camera(
-                smooth.render_position,
+                cam_position,
                 cam_ctrl.yaw,
                 cam_ctrl.pitch,
                 player.is_piloting,
@@ -1048,7 +1170,7 @@ impl ClientApp {
                 cam,
                 ft.count,
                 conn.secondary_shard_type,
-                smooth.render_position,
+                cam_position,
                 player.velocity,
                 player.ship_rotation,
                 player.is_piloting,
@@ -1199,6 +1321,46 @@ impl ClientApp {
                     total_gpu_chunks = br.total_chunk_count(),
                     "block renderer chunk update complete"
                 );
+
+                // Rebuild functional block index (only when chunks changed).
+                // Build the entries in a local Vec, then swap into the resource.
+                let primary_src = chunk_cache.primary_source;
+                if let Some(src) = primary_src {
+                    let mut new_entries = Vec::new();
+                    let chunk_keys: Vec<_> = chunk_cache.cache.source_chunk_keys(src).collect();
+                    for ck in chunk_keys {
+                        let chunk = match chunk_cache.cache.get_chunk(src, ck) {
+                            Some(c) => c,
+                            None => continue,
+                        };
+                        for bx in 0u8..62 {
+                            for by in 0u8..62 {
+                                for bz in 0u8..62 {
+                                    let bid = chunk.get_block(bx, by, bz);
+                                    if bid.is_air() { continue; }
+                                    if let Some(kind) = registry.functional_kind(bid) {
+                                        let wx = ck.x * 62 + bx as i32;
+                                        let wy = ck.y * 62 + by as i32;
+                                        let wz = ck.z * 62 + bz as i32;
+                                        let pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                                        let letter = match kind {
+                                            voxeldust_core::block::FunctionalBlockKind::Thruster => 'T',
+                                            voxeldust_core::block::FunctionalBlockKind::Reactor => 'R',
+                                            voxeldust_core::block::FunctionalBlockKind::Seat => 'S',
+                                            voxeldust_core::block::FunctionalBlockKind::Battery => 'B',
+                                            voxeldust_core::block::FunctionalBlockKind::SignalConverter => 'C',
+                                            voxeldust_core::block::FunctionalBlockKind::Antenna => 'A',
+                                            _ => 'F',
+                                        };
+                                        new_entries.push((pos, kind as u8, letter));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    drop(chunk_cache);
+                    world_mut.resource_mut::<ClientBlockIndex>().entries = new_entries;
+                }
             }
         }
 
@@ -1238,11 +1400,11 @@ impl ClientApp {
             world_mut.resource_mut::<BlockTarget>().hit = None;
         }
 
-        // Extract config state for the egui panel (needs mutable access).
+        // Extract config state for the egui panel — only during Interactive phase.
         let mut config_for_panel = {
             let world_mut = self.ecs_app.world_mut();
             let ui_state = world_mut.resource::<BlockConfigUIState>();
-            if ui_state.is_open {
+            if matches!(ui_state.phase, ConfigPanelPhase::Interactive) {
                 ui_state.open_config.clone()
             } else {
                 None
@@ -1279,6 +1441,7 @@ impl ClientApp {
             warp_target_info,
             self.block_renderer.as_ref(),
             world.resource::<BlockTarget>().hit.as_ref(),
+            &world.resource::<ClientBlockIndex>().entries,
             config_for_panel.as_mut(),
         );
 
@@ -1286,7 +1449,6 @@ impl ClientApp {
         match panel_action {
             hud::ConfigPanelAction::Save => {
                 if let Some(config) = &config_for_panel {
-                    // Send config update to server.
                     let update = voxeldust_core::signal::config::BlockConfigUpdateData {
                         block_pos: config.block_pos,
                         publish_bindings: config.publish_bindings.clone(),
@@ -1301,23 +1463,28 @@ impl ClientApp {
                         let data = msg.serialize();
                         let mut pkt = Vec::new();
                         voxeldust_core::wire_codec::encode(&data, &mut pkt);
-                        // Send via the block_edit channel (reuses UDP sender).
-                        // The block_edit_tx expects BlockEditData, not raw bytes.
                         // TODO: add a separate config_update_tx channel for proper typing.
-                        // For now, log the save action.
                     }
                     info!(block = ?config.block_pos, "config saved (sending to server)");
                 }
-                let world_mut = self.ecs_app.world_mut();
-                let mut ui_state = world_mut.resource_mut::<BlockConfigUIState>();
-                ui_state.is_open = false;
-                ui_state.open_config = None;
+                // Fire close message → tick_config_panel_system handles animate-out.
+                let world = self.ecs_app.world_mut();
+                world.resource_mut::<events::RawInputBuffer>().key_presses.push(
+                    events::KeyPressedMsg { key: KeyCode::Escape },
+                );
+                // Direct: close immediately via config_ui since we're outside the ECS schedule.
+                let mut ui = world.resource_mut::<BlockConfigUIState>();
+                ui.open_config = None;
+                ui.phase = ConfigPanelPhase::AnimatingOut { progress: 0.0 };
+                world.resource_mut::<events::InputContext>().mode = events::InputMode::Animating;
+                // Cursor re-grab will happen via apply_cursor_changes next frame.
             }
             hud::ConfigPanelAction::Close => {
-                let world_mut = self.ecs_app.world_mut();
-                let mut ui_state = world_mut.resource_mut::<BlockConfigUIState>();
-                ui_state.is_open = false;
-                ui_state.open_config = None;
+                let world = self.ecs_app.world_mut();
+                let mut ui = world.resource_mut::<BlockConfigUIState>();
+                ui.open_config = None;
+                ui.phase = ConfigPanelPhase::AnimatingOut { progress: 0.0 };
+                world.resource_mut::<events::InputContext>().mode = events::InputMode::Animating;
             }
             hud::ConfigPanelAction::None => {
                 // Panel still open — write back edited config.
@@ -1328,6 +1495,444 @@ impl ClientApp {
                 }
             }
         }
+    }
+
+    /// Drain CursorGrabRequest messages and apply to the !Send Window.
+    fn apply_cursor_changes(&mut self) {
+        let world = self.ecs_app.world_mut();
+        // Read pending cursor requests from the InputContext (set by tick_config_panel_system).
+        // We use a simple approach: check if InputContext.cursor_grabbed disagrees with
+        // KeyboardState.mouse_grabbed (the latter is the actual OS state).
+        let desired_grabbed = {
+            let input_ctx = world.resource::<events::InputContext>();
+            match input_ctx.mode {
+                events::InputMode::Game => true,     // Game mode = cursor locked
+                events::InputMode::Animating => true, // Animating = cursor locked
+                events::InputMode::UiPanel => false,  // UI panel = cursor free
+                events::InputMode::MenuFocus => false, // Menu = cursor free
+            }
+        };
+        let currently_grabbed = world.resource::<KeyboardState>().mouse_grabbed;
+
+        if desired_grabbed != currently_grabbed {
+            if let Some(ref w) = self.window {
+                if desired_grabbed {
+                    if w.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+                        let _ = w.set_cursor_grab(CursorGrabMode::Confined);
+                    }
+                    w.set_cursor_visible(false);
+                } else {
+                    let _ = w.set_cursor_grab(CursorGrabMode::None);
+                    w.set_cursor_visible(true);
+                }
+                world.resource_mut::<KeyboardState>().mouse_grabbed = desired_grabbed;
+                world.resource_mut::<events::InputContext>().cursor_grabbed = desired_grabbed;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config animation helpers
+// ---------------------------------------------------------------------------
+
+/// Smoothstep for [0,1] — ease in/out.
+fn smooth_step(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Lerp between two angles, taking the shortest path.
+fn lerp_angle(a: f64, b: f64, t: f64) -> f64 {
+    let tau = std::f64::consts::TAU;
+    let mut diff = (b - a) % tau;
+    if diff > std::f64::consts::PI { diff -= tau; }
+    if diff < -std::f64::consts::PI { diff += tau; }
+    a + diff * t
+}
+
+fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+// ---------------------------------------------------------------------------
+// ECS input pipeline: bridge → interpret → config panel
+// ---------------------------------------------------------------------------
+
+/// Drain raw input buffer (populated by window_event) into ECS messages.
+fn bridge_raw_input_system(
+    mut buf: ResMut<events::RawInputBuffer>,
+    mut key_presses: MessageWriter<events::KeyPressedMsg>,
+    mut key_releases: MessageWriter<events::KeyReleasedMsg>,
+    mut mouse_buttons: MessageWriter<events::MouseButtonMsg>,
+    mut mouse_motions: MessageWriter<events::MouseMotionMsg>,
+) {
+    for ev in buf.key_presses.drain(..) { key_presses.write(ev); }
+    for ev in buf.key_releases.drain(..) { key_releases.write(ev); }
+    for ev in buf.mouse_buttons.drain(..) { mouse_buttons.write(ev); }
+    for ev in buf.mouse_motions.drain(..) { mouse_motions.write(ev); }
+}
+
+// ---------------------------------------------------------------------------
+// SystemParam bundles — group related params by domain
+// ---------------------------------------------------------------------------
+
+/// Player state and camera — read by all input interpretation systems.
+#[derive(SystemParam)]
+struct PlayerCtx<'w> {
+    player: Res<'w, LocalPlayer>,
+    conn: Res<'w, ConnectionInfo>,
+    smooth: Res<'w, RenderSmoothing>,
+    cam: ResMut<'w, CameraControl>,
+    kb: Res<'w, KeyboardState>,
+}
+
+/// Game action targets — resources mutated by key/mouse input interpretation.
+#[derive(SystemParam)]
+struct GameActionCtx<'w> {
+    net: Res<'w, NetworkChannels>,
+    flight: ResMut<'w, FlightControl>,
+    hotbar: ResMut<'w, BlockHotbar>,
+    ap: ResMut<'w, ClientAutopilot>,
+    warp: ResMut<'w, ClientWarp>,
+    ws: Res<'w, ServerWorldState>,
+}
+
+/// Interpret mouse motion → camera rotation.
+fn interpret_camera_system(
+    mut ctx: PlayerCtx,
+    input_ctx: ResMut<events::InputContext>,
+    mut motion_events: MessageReader<events::MouseMotionMsg>,
+) {
+    if !input_ctx.cursor_grabbed || input_ctx.mode != events::InputMode::Game {
+        return;
+    }
+    for motion in motion_events.read() {
+        let sensitivity = 0.003;
+        let free_look = ctx.kb.keys_held.contains(&KeyCode::AltLeft);
+        if ctx.player.is_piloting && !free_look {
+            ctx.cam.pilot_yaw_rate = (ctx.cam.pilot_yaw_rate - motion.delta_x * sensitivity * 5.0).clamp(-1.0, 1.0);
+            ctx.cam.pilot_pitch_rate = (ctx.cam.pilot_pitch_rate - motion.delta_y * sensitivity * 5.0).clamp(-1.0, 1.0);
+        } else {
+            ctx.cam.yaw += motion.delta_x * sensitivity;
+            ctx.cam.pitch -= motion.delta_y * sensitivity;
+            ctx.cam.pitch = ctx.cam.pitch.clamp(
+                -std::f64::consts::FRAC_PI_2 + 0.01,
+                std::f64::consts::FRAC_PI_2 - 0.01,
+            );
+        }
+    }
+}
+
+/// Interpret key presses → game actions (autopilot, interact, hotbar, warp, etc.).
+fn interpret_key_system(
+    ctx: PlayerCtx,
+    mut input_ctx: ResMut<events::InputContext>,
+    mut actions: GameActionCtx,
+    mut key_events: MessageReader<events::KeyPressedMsg>,
+    mut config_closes: MessageWriter<events::ConfigPanelCloseMsg>,
+) {
+    match input_ctx.mode {
+        events::InputMode::Game => {
+            for ev in key_events.read() {
+                let key = ev.key;
+                let is_piloting = ctx.player.is_piloting;
+                let warp_target = actions.warp.target_star_index;
+                let shard_type = ctx.conn.current_shard_type;
+
+                // Autopilot: double-tap T = orbit, single-tap T = direct.
+                if key == KeyCode::KeyT && is_piloting && warp_target.is_none() {
+                    if actions.ap.target.is_some() {
+                        actions.ap.target = None;
+                        actions.ap.trajectory_plan = None;
+                        actions.ap.mode = AutopilotMode::DirectApproach;
+                    } else {
+                        let now = Instant::now();
+                        let is_double = actions.ap.last_t_press
+                            .map(|prev| now.duration_since(prev) < std::time::Duration::from_millis(400))
+                            .unwrap_or(false);
+                        if is_double {
+                            actions.ap.last_t_press = None;
+                            let best = if let Some(ref world_state) = actions.ws.latest {
+                                let ship_fwd = ctx.player.ship_rotation * DVec3::NEG_Z;
+                                let ship_pos = world_state.origin;
+                                let mut best_result: Option<(usize, f64)> = None;
+                                for body in &world_state.bodies {
+                                    if body.body_id == 0 { continue; }
+                                    let to_body = (body.position - ship_pos).normalize_or_zero();
+                                    let d = ship_fwd.dot(to_body);
+                                    if d > best_result.map(|(_, bd)| bd).unwrap_or(0.7) {
+                                        best_result = Some(((body.body_id - 1) as usize, d));
+                                    }
+                                }
+                                best_result
+                            } else { None };
+                            if let Some((idx, _)) = best {
+                                actions.ap.target = Some(idx);
+                                actions.ap.mode = AutopilotMode::OrbitInsertion;
+                                info!(planet = idx, mode = ?AutopilotMode::OrbitInsertion, "autopilot engaged");
+                            }
+                        } else {
+                            actions.ap.last_t_press = Some(now);
+                        }
+                    }
+                }
+
+                // WASD cancels autopilot.
+                if actions.ap.target.is_some() && matches!(key,
+                    KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD) {
+                    actions.ap.target = None;
+                    actions.ap.trajectory_plan = None;
+                    actions.ap.mode = AutopilotMode::DirectApproach;
+                }
+
+                // X key: toggle engine cutoff.
+                if key == KeyCode::KeyX && is_piloting {
+                    actions.flight.engines_off = !actions.flight.engines_off;
+                    info!(engines_off = actions.flight.engines_off, "engine cutoff toggled");
+                }
+
+                // Block hotbar selection (1-9) — only when walking.
+                if !is_piloting {
+                    let slot = match key {
+                        KeyCode::Digit1 => Some(0usize),
+                        KeyCode::Digit2 => Some(1),
+                        KeyCode::Digit3 => Some(2),
+                        KeyCode::Digit4 => Some(3),
+                        KeyCode::Digit5 => Some(4),
+                        KeyCode::Digit6 => Some(5),
+                        KeyCode::Digit7 => Some(6),
+                        KeyCode::Digit8 => Some(7),
+                        KeyCode::Digit9 => Some(8),
+                        _ => None,
+                    };
+                    if let Some(s) = slot {
+                        actions.hotbar.selected_slot = s;
+                    }
+                }
+
+                // E key: primary interaction on ship shard.
+                if key == KeyCode::KeyE && shard_type == 2 && input_ctx.cursor_grabbed {
+                    let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+                    let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
+                    let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
+                    let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+                    let edit = voxeldust_core::client_message::BlockEditData {
+                        action: 3, eye, look, block_type: 0,
+                    };
+                    if let Some(ref tx) = actions.net.block_edit_tx {
+                        let _ = tx.send(edit);
+                    }
+                }
+
+                // F key: open config UI on any functional block.
+                if key == KeyCode::KeyF && shard_type == 2 && input_ctx.cursor_grabbed && !is_piloting {
+                    let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+                    let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
+                    let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
+                    let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+                    let edit = voxeldust_core::client_message::BlockEditData {
+                        action: 8, eye, look, block_type: 0,
+                    };
+                    if let Some(ref tx) = actions.net.block_edit_tx {
+                        let _ = tx.send(edit);
+                    }
+                }
+
+                // Enter key: confirm warp.
+                if key == KeyCode::Enter && is_piloting && warp_target.is_some() {
+                    info!(target = ?warp_target, "warp confirmed via Enter");
+                }
+
+                // Escape: cancel warp target.
+                if key == KeyCode::Escape && warp_target.is_some() {
+                    actions.warp.target_star_index = None;
+                    info!("warp target cancelled");
+                }
+
+                // Escape: ungrab cursor → MenuFocus mode.
+                if key == KeyCode::Escape && input_ctx.cursor_grabbed {
+                    input_ctx.mode = events::InputMode::MenuFocus;
+                    input_ctx.cursor_grabbed = false;
+                }
+            }
+        }
+        events::InputMode::UiPanel => {
+            for ev in key_events.read() {
+                if ev.key == KeyCode::Escape {
+                    config_closes.write(events::ConfigPanelCloseMsg);
+                }
+            }
+        }
+        events::InputMode::Animating | events::InputMode::MenuFocus => {}
+    }
+}
+
+/// Interpret mouse buttons → cursor grab / block editing.
+fn interpret_mouse_system(
+    ctx: PlayerCtx,
+    actions: GameActionCtx,
+    mut mouse_events: MessageReader<events::MouseButtonMsg>,
+    mut input_ctx: ResMut<events::InputContext>,
+) {
+    match input_ctx.mode {
+        events::InputMode::Game => {
+            for ev in mouse_events.read() {
+                if !input_ctx.cursor_grabbed {
+                    if ev.pressed && ev.button == winit::event::MouseButton::Left {
+                        input_ctx.mode = events::InputMode::Game;
+                        input_ctx.cursor_grabbed = true; // Will be applied by apply_cursor_changes.
+                    }
+                } else if ev.pressed {
+                    let is_piloting = ctx.player.is_piloting;
+                    let shard_type = ctx.conn.current_shard_type;
+                    if !is_piloting && shard_type == 2 {
+                        let action = match ev.button {
+                            winit::event::MouseButton::Left => 1u8,
+                            winit::event::MouseButton::Right => 2u8,
+                            _ => 0u8,
+                        };
+                        if action > 0 {
+                            let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+                            let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
+                            let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
+                            let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+                            let block_type = if action == 2 { actions.hotbar.selected_block().as_u16() } else { 0 };
+                            let edit = voxeldust_core::client_message::BlockEditData {
+                                action, eye, look, block_type,
+                            };
+                            if let Some(ref tx) = actions.net.block_edit_tx {
+                                let _ = tx.send(edit);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        events::InputMode::MenuFocus => {
+            for ev in mouse_events.read() {
+                if ev.pressed && ev.button == winit::event::MouseButton::Left {
+                    input_ctx.mode = events::InputMode::Game;
+                    input_ctx.cursor_grabbed = true;
+                }
+            }
+        }
+        events::InputMode::UiPanel | events::InputMode::Animating => {}
+    }
+}
+
+/// Config panel state machine: animation, input mode transitions, cursor management.
+fn tick_config_panel_system(
+    mut config_ui: ResMut<BlockConfigUIState>,
+    mut input_ctx: ResMut<events::InputContext>,
+    mut cam: ResMut<CameraControl>,
+    mut zoom_offset: ResMut<CameraZoomOffset>,
+    smooth: Res<RenderSmoothing>,
+    block_target: Res<BlockTarget>,
+    ft: Res<FrameTime>,
+    mut open_msgs: MessageReader<events::ConfigPanelOpenMsg>,
+    mut close_msgs: MessageReader<events::ConfigPanelCloseMsg>,
+    mut cursor_grabs: MessageWriter<events::CursorGrabRequest>,
+) {
+    // Handle open requests (from network).
+    for msg in open_msgs.read() {
+        let config = &msg.config;
+        let block_center = DVec3::new(
+            config.block_pos.x as f64 + 0.5,
+            config.block_pos.y as f64 + 0.5,
+            config.block_pos.z as f64 + 0.5,
+        );
+        let eye = smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+
+        // Use the block face normal from client raycast to align camera perpendicular
+        // to the face — looking straight into the block surface, not at an angle.
+        let face_normal = block_target.hit.as_ref()
+            .filter(|h| h.face_normal != glam::IVec3::ZERO)
+            .map(|h| DVec3::new(h.face_normal.x as f64, h.face_normal.y as f64, h.face_normal.z as f64))
+            .unwrap_or_else(|| (block_center - eye).normalize());
+
+        // Camera looks in the direction opposite to the face normal (into the face).
+        let look_dir = -face_normal;
+        let target_yaw = look_dir.z.atan2(look_dir.x);
+        let target_pitch = look_dir.y.asin();
+
+        // Zoom target: position camera directly in front of the face, 1.0m out.
+        let face_center = block_center + face_normal * 0.5; // center of the block face
+        let target_cam_pos = face_center + face_normal * 1.0; // 1m from the face
+        let zoom_vec = target_cam_pos - eye;
+
+        config_ui.block_world_pos = config.block_pos;
+        config_ui.saved_yaw = cam.yaw;
+        config_ui.saved_pitch = cam.pitch;
+        config_ui.target_yaw = target_yaw;
+        config_ui.target_pitch = target_pitch;
+        config_ui.zoom_direction = zoom_vec.normalize();
+        config_ui.zoom_distance = zoom_vec.length();
+        config_ui.phase = ConfigPanelPhase::AnimatingIn { progress: 0.0 };
+        config_ui.open_config = Some(config.clone());
+        config_ui.is_open = true;
+        zoom_offset.offset = DVec3::ZERO;
+        input_ctx.mode = events::InputMode::Animating;
+    }
+
+    // Handle close requests (ESC, Cancel, Save).
+    for _msg in close_msgs.read() {
+        if matches!(config_ui.phase, ConfigPanelPhase::Interactive) {
+            config_ui.open_config = None;
+            config_ui.phase = ConfigPanelPhase::AnimatingOut { progress: 0.0 };
+            input_ctx.mode = events::InputMode::Animating;
+            cursor_grabs.write(events::CursorGrabRequest { grabbed: true });
+        }
+    }
+
+    // Tick animation.
+    let dt = ft.dt as f32;
+    let (saved_yaw, saved_pitch, target_yaw, target_pitch) = (
+        config_ui.saved_yaw, config_ui.saved_pitch,
+        config_ui.target_yaw, config_ui.target_pitch,
+    );
+
+    let zoom_dir = config_ui.zoom_direction;
+    let zoom_dist = config_ui.zoom_distance;
+
+    match config_ui.phase {
+        ConfigPanelPhase::AnimatingIn { progress } => {
+            let new_progress = (progress + dt / CONFIG_ANIM_DURATION).min(1.0);
+            if new_progress >= 1.0 {
+                config_ui.phase = ConfigPanelPhase::Interactive;
+                input_ctx.mode = events::InputMode::UiPanel;
+                cursor_grabs.write(events::CursorGrabRequest { grabbed: false });
+            } else {
+                config_ui.phase = ConfigPanelPhase::AnimatingIn { progress: new_progress };
+            }
+            let t = smooth_step(new_progress.min(1.0));
+            cam.yaw = lerp_angle(saved_yaw, target_yaw, t as f64);
+            cam.pitch = lerp_f64(saved_pitch, target_pitch, t as f64);
+            zoom_offset.offset = zoom_dir * zoom_dist * t as f64;
+        }
+        ConfigPanelPhase::AnimatingOut { progress } => {
+            let new_progress = (progress + dt / CONFIG_ANIM_DURATION).min(1.0);
+            if new_progress >= 1.0 {
+                config_ui.phase = ConfigPanelPhase::Closed;
+                config_ui.is_open = false;
+                input_ctx.mode = events::InputMode::Game;
+                cam.yaw = saved_yaw;
+                cam.pitch = saved_pitch;
+                zoom_offset.offset = DVec3::ZERO;
+            } else {
+                config_ui.phase = ConfigPanelPhase::AnimatingOut { progress: new_progress };
+                let t = smooth_step(new_progress);
+                cam.yaw = lerp_angle(target_yaw, saved_yaw, t as f64);
+                cam.pitch = lerp_f64(target_pitch, saved_pitch, t as f64);
+                // Reverse zoom: from full offset back to zero.
+                zoom_offset.offset = zoom_dir * zoom_dist * (1.0 - t as f64);
+            }
+        }
+        ConfigPanelPhase::Interactive => {
+            // Maintain full zoom offset while panel is open.
+            zoom_offset.offset = zoom_dir * zoom_dist;
+        }
+        ConfigPanelPhase::Closed => {}
     }
 }
 
@@ -1342,7 +1947,12 @@ fn send_input_system(
     mut cam: ResMut<CameraControl>,
     player: Res<LocalPlayer>,
     ft: Res<FrameTime>,
+    input_ctx: Res<events::InputContext>,
 ) {
+    // Suppress movement input when not in Game mode.
+    if input_ctx.mode != events::InputMode::Game {
+        return;
+    }
     let cam = &mut *cam;
     input::send_input_with_dt(
         &net.input_tx,
@@ -1377,6 +1987,11 @@ impl ApplicationHandler for ClientApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Forward events to egui for UI panel interaction.
+        if let (Some(gpu), Some(window)) = (&mut self.gpu, &self.window) {
+            let _ = gpu.egui_winit.on_window_event(window, &event);
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -1387,269 +2002,33 @@ impl ApplicationHandler for ClientApp {
                     gpu.depth_view = gpu::create_depth_texture(&gpu.device, gpu.config.width, gpu.config.height, wgpu::TextureFormat::Depth32Float);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(key) = event.physical_key {
+            WindowEvent::KeyboardInput { event: key_event, .. } => {
+                if let PhysicalKey::Code(key) = key_event.physical_key {
                     let world = self.ecs_app.world_mut();
-                    if event.state.is_pressed() {
-                        {
-                            let mut kb = world.resource_mut::<KeyboardState>();
-                            kb.keys_held.insert(key);
-                        }
-
-                        // Read is_piloting for input handling.
-                        let is_piloting = world.resource::<LocalPlayer>().is_piloting;
-                        let warp_target = world.resource::<ClientWarp>().target_star_index;
-
-                        // Autopilot: double-tap T = orbit, single-tap T = direct approach.
-                        // Skip planet autopilot if a warp target is selected.
-                        if key == KeyCode::KeyT && is_piloting && warp_target.is_none() {
-                            let autopilot_target = world.resource::<ClientAutopilot>().target;
-                            if autopilot_target.is_some() {
-                                // Disengage.
-                                let mut ap = world.resource_mut::<ClientAutopilot>();
-                                ap.target = None;
-                                ap.trajectory_plan = None;
-                                ap.mode = AutopilotMode::DirectApproach;
-                            } else {
-                                let last_t = world.resource::<ClientAutopilot>().last_t_press;
-                                let now = Instant::now();
-                                let is_double = last_t
-                                    .map(|prev| now.duration_since(prev) < std::time::Duration::from_millis(400))
-                                    .unwrap_or(false);
-
-                                if is_double {
-                                    // Double-tap: orbit insertion mode — engage immediately.
-                                    world.resource_mut::<ClientAutopilot>().last_t_press = None;
-                                    // Need to call engage_autopilot_to_nearest with world access.
-                                    let ws = world.resource::<ServerWorldState>();
-                                    let player = world.resource::<LocalPlayer>();
-                                    let ship_rotation = player.ship_rotation;
-                                    let _is_piloting_now = player.is_piloting;
-                                    // Find best target.
-                                    let best = if let Some(ref world_state) = ws.latest {
-                                        let ship_fwd = ship_rotation * DVec3::NEG_Z;
-                                        let ship_pos = world_state.origin;
-                                        let mut best_result: Option<(usize, f64)> = None;
-                                        for body in &world_state.bodies {
-                                            if body.body_id == 0 { continue; }
-                                            let to_body = (body.position - ship_pos).normalize_or_zero();
-                                            let d = ship_fwd.dot(to_body);
-                                            if d > best_result.map(|(_, bd)| bd).unwrap_or(0.7) {
-                                                best_result = Some(((body.body_id - 1) as usize, d));
-                                            }
-                                        }
-                                        best_result
-                                    } else {
-                                        None
-                                    };
-                                    if let Some((idx, _)) = best {
-                                        let mut ap = world.resource_mut::<ClientAutopilot>();
-                                        ap.target = Some(idx);
-                                        ap.mode = AutopilotMode::OrbitInsertion;
-                                        info!(planet = idx, mode = ?AutopilotMode::OrbitInsertion, "autopilot engaged");
-                                    }
-                                } else {
-                                    // First tap: record time, wait for possible second tap.
-                                    world.resource_mut::<ClientAutopilot>().last_t_press = Some(now);
-                                }
-                            }
-                        }
-
-                        // WASD cancels autopilot.
-                        if world.resource::<ClientAutopilot>().target.is_some() && matches!(key,
-                            KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD) {
-                            let mut ap = world.resource_mut::<ClientAutopilot>();
-                            ap.target = None;
-                            ap.trajectory_plan = None;
-                            ap.mode = AutopilotMode::DirectApproach;
-                        }
-
-                        // X key: toggle engine cutoff (SC-style decoupled mode).
-                        if key == KeyCode::KeyX && is_piloting {
-                            let mut flight = world.resource_mut::<FlightControl>();
-                            flight.engines_off = !flight.engines_off;
-                            info!(engines_off = flight.engines_off, "engine cutoff toggled");
-                        }
-
-                        // Block hotbar selection (1-9) — only when NOT piloting.
-                        if !is_piloting {
-                            let slot = match key {
-                                KeyCode::Digit1 => Some(0),
-                                KeyCode::Digit2 => Some(1),
-                                KeyCode::Digit3 => Some(2),
-                                KeyCode::Digit4 => Some(3),
-                                KeyCode::Digit5 => Some(4),
-                                KeyCode::Digit6 => Some(5),
-                                KeyCode::Digit7 => Some(6),
-                                KeyCode::Digit8 => Some(7),
-                                KeyCode::Digit9 => Some(8),
-                                _ => None,
-                            };
-                            if let Some(s) = slot {
-                                let mut hotbar = world.resource_mut::<BlockHotbar>();
-                                hotbar.selected_slot = s;
-                            }
-                        }
-
-                        // E key: interact with targeted functional block.
-                        // Sends BlockEditRequest with action=3 via UDP.
-                        // TODO: This should be part of a proper interaction input system
-                        // that reads the InteractionSchema from the registry and maps
-                        // multiple keys (E, F, G) to different action codes per block kind.
-                        let shard_type_e = world.resource::<ConnectionInfo>().current_shard_type;
-                        let mouse_grabbed_e = world.resource::<KeyboardState>().mouse_grabbed;
-                        if key == KeyCode::KeyE && shard_type_e == 2 && mouse_grabbed_e {
-                            let smooth = world.resource::<RenderSmoothing>();
-                            let cam_ctrl = world.resource::<CameraControl>();
-                            let eye = smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
-                            let (sy, cy) = (cam_ctrl.yaw as f32).sin_cos();
-                            let (sp, cp) = (cam_ctrl.pitch as f32).sin_cos();
-                            let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
-
-                            let edit = voxeldust_core::client_message::BlockEditData {
-                                action: 3,
-                                eye,
-                                look,
-                                block_type: 0,
-                            };
-                            let net = world.resource::<NetworkChannels>();
-                            if let Some(ref tx) = net.block_edit_tx {
-                                let _ = tx.send(edit);
-                            }
-                        }
-
-                        // F key: open block signal config UI on any functional block.
-                        if key == KeyCode::KeyF && shard_type_e == 2 && mouse_grabbed_e && !is_piloting {
-                            let config_open = world.resource::<BlockConfigUIState>().is_open;
-                            if !config_open {
-                                let smooth = world.resource::<RenderSmoothing>();
-                                let cam_ctrl = world.resource::<CameraControl>();
-                                let eye = smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
-                                let (sy, cy) = (cam_ctrl.yaw as f32).sin_cos();
-                                let (sp, cp) = (cam_ctrl.pitch as f32).sin_cos();
-                                let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
-
-                                let edit = voxeldust_core::client_message::BlockEditData {
-                                    action: 8, // F key = open config
-                                    eye,
-                                    look,
-                                    block_type: 0,
-                                };
-                                let net = world.resource::<NetworkChannels>();
-                                if let Some(ref tx) = net.block_edit_tx {
-                                    let _ = tx.send(edit);
-                                }
-                            }
-                        }
-
-                        // ESC closes config panel if open.
-                        if key == KeyCode::Escape {
-                            let config_open = world.resource::<BlockConfigUIState>().is_open;
-                            if config_open {
-                                let mut ui_state = world.resource_mut::<BlockConfigUIState>();
-                                ui_state.is_open = false;
-                                ui_state.open_config = None;
-                            }
-                        }
-
-                        // Enter key: confirm warp to targeted star.
-                        if key == KeyCode::Enter && is_piloting && warp_target.is_some() {
-                            info!(target = ?warp_target, "warp confirmed via Enter");
-                        }
-
-                        // Escape key: cancel warp target.
-                        if key == KeyCode::Escape && warp_target.is_some() {
-                            world.resource_mut::<ClientWarp>().target_star_index = None;
-                            info!("warp target cancelled");
-                        }
-
-                        // G key: warp target cycling is server-authoritative.
-                        // The ship shard handles action=6 and sends the selected
-                        // star index via WorldState.warp_target_star_index.
-
-                        if key == KeyCode::Escape {
-                            let mouse_grabbed = world.resource::<KeyboardState>().mouse_grabbed;
-                            if mouse_grabbed {
-                                if let Some(ref w) = self.window {
-                                    let _ = w.set_cursor_grab(CursorGrabMode::None);
-                                    w.set_cursor_visible(true);
-                                    world.resource_mut::<KeyboardState>().mouse_grabbed = false;
-                                }
-                            } else {
-                                event_loop.exit();
-                            }
+                    if key_event.state.is_pressed() {
+                        world.resource_mut::<KeyboardState>().keys_held.insert(key);
+                        world.resource_mut::<events::RawInputBuffer>().key_presses.push(
+                            events::KeyPressedMsg { key },
+                        );
+                        // ESC with no cursor grab → quit.
+                        let mode = world.resource::<events::InputContext>().mode;
+                        let grabbed = world.resource::<events::InputContext>().cursor_grabbed;
+                        if key == KeyCode::Escape && mode == events::InputMode::Game && !grabbed {
+                            event_loop.exit();
                         }
                     } else {
-                        let mut kb = world.resource_mut::<KeyboardState>();
-                        kb.keys_held.remove(&key);
+                        world.resource_mut::<KeyboardState>().keys_held.remove(&key);
+                        world.resource_mut::<events::RawInputBuffer>().key_releases.push(
+                            events::KeyReleasedMsg { key },
+                        );
                     }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let world = self.ecs_app.world_mut();
-                let mouse_grabbed = world.resource::<KeyboardState>().mouse_grabbed;
-
-                if !mouse_grabbed {
-                    // Not grabbed yet — LMB grabs the cursor.
-                    if state.is_pressed() && button == winit::event::MouseButton::Left {
-                        if let Some(ref w) = self.window {
-                            if w.set_cursor_grab(CursorGrabMode::Locked).is_err() {
-                                let _ = w.set_cursor_grab(CursorGrabMode::Confined);
-                            }
-                            w.set_cursor_visible(false);
-                            world.resource_mut::<KeyboardState>().mouse_grabbed = true;
-                        }
-                    }
-                } else if state.is_pressed() {
-                    // Mouse is grabbed — handle block editing.
-                    let is_piloting = world.resource::<LocalPlayer>().is_piloting;
-                    let shard_type = world.resource::<ConnectionInfo>().current_shard_type;
-
-                    // Block editing only when walking (not piloting) on a ship shard.
-                    if !is_piloting && shard_type == 2 {
-                        let action = match button {
-                            winit::event::MouseButton::Left => 1u8,   // break
-                            winit::event::MouseButton::Right => 2u8,  // place
-                            _ => 0u8,
-                        };
-                        if action > 0 {
-                            let player = world.resource::<LocalPlayer>();
-                            let smooth = world.resource::<RenderSmoothing>();
-                            let cam_ctrl = world.resource::<CameraControl>();
-                            let hotbar = world.resource::<BlockHotbar>();
-
-                            // Compute eye and look in ship-local coordinates.
-                            let eye = smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
-
-                            // Ship-local look direction from yaw/pitch.
-                            let (sy, cy) = (cam_ctrl.yaw as f32).sin_cos();
-                            let (sp, cp) = (cam_ctrl.pitch as f32).sin_cos();
-                            let look = DVec3::new(
-                                (cy * cp) as f64,
-                                sp as f64,
-                                (sy * cp) as f64,
-                            );
-
-                            let block_type = if action == 2 {
-                                hotbar.selected_block().as_u16()
-                            } else {
-                                0
-                            };
-
-                            let edit = voxeldust_core::client_message::BlockEditData {
-                                action,
-                                eye,
-                                look,
-                                block_type,
-                            };
-
-                            let net = world.resource::<NetworkChannels>();
-                            if let Some(ref tx) = net.block_edit_tx {
-                                let _ = tx.send(edit);
-                            }
-                        }
-                    }
-                }
+                world.resource_mut::<events::RawInputBuffer>().mouse_buttons.push(
+                    events::MouseButtonMsg { button, pressed: state.is_pressed() },
+                );
             }
             WindowEvent::RedrawRequested => {
                 self.render();
@@ -1660,30 +2039,11 @@ impl ApplicationHandler for ClientApp {
     }
 
     fn device_event(&mut self, _el: &ActiveEventLoop, _did: DeviceId, event: DeviceEvent) {
-        let world = self.ecs_app.world_mut();
-        let mouse_grabbed = world.resource::<KeyboardState>().mouse_grabbed;
-        if !mouse_grabbed { return; }
         if let DeviceEvent::MouseMotion { delta } = event {
-            let sensitivity = 0.003;
-            let is_piloting = world.resource::<LocalPlayer>().is_piloting;
-            let free_look = world.resource::<KeyboardState>().keys_held.contains(&KeyCode::AltLeft);
-
-            if is_piloting && !free_look {
-                // Piloting: set yaw/pitch rate from mouse movement.
-                // Rate is proportional to mouse velocity, clamped to [-1, 1].
-                let mut cam = world.resource_mut::<CameraControl>();
-                cam.pilot_yaw_rate = (cam.pilot_yaw_rate - delta.0 * sensitivity * 5.0).clamp(-1.0, 1.0);
-                cam.pilot_pitch_rate = (cam.pilot_pitch_rate - delta.1 * sensitivity * 5.0).clamp(-1.0, 1.0);
-            } else {
-                // Walking or free-look: move camera yaw/pitch directly.
-                let mut cam = world.resource_mut::<CameraControl>();
-                cam.yaw += delta.0 * sensitivity;
-                cam.pitch -= delta.1 * sensitivity;
-                cam.pitch = cam.pitch.clamp(
-                    -std::f64::consts::FRAC_PI_2 + 0.01,
-                    std::f64::consts::FRAC_PI_2 - 0.01,
-                );
-            }
+            let world = self.ecs_app.world_mut();
+            world.resource_mut::<events::RawInputBuffer>().mouse_motions.push(
+                events::MouseMotionMsg { delta_x: delta.0, delta_y: delta.1 },
+            );
         }
     }
 }

@@ -396,10 +396,9 @@ impl ClientMsg {
                     })
                 }).collect();
                 let seats: Vec<_> = data.seat_mappings.iter().map(|s| {
-                    let inp = builder.create_string(&s.input_name);
                     let ch = builder.create_string(&s.channel_name);
                     fb::SeatBindingFB::create(&mut builder, &fb::SeatBindingFBArgs {
-                        input_name: Some(inp), channel_name: Some(ch), property: s.property as u8,
+                        control: s.control as u8, channel_name: Some(ch), property: s.property as u8,
                     })
                 }).collect();
                 let pv = builder.create_vector(&pub_b);
@@ -491,12 +490,13 @@ impl ClientMsg {
                         expression: deserialize_expression(r.expression_type(), r.expression_value(), r.expression_value2()),
                     }
                 }).collect()).unwrap_or_default();
-                let seats = bcu.seat_mappings().map(|v| v.iter().map(|s| {
-                    crate::signal::components::SeatInputBinding {
-                        input_name: s.input_name().unwrap_or("").to_string(),
+                let seats = bcu.seat_mappings().map(|v| v.iter().filter_map(|s| {
+                    let control = crate::signal::components::SeatControl::from_u8(s.control())?;
+                    Some(crate::signal::components::SeatInputBinding {
+                        control,
                         channel_name: s.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(s.property()),
-                    }
+                    })
                 }).collect()).unwrap_or_default();
                 Ok(ClientMsg::BlockConfigUpdate(crate::signal::config::BlockConfigUpdateData {
                     block_pos: glam::IVec3::new(bcu.block_x(), bcu.block_y(), bcu.block_z()),
@@ -808,10 +808,9 @@ impl ServerMsg {
                     })
                 }).collect();
                 let seats: Vec<_> = data.seat_mappings.iter().map(|s| {
-                    let input = builder.create_string(&s.input_name);
                     let channel = builder.create_string(&s.channel_name);
                     fb::SeatBindingFB::create(&mut builder, &fb::SeatBindingFBArgs {
-                        input_name: Some(input), channel_name: Some(channel), property: s.property as u8,
+                        control: s.control as u8, channel_name: Some(channel), property: s.property as u8,
                     })
                 }).collect();
                 let channels: Vec<_> = data.available_channels.iter()
@@ -1110,12 +1109,13 @@ impl ServerMsg {
                         expression: deserialize_expression(r.expression_type(), r.expression_value(), r.expression_value2()),
                     }
                 }).collect()).unwrap_or_default();
-                let seats = bcs.seat_mappings().map(|v| v.iter().map(|s| {
-                    crate::signal::components::SeatInputBinding {
-                        input_name: s.input_name().unwrap_or("").to_string(),
+                let seats = bcs.seat_mappings().map(|v| v.iter().filter_map(|s| {
+                    let control = crate::signal::components::SeatControl::from_u8(s.control())?;
+                    Some(crate::signal::components::SeatInputBinding {
+                        control,
                         channel_name: s.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(s.property()),
-                    }
+                    })
                 }).collect()).unwrap_or_default();
                 let channels = bcs.available_channels().map(|v| {
                     v.iter().map(|s| s.to_string()).collect()

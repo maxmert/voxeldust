@@ -280,6 +280,7 @@ pub fn render_frame(
     warp_target_star: Option<hud::WarpTargetInfo>,
     block_renderer: Option<&BlockRenderer>,
     block_target: Option<&voxeldust_core::block::raycast::BlockHit>,
+    block_indicators: &[(glam::Vec3, u8, char)],
     config_state: Option<&mut voxeldust_core::signal::config::BlockSignalConfig>,
 ) -> hud::ConfigPanelAction {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
@@ -536,6 +537,7 @@ pub fn render_frame(
         system_params,
         frame_count,
         warp_target_star,
+        block_indicators,
     };
     let (full_output, panel_action) = hud::run_hud(gpu, window, &hud_ctx, config_state);
     hud::render_egui(gpu, &mut encoder, &view, full_output);

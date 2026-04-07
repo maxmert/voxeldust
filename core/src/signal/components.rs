@@ -51,12 +51,72 @@ pub struct SeatChannelMapping {
     pub bindings: Vec<SeatInputBinding>,
 }
 
-/// Maps a pilot input (key/axis) to a signal channel publish.
+/// Typed controls available to seat occupants.
+/// Each seat type uses a subset. New seat types add new variants.
+/// The server maps each control to a concrete input source (key, mouse axis, slider).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SeatControl {
+    // Pilot controls (WASD, mouse)
+    ThrustForward  = 0,
+    ThrustLateral  = 1,
+    ThrustVertical = 2,
+    TorqueYaw      = 3,
+    TorquePitch    = 4,
+    // Future: Gunner controls (10-19)
+    // AimX           = 10,
+    // AimY           = 11,
+    // FirePrimary    = 12,
+    // FireSecondary  = 13,
+    // Future: Engineer controls (20-29)
+    // PowerWeapons   = 20,
+    // PowerShields   = 21,
+    // PowerEngines   = 22,
+    // CoolantLevel   = 23,
+}
+
+impl SeatControl {
+    /// Human-readable label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ThrustForward  => "Thrust Forward",
+            Self::ThrustLateral  => "Thrust Lateral",
+            Self::ThrustVertical => "Thrust Vertical",
+            Self::TorqueYaw      => "Torque Yaw",
+            Self::TorquePitch    => "Torque Pitch",
+        }
+    }
+
+    /// All controls valid for a given functional block kind.
+    /// For now all seats are pilot seats.
+    pub fn available_for_kind(_kind: crate::block::FunctionalBlockKind) -> &'static [SeatControl] {
+        &[
+            SeatControl::ThrustForward,
+            SeatControl::ThrustLateral,
+            SeatControl::ThrustVertical,
+            SeatControl::TorqueYaw,
+            SeatControl::TorquePitch,
+        ]
+    }
+
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::ThrustForward),
+            1 => Some(Self::ThrustLateral),
+            2 => Some(Self::ThrustVertical),
+            3 => Some(Self::TorqueYaw),
+            4 => Some(Self::TorquePitch),
+            _ => None,
+        }
+    }
+}
+
+/// Maps a seat control to a signal channel.
 #[derive(Clone, Debug)]
 pub struct SeatInputBinding {
-    /// Human-readable input name (e.g., "W", "thrust_forward", "button_1").
-    pub input_name: String,
-    /// Channel to publish to when this input is active.
+    /// Which typed control this binding reads.
+    pub control: SeatControl,
+    /// Channel to publish to (free-text, user-defined).
     pub channel_name: String,
     /// What type of value to publish.
     pub property: SignalProperty,
@@ -66,31 +126,11 @@ impl Default for SeatChannelMapping {
     fn default() -> Self {
         Self {
             bindings: vec![
-                SeatInputBinding {
-                    input_name: "thrust_forward".into(),
-                    channel_name: "thrust-forward".into(),
-                    property: SignalProperty::Throttle,
-                },
-                SeatInputBinding {
-                    input_name: "thrust_lateral".into(),
-                    channel_name: "thrust-lateral".into(),
-                    property: SignalProperty::Throttle,
-                },
-                SeatInputBinding {
-                    input_name: "thrust_vertical".into(),
-                    channel_name: "thrust-vertical".into(),
-                    property: SignalProperty::Throttle,
-                },
-                SeatInputBinding {
-                    input_name: "torque_yaw".into(),
-                    channel_name: "torque-yaw".into(),
-                    property: SignalProperty::Throttle,
-                },
-                SeatInputBinding {
-                    input_name: "torque_pitch".into(),
-                    channel_name: "torque-pitch".into(),
-                    property: SignalProperty::Throttle,
-                },
+                SeatInputBinding { control: SeatControl::ThrustForward,  channel_name: "thrust-forward".into(),  property: SignalProperty::Throttle },
+                SeatInputBinding { control: SeatControl::ThrustLateral,  channel_name: "thrust-lateral".into(),  property: SignalProperty::Throttle },
+                SeatInputBinding { control: SeatControl::ThrustVertical, channel_name: "thrust-vertical".into(), property: SignalProperty::Throttle },
+                SeatInputBinding { control: SeatControl::TorqueYaw,      channel_name: "torque-yaw".into(),      property: SignalProperty::Throttle },
+                SeatInputBinding { control: SeatControl::TorquePitch,    channel_name: "torque-pitch".into(),    property: SignalProperty::Throttle },
             ],
         }
     }

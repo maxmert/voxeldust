@@ -8576,7 +8576,7 @@ impl ::core::fmt::Debug for SignalRuleFB<'_> {
 pub enum SeatBindingFBOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// Seat input → channel mapping.
+/// Seat control → channel mapping.
 pub struct SeatBindingFB<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -8590,7 +8590,7 @@ impl<'a> ::flatbuffers::Follow<'a> for SeatBindingFB<'a> {
 }
 
 impl<'a> SeatBindingFB<'a> {
-  pub const VT_INPUT_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CONTROL: ::flatbuffers::VOffsetT = 4;
   pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
   pub const VT_PROPERTY: ::flatbuffers::VOffsetT = 8;
 
@@ -8605,18 +8605,18 @@ impl<'a> SeatBindingFB<'a> {
   ) -> ::flatbuffers::WIPOffset<SeatBindingFB<'bldr>> {
     let mut builder = SeatBindingFBBuilder::new(_fbb);
     if let Some(x) = args.channel_name { builder.add_channel_name(x); }
-    if let Some(x) = args.input_name { builder.add_input_name(x); }
     builder.add_property(args.property);
+    builder.add_control(args.control);
     builder.finish()
   }
 
 
   #[inline]
-  pub fn input_name(&self) -> Option<&'a str> {
+  pub fn control(&self) -> u8 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SeatBindingFB::VT_INPUT_NAME, None)}
+    unsafe { self._tab.get::<u8>(SeatBindingFB::VT_CONTROL, Some(0)).unwrap()}
   }
   #[inline]
   pub fn channel_name(&self) -> Option<&'a str> {
@@ -8640,7 +8640,7 @@ impl ::flatbuffers::Verifiable for SeatBindingFB<'_> {
     v: &mut ::flatbuffers::Verifier, pos: usize
   ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
     v.visit_table(pos)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("input_name", Self::VT_INPUT_NAME, false)?
+     .visit_field::<u8>("control", Self::VT_CONTROL, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
      .visit_field::<u8>("property", Self::VT_PROPERTY, false)?
      .finish();
@@ -8648,7 +8648,7 @@ impl ::flatbuffers::Verifiable for SeatBindingFB<'_> {
   }
 }
 pub struct SeatBindingFBArgs<'a> {
-    pub input_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub control: u8,
     pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub property: u8,
 }
@@ -8656,7 +8656,7 @@ impl<'a> Default for SeatBindingFBArgs<'a> {
   #[inline]
   fn default() -> Self {
     SeatBindingFBArgs {
-      input_name: None,
+      control: 0,
       channel_name: None,
       property: 0,
     }
@@ -8669,8 +8669,8 @@ pub struct SeatBindingFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SeatBindingFBBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_input_name(&mut self, input_name: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SeatBindingFB::VT_INPUT_NAME, input_name);
+  pub fn add_control(&mut self, control: u8) {
+    self.fbb_.push_slot::<u8>(SeatBindingFB::VT_CONTROL, control, 0);
   }
   #[inline]
   pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
@@ -8698,7 +8698,7 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SeatBindingFBBuilder<'a, 'b, 
 impl ::core::fmt::Debug for SeatBindingFB<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("SeatBindingFB");
-      ds.field("input_name", &self.input_name());
+      ds.field("control", &self.control());
       ds.field("channel_name", &self.channel_name());
       ds.field("property", &self.property());
       ds.finish()
