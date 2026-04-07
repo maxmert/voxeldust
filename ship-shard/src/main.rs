@@ -224,6 +224,11 @@ struct PendingEntityOps {
     ops: Vec<EntityOp>,
 }
 
+/// Whether ship physical properties need recomputation from block composition.
+/// Set to `true` when blocks change. The aggregation system clears it after recomputing.
+#[derive(Resource)]
+struct AggregationDirty(bool);
+
 /// Handles of per-chunk compound colliders. Keyed by chunk key.
 /// When blocks change in a chunk, we remove the old collider and insert a new one.
 #[derive(Resource, Default)]
@@ -1616,6 +1621,11 @@ fn produce_player_edits(
                     continue;
                 }
 
+                // Set block orientation from placement face normal.
+                // The block faces outward from the surface it's placed on.
+                let orientation = block::BlockOrientation::from_face_normal(hit.face_normal);
+                grid.0.set_orientation(target.x, target.y, target.z, orientation);
+
                 queue.push(BlockEdit {
                     pos: target,
                     new_block: block_type,
@@ -1704,6 +1714,7 @@ fn apply_block_edits(
     bridge: Res<NetworkBridge>,
     mut persistence: Option<ResMut<ShipPersistence>>,
     mut pending_entity_ops: Option<ResMut<PendingEntityOps>>,
+    mut agg_dirty: ResMut<AggregationDirty>,
 ) {
     let edits = queue.drain_all();
     if edits.is_empty() {
@@ -1716,6 +1727,9 @@ fn apply_block_edits(
     if result.applied_count == 0 {
         return;
     }
+
+    // Mark aggregation as needing recomputation.
+    agg_dirty.0 = true;
 
     // 2. Shard-specific: rebuild chunk colliders for all dirty chunks.
     for &chunk_key in result.dirty_chunks.keys() {
@@ -1780,6 +1794,7 @@ fn init_functional_blocks(
     grid: Res<ShipGridResource>,
     registry: Res<BlockRegistryResource>,
     mut block_index: ResMut<FunctionalBlockIndex>,
+    mut dirty: ResMut<AggregationDirty>,
 ) {
     let cs = block::CHUNK_SIZE as i32;
     for (chunk_key, chunk) in grid.0.iter_chunks() {
@@ -1809,6 +1824,9 @@ fn init_functional_blocks(
     if !block_index.0.is_empty() {
         info!(count = block_index.0.len(), "initialized functional block entities from grid");
     }
+
+    // Trigger initial aggregation on first tick.
+    dirty.0 = true;
 }
 
 /// Process entity lifecycle operations: spawn/despawn ECS entities for functional blocks.
@@ -1857,6 +1875,77 @@ fn process_entity_ops(
                 }
                 // Clear metadata at this position.
                 grid.0.remove_meta(pos.x, pos.y, pos.z);
+            }
+        }
+    }
+}
+
+/// Aggregation system: recomputes ship physical properties from block composition.
+/// Runs after entity lifecycle ops, only when the dirty flag is set.
+fn aggregate_ship_properties(
+    mut dirty: ResMut<AggregationDirty>,
+    grid: Res<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    mut ship_props: ResMut<ShipProps>,
+    block_query: Query<&FunctionalBlockRef>,
+    config: Res<ShipConfig>,
+    bridge: Res<NetworkBridge>,
+) {
+    if !dirty.0 {
+        return;
+    }
+    dirty.0 = false;
+
+    // Compute mass properties from all blocks.
+    let mass = block::aggregation::compute_mass_properties(&grid.0, &registry.0);
+
+    // Collect thruster positions + orientations from ECS entities.
+    let thrusters: Vec<_> = block_query
+        .iter()
+        .filter(|b| b.kind == FunctionalBlockKind::Thruster)
+        .map(|b| {
+            let orientation = grid
+                .0
+                .get_meta(b.world_pos.x, b.world_pos.y, b.world_pos.z)
+                .map(|m| m.orientation)
+                .unwrap_or_default();
+            (b.world_pos, b.block_id, orientation)
+        })
+        .collect();
+
+    // Compute thrust properties from thruster block positions.
+    let thrust =
+        block::aggregation::compute_thrust_properties(&thrusters, mass.center_of_mass, &registry.0);
+
+    // Build the final ShipPhysicalProperties.
+    let new_props = block::aggregation::build_ship_properties(&mass, &thrust);
+    ship_props.0 = new_props.clone();
+
+    info!(
+        mass = format!("{:.0} kg", mass.total_mass_kg),
+        blocks = mass.block_count,
+        thrusters = thrust.thruster_count,
+        forward_thrust = format!("{:.0} N", new_props.max_thrust_forward_n),
+        torque = format!("{:.0} N·m", new_props.max_torque_nm),
+        "ship properties aggregated from blocks"
+    );
+
+    // Send updated properties to the system shard via QUIC.
+    if let Some(host_id) = config.host_shard_id {
+        let msg = voxeldust_core::shard_message::ShardMsg::ShipPropertiesUpdate(
+            voxeldust_core::shard_message::ShipPropertiesUpdateData {
+                ship_id: config.ship_id,
+                mass_kg: new_props.mass_kg,
+                max_thrust_forward_n: new_props.max_thrust_forward_n,
+                max_thrust_reverse_n: new_props.max_thrust_reverse_n,
+                max_torque_nm: new_props.max_torque_nm,
+                thrust_multiplier: new_props.thrust_multiplier,
+                dimensions: new_props.dimensions,
+            },
+        );
+        if let Ok(reg) = bridge.peer_registry.try_read() {
+            if let Some(addr) = reg.quic_addr(host_id) {
+                let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
             }
         }
     }
@@ -2111,6 +2200,7 @@ fn build_ship_interior(
     app.insert_resource(InputActions::default());
     app.insert_resource(ecs::TickCounter::default());
     app.insert_resource(BlockEditQueue::default());
+    app.insert_resource(AggregationDirty(false));
     app.insert_resource(ship_persistence);
 
     // Messages.
@@ -2152,7 +2242,7 @@ fn build_ship_interior(
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
         Update,
-        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops)
+        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, aggregate_ship_properties)
             .chain()
             .in_set(ShipSet::BlockEdit),
     );

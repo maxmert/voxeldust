@@ -32,6 +32,15 @@ pub enum FunctionalBlockKind {
     Computer,
 }
 
+/// Per-thruster-block static properties (thrust output, fuel consumption).
+#[derive(Clone, Copy, Debug)]
+pub struct ThrusterProps {
+    /// Maximum thrust output in Newtons.
+    pub thrust_n: f64,
+    /// Fuel consumption rate (kg/s) — future use for fuel system.
+    pub fuel_rate: f64,
+}
+
 /// What an interaction does when triggered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractionType {
@@ -94,6 +103,8 @@ pub struct BlockRegistry {
     defs: Vec<BlockDef>,
     /// Functional block kind per block ID. None = not functional (structural/natural block).
     functional_kinds: Vec<Option<FunctionalBlockKind>>,
+    /// Per-thruster-block properties. None = not a thruster.
+    thruster_props: Vec<Option<ThrusterProps>>,
 }
 
 impl BlockRegistry {
@@ -102,6 +113,7 @@ impl BlockRegistry {
         let mut defs = Vec::with_capacity(MAX_BLOCK_TYPES);
         defs.resize_with(MAX_BLOCK_TYPES, || BlockDef::UNDEFINED.clone());
         let mut functional_kinds = vec![None; MAX_BLOCK_TYPES];
+        let mut thruster_props_vec: Vec<Option<ThrusterProps>> = vec![None; MAX_BLOCK_TYPES];
 
         let r = &mut defs;
 
@@ -636,7 +648,22 @@ impl BlockRegistry {
         }
         fk[BlockId::COMPUTER.as_u16() as usize] = Some(Computer);
 
-        Self { defs, functional_kinds }
+        // Populate thruster-specific properties.
+        let tp = &mut thruster_props_vec;
+        // Chemical: cheap, moderate thrust, high fuel
+        tp[BlockId::THRUSTER_SMALL_CHEMICAL.as_u16() as usize] = Some(ThrusterProps { thrust_n: 50_000.0, fuel_rate: 5.0 });
+        tp[BlockId::THRUSTER_MEDIUM_CHEMICAL.as_u16() as usize] = Some(ThrusterProps { thrust_n: 200_000.0, fuel_rate: 15.0 });
+        tp[BlockId::THRUSTER_LARGE_CHEMICAL.as_u16() as usize] = Some(ThrusterProps { thrust_n: 800_000.0, fuel_rate: 50.0 });
+        // Ion: efficient, low thrust, low fuel
+        tp[BlockId::THRUSTER_SMALL_ION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 20_000.0, fuel_rate: 0.5 });
+        tp[BlockId::THRUSTER_MEDIUM_ION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 100_000.0, fuel_rate: 2.0 });
+        tp[BlockId::THRUSTER_LARGE_ION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 500_000.0, fuel_rate: 8.0 });
+        // Fusion: best power/weight ratio
+        tp[BlockId::THRUSTER_SMALL_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 100_000.0, fuel_rate: 1.0 });
+        tp[BlockId::THRUSTER_MEDIUM_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 500_000.0, fuel_rate: 4.0 });
+        tp[BlockId::THRUSTER_LARGE_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 2_000_000.0, fuel_rate: 12.0 });
+
+        Self { defs, functional_kinds, thruster_props: thruster_props_vec }
     }
 
     /// O(1) lookup by `BlockId`.
@@ -665,6 +692,12 @@ impl BlockRegistry {
     #[inline(always)]
     pub fn functional_kind(&self, id: BlockId) -> Option<FunctionalBlockKind> {
         self.functional_kinds[id.as_u16() as usize]
+    }
+
+    /// Get thruster-specific properties for a block ID. None = not a thruster.
+    #[inline]
+    pub fn thruster_props(&self, id: BlockId) -> Option<ThrusterProps> {
+        self.thruster_props[id.as_u16() as usize]
     }
 
     /// Get the interaction schema for a functional block kind.

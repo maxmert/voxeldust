@@ -13,10 +13,10 @@ pub mod protocol {
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 14;
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 15;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 15] = [
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 16] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -32,6 +32,7 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 15] = [
   ShardPayload::ShipNearbyInfo,
   ShardPayload::WarpAutopilotCommand,
   ShardPayload::HostSwitch,
+  ShardPayload::ShipPropertiesUpdate,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -54,9 +55,10 @@ impl ShardPayload {
   pub const ShipNearbyInfo: Self = Self(12);
   pub const WarpAutopilotCommand: Self = Self(13);
   pub const HostSwitch: Self = Self(14);
+  pub const ShipPropertiesUpdate: Self = Self(15);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 14;
+  pub const ENUM_MAX: u8 = 15;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -73,6 +75,7 @@ impl ShardPayload {
     Self::ShipNearbyInfo,
     Self::WarpAutopilotCommand,
     Self::HostSwitch,
+    Self::ShipPropertiesUpdate,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -92,6 +95,7 @@ impl ShardPayload {
       Self::ShipNearbyInfo => Some("ShipNearbyInfo"),
       Self::WarpAutopilotCommand => Some("WarpAutopilotCommand"),
       Self::HostSwitch => Some("HostSwitch"),
+      Self::ShipPropertiesUpdate => Some("ShipPropertiesUpdate"),
       _ => None,
     }
   }
@@ -2346,6 +2350,240 @@ impl ::core::fmt::Debug for CrossShardBlockEdits<'_> {
       ds.finish()
   }
 }
+pub enum ShipPropertiesUpdateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Ship physical properties derived from block composition.
+/// Sent from ship shard → system shard when blocks change.
+pub struct ShipPropertiesUpdate<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ShipPropertiesUpdate<'a> {
+  type Inner = ShipPropertiesUpdate<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ShipPropertiesUpdate<'a> {
+  pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_MASS_KG: ::flatbuffers::VOffsetT = 6;
+  pub const VT_MAX_THRUST_FORWARD_N: ::flatbuffers::VOffsetT = 8;
+  pub const VT_MAX_THRUST_REVERSE_N: ::flatbuffers::VOffsetT = 10;
+  pub const VT_MAX_TORQUE_NM: ::flatbuffers::VOffsetT = 12;
+  pub const VT_THRUST_MULTIPLIER: ::flatbuffers::VOffsetT = 14;
+  pub const VT_DIMENSIONS_X: ::flatbuffers::VOffsetT = 16;
+  pub const VT_DIMENSIONS_Y: ::flatbuffers::VOffsetT = 18;
+  pub const VT_DIMENSIONS_Z: ::flatbuffers::VOffsetT = 20;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ShipPropertiesUpdate { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ShipPropertiesUpdateArgs
+  ) -> ::flatbuffers::WIPOffset<ShipPropertiesUpdate<'bldr>> {
+    let mut builder = ShipPropertiesUpdateBuilder::new(_fbb);
+    builder.add_dimensions_z(args.dimensions_z);
+    builder.add_dimensions_y(args.dimensions_y);
+    builder.add_dimensions_x(args.dimensions_x);
+    builder.add_thrust_multiplier(args.thrust_multiplier);
+    builder.add_max_torque_nm(args.max_torque_nm);
+    builder.add_max_thrust_reverse_n(args.max_thrust_reverse_n);
+    builder.add_max_thrust_forward_n(args.max_thrust_forward_n);
+    builder.add_mass_kg(args.mass_kg);
+    builder.add_ship_id(args.ship_id);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShipPropertiesUpdate::VT_SHIP_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn mass_kg(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_MASS_KG, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn max_thrust_forward_n(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_MAX_THRUST_FORWARD_N, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn max_thrust_reverse_n(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_MAX_THRUST_REVERSE_N, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn max_torque_nm(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_MAX_TORQUE_NM, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn thrust_multiplier(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_THRUST_MULTIPLIER, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn dimensions_x(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_DIMENSIONS_X, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn dimensions_y(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_DIMENSIONS_Y, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn dimensions_z(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPropertiesUpdate::VT_DIMENSIONS_Z, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ShipPropertiesUpdate<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
+     .visit_field::<f64>("mass_kg", Self::VT_MASS_KG, false)?
+     .visit_field::<f64>("max_thrust_forward_n", Self::VT_MAX_THRUST_FORWARD_N, false)?
+     .visit_field::<f64>("max_thrust_reverse_n", Self::VT_MAX_THRUST_REVERSE_N, false)?
+     .visit_field::<f64>("max_torque_nm", Self::VT_MAX_TORQUE_NM, false)?
+     .visit_field::<f64>("thrust_multiplier", Self::VT_THRUST_MULTIPLIER, false)?
+     .visit_field::<f64>("dimensions_x", Self::VT_DIMENSIONS_X, false)?
+     .visit_field::<f64>("dimensions_y", Self::VT_DIMENSIONS_Y, false)?
+     .visit_field::<f64>("dimensions_z", Self::VT_DIMENSIONS_Z, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ShipPropertiesUpdateArgs {
+    pub ship_id: u64,
+    pub mass_kg: f64,
+    pub max_thrust_forward_n: f64,
+    pub max_thrust_reverse_n: f64,
+    pub max_torque_nm: f64,
+    pub thrust_multiplier: f64,
+    pub dimensions_x: f64,
+    pub dimensions_y: f64,
+    pub dimensions_z: f64,
+}
+impl<'a> Default for ShipPropertiesUpdateArgs {
+  #[inline]
+  fn default() -> Self {
+    ShipPropertiesUpdateArgs {
+      ship_id: 0,
+      mass_kg: 0.0,
+      max_thrust_forward_n: 0.0,
+      max_thrust_reverse_n: 0.0,
+      max_torque_nm: 0.0,
+      thrust_multiplier: 0.0,
+      dimensions_x: 0.0,
+      dimensions_y: 0.0,
+      dimensions_z: 0.0,
+    }
+  }
+}
+
+pub struct ShipPropertiesUpdateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipPropertiesUpdateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ship_id(&mut self, ship_id: u64) {
+    self.fbb_.push_slot::<u64>(ShipPropertiesUpdate::VT_SHIP_ID, ship_id, 0);
+  }
+  #[inline]
+  pub fn add_mass_kg(&mut self, mass_kg: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_MASS_KG, mass_kg, 0.0);
+  }
+  #[inline]
+  pub fn add_max_thrust_forward_n(&mut self, max_thrust_forward_n: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_MAX_THRUST_FORWARD_N, max_thrust_forward_n, 0.0);
+  }
+  #[inline]
+  pub fn add_max_thrust_reverse_n(&mut self, max_thrust_reverse_n: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_MAX_THRUST_REVERSE_N, max_thrust_reverse_n, 0.0);
+  }
+  #[inline]
+  pub fn add_max_torque_nm(&mut self, max_torque_nm: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_MAX_TORQUE_NM, max_torque_nm, 0.0);
+  }
+  #[inline]
+  pub fn add_thrust_multiplier(&mut self, thrust_multiplier: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_THRUST_MULTIPLIER, thrust_multiplier, 0.0);
+  }
+  #[inline]
+  pub fn add_dimensions_x(&mut self, dimensions_x: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_DIMENSIONS_X, dimensions_x, 0.0);
+  }
+  #[inline]
+  pub fn add_dimensions_y(&mut self, dimensions_y: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_DIMENSIONS_Y, dimensions_y, 0.0);
+  }
+  #[inline]
+  pub fn add_dimensions_z(&mut self, dimensions_z: f64) {
+    self.fbb_.push_slot::<f64>(ShipPropertiesUpdate::VT_DIMENSIONS_Z, dimensions_z, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipPropertiesUpdateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ShipPropertiesUpdateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ShipPropertiesUpdate<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ShipPropertiesUpdate<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ShipPropertiesUpdate");
+      ds.field("ship_id", &self.ship_id());
+      ds.field("mass_kg", &self.mass_kg());
+      ds.field("max_thrust_forward_n", &self.max_thrust_forward_n());
+      ds.field("max_thrust_reverse_n", &self.max_thrust_reverse_n());
+      ds.field("max_torque_nm", &self.max_torque_nm());
+      ds.field("thrust_multiplier", &self.thrust_multiplier());
+      ds.field("dimensions_x", &self.dimensions_x());
+      ds.field("dimensions_y", &self.dimensions_y());
+      ds.field("dimensions_z", &self.dimensions_z());
+      ds.finish()
+  }
+}
 pub enum AutopilotSnapshotOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -4520,6 +4758,21 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_ship_properties_update(&self) -> Option<ShipPropertiesUpdate<'a>> {
+    if self.payload_type() == ShardPayload::ShipPropertiesUpdate {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ShipPropertiesUpdate::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -4544,6 +4797,7 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::ShipNearbyInfo => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipNearbyInfo>>("ShardPayload::ShipNearbyInfo", pos),
           ShardPayload::WarpAutopilotCommand => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WarpAutopilotCommand>>("ShardPayload::WarpAutopilotCommand", pos),
           ShardPayload::HostSwitch => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<HostSwitch>>("ShardPayload::HostSwitch", pos),
+          ShardPayload::ShipPropertiesUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipPropertiesUpdate>>("ShardPayload::ShipPropertiesUpdate", pos),
           _ => Ok(()),
         }
      })?
@@ -4691,6 +4945,13 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::HostSwitch => {
           if let Some(x) = self.payload_as_host_switch() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::ShipPropertiesUpdate => {
+          if let Some(x) = self.payload_as_ship_properties_update() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

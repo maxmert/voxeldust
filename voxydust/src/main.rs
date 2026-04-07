@@ -1416,6 +1416,33 @@ impl ApplicationHandler for ClientApp {
                             }
                         }
 
+                        // E key: interact with targeted functional block.
+                        // Sends BlockEditRequest with action=3 via UDP.
+                        // TODO: This should be part of a proper interaction input system
+                        // that reads the InteractionSchema from the registry and maps
+                        // multiple keys (E, F, G) to different action codes per block kind.
+                        let shard_type_e = world.resource::<ConnectionInfo>().current_shard_type;
+                        let mouse_grabbed_e = world.resource::<KeyboardState>().mouse_grabbed;
+                        if key == KeyCode::KeyE && shard_type_e == 2 && mouse_grabbed_e {
+                            let smooth = world.resource::<RenderSmoothing>();
+                            let cam_ctrl = world.resource::<CameraControl>();
+                            let eye = smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+                            let (sy, cy) = (cam_ctrl.yaw as f32).sin_cos();
+                            let (sp, cp) = (cam_ctrl.pitch as f32).sin_cos();
+                            let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+
+                            let edit = voxeldust_core::client_message::BlockEditData {
+                                action: 3,
+                                eye,
+                                look,
+                                block_type: 0,
+                            };
+                            let net = world.resource::<NetworkChannels>();
+                            if let Some(ref tx) = net.block_edit_tx {
+                                let _ = tx.send(edit);
+                            }
+                        }
+
                         // Enter key: confirm warp to targeted star.
                         if key == KeyCode::Enter && is_piloting && warp_target.is_some() {
                             info!(target = ?warp_target, "warp confirmed via Enter");

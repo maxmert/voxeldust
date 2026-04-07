@@ -23,6 +23,9 @@ pub enum ShardMsg {
     ShipNearbyInfo(ShipNearbyInfoData),
     WarpAutopilotCommand(WarpAutopilotCommandData),
     HostSwitch(HostSwitchData),
+    /// Ship physical properties update (ship shard → system shard).
+    /// Sent when block composition changes (aggregation recomputes).
+    ShipPropertiesUpdate(ShipPropertiesUpdateData),
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +155,19 @@ pub struct HostSwitchData {
     pub new_host_udp_addr: String,
     pub new_host_shard_type: u8, // 1=System, 3=Galaxy
     pub seed: u64,               // galaxy_seed or system_seed
+}
+
+/// Ship physical properties derived from block composition.
+/// Sent from ship shard to system shard when blocks change.
+#[derive(Debug, Clone)]
+pub struct ShipPropertiesUpdateData {
+    pub ship_id: u64,
+    pub mass_kg: f64,
+    pub max_thrust_forward_n: f64,
+    pub max_thrust_reverse_n: f64,
+    pub max_torque_nm: f64,
+    pub thrust_multiplier: f64,
+    pub dimensions: (f64, f64, f64),
 }
 
 /// Block edits affecting chunks on adjacent shard boundaries.
@@ -581,6 +597,30 @@ impl ShardMsg {
                 );
                 builder.finish(msg, None);
             }
+            ShardMsg::ShipPropertiesUpdate(data) => {
+                let spu = fb::ShipPropertiesUpdate::create(
+                    &mut builder,
+                    &fb::ShipPropertiesUpdateArgs {
+                        ship_id: data.ship_id,
+                        mass_kg: data.mass_kg,
+                        max_thrust_forward_n: data.max_thrust_forward_n,
+                        max_thrust_reverse_n: data.max_thrust_reverse_n,
+                        max_torque_nm: data.max_torque_nm,
+                        thrust_multiplier: data.thrust_multiplier,
+                        dimensions_x: data.dimensions.0,
+                        dimensions_y: data.dimensions.1,
+                        dimensions_z: data.dimensions.2,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::ShipPropertiesUpdate,
+                        payload: Some(spu.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -901,6 +941,22 @@ impl ShardMsg {
                     new_host_udp_addr: h.new_host_udp_addr().unwrap_or("").to_string(),
                     new_host_shard_type: h.new_host_shard_type(),
                     seed: h.seed(),
+                }))
+            }
+
+            fb::ShardPayload::ShipPropertiesUpdate => {
+                let spu = msg
+                    .payload_as_ship_properties_update()
+                    .ok_or(MessageError::MissingField("ShipPropertiesUpdate payload"))?;
+
+                Ok(ShardMsg::ShipPropertiesUpdate(ShipPropertiesUpdateData {
+                    ship_id: spu.ship_id(),
+                    mass_kg: spu.mass_kg(),
+                    max_thrust_forward_n: spu.max_thrust_forward_n(),
+                    max_thrust_reverse_n: spu.max_thrust_reverse_n(),
+                    max_torque_nm: spu.max_torque_nm(),
+                    thrust_multiplier: spu.thrust_multiplier(),
+                    dimensions: (spu.dimensions_x(), spu.dimensions_y(), spu.dimensions_z()),
                 }))
             }
 

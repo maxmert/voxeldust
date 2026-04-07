@@ -321,6 +321,37 @@ impl ShipGrid {
     }
 }
 
+impl super::block_grid::BlockGridView for ShipGrid {
+    fn iter_blocks(&self) -> Box<dyn Iterator<Item = (IVec3, BlockId)> + '_> {
+        let cs = CHUNK_SIZE as i32;
+        Box::new(self.chunks.iter().flat_map(move |(&key, chunk)| {
+            let chunk_origin = key * cs;
+            (0..CHUNK_SIZE as u8).flat_map(move |x| {
+                (0..CHUNK_SIZE as u8).flat_map(move |y| {
+                    (0..CHUNK_SIZE as u8).filter_map(move |z| {
+                        let id = chunk.get_block(x, y, z);
+                        if id.is_air() {
+                            None
+                        } else {
+                            let wp = chunk_origin + IVec3::new(x as i32, y as i32, z as i32);
+                            Some((wp, id))
+                        }
+                    })
+                })
+            })
+        }))
+    }
+
+    fn get_block(&self, x: i32, y: i32, z: i32) -> BlockId {
+        self.get_block(x, y, z)
+    }
+
+    fn get_meta(&self, x: i32, y: i32, z: i32) -> Option<&BlockMeta> {
+        let (key, lx, ly, lz) = Self::world_to_chunk(x, y, z);
+        self.chunks.get(&key)?.get_meta(lx, ly, lz)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Starter ship builder
 // ---------------------------------------------------------------------------

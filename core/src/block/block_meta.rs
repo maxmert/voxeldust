@@ -32,6 +32,50 @@ impl BlockOrientation {
 
     /// Total number of valid orientations.
     pub const COUNT: u8 = 24;
+
+    /// Create orientation from a face normal direction (IVec3).
+    /// The block faces in the direction of the normal — e.g., a thruster
+    /// placed on the -Z face of a wall will face +Z (outward from the wall).
+    pub fn from_face_normal(normal: glam::IVec3) -> Self {
+        let facing = match (normal.x, normal.y, normal.z) {
+            (1, 0, 0)  => 0,  // +X
+            (-1, 0, 0) => 1,  // -X
+            (0, 1, 0)  => 2,  // +Y
+            (0, -1, 0) => 3,  // -Y
+            (0, 0, 1)  => 4,  // +Z
+            (0, 0, -1) => 5,  // -Z
+            _ => 2,            // fallback: +Y (default)
+        };
+        Self::new(facing, 0)
+    }
+
+    /// Get the facing direction as a unit DVec3.
+    /// Maps facing index 0-5 to axis-aligned direction vectors.
+    pub fn facing_direction(self) -> glam::DVec3 {
+        match self.facing() {
+            0 => glam::DVec3::X,
+            1 => glam::DVec3::NEG_X,
+            2 => glam::DVec3::Y,
+            3 => glam::DVec3::NEG_Y,
+            4 => glam::DVec3::Z,
+            5 => glam::DVec3::NEG_Z,
+            _ => glam::DVec3::Y,
+        }
+    }
+
+    /// Get the facing index (0-5) for a given axis direction.
+    /// Inverse of `facing_direction()`.
+    pub fn axis_to_facing(positive_axis: bool, axis: u8) -> u8 {
+        match (axis, positive_axis) {
+            (0, true)  => 0,  // +X
+            (0, false) => 1,  // -X
+            (1, true)  => 2,  // +Y
+            (1, false) => 3,  // -Y
+            (2, true)  => 4,  // +Z
+            (2, false) => 5,  // -Z
+            _ => 2,
+        }
+    }
 }
 
 /// Per-block metadata flags stored as a bitfield.
@@ -160,5 +204,26 @@ mod tests {
         let mut m4 = BlockMeta::EMPTY;
         m4.entity_index = 42;
         assert!(!m4.is_empty());
+    }
+
+    #[test]
+    fn from_face_normal_all_axes() {
+        use glam::IVec3;
+        assert_eq!(BlockOrientation::from_face_normal(IVec3::X).facing(), 0);
+        assert_eq!(BlockOrientation::from_face_normal(IVec3::NEG_X).facing(), 1);
+        assert_eq!(BlockOrientation::from_face_normal(IVec3::Y).facing(), 2);
+        assert_eq!(BlockOrientation::from_face_normal(IVec3::NEG_Y).facing(), 3);
+        assert_eq!(BlockOrientation::from_face_normal(IVec3::Z).facing(), 4);
+        assert_eq!(BlockOrientation::from_face_normal(IVec3::NEG_Z).facing(), 5);
+    }
+
+    #[test]
+    fn facing_direction_roundtrip() {
+        use glam::DVec3;
+        let dirs = [DVec3::X, DVec3::NEG_X, DVec3::Y, DVec3::NEG_Y, DVec3::Z, DVec3::NEG_Z];
+        for (i, expected) in dirs.iter().enumerate() {
+            let o = BlockOrientation::new(i as u8, 0);
+            assert_eq!(o.facing_direction(), *expected, "facing {} should map to {:?}", i, expected);
+        }
     }
 }

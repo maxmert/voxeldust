@@ -229,6 +229,12 @@ struct HandoffMsg {
 
 /// Handoff accepted relay.
 #[derive(Message)]
+struct ShipPropsUpdateMsg {
+    ship_id: u64,
+    props: voxeldust_core::shard_message::ShipPropertiesUpdateData,
+}
+
+#[derive(Message)]
 struct HandoffAcceptedMsg {
     session_token: SessionToken,
     target_shard: ShardId,
@@ -298,6 +304,7 @@ fn drain_quic(
     mut warp_events: MessageWriter<WarpAutopilotMsg>,
     mut handoff_events: MessageWriter<HandoffMsg>,
     mut accepted_events: MessageWriter<HandoffAcceptedMsg>,
+    mut props_events: MessageWriter<ShipPropsUpdateMsg>,
     tick: Res<ecs::TickCounter>,
 ) {
     for _ in 0..32 {
@@ -338,6 +345,12 @@ fn drain_quic(
                 accepted_events.write(HandoffAcceptedMsg {
                     session_token: a.session_token,
                     target_shard: a.target_shard,
+                });
+            }
+            ShardMsg::ShipPropertiesUpdate(data) => {
+                props_events.write(ShipPropsUpdateMsg {
+                    ship_id: data.ship_id,
+                    props: data,
                 });
             }
             other => {
@@ -533,6 +546,41 @@ fn process_ship_control(
                     "ShipControlInput applied"
                 );
             }
+            break;
+        }
+    }
+}
+
+/// Process ship physical properties updates from ship shards.
+/// Updates the ShipPhysics component so the system shard uses correct mass/thrust.
+fn process_ship_props_update(
+    mut events: MessageReader<ShipPropsUpdateMsg>,
+    mut ships: Query<(&ShipId, &mut ShipPhysics)>,
+) {
+    for event in events.read() {
+        for (ship_id, mut physics) in &mut ships {
+            if ship_id.0 != event.ship_id {
+                continue;
+            }
+
+            let d = &event.props;
+            physics.0.mass_kg = d.mass_kg;
+            physics.0.max_thrust_forward_n = d.max_thrust_forward_n;
+            physics.0.max_thrust_reverse_n = d.max_thrust_reverse_n;
+            physics.0.max_torque_nm = d.max_torque_nm;
+            physics.0.thrust_multiplier = d.thrust_multiplier;
+            physics.0.dimensions = d.dimensions;
+            // Recompute cross sections from new dimensions.
+            physics.0.cross_section_front = d.dimensions.0 * d.dimensions.1;
+            physics.0.cross_section_side = d.dimensions.2 * d.dimensions.1;
+            physics.0.cross_section_top = d.dimensions.0 * d.dimensions.2;
+
+            info!(
+                ship_id = event.ship_id,
+                mass = format!("{:.0} kg", d.mass_kg),
+                thrust_fwd = format!("{:.0} N", d.max_thrust_forward_n),
+                "ship properties updated from ship shard"
+            );
             break;
         }
     }
@@ -3458,6 +3506,7 @@ fn build_app(
     app.add_message::<HandoffAcceptedMsg>();
     app.add_message::<PlanetProvisionedMsg>();
     app.add_message::<GalaxyProvisionedMsg>();
+    app.add_message::<ShipPropsUpdateMsg>();
 
     // System ordering via SystemSets.
     app.configure_sets(
@@ -3485,6 +3534,7 @@ fn build_app(
         (
             process_connects,
             process_ship_control,
+            process_ship_props_update,
             process_autopilot_commands,
             process_warp_commands,
             process_handoffs,

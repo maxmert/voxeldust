@@ -111,6 +111,20 @@ table CrossShardBlockEdits {
     seq: uint64;
 }
 
+/// Ship physical properties derived from block composition.
+/// Sent from ship shard → system shard when blocks change.
+table ShipPropertiesUpdate {
+    ship_id: uint64;
+    mass_kg: double;
+    max_thrust_forward_n: double;
+    max_thrust_reverse_n: double;
+    max_torque_nm: double;
+    thrust_multiplier: double;
+    dimensions_x: double;
+    dimensions_y: double;
+    dimensions_z: double;
+}
+
 /// Server-authoritative autopilot state snapshot.
 table AutopilotSnapshot {
     phase: uint8;                     // FlightPhase as u8
@@ -245,6 +259,7 @@ union ShardPayload {
     ShipNearbyInfo,
     WarpAutopilotCommand,
     HostSwitch,
+    ShipPropertiesUpdate,
 }
 
 /// Root type for all inter-shard QUIC messages.
