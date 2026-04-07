@@ -273,6 +273,8 @@ struct KeyboardState {
 struct FlightControl {
     selected_thrust_tier: u8,
     engines_off: bool,
+    /// Thrust limiter (0.0–1.0), adjusted by mouse wheel.
+    thrust_limiter: f32,
 }
 
 #[derive(Resource)]
@@ -490,7 +492,7 @@ fn poll_network(
                     // Always update ship_rotation on a ship shard — needed for
                     // correct floating-origin rendering of celestial bodies
                     // even while walking inside the ship.
-                    if conn.current_shard_type == 2 {
+                    if conn.current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
                         player.ship_rotation = p.rotation;
                     }
 
@@ -528,7 +530,7 @@ fn poll_network(
                 conn.current_shard_type = shard_type;
                 conn.reference_position = reference_position;
                 conn.reference_rotation = reference_rotation;
-                if shard_type == 2 {
+                if shard_type == voxeldust_core::client_message::shard_type::SHIP {
                     player.ship_rotation = reference_rotation;
                 }
                 conn.connected = true;
@@ -675,7 +677,7 @@ fn poll_network(
 
                     // Convert camera yaw/pitch from ship frame to planet tangent
                     // frame so the view direction is preserved across the transition.
-                    if conn.current_shard_type == 2 {
+                    if conn.current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
                         // Step 1: world-space forward from ship-local yaw/pitch.
                         let sp = (cam.pitch as f32).sin() as f64;
                         let cp = (cam.pitch as f32).cos() as f64;
@@ -979,8 +981,9 @@ impl ClientApp {
             mouse_grabbed: false,
         });
         ecs_app.insert_resource(FlightControl {
-            selected_thrust_tier: 3, // default Long Range
+            selected_thrust_tier: 3,
             engines_off: false,
+            thrust_limiter: 0.75,
         });
         ecs_app.insert_resource(ClientAutopilot {
             target: None,
@@ -1029,6 +1032,7 @@ impl ClientApp {
         ecs_app.add_message::<events::MouseMotionMsg>();
         ecs_app.add_message::<events::CursorGrabRequest>();
         ecs_app.add_message::<events::ConfigPanelCloseMsg>();
+        ecs_app.add_message::<events::MouseScrollMsg>();
         ecs_app.add_message::<events::ConfigPanelOpenMsg>();
 
         // Register systems.
@@ -1366,7 +1370,7 @@ impl ClientApp {
 
         // Client-side block targeting raycast (for highlight).
         // Only when walking inside a ship shard (not piloting).
-        if current_shard_type == 2 && !is_piloting {
+        if current_shard_type == voxeldust_core::client_message::shard_type::SHIP && !is_piloting {
             let world_mut = self.ecs_app.world_mut();
             let chunk_cache = world_mut.resource::<ClientChunkCacheRes>();
             let registry = voxeldust_core::block::BlockRegistry::new();
@@ -1566,11 +1570,13 @@ fn bridge_raw_input_system(
     mut key_releases: MessageWriter<events::KeyReleasedMsg>,
     mut mouse_buttons: MessageWriter<events::MouseButtonMsg>,
     mut mouse_motions: MessageWriter<events::MouseMotionMsg>,
+    mut mouse_scrolls: MessageWriter<events::MouseScrollMsg>,
 ) {
     for ev in buf.key_presses.drain(..) { key_presses.write(ev); }
     for ev in buf.key_releases.drain(..) { key_releases.write(ev); }
     for ev in buf.mouse_buttons.drain(..) { mouse_buttons.write(ev); }
     for ev in buf.mouse_motions.drain(..) { mouse_motions.write(ev); }
+    for ev in buf.mouse_scrolls.drain(..) { mouse_scrolls.write(ev); }
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,27 +1718,36 @@ fn interpret_key_system(
                 }
 
                 // E key: primary interaction on ship shard.
-                if key == KeyCode::KeyE && shard_type == 2 && input_ctx.cursor_grabbed {
+                if key == KeyCode::KeyE && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed {
                     let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
                     let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
                     let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
                     let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
                     let edit = voxeldust_core::client_message::BlockEditData {
-                        action: 3, eye, look, block_type: 0,
+                        action: voxeldust_core::client_message::action::INTERACT, eye, look, block_type: 0,
                     };
                     if let Some(ref tx) = actions.net.block_edit_tx {
                         let _ = tx.send(edit);
                     }
                 }
 
-                // F key: open config UI on any functional block.
-                if key == KeyCode::KeyF && shard_type == 2 && input_ctx.cursor_grabbed && !is_piloting {
+                // F key: exit seat (when piloting) or open config UI (when walking).
+                if key == KeyCode::KeyF && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed && is_piloting {
+                    // Send exit-seat action (no raycast needed on server).
+                    let edit = voxeldust_core::client_message::BlockEditData {
+                        action: voxeldust_core::client_message::action::EXIT_SEAT, eye: DVec3::ZERO, look: DVec3::ZERO, block_type: 0,
+                    };
+                    if let Some(ref tx) = actions.net.block_edit_tx {
+                        let _ = tx.send(edit);
+                    }
+                }
+                if key == KeyCode::KeyF && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed && !is_piloting {
                     let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
                     let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
                     let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
                     let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
                     let edit = voxeldust_core::client_message::BlockEditData {
-                        action: 8, eye, look, block_type: 0,
+                        action: voxeldust_core::client_message::action::OPEN_CONFIG, eye, look, block_type: 0,
                     };
                     if let Some(ref tx) = actions.net.block_edit_tx {
                         let _ = tx.send(edit);
@@ -1768,13 +1783,20 @@ fn interpret_key_system(
     }
 }
 
-/// Interpret mouse buttons → cursor grab / block editing.
+/// Interpret mouse buttons/scroll → cursor grab / block editing / thrust limiter.
 fn interpret_mouse_system(
     ctx: PlayerCtx,
-    actions: GameActionCtx,
+    mut actions: GameActionCtx,
     mut mouse_events: MessageReader<events::MouseButtonMsg>,
+    mut scroll_events: MessageReader<events::MouseScrollMsg>,
     mut input_ctx: ResMut<events::InputContext>,
 ) {
+    // Mouse wheel → thrust limiter (only when piloting).
+    if ctx.player.is_piloting && input_ctx.mode == events::InputMode::Game {
+        for ev in scroll_events.read() {
+            actions.flight.thrust_limiter = (actions.flight.thrust_limiter + ev.delta_y * 0.05).clamp(0.0, 1.0);
+        }
+    }
     match input_ctx.mode {
         events::InputMode::Game => {
             for ev in mouse_events.read() {
@@ -1786,7 +1808,7 @@ fn interpret_mouse_system(
                 } else if ev.pressed {
                     let is_piloting = ctx.player.is_piloting;
                     let shard_type = ctx.conn.current_shard_type;
-                    if !is_piloting && shard_type == 2 {
+                    if !is_piloting && shard_type == voxeldust_core::client_message::shard_type::SHIP {
                         let action = match ev.button {
                             winit::event::MouseButton::Left => 1u8,
                             winit::event::MouseButton::Right => 2u8,
@@ -1954,6 +1976,7 @@ fn send_input_system(
         return;
     }
     let cam = &mut *cam;
+    let limiter = flight.thrust_limiter;
     input::send_input_with_dt(
         &net.input_tx,
         &kb.keys_held,
@@ -1964,6 +1987,7 @@ fn send_input_system(
         &mut cam.pilot_yaw_rate,
         &mut cam.pilot_pitch_rate,
         &mut flight.selected_thrust_tier,
+        limiter,
         ft.count,
         ft.dt,
     );
@@ -2023,6 +2047,16 @@ impl ApplicationHandler for ClientApp {
                         );
                     }
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 40.0,
+                };
+                let world = self.ecs_app.world_mut();
+                world.resource_mut::<events::RawInputBuffer>().mouse_scrolls.push(
+                    events::MouseScrollMsg { delta_y: dy },
+                );
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let world = self.ecs_app.world_mut();

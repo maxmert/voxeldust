@@ -5910,6 +5910,8 @@ impl<'a> PlayerInput<'a> {
   pub const VT_ACTION: ::flatbuffers::VOffsetT = 22;
   pub const VT_BLOCK_TYPE: ::flatbuffers::VOffsetT = 24;
   pub const VT_TICK: ::flatbuffers::VOffsetT = 26;
+  pub const VT_THRUST_LIMITER: ::flatbuffers::VOffsetT = 28;
+  pub const VT_ROLL: ::flatbuffers::VOffsetT = 30;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5922,6 +5924,8 @@ impl<'a> PlayerInput<'a> {
   ) -> ::flatbuffers::WIPOffset<PlayerInput<'bldr>> {
     let mut builder = PlayerInputBuilder::new(_fbb);
     builder.add_tick(args.tick);
+    builder.add_roll(args.roll);
+    builder.add_thrust_limiter(args.thrust_limiter);
     builder.add_look_pitch(args.look_pitch);
     builder.add_look_yaw(args.look_yaw);
     builder.add_movement_z(args.movement_z);
@@ -6021,6 +6025,20 @@ impl<'a> PlayerInput<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(PlayerInput::VT_TICK, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn thrust_limiter(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerInput::VT_THRUST_LIMITER, Some(0.75)).unwrap()}
+  }
+  #[inline]
+  pub fn roll(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerInput::VT_ROLL, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerInput<'_> {
@@ -6041,6 +6059,8 @@ impl ::flatbuffers::Verifiable for PlayerInput<'_> {
      .visit_field::<u8>("action", Self::VT_ACTION, false)?
      .visit_field::<u16>("block_type", Self::VT_BLOCK_TYPE, false)?
      .visit_field::<u64>("tick", Self::VT_TICK, false)?
+     .visit_field::<f32>("thrust_limiter", Self::VT_THRUST_LIMITER, false)?
+     .visit_field::<f32>("roll", Self::VT_ROLL, false)?
      .finish();
     Ok(())
   }
@@ -6058,6 +6078,8 @@ pub struct PlayerInputArgs {
     pub action: u8,
     pub block_type: u16,
     pub tick: u64,
+    pub thrust_limiter: f32,
+    pub roll: f32,
 }
 impl<'a> Default for PlayerInputArgs {
   #[inline]
@@ -6075,6 +6097,8 @@ impl<'a> Default for PlayerInputArgs {
       action: 0,
       block_type: 0,
       tick: 0,
+      thrust_limiter: 0.75,
+      roll: 0.0,
     }
   }
 }
@@ -6133,6 +6157,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerInputBuilder<'a, 'b, A>
     self.fbb_.push_slot::<u64>(PlayerInput::VT_TICK, tick, 0);
   }
   #[inline]
+  pub fn add_thrust_limiter(&mut self, thrust_limiter: f32) {
+    self.fbb_.push_slot::<f32>(PlayerInput::VT_THRUST_LIMITER, thrust_limiter, 0.75);
+  }
+  #[inline]
+  pub fn add_roll(&mut self, roll: f32) {
+    self.fbb_.push_slot::<f32>(PlayerInput::VT_ROLL, roll, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerInputBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerInputBuilder {
@@ -6162,6 +6194,8 @@ impl ::core::fmt::Debug for PlayerInput<'_> {
       ds.field("action", &self.action());
       ds.field("block_type", &self.block_type());
       ds.field("tick", &self.tick());
+      ds.field("thrust_limiter", &self.thrust_limiter());
+      ds.field("roll", &self.roll());
       ds.finish()
   }
 }

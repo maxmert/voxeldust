@@ -339,6 +339,8 @@ table PlayerInput {
     action: uint8; // 0=none, 1=break, 2=place
     block_type: uint16;
     tick: uint64;
+    thrust_limiter: float = 0.75; // 0.0–1.0, default 75%
+    roll: float;                  // Q/E: -1.0 (CCW) to +1.0 (CW)
 }
 
 table PlayerSnapshot {

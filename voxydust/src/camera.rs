@@ -34,7 +34,7 @@ pub fn compute_camera(
 
     // First-person camera. Player position is in ship-local coords when in a ship.
     // Rotate into world space for consistent rendering with the view matrix.
-    let cam_pos = if is_piloting || current_shard_type == 2 {
+    let cam_pos = if is_piloting || current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
         // Ship: player_position is ship-local. Rotate by ship_rotation to get world-relative.
         let player_local = player_position + DVec3::new(0.0, EYE_HEIGHT, 0.0);
         ship_rotation * player_local
@@ -51,7 +51,7 @@ pub fn compute_camera(
         // Camera locked to ship heading.
         let fwd = ship_rotation * DVec3::NEG_Z;
         fwd.as_vec3().normalize()
-    } else if current_shard_type == 2 {
+    } else if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
         // Walking inside ship: camera_yaw/pitch are ship-local.
         // Rotate local look direction by ship_rotation for world-space rendering.
         let (sy, cy) = (camera_yaw as f32).sin_cos();
@@ -86,7 +86,7 @@ pub fn compute_camera(
     let aspect = gpu_width as f32 / gpu_height as f32;
     let proj = Mat4::perspective_infinite_reverse_rh(70.0_f32.to_radians(), aspect, 0.1);
 
-    let cam_up = if current_shard_type == 2 {
+    let cam_up = if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
         // Inside ship: up follows ship rotation (artificial gravity floor).
         (ship_rotation * DVec3::Y).as_vec3().normalize()
     } else if current_shard_type == 0 && player_position.length_squared() > 1.0 {
@@ -104,7 +104,7 @@ pub fn compute_camera(
     // In ship shard, cam_pos is only the player's offset from ship center;
     // we must add the ship's system-space position (ws.origin) to get the
     // true camera position for correct body offsets.
-    let cam_system_pos = if current_shard_type == 2 {
+    let cam_system_pos = if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
         latest_world_state.map_or(cam_pos, |ws| ws.origin + cam_pos)
     } else {
         cam_pos

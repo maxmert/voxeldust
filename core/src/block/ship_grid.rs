@@ -451,6 +451,55 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     // Place ownership core at center of ship
     grid.set_block(0, 1, 0, BlockId::OWNERSHIP_CORE);
 
+    // Thrusters placed one block OUTSIDE the hull — they protrude from the surface.
+    // facing_direction = exhaust direction; thrust (reaction) = -facing.
+    // 4 thrusters per direction at the corners of each face for zero net torque.
+    //
+    // Ship: X=[-5..4], Y=[0..5], Z=[-8..7]. 4 corners of each face are symmetric
+    // around the face center, so all torques cancel perfectly.
+
+    let set_thruster = |grid: &mut ShipGrid, x: i32, y: i32, z: i32, normal: IVec3| {
+        grid.set_block(x, y, z, BlockId::THRUSTER_SMALL_CHEMICAL);
+        grid.set_orientation(x, y, z, BlockOrientation::from_face_normal(normal));
+    };
+
+    // Aft face (z_max+1): exhaust +Z, thrust -Z (forward). 4 at corners.
+    set_thruster(&mut grid, x_min, y_min, z_max + 1, IVec3::new(0, 0, 1));
+    set_thruster(&mut grid, x_max, y_min, z_max + 1, IVec3::new(0, 0, 1));
+    set_thruster(&mut grid, x_min, y_max, z_max + 1, IVec3::new(0, 0, 1));
+    set_thruster(&mut grid, x_max, y_max, z_max + 1, IVec3::new(0, 0, 1));
+
+    // Fore: reverse thrusters on port/starboard sides near the bow (not on front glass).
+    // Exhaust -Z, thrust +Z (reverse).
+    set_thruster(&mut grid, x_min - 1, y_min, z_min + 1, IVec3::new(0, 0, -1));
+    set_thruster(&mut grid, x_min - 1, y_max, z_min + 1, IVec3::new(0, 0, -1));
+    set_thruster(&mut grid, x_max + 1, y_min, z_min + 1, IVec3::new(0, 0, -1));
+    set_thruster(&mut grid, x_max + 1, y_max, z_min + 1, IVec3::new(0, 0, -1));
+
+    // Port face (x_min-1): exhaust -X, thrust +X (right). 4 at corners.
+    set_thruster(&mut grid, x_min - 1, y_min, z_min, IVec3::new(-1, 0, 0));
+    set_thruster(&mut grid, x_min - 1, y_max, z_min, IVec3::new(-1, 0, 0));
+    set_thruster(&mut grid, x_min - 1, y_min, z_max, IVec3::new(-1, 0, 0));
+    set_thruster(&mut grid, x_min - 1, y_max, z_max, IVec3::new(-1, 0, 0));
+
+    // Starboard face (x_max+1): exhaust +X, thrust -X (left). 4 at corners.
+    set_thruster(&mut grid, x_max + 1, y_min, z_min, IVec3::new(1, 0, 0));
+    set_thruster(&mut grid, x_max + 1, y_max, z_min, IVec3::new(1, 0, 0));
+    set_thruster(&mut grid, x_max + 1, y_min, z_max, IVec3::new(1, 0, 0));
+    set_thruster(&mut grid, x_max + 1, y_max, z_max, IVec3::new(1, 0, 0));
+
+    // Bottom face (y_min-1): exhaust -Y, thrust +Y (up). 4 at corners.
+    set_thruster(&mut grid, x_min, y_min - 1, z_min, IVec3::new(0, -1, 0));
+    set_thruster(&mut grid, x_max, y_min - 1, z_min, IVec3::new(0, -1, 0));
+    set_thruster(&mut grid, x_min, y_min - 1, z_max, IVec3::new(0, -1, 0));
+    set_thruster(&mut grid, x_max, y_min - 1, z_max, IVec3::new(0, -1, 0));
+
+    // Top face (y_max+1): exhaust +Y, thrust -Y (down). 4 at corners.
+    set_thruster(&mut grid, x_min, y_max + 1, z_min, IVec3::new(0, 1, 0));
+    set_thruster(&mut grid, x_max, y_max + 1, z_min, IVec3::new(0, 1, 0));
+    set_thruster(&mut grid, x_min, y_max + 1, z_max, IVec3::new(0, 1, 0));
+    set_thruster(&mut grid, x_max, y_max + 1, z_max, IVec3::new(0, 1, 0));
+
     grid
 }
 

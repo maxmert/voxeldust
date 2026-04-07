@@ -94,6 +94,12 @@ impl Default for InputContext {
 // Raw input buffer (winit → ECS bridge)
 // ---------------------------------------------------------------------------
 
+/// Mouse scroll event (for thrust limiter).
+#[derive(Message)]
+pub struct MouseScrollMsg {
+    pub delta_y: f32,
+}
+
 /// Accumulates raw input events from `window_event()` / `device_event()`
 /// outside the ECS schedule. Drained into `MessageWriter<T>` by
 /// `bridge_raw_input_system` at the top of each frame.
@@ -103,4 +109,5 @@ pub struct RawInputBuffer {
     pub key_releases: Vec<KeyReleasedMsg>,
     pub mouse_buttons: Vec<MouseButtonMsg>,
     pub mouse_motions: Vec<MouseMotionMsg>,
+    pub mouse_scrolls: Vec<MouseScrollMsg>,
 }

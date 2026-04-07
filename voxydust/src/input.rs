@@ -16,6 +16,7 @@ pub fn send_input_with_dt(
     pilot_yaw_rate: &mut f64,
     pilot_pitch_rate: &mut f64,
     selected_thrust_tier: &mut u8,
+    thrust_limiter: f32,
     frame_count: u64,
     dt: f64,
 ) {
@@ -27,13 +28,22 @@ pub fn send_input_with_dt(
             if keys_held.contains(&KeyCode::KeyS) { movement[2] -= 1.0; }
             if keys_held.contains(&KeyCode::KeyD) { movement[0] += 1.0; }
             if keys_held.contains(&KeyCode::KeyA) { movement[0] -= 1.0; }
+            if keys_held.contains(&KeyCode::Space) { movement[1] += 1.0; }
+            if keys_held.contains(&KeyCode::ControlLeft) { movement[1] -= 1.0; }
         }
         let jump = keys_held.contains(&KeyCode::Space);
+
+        // Roll: Q (CCW, -1) / E (CW, +1). Only meaningful when piloting.
+        let mut roll = 0.0f32;
+        if is_piloting && !engines_off {
+            if keys_held.contains(&KeyCode::KeyE) { roll += 1.0; }
+            if keys_held.contains(&KeyCode::KeyQ) { roll -= 1.0; }
+        }
+
         let action = if engines_off { 5 } // engine cutoff signal
             else if keys_held.contains(&KeyCode::Enter) { 7 } // warp confirm
             else if keys_held.contains(&KeyCode::KeyG) { 6 } // warp target
             else if keys_held.contains(&KeyCode::KeyT) { 4 }
-            else if keys_held.contains(&KeyCode::KeyE) { 3 }
             else { 0 };
 
         // Thrust tier selection (1-5 keys).
@@ -71,6 +81,8 @@ pub fn send_input_with_dt(
             action,
             block_type: 0,
             tick: frame_count,
+            thrust_limiter,
+            roll,
         });
     }
 }

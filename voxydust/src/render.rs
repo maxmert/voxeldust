@@ -159,7 +159,7 @@ fn build_uniforms(
     let mut block_ships: Vec<BlockShipTransform> = Vec::new();
 
     // Interior ship (player is inside — shard_type 2).
-    if current_shard_type == 2 {
+    if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
         let ship_rot_mat = Mat4::from_quat(ship_rotation.as_quat());
         let origin_local = -(player_position + DVec3::new(0.0, EYE_HEIGHT, 0.0));
         let ship_origin_offset = (ship_rotation * origin_local).as_vec3();
@@ -477,7 +477,7 @@ pub fn render_frame(
 
         // Block highlight: render a translucent cube at the targeted block.
         if let Some(target) = block_target {
-            if current_shard_type == 2 && !ro.block_ships.is_empty() {
+            if current_shard_type == voxeldust_core::client_message::shard_type::SHIP && !ro.block_ships.is_empty() {
                 let base_transform = ro.block_ships[0].base_transform;
 
                 // Block center in ship-local space.

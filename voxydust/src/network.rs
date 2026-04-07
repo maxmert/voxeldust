@@ -466,5 +466,7 @@ fn empty_input() -> PlayerInputData {
         action: 0,
         block_type: 0,
         tick: 0,
+        thrust_limiter: 0.75,
+        roll: 0.0,
     }
 }

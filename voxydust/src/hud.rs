@@ -367,7 +367,7 @@ fn draw_info_panel(ectx: &egui::Context, ctx: &HudContext) {
         ui.style_mut().visuals.override_text_color = Some(egui::Color32::from_rgb(200, 200, 200));
         ui.label(format!("Shard: {} | Connected: {}", shard_name, ctx.connected));
 
-        if ctx.current_shard_type == 2 {
+        if ctx.current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
             draw_ship_hud(ui, ctx);
         } else if ctx.current_shard_type == 3 {
             // Galaxy shard HUD — warp travel.

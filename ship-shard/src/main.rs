@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::SystemParam;
 use clap::Parser;
 use glam::{DQuat, DVec3, Vec3};
 use rapier3d::prelude::*;
@@ -185,6 +186,43 @@ struct PilotAccumulator {
     torque: DVec3,
 }
 
+/// Normalized pilot control values, written by process_input, read by signal_publish.
+#[derive(Resource, Default)]
+struct RawPilotInput {
+    thrust_forward: f32,
+    thrust_lateral: f32,
+    thrust_vertical: f32,
+    torque_yaw: f32,
+    torque_pitch: f32,
+    roll_cw: f32,
+    roll_ccw: f32,
+    thrust_limiter: f32,
+    in_atmosphere: bool,
+    engines_off: bool,
+}
+
+/// Tracks which seat entity the pilot occupies (needed for SeatChannelMapping lookup).
+#[derive(Resource, Default)]
+struct ActiveSeatEntity(Option<Entity>);
+
+/// Runtime throttle state for a thruster, driven by signal channel subscription.
+#[derive(Component, Default)]
+struct ThrusterState {
+    throttle: f32,
+}
+
+/// Static thruster properties, copied from registry on spawn.
+#[derive(Component)]
+struct ThrusterBlock {
+    thrust_n: f64,
+    block_pos: glam::IVec3,
+    direction: DVec3,
+}
+
+/// Ship center of mass (block coordinates). Updated by aggregate_ship_properties.
+#[derive(Resource, Default)]
+struct ShipCenterOfMass(DVec3);
+
 /// Autopilot state tracked by the ship shard.
 #[derive(Resource, Default)]
 struct AutopilotState {
@@ -326,6 +364,20 @@ struct PlayerInputMsg {
 #[derive(Message)]
 struct BlockEditMsg {
     edit: BlockEditData,
+}
+
+// ---------------------------------------------------------------------------
+// SystemParam bundles
+// ---------------------------------------------------------------------------
+
+/// Signal-related queries bundled to stay within the 16-param system limit.
+#[derive(SystemParam)]
+struct SignalQueryCtx<'w, 's> {
+    channels: Res<'w, SignalChannelTable>,
+    pub_query: Query<'w, 's, &'static SignalPublisher>,
+    sub_query: Query<'w, 's, &'static SignalSubscriber>,
+    converter_query: Query<'w, 's, &'static SignalConverterConfig>,
+    seat_query: Query<'w, 's, &'static SeatChannelMapping>,
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +724,7 @@ fn process_input(
     mut player_yaw: ResMut<PlayerYaw>,
     pilot_mode: Res<PilotMode>,
     mut pilot_acc: ResMut<PilotAccumulator>,
+    mut raw_input: ResMut<RawPilotInput>,
     mut rapier: ResMut<RapierContext>,
     body_handle: Res<PlayerBodyHandle>,
     exterior: Res<ShipExterior>,
@@ -818,91 +871,30 @@ fn process_input(
                 }
             }
 
-            // Pilot thrust computation.
-            {
-                let in_atmosphere = if let Some(ref sys) = cached_sys.0 {
-                    scene.bodies.iter().any(|b| {
-                        if b.body_id == 0 {
-                            return false;
-                        }
-                        let pi = (b.body_id - 1) as usize;
-                        if pi >= sys.planets.len() {
-                            return false;
-                        }
-                        let alt = (exterior.position - b.position).length()
-                            - sys.planets[pi].radius_m;
-                        alt < sys.planets[pi].atmosphere.atmosphere_height
-                            && sys.planets[pi].atmosphere.has_atmosphere
-                    })
-                } else {
-                    false
-                };
-                let effective_tier =
-                    autopilot::effective_tier(input.speed_tier, in_atmosphere, false);
-                let et = autopilot::engine_tier(effective_tier);
-                let tier_thrust = et.thrust_force_n * ship_props.0.thrust_multiplier;
-                pilot_acc.thrust = DVec3::new(
-                    input.movement[0] as f64 * tier_thrust,
-                    input.movement[1] as f64 * tier_thrust,
-                    -input.movement[2] as f64 * tier_thrust,
-                );
-                pilot_acc.torque = DVec3::new(
-                    input.look_pitch as f64,
-                    input.look_yaw as f64,
-                    0.0,
-                );
+            // Write normalized pilot input for the signal publish pipeline.
+            // Thrust is computed by compute_ship_thrust from per-thruster channel values.
+            let in_atmosphere = if let Some(ref sys) = cached_sys.0 {
+                scene.bodies.iter().any(|b| {
+                    if b.body_id == 0 { return false; }
+                    let pi = (b.body_id - 1) as usize;
+                    if pi >= sys.planets.len() { return false; }
+                    let alt = (exterior.position - b.position).length()
+                        - sys.planets[pi].radius_m;
+                    alt < sys.planets[pi].atmosphere.atmosphere_height
+                        && sys.planets[pi].atmosphere.has_atmosphere
+                })
+            } else { false };
 
-                // Gravity compensation in atmosphere.
-                let engines_off = input.action == 5;
-                if in_atmosphere && autopilot.target_body_id.is_none() && !engines_off {
-                    if let Some(ref sys) = cached_sys.0 {
-                        for b in &scene.bodies {
-                            if b.body_id == 0 {
-                                continue;
-                            }
-                            let pi = (b.body_id - 1) as usize;
-                            if pi >= sys.planets.len() {
-                                continue;
-                            }
-                            let dist = (exterior.position - b.position).length();
-                            let alt = dist - sys.planets[pi].radius_m;
-                            if alt < sys.planets[pi].atmosphere.atmosphere_height {
-                                let grav_mag = sys.planets[pi].gm / (dist * dist);
-                                let grav_dir = (b.position - exterior.position).normalize();
-                                let grav_world = grav_dir * grav_mag;
-
-                                if input.movement[1].abs() < 0.01 {
-                                    let grav_local =
-                                        exterior.rotation.inverse() * (-grav_world);
-                                    let hover = grav_local * ship_props.0.mass_kg;
-                                    pilot_acc.thrust += DVec3::new(hover.x, hover.y, hover.z);
-                                }
-
-                                let has_input = input.movement[0].abs() > 0.01
-                                    || input.movement[1].abs() > 0.01
-                                    || input.movement[2].abs() > 0.01;
-                                if !has_input {
-                                    let max_accel =
-                                        ship_props.0.engine_acceleration(effective_tier);
-                                    let damping_rate = (max_accel * 0.1).min(5.0);
-                                    let vel_local =
-                                        exterior.rotation.inverse() * exterior.velocity;
-                                    let damping =
-                                        -vel_local * damping_rate * ship_props.0.mass_kg;
-                                    let max_damp = tier_thrust * 0.5;
-                                    let damping_clamped = damping.clamp_length_max(max_damp);
-                                    pilot_acc.thrust += DVec3::new(
-                                        damping_clamped.x,
-                                        damping_clamped.y,
-                                        damping_clamped.z,
-                                    );
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            raw_input.thrust_forward = input.movement[2];
+            raw_input.thrust_lateral = input.movement[0];
+            raw_input.thrust_vertical = input.movement[1];
+            raw_input.torque_yaw = input.look_yaw;
+            raw_input.torque_pitch = input.look_pitch;
+            raw_input.in_atmosphere = in_atmosphere;
+            raw_input.engines_off = input.action == 5;
+            raw_input.thrust_limiter = input.thrust_limiter;
+            raw_input.roll_cw = input.roll.max(0.0);
+            raw_input.roll_ccw = (-input.roll).max(0.0);
         } else {
             // Walking mode: apply velocity to Rapier body.
             let (sin_y, cos_y) = player_yaw.0.sin_cos();
@@ -1617,14 +1609,11 @@ fn produce_player_edits(
     player_pos: Res<PlayerPosition>,
     block_index: Res<FunctionalBlockIndex>,
     mut pilot_mode: ResMut<PilotMode>,
+    mut active_seat: ResMut<ActiveSeatEntity>,
     mut rapier: ResMut<RapierContext>,
     body_handle: Res<PlayerBodyHandle>,
     bridge: Res<NetworkBridge>,
-    channels: Res<SignalChannelTable>,
-    pub_query: Query<&SignalPublisher>,
-    sub_query: Query<&SignalSubscriber>,
-    converter_query: Query<&SignalConverterConfig>,
-    seat_query: Query<&SeatChannelMapping>,
+    signal_ctx: SignalQueryCtx,
 ) {
     if connected.session.is_none() || connected.handoff_pending {
         return;
@@ -1633,11 +1622,18 @@ fn produce_player_edits(
 
     for event in events.read() {
         let edit = &event.edit;
+
+        // Action EXIT_SEAT: no raycast or position validation needed.
+        if edit.action == voxeldust_core::client_message::action::EXIT_SEAT && pilot_mode.0 {
+            pilot_mode.0 = false;
+            info!("exited pilot mode via F key");
+            continue;
+        }
+
         let eye = glam::Vec3::new(edit.eye.x as f32, edit.eye.y as f32, edit.eye.z as f32);
         let look = glam::Vec3::new(edit.look.x as f32, edit.look.y as f32, edit.look.z as f32);
 
-        // Validate: player eye position should be close to their actual position
-        // (anti-cheat: don't allow editing from arbitrary positions).
+        // Validate: player eye position should be close to their actual position.
         let eye_to_player = (eye - player_pos.0).length();
         if eye_to_player > 3.0 {
             warn!("block edit rejected: eye position too far from player ({:.1}m)", eye_to_player);
@@ -1654,8 +1650,9 @@ fn produce_player_edits(
             None => continue, // ray didn't hit anything
         };
 
+        use voxeldust_core::client_message::action;
         match edit.action {
-            1 => {
+            action::BREAK => {
                 // Break: apply progressive damage.
                 let result = grid.0.damage_block(
                     hit.world_pos.x,
@@ -1691,7 +1688,7 @@ fn produce_player_edits(
                     DamageResult::NoEffect => {}
                 }
             }
-            2 => {
+            action::PLACE => {
                 // Place: put a new block on the face adjacent to the hit.
                 let target = hit.world_pos + hit.face_normal;
 
@@ -1733,7 +1730,7 @@ fn produce_player_edits(
                     source: EditSource::Player(session),
                 });
             }
-            action @ (3..=7 | 9) => {
+            action @ (action::INTERACT..=7 | 9) => {
                 // Interaction: raycast to find targeted functional block,
                 // look up its kind, check interaction schema, dispatch.
                 if let Some(&entity) = block_index.0.get(&hit.world_pos) {
@@ -1751,11 +1748,13 @@ fn produce_player_edits(
                                     // Toggle pilot mode.
                                     pilot_mode.0 = !pilot_mode.0;
                                     if pilot_mode.0 {
+                                        active_seat.0 = Some(entity);
                                         if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
                                             body.set_linvel(vector![0.0, 0.0, 0.0], true);
                                         }
                                         info!("entered pilot mode via seat at {:?}", hit.world_pos);
                                     } else {
+                                        // Keep active_seat for one-tick zero-publish.
                                         info!("exited pilot mode");
                                     }
                                 }
@@ -1773,7 +1772,7 @@ fn produce_player_edits(
                     }
                 }
             }
-            8 => {
+            action::OPEN_CONFIG => {
                 // F key: universal config UI — open config for any functional block.
                 if let Some(&entity) = block_index.0.get(&hit.world_pos) {
                     let block_id = grid.0.get_block(
@@ -1783,8 +1782,9 @@ fn produce_player_edits(
                         // Build config snapshot from entity components.
                         let config = build_config_snapshot(
                             entity, hit.world_pos, block_id, kind,
-                            &pub_query, &sub_query, &converter_query, &seat_query,
-                            &channels,
+                            &signal_ctx.pub_query, &signal_ctx.sub_query,
+                            &signal_ctx.converter_query, &signal_ctx.seat_query,
+                            &signal_ctx.channels,
                         );
                         // Send to client via TCP.
                         if let Some(session) = connected.session {
@@ -1987,7 +1987,7 @@ fn init_functional_blocks(
                             block_id: id,
                             kind,
                         });
-                        add_default_signal_bindings(&mut entity_cmds, kind);
+                        add_default_signal_bindings(&mut entity_cmds, kind, id, wp, &grid.0, &registry.0);
                         let entity = entity_cmds.id();
                         block_index.0.insert(wp, entity);
                     }
@@ -2023,7 +2023,7 @@ fn process_entity_ops(
                     });
 
                     // Add default signal bindings based on block kind.
-                    add_default_signal_bindings(&mut entity_cmds, kind);
+                    add_default_signal_bindings(&mut entity_cmds, kind, block_id, pos, &grid.0, &registry.0);
 
                     let entity = entity_cmds.id();
 
@@ -2066,6 +2066,7 @@ fn aggregate_ship_properties(
     grid: Res<ShipGridResource>,
     registry: Res<BlockRegistryResource>,
     mut ship_props: ResMut<ShipProps>,
+    mut ship_com: ResMut<ShipCenterOfMass>,
     block_query: Query<&FunctionalBlockRef>,
     config: Res<ShipConfig>,
     bridge: Res<NetworkBridge>,
@@ -2099,6 +2100,7 @@ fn aggregate_ship_properties(
     // Build the final ShipPhysicalProperties.
     let new_props = block::aggregation::build_ship_properties(&mass, &thrust);
     ship_props.0 = new_props.clone();
+    ship_com.0 = mass.center_of_mass;
 
     info!(
         mass = format!("{:.0} kg", mass.total_mass_kg),
@@ -2139,15 +2141,41 @@ fn aggregate_ship_properties(
 fn add_default_signal_bindings(
     entity_cmds: &mut bevy_ecs::system::EntityCommands,
     kind: FunctionalBlockKind,
+    block_id: BlockId,
+    pos: glam::IVec3,
+    grid: &voxeldust_core::block::ShipGrid,
+    registry: &voxeldust_core::block::BlockRegistry,
 ) {
     match kind {
         FunctionalBlockKind::Thruster => {
-            // Thrusters subscribe to a throttle channel.
+            // Determine thrust direction from block orientation.
+            let orientation = grid.get_meta(pos.x, pos.y, pos.z)
+                .map(|m| m.orientation)
+                .unwrap_or(block::BlockOrientation::DEFAULT);
+            let dir = orientation.facing_direction();
+
+            // Map exhaust direction (facing) to thrust channel.
+            // Thrust = -facing (reaction force). Channel name = thrust direction.
+            // Exhaust +Z → thrust -Z (forward). Exhaust -Z → thrust +Z (reverse).
+            let default_channel = if dir.z.abs() > 0.5 {
+                if dir.z > 0.0 { "thrust-forward" } else { "thrust-reverse" }
+            } else if dir.x.abs() > 0.5 {
+                if dir.x > 0.0 { "thrust-left" } else { "thrust-right" }
+            } else {
+                if dir.y > 0.0 { "thrust-down" } else { "thrust-up" }
+            };
+
             entity_cmds.insert(SignalSubscriber {
                 bindings: vec![SubscribeBinding {
-                    channel_name: "thrust-forward".into(),
+                    channel_name: default_channel.into(),
                     property: SignalProperty::Throttle,
                 }],
+            });
+            entity_cmds.insert(ThrusterState::default());
+            entity_cmds.insert(ThrusterBlock {
+                thrust_n: registry.thruster_props(block_id).map(|p| p.thrust_n).unwrap_or(50_000.0),
+                block_pos: pos,
+                direction: dir,
             });
         }
         FunctionalBlockKind::Reactor => {
@@ -2193,19 +2221,54 @@ fn signal_publish(
     mut channels: ResMut<SignalChannelTable>,
     publishers: Query<(&FunctionalBlockRef, &SignalPublisher)>,
     mut incoming: ResMut<IncomingSignalBuffer>,
+    pilot_mode: Res<PilotMode>,
+    mut active_seat: ResMut<ActiveSeatEntity>,
+    raw_input: Res<RawPilotInput>,
+    seat_query: Query<&SeatChannelMapping>,
 ) {
     channels.clear_pending();
 
-    // First: inject any cross-shard signals received via QUIC.
+    // Cross-shard signals received via QUIC.
     for (name, value) in incoming.signals.drain(..) {
         channels.push_pending(&name, value);
     }
 
+    // Seat control publishing: map pilot input to signal channels via SeatChannelMapping.
+    if let Some(seat_entity) = active_seat.0 {
+        if let Ok(mapping) = seat_query.get(seat_entity) {
+            for binding in &mapping.bindings {
+                use voxeldust_core::signal::components::SeatControl;
+                let value = if pilot_mode.0 {
+                    match binding.control {
+                        SeatControl::ThrustForward   => raw_input.thrust_forward.max(0.0),
+                        SeatControl::ThrustReverse   => (-raw_input.thrust_forward).max(0.0),
+                        SeatControl::ThrustRight     => raw_input.thrust_lateral.max(0.0),
+                        SeatControl::ThrustLeft      => (-raw_input.thrust_lateral).max(0.0),
+                        SeatControl::ThrustUp        => raw_input.thrust_vertical.max(0.0),
+                        SeatControl::ThrustDown      => (-raw_input.thrust_vertical).max(0.0),
+                        SeatControl::TorqueYawCW     => raw_input.torque_yaw.max(0.0),
+                        SeatControl::TorqueYawCCW    => (-raw_input.torque_yaw).max(0.0),
+                        SeatControl::TorquePitchUp   => raw_input.torque_pitch.max(0.0),
+                        SeatControl::TorquePitchDown => (-raw_input.torque_pitch).max(0.0),
+                        SeatControl::ThrustLimiter   => raw_input.thrust_limiter,
+                        SeatControl::TorqueRollCW    => raw_input.roll_cw,
+                        SeatControl::TorqueRollCCW   => raw_input.roll_ccw,
+                    }
+                } else {
+                    0.0 // Zero-publish when pilot exits seat.
+                };
+                channels.push_pending(&binding.channel_name, signal::SignalValue::Float(value));
+            }
+        }
+        // Clear seat tracking after zero-publish (pilot exited).
+        if !pilot_mode.0 {
+            active_seat.0 = None;
+        }
+    }
+
+    // Block publishers (reactors, sensors, etc.).
     for (_block_ref, publisher) in &publishers {
         for binding in &publisher.bindings {
-            // For now, publish a default value based on the property type.
-            // Future phases will read actual block state (reactor power level,
-            // sensor readings, etc.) from kind-specific components.
             let value = match binding.property {
                 SignalProperty::Active => signal::SignalValue::Bool(true),
                 SignalProperty::Throttle => signal::SignalValue::Float(0.0),
@@ -2251,16 +2314,133 @@ fn signal_evaluate(
 /// (thruster throttle, piston extension, rotor angle, etc.).
 fn signal_subscribe(
     channels: Res<SignalChannelTable>,
-    subscribers: Query<(&FunctionalBlockRef, &SignalSubscriber)>,
+    mut subscribers: Query<(&SignalSubscriber, Option<&mut ThrusterState>)>,
 ) {
-    for (block_ref, subscriber) in &subscribers {
+    for (subscriber, mut thruster_state) in &mut subscribers {
         for binding in &subscriber.bindings {
             if let Some(ch) = channels.get(&binding.channel_name) {
-                if ch.dirty {
-                    // Future: apply_signal_to_block(block_ref, binding.property, ch.value)
-                    // For now, the signal value is available for future per-kind systems
-                    // to read from the channel table.
-                    let _ = (block_ref, &binding.property, ch.value);
+                // Apply signal value to the appropriate component.
+                if binding.property == SignalProperty::Throttle {
+                    if let Some(ref mut ts) = thruster_state {
+                        ts.throttle = ch.value.as_f32();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Compute ship thrust/torque from per-thruster signal channel values.
+/// Each thruster reads its throttle from its subscribed channel and contributes
+/// thrust_n × throttle × direction. Torque is computed from offset to center of mass.
+fn compute_ship_thrust(
+    pilot_mode: Res<PilotMode>,
+    mut pilot_acc: ResMut<PilotAccumulator>,
+    thrusters: Query<(&ThrusterBlock, &ThrusterState)>,
+    channels: Res<SignalChannelTable>,
+    raw_input: Res<RawPilotInput>,
+    ship_props: Res<ShipProps>,
+    ship_com: Res<ShipCenterOfMass>,
+    exterior: Res<ShipExterior>,
+    scene: Res<SceneCache>,
+    cached_sys: Res<CachedSystemParams>,
+    autopilot: Res<AutopilotState>,
+) {
+    if !pilot_mode.0 {
+        pilot_acc.thrust = DVec3::ZERO;
+        pilot_acc.torque = DVec3::ZERO;
+        return;
+    }
+
+    // Read thrust limiter channel (mouse wheel control, 0.0–1.0).
+    let limiter = channels.get("thrust-limiter")
+        .map(|ch| ch.value.as_f32() as f64)
+        .unwrap_or(1.0);
+
+    // Sum thrust from all thrusters. Force only — torque from off-CoM thrusters
+    // is NOT added here because player-built ships can't guarantee symmetric placement.
+    // Rotation is controlled exclusively through the torque channels.
+    let mut total_thrust = DVec3::ZERO;
+
+    for (thruster, state) in &thrusters {
+        if state.throttle.abs() < 0.001 { continue; }
+        // Reaction force: opposite to exhaust (facing) direction.
+        let thrust_vec = -thruster.direction * thruster.thrust_n * state.throttle as f64 * limiter;
+        total_thrust += thrust_vec;
+    }
+
+    // Rotation torque from dedicated channels (yaw/pitch/roll).
+    let yaw_cw = channels.get("torque-yaw-cw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
+    let yaw_ccw = channels.get("torque-yaw-ccw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
+    let pitch_up = channels.get("torque-pitch-up").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
+    let pitch_down = channels.get("torque-pitch-down").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
+    let roll_cw = channels.get("torque-roll-cw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
+    let roll_ccw = channels.get("torque-roll-ccw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
+    let total_torque = DVec3::new(
+        (pitch_up - pitch_down) * limiter,
+        (yaw_cw - yaw_ccw) * limiter,
+        (roll_cw - roll_ccw) * limiter,
+    );
+
+    // Log thrust diagnostics every ~2 seconds (40 ticks at 20Hz).
+    static DIAG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tick = DIAG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if (total_thrust.length() > 0.1 || total_torque.length() > 0.001) && tick % 40 == 0 {
+        info!(
+            thrust_x = format!("{:.1}", total_thrust.x),
+            thrust_y = format!("{:.1}", total_thrust.y),
+            thrust_z = format!("{:.1}", total_thrust.z),
+            torque_x = format!("{:.4}", total_torque.x),
+            torque_y = format!("{:.4}", total_torque.y),
+            torque_z = format!("{:.4}", total_torque.z),
+            com_x = format!("{:.2}", ship_com.0.x),
+            com_y = format!("{:.2}", ship_com.0.y),
+            com_z = format!("{:.2}", ship_com.0.z),
+            limiter = format!("{:.2}", limiter),
+            thruster_count = thrusters.iter().count(),
+            "ship thrust diagnostics",
+        );
+    }
+
+    pilot_acc.thrust = total_thrust;
+    pilot_acc.torque = total_torque;
+
+    // Gravity compensation in atmosphere.
+    if raw_input.in_atmosphere && autopilot.target_body_id.is_none() && !raw_input.engines_off {
+        if let Some(ref sys) = cached_sys.0 {
+            for b in &scene.bodies {
+                if b.body_id == 0 { continue; }
+                let pi = (b.body_id - 1) as usize;
+                if pi >= sys.planets.len() { continue; }
+                let dist = (exterior.position - b.position).length();
+                let alt = dist - sys.planets[pi].radius_m;
+                if alt < sys.planets[pi].atmosphere.atmosphere_height {
+                    let grav_mag = sys.planets[pi].gm / (dist * dist);
+                    let grav_dir = (b.position - exterior.position).normalize();
+                    let grav_world = grav_dir * grav_mag;
+
+                    if raw_input.thrust_vertical.abs() < 0.01 {
+                        let grav_local = exterior.rotation.inverse() * (-grav_world);
+                        let hover = grav_local * ship_props.0.mass_kg;
+                        pilot_acc.thrust += DVec3::new(hover.x, hover.y, hover.z);
+                    }
+
+                    let has_input = raw_input.thrust_lateral.abs() > 0.01
+                        || raw_input.thrust_vertical.abs() > 0.01
+                        || raw_input.thrust_forward.abs() > 0.01;
+                    if !has_input {
+                        let max_thrust = total_thrust.length().max(50_000.0);
+                        let max_accel = max_thrust / ship_props.0.mass_kg;
+                        let damping_rate = (max_accel * 0.1).min(5.0);
+                        let vel_local = exterior.rotation.inverse() * exterior.velocity;
+                        let damping = -vel_local * damping_rate * ship_props.0.mass_kg;
+                        let max_damp = max_thrust * 0.5;
+                        let damping_clamped = damping.clamp_length_max(max_damp);
+                        pilot_acc.thrust += DVec3::new(
+                            damping_clamped.x, damping_clamped.y, damping_clamped.z,
+                        );
+                    }
+                    break;
                 }
             }
         }
@@ -2572,6 +2752,9 @@ fn build_ship_interior(
     app.insert_resource(FunctionalBlockIndex::default());
     app.insert_resource(ShipProps(ShipPhysicalProperties::starter_ship()));
     app.insert_resource(PilotAccumulator::default());
+    app.insert_resource(RawPilotInput { thrust_limiter: 0.75, ..Default::default() });
+    app.insert_resource(ShipCenterOfMass::default());
+    app.insert_resource(ActiveSeatEntity::default());
     app.insert_resource(AutopilotState::default());
     app.insert_resource(WarpTargetState::default());
     app.insert_resource(ConnectedPlayer::default());
@@ -2640,7 +2823,7 @@ fn build_ship_interior(
     // Signal pipeline: publish → evaluate → subscribe → clear dirty.
     app.add_systems(
         Update,
-        (signal_publish, signal_evaluate, signal_subscribe, signal_clear_dirty)
+        (signal_publish, signal_evaluate, signal_subscribe, compute_ship_thrust, signal_clear_dirty)
             .chain()
             .in_set(ShipSet::Signal),
     );

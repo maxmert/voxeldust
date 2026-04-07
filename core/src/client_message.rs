@@ -154,6 +154,26 @@ pub struct PlayerInputData {
     pub action: u8,
     pub block_type: u16,
     pub tick: u64,
+    pub thrust_limiter: f32,
+    /// Roll input: -1.0 (Q, CCW) to +1.0 (E, CW). 0.0 when neither pressed.
+    pub roll: f32,
+}
+
+/// Block edit action codes (client → server).
+pub mod action {
+    pub const BREAK: u8 = 1;
+    pub const PLACE: u8 = 2;
+    pub const INTERACT: u8 = 3;
+    pub const OPEN_CONFIG: u8 = 8;
+    pub const EXIT_SEAT: u8 = 9;
+}
+
+/// Shard type identifiers.
+pub mod shard_type {
+    pub const PLANET: u8 = 0;
+    pub const SYSTEM: u8 = 1;
+    pub const SHIP: u8 = 2;
+    pub const GALAXY: u8 = 3;
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +357,8 @@ impl ClientMsg {
                         action: data.action,
                         block_type: data.block_type,
                         tick: data.tick,
+                        thrust_limiter: data.thrust_limiter,
+                        roll: data.roll,
                     },
                 );
                 let msg = fb::ClientMessage::create(
@@ -454,6 +476,8 @@ impl ClientMsg {
                     action: p.action(),
                     block_type: p.block_type(),
                     tick: p.tick(),
+                    thrust_limiter: p.thrust_limiter(),
+                    roll: p.roll(),
                 }))
             }
             fb::ClientPayload::BlockEditRequest => {
@@ -1226,6 +1250,8 @@ mod tests {
             action: 1,
             block_type: 3,
             tick: 1000,
+            thrust_limiter: 0.75,
+            roll: 0.0,
         });
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
