@@ -169,6 +169,11 @@ impl SignalChannelTable {
     pub fn remove(&mut self, name: &str) {
         self.channels.remove(name);
     }
+
+    /// All channel names (for UI dropdowns).
+    pub fn channel_names(&self) -> impl Iterator<Item = &str> {
+        self.channels.keys().map(|s| s.as_str())
+    }
 }
 
 #[cfg(test)]

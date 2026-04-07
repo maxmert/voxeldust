@@ -36,14 +36,27 @@ pub struct WarpTargetInfo {
 
 /// Run the egui HUD pass: body labels, trajectory, info panel, crosshair.
 /// Returns the egui `FullOutput` ready for tessellation.
-pub fn run_hud(gpu: &mut GpuState, window: &winit::window::Window, ctx: &HudContext) -> egui::FullOutput {
+/// Result from the config panel: whether Save or Cancel was clicked.
+pub enum ConfigPanelAction {
+    None,
+    Save,
+    Close,
+}
+
+pub fn run_hud(
+    gpu: &mut GpuState,
+    window: &winit::window::Window,
+    ctx: &HudContext,
+    mut config_state: Option<&mut voxeldust_core::signal::config::BlockSignalConfig>,
+) -> (egui::FullOutput, ConfigPanelAction) {
     let scale_factor = window.scale_factor() as f32;
     let logical_w = gpu.config.width as f32 / scale_factor;
     let logical_h = gpu.config.height as f32 / scale_factor;
 
     let raw_input = gpu.egui_winit.take_egui_input(window);
+    let mut panel_action = ConfigPanelAction::None;
 
-    gpu.egui_ctx.run(raw_input, |ectx| {
+    let output = gpu.egui_ctx.run(raw_input, |ectx| {
         let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hud"));
         let painter = ectx.layer_painter(layer);
 
@@ -59,10 +72,18 @@ pub fn run_hud(gpu: &mut GpuState, window: &winit::window::Window, ctx: &HudCont
         // Info panel.
         draw_info_panel(ectx, ctx);
 
-        // Crosshair.
-        let center = egui::pos2(logical_w / 2.0, logical_h / 2.0);
-        painter.circle_stroke(center, 3.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(200, 200, 200, 100)));
-    })
+        // Block config panel (when open).
+        if let Some(ref mut config) = config_state {
+            panel_action = draw_block_config_panel(ectx, config);
+        }
+
+        // Crosshair (only when config panel is closed).
+        if matches!(panel_action, ConfigPanelAction::None) {
+            let center = egui::pos2(logical_w / 2.0, logical_h / 2.0);
+            painter.circle_stroke(center, 3.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(200, 200, 200, 100)));
+        }
+    });
+    (output, panel_action)
 }
 
 /// Tessellate and render the egui output into the command encoder.
@@ -560,4 +581,202 @@ fn catmull_rom(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t
             + (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2
             + (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3);
     egui::pos2(x, y)
+}
+
+// ---------------------------------------------------------------------------
+// Block signal config panel
+// ---------------------------------------------------------------------------
+
+use voxeldust_core::signal::config::BlockSignalConfig;
+use voxeldust_core::signal::types::SignalProperty;
+
+const SIGNAL_PROPERTY_NAMES: &[(&str, SignalProperty)] = &[
+    ("Active", SignalProperty::Active),
+    ("Throttle", SignalProperty::Throttle),
+    ("Angle", SignalProperty::Angle),
+    ("Extension", SignalProperty::Extension),
+    ("Pressure", SignalProperty::Pressure),
+    ("Speed", SignalProperty::Speed),
+    ("Level", SignalProperty::Level),
+    ("SwitchState", SignalProperty::SwitchState),
+];
+
+fn property_name(prop: SignalProperty) -> &'static str {
+    SIGNAL_PROPERTY_NAMES.iter()
+        .find(|(_, p)| *p == prop)
+        .map(|(name, _)| *name)
+        .unwrap_or("Unknown")
+}
+
+fn draw_block_config_panel(
+    ectx: &egui::Context,
+    config: &mut BlockSignalConfig,
+) -> ConfigPanelAction {
+    let mut action = ConfigPanelAction::None;
+    let kind_name = format!("Block Config (kind {})", config.kind);
+
+    egui::Window::new(&kind_name)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(400.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ectx, |ui| {
+            ui.label(format!(
+                "Position: ({}, {}, {})",
+                config.block_pos.x, config.block_pos.y, config.block_pos.z
+            ));
+            ui.separator();
+
+            // --- Publish Bindings ---
+            egui::CollapsingHeader::new("Publish Channels")
+                .default_open(true)
+                .show(ui, |ui| {
+                    let mut remove_idx = None;
+                    for (i, binding) in config.publish_bindings.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label("Channel:");
+                            egui::ComboBox::from_id_salt(format!("pub_ch_{i}"))
+                                .selected_text(&binding.channel_name)
+                                .show_ui(ui, |ui| {
+                                    for ch in &config.available_channels {
+                                        ui.selectable_value(&mut binding.channel_name, ch.clone(), ch);
+                                    }
+                                });
+                            ui.label("Property:");
+                            egui::ComboBox::from_id_salt(format!("pub_prop_{i}"))
+                                .selected_text(property_name(binding.property))
+                                .show_ui(ui, |ui| {
+                                    for &(name, prop) in SIGNAL_PROPERTY_NAMES {
+                                        ui.selectable_value(&mut binding.property, prop, name);
+                                    }
+                                });
+                            if ui.small_button("−").clicked() {
+                                remove_idx = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_idx {
+                        config.publish_bindings.remove(idx);
+                    }
+                    if ui.button("+ Add Publish Binding").clicked() {
+                        config.publish_bindings.push(
+                            voxeldust_core::signal::components::PublishBinding {
+                                channel_name: "new-channel".into(),
+                                property: SignalProperty::Active,
+                            },
+                        );
+                    }
+                });
+
+            // --- Subscribe Bindings ---
+            egui::CollapsingHeader::new("Subscribe Channels")
+                .default_open(true)
+                .show(ui, |ui| {
+                    let mut remove_idx = None;
+                    for (i, binding) in config.subscribe_bindings.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label("Channel:");
+                            egui::ComboBox::from_id_salt(format!("sub_ch_{i}"))
+                                .selected_text(&binding.channel_name)
+                                .show_ui(ui, |ui| {
+                                    for ch in &config.available_channels {
+                                        ui.selectable_value(&mut binding.channel_name, ch.clone(), ch);
+                                    }
+                                });
+                            ui.label("Property:");
+                            egui::ComboBox::from_id_salt(format!("sub_prop_{i}"))
+                                .selected_text(property_name(binding.property))
+                                .show_ui(ui, |ui| {
+                                    for &(name, prop) in SIGNAL_PROPERTY_NAMES {
+                                        ui.selectable_value(&mut binding.property, prop, name);
+                                    }
+                                });
+                            if ui.small_button("−").clicked() {
+                                remove_idx = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_idx {
+                        config.subscribe_bindings.remove(idx);
+                    }
+                    if ui.button("+ Add Subscribe Binding").clicked() {
+                        config.subscribe_bindings.push(
+                            voxeldust_core::signal::components::SubscribeBinding {
+                                channel_name: "new-channel".into(),
+                                property: SignalProperty::Throttle,
+                            },
+                        );
+                    }
+                });
+
+            // --- Converter Rules (only show if block has rules or is a converter) ---
+            if !config.converter_rules.is_empty() || config.kind == voxeldust_core::block::FunctionalBlockKind::SignalConverter as u8 {
+                egui::CollapsingHeader::new("Converter Rules")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let mut remove_idx = None;
+                        for (i, rule) in config.converter_rules.iter_mut().enumerate() {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("IF");
+                                    ui.text_edit_singleline(&mut rule.input_channel);
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("THEN →");
+                                    ui.text_edit_singleline(&mut rule.output_channel);
+                                });
+                                if ui.small_button("− Remove Rule").clicked() {
+                                    remove_idx = Some(i);
+                                }
+                            });
+                        }
+                        if let Some(idx) = remove_idx {
+                            config.converter_rules.remove(idx);
+                        }
+                        if ui.button("+ Add Rule").clicked() {
+                            config.converter_rules.push(
+                                voxeldust_core::signal::converter::SignalRule {
+                                    input_channel: "input".into(),
+                                    condition: voxeldust_core::signal::converter::SignalCondition::Always,
+                                    output_channel: "output".into(),
+                                    expression: voxeldust_core::signal::converter::SignalExpression::PassThrough,
+                                },
+                            );
+                        }
+                    });
+            }
+
+            // --- Seat Mappings (only show for seats) ---
+            if !config.seat_mappings.is_empty() {
+                egui::CollapsingHeader::new("Seat Input Mappings")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for (i, mapping) in config.seat_mappings.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(&mapping.input_name);
+                                ui.label("→");
+                                egui::ComboBox::from_id_salt(format!("seat_ch_{i}"))
+                                    .selected_text(&mapping.channel_name)
+                                    .show_ui(ui, |ui| {
+                                        for ch in &config.available_channels {
+                                            ui.selectable_value(&mut mapping.channel_name, ch.clone(), ch);
+                                        }
+                                    });
+                            });
+                        }
+                    });
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    action = ConfigPanelAction::Save;
+                }
+                if ui.button("Cancel").clicked() {
+                    action = ConfigPanelAction::Close;
+                }
+            });
+        });
+
+    action
 }

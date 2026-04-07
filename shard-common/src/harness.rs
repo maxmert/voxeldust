@@ -44,6 +44,8 @@ pub struct NetworkBridge {
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
     /// Incoming block edit requests from UDP.
     pub block_edit_rx: mpsc::UnboundedReceiver<BlockEditData>,
+    /// Incoming block config updates from UDP.
+    pub config_update_rx: mpsc::UnboundedReceiver<voxeldust_core::signal::config::BlockConfigUpdateData>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
@@ -113,6 +115,8 @@ pub struct ShardHarness {
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
     /// Incoming BlockEditRequest from UDP clients.
     pub block_edit_rx: mpsc::UnboundedReceiver<BlockEditData>,
+    /// Incoming BlockConfigUpdate from UDP clients.
+    pub config_update_rx: mpsc::UnboundedReceiver<voxeldust_core::signal::config::BlockConfigUpdateData>,
     /// Incoming inter-shard messages from QUIC (with source peer address).
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Channel to send WorldState for UDP broadcast (bounded for backpressure).
@@ -125,6 +129,7 @@ pub struct ShardHarness {
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
     block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
+    config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
     quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
@@ -134,6 +139,7 @@ impl ShardHarness {
         let (connect_tx, connect_rx) = mpsc::unbounded_channel();
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (block_edit_tx, block_edit_rx) = mpsc::unbounded_channel();
+        let (config_update_tx, config_update_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
         let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
@@ -153,6 +159,7 @@ impl ShardHarness {
             client_registry: Arc::new(RwLock::new(ClientRegistry::new())),
             input_rx,
             block_edit_rx,
+            config_update_rx,
             quic_msg_rx,
             broadcast_tx,
             quic_send_tx,
@@ -161,6 +168,7 @@ impl ShardHarness {
             connect_tx,
             input_tx,
             block_edit_tx,
+            config_update_tx,
             quic_msg_tx,
             cancel: CancellationToken::new(),
         }
@@ -271,8 +279,9 @@ impl ShardHarness {
         let udp_registry = self.client_registry.clone();
         let input_tx = self.input_tx.clone();
         let block_edit_tx = self.block_edit_tx.clone();
+        let config_update_tx = self.config_update_tx.clone();
         tokio::spawn(async move {
-            client_listener::run_udp_receiver(udp_recv_socket, udp_registry, input_tx, block_edit_tx, udp_recv_cancel).await;
+            client_listener::run_udp_receiver(udp_recv_socket, udp_registry, input_tx, block_edit_tx, config_update_tx, udp_recv_cancel).await;
         });
 
         // QUIC accept loop for inter-shard messages.
@@ -492,6 +501,7 @@ impl ShardHarness {
             connect_rx: self.connect_rx,
             input_rx: self.input_rx,
             block_edit_rx: self.block_edit_rx,
+            config_update_rx: self.config_update_rx,
             quic_msg_rx: self.quic_msg_rx,
             broadcast_tx: self.broadcast_tx.clone(),
             quic_send_tx: self.quic_send_tx.clone(),

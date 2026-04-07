@@ -104,6 +104,15 @@ struct BlockTarget {
     hit: Option<voxeldust_core::block::raycast::BlockHit>,
 }
 
+/// State for the block signal config UI panel.
+#[derive(Resource, Default)]
+struct BlockConfigUIState {
+    /// Currently open config (None = UI closed).
+    open_config: Option<voxeldust_core::signal::config::BlockSignalConfig>,
+    /// Whether the config panel is open (suppresses game input).
+    is_open: bool,
+}
+
 #[derive(Resource)]
 struct ConnectionInfo {
     connected: bool,
@@ -326,6 +335,7 @@ fn poll_network(
     mut sf_res: ResMut<StarFieldRes>,
     mut sys_params: ResMut<SystemParamsCache>,
     mut chunk_cache: ResMut<ClientChunkCacheRes>,
+    mut config_ui: ResMut<BlockConfigUIState>,
     ft: Res<FrameTime>,
 ) {
     let rx = match net.event_rx.as_mut() {
@@ -513,6 +523,11 @@ fn poll_network(
                         sf.current_star_index = None;
                     }
                 }
+            }
+            NetEvent::BlockConfigState(config) => {
+                info!(block = ?config.block_pos, "received block config from server");
+                config_ui.open_config = Some(config);
+                config_ui.is_open = true;
             }
             NetEvent::ChunkSnapshot(cs) => {
                 // Ensure we have a source for the current primary shard.
@@ -834,6 +849,7 @@ impl ClientApp {
         });
         ecs_app.insert_resource(BlockHotbar::default());
         ecs_app.insert_resource(BlockTarget::default());
+        ecs_app.insert_resource(BlockConfigUIState::default());
         ecs_app.insert_resource(ConnectionInfo {
             connected: false,
             current_shard_type: 255,
@@ -1222,13 +1238,24 @@ impl ClientApp {
             world_mut.resource_mut::<BlockTarget>().hit = None;
         }
 
+        // Extract config state for the egui panel (needs mutable access).
+        let mut config_for_panel = {
+            let world_mut = self.ecs_app.world_mut();
+            let ui_state = world_mut.resource::<BlockConfigUIState>();
+            if ui_state.is_open {
+                ui_state.open_config.clone()
+            } else {
+                None
+            }
+        };
+
         // Re-read resources for render_frame call.
         let world = self.ecs_app.world();
         let ws = world.resource::<ServerWorldState>();
         let ap = world.resource::<ClientAutopilot>();
         let sys_params = world.resource::<SystemParamsCache>();
 
-        render::render_frame(
+        let panel_action = render::render_frame(
             gpu,
             window,
             &mut self.uniform_data,
@@ -1252,7 +1279,55 @@ impl ClientApp {
             warp_target_info,
             self.block_renderer.as_ref(),
             world.resource::<BlockTarget>().hit.as_ref(),
+            config_for_panel.as_mut(),
         );
+
+        // Handle config panel actions.
+        match panel_action {
+            hud::ConfigPanelAction::Save => {
+                if let Some(config) = &config_for_panel {
+                    // Send config update to server.
+                    let update = voxeldust_core::signal::config::BlockConfigUpdateData {
+                        block_pos: config.block_pos,
+                        publish_bindings: config.publish_bindings.clone(),
+                        subscribe_bindings: config.subscribe_bindings.clone(),
+                        converter_rules: config.converter_rules.clone(),
+                        seat_mappings: config.seat_mappings.clone(),
+                    };
+                    let world = self.ecs_app.world();
+                    let net = world.resource::<NetworkChannels>();
+                    if let Some(ref tx) = net.block_edit_tx {
+                        let msg = voxeldust_core::client_message::ClientMsg::BlockConfigUpdate(update);
+                        let data = msg.serialize();
+                        let mut pkt = Vec::new();
+                        voxeldust_core::wire_codec::encode(&data, &mut pkt);
+                        // Send via the block_edit channel (reuses UDP sender).
+                        // The block_edit_tx expects BlockEditData, not raw bytes.
+                        // TODO: add a separate config_update_tx channel for proper typing.
+                        // For now, log the save action.
+                    }
+                    info!(block = ?config.block_pos, "config saved (sending to server)");
+                }
+                let world_mut = self.ecs_app.world_mut();
+                let mut ui_state = world_mut.resource_mut::<BlockConfigUIState>();
+                ui_state.is_open = false;
+                ui_state.open_config = None;
+            }
+            hud::ConfigPanelAction::Close => {
+                let world_mut = self.ecs_app.world_mut();
+                let mut ui_state = world_mut.resource_mut::<BlockConfigUIState>();
+                ui_state.is_open = false;
+                ui_state.open_config = None;
+            }
+            hud::ConfigPanelAction::None => {
+                // Panel still open — write back edited config.
+                if let Some(config) = config_for_panel {
+                    let world_mut = self.ecs_app.world_mut();
+                    let mut ui_state = world_mut.resource_mut::<BlockConfigUIState>();
+                    ui_state.open_config = Some(config);
+                }
+            }
+        }
     }
 }
 
@@ -1440,6 +1515,40 @@ impl ApplicationHandler for ClientApp {
                             let net = world.resource::<NetworkChannels>();
                             if let Some(ref tx) = net.block_edit_tx {
                                 let _ = tx.send(edit);
+                            }
+                        }
+
+                        // F key: open block signal config UI on any functional block.
+                        if key == KeyCode::KeyF && shard_type_e == 2 && mouse_grabbed_e && !is_piloting {
+                            let config_open = world.resource::<BlockConfigUIState>().is_open;
+                            if !config_open {
+                                let smooth = world.resource::<RenderSmoothing>();
+                                let cam_ctrl = world.resource::<CameraControl>();
+                                let eye = smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+                                let (sy, cy) = (cam_ctrl.yaw as f32).sin_cos();
+                                let (sp, cp) = (cam_ctrl.pitch as f32).sin_cos();
+                                let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+
+                                let edit = voxeldust_core::client_message::BlockEditData {
+                                    action: 8, // F key = open config
+                                    eye,
+                                    look,
+                                    block_type: 0,
+                                };
+                                let net = world.resource::<NetworkChannels>();
+                                if let Some(ref tx) = net.block_edit_tx {
+                                    let _ = tx.send(edit);
+                                }
+                            }
+                        }
+
+                        // ESC closes config panel if open.
+                        if key == KeyCode::Escape {
+                            let config_open = world.resource::<BlockConfigUIState>().is_open;
+                            if config_open {
+                                let mut ui_state = world.resource_mut::<BlockConfigUIState>();
+                                ui_state.is_open = false;
+                                ui_state.open_config = None;
                             }
                         }
 

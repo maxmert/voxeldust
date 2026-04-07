@@ -461,6 +461,55 @@ table PlayerDestroyed {
     position: Vec3d;
 }
 
+/// Signal binding: maps a channel name to a block property.
+table SignalBindingFB {
+    channel_name: string;
+    property: uint8;   // SignalProperty enum
+}
+
+/// Signal converter rule: condition → action.
+table SignalRuleFB {
+    input_channel: string;
+    condition_type: uint8;    // 0=GreaterThan, 1=LessThan, 2=Equals, 3=NotEquals, 4=Changed, 5=Always
+    condition_value: float;
+    output_channel: string;
+    expression_type: uint8;   // 0=Constant, 1=PassThrough, 2=Invert, 3=Scale, 4=Clamp
+    expression_value: float;  // for Constant (bool as 0/1), Scale factor
+    expression_value2: float; // for Clamp max
+}
+
+/// Seat input → channel mapping.
+table SeatBindingFB {
+    input_name: string;
+    channel_name: string;
+    property: uint8;
+}
+
+/// Server → client: current signal config for a functional block.
+table BlockConfigState {
+    block_x: int32;
+    block_y: int32;
+    block_z: int32;
+    block_type: uint16;
+    kind: uint8;
+    publish_bindings: [SignalBindingFB];
+    subscribe_bindings: [SignalBindingFB];
+    converter_rules: [SignalRuleFB];
+    seat_mappings: [SeatBindingFB];
+    available_channels: [string];
+}
+
+/// Client → server: updated signal config for a functional block.
+table BlockConfigUpdate {
+    block_x: int32;
+    block_y: int32;
+    block_z: int32;
+    publish_bindings: [SignalBindingFB];
+    subscribe_bindings: [SignalBindingFB];
+    converter_rules: [SignalRuleFB];
+    seat_mappings: [SeatBindingFB];
+}
+
 union ServerPayload {
     JoinResponse,
     WorldState,
@@ -473,6 +522,7 @@ union ServerPayload {
     GalaxyWorldState,
     ChunkSnapshot,
     ChunkDelta,
+    BlockConfigState,
 }
 
 /// Root type for server → client messages.
@@ -484,6 +534,7 @@ union ClientPayload {
     Connect,
     PlayerInput,
     BlockEditRequest,
+    BlockConfigUpdate,
 }
 
 /// Root type for client → server messages.

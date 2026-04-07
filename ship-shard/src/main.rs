@@ -1522,6 +1522,69 @@ fn persist_chunks(
 // Block edit systems
 // ---------------------------------------------------------------------------
 
+/// ECS Message for incoming config updates.
+#[derive(Message)]
+struct ConfigUpdateMsg {
+    update: voxeldust_core::signal::config::BlockConfigUpdateData,
+}
+
+/// Bridge system: drain BlockConfigUpdate messages from the UDP channel.
+fn drain_config_updates(
+    mut bridge: ResMut<NetworkBridge>,
+    mut events: MessageWriter<ConfigUpdateMsg>,
+) {
+    for _ in 0..16 {
+        let update = match bridge.config_update_rx.try_recv() {
+            Ok(u) => u,
+            Err(_) => break,
+        };
+        events.write(ConfigUpdateMsg { update });
+    }
+}
+
+/// Apply config updates received from clients to entity signal components.
+fn apply_config_updates(
+    mut events: MessageReader<ConfigUpdateMsg>,
+    block_index: Res<FunctionalBlockIndex>,
+    mut commands: Commands,
+) {
+    for event in events.read() {
+        let update = &event.update;
+        let entity = match block_index.0.get(&update.block_pos) {
+            Some(&e) => e,
+            None => {
+                warn!(block = ?update.block_pos, "config update for nonexistent block");
+                continue;
+            }
+        };
+
+        // Replace signal components on the entity.
+        // Using insert() overwrites existing components.
+        if !update.publish_bindings.is_empty() {
+            commands.entity(entity).insert(SignalPublisher {
+                bindings: update.publish_bindings.clone(),
+            });
+        }
+        if !update.subscribe_bindings.is_empty() {
+            commands.entity(entity).insert(SignalSubscriber {
+                bindings: update.subscribe_bindings.clone(),
+            });
+        }
+        if !update.converter_rules.is_empty() {
+            commands.entity(entity).insert(SignalConverterConfig {
+                rules: update.converter_rules.clone(),
+            });
+        }
+        if !update.seat_mappings.is_empty() {
+            commands.entity(entity).insert(SeatChannelMapping {
+                bindings: update.seat_mappings.clone(),
+            });
+        }
+
+        info!(block = ?update.block_pos, "applied signal config update from client");
+    }
+}
+
 /// Bridge system: drain BlockEditRequest messages from the UDP channel.
 fn drain_block_edits(
     mut bridge: ResMut<NetworkBridge>,
@@ -1556,6 +1619,12 @@ fn produce_player_edits(
     mut pilot_mode: ResMut<PilotMode>,
     mut rapier: ResMut<RapierContext>,
     body_handle: Res<PlayerBodyHandle>,
+    bridge: Res<NetworkBridge>,
+    channels: Res<SignalChannelTable>,
+    pub_query: Query<&SignalPublisher>,
+    sub_query: Query<&SignalSubscriber>,
+    converter_query: Query<&SignalConverterConfig>,
+    seat_query: Query<&SeatChannelMapping>,
 ) {
     if connected.session.is_none() || connected.handoff_pending {
         return;
@@ -1704,8 +1773,79 @@ fn produce_player_edits(
                     }
                 }
             }
+            8 => {
+                // F key: universal config UI — open config for any functional block.
+                if let Some(&entity) = block_index.0.get(&hit.world_pos) {
+                    let block_id = grid.0.get_block(
+                        hit.world_pos.x, hit.world_pos.y, hit.world_pos.z,
+                    );
+                    if let Some(kind) = registry.0.functional_kind(block_id) {
+                        // Build config snapshot from entity components.
+                        let config = build_config_snapshot(
+                            entity, hit.world_pos, block_id, kind,
+                            &pub_query, &sub_query, &converter_query, &seat_query,
+                            &channels,
+                        );
+                        // Send to client via TCP.
+                        if let Some(session) = connected.session {
+                            let msg = ServerMsg::BlockConfigState(config);
+                            let cr = bridge.client_registry.clone();
+                            tokio::spawn(async move {
+                                if let Ok(reg) = cr.try_read() {
+                                    let _ = reg.send_tcp(session, &msg).await;
+                                }
+                            });
+                        }
+                        info!(kind = ?kind, block = ?hit.world_pos, "sent block config to client");
+                    }
+                }
+            }
             _ => {} // unknown action
         }
+    }
+}
+
+/// Build a config snapshot from entity components for the client UI.
+fn build_config_snapshot(
+    entity: Entity,
+    pos: glam::IVec3,
+    block_id: BlockId,
+    kind: FunctionalBlockKind,
+    pub_query: &Query<&SignalPublisher>,
+    sub_query: &Query<&SignalSubscriber>,
+    converter_query: &Query<&SignalConverterConfig>,
+    seat_query: &Query<&SeatChannelMapping>,
+    channels: &SignalChannelTable,
+) -> voxeldust_core::signal::config::BlockSignalConfig {
+    let publish_bindings = pub_query.get(entity)
+        .map(|p| p.bindings.clone())
+        .unwrap_or_default();
+    let subscribe_bindings = sub_query.get(entity)
+        .map(|s| s.bindings.clone())
+        .unwrap_or_default();
+    let converter_rules = converter_query.get(entity)
+        .map(|c| c.rules.clone())
+        .unwrap_or_default();
+    let seat_mappings = seat_query.get(entity)
+        .map(|s| s.bindings.clone())
+        .unwrap_or_default();
+
+    let mut available_channels: Vec<String> = Vec::new();
+    // Collect all channel names from the channel table for the dropdown.
+    for name in channels.channel_names() {
+        available_channels.push(name.to_string());
+    }
+    available_channels.sort();
+
+    voxeldust_core::signal::config::BlockSignalConfig {
+        block_pos: pos,
+        block_type: block_id.as_u16(),
+        kind: kind as u8,
+        publish_bindings,
+        subscribe_bindings,
+        converter_rules,
+        seat_mappings,
+        available_channels,
     }
 }
 
@@ -2455,6 +2595,7 @@ fn build_ship_interior(
     app.add_message::<ClientConnectedMsg>();
     app.add_message::<PlayerInputMsg>();
     app.add_message::<BlockEditMsg>();
+    app.add_message::<ConfigUpdateMsg>();
 
     // System ordering.
     app.configure_sets(
@@ -2476,13 +2617,13 @@ fn build_ship_interior(
     // Bridge: drain async channels.
     app.add_systems(
         Update,
-        (drain_connects, drain_input, drain_block_edits, drain_quic).in_set(ShipSet::Bridge),
+        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_quic).in_set(ShipSet::Bridge),
     );
 
-    // Input: process connects, player input, preconnect.
+    // Input: process connects, player input, preconnect, config updates.
     app.add_systems(
         Update,
-        (process_connects, process_input, preconnect_check).in_set(ShipSet::Input),
+        (process_connects, process_input, preconnect_check, apply_config_updates).in_set(ShipSet::Input),
     );
 
     // Startup: scan grid for existing functional blocks.

@@ -313,6 +313,7 @@ pub async fn run_udp_receiver(
     registry: Arc<RwLock<ClientRegistry>>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
     block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
+    config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
     cancel: CancellationToken,
 ) {
     let mut buf = vec![0u8; 65536];
@@ -344,6 +345,9 @@ pub async fn run_udp_receiver(
                             }
                             Ok(ClientMsg::BlockEditRequest(edit)) => {
                                 let _ = block_edit_tx.send(edit);
+                            }
+                            Ok(ClientMsg::BlockConfigUpdate(update)) => {
+                                let _ = config_update_tx.send(update);
                             }
                             _ => {}
                         }

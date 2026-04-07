@@ -38,6 +38,8 @@ pub enum NetEvent {
     SecondaryWorldState(WorldStateData),
     /// Galaxy world state from secondary UDP (warp travel position for star parallax).
     GalaxyWorldState(voxeldust_core::client_message::GalaxyWorldStateData),
+    /// Block signal config state from server (config UI).
+    BlockConfigState(voxeldust_core::signal::config::BlockSignalConfig),
     /// Full chunk snapshot received (initial sync or resync).
     ChunkSnapshot(ChunkSnapshotData),
     /// Incremental block changes to a chunk.
@@ -318,6 +320,9 @@ pub async fn run_network(
                                         }
                                     }
                                 });
+                            }
+                            Ok(ServerMsg::BlockConfigState(config)) => {
+                                let _ = event_tx_tcp.send(NetEvent::BlockConfigState(config));
                             }
                             Ok(ServerMsg::ChunkSnapshot(cs)) => {
                                 let _ = event_tx_tcp.send(NetEvent::ChunkSnapshot(cs));

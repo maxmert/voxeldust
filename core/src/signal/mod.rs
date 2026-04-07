@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod components;
+pub mod config;
 pub mod converter;
 pub mod types;
 

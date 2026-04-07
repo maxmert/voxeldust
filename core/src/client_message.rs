@@ -4,7 +4,67 @@ use glam::{DQuat, DVec3};
 use crate::handoff::{self, ShardRedirect};
 use crate::protocol_generated as fb;
 use crate::shard_message::{AutopilotSnapshotData, MessageError};
+use crate::signal::converter::{SignalCondition, SignalExpression};
+use crate::signal::types::SignalProperty;
 use crate::shard_types::{SessionToken, ShardId};
+
+fn serialize_condition(cond: &SignalCondition) -> (u8, f32) {
+    match cond {
+        SignalCondition::GreaterThan(v) => (0, *v),
+        SignalCondition::LessThan(v) => (1, *v),
+        SignalCondition::Equals(v) => (2, *v),
+        SignalCondition::NotEquals(v) => (3, *v),
+        SignalCondition::Changed => (4, 0.0),
+        SignalCondition::Always => (5, 0.0),
+    }
+}
+
+fn deserialize_condition(ctype: u8, val: f32) -> SignalCondition {
+    match ctype {
+        0 => SignalCondition::GreaterThan(val),
+        1 => SignalCondition::LessThan(val),
+        2 => SignalCondition::Equals(val),
+        3 => SignalCondition::NotEquals(val),
+        4 => SignalCondition::Changed,
+        5 => SignalCondition::Always,
+        _ => SignalCondition::Always,
+    }
+}
+
+fn serialize_expression(expr: &SignalExpression) -> (u8, f32, f32) {
+    match expr {
+        SignalExpression::Constant(v) => (0, v.as_f32(), 0.0),
+        SignalExpression::PassThrough => (1, 0.0, 0.0),
+        SignalExpression::Invert => (2, 0.0, 0.0),
+        SignalExpression::Scale(f) => (3, *f, 0.0),
+        SignalExpression::Clamp(min, max) => (4, *min, *max),
+    }
+}
+
+fn deserialize_expression(etype: u8, val: f32, val2: f32) -> SignalExpression {
+    match etype {
+        0 => SignalExpression::Constant(crate::signal::types::SignalValue::Float(val)),
+        1 => SignalExpression::PassThrough,
+        2 => SignalExpression::Invert,
+        3 => SignalExpression::Scale(val),
+        4 => SignalExpression::Clamp(val, val2),
+        _ => SignalExpression::PassThrough,
+    }
+}
+
+fn u8_to_signal_property(v: u8) -> SignalProperty {
+    match v {
+        0 => SignalProperty::Active,
+        1 => SignalProperty::Throttle,
+        2 => SignalProperty::Angle,
+        3 => SignalProperty::Extension,
+        4 => SignalProperty::Pressure,
+        5 => SignalProperty::Speed,
+        6 => SignalProperty::Level,
+        7 => SignalProperty::SwitchState,
+        _ => SignalProperty::Active,
+    }
+}
 
 /// Client → server messages.
 #[derive(Debug, Clone)]
@@ -12,6 +72,8 @@ pub enum ClientMsg {
     Connect { player_name: String },
     PlayerInput(PlayerInputData),
     BlockEditRequest(BlockEditData),
+    /// Signal config update for a functional block (client → server).
+    BlockConfigUpdate(crate::signal::config::BlockConfigUpdateData),
 }
 
 /// Server → client messages.
@@ -30,6 +92,8 @@ pub enum ServerMsg {
     ChunkSnapshot(ChunkSnapshotData),
     /// Incremental block changes to a chunk. Shard-type agnostic.
     ChunkDelta(ChunkDeltaData),
+    /// Signal config snapshot for a functional block (server → client).
+    BlockConfigState(crate::signal::config::BlockSignalConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +371,52 @@ impl ClientMsg {
                 );
                 builder.finish(msg, None);
             }
+            ClientMsg::BlockConfigUpdate(data) => {
+                let pub_b: Vec<_> = data.publish_bindings.iter().map(|b| {
+                    let n = builder.create_string(&b.channel_name);
+                    fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
+                        channel_name: Some(n), property: b.property as u8,
+                    })
+                }).collect();
+                let sub_b: Vec<_> = data.subscribe_bindings.iter().map(|b| {
+                    let n = builder.create_string(&b.channel_name);
+                    fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
+                        channel_name: Some(n), property: b.property as u8,
+                    })
+                }).collect();
+                let rules: Vec<_> = data.converter_rules.iter().map(|r| {
+                    let ic = builder.create_string(&r.input_channel);
+                    let oc = builder.create_string(&r.output_channel);
+                    let (ct, cv) = serialize_condition(&r.condition);
+                    let (et, ev, ev2) = serialize_expression(&r.expression);
+                    fb::SignalRuleFB::create(&mut builder, &fb::SignalRuleFBArgs {
+                        input_channel: Some(ic), condition_type: ct, condition_value: cv,
+                        output_channel: Some(oc), expression_type: et,
+                        expression_value: ev, expression_value2: ev2,
+                    })
+                }).collect();
+                let seats: Vec<_> = data.seat_mappings.iter().map(|s| {
+                    let inp = builder.create_string(&s.input_name);
+                    let ch = builder.create_string(&s.channel_name);
+                    fb::SeatBindingFB::create(&mut builder, &fb::SeatBindingFBArgs {
+                        input_name: Some(inp), channel_name: Some(ch), property: s.property as u8,
+                    })
+                }).collect();
+                let pv = builder.create_vector(&pub_b);
+                let sv = builder.create_vector(&sub_b);
+                let rv = builder.create_vector(&rules);
+                let stv = builder.create_vector(&seats);
+                let bcu = fb::BlockConfigUpdate::create(&mut builder, &fb::BlockConfigUpdateArgs {
+                    block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
+                    publish_bindings: Some(pv), subscribe_bindings: Some(sv),
+                    converter_rules: Some(rv), seat_mappings: Some(stv),
+                });
+                let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
+                    payload_type: fb::ClientPayload::BlockConfigUpdate,
+                    payload: Some(bcu.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -356,6 +466,44 @@ impl ClientMsg {
                     eye: DVec3::new(r.eye_x(), r.eye_y(), r.eye_z()),
                     look: DVec3::new(r.look_x(), r.look_y(), r.look_z()),
                     block_type: r.block_type(),
+                }))
+            }
+            fb::ClientPayload::BlockConfigUpdate => {
+                let bcu = msg.payload_as_block_config_update()
+                    .ok_or(MessageError::MissingField("BlockConfigUpdate payload"))?;
+                let pub_b = bcu.publish_bindings().map(|v| v.iter().map(|b| {
+                    crate::signal::components::PublishBinding {
+                        channel_name: b.channel_name().unwrap_or("").to_string(),
+                        property: u8_to_signal_property(b.property()),
+                    }
+                }).collect()).unwrap_or_default();
+                let sub_b = bcu.subscribe_bindings().map(|v| v.iter().map(|b| {
+                    crate::signal::components::SubscribeBinding {
+                        channel_name: b.channel_name().unwrap_or("").to_string(),
+                        property: u8_to_signal_property(b.property()),
+                    }
+                }).collect()).unwrap_or_default();
+                let rules = bcu.converter_rules().map(|v| v.iter().map(|r| {
+                    crate::signal::converter::SignalRule {
+                        input_channel: r.input_channel().unwrap_or("").to_string(),
+                        condition: deserialize_condition(r.condition_type(), r.condition_value()),
+                        output_channel: r.output_channel().unwrap_or("").to_string(),
+                        expression: deserialize_expression(r.expression_type(), r.expression_value(), r.expression_value2()),
+                    }
+                }).collect()).unwrap_or_default();
+                let seats = bcu.seat_mappings().map(|v| v.iter().map(|s| {
+                    crate::signal::components::SeatInputBinding {
+                        input_name: s.input_name().unwrap_or("").to_string(),
+                        channel_name: s.channel_name().unwrap_or("").to_string(),
+                        property: u8_to_signal_property(s.property()),
+                    }
+                }).collect()).unwrap_or_default();
+                Ok(ClientMsg::BlockConfigUpdate(crate::signal::config::BlockConfigUpdateData {
+                    block_pos: glam::IVec3::new(bcu.block_x(), bcu.block_y(), bcu.block_z()),
+                    publish_bindings: pub_b,
+                    subscribe_bindings: sub_b,
+                    converter_rules: rules,
+                    seat_mappings: seats,
                 }))
             }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),
@@ -635,6 +783,59 @@ impl ServerMsg {
                 });
                 builder.finish(msg, None);
             }
+            ServerMsg::BlockConfigState(data) => {
+                let pub_bindings: Vec<_> = data.publish_bindings.iter().map(|b| {
+                    let name = builder.create_string(&b.channel_name);
+                    fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
+                        channel_name: Some(name), property: b.property as u8,
+                    })
+                }).collect();
+                let sub_bindings: Vec<_> = data.subscribe_bindings.iter().map(|b| {
+                    let name = builder.create_string(&b.channel_name);
+                    fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
+                        channel_name: Some(name), property: b.property as u8,
+                    })
+                }).collect();
+                let rules: Vec<_> = data.converter_rules.iter().map(|r| {
+                    let input = builder.create_string(&r.input_channel);
+                    let output = builder.create_string(&r.output_channel);
+                    let (cond_type, cond_val) = serialize_condition(&r.condition);
+                    let (expr_type, expr_val, expr_val2) = serialize_expression(&r.expression);
+                    fb::SignalRuleFB::create(&mut builder, &fb::SignalRuleFBArgs {
+                        input_channel: Some(input), condition_type: cond_type, condition_value: cond_val,
+                        output_channel: Some(output), expression_type: expr_type,
+                        expression_value: expr_val, expression_value2: expr_val2,
+                    })
+                }).collect();
+                let seats: Vec<_> = data.seat_mappings.iter().map(|s| {
+                    let input = builder.create_string(&s.input_name);
+                    let channel = builder.create_string(&s.channel_name);
+                    fb::SeatBindingFB::create(&mut builder, &fb::SeatBindingFBArgs {
+                        input_name: Some(input), channel_name: Some(channel), property: s.property as u8,
+                    })
+                }).collect();
+                let channels: Vec<_> = data.available_channels.iter()
+                    .map(|c| builder.create_string(c)).collect();
+
+                let pub_vec = builder.create_vector(&pub_bindings);
+                let sub_vec = builder.create_vector(&sub_bindings);
+                let rules_vec = builder.create_vector(&rules);
+                let seats_vec = builder.create_vector(&seats);
+                let channels_vec = builder.create_vector(&channels);
+
+                let bcs = fb::BlockConfigState::create(&mut builder, &fb::BlockConfigStateArgs {
+                    block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
+                    block_type: data.block_type, kind: data.kind,
+                    publish_bindings: Some(pub_vec), subscribe_bindings: Some(sub_vec),
+                    converter_rules: Some(rules_vec), seat_mappings: Some(seats_vec),
+                    available_channels: Some(channels_vec),
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::BlockConfigState,
+                    payload: Some(bcs.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -884,6 +1085,50 @@ impl ServerMsg {
                     chunk_z: addr.z(),
                     seq: cd.seq(),
                     mods,
+                }))
+            }
+            fb::ServerPayload::BlockConfigState => {
+                let bcs = msg.payload_as_block_config_state()
+                    .ok_or(MessageError::MissingField("BlockConfigState payload"))?;
+                let pub_b = bcs.publish_bindings().map(|v| v.iter().map(|b| {
+                    crate::signal::components::PublishBinding {
+                        channel_name: b.channel_name().unwrap_or("").to_string(),
+                        property: u8_to_signal_property(b.property()),
+                    }
+                }).collect()).unwrap_or_default();
+                let sub_b = bcs.subscribe_bindings().map(|v| v.iter().map(|b| {
+                    crate::signal::components::SubscribeBinding {
+                        channel_name: b.channel_name().unwrap_or("").to_string(),
+                        property: u8_to_signal_property(b.property()),
+                    }
+                }).collect()).unwrap_or_default();
+                let rules = bcs.converter_rules().map(|v| v.iter().map(|r| {
+                    crate::signal::converter::SignalRule {
+                        input_channel: r.input_channel().unwrap_or("").to_string(),
+                        condition: deserialize_condition(r.condition_type(), r.condition_value()),
+                        output_channel: r.output_channel().unwrap_or("").to_string(),
+                        expression: deserialize_expression(r.expression_type(), r.expression_value(), r.expression_value2()),
+                    }
+                }).collect()).unwrap_or_default();
+                let seats = bcs.seat_mappings().map(|v| v.iter().map(|s| {
+                    crate::signal::components::SeatInputBinding {
+                        input_name: s.input_name().unwrap_or("").to_string(),
+                        channel_name: s.channel_name().unwrap_or("").to_string(),
+                        property: u8_to_signal_property(s.property()),
+                    }
+                }).collect()).unwrap_or_default();
+                let channels = bcs.available_channels().map(|v| {
+                    v.iter().map(|s| s.to_string()).collect()
+                }).unwrap_or_default();
+                Ok(ServerMsg::BlockConfigState(crate::signal::config::BlockSignalConfig {
+                    block_pos: glam::IVec3::new(bcs.block_x(), bcs.block_y(), bcs.block_z()),
+                    block_type: bcs.block_type(),
+                    kind: bcs.kind(),
+                    publish_bindings: pub_b,
+                    subscribe_bindings: sub_b,
+                    converter_rules: rules,
+                    seat_mappings: seats,
+                    available_channels: channels,
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),

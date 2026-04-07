@@ -280,8 +280,9 @@ pub fn render_frame(
     warp_target_star: Option<hud::WarpTargetInfo>,
     block_renderer: Option<&BlockRenderer>,
     block_target: Option<&voxeldust_core::block::raycast::BlockHit>,
-) {
-    let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return };
+    config_state: Option<&mut voxeldust_core::signal::config::BlockSignalConfig>,
+) -> hud::ConfigPanelAction {
+    let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     // Build object uniforms.
@@ -536,9 +537,11 @@ pub fn render_frame(
         frame_count,
         warp_target_star,
     };
-    let full_output = hud::run_hud(gpu, window, &hud_ctx);
+    let (full_output, panel_action) = hud::run_hud(gpu, window, &hud_ctx, config_state);
     hud::render_egui(gpu, &mut encoder, &view, full_output);
 
     gpu.queue.submit(std::iter::once(encoder.finish()));
     frame.present();
+
+    panel_action
 }

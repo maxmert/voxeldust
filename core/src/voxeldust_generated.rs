@@ -159,10 +159,10 @@ pub struct ShardPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SERVER_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 11;
+pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 12;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 12] = [
+pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 13] = [
   ServerPayload::NONE,
   ServerPayload::JoinResponse,
   ServerPayload::WorldState,
@@ -175,6 +175,7 @@ pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 12] = [
   ServerPayload::GalaxyWorldState,
   ServerPayload::ChunkSnapshot,
   ServerPayload::ChunkDelta,
+  ServerPayload::BlockConfigState,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -194,9 +195,10 @@ impl ServerPayload {
   pub const GalaxyWorldState: Self = Self(9);
   pub const ChunkSnapshot: Self = Self(10);
   pub const ChunkDelta: Self = Self(11);
+  pub const BlockConfigState: Self = Self(12);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 11;
+  pub const ENUM_MAX: u8 = 12;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::JoinResponse,
@@ -210,6 +212,7 @@ impl ServerPayload {
     Self::GalaxyWorldState,
     Self::ChunkSnapshot,
     Self::ChunkDelta,
+    Self::BlockConfigState,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -226,6 +229,7 @@ impl ServerPayload {
       Self::GalaxyWorldState => Some("GalaxyWorldState"),
       Self::ChunkSnapshot => Some("ChunkSnapshot"),
       Self::ChunkDelta => Some("ChunkDelta"),
+      Self::BlockConfigState => Some("BlockConfigState"),
       _ => None,
     }
   }
@@ -285,14 +289,15 @@ pub struct ServerPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 3;
+pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 4;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 4] = [
+pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 5] = [
   ClientPayload::NONE,
   ClientPayload::Connect,
   ClientPayload::PlayerInput,
   ClientPayload::BlockEditRequest,
+  ClientPayload::BlockConfigUpdate,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -304,14 +309,16 @@ impl ClientPayload {
   pub const Connect: Self = Self(1);
   pub const PlayerInput: Self = Self(2);
   pub const BlockEditRequest: Self = Self(3);
+  pub const BlockConfigUpdate: Self = Self(4);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 3;
+  pub const ENUM_MAX: u8 = 4;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::Connect,
     Self::PlayerInput,
     Self::BlockEditRequest,
+    Self::BlockConfigUpdate,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -320,6 +327,7 @@ impl ClientPayload {
       Self::Connect => Some("Connect"),
       Self::PlayerInput => Some("PlayerInput"),
       Self::BlockEditRequest => Some("BlockEditRequest"),
+      Self::BlockConfigUpdate => Some("BlockConfigUpdate"),
       _ => None,
     }
   }
@@ -8252,6 +8260,899 @@ impl ::core::fmt::Debug for PlayerDestroyed<'_> {
       ds.finish()
   }
 }
+pub enum SignalBindingFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Signal binding: maps a channel name to a block property.
+pub struct SignalBindingFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SignalBindingFB<'a> {
+  type Inner = SignalBindingFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SignalBindingFB<'a> {
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_PROPERTY: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SignalBindingFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SignalBindingFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SignalBindingFB<'bldr>> {
+    let mut builder = SignalBindingFBBuilder::new(_fbb);
+    if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    builder.add_property(args.property);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SignalBindingFB::VT_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn property(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalBindingFB::VT_PROPERTY, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SignalBindingFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
+     .visit_field::<u8>("property", Self::VT_PROPERTY, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SignalBindingFBArgs<'a> {
+    pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub property: u8,
+}
+impl<'a> Default for SignalBindingFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SignalBindingFBArgs {
+      channel_name: None,
+      property: 0,
+    }
+  }
+}
+
+pub struct SignalBindingFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SignalBindingFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SignalBindingFB::VT_CHANNEL_NAME, channel_name);
+  }
+  #[inline]
+  pub fn add_property(&mut self, property: u8) {
+    self.fbb_.push_slot::<u8>(SignalBindingFB::VT_PROPERTY, property, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SignalBindingFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SignalBindingFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SignalBindingFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SignalBindingFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SignalBindingFB");
+      ds.field("channel_name", &self.channel_name());
+      ds.field("property", &self.property());
+      ds.finish()
+  }
+}
+pub enum SignalRuleFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Signal converter rule: condition → action.
+pub struct SignalRuleFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SignalRuleFB<'a> {
+  type Inner = SignalRuleFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SignalRuleFB<'a> {
+  pub const VT_INPUT_CHANNEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CONDITION_TYPE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_CONDITION_VALUE: ::flatbuffers::VOffsetT = 8;
+  pub const VT_OUTPUT_CHANNEL: ::flatbuffers::VOffsetT = 10;
+  pub const VT_EXPRESSION_TYPE: ::flatbuffers::VOffsetT = 12;
+  pub const VT_EXPRESSION_VALUE: ::flatbuffers::VOffsetT = 14;
+  pub const VT_EXPRESSION_VALUE2: ::flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SignalRuleFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SignalRuleFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SignalRuleFB<'bldr>> {
+    let mut builder = SignalRuleFBBuilder::new(_fbb);
+    builder.add_expression_value2(args.expression_value2);
+    builder.add_expression_value(args.expression_value);
+    if let Some(x) = args.output_channel { builder.add_output_channel(x); }
+    builder.add_condition_value(args.condition_value);
+    if let Some(x) = args.input_channel { builder.add_input_channel(x); }
+    builder.add_expression_type(args.expression_type);
+    builder.add_condition_type(args.condition_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn input_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SignalRuleFB::VT_INPUT_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn condition_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalRuleFB::VT_CONDITION_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn condition_value(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(SignalRuleFB::VT_CONDITION_VALUE, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn output_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SignalRuleFB::VT_OUTPUT_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn expression_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalRuleFB::VT_EXPRESSION_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn expression_value(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(SignalRuleFB::VT_EXPRESSION_VALUE, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn expression_value2(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(SignalRuleFB::VT_EXPRESSION_VALUE2, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SignalRuleFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("input_channel", Self::VT_INPUT_CHANNEL, false)?
+     .visit_field::<u8>("condition_type", Self::VT_CONDITION_TYPE, false)?
+     .visit_field::<f32>("condition_value", Self::VT_CONDITION_VALUE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("output_channel", Self::VT_OUTPUT_CHANNEL, false)?
+     .visit_field::<u8>("expression_type", Self::VT_EXPRESSION_TYPE, false)?
+     .visit_field::<f32>("expression_value", Self::VT_EXPRESSION_VALUE, false)?
+     .visit_field::<f32>("expression_value2", Self::VT_EXPRESSION_VALUE2, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SignalRuleFBArgs<'a> {
+    pub input_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub condition_type: u8,
+    pub condition_value: f32,
+    pub output_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub expression_type: u8,
+    pub expression_value: f32,
+    pub expression_value2: f32,
+}
+impl<'a> Default for SignalRuleFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SignalRuleFBArgs {
+      input_channel: None,
+      condition_type: 0,
+      condition_value: 0.0,
+      output_channel: None,
+      expression_type: 0,
+      expression_value: 0.0,
+      expression_value2: 0.0,
+    }
+  }
+}
+
+pub struct SignalRuleFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SignalRuleFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_input_channel(&mut self, input_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SignalRuleFB::VT_INPUT_CHANNEL, input_channel);
+  }
+  #[inline]
+  pub fn add_condition_type(&mut self, condition_type: u8) {
+    self.fbb_.push_slot::<u8>(SignalRuleFB::VT_CONDITION_TYPE, condition_type, 0);
+  }
+  #[inline]
+  pub fn add_condition_value(&mut self, condition_value: f32) {
+    self.fbb_.push_slot::<f32>(SignalRuleFB::VT_CONDITION_VALUE, condition_value, 0.0);
+  }
+  #[inline]
+  pub fn add_output_channel(&mut self, output_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SignalRuleFB::VT_OUTPUT_CHANNEL, output_channel);
+  }
+  #[inline]
+  pub fn add_expression_type(&mut self, expression_type: u8) {
+    self.fbb_.push_slot::<u8>(SignalRuleFB::VT_EXPRESSION_TYPE, expression_type, 0);
+  }
+  #[inline]
+  pub fn add_expression_value(&mut self, expression_value: f32) {
+    self.fbb_.push_slot::<f32>(SignalRuleFB::VT_EXPRESSION_VALUE, expression_value, 0.0);
+  }
+  #[inline]
+  pub fn add_expression_value2(&mut self, expression_value2: f32) {
+    self.fbb_.push_slot::<f32>(SignalRuleFB::VT_EXPRESSION_VALUE2, expression_value2, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SignalRuleFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SignalRuleFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SignalRuleFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SignalRuleFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SignalRuleFB");
+      ds.field("input_channel", &self.input_channel());
+      ds.field("condition_type", &self.condition_type());
+      ds.field("condition_value", &self.condition_value());
+      ds.field("output_channel", &self.output_channel());
+      ds.field("expression_type", &self.expression_type());
+      ds.field("expression_value", &self.expression_value());
+      ds.field("expression_value2", &self.expression_value2());
+      ds.finish()
+  }
+}
+pub enum SeatBindingFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Seat input → channel mapping.
+pub struct SeatBindingFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SeatBindingFB<'a> {
+  type Inner = SeatBindingFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SeatBindingFB<'a> {
+  pub const VT_INPUT_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PROPERTY: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SeatBindingFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SeatBindingFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SeatBindingFB<'bldr>> {
+    let mut builder = SeatBindingFBBuilder::new(_fbb);
+    if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    if let Some(x) = args.input_name { builder.add_input_name(x); }
+    builder.add_property(args.property);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn input_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SeatBindingFB::VT_INPUT_NAME, None)}
+  }
+  #[inline]
+  pub fn channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SeatBindingFB::VT_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn property(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SeatBindingFB::VT_PROPERTY, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SeatBindingFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("input_name", Self::VT_INPUT_NAME, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
+     .visit_field::<u8>("property", Self::VT_PROPERTY, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SeatBindingFBArgs<'a> {
+    pub input_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub property: u8,
+}
+impl<'a> Default for SeatBindingFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SeatBindingFBArgs {
+      input_name: None,
+      channel_name: None,
+      property: 0,
+    }
+  }
+}
+
+pub struct SeatBindingFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SeatBindingFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_input_name(&mut self, input_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SeatBindingFB::VT_INPUT_NAME, input_name);
+  }
+  #[inline]
+  pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SeatBindingFB::VT_CHANNEL_NAME, channel_name);
+  }
+  #[inline]
+  pub fn add_property(&mut self, property: u8) {
+    self.fbb_.push_slot::<u8>(SeatBindingFB::VT_PROPERTY, property, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SeatBindingFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SeatBindingFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SeatBindingFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SeatBindingFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SeatBindingFB");
+      ds.field("input_name", &self.input_name());
+      ds.field("channel_name", &self.channel_name());
+      ds.field("property", &self.property());
+      ds.finish()
+  }
+}
+pub enum BlockConfigStateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Server → client: current signal config for a functional block.
+pub struct BlockConfigState<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for BlockConfigState<'a> {
+  type Inner = BlockConfigState<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> BlockConfigState<'a> {
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_BLOCK_TYPE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_KIND: ::flatbuffers::VOffsetT = 12;
+  pub const VT_PUBLISH_BINDINGS: ::flatbuffers::VOffsetT = 14;
+  pub const VT_SUBSCRIBE_BINDINGS: ::flatbuffers::VOffsetT = 16;
+  pub const VT_CONVERTER_RULES: ::flatbuffers::VOffsetT = 18;
+  pub const VT_SEAT_MAPPINGS: ::flatbuffers::VOffsetT = 20;
+  pub const VT_AVAILABLE_CHANNELS: ::flatbuffers::VOffsetT = 22;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    BlockConfigState { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args BlockConfigStateArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<BlockConfigState<'bldr>> {
+    let mut builder = BlockConfigStateBuilder::new(_fbb);
+    if let Some(x) = args.available_channels { builder.add_available_channels(x); }
+    if let Some(x) = args.seat_mappings { builder.add_seat_mappings(x); }
+    if let Some(x) = args.converter_rules { builder.add_converter_rules(x); }
+    if let Some(x) = args.subscribe_bindings { builder.add_subscribe_bindings(x); }
+    if let Some(x) = args.publish_bindings { builder.add_publish_bindings(x); }
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.add_block_type(args.block_type);
+    builder.add_kind(args.kind);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(BlockConfigState::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(BlockConfigState::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(BlockConfigState::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_type(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(BlockConfigState::VT_BLOCK_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn kind(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(BlockConfigState::VT_KIND, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn publish_bindings(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>(BlockConfigState::VT_PUBLISH_BINDINGS, None)}
+  }
+  #[inline]
+  pub fn subscribe_bindings(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>(BlockConfigState::VT_SUBSCRIBE_BINDINGS, None)}
+  }
+  #[inline]
+  pub fn converter_rules(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB>>>>(BlockConfigState::VT_CONVERTER_RULES, None)}
+  }
+  #[inline]
+  pub fn seat_mappings(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>(BlockConfigState::VT_SEAT_MAPPINGS, None)}
+  }
+  #[inline]
+  pub fn available_channels(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(BlockConfigState::VT_AVAILABLE_CHANNELS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for BlockConfigState<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .visit_field::<u16>("block_type", Self::VT_BLOCK_TYPE, false)?
+     .visit_field::<u8>("kind", Self::VT_KIND, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>("publish_bindings", Self::VT_PUBLISH_BINDINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>("subscribe_bindings", Self::VT_SUBSCRIBE_BINDINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalRuleFB>>>>("converter_rules", Self::VT_CONVERTER_RULES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>("seat_mappings", Self::VT_SEAT_MAPPINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("available_channels", Self::VT_AVAILABLE_CHANNELS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct BlockConfigStateArgs<'a> {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub block_type: u16,
+    pub kind: u8,
+    pub publish_bindings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>>>,
+    pub subscribe_bindings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>>>,
+    pub converter_rules: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB<'a>>>>>,
+    pub seat_mappings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>>>,
+    pub available_channels: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
+}
+impl<'a> Default for BlockConfigStateArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    BlockConfigStateArgs {
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+      block_type: 0,
+      kind: 0,
+      publish_bindings: None,
+      subscribe_bindings: None,
+      converter_rules: None,
+      seat_mappings: None,
+      available_channels: None,
+    }
+  }
+}
+
+pub struct BlockConfigStateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigStateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(BlockConfigState::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(BlockConfigState::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(BlockConfigState::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn add_block_type(&mut self, block_type: u16) {
+    self.fbb_.push_slot::<u16>(BlockConfigState::VT_BLOCK_TYPE, block_type, 0);
+  }
+  #[inline]
+  pub fn add_kind(&mut self, kind: u8) {
+    self.fbb_.push_slot::<u8>(BlockConfigState::VT_KIND, kind, 0);
+  }
+  #[inline]
+  pub fn add_publish_bindings(&mut self, publish_bindings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SignalBindingFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_PUBLISH_BINDINGS, publish_bindings);
+  }
+  #[inline]
+  pub fn add_subscribe_bindings(&mut self, subscribe_bindings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SignalBindingFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_SUBSCRIBE_BINDINGS, subscribe_bindings);
+  }
+  #[inline]
+  pub fn add_converter_rules(&mut self, converter_rules: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SignalRuleFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_CONVERTER_RULES, converter_rules);
+  }
+  #[inline]
+  pub fn add_seat_mappings(&mut self, seat_mappings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SeatBindingFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_SEAT_MAPPINGS, seat_mappings);
+  }
+  #[inline]
+  pub fn add_available_channels(&mut self, available_channels: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<&'b  str>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_AVAILABLE_CHANNELS, available_channels);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigStateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    BlockConfigStateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<BlockConfigState<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for BlockConfigState<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("BlockConfigState");
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.field("block_type", &self.block_type());
+      ds.field("kind", &self.kind());
+      ds.field("publish_bindings", &self.publish_bindings());
+      ds.field("subscribe_bindings", &self.subscribe_bindings());
+      ds.field("converter_rules", &self.converter_rules());
+      ds.field("seat_mappings", &self.seat_mappings());
+      ds.field("available_channels", &self.available_channels());
+      ds.finish()
+  }
+}
+pub enum BlockConfigUpdateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Client → server: updated signal config for a functional block.
+pub struct BlockConfigUpdate<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for BlockConfigUpdate<'a> {
+  type Inner = BlockConfigUpdate<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> BlockConfigUpdate<'a> {
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_PUBLISH_BINDINGS: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SUBSCRIBE_BINDINGS: ::flatbuffers::VOffsetT = 12;
+  pub const VT_CONVERTER_RULES: ::flatbuffers::VOffsetT = 14;
+  pub const VT_SEAT_MAPPINGS: ::flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    BlockConfigUpdate { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args BlockConfigUpdateArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<BlockConfigUpdate<'bldr>> {
+    let mut builder = BlockConfigUpdateBuilder::new(_fbb);
+    if let Some(x) = args.seat_mappings { builder.add_seat_mappings(x); }
+    if let Some(x) = args.converter_rules { builder.add_converter_rules(x); }
+    if let Some(x) = args.subscribe_bindings { builder.add_subscribe_bindings(x); }
+    if let Some(x) = args.publish_bindings { builder.add_publish_bindings(x); }
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(BlockConfigUpdate::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(BlockConfigUpdate::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(BlockConfigUpdate::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn publish_bindings(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>(BlockConfigUpdate::VT_PUBLISH_BINDINGS, None)}
+  }
+  #[inline]
+  pub fn subscribe_bindings(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>(BlockConfigUpdate::VT_SUBSCRIBE_BINDINGS, None)}
+  }
+  #[inline]
+  pub fn converter_rules(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB>>>>(BlockConfigUpdate::VT_CONVERTER_RULES, None)}
+  }
+  #[inline]
+  pub fn seat_mappings(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>(BlockConfigUpdate::VT_SEAT_MAPPINGS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for BlockConfigUpdate<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>("publish_bindings", Self::VT_PUBLISH_BINDINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>("subscribe_bindings", Self::VT_SUBSCRIBE_BINDINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalRuleFB>>>>("converter_rules", Self::VT_CONVERTER_RULES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>("seat_mappings", Self::VT_SEAT_MAPPINGS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct BlockConfigUpdateArgs<'a> {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub publish_bindings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>>>,
+    pub subscribe_bindings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>>>,
+    pub converter_rules: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB<'a>>>>>,
+    pub seat_mappings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>>>,
+}
+impl<'a> Default for BlockConfigUpdateArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    BlockConfigUpdateArgs {
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+      publish_bindings: None,
+      subscribe_bindings: None,
+      converter_rules: None,
+      seat_mappings: None,
+    }
+  }
+}
+
+pub struct BlockConfigUpdateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigUpdateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(BlockConfigUpdate::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(BlockConfigUpdate::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(BlockConfigUpdate::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn add_publish_bindings(&mut self, publish_bindings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SignalBindingFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigUpdate::VT_PUBLISH_BINDINGS, publish_bindings);
+  }
+  #[inline]
+  pub fn add_subscribe_bindings(&mut self, subscribe_bindings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SignalBindingFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigUpdate::VT_SUBSCRIBE_BINDINGS, subscribe_bindings);
+  }
+  #[inline]
+  pub fn add_converter_rules(&mut self, converter_rules: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SignalRuleFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigUpdate::VT_CONVERTER_RULES, converter_rules);
+  }
+  #[inline]
+  pub fn add_seat_mappings(&mut self, seat_mappings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SeatBindingFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigUpdate::VT_SEAT_MAPPINGS, seat_mappings);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigUpdateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    BlockConfigUpdateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<BlockConfigUpdate<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for BlockConfigUpdate<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("BlockConfigUpdate");
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.field("publish_bindings", &self.publish_bindings());
+      ds.field("subscribe_bindings", &self.subscribe_bindings());
+      ds.field("converter_rules", &self.converter_rules());
+      ds.field("seat_mappings", &self.seat_mappings());
+      ds.finish()
+  }
+}
 pub enum ServerMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -8467,6 +9368,21 @@ impl<'a> ServerMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_block_config_state(&self) -> Option<BlockConfigState<'a>> {
+    if self.payload_type() == ServerPayload::BlockConfigState {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { BlockConfigState::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ServerMessage<'_> {
@@ -8488,6 +9404,7 @@ impl ::flatbuffers::Verifiable for ServerMessage<'_> {
           ServerPayload::GalaxyWorldState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<GalaxyWorldState>>("ServerPayload::GalaxyWorldState", pos),
           ServerPayload::ChunkSnapshot => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChunkSnapshot>>("ServerPayload::ChunkSnapshot", pos),
           ServerPayload::ChunkDelta => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChunkDelta>>("ServerPayload::ChunkDelta", pos),
+          ServerPayload::BlockConfigState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockConfigState>>("ServerPayload::BlockConfigState", pos),
           _ => Ok(()),
         }
      })?
@@ -8619,6 +9536,13 @@ impl ::core::fmt::Debug for ServerMessage<'_> {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
           }
         },
+        ServerPayload::BlockConfigState => {
+          if let Some(x) = self.payload_as_block_config_state() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
         _ => {
           let x: Option<()> = None;
           ds.field("payload", &x)
@@ -8722,6 +9646,21 @@ impl<'a> ClientMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_block_config_update(&self) -> Option<BlockConfigUpdate<'a>> {
+    if self.payload_type() == ClientPayload::BlockConfigUpdate {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { BlockConfigUpdate::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ClientMessage<'_> {
@@ -8735,6 +9674,7 @@ impl ::flatbuffers::Verifiable for ClientMessage<'_> {
           ClientPayload::Connect => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<Connect>>("ClientPayload::Connect", pos),
           ClientPayload::PlayerInput => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerInput>>("ClientPayload::PlayerInput", pos),
           ClientPayload::BlockEditRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockEditRequest>>("ClientPayload::BlockEditRequest", pos),
+          ClientPayload::BlockConfigUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockConfigUpdate>>("ClientPayload::BlockConfigUpdate", pos),
           _ => Ok(()),
         }
      })?
@@ -8805,6 +9745,13 @@ impl ::core::fmt::Debug for ClientMessage<'_> {
         },
         ClientPayload::BlockEditRequest => {
           if let Some(x) = self.payload_as_block_edit_request() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::BlockConfigUpdate => {
+          if let Some(x) = self.payload_as_block_config_update() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
