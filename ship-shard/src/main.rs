@@ -9,10 +9,12 @@ use tracing::{info, warn};
 
 use voxeldust_core::autopilot::{self, ShipPhysicalProperties};
 use voxeldust_core::block::{
-    self, BlockId, BlockRegistry, DamageResult, ShipGrid, StarterShipLayout, build_starter_ship,
-    edit_pipeline::{self, BlockEditQueue, BlockEdit, EditSource},
+    self, BlockId, BlockRegistry, DamageResult, FunctionalBlockKind, ShipGrid,
+    StarterShipLayout, build_starter_ship,
+    edit_pipeline::{self, BlockEditQueue, BlockEdit, EditSource, EntityOp},
     raycast,
 };
+use voxeldust_core::ecs::components::FunctionalBlockRef;
 use voxeldust_core::shard_message::AutopilotSnapshotData;
 use voxeldust_core::client_message::{
     BlockEditData, CelestialBodyData, ChunkDeltaData, JoinResponseData, LightingData,
@@ -210,28 +212,16 @@ struct ShipGridResource(ShipGrid);
 #[derive(Resource)]
 struct BlockRegistryResource(BlockRegistry);
 
-/// A single interactable block discovered from the ShipGrid.
-#[derive(Clone, Debug)]
-struct InteractableBlock {
-    /// Block type.
-    block_id: BlockId,
-    /// World-space block position (center of block) in ship-local coordinates.
-    position: Vec3,
-    /// World-space integer position for block operations.
-    world_pos: glam::IVec3,
-}
+/// Index mapping world position → Entity for O(1) lookup of functional blocks.
+/// Synced automatically by the entity lifecycle system (process_entity_ops).
+#[derive(Resource, Default)]
+struct FunctionalBlockIndex(std::collections::HashMap<glam::IVec3, Entity>);
 
-/// All interactable blocks discovered from the ShipGrid.
-/// Rebuilt whenever the ship structure changes (block placed/broken).
-/// Supports multiple cockpits, multiple doors, etc.
-#[derive(Resource)]
-struct InteractionPoints {
-    /// All cockpit blocks. Player interacts with the nearest one.
-    cockpits: Vec<InteractableBlock>,
-    /// All door blocks. Player interacts with the nearest one.
-    doors: Vec<InteractableBlock>,
-    /// Dirty flag — set when blocks change, triggers rescan.
-    dirty: bool,
+/// Pending entity lifecycle operations from the edit pipeline.
+/// Set by apply_block_edits, consumed by process_entity_ops.
+#[derive(Resource, Default)]
+struct PendingEntityOps {
+    ops: Vec<EntityOp>,
 }
 
 /// Handles of per-chunk compound colliders. Keyed by chunk key.
@@ -239,25 +229,6 @@ struct InteractionPoints {
 #[derive(Resource, Default)]
 struct ChunkColliderHandles(std::collections::HashMap<glam::IVec3, ColliderHandle>);
 
-/// Per-door runtime state.
-#[derive(Clone, Debug)]
-struct DoorInstance {
-    /// Whether this door is currently open.
-    open: bool,
-    /// Rapier collider handle for the door blocker (present when closed).
-    blocker_handle: Option<ColliderHandle>,
-    /// Ship-local position of the door block center.
-    position: Vec3,
-    /// World-space integer coordinates for block operations.
-    world_pos: glam::IVec3,
-}
-
-/// All door states in the ship. Supports multiple doors.
-/// Indexed in parallel with `InteractionPoints::doors`.
-#[derive(Resource, Default)]
-struct DoorStates {
-    doors: Vec<DoorInstance>,
-}
 
 /// Tight bounding box of all solid blocks in the ship.
 /// Used for hull boundary exit detection — if the player leaves this volume
@@ -404,10 +375,8 @@ fn drain_quic(
     mut autopilot: ResMut<AutopilotState>,
     mut connected: ResMut<ConnectedPlayer>,
     mut landing: ResMut<LandingState>,
-    mut door_states: ResMut<DoorStates>,
     mut rapier: ResMut<RapierContext>,
     mut warp: ResMut<WarpTargetState>,
-    interaction_pts: Res<InteractionPoints>,
     body_handle: Res<PlayerBodyHandle>,
     mut player_pos: ResMut<PlayerPosition>,
     mut pilot_mode: ResMut<PilotMode>,
@@ -444,13 +413,6 @@ fn drain_quic(
                 let was_landed = landing.landed;
                 landing.landed = data.velocity.length() < 0.5;
 
-                // Auto-close all open doors on takeoff (state tracking only).
-                if was_landed && !landing.landed {
-                    for door in &mut door_states.doors {
-                        door.open = false;
-                    }
-                    info!("all doors auto-closed on takeoff");
-                }
             }
             ShardMsg::HandoffAccepted(accepted) => {
                 // Planet shard accepted the player. Send ShardRedirect to client.
@@ -501,19 +463,17 @@ fn drain_quic(
                 connected.handoff_pending = false;
                 pilot_mode.0 = false;
 
-                // Spawn player at the first door (or a safe fallback).
-                let door_spawn = interaction_pts.doors
-                    .first()
-                    .map(|d| d.position)
-                    .unwrap_or(Vec3::new(0.0, 1.5, 0.0));
+                // Spawn player at a safe interior position.
+                // TODO: find the nearest air block inside the hull boundary.
+                let reentry_pos = Vec3::new(0.0, 1.5, 0.0);
                 if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
                     body.set_translation(
-                        vector![door_spawn.x, door_spawn.y, door_spawn.z],
+                        vector![reentry_pos.x, reentry_pos.y, reentry_pos.z],
                         true,
                     );
                     body.set_linvel(vector![0.0, 0.0, 0.0], true);
                 }
-                player_pos.0 = door_spawn;
+                player_pos.0 = reentry_pos;
 
                 // Send HandoffAccepted back to host shard.
                 let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
@@ -1032,40 +992,6 @@ fn preconnect_check(
     info!(planet_seed, planet_index, "sent ShardPreConnect to client");
 }
 
-// ---------------------------------------------------------------------------
-// Interaction (pilot seat + exit door)
-// ---------------------------------------------------------------------------
-
-fn interaction(
-    actions: Res<InputActions>,
-    player_pos: Res<PlayerPosition>,
-    interaction_pts: Res<InteractionPoints>,
-    mut pilot_mode: ResMut<PilotMode>,
-    mut rapier: ResMut<RapierContext>,
-    body_handle: Res<PlayerBodyHandle>,
-) {
-    let action_pressed = actions.current == 3 && actions.previous != 3;
-    if !action_pressed {
-        return;
-    }
-
-    let pos = player_pos.0;
-
-    // Check nearest cockpit.
-    if let Some((_idx, dist, _cockpit)) = nearest_interactable(&interaction_pts.cockpits, pos) {
-        if dist < INTERACT_DIST {
-            pilot_mode.0 = !pilot_mode.0;
-            if pilot_mode.0 {
-                if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
-                    body.set_linvel(vector![0.0, 0.0, 0.0], true);
-                }
-                info!("entered pilot mode");
-            } else {
-                info!("exited pilot mode");
-            }
-        }
-    }
-}
 
 /// Detect when the player has left the ship's hull volume and trigger
 /// handoff to the nearest planet shard. Works for any ship shape — checks
@@ -1589,6 +1515,10 @@ fn produce_player_edits(
     registry: Res<BlockRegistryResource>,
     connected: Res<ConnectedPlayer>,
     player_pos: Res<PlayerPosition>,
+    block_index: Res<FunctionalBlockIndex>,
+    mut pilot_mode: ResMut<PilotMode>,
+    mut rapier: ResMut<RapierContext>,
+    body_handle: Res<PlayerBodyHandle>,
 ) {
     if connected.session.is_none() || connected.handoff_pending {
         return;
@@ -1692,6 +1622,46 @@ fn produce_player_edits(
                     source: EditSource::Player(session),
                 });
             }
+            action @ 3..=9 => {
+                // Interaction: raycast to find targeted functional block,
+                // look up its kind, check interaction schema, dispatch.
+                if let Some(&entity) = block_index.0.get(&hit.world_pos) {
+                    let block_id = grid.0.get_block(
+                        hit.world_pos.x, hit.world_pos.y, hit.world_pos.z,
+                    );
+                    if let Some(kind) = registry.0.functional_kind(block_id) {
+                        let schema = registry.0.interaction_schema(kind);
+                        let matching_action = schema.actions.iter()
+                            .find(|a| a.action_key == action);
+
+                        if let Some(interaction_def) = matching_action {
+                            match kind {
+                                FunctionalBlockKind::Seat => {
+                                    // Toggle pilot mode.
+                                    pilot_mode.0 = !pilot_mode.0;
+                                    if pilot_mode.0 {
+                                        if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
+                                            body.set_linvel(vector![0.0, 0.0, 0.0], true);
+                                        }
+                                        info!("entered pilot mode via seat at {:?}", hit.world_pos);
+                                    } else {
+                                        info!("exited pilot mode");
+                                    }
+                                }
+                                _ => {
+                                    // Future phases: dispatch to kind-specific handlers.
+                                    info!(
+                                        kind = ?kind,
+                                        interaction = interaction_def.label,
+                                        block = ?hit.world_pos,
+                                        "interaction not yet implemented"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => {} // unknown action
         }
     }
@@ -1730,10 +1700,10 @@ fn apply_block_edits(
     mut rapier: ResMut<RapierContext>,
     mut collider_handles: ResMut<ChunkColliderHandles>,
     mut hull_bounds: ResMut<ShipHullBounds>,
-    mut interaction_pts: ResMut<InteractionPoints>,
     connected: Res<ConnectedPlayer>,
     bridge: Res<NetworkBridge>,
     mut persistence: Option<ResMut<ShipPersistence>>,
+    mut pending_entity_ops: Option<ResMut<PendingEntityOps>>,
 ) {
     let edits = queue.drain_all();
     if edits.is_empty() {
@@ -1767,12 +1737,7 @@ fn apply_block_edits(
         }
     }
 
-    // 4. Shard-specific: rescan interactable blocks if needed.
-    if result.interactables_changed {
-        *interaction_pts = scan_interactable_blocks(&grid.0);
-    }
-
-    // 5. Broadcast ChunkDeltas to all connected clients (one per dirty chunk).
+    // 4. Broadcast ChunkDeltas to all connected clients (one per dirty chunk).
     if let Some(session) = connected.session {
         for (chunk_key, mods) in &result.dirty_chunks {
             let seq = grid.0.get_chunk_mut(*chunk_key)
@@ -1794,11 +1759,107 @@ fn apply_block_edits(
         }
     }
 
+    // 6. Store entity lifecycle operations for process_entity_ops.
+    if !result.entity_ops.is_empty() {
+        if let Some(mut pending) = pending_entity_ops {
+            pending.ops.extend(result.entity_ops);
+        }
+    }
+
     info!(
         applied = result.applied_count,
         dirty_chunks = result.dirty_chunks.len(),
         "block edits applied"
     );
+}
+
+/// Startup system: scan the ShipGrid for existing functional blocks and spawn entities.
+/// Runs once on the first tick to initialize the FunctionalBlockIndex.
+fn init_functional_blocks(
+    mut commands: Commands,
+    grid: Res<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    mut block_index: ResMut<FunctionalBlockIndex>,
+) {
+    let cs = block::CHUNK_SIZE as i32;
+    for (chunk_key, chunk) in grid.0.iter_chunks() {
+        if chunk.is_empty() {
+            continue;
+        }
+        let chunk_origin = glam::IVec3::new(
+            chunk_key.x * cs, chunk_key.y * cs, chunk_key.z * cs,
+        );
+        for x in 0..block::CHUNK_SIZE as u8 {
+            for y in 0..block::CHUNK_SIZE as u8 {
+                for z in 0..block::CHUNK_SIZE as u8 {
+                    let id = chunk.get_block(x, y, z);
+                    if let Some(kind) = registry.0.functional_kind(id) {
+                        let wp = chunk_origin + glam::IVec3::new(x as i32, y as i32, z as i32);
+                        let entity = commands.spawn(FunctionalBlockRef {
+                            world_pos: wp,
+                            block_id: id,
+                            kind,
+                        }).id();
+                        block_index.0.insert(wp, entity);
+                    }
+                }
+            }
+        }
+    }
+    if !block_index.0.is_empty() {
+        info!(count = block_index.0.len(), "initialized functional block entities from grid");
+    }
+}
+
+/// Process entity lifecycle operations: spawn/despawn ECS entities for functional blocks.
+/// Runs after apply_block_edits in the BlockEdit SystemSet.
+fn process_entity_ops(
+    mut commands: Commands,
+    mut grid: ResMut<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    mut block_index: ResMut<FunctionalBlockIndex>,
+    mut pending: ResMut<PendingEntityOps>,
+) {
+    for op in pending.ops.drain(..) {
+        match op {
+            EntityOp::Spawn { pos, block_id } => {
+                if let Some(kind) = registry.0.functional_kind(block_id) {
+                    let entity = commands.spawn(FunctionalBlockRef {
+                        world_pos: pos,
+                        block_id,
+                        kind,
+                    }).id();
+
+                    // Store entity index in block metadata (grid → entity link).
+                    let meta = grid.0.get_or_create_meta(pos.x, pos.y, pos.z);
+                    meta.entity_index = entity.index_u32();
+
+                    // Store in position index (position → entity link).
+                    block_index.0.insert(pos, entity);
+
+                    info!(
+                        kind = ?kind,
+                        block = ?pos,
+                        entity = entity.index_u32(),
+                        "spawned functional block entity"
+                    );
+                }
+            }
+            EntityOp::Despawn { pos, entity_index: _ } => {
+                // Find and despawn the entity via the position index.
+                if let Some(entity) = block_index.0.remove(&pos) {
+                    commands.entity(entity).despawn();
+                    info!(
+                        block = ?pos,
+                        entity = entity.index_u32(),
+                        "despawned functional block entity"
+                    );
+                }
+                // Clear metadata at this position.
+                grid.0.remove_meta(pos.x, pos.y, pos.z);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1835,62 +1896,6 @@ fn build_chunk_collider(
 ///
 /// Called at startup and whenever blocks change. Returns the full set of
 /// interaction points — supporting any number of cockpits and doors.
-fn scan_interactable_blocks(grid: &ShipGrid) -> InteractionPoints {
-    let cs = block::CHUNK_SIZE as i32;
-    let mut cockpits = Vec::new();
-    let mut doors = Vec::new();
-
-    for (chunk_key, chunk) in grid.iter_chunks() {
-        if chunk.is_empty() {
-            continue;
-        }
-        let chunk_origin = glam::IVec3::new(
-            chunk_key.x * cs,
-            chunk_key.y * cs,
-            chunk_key.z * cs,
-        );
-
-        for x in 0..block::CHUNK_SIZE as u8 {
-            for y in 0..block::CHUNK_SIZE as u8 {
-                for z in 0..block::CHUNK_SIZE as u8 {
-                    let id = chunk.get_block(x, y, z);
-                    if id == BlockId::COCKPIT || id == BlockId::DOOR {
-                        let wp = chunk_origin + glam::IVec3::new(x as i32, y as i32, z as i32);
-                        let block = InteractableBlock {
-                            block_id: id,
-                            position: Vec3::new(wp.x as f32 + 0.5, wp.y as f32 + 0.5, wp.z as f32 + 0.5),
-                            world_pos: wp,
-                        };
-                        match id {
-                            BlockId::COCKPIT => cockpits.push(block),
-                            BlockId::DOOR => doors.push(block),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    InteractionPoints {
-        cockpits,
-        doors,
-        dirty: false,
-    }
-}
-
-/// Find the nearest interactable block of a given type to the player.
-fn nearest_interactable<'a>(
-    blocks: &'a [InteractableBlock],
-    player_pos: Vec3,
-) -> Option<(usize, f32, &'a InteractableBlock)> {
-    blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (i, (b.position - player_pos).length(), b))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-}
-
 fn build_ship_interior(
     shard_id: ShardId,
     ship_id: u64,
@@ -1956,30 +1961,31 @@ fn build_ship_interior(
         }
     }
 
-    // Scan for all interactable blocks (cockpits, doors).
-    let interaction_points = scan_interactable_blocks(&grid);
-
-    // Create door blocker colliders for each door block.
-    let mut door_instances: Vec<DoorInstance> = Vec::new();
-    for door_block in &interaction_points.doors {
-        let dp = door_block.position;
-        let blocker = ColliderBuilder::cuboid(0.5, 0.5, 0.5)
-            .translation(vector![dp.x, dp.y, dp.z])
-            .build();
-        let handle = collider_set.insert(blocker);
-        door_instances.push(DoorInstance {
-            open: false,
-            blocker_handle: Some(handle),
-            position: dp,
-            world_pos: door_block.world_pos,
-        });
+    // Find the first cockpit/seat block for player spawn position.
+    // Scan the grid for any COCKPIT block as the spawn anchor.
+    let mut spawn_pos = Vec3::new(0.0, 1.5, 0.0); // fallback
+    {
+        let cs = block::CHUNK_SIZE as i32;
+        'outer: for (chunk_key, chunk) in grid.iter_chunks() {
+            if chunk.is_empty() { continue; }
+            let co = glam::IVec3::new(chunk_key.x * cs, chunk_key.y * cs, chunk_key.z * cs);
+            for x in 0..block::CHUNK_SIZE as u8 {
+                for y in 0..block::CHUNK_SIZE as u8 {
+                    for z in 0..block::CHUNK_SIZE as u8 {
+                        if chunk.get_block(x, y, z) == BlockId::COCKPIT {
+                            let wp = co + glam::IVec3::new(x as i32, y as i32, z as i32);
+                            spawn_pos = Vec3::new(
+                                wp.x as f32 + 0.5,
+                                wp.y as f32 + 1.0,
+                                wp.z as f32 + 1.5,
+                            );
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
     }
-
-    // Player capsule — spawn near the first cockpit (or safe fallback).
-    let spawn_pos = interaction_points.cockpits
-        .first()
-        .map(|c| Vec3::new(c.position.x, c.position.y + 0.5, c.position.z + 1.0))
-        .unwrap_or(Vec3::new(0.0, 1.5, 0.0));
     let player_rb = RigidBodyBuilder::dynamic()
         .translation(vector![spawn_pos.x, spawn_pos.y, spawn_pos.z])
         .lock_rotations()
@@ -2085,15 +2091,15 @@ fn build_ship_interior(
 
     app.insert_resource(ShipGridResource(grid));
     app.insert_resource(BlockRegistryResource(registry));
-    app.insert_resource(interaction_points);
     app.insert_resource(hull_bounds);
     app.insert_resource(ChunkColliderHandles(chunk_collider_handles));
+    app.insert_resource(PendingEntityOps::default());
+    app.insert_resource(FunctionalBlockIndex::default());
     app.insert_resource(ShipProps(ShipPhysicalProperties::starter_ship()));
     app.insert_resource(PilotAccumulator::default());
     app.insert_resource(AutopilotState::default());
     app.insert_resource(WarpTargetState::default());
     app.insert_resource(ConnectedPlayer::default());
-    app.insert_resource(DoorStates { doors: door_instances });
     app.insert_resource(AtmosphereState::default());
     app.insert_resource(LandingState::default());
     app.insert_resource(PendingMessages::default());
@@ -2140,10 +2146,15 @@ fn build_ship_interior(
         (process_connects, process_input, preconnect_check).in_set(ShipSet::Input),
     );
 
-    // Block editing: produce edits from player input, then apply all queued edits.
+    // Startup: scan grid for existing functional blocks.
+    app.add_systems(Startup, init_functional_blocks);
+
+    // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
         Update,
-        (produce_player_edits, apply_block_edits).chain().in_set(ShipSet::BlockEdit),
+        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops)
+            .chain()
+            .in_set(ShipSet::BlockEdit),
     );
 
     // Physics.
@@ -2152,10 +2163,10 @@ fn build_ship_interior(
         (tick_counter, physics_step).chain().in_set(ShipSet::Physics),
     );
 
-    // Interaction: seat, door, threshold.
+    // Interaction: hull exit detection (seat interaction moved to BlockEdit via raycast).
     app.add_systems(
         Update,
-        (interaction, hull_exit_check).chain().in_set(ShipSet::Interaction),
+        hull_exit_check.in_set(ShipSet::Interaction),
     );
 
     // Send: QUIC messages to host shard.

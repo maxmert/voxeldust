@@ -6,7 +6,10 @@
 use bevy_ecs::prelude::*;
 use glam::{DQuat, DVec3};
 
+use glam::IVec3;
+
 use crate::autopilot::{AutopilotMode, FlightPhase, ShipPhysicalProperties};
+use crate::block::{BlockId, FunctionalBlockKind};
 use crate::shard_types::{SessionToken, ShardId};
 
 // ---------------------------------------------------------------------------
@@ -229,6 +232,28 @@ pub struct ShipShardRef(pub Option<ShardId>);
 /// Source system shard for warp ships.
 #[derive(Component)]
 pub struct SourceSystemShard(pub ShardId);
+
+// ---------------------------------------------------------------------------
+// Functional block entity
+// ---------------------------------------------------------------------------
+
+/// Marks an ECS entity as a functional block in the ship/planet grid.
+///
+/// This is the bidirectional link between the block grid and the ECS world:
+/// - **Grid → Entity**: `BlockMeta::entity_index` stores the Entity index
+/// - **Entity → Grid**: this component's `world_pos` stores the block position
+///
+/// Future phases add kind-specific components (ThrusterState, ReactorState, etc.)
+/// on top of this via `Added<FunctionalBlockRef>` change detection.
+#[derive(Component, Clone, Debug)]
+pub struct FunctionalBlockRef {
+    /// World-space block position in the ship grid.
+    pub world_pos: IVec3,
+    /// Block type ID.
+    pub block_id: BlockId,
+    /// Functional category — determines which subsystems interact with this block.
+    pub kind: FunctionalBlockKind,
+}
 
 // ---------------------------------------------------------------------------
 // Thermal state (ships in atmosphere)

@@ -97,6 +97,23 @@ impl BlockEditQueue {
     }
 }
 
+/// Entity lifecycle operation emitted by the edit pipeline.
+/// The shard executes these to spawn/despawn ECS entities for functional blocks.
+#[derive(Clone, Debug)]
+pub enum EntityOp {
+    /// A functional block was placed — spawn an ECS entity for it.
+    Spawn {
+        pos: IVec3,
+        block_id: BlockId,
+    },
+    /// A functional block was broken — despawn its ECS entity.
+    /// `entity_index` comes from `BlockMeta::entity_index` at the old position.
+    Despawn {
+        pos: IVec3,
+        entity_index: u32,
+    },
+}
+
 /// Result of applying block edits to a grid.
 /// Tells the shard what changed so it can handle side effects.
 pub struct ApplyResult {
@@ -112,6 +129,9 @@ pub struct ApplyResult {
     pub interactables_changed: bool,
     /// Number of edits that actually changed a block (vs no-ops).
     pub applied_count: usize,
+    /// Entity lifecycle operations for functional blocks.
+    /// The shard processes these to spawn/despawn ECS entities.
+    pub entity_ops: Vec<EntityOp>,
 }
 
 /// Apply block edits to a ShipGrid. **Pure function** — no side effects.
@@ -132,6 +152,7 @@ pub fn apply_edits_to_grid(
     let mut solidity_changed = false;
     let mut interactables_changed = false;
     let mut applied_count = 0usize;
+    let mut entity_ops = Vec::new();
 
     for edit in edits {
         let old = grid.get_block(edit.pos.x, edit.pos.y, edit.pos.z);
@@ -139,8 +160,31 @@ pub fn apply_edits_to_grid(
             continue; // no-op
         }
 
+        // Check for functional block despawn BEFORE overwriting the block
+        // (we need the old block's metadata to get the entity_index).
+        if registry.is_functional(old) {
+            let entity_index = grid
+                .get_meta(edit.pos.x, edit.pos.y, edit.pos.z)
+                .map(|m| m.entity_index)
+                .unwrap_or(0);
+            if entity_index != 0 {
+                entity_ops.push(EntityOp::Despawn {
+                    pos: edit.pos,
+                    entity_index,
+                });
+            }
+        }
+
         grid.set_block(edit.pos.x, edit.pos.y, edit.pos.z, edit.new_block);
         applied_count += 1;
+
+        // Check for functional block spawn AFTER placing the new block.
+        if registry.is_functional(edit.new_block) {
+            entity_ops.push(EntityOp::Spawn {
+                pos: edit.pos,
+                block_id: edit.new_block,
+            });
+        }
 
         // Track dirty chunk + block modification for this edit.
         let (chunk_key, lx, ly, lz) = ShipGrid::world_to_chunk(
@@ -163,7 +207,7 @@ pub fn apply_edits_to_grid(
             solidity_changed = true;
         }
 
-        // Track whether interactable blocks changed.
+        // Track whether interactable blocks changed (used by legacy systems).
         if is_interactable(old) || is_interactable(edit.new_block) {
             interactables_changed = true;
         }
@@ -174,6 +218,7 @@ pub fn apply_edits_to_grid(
         solidity_changed,
         interactables_changed,
         applied_count,
+        entity_ops,
     }
 }
 
@@ -322,5 +367,93 @@ mod tests {
 
         let result = apply_edits_to_grid(&mut grid, &edits, &registry);
         assert!(result.interactables_changed);
+    }
+
+    #[test]
+    fn apply_emits_spawn_for_functional_block() {
+        let registry = BlockRegistry::new();
+        let mut grid = ShipGrid::new();
+
+        let edits = vec![BlockEdit {
+            pos: IVec3::new(5, 5, 5),
+            new_block: BlockId::THRUSTER_SMALL_CHEMICAL,
+            source: EditSource::Player(SessionToken(0)),
+        }];
+
+        let result = apply_edits_to_grid(&mut grid, &edits, &registry);
+        assert_eq!(result.entity_ops.len(), 1);
+        match &result.entity_ops[0] {
+            EntityOp::Spawn { pos, block_id } => {
+                assert_eq!(*pos, IVec3::new(5, 5, 5));
+                assert_eq!(*block_id, BlockId::THRUSTER_SMALL_CHEMICAL);
+            }
+            _ => panic!("expected Spawn"),
+        }
+    }
+
+    #[test]
+    fn apply_emits_despawn_for_removed_functional_block() {
+        let registry = BlockRegistry::new();
+        let mut grid = ShipGrid::new();
+
+        // Place a functional block with a fake entity_index in metadata.
+        grid.set_block(5, 5, 5, BlockId::REACTOR_SMALL);
+        let meta = grid.get_or_create_meta(5, 5, 5);
+        meta.entity_index = 42;
+
+        // Now break it.
+        let edits = vec![BlockEdit {
+            pos: IVec3::new(5, 5, 5),
+            new_block: BlockId::AIR,
+            source: EditSource::Explosion,
+        }];
+
+        let result = apply_edits_to_grid(&mut grid, &edits, &registry);
+        assert_eq!(result.entity_ops.len(), 1);
+        match &result.entity_ops[0] {
+            EntityOp::Despawn { pos, entity_index } => {
+                assert_eq!(*pos, IVec3::new(5, 5, 5));
+                assert_eq!(*entity_index, 42);
+            }
+            _ => panic!("expected Despawn"),
+        }
+    }
+
+    #[test]
+    fn apply_no_entity_ops_for_structural_blocks() {
+        let registry = BlockRegistry::new();
+        let mut grid = ShipGrid::new();
+
+        let edits = vec![BlockEdit {
+            pos: IVec3::new(0, 0, 0),
+            new_block: BlockId::HULL_STANDARD,
+            source: EditSource::Blueprint,
+        }];
+
+        let result = apply_edits_to_grid(&mut grid, &edits, &registry);
+        assert!(result.entity_ops.is_empty());
+    }
+
+    #[test]
+    fn apply_replace_functional_emits_despawn_then_spawn() {
+        let registry = BlockRegistry::new();
+        let mut grid = ShipGrid::new();
+
+        // Place one functional block.
+        grid.set_block(3, 3, 3, BlockId::REACTOR_SMALL);
+        let meta = grid.get_or_create_meta(3, 3, 3);
+        meta.entity_index = 99;
+
+        // Replace with a different functional block.
+        let edits = vec![BlockEdit {
+            pos: IVec3::new(3, 3, 3),
+            new_block: BlockId::BATTERY,
+            source: EditSource::Player(SessionToken(0)),
+        }];
+
+        let result = apply_edits_to_grid(&mut grid, &edits, &registry);
+        assert_eq!(result.entity_ops.len(), 2);
+        assert!(matches!(result.entity_ops[0], EntityOp::Despawn { entity_index: 99, .. }));
+        assert!(matches!(result.entity_ops[1], EntityOp::Spawn { block_id, .. } if block_id == BlockId::BATTERY));
     }
 }

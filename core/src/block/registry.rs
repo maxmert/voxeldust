@@ -4,15 +4,96 @@ use super::block_id::BlockId;
 /// Maximum number of block types supported by the u16 address space.
 const MAX_BLOCK_TYPES: usize = 65536;
 
+// ---------------------------------------------------------------------------
+// Functional block types and interaction schemas
+// ---------------------------------------------------------------------------
+
+/// Category of functional block — determines which subsystems interact with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FunctionalBlockKind {
+    Thruster,
+    Reactor,
+    Battery,
+    SolarPanel,
+    PowerConduit,
+    Seat,
+    GravityGenerator,
+    ShieldEmitter,
+    ShieldGenerator,
+    AirCompressor,
+    Antenna,
+    Rotor,
+    Piston,
+    Rail,
+    RailJunction,
+    RailSignal,
+    SignalConverter,
+    Sensor,
+    Computer,
+}
+
+/// What an interaction does when triggered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InteractionType {
+    /// Simple on/off toggle (seat, reactor, shield generator).
+    Toggle,
+    /// Cycle through discrete states (rail junction direction).
+    CycleState,
+    /// Open a UI panel on the client (signal converter rules, computer terminal).
+    OpenUI,
+    /// Custom interaction dispatched to a kind-specific handler.
+    Custom(u8),
+}
+
+/// A single interaction that a functional block supports.
+#[derive(Clone, Debug)]
+pub struct InteractionDef {
+    /// Input action code that triggers this (3=E key, 8=F key, etc.)
+    pub action_key: u8,
+    /// What this interaction does.
+    pub interaction_type: InteractionType,
+    /// Display label for client HUD prompt ("Sit", "Toggle Power", "Open Config").
+    pub label: &'static str,
+}
+
+/// All interactions a block kind supports.
+pub struct InteractionSchema {
+    pub actions: &'static [InteractionDef],
+}
+
+/// No interactions — used for functional blocks that have no player-facing interaction.
+static SCHEMA_NONE: InteractionSchema = InteractionSchema { actions: &[] };
+
+static SCHEMA_SEAT: InteractionSchema = InteractionSchema {
+    actions: &[InteractionDef { action_key: 3, interaction_type: InteractionType::Toggle, label: "Sit" }],
+};
+
+static SCHEMA_TOGGLE: InteractionSchema = InteractionSchema {
+    actions: &[InteractionDef { action_key: 3, interaction_type: InteractionType::Toggle, label: "Toggle" }],
+};
+
+static SCHEMA_PROGRAM: InteractionSchema = InteractionSchema {
+    actions: &[InteractionDef { action_key: 3, interaction_type: InteractionType::OpenUI, label: "Program" }],
+};
+
+static SCHEMA_JUNCTION: InteractionSchema = InteractionSchema {
+    actions: &[
+        InteractionDef { action_key: 3, interaction_type: InteractionType::CycleState, label: "Switch" },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Block Registry
+// ---------------------------------------------------------------------------
+
 /// The global block property table. Indexed by `BlockId::as_u16()`.
 ///
 /// Constructed once at startup via `BlockRegistry::new()`. Both server and
 /// client build identical instances from the same static data.
-///
-/// Memory: 65536 entries. The actual `BlockDef` size is moderate (~80 bytes),
-/// but most entries are the default (undefined/air). Only ~100 are populated.
 pub struct BlockRegistry {
     defs: Vec<BlockDef>,
+    /// Functional block kind per block ID. None = not functional (structural/natural block).
+    functional_kinds: Vec<Option<FunctionalBlockKind>>,
 }
 
 impl BlockRegistry {
@@ -20,6 +101,7 @@ impl BlockRegistry {
     pub fn new() -> Self {
         let mut defs = Vec::with_capacity(MAX_BLOCK_TYPES);
         defs.resize_with(MAX_BLOCK_TYPES, || BlockDef::UNDEFINED.clone());
+        let mut functional_kinds = vec![None; MAX_BLOCK_TYPES];
 
         let r = &mut defs;
 
@@ -510,7 +592,51 @@ impl BlockRegistry {
         set(r, BlockId::SENSOR_DAMAGE, functional_block("sensor_damage", 800, 20, [100, 200, 180]));
         set(r, BlockId::COMPUTER, functional_block("computer", 2000, 40, [40, 50, 60]));
 
-        Self { defs }
+        // Populate functional block kinds.
+        use FunctionalBlockKind::*;
+        let fk = &mut functional_kinds;
+        // Propulsion
+        for id in [BlockId::THRUSTER_SMALL_CHEMICAL, BlockId::THRUSTER_MEDIUM_CHEMICAL,
+            BlockId::THRUSTER_LARGE_CHEMICAL, BlockId::THRUSTER_SMALL_ION,
+            BlockId::THRUSTER_MEDIUM_ION, BlockId::THRUSTER_LARGE_ION,
+            BlockId::THRUSTER_SMALL_FUSION, BlockId::THRUSTER_MEDIUM_FUSION,
+            BlockId::THRUSTER_LARGE_FUSION] {
+            fk[id.as_u16() as usize] = Some(Thruster);
+        }
+        // Power
+        for id in [BlockId::REACTOR_SMALL, BlockId::REACTOR_MEDIUM, BlockId::REACTOR_LARGE] {
+            fk[id.as_u16() as usize] = Some(Reactor);
+        }
+        fk[BlockId::BATTERY.as_u16() as usize] = Some(Battery);
+        fk[BlockId::SOLAR_PANEL.as_u16() as usize] = Some(SolarPanel);
+        fk[BlockId::POWER_CONDUIT.as_u16() as usize] = Some(PowerConduit);
+        // Seats (replaces COCKPIT placeholder)
+        fk[BlockId::COCKPIT.as_u16() as usize] = Some(Seat);
+        // Utility
+        fk[BlockId::GRAVITY_GENERATOR.as_u16() as usize] = Some(GravityGenerator);
+        fk[BlockId::ANTENNA.as_u16() as usize] = Some(Antenna);
+        // Shields
+        fk[BlockId::SHIELD_EMITTER.as_u16() as usize] = Some(ShieldEmitter);
+        fk[BlockId::SHIELD_GENERATOR.as_u16() as usize] = Some(ShieldGenerator);
+        // Life support
+        fk[BlockId::AIR_COMPRESSOR.as_u16() as usize] = Some(AirCompressor);
+        // Mechanical
+        fk[BlockId::ROTOR.as_u16() as usize] = Some(Rotor);
+        fk[BlockId::PISTON.as_u16() as usize] = Some(Piston);
+        // Transport
+        fk[BlockId::RAIL_STRAIGHT.as_u16() as usize] = Some(Rail);
+        fk[BlockId::RAIL_CURVE.as_u16() as usize] = Some(Rail);
+        fk[BlockId::RAIL_JUNCTION.as_u16() as usize] = Some(RailJunction);
+        fk[BlockId::RAIL_SIGNAL.as_u16() as usize] = Some(RailSignal);
+        // Logic
+        fk[BlockId::SIGNAL_CONVERTER.as_u16() as usize] = Some(SignalConverter);
+        for id in [BlockId::SENSOR_PRESSURE, BlockId::SENSOR_PROXIMITY,
+            BlockId::SENSOR_SPEED, BlockId::SENSOR_POWER, BlockId::SENSOR_DAMAGE] {
+            fk[id.as_u16() as usize] = Some(Sensor);
+        }
+        fk[BlockId::COMPUTER.as_u16() as usize] = Some(Computer);
+
+        Self { defs, functional_kinds }
     }
 
     /// O(1) lookup by `BlockId`.
@@ -527,6 +653,35 @@ impl BlockRegistry {
     #[inline(always)]
     pub fn is_transparent(&self, id: BlockId) -> bool {
         self.get(id).is_transparent
+    }
+
+    /// Whether this block type is a functional block (has ECS entity lifecycle).
+    #[inline(always)]
+    pub fn is_functional(&self, id: BlockId) -> bool {
+        self.functional_kinds[id.as_u16() as usize].is_some()
+    }
+
+    /// Get the functional block kind for a block type. None = not functional.
+    #[inline(always)]
+    pub fn functional_kind(&self, id: BlockId) -> Option<FunctionalBlockKind> {
+        self.functional_kinds[id.as_u16() as usize]
+    }
+
+    /// Get the interaction schema for a functional block kind.
+    /// Returns the set of interactions (action keys + types + labels) this kind supports.
+    pub fn interaction_schema(&self, kind: FunctionalBlockKind) -> &'static InteractionSchema {
+        match kind {
+            FunctionalBlockKind::Seat => &SCHEMA_SEAT,
+            FunctionalBlockKind::Reactor => &SCHEMA_TOGGLE,
+            FunctionalBlockKind::Battery => &SCHEMA_TOGGLE,
+            FunctionalBlockKind::ShieldGenerator => &SCHEMA_TOGGLE,
+            FunctionalBlockKind::AirCompressor => &SCHEMA_TOGGLE,
+            FunctionalBlockKind::SignalConverter => &SCHEMA_PROGRAM,
+            FunctionalBlockKind::Computer => &SCHEMA_PROGRAM,
+            FunctionalBlockKind::RailJunction => &SCHEMA_JUNCTION,
+            // Blocks with no direct player interaction.
+            _ => &SCHEMA_NONE,
+        }
     }
 }
 
@@ -778,5 +933,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn structural_blocks_are_not_functional() {
+        let reg = BlockRegistry::new();
+        assert!(!reg.is_functional(BlockId::AIR));
+        assert!(!reg.is_functional(BlockId::STONE));
+        assert!(!reg.is_functional(BlockId::HULL_STANDARD));
+        assert!(!reg.is_functional(BlockId::WINDOW));
+        assert!(!reg.is_functional(BlockId::DIRT));
+    }
+
+    #[test]
+    fn functional_blocks_have_kinds() {
+        let reg = BlockRegistry::new();
+        assert_eq!(reg.functional_kind(BlockId::THRUSTER_SMALL_CHEMICAL), Some(FunctionalBlockKind::Thruster));
+        assert_eq!(reg.functional_kind(BlockId::REACTOR_SMALL), Some(FunctionalBlockKind::Reactor));
+        assert_eq!(reg.functional_kind(BlockId::BATTERY), Some(FunctionalBlockKind::Battery));
+        assert_eq!(reg.functional_kind(BlockId::COCKPIT), Some(FunctionalBlockKind::Seat));
+        assert_eq!(reg.functional_kind(BlockId::ROTOR), Some(FunctionalBlockKind::Rotor));
+        assert_eq!(reg.functional_kind(BlockId::PISTON), Some(FunctionalBlockKind::Piston));
+        assert_eq!(reg.functional_kind(BlockId::RAIL_STRAIGHT), Some(FunctionalBlockKind::Rail));
+        assert_eq!(reg.functional_kind(BlockId::SIGNAL_CONVERTER), Some(FunctionalBlockKind::SignalConverter));
+        assert_eq!(reg.functional_kind(BlockId::COMPUTER), Some(FunctionalBlockKind::Computer));
+    }
+
+    #[test]
+    fn interaction_schemas() {
+        let reg = BlockRegistry::new();
+        let seat_schema = reg.interaction_schema(FunctionalBlockKind::Seat);
+        assert_eq!(seat_schema.actions.len(), 1);
+        assert_eq!(seat_schema.actions[0].action_key, 3);
+        assert_eq!(seat_schema.actions[0].label, "Sit");
+
+        let thruster_schema = reg.interaction_schema(FunctionalBlockKind::Thruster);
+        assert!(thruster_schema.actions.is_empty());
+
+        let junction_schema = reg.interaction_schema(FunctionalBlockKind::RailJunction);
+        assert_eq!(junction_schema.actions.len(), 1);
+        assert_eq!(junction_schema.actions[0].interaction_type, InteractionType::CycleState);
     }
 }
