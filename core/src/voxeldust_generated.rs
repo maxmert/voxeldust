@@ -13,10 +13,10 @@ pub mod protocol {
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 15;
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 16;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 16] = [
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 17] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -33,6 +33,7 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 16] = [
   ShardPayload::WarpAutopilotCommand,
   ShardPayload::HostSwitch,
   ShardPayload::ShipPropertiesUpdate,
+  ShardPayload::SignalBroadcast,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -56,9 +57,10 @@ impl ShardPayload {
   pub const WarpAutopilotCommand: Self = Self(13);
   pub const HostSwitch: Self = Self(14);
   pub const ShipPropertiesUpdate: Self = Self(15);
+  pub const SignalBroadcast: Self = Self(16);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 15;
+  pub const ENUM_MAX: u8 = 16;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -76,6 +78,7 @@ impl ShardPayload {
     Self::WarpAutopilotCommand,
     Self::HostSwitch,
     Self::ShipPropertiesUpdate,
+    Self::SignalBroadcast,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -96,6 +99,7 @@ impl ShardPayload {
       Self::WarpAutopilotCommand => Some("WarpAutopilotCommand"),
       Self::HostSwitch => Some("HostSwitch"),
       Self::ShipPropertiesUpdate => Some("ShipPropertiesUpdate"),
+      Self::SignalBroadcast => Some("SignalBroadcast"),
       _ => None,
     }
   }
@@ -4498,6 +4502,211 @@ impl ::core::fmt::Debug for SystemSceneUpdate<'_> {
       ds.finish()
   }
 }
+pub enum SignalBroadcastOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Cross-shard signal broadcast (ShortRange or LongRange scope).
+/// Any shard with antenna-equipped blocks can send/receive.
+pub struct SignalBroadcast<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SignalBroadcast<'a> {
+  type Inner = SignalBroadcast<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SignalBroadcast<'a> {
+  pub const VT_SOURCE_SHARD_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_VALUE_TYPE: ::flatbuffers::VOffsetT = 8;
+  pub const VT_VALUE_DATA: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SCOPE: ::flatbuffers::VOffsetT = 12;
+  pub const VT_RANGE_M: ::flatbuffers::VOffsetT = 14;
+  pub const VT_SOURCE_POSITION: ::flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SignalBroadcast { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SignalBroadcastArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SignalBroadcast<'bldr>> {
+    let mut builder = SignalBroadcastBuilder::new(_fbb);
+    builder.add_range_m(args.range_m);
+    builder.add_source_shard_id(args.source_shard_id);
+    if let Some(x) = args.source_position { builder.add_source_position(x); }
+    builder.add_value_data(args.value_data);
+    if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    builder.add_scope(args.scope);
+    builder.add_value_type(args.value_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn source_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SignalBroadcast::VT_SOURCE_SHARD_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SignalBroadcast::VT_CHANNEL_NAME, None)}
+  }
+  /// Signal value type: 0=Bool, 1=Float, 2=State
+  #[inline]
+  pub fn value_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalBroadcast::VT_VALUE_TYPE, Some(0)).unwrap()}
+  }
+  /// Signal value data (bool as 0.0/1.0, state as float cast).
+  #[inline]
+  pub fn value_data(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(SignalBroadcast::VT_VALUE_DATA, Some(0.0)).unwrap()}
+  }
+  /// Scope: 1=ShortRange, 2=LongRange
+  #[inline]
+  pub fn scope(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalBroadcast::VT_SCOPE, Some(0)).unwrap()}
+  }
+  /// Range in meters (for ShortRange proximity check).
+  #[inline]
+  pub fn range_m(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(SignalBroadcast::VT_RANGE_M, Some(0.0)).unwrap()}
+  }
+  /// World position of the broadcasting antenna (for distance checks).
+  #[inline]
+  pub fn source_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(SignalBroadcast::VT_SOURCE_POSITION, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SignalBroadcast<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("source_shard_id", Self::VT_SOURCE_SHARD_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
+     .visit_field::<u8>("value_type", Self::VT_VALUE_TYPE, false)?
+     .visit_field::<f32>("value_data", Self::VT_VALUE_DATA, false)?
+     .visit_field::<u8>("scope", Self::VT_SCOPE, false)?
+     .visit_field::<f64>("range_m", Self::VT_RANGE_M, false)?
+     .visit_field::<Vec3d>("source_position", Self::VT_SOURCE_POSITION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SignalBroadcastArgs<'a> {
+    pub source_shard_id: u64,
+    pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub value_type: u8,
+    pub value_data: f32,
+    pub scope: u8,
+    pub range_m: f64,
+    pub source_position: Option<&'a Vec3d>,
+}
+impl<'a> Default for SignalBroadcastArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SignalBroadcastArgs {
+      source_shard_id: 0,
+      channel_name: None,
+      value_type: 0,
+      value_data: 0.0,
+      scope: 0,
+      range_m: 0.0,
+      source_position: None,
+    }
+  }
+}
+
+pub struct SignalBroadcastBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SignalBroadcastBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_source_shard_id(&mut self, source_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(SignalBroadcast::VT_SOURCE_SHARD_ID, source_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SignalBroadcast::VT_CHANNEL_NAME, channel_name);
+  }
+  #[inline]
+  pub fn add_value_type(&mut self, value_type: u8) {
+    self.fbb_.push_slot::<u8>(SignalBroadcast::VT_VALUE_TYPE, value_type, 0);
+  }
+  #[inline]
+  pub fn add_value_data(&mut self, value_data: f32) {
+    self.fbb_.push_slot::<f32>(SignalBroadcast::VT_VALUE_DATA, value_data, 0.0);
+  }
+  #[inline]
+  pub fn add_scope(&mut self, scope: u8) {
+    self.fbb_.push_slot::<u8>(SignalBroadcast::VT_SCOPE, scope, 0);
+  }
+  #[inline]
+  pub fn add_range_m(&mut self, range_m: f64) {
+    self.fbb_.push_slot::<f64>(SignalBroadcast::VT_RANGE_M, range_m, 0.0);
+  }
+  #[inline]
+  pub fn add_source_position(&mut self, source_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(SignalBroadcast::VT_SOURCE_POSITION, source_position);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SignalBroadcastBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SignalBroadcastBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SignalBroadcast<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SignalBroadcast<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SignalBroadcast");
+      ds.field("source_shard_id", &self.source_shard_id());
+      ds.field("channel_name", &self.channel_name());
+      ds.field("value_type", &self.value_type());
+      ds.field("value_data", &self.value_data());
+      ds.field("scope", &self.scope());
+      ds.field("range_m", &self.range_m());
+      ds.field("source_position", &self.source_position());
+      ds.finish()
+  }
+}
 pub enum ShardMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -4773,6 +4982,21 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_signal_broadcast(&self) -> Option<SignalBroadcast<'a>> {
+    if self.payload_type() == ShardPayload::SignalBroadcast {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { SignalBroadcast::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -4798,6 +5022,7 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::WarpAutopilotCommand => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WarpAutopilotCommand>>("ShardPayload::WarpAutopilotCommand", pos),
           ShardPayload::HostSwitch => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<HostSwitch>>("ShardPayload::HostSwitch", pos),
           ShardPayload::ShipPropertiesUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipPropertiesUpdate>>("ShardPayload::ShipPropertiesUpdate", pos),
+          ShardPayload::SignalBroadcast => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SignalBroadcast>>("ShardPayload::SignalBroadcast", pos),
           _ => Ok(()),
         }
      })?
@@ -4952,6 +5177,13 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::ShipPropertiesUpdate => {
           if let Some(x) = self.payload_as_ship_properties_update() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::SignalBroadcast => {
+          if let Some(x) = self.payload_as_signal_broadcast() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

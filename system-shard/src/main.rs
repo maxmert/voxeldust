@@ -353,6 +353,23 @@ fn drain_quic(
                     props: data,
                 });
             }
+            ShardMsg::SignalBroadcast(data) => {
+                // LongRange relay: forward to all other shards in the system.
+                if data.scope == 2 {
+                    if let Ok(reg) = bridge.peer_registry.try_read() {
+                        for peer in reg.all() {
+                            if peer.id.0 == data.source_shard_id {
+                                continue; // don't relay back to sender
+                            }
+                            if let Some(addr) = reg.quic_addr(peer.id) {
+                                let relay_msg = ShardMsg::SignalBroadcast(data.clone());
+                                let _ = bridge.quic_send_tx.try_send((peer.id, addr, relay_msg));
+                            }
+                        }
+                    }
+                }
+                // ShortRange signals are sent directly between shards, not relayed.
+            }
             other => {
                 if tick.0 % 100 == 0 {
                     info!(

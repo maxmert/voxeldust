@@ -15,6 +15,10 @@ use voxeldust_core::block::{
     raycast,
 };
 use voxeldust_core::ecs::components::FunctionalBlockRef;
+use voxeldust_core::signal::{
+    self, SignalChannelTable, SignalPublisher, SignalSubscriber, SignalConverterConfig,
+    SeatChannelMapping, PublishBinding, SubscribeBinding, SignalProperty,
+};
 use voxeldust_core::shard_message::AutopilotSnapshotData;
 use voxeldust_core::client_message::{
     BlockEditData, CelestialBodyData, ChunkDeltaData, JoinResponseData, LightingData,
@@ -229,6 +233,13 @@ struct PendingEntityOps {
 #[derive(Resource)]
 struct AggregationDirty(bool);
 
+/// Buffer for incoming cross-shard signals received via QUIC.
+/// Drained by signal_publish at the start of the signal pipeline.
+#[derive(Resource, Default)]
+struct IncomingSignalBuffer {
+    signals: Vec<(String, signal::SignalValue)>,
+}
+
 /// Handles of per-chunk compound colliders. Keyed by chunk key.
 /// When blocks change in a chunk, we remove the old collider and insert a new one.
 #[derive(Resource, Default)]
@@ -326,6 +337,7 @@ enum ShipSet {
     Bridge,
     Input,
     BlockEdit,
+    Signal,
     Physics,
     Interaction,
     Send,
@@ -386,6 +398,7 @@ fn drain_quic(
     mut player_pos: ResMut<PlayerPosition>,
     mut pilot_mode: ResMut<PilotMode>,
     tick: Res<ecs::TickCounter>,
+    mut incoming_signals: ResMut<IncomingSignalBuffer>,
 ) {
     for _ in 0..32 {
         let queued = match bridge.quic_msg_rx.try_recv() {
@@ -548,6 +561,25 @@ fn drain_quic(
                         "HostSwitch has empty UDP address — ShardPreConnect NOT sent"
                     );
                 }
+            }
+            ShardMsg::SignalBroadcast(data) => {
+                // Distance check for ShortRange signals.
+                if data.scope == 1 {
+                    let dist = (exterior.position - data.source_position).length();
+                    if dist > data.range_m {
+                        continue;
+                    }
+                }
+
+                let value = match data.value_type {
+                    0 => signal::SignalValue::Bool(data.value_data > 0.5),
+                    1 => signal::SignalValue::Float(data.value_data),
+                    2 => signal::SignalValue::State(data.value_data as u8),
+                    _ => signal::SignalValue::Float(data.value_data),
+                };
+
+                // Buffer for processing in signal_publish next tick.
+                incoming_signals.signals.push((data.channel_name.clone(), value));
             }
             _ => {}
         }
@@ -1810,11 +1842,13 @@ fn init_functional_blocks(
                     let id = chunk.get_block(x, y, z);
                     if let Some(kind) = registry.0.functional_kind(id) {
                         let wp = chunk_origin + glam::IVec3::new(x as i32, y as i32, z as i32);
-                        let entity = commands.spawn(FunctionalBlockRef {
+                        let mut entity_cmds = commands.spawn(FunctionalBlockRef {
                             world_pos: wp,
                             block_id: id,
                             kind,
-                        }).id();
+                        });
+                        add_default_signal_bindings(&mut entity_cmds, kind);
+                        let entity = entity_cmds.id();
                         block_index.0.insert(wp, entity);
                     }
                 }
@@ -1842,11 +1876,16 @@ fn process_entity_ops(
         match op {
             EntityOp::Spawn { pos, block_id } => {
                 if let Some(kind) = registry.0.functional_kind(block_id) {
-                    let entity = commands.spawn(FunctionalBlockRef {
+                    let mut entity_cmds = commands.spawn(FunctionalBlockRef {
                         world_pos: pos,
                         block_id,
                         kind,
-                    }).id();
+                    });
+
+                    // Add default signal bindings based on block kind.
+                    add_default_signal_bindings(&mut entity_cmds, kind);
+
+                    let entity = entity_cmds.id();
 
                     // Store entity index in block metadata (grid → entity link).
                     let meta = grid.0.get_or_create_meta(pos.x, pos.y, pos.z);
@@ -1946,6 +1985,213 @@ fn aggregate_ship_properties(
         if let Ok(reg) = bridge.peer_registry.try_read() {
             if let Some(addr) = reg.quic_addr(host_id) {
                 let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signal default bindings
+// ---------------------------------------------------------------------------
+
+/// Add default signal publisher/subscriber components to a functional block entity
+/// based on its kind. Players can reconfigure these via the block config UI.
+fn add_default_signal_bindings(
+    entity_cmds: &mut bevy_ecs::system::EntityCommands,
+    kind: FunctionalBlockKind,
+) {
+    match kind {
+        FunctionalBlockKind::Thruster => {
+            // Thrusters subscribe to a throttle channel.
+            entity_cmds.insert(SignalSubscriber {
+                bindings: vec![SubscribeBinding {
+                    channel_name: "thrust-forward".into(),
+                    property: SignalProperty::Throttle,
+                }],
+            });
+        }
+        FunctionalBlockKind::Reactor => {
+            // Reactors publish their power level.
+            entity_cmds.insert(SignalPublisher {
+                bindings: vec![PublishBinding {
+                    channel_name: "power".into(),
+                    property: SignalProperty::Level,
+                }],
+            });
+        }
+        FunctionalBlockKind::Seat => {
+            // Seats get the full channel mapping for pilot controls.
+            entity_cmds.insert(SeatChannelMapping::default());
+        }
+        FunctionalBlockKind::Sensor => {
+            // Sensors publish their readings.
+            entity_cmds.insert(SignalPublisher {
+                bindings: vec![PublishBinding {
+                    channel_name: "sensor".into(),
+                    property: SignalProperty::Active,
+                }],
+            });
+        }
+        FunctionalBlockKind::SignalConverter => {
+            // Signal converters start with an empty rule set (player configures).
+            entity_cmds.insert(SignalConverterConfig::default());
+        }
+        _ => {
+            // Other kinds: no default signal bindings.
+            // Players can add bindings via the config UI.
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signal pipeline systems
+// ---------------------------------------------------------------------------
+
+/// Phase 1: All functional blocks with SignalPublisher write their state to channels.
+/// Values accumulate in pending_values, merged after all publishers write.
+fn signal_publish(
+    mut channels: ResMut<SignalChannelTable>,
+    publishers: Query<(&FunctionalBlockRef, &SignalPublisher)>,
+    mut incoming: ResMut<IncomingSignalBuffer>,
+) {
+    channels.clear_pending();
+
+    // First: inject any cross-shard signals received via QUIC.
+    for (name, value) in incoming.signals.drain(..) {
+        channels.push_pending(&name, value);
+    }
+
+    for (_block_ref, publisher) in &publishers {
+        for binding in &publisher.bindings {
+            // For now, publish a default value based on the property type.
+            // Future phases will read actual block state (reactor power level,
+            // sensor readings, etc.) from kind-specific components.
+            let value = match binding.property {
+                SignalProperty::Active => signal::SignalValue::Bool(true),
+                SignalProperty::Throttle => signal::SignalValue::Float(0.0),
+                SignalProperty::Level => signal::SignalValue::Float(1.0),
+                SignalProperty::Pressure => signal::SignalValue::Float(101.3),
+                _ => signal::SignalValue::Float(0.0),
+            };
+            channels.push_pending(&binding.channel_name, value);
+        }
+    }
+
+    channels.merge_pending();
+}
+
+/// Phase 2: Signal Converters with dirty inputs evaluate their condition→action rules.
+/// Lazy evaluation: only processes converters whose input channels changed this tick.
+fn signal_evaluate(
+    mut channels: ResMut<SignalChannelTable>,
+    converters: Query<&SignalConverterConfig>,
+) {
+    for config in &converters {
+        for rule in &config.rules {
+            let (input_value, is_dirty) = match channels.get(&rule.input_channel) {
+                Some(ch) => (ch.value, ch.dirty),
+                None => continue,
+            };
+
+            // Skip if input channel not dirty (lazy evaluation for 100K scale).
+            if !is_dirty && !matches!(rule.condition, signal::SignalCondition::Always) {
+                continue;
+            }
+
+            if rule.condition.evaluate(input_value, is_dirty) {
+                let output = rule.expression.compute(input_value);
+                channels.publish_direct(&rule.output_channel, output);
+            }
+        }
+    }
+}
+
+/// Phase 3: Functional blocks with SignalSubscriber read channels and act.
+/// For now, actions are logged. Future phases will apply to block-specific state
+/// (thruster throttle, piston extension, rotor angle, etc.).
+fn signal_subscribe(
+    channels: Res<SignalChannelTable>,
+    subscribers: Query<(&FunctionalBlockRef, &SignalSubscriber)>,
+) {
+    for (block_ref, subscriber) in &subscribers {
+        for binding in &subscriber.bindings {
+            if let Some(ch) = channels.get(&binding.channel_name) {
+                if ch.dirty {
+                    // Future: apply_signal_to_block(block_ref, binding.property, ch.value)
+                    // For now, the signal value is available for future per-kind systems
+                    // to read from the channel table.
+                    let _ = (block_ref, &binding.property, ch.value);
+                }
+            }
+        }
+    }
+}
+
+/// Phase 4: Clear dirty flags after all processing.
+fn signal_clear_dirty(mut channels: ResMut<SignalChannelTable>) {
+    channels.clear_dirty();
+}
+
+/// Broadcast non-Local dirty signals to other shards via QUIC.
+/// Runs in the Send set (after signal processing, before broadcast).
+fn signal_broadcast_remote(
+    channels: Res<SignalChannelTable>,
+    exterior: Res<ShipExterior>,
+    config: Res<ShipConfig>,
+    bridge: Res<NetworkBridge>,
+) {
+    let remote_signals = channels.drain_remote_dirty();
+    if remote_signals.is_empty() {
+        return;
+    }
+
+    for (channel_name, value, scope) in &remote_signals {
+        let (scope_code, range_m) = match scope {
+            signal::SignalScope::ShortRange { range_m } => (1u8, *range_m),
+            signal::SignalScope::LongRange => (2u8, 0.0),
+            signal::SignalScope::Local => continue, // shouldn't happen (filtered)
+        };
+
+        let (value_type, value_data) = match value {
+            signal::SignalValue::Bool(b) => (0u8, if *b { 1.0f32 } else { 0.0 }),
+            signal::SignalValue::Float(f) => (1u8, *f),
+            signal::SignalValue::State(s) => (2u8, *s as f32),
+        };
+
+        let msg = voxeldust_core::shard_message::ShardMsg::SignalBroadcast(
+            voxeldust_core::shard_message::SignalBroadcastData {
+                source_shard_id: config.shard_id.0,
+                channel_name: channel_name.clone(),
+                value_type,
+                value_data,
+                scope: scope_code,
+                range_m,
+                source_position: exterior.position,
+            },
+        );
+
+        // For ShortRange: send to all known shards (they distance-check on receive).
+        // For LongRange: send to the host (system) shard for relay.
+        if scope_code == 2 {
+            // LongRange → system shard relay.
+            if let Some(host_id) = config.host_shard_id {
+                if let Ok(reg) = bridge.peer_registry.try_read() {
+                    if let Some(addr) = reg.quic_addr(host_id) {
+                        let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
+                    }
+                }
+            }
+        } else {
+            // ShortRange → broadcast to all known peer shards.
+            if let Ok(reg) = bridge.peer_registry.try_read() {
+                for peer in reg.all() {
+                    if peer.id == config.shard_id {
+                        continue; // don't send to self
+                    }
+                    if let Some(addr) = reg.quic_addr(peer.id) {
+                        let _ = bridge.quic_send_tx.try_send((peer.id, addr, msg.clone()));
+                    }
+                }
             }
         }
     }
@@ -2201,6 +2447,8 @@ fn build_ship_interior(
     app.insert_resource(ecs::TickCounter::default());
     app.insert_resource(BlockEditQueue::default());
     app.insert_resource(AggregationDirty(false));
+    app.insert_resource(SignalChannelTable::new());
+    app.insert_resource(IncomingSignalBuffer::default());
     app.insert_resource(ship_persistence);
 
     // Messages.
@@ -2215,6 +2463,7 @@ fn build_ship_interior(
             ShipSet::Bridge,
             ShipSet::Input,
             ShipSet::BlockEdit,
+            ShipSet::Signal,
             ShipSet::Physics,
             ShipSet::Interaction,
             ShipSet::Send,
@@ -2247,6 +2496,14 @@ fn build_ship_interior(
             .in_set(ShipSet::BlockEdit),
     );
 
+    // Signal pipeline: publish → evaluate → subscribe → clear dirty.
+    app.add_systems(
+        Update,
+        (signal_publish, signal_evaluate, signal_subscribe, signal_clear_dirty)
+            .chain()
+            .in_set(ShipSet::Signal),
+    );
+
     // Physics.
     app.add_systems(
         Update,
@@ -2260,7 +2517,7 @@ fn build_ship_interior(
     );
 
     // Send: QUIC messages to host shard.
-    app.add_systems(Update, pilot_send.in_set(ShipSet::Send));
+    app.add_systems(Update, (pilot_send, signal_broadcast_remote).in_set(ShipSet::Send));
 
     // Broadcast: WorldState to client.
     app.add_systems(Update, broadcast_world_state.in_set(ShipSet::Broadcast));

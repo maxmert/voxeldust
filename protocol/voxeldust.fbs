@@ -243,6 +243,23 @@ table SystemSceneUpdate {
     lighting: LightingInfoMsg;
 }
 
+/// Cross-shard signal broadcast (ShortRange or LongRange scope).
+/// Any shard with antenna-equipped blocks can send/receive.
+table SignalBroadcast {
+    source_shard_id: uint64;
+    channel_name: string;
+    /// Signal value type: 0=Bool, 1=Float, 2=State
+    value_type: uint8;
+    /// Signal value data (bool as 0.0/1.0, state as float cast).
+    value_data: float;
+    /// Scope: 1=ShortRange, 2=LongRange
+    scope: uint8;
+    /// Range in meters (for ShortRange proximity check).
+    range_m: double;
+    /// World position of the broadcasting antenna (for distance checks).
+    source_position: Vec3d;
+}
+
 // Union of all inter-shard message payloads.
 union ShardPayload {
     PlayerHandoff,
@@ -260,6 +277,7 @@ union ShardPayload {
     WarpAutopilotCommand,
     HostSwitch,
     ShipPropertiesUpdate,
+    SignalBroadcast,
 }
 
 /// Root type for all inter-shard QUIC messages.

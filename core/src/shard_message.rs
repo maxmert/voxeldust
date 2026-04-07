@@ -26,6 +26,9 @@ pub enum ShardMsg {
     /// Ship physical properties update (ship shard → system shard).
     /// Sent when block composition changes (aggregation recomputes).
     ShipPropertiesUpdate(ShipPropertiesUpdateData),
+    /// Cross-shard signal broadcast (ShortRange or LongRange).
+    /// Any shard with antenna blocks can send/receive.
+    SignalBroadcast(SignalBroadcastData),
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +171,21 @@ pub struct ShipPropertiesUpdateData {
     pub max_torque_nm: f64,
     pub thrust_multiplier: f64,
     pub dimensions: (f64, f64, f64),
+}
+
+/// Cross-shard signal broadcast for ShortRange/LongRange channels.
+/// Any shard with antenna-equipped blocks can send/receive.
+#[derive(Debug, Clone)]
+pub struct SignalBroadcastData {
+    pub source_shard_id: u64,
+    pub channel_name: String,
+    /// 0=Bool, 1=Float, 2=State
+    pub value_type: u8,
+    pub value_data: f32,
+    /// 1=ShortRange, 2=LongRange
+    pub scope: u8,
+    pub range_m: f64,
+    pub source_position: DVec3,
 }
 
 /// Block edits affecting chunks on adjacent shard boundaries.
@@ -621,6 +639,30 @@ impl ShardMsg {
                 );
                 builder.finish(msg, None);
             }
+            ShardMsg::SignalBroadcast(data) => {
+                let name = builder.create_string(&data.channel_name);
+                let src_pos = to_fb_vec3d(&data.source_position);
+                let sb = fb::SignalBroadcast::create(
+                    &mut builder,
+                    &fb::SignalBroadcastArgs {
+                        source_shard_id: data.source_shard_id,
+                        channel_name: Some(name),
+                        value_type: data.value_type,
+                        value_data: data.value_data,
+                        scope: data.scope,
+                        range_m: data.range_m,
+                        source_position: Some(&src_pos),
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::SignalBroadcast,
+                        payload: Some(sb.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -957,6 +999,24 @@ impl ShardMsg {
                     max_torque_nm: spu.max_torque_nm(),
                     thrust_multiplier: spu.thrust_multiplier(),
                     dimensions: (spu.dimensions_x(), spu.dimensions_y(), spu.dimensions_z()),
+                }))
+            }
+
+            fb::ShardPayload::SignalBroadcast => {
+                let sb = msg
+                    .payload_as_signal_broadcast()
+                    .ok_or(MessageError::MissingField("SignalBroadcast payload"))?;
+                let src_pos = sb.source_position()
+                    .ok_or(MessageError::MissingField("source_position"))?;
+
+                Ok(ShardMsg::SignalBroadcast(SignalBroadcastData {
+                    source_shard_id: sb.source_shard_id(),
+                    channel_name: sb.channel_name().unwrap_or("").to_string(),
+                    value_type: sb.value_type(),
+                    value_data: sb.value_data(),
+                    scope: sb.scope(),
+                    range_m: sb.range_m(),
+                    source_position: from_fb_vec3d(src_pos),
                 }))
             }
 
