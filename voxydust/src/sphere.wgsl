@@ -27,8 +27,8 @@ struct RenderConfig {
     eclipse_shadows_enabled: u32,
     frame_count: u32,
     soft_shadows_enabled: u32,
+    hdr_enabled: u32,
     _pad0: u32,
-    _pad1: u32,
 }
 
 struct VoxelVolumeParams {
@@ -58,6 +58,21 @@ var light_sampler: sampler;
 @group(2) @binding(3)
 var<uniform> voxel_params: VoxelVolumeParams;
 
+@group(2) @binding(4)
+var shadow_map: texture_depth_2d_array;
+
+@group(2) @binding(5)
+var shadow_sampler: sampler_comparison;
+
+struct ShadowCascades {
+    light_vp: array<mat4x4<f32>, 4>,
+    splits: vec4<f32>,
+    _pad: vec4<f32>,
+}
+
+@group(2) @binding(6)
+var<uniform> cascades: ShadowCascades;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
 }
@@ -66,6 +81,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) world_pos: vec3<f32>,
+    @location(2) view_z: f32,
 }
 
 @vertex
@@ -75,6 +91,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // Transform normal and position to world space.
     out.world_normal = normalize((u.model * vec4(in.position, 0.0)).xyz);
     out.world_pos = (u.model * vec4(in.position, 1.0)).xyz;
+    out.view_z = length(out.world_pos);
     return out;
 }
 
@@ -107,62 +124,39 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// Voxel sun shadow: Amanatides & Woo DDA through 3D occupancy volume
+// Cascaded Shadow Map sampling: 9-tap Gaussian PCF (Castano '13)
 // ---------------------------------------------------------------------------
 
-fn voxel_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, clip_pos: vec4<f32>) -> f32 {
+fn csm_shadow(world_pos: vec3<f32>, view_z: f32) -> f32 {
     if config.voxel_shadows_enabled == 0u { return 1.0; }
 
-    // Normal bias: offset ray start along surface normal to avoid self-shadowing.
-    let biased_pos = world_pos + world_normal * 0.5;
+    var cascade = 3u;
+    if view_z < cascades.splits.x { cascade = 0u; }
+    else if view_z < cascades.splits.y { cascade = 1u; }
+    else if view_z < cascades.splits.z { cascade = 2u; }
 
-    let vol_size = voxel_params.sun_dir_and_size.w;
+    let light_clip = cascades.light_vp[cascade] * vec4(world_pos, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+    let uv = vec2(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
+    let depth = light_ndc.z;
 
-    // Transform biased position to volume-index coordinates.
-    let vol_pos_base = (voxel_params.world_to_volume * vec4(biased_pos, 1.0)).xyz;
-
-    // Temporal jitter for soft shadow edges.
-    var vol_pos = vol_pos_base;
-    if config.soft_shadows_enabled != 0u {
-        let jitter_idx = (u32(clip_pos.x) + u32(clip_pos.y) * 2u + config.frame_count) % 4u;
-        let jitter = array<vec3<f32>, 4>(
-            vec3(0.15, 0.15, 0.0),
-            vec3(-0.15, 0.15, 0.0),
-            vec3(0.15, -0.15, 0.0),
-            vec3(-0.15, -0.15, 0.0)
-        );
-        vol_pos = vol_pos_base + jitter[jitter_idx];
+    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || depth < 0.0 || depth > 1.0 {
+        return 1.0;
     }
 
-    // Outside volume: no shadow data — return lit.
-    if any(vol_pos < vec3(0.0)) || any(vol_pos >= vec3(vol_size)) { return 1.0; }
+    let texel = 1.0 / 2048.0;
+    var shadow = 0.0;
+    shadow += 1.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2(-1.5, -1.5) * texel, cascade, depth);
+    shadow += 2.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2( 0.0, -1.5) * texel, cascade, depth);
+    shadow += 1.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2( 1.5, -1.5) * texel, cascade, depth);
+    shadow += 2.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2(-1.5,  0.0) * texel, cascade, depth);
+    shadow += 4.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2( 0.0,  0.0) * texel, cascade, depth);
+    shadow += 2.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2( 1.5,  0.0) * texel, cascade, depth);
+    shadow += 1.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2(-1.5,  1.5) * texel, cascade, depth);
+    shadow += 2.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2( 0.0,  1.5) * texel, cascade, depth);
+    shadow += 1.0 * textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2( 1.5,  1.5) * texel, cascade, depth);
 
-    // DDA ray march in volume space using volume-space sun direction.
-    let vol_sun_dir = voxel_params.sun_dir_and_size.xyz;
-    let step_dir = sign(vol_sun_dir);
-    var voxel = vec3<i32>(floor(vol_pos));
-    let inv_dir = 1.0 / max(abs(vol_sun_dir), vec3(1e-10));
-    var t_max = ((vec3<f32>(voxel) + max(step_dir, vec3(0.0))) - vol_pos) * inv_dir;
-    let t_delta = abs(inv_dir);
-    let vol_size_i = i32(vol_size);
-    let max_steps = i32(config.shadow_max_steps);
-
-    for (var i = 0; i < max_steps; i++) {
-        if t_max.x < t_max.y && t_max.x < t_max.z {
-            voxel.x += i32(step_dir.x);
-            t_max.x += t_delta.x;
-        } else if t_max.y < t_max.z {
-            voxel.y += i32(step_dir.y);
-            t_max.y += t_delta.y;
-        } else {
-            voxel.z += i32(step_dir.z);
-            t_max.z += t_delta.z;
-        }
-        if any(voxel < vec3(0)) || any(voxel >= vec3(vol_size_i)) { break; }
-        let occ = textureLoad(voxel_occupancy, voxel, 0).r;
-        if occ > 128u { return 0.0; }
-    }
-    return 1.0;
+    return shadow / 16.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +212,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_intensity = scene.sun_color.a;
     let light_color = scene.sun_color.rgb * sun_intensity;
 
-    // Voxel ray-marched sun shadow (replaces shadow map).
-    let shadow = voxel_shadow(in.world_pos, N, in.clip_position);
+    // Cascaded shadow map sampling (9-tap Gaussian PCF).
+    let shadow = csm_shadow(in.world_pos, in.view_z);
 
     // Block light contribution (from emissive voxels).
     var block_light = vec3(0.0);
@@ -238,9 +232,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Ambient.
     let ambient_color = scene.ambient.x * base_color * 0.3;
 
-    // ACES filmic tonemapping.
     var color = ambient_color + sun_contrib + block_contrib;
-    color = color * (color * 2.51 + vec3(0.03)) / (color * (color * 2.43 + vec3(0.59)) + vec3(0.14));
+
+    // When HDR is disabled, apply tonemapping inline (LDR fallback path).
+    // When HDR is enabled, output linear HDR — tonemapping happens in composite pass.
+    if config.hdr_enabled == 0u {
+        color = color * (color * 2.51 + vec3(0.03)) / (color * (color * 2.43 + vec3(0.59)) + vec3(0.14));
+    }
 
     return vec4(color, 1.0);
 }

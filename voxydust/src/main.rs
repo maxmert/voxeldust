@@ -1199,11 +1199,12 @@ impl ClientApp {
     }
 
     fn init_gpu(&mut self, window: Arc<Window>) {
-        let mut gpu_state = gpu::init_gpu(window.clone());
+        let gfx = self.ecs_app.world().resource::<graphics_settings::GraphicsSettings>().clone();
+        let mut gpu_state = gpu::init_gpu(window.clone(), gfx.hdr_enabled);
         // Create the block renderer now that we have GPU state.
         let br = block_render::BlockRenderer::new(
             &gpu_state.device,
-            gpu_state.config.format,
+            gpu_state.render_format,
             &gpu_state.bind_group_layout,
             &gpu_state.scene_bind_group_layout,
             &gpu_state.voxel_bind_group_layout,
@@ -1215,6 +1216,9 @@ impl ClientApp {
             &gpu_state.device,
             &gpu_state.voxel_bind_group_layout,
             &vol,
+            gpu_state.shadow_texture_view.as_ref().unwrap(),
+            gpu_state.shadow_sampler.as_ref().unwrap(),
+            gpu_state.shadow_cascade_buf.as_ref().unwrap(),
         ));
         self.voxel_volume = Some(vol);
         self.window = Some(window);
@@ -1583,6 +1587,9 @@ impl ClientApp {
                     &gpu.device,
                     &gpu.voxel_bind_group_layout,
                     vol,
+                    gpu.shadow_texture_view.as_ref().unwrap(),
+                    gpu.shadow_sampler.as_ref().unwrap(),
+                    gpu.shadow_cascade_buf.as_ref().unwrap(),
                 ));
             }
 
@@ -2314,6 +2321,38 @@ impl ApplicationHandler for ClientApp {
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                     gpu.depth_view = gpu::create_depth_texture(&gpu.device, gpu.config.width, gpu.config.height, wgpu::TextureFormat::Depth32Float);
+                    // Recreate HDR texture and composite bind group on resize.
+                    if gpu.hdr_enabled {
+                        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("hdr_color"),
+                            size: wgpu::Extent3d { width: gpu.config.width, height: gpu.config.height, depth_or_array_layers: 1 },
+                            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        });
+                        let view = tex.create_view(&Default::default());
+                        // Rebuild composite bind group with new HDR view.
+                        if let (Some(layout), Some(params_buf)) = (&gpu.composite_bind_group_layout, &gpu.composite_params_buf) {
+                            let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                                label: Some("screen_sampler"),
+                                mag_filter: wgpu::FilterMode::Linear,
+                                min_filter: wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            });
+                            gpu.composite_bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("composite_bind_group"),
+                                layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                                    wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                                ],
+                            }));
+                        }
+                        gpu.hdr_texture = Some(tex);
+                        gpu.hdr_view = Some(view);
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event: key_event, .. } => {

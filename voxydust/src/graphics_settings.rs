@@ -204,8 +204,10 @@ pub struct RenderConfig {
     pub frame_count: u32,
     /// 1 = soft shadows enabled (temporal jitter), 0 = hard shadows.
     pub soft_shadows_enabled: u32,
+    /// 1 = HDR pipeline enabled (render to Rgba16Float, tonemap in composite pass).
+    pub hdr_enabled: u32,
     /// Padding to 48 bytes (3 × vec4).
-    pub _pad: [u32; 2],
+    pub _pad: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<RenderConfig>() == 48);
@@ -222,9 +224,10 @@ impl RenderConfig {
             god_ray_samples: s.god_ray_samples,
             voxel_shadows_enabled: s.voxel_shadows_enabled as u32,
             eclipse_shadows_enabled: s.eclipse_shadows_enabled as u32,
-            frame_count: (frame_count % 4) as u32,
+            frame_count: (frame_count % 16) as u32,
             soft_shadows_enabled: s.soft_shadows as u32,
-            _pad: [0; 2],
+            hdr_enabled: s.hdr_enabled as u32,
+            _pad: 0,
         }
     }
 }

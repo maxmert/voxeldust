@@ -4,12 +4,69 @@ use glam::{DVec3, DQuat, Mat4, Quat, Vec3};
 
 use crate::block_render::{BlockRenderer, ChunkGpuMesh};
 use crate::camera::CameraParams;
-use crate::gpu::{GpuState, ObjectUniforms, SceneLighting, EYE_HEIGHT, MAX_OBJECTS};
+use crate::gpu::{
+    GpuState, ObjectUniforms, SceneLighting, ShadowCascades,
+    EYE_HEIGHT, MAX_OBJECTS, SHADOW_MAP_SIZE, NUM_CASCADES,
+};
 use crate::graphics_settings::{GraphicsSettings, RenderConfig};
 use crate::hud::{self, HudContext};
 
 use voxeldust_core::block::palette::CHUNK_SIZE;
 use voxeldust_core::client_message::WorldStateData;
+
+/// Cascade split distances (view-space Z thresholds) and the corresponding
+/// orthographic light VP matrices for cascaded shadow maps.
+const CASCADE_SPLITS: [f32; 4] = [15.0, 60.0, 200.0, 800.0];
+const CASCADE_NEAR: f32 = 0.1;
+
+/// Compute the 4 cascade light-space view-projection matrices for CSM.
+///
+/// Each cascade is a sphere centered on the **camera position** with radius
+/// equal to the cascade's far split distance. This is fully rotation-invariant:
+/// rotating the camera does not move the shadow at all.
+fn compute_cascade_matrices(
+    sun_dir: Vec3,
+    _cam: &CameraParams,
+) -> [Mat4; 4] {
+    let mut matrices = [Mat4::IDENTITY; 4];
+
+    // Stable up vector not parallel to sun direction.
+    let light_up = if sun_dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+
+    // Camera is always at origin in floating-origin rendering.
+    let center = Vec3::ZERO;
+
+    for i in 0..4 {
+        // Radius = cascade far distance. The sphere covers everything within
+        // that distance from the camera, regardless of look direction.
+        let radius = CASCADE_SPLITS[i];
+
+        // Texel size for snapping (prevents sub-texel shimmer on camera translation).
+        let texel_size = (radius * 2.0) / SHADOW_MAP_SIZE as f32;
+
+        // Light view: look at the camera position from the sun direction.
+        let light_eye = center + sun_dir * (radius + 500.0);
+        let light_view = Mat4::look_at_rh(light_eye, center, light_up);
+
+        // Snap the ortho projection to world-space texel boundaries.
+        // Project camera position to light space and round to texel grid.
+        let center_ls = (light_view * center.extend(1.0)).truncate();
+        let snapped_x = (center_ls.x / texel_size).round() * texel_size;
+        let snapped_y = (center_ls.y / texel_size).round() * texel_size;
+        let offset_x = snapped_x - center_ls.x;
+        let offset_y = snapped_y - center_ls.y;
+
+        let light_proj = Mat4::orthographic_rh(
+            -radius + offset_x, radius + offset_x,
+            -radius + offset_y, radius + offset_y,
+            0.1, radius * 2.0 + 1000.0,
+        );
+
+        matrices[i] = light_proj * light_view;
+    }
+
+    matrices
+}
 
 /// Transform for a ship that should be rendered with block chunks.
 struct BlockShipTransform {
@@ -283,12 +340,148 @@ pub fn render_frame(
 
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
+    // -- CSM Shadow pass: render depth into 4 cascade layers --
+    let sun_dir = Vec3::new(scene_lighting.sun_direction[0], scene_lighting.sun_direction[1], scene_lighting.sun_direction[2]);
+    if sun_dir.length_squared() > 0.001 {
+        let cascade_matrices = compute_cascade_matrices(sun_dir.normalize(), cam);
+
+
+        // Upload cascade uniforms.
+        let cascades = ShadowCascades {
+            light_vp: [
+                cascade_matrices[0].to_cols_array_2d(),
+                cascade_matrices[1].to_cols_array_2d(),
+                cascade_matrices[2].to_cols_array_2d(),
+                cascade_matrices[3].to_cols_array_2d(),
+            ],
+            splits: CASCADE_SPLITS,
+            _pad: [0.0; 4],
+        };
+        if let Some(buf) = &gpu.shadow_cascade_buf {
+            gpu.queue.write_buffer(buf, 0, bytemuck::bytes_of(&cascades));
+        }
+
+        // Render depth for each cascade. Each cascade gets its own command buffer
+        // submission to ensure queue.write_buffer() data is consumed before the next
+        // cascade overwrites it. (wgpu executes write_buffer before submit, but
+        // multiple writes to the same offset within a single encoder would race.)
+        if let Some(shadow_pipeline) = &gpu.shadow_pipeline {
+            for cascade_idx in 0..NUM_CASCADES as usize {
+                // Write shadow-space MVPs for this cascade.
+                for i in 0..ro.object_count {
+                    let model = Mat4::from_cols_array_2d(&uniform_data[i].model);
+                    uniform_data[i].mvp = (cascade_matrices[cascade_idx] * model).to_cols_array_2d();
+                }
+                if ro.object_count > 0 {
+                    gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
+                }
+
+                // Write block chunk shadow MVPs.
+                if let Some(br) = block_renderer {
+                    if br.has_chunks() && !ro.block_ships.is_empty() {
+                        let block_start = ro.block_uniform_start;
+                        let mut chunk_idx = 0usize;
+                        for ship_transform in &ro.block_ships {
+                            for source in br.active_sources() {
+                                for (chunk_pos, _chunk_mesh) in br.chunks_for_source(source) {
+                                    let uniform_idx = block_start + chunk_idx;
+                                    if uniform_idx >= MAX_OBJECTS { break; }
+                                    let chunk_model = crate::block_render::BlockRenderer::chunk_model_matrix(
+                                        ship_transform.base_transform, chunk_pos, CHUNK_SIZE as f64,
+                                    );
+                                    let shadow_mvp = cascade_matrices[cascade_idx] * chunk_model;
+                                    uniform_data[uniform_idx].mvp = shadow_mvp.to_cols_array_2d();
+                                    uniform_data[uniform_idx].model = chunk_model.to_cols_array_2d();
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf, (uniform_idx as u64) * 256,
+                                        bytemuck::bytes_of(&uniform_data[uniform_idx]),
+                                    );
+                                    chunk_idx += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Submit a dedicated command buffer for this cascade so the uniform
+                // data written above is consumed before the next cascade overwrites it.
+                let mut shadow_encoder = gpu.device.create_command_encoder(
+                    &wgpu::CommandEncoderDescriptor { label: Some("shadow_cascade") },
+                );
+                {
+                    let mut pass = shadow_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("shadow"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &gpu.shadow_cascade_views[cascade_idx],
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        ..Default::default()
+                    });
+
+                    // Draw sphere objects.
+                    pass.set_pipeline(shadow_pipeline);
+                    pass.set_vertex_buffer(0, gpu.sphere_vertex_buf.slice(..));
+                    pass.set_index_buffer(gpu.sphere_index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    for i in 0..ro.object_count {
+                        if uniform_data[i].color[3] > 0.5 { continue; }
+                        pass.set_bind_group(0, &gpu.bind_group, &[(i as u32) * 256]);
+                        pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
+                    }
+
+                    // Draw block chunk meshes.
+                    if let Some(br) = block_renderer {
+                        if br.has_chunks() && !ro.block_ships.is_empty() {
+                            pass.set_pipeline(&br.shadow_pipeline);
+                            let block_start = ro.block_uniform_start;
+                            let mut chunk_idx = 0usize;
+                            for _ship_transform in &ro.block_ships {
+                                for source in br.active_sources() {
+                                    for (chunk_pos, chunk_mesh) in br.chunks_for_source(source) {
+                                        let uniform_idx = block_start + chunk_idx;
+                                        if uniform_idx >= MAX_OBJECTS { break; }
+                                        pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
+                                        pass.set_vertex_buffer(0, chunk_mesh.vertex_buf.slice(..));
+                                        pass.set_index_buffer(chunk_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                                        pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
+                                        chunk_idx += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                gpu.queue.submit(std::iter::once(shadow_encoder.finish()));
+            }
+        }
+
+        // Restore camera-space MVPs for the main pass.
+        let ro = build_uniforms(
+            uniform_data, cam, latest_world_state, secondary_world_state,
+            current_shard_type, player_position, ship_rotation,
+        );
+        if ro.object_count > 0 {
+            gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
+        }
+    }
+
+    // 3D passes render to the HDR texture when enabled, swapchain otherwise.
+    let color_target = if gpu.hdr_enabled {
+        gpu.hdr_view.as_ref().unwrap()
+    } else {
+        &view
+    };
+
     // -- Star pass (before main pass, additive blend, no depth write) --
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("stars"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view, resolve_target: None,
+                view: color_target, resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.005, g: 0.005, b: 0.02, a: 1.0 }),
                     store: wgpu::StoreOp::Store,
@@ -317,7 +510,7 @@ pub fn render_frame(
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("main"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view, resolve_target: None,
+                view: color_target, resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load, // preserve stars from previous pass
                     store: wgpu::StoreOp::Store,
@@ -472,6 +665,38 @@ pub fn render_frame(
                     pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
                 }
             }
+        }
+    }
+
+    // -- HDR composite pass: tonemap HDR → swapchain --
+    if gpu.hdr_enabled {
+        if let (Some(pipeline), Some(bind_group), Some(params_buf)) =
+            (&gpu.composite_pipeline, &gpu.composite_bind_group, &gpu.composite_params_buf)
+        {
+            // Upload composite params (screen dimensions).
+            let w = gpu.config.width as f32;
+            let h = gpu.config.height as f32;
+            let params = crate::gpu::CompositeParams {
+                screen_dims: [w, h, 1.0 / w, 1.0 / h],
+            };
+            gpu.queue.write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(0..3, 0..1); // vertexless fullscreen triangle
         }
     }
 

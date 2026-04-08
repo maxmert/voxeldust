@@ -98,6 +98,18 @@ pub struct GpuState {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    /// Whether the HDR pipeline is active (3D renders to Rgba16Float, then composite to swapchain).
+    pub hdr_enabled: bool,
+    /// Format used for 3D render targets (Rgba16Float when HDR, swapchain format when LDR).
+    pub render_format: wgpu::TextureFormat,
+    /// HDR intermediate render target. None when hdr_enabled is false.
+    pub hdr_texture: Option<wgpu::Texture>,
+    pub hdr_view: Option<wgpu::TextureView>,
+    /// Composite pipeline (fullscreen tonemapping pass). None when hdr_enabled is false.
+    pub composite_pipeline: Option<wgpu::RenderPipeline>,
+    pub composite_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    pub composite_bind_group: Option<wgpu::BindGroup>,
+    pub composite_params_buf: Option<wgpu::Buffer>,
     pub pipeline: wgpu::RenderPipeline,
     pub sphere_inside_pipeline: wgpu::RenderPipeline,
     pub sphere_vertex_buf: wgpu::Buffer,
@@ -118,9 +130,18 @@ pub struct GpuState {
     pub scene_lighting_buf: wgpu::Buffer,
     pub render_config_buf: wgpu::Buffer,
     pub scene_bind_group: wgpu::BindGroup,
-    /// Voxel volume bind group (group 2): occupancy 3D tex, light 3D tex, sampler, params uniform.
-    /// Recreated when VoxelVolume resizes or is first initialized.
+    /// Combined voxel + shadow bind group (group 2):
+    /// bindings 0-3: voxel volume (occupancy, light, sampler, params)
+    /// bindings 4-6: CSM shadow (depth array, comparison sampler, cascade uniforms)
     pub voxel_bind_group: Option<wgpu::BindGroup>,
+
+    // Shadow map resources.
+    pub shadow_texture: Option<wgpu::Texture>,
+    pub shadow_texture_view: Option<wgpu::TextureView>,
+    pub shadow_cascade_views: Vec<wgpu::TextureView>,  // per-layer views for render targets
+    pub shadow_sampler: Option<wgpu::Sampler>,
+    pub shadow_cascade_buf: Option<wgpu::Buffer>,
+    pub shadow_pipeline: Option<wgpu::RenderPipeline>,
 
     // Bind group layouts — stored for creating additional pipelines (block renderer).
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -141,8 +162,32 @@ pub struct GpuState {
     pub star_bind_group: wgpu::BindGroup,
 }
 
+pub const SHADOW_MAP_SIZE: u32 = 2048;
+pub const NUM_CASCADES: u32 = 4;
+
+/// Shadow cascade data passed to the fragment shader for CSM shadow sampling.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShadowCascades {
+    /// 4 light-space view-projection matrices (one per cascade).
+    pub light_vp: [[[f32; 4]; 4]; 4],
+    /// View-space Z thresholds for cascade selection.
+    pub splits: [f32; 4],
+    /// Padding for 16-byte alignment.
+    pub _pad: [f32; 4],
+}
+
+const _: () = assert!(std::mem::size_of::<ShadowCascades>() == 288);
+
+/// GPU uniform for the composite (tonemapping) fullscreen pass.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CompositeParams {
+    pub screen_dims: [f32; 4], // xy = width, height; zw = 1/width, 1/height
+}
+
 /// Initialize GPU state: adapter, device, surface, pipelines, buffers, egui.
-pub fn init_gpu(window: Arc<Window>) -> GpuState {
+pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
     let size = window.inner_size();
     let instance = wgpu::Instance::default();
     let surface = instance.create_surface(window.clone()).unwrap();
@@ -246,12 +291,11 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         ],
     });
 
-    // Voxel volume bind group layout (group 2): occupancy 3D, light 3D, sampler, params.
-    // The actual bind group is created later when VoxelVolume is initialized.
+    // Group 2 layout: voxel volume (block light) + cascaded shadow maps (sun shadows).
     let voxel_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("voxel_bind_group_layout"),
+        label: Some("voxel_shadow_bind_group_layout"),
         entries: &[
-            // binding 0: occupancy 3D texture (Rgba8Uint, read by fragment for DDA ray march)
+            // binding 0: voxel occupancy 3D texture (for block light propagation)
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -262,7 +306,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
                 },
                 count: None,
             },
-            // binding 1: block light 3D texture (Rgba16Float, read by fragment for emissive light)
+            // binding 1: block light 3D texture (Rgba16Float)
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -273,14 +317,14 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
                 },
                 count: None,
             },
-            // binding 2: trilinear sampler for block light texture
+            // binding 2: trilinear sampler for block light
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
-            // binding 3: volume params uniform (origin, size)
+            // binding 3: voxel volume params uniform
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -293,11 +337,138 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
                 },
                 count: None,
             },
+            // binding 4: CSM shadow depth texture array (4 cascades)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // binding 5: CSM comparison sampler (hardware 2×2 PCF)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+            // binding 6: CSM cascade uniforms (VP matrices + split distances)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<ShadowCascades>() as u64,
+                    ),
+                },
+                count: None,
+            },
         ],
+    });
+
+    // Create shadow map resources: 4-cascade depth texture array + comparison sampler.
+    let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow_cascades"),
+        size: wgpu::Extent3d {
+            width: SHADOW_MAP_SIZE,
+            height: SHADOW_MAP_SIZE,
+            depth_or_array_layers: NUM_CASCADES,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+
+    // Full array view for sampling in the fragment shader.
+    let shadow_texture_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("shadow_cascades_view"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+
+    // Per-layer views for rendering into individual cascade layers.
+    let shadow_cascade_views: Vec<wgpu::TextureView> = (0..NUM_CASCADES)
+        .map(|i| {
+            shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("shadow_cascade_{i}")),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: i,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+
+    let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("shadow_comparison_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        ..Default::default()
+    });
+
+    let shadow_cascade_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("shadow_cascades_uniform"),
+        size: std::mem::size_of::<ShadowCascades>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     });
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("shader"), source: wgpu::ShaderSource::Wgsl(include_str!("sphere.wgsl").into()),
+    });
+
+    // Shadow depth-only pipeline (for rendering into cascade layers).
+    let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("shadow_pipeline_layout"),
+        bind_group_layouts: &[&bind_group_layout], // only group 0 (per-object uniforms)
+        push_constant_ranges: &[],
+    });
+
+    let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("shadow_pipeline"),
+        layout: Some(&shadow_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 12,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: None, // depth-only
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: Default::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: Default::default(),
+        multiview: None,
+        cache: None,
     });
 
     // Main pipeline layout: group 0 (per-object), group 1 (scene lighting + config), group 2 (voxel volume).
@@ -309,6 +480,24 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
 
     let depth_format = wgpu::TextureFormat::Depth32Float;
     let depth_view = create_depth_texture(&device, config.width, config.height, depth_format);
+
+    // HDR: 3D passes render to Rgba16Float when HDR is enabled, swapchain format otherwise.
+    let render_format = if hdr_enabled { wgpu::TextureFormat::Rgba16Float } else { format };
+
+    let (hdr_texture, hdr_view) = if hdr_enabled {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hdr_color"),
+            size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        (Some(tex), Some(view))
+    } else {
+        (None, None)
+    };
 
     let vertex_layout = wgpu::VertexBufferLayout {
         array_stride: 12, step_mode: wgpu::VertexStepMode::Vertex,
@@ -323,7 +512,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader, entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState { format: render_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -354,7 +543,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader, entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState { format: render_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -502,7 +691,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
             module: &star_shader,
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
-                format,
+                format: render_format,
                 blend: Some(wgpu::BlendState {
                     // Additive blending: each star adds light. Dense galactic
                     // plane regions accumulate into a natural Milky Way band.
@@ -601,7 +790,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
             module: &star_shader,
             entry_point: Some("fs_point"),
             targets: &[Some(wgpu::ColorTargetState {
-                format,
+                format: render_format,
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -623,13 +812,134 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         cache: None,
     });
 
+    // -- Composite pipeline (HDR tonemapping fullscreen pass) --
+    let (composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf) = if hdr_enabled {
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
+        });
+
+        let composite_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite_layout"),
+            entries: &[
+                // binding 0: HDR scene texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 1: screen sampler (linear)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 2: composite params uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<CompositeParams>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let composite_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite_pipeline_layout"),
+            bind_group_layouts: &[&composite_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite_pipeline"),
+            layout: Some(&composite_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_composite"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format, // swapchain format (LDR output)
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let screen_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("screen_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("composite_params"),
+            size: std::mem::size_of::<CompositeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite_bind_group"),
+            layout: &composite_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(hdr_view.as_ref().unwrap()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&screen_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        (Some(composite_pipeline), Some(composite_bind_group_layout), Some(bind_group), Some(params_buf))
+    } else {
+        (None, None, None, None)
+    };
+
     // egui.
     let egui_ctx = egui::Context::default();
     let egui_winit = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None);
     let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
 
     GpuState {
-        surface, device, queue, config, pipeline, sphere_inside_pipeline,
+        surface, device, queue, config,
+        hdr_enabled, render_format,
+        hdr_texture, hdr_view,
+        composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf,
+        pipeline, sphere_inside_pipeline,
         sphere_vertex_buf, sphere_index_buf, sphere_index_count: sphere.indices.len() as u32,
         box_vertex_buf, box_index_buf, box_index_count: box_idxs.len() as u32,
         cockpit_vertex_buf, cockpit_index_buf, cockpit_index_count: win_idxs.len() as u32,
@@ -637,6 +947,12 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         depth_view, uniform_buf, bind_group,
         scene_lighting_buf, render_config_buf, scene_bind_group,
         voxel_bind_group: None,
+        shadow_texture: Some(shadow_texture),
+        shadow_texture_view: Some(shadow_texture_view),
+        shadow_cascade_views,
+        shadow_sampler: Some(shadow_sampler),
+        shadow_cascade_buf: Some(shadow_cascade_buf),
+        shadow_pipeline: Some(shadow_pipeline),
         bind_group_layout, scene_bind_group_layout, voxel_bind_group_layout,
         egui_ctx, egui_winit, egui_renderer,
         star_pipeline, star_point_pipeline, star_quad_vertex_buf, star_quad_index_buf,
@@ -644,17 +960,22 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
     }
 }
 
-/// Create or recreate the voxel volume bind group (group 2) from a VoxelVolume's textures.
+/// Create or recreate the combined voxel + shadow bind group (group 2).
 /// Called once after VoxelVolume is created and again if it is resized.
+/// Includes both voxel block light (bindings 0-3) and CSM shadow (bindings 4-6).
 pub fn create_voxel_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     vol: &crate::voxel_volume::VoxelVolume,
+    shadow_view: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
+    shadow_cascade_buf: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("voxel_bind_group"),
+        label: Some("voxel_shadow_bind_group"),
         layout,
         entries: &[
+            // Voxel block light (bindings 0-3).
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wgpu::BindingResource::TextureView(&vol.occupancy_view),
@@ -670,6 +991,19 @@ pub fn create_voxel_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: vol.params_buf.as_entire_binding(),
+            },
+            // CSM shadow (bindings 4-6).
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(shadow_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(shadow_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: shadow_cascade_buf.as_entire_binding(),
             },
         ],
     })

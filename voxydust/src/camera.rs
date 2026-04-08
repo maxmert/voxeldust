@@ -9,7 +9,10 @@ pub struct CameraParams {
     pub cam_pos: DVec3,
     pub cam_fwd: Vec3,
     pub cam_up: Vec3,
+    pub view: Mat4,
     pub vp: Mat4,
+    pub aspect: f32,
+    pub fov_y: f32,
     pub frustum: crate::gpu::FrustumPlanes,
     /// Camera position in system-space (accounts for ship origin offset).
     pub cam_system_pos: DVec3,
@@ -117,11 +120,15 @@ pub fn compute_camera(
         cam_pos
     };
 
+    let fov_y = 70.0_f32.to_radians();
     CameraParams {
         cam_pos,
         cam_fwd,
         cam_up,
+        view: view_mat,
         vp,
+        aspect,
+        fov_y,
         frustum,
         cam_system_pos,
     }
