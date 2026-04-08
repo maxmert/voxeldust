@@ -6,6 +6,7 @@ use tracing::info;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::graphics_settings::RenderConfig;
 use crate::mesh::IcoSphere;
 use crate::stars::{StarInstance, StarSceneUniforms, MAX_STAR_INSTANCES};
 
@@ -89,11 +90,8 @@ pub struct SceneLighting {
     pub sun_color: [f32; 4],    // rgb = color, a = intensity
     pub ambient: [f32; 4],      // x = ambient level, yzw = unused
     pub camera_pos: [f32; 4],   // xyz = camera world pos (near origin), w = unused
-    pub light_vp: [[f32; 4]; 4], // sun view-projection matrix for shadow mapping
 }
-const _: () = assert!(std::mem::size_of::<SceneLighting>() == 128);
-
-pub const SHADOW_MAP_SIZE: u32 = 2048;
+const _: () = assert!(std::mem::size_of::<SceneLighting>() == 64);
 
 pub struct GpuState {
     pub surface: wgpu::Surface<'static>,
@@ -102,7 +100,6 @@ pub struct GpuState {
     pub config: wgpu::SurfaceConfiguration,
     pub pipeline: wgpu::RenderPipeline,
     pub sphere_inside_pipeline: wgpu::RenderPipeline,
-    pub shadow_pipeline: wgpu::RenderPipeline,
     pub sphere_vertex_buf: wgpu::Buffer,
     pub sphere_index_buf: wgpu::Buffer,
     pub sphere_index_count: u32,
@@ -119,14 +116,16 @@ pub struct GpuState {
     pub uniform_buf: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
     pub scene_lighting_buf: wgpu::Buffer,
+    pub render_config_buf: wgpu::Buffer,
     pub scene_bind_group: wgpu::BindGroup,
-    pub shadow_texture_view: wgpu::TextureView,
-    pub shadow_bind_group: wgpu::BindGroup,
+    /// Voxel volume bind group (group 2): occupancy 3D tex, light 3D tex, sampler, params uniform.
+    /// Recreated when VoxelVolume resizes or is first initialized.
+    pub voxel_bind_group: Option<wgpu::BindGroup>,
 
     // Bind group layouts — stored for creating additional pipelines (block renderer).
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub scene_bind_group_layout: wgpu::BindGroupLayout,
-    pub shadow_bind_group_layout: wgpu::BindGroupLayout,
+    pub voxel_bind_group_layout: wgpu::BindGroupLayout,
 
     pub egui_ctx: egui::Context,
     pub egui_winit: egui_winit::State,
@@ -194,86 +193,106 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         }],
     });
 
-    // Scene-wide lighting uniform (group 1).
+    // Scene-wide lighting uniform (group 1, binding 0) + render config (binding 1).
     let scene_lighting_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("scene_lighting"),
         size: std::mem::size_of::<SceneLighting>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let render_config_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("render_config"),
+        size: std::mem::size_of::<RenderConfig>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let scene_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("scene_layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<SceneLighting>() as u64),
-            },
-            count: None,
-        }],
-    });
-    let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("scene_bind_group"),
-        layout: &scene_bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: scene_lighting_buf.as_entire_binding(),
-        }],
-    });
-
-    // Shadow map: 2048x2048 depth texture with texture binding for sampling in main pass.
-    let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("shadow_map"),
-        size: wgpu::Extent3d { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE, depth_or_array_layers: 1 },
-        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let shadow_texture_view = shadow_texture.create_view(&Default::default());
-
-    let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("shadow_sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        compare: Some(wgpu::CompareFunction::LessEqual),
-        ..Default::default()
-    });
-
-    // Shadow bind group layout (group 2 in main pipeline): shadow texture + comparison sampler.
-    let shadow_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("shadow_bind_group_layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<SceneLighting>() as u64),
                 },
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<RenderConfig>() as u64),
+                },
                 count: None,
             },
         ],
     });
-
-    let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("shadow_bind_group"),
-        layout: &shadow_bind_group_layout,
+    let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scene_bind_group"),
+        layout: &scene_bind_group_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_texture_view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scene_lighting_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: render_config_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    // Voxel volume bind group layout (group 2): occupancy 3D, light 3D, sampler, params.
+    // The actual bind group is created later when VoxelVolume is initialized.
+    let voxel_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("voxel_bind_group_layout"),
+        entries: &[
+            // binding 0: occupancy 3D texture (Rgba8Uint, read by fragment for DDA ray march)
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // binding 1: block light 3D texture (Rgba16Float, read by fragment for emissive light)
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // binding 2: trilinear sampler for block light texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // binding 3: volume params uniform (origin, size)
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<crate::voxel_volume::VoxelVolumeParams>() as u64,
+                    ),
+                },
+                count: None,
+            },
         ],
     });
 
@@ -281,17 +300,10 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         label: Some("shader"), source: wgpu::ShaderSource::Wgsl(include_str!("sphere.wgsl").into()),
     });
 
-    // Main pipeline layout: group 0 (per-object), group 1 (scene lighting), group 2 (shadow map).
+    // Main pipeline layout: group 0 (per-object), group 1 (scene lighting + config), group 2 (voxel volume).
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[&bind_group_layout, &scene_bind_group_layout, &shadow_bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    // Shadow pipeline layout: only group 0 (per-object uniforms). Depth-only, no fragment.
-    let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("shadow_pipeline_layout"),
-        bind_group_layouts: &[&bind_group_layout],
+        bind_group_layouts: &[&bind_group_layout, &scene_bind_group_layout, &voxel_bind_group_layout],
         push_constant_ranges: &[],
     });
 
@@ -359,41 +371,7 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
         multisample: Default::default(), multiview: None, cache: None,
     });
 
-    // Shadow pipeline: depth-only rendering from the sun's perspective.
-    // Uses its own pipeline layout (only group 0) and no fragment shader.
-    let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("shadow_pipeline"),
-        layout: Some(&shadow_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader, entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: 12, step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-            }],
-            compilation_options: Default::default(),
-        },
-        fragment: None, // depth-only
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: depth_format,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::LessEqual, // standard depth (not reverse-Z)
-            stencil: Default::default(),
-            bias: wgpu::DepthBiasState {
-                constant: 2,     // offset to reduce shadow acne
-                slope_scale: 2.0,
-                clamp: 0.0,
-            },
-        }),
-        multisample: Default::default(),
-        multiview: None,
-        cache: None,
-    });
+
 
     // Sphere mesh.
     let sphere = IcoSphere::generate(4);
@@ -651,19 +629,50 @@ pub fn init_gpu(window: Arc<Window>) -> GpuState {
     let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
 
     GpuState {
-        surface, device, queue, config, pipeline, sphere_inside_pipeline, shadow_pipeline,
+        surface, device, queue, config, pipeline, sphere_inside_pipeline,
         sphere_vertex_buf, sphere_index_buf, sphere_index_count: sphere.indices.len() as u32,
         box_vertex_buf, box_index_buf, box_index_count: box_idxs.len() as u32,
         cockpit_vertex_buf, cockpit_index_buf, cockpit_index_count: win_idxs.len() as u32,
         ext_box_vertex_buf, ext_box_index_buf, ext_box_index_count: ext_box_idxs.len() as u32,
         depth_view, uniform_buf, bind_group,
-        scene_lighting_buf, scene_bind_group,
-        shadow_texture_view, shadow_bind_group,
-        bind_group_layout, scene_bind_group_layout, shadow_bind_group_layout,
+        scene_lighting_buf, render_config_buf, scene_bind_group,
+        voxel_bind_group: None,
+        bind_group_layout, scene_bind_group_layout, voxel_bind_group_layout,
         egui_ctx, egui_winit, egui_renderer,
         star_pipeline, star_point_pipeline, star_quad_vertex_buf, star_quad_index_buf,
         star_instance_buf, star_scene_uniform_buf, star_bind_group,
     }
+}
+
+/// Create or recreate the voxel volume bind group (group 2) from a VoxelVolume's textures.
+/// Called once after VoxelVolume is created and again if it is resized.
+pub fn create_voxel_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    vol: &crate::voxel_volume::VoxelVolume,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("voxel_bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&vol.occupancy_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&vol.light_view_a),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&vol.light_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: vol.params_buf.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 pub fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::TextureView {

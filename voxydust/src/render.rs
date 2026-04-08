@@ -5,6 +5,7 @@ use glam::{DVec3, DQuat, Mat4, Quat, Vec3};
 use crate::block_render::{BlockRenderer, ChunkGpuMesh};
 use crate::camera::CameraParams;
 use crate::gpu::{GpuState, ObjectUniforms, SceneLighting, EYE_HEIGHT, MAX_OBJECTS};
+use crate::graphics_settings::{GraphicsSettings, RenderConfig};
 use crate::hud::{self, HudContext};
 
 use voxeldust_core::block::palette::CHUNK_SIZE;
@@ -198,39 +199,16 @@ fn build_uniforms(
     }
 }
 
-/// Compute orthographic light view-projection matrix for directional shadow mapping.
-/// Centers the shadow frustum on the camera position, looking along the sun direction.
-fn compute_light_vp(sun_dir: Vec3) -> Mat4 {
-    let half_extent = 200.0_f32; // 200m half-width covers nearby scene
-
-    // Sun shines from `sun_dir` toward the origin. The light "eye" is far along sun_dir.
-    let light_eye = sun_dir * 500.0; // 500m away from center
-    let light_target = Vec3::ZERO;
-    // Choose a stable up vector that isn't parallel to sun_dir.
-    let light_up = if sun_dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-
-    let light_view = Mat4::look_at_rh(light_eye, light_target, light_up);
-    // Standard depth (near=0, far=1). The light frustum is 1000m deep (light at 500m, so 500m behind + 500m in front).
-    let light_proj = Mat4::orthographic_rh(
-        -half_extent, half_extent,
-        -half_extent, half_extent,
-        0.1, 1000.0,
-    );
-    light_proj * light_view
-}
-
 /// Build SceneLighting from the current WorldState.
 fn build_scene_lighting(ws: Option<&WorldStateData>) -> SceneLighting {
     if let Some(ws) = ws {
         if let Some(ref l) = ws.lighting {
             let dir = l.sun_direction.normalize().as_vec3();
-            let light_vp = compute_light_vp(dir);
             SceneLighting {
                 sun_direction: [dir.x, dir.y, dir.z, 0.0],
                 sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], l.sun_intensity],
                 ambient: [l.ambient, 0.0, 0.0, 0.0],
                 camera_pos: [0.0, 0.0, 0.0, 0.0],
-                light_vp: light_vp.to_cols_array_2d(),
             }
         } else {
             default_scene_lighting()
@@ -244,14 +222,11 @@ fn default_scene_lighting() -> SceneLighting {
     // Dim interstellar ambient — used as fallback when no host is sending
     // scene updates (e.g., during warp HostSwitch gap before galaxy shard
     // scene data arrives). Must not be bright white.
-    let dir = Vec3::new(0.0, -1.0, 0.0);
-    let light_vp = compute_light_vp(dir);
     SceneLighting {
         sun_direction: [0.0, -1.0, 0.0, 0.0],
         sun_color: [0.4, 0.4, 0.5, 0.15],
         ambient: [0.06, 0.0, 0.0, 0.0],
         camera_pos: [0.0, 0.0, 0.0, 0.0],
-        light_vp: light_vp.to_cols_array_2d(),
     }
 }
 
@@ -282,6 +257,7 @@ pub fn render_frame(
     block_target: Option<&voxeldust_core::block::raycast::BlockHit>,
     block_indicators: &[(glam::Vec3, u8, char)],
     config_state: Option<&mut voxeldust_core::signal::config::BlockSignalConfig>,
+    gfx_settings: &GraphicsSettings,
 ) -> hud::ConfigPanelAction {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -296,46 +272,16 @@ pub fn render_frame(
     let scene_lighting = build_scene_lighting(latest_world_state);
     gpu.queue.write_buffer(&gpu.scene_lighting_buf, 0, bytemuck::bytes_of(&scene_lighting));
 
-    let light_vp = Mat4::from_cols_array_2d(&scene_lighting.light_vp);
+    // Write render configuration from graphics settings.
+    let render_config = RenderConfig::from_settings(gfx_settings, frame_count);
+    gpu.queue.write_buffer(&gpu.render_config_buf, 0, bytemuck::bytes_of(&render_config));
 
-    // -- Shadow pass --
-    // Overwrite MVPs with light-space projections for the shadow depth pass.
+    // Upload camera-space uniforms.
     if ro.object_count > 0 {
-        // Compute shadow-space MVPs: replace each object's mvp with light_vp * model.
-        for i in 0..ro.object_count {
-            let model = Mat4::from_cols_array_2d(&uniform_data[i].model);
-            uniform_data[i].mvp = (light_vp * model).to_cols_array_2d();
-        }
         gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
     }
 
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-    // Shadow render pass: depth-only into the shadow texture.
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("shadow"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &gpu.shadow_texture_view,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
-        pass.set_pipeline(&gpu.shadow_pipeline);
-        pass.set_vertex_buffer(0, gpu.sphere_vertex_buf.slice(..));
-        pass.set_index_buffer(gpu.sphere_index_buf.slice(..), wgpu::IndexFormat::Uint32);
-
-        // Draw all non-emissive sphere objects into the shadow map.
-        for i in 0..ro.object_count {
-            if uniform_data[i].color[3] > 0.5 { continue; }
-            pass.set_bind_group(0, &gpu.bind_group, &[(i as u32) * 256]);
-            pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
-        }
-
-        // TODO: block chunk shadow pass (requires computing shadow-space MVPs for chunks).
-    }
 
     // -- Star pass (before main pass, additive blend, no depth write) --
     {
@@ -367,17 +313,6 @@ pub fn render_frame(
     }
 
     // -- Main pass --
-    // Restore camera-space MVPs by re-running the uniform build.
-    let ro = build_uniforms(
-        uniform_data, cam, latest_world_state, secondary_world_state,
-        current_shard_type, player_position, ship_rotation,
-    );
-
-    // Upload camera-space uniforms for the main pass.
-    if ro.object_count > 0 {
-        gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
-    }
-
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("main"),
@@ -398,8 +333,10 @@ pub fn render_frame(
 
         // Set scene-wide lighting uniform (group 1) -- constant for entire pass.
         pass.set_bind_group(1, &gpu.scene_bind_group, &[]);
-        // Set shadow map (group 2) -- constant for entire pass.
-        pass.set_bind_group(2, &gpu.shadow_bind_group, &[]);
+        // Set voxel volume (group 2) -- constant for entire pass.
+        if let Some(ref voxel_bg) = gpu.voxel_bind_group {
+            pass.set_bind_group(2, voxel_bg, &[]);
+        }
 
         // Draw celestial bodies (spheres).
         pass.set_vertex_buffer(0, gpu.sphere_vertex_buf.slice(..));
@@ -469,7 +406,7 @@ pub fn render_frame(
                     // Record draw calls.
                     pass.set_pipeline(&br.pipeline);
                     pass.set_bind_group(1, &gpu.scene_bind_group, &[]);
-                    pass.set_bind_group(2, &gpu.shadow_bind_group, &[]);
+                    if let Some(ref vbg) = gpu.voxel_bind_group { pass.set_bind_group(2, vbg, &[]); }
 
                     for &(uniform_idx, chunk_mesh) in &block_draws {
                         pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
@@ -528,7 +465,7 @@ pub fn render_frame(
                     // Draw as sphere with inside pipeline (no backface culling).
                     pass.set_pipeline(&gpu.sphere_inside_pipeline);
                     pass.set_bind_group(1, &gpu.scene_bind_group, &[]);
-                    pass.set_bind_group(2, &gpu.shadow_bind_group, &[]);
+                    if let Some(ref vbg) = gpu.voxel_bind_group { pass.set_bind_group(2, vbg, &[]); }
                     pass.set_vertex_buffer(0, gpu.sphere_vertex_buf.slice(..));
                     pass.set_index_buffer(gpu.sphere_index_buf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.set_bind_group(0, &gpu.bind_group, &[(highlight_idx as u32) * 256]);

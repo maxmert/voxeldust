@@ -104,6 +104,11 @@ impl ClientChunkCache {
         self.active_sources.contains(&source)
     }
 
+    /// Iterate over all currently active source IDs.
+    pub fn active_sources_iter(&self) -> impl Iterator<Item = ChunkSourceId> + '_ {
+        self.active_sources.iter().copied()
+    }
+
     /// Drain the list of sources removed since the last call.
     /// The renderer uses this to clean up GPU buffers for removed sources.
     pub fn drain_removed_sources(&mut self) -> Vec<ChunkSourceId> {

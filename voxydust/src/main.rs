@@ -8,12 +8,14 @@ mod block_render;
 mod camera;
 mod events;
 mod gpu;
+pub mod graphics_settings;
 mod hud;
 mod input;
 mod mesh;
 mod network;
 mod render;
 mod stars;
+mod voxel_volume;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -85,12 +87,12 @@ impl Default for BlockHotbar {
             slots: [
                 BlockId::HULL_STANDARD,
                 BlockId::HULL_LIGHT,
-                BlockId::HULL_HEAVY,
                 BlockId::HULL_ARMORED,
                 BlockId::WINDOW,
+                BlockId::LAVA,
+                BlockId::ENERGY_CRYSTAL,
+                BlockId::MAGMA_ROCK,
                 BlockId::STONE,
-                BlockId::DIRT,
-                BlockId::SAND,
                 BlockId::GRASS,
             ],
         }
@@ -1036,6 +1038,7 @@ struct ClientApp {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     block_renderer: Option<block_render::BlockRenderer>,
+    voxel_volume: Option<voxel_volume::VoxelVolume>,
     uniform_data: Vec<ObjectUniforms>,
     /// Cached block registry — built once, used for meshing and raycast.
     /// Stored outside the ECS world to avoid borrow conflicts with chunk cache.
@@ -1057,6 +1060,7 @@ impl ClientApp {
             block_edit_tx: None,
             tcp_out_tx: None,
         });
+        ecs_app.insert_resource(graphics_settings::GraphicsSettings::default());
         ecs_app.insert_resource(BlockHotbar::default());
         ecs_app.insert_resource(BlockTarget::default());
         ecs_app.insert_resource(SubBlockTool::default());
@@ -1187,6 +1191,7 @@ impl ClientApp {
             window: None,
             gpu: None,
             block_renderer: None,
+            voxel_volume: None,
             uniform_data: vec![bytemuck::Zeroable::zeroed(); MAX_OBJECTS],
             registry: voxeldust_core::block::BlockRegistry::new(),
             args,
@@ -1194,16 +1199,24 @@ impl ClientApp {
     }
 
     fn init_gpu(&mut self, window: Arc<Window>) {
-        let gpu_state = gpu::init_gpu(window.clone());
+        let mut gpu_state = gpu::init_gpu(window.clone());
         // Create the block renderer now that we have GPU state.
         let br = block_render::BlockRenderer::new(
             &gpu_state.device,
             gpu_state.config.format,
             &gpu_state.bind_group_layout,
             &gpu_state.scene_bind_group_layout,
-            &gpu_state.shadow_bind_group_layout,
+            &gpu_state.voxel_bind_group_layout,
         );
         self.block_renderer = Some(br);
+        let gfx = self.ecs_app.world().resource::<graphics_settings::GraphicsSettings>().clone();
+        let vol = voxel_volume::VoxelVolume::new(&gpu_state.device, &gfx);
+        gpu_state.voxel_bind_group = Some(gpu::create_voxel_bind_group(
+            &gpu_state.device,
+            &gpu_state.voxel_bind_group_layout,
+            &vol,
+        ));
+        self.voxel_volume = Some(vol);
         self.window = Some(window);
         self.gpu = Some(gpu_state);
     }
@@ -1558,11 +1571,79 @@ impl ClientApp {
             }
         };
 
+        // Update voxel volume from nearby chunk data.
+        if let Some(vol) = &mut self.voxel_volume {
+            let world = self.ecs_app.world();
+            let gfx = world.resource::<graphics_settings::GraphicsSettings>();
+            let resized = vol.resize_if_needed(&gpu.device, gfx);
+
+            // Recreate the voxel bind group if the volume was resized.
+            if resized {
+                gpu.voxel_bind_group = Some(gpu::create_voxel_bind_group(
+                    &gpu.device,
+                    &gpu.voxel_bind_group_layout,
+                    vol,
+                ));
+            }
+
+            let chunk_cache_res = world.resource::<ClientChunkCacheRes>();
+            let active: Vec<_> = chunk_cache_res.active_sources_iter().collect();
+            let player_block = glam::IVec3::new(
+                render_position.x.floor() as i32,
+                render_position.y.floor() as i32,
+                render_position.z.floor() as i32,
+            );
+            vol.populate(player_block, &*chunk_cache_res, &self.registry, &active);
+            vol.upload(&gpu.queue);
+
+            // Compute the base_transform matching the one used for chunk rendering,
+            // so the world_to_volume matrix correctly maps fragment world_pos back
+            // to volume-index coordinates.
+            let base_transform = if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
+                let ship_rot_mat = glam::Mat4::from_quat(ship_rotation.as_quat());
+                let origin_local = -(render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0));
+                let ship_origin_offset = (ship_rotation * origin_local).as_vec3();
+                glam::Mat4::from_translation(ship_origin_offset) * ship_rot_mat
+            } else {
+                // Planet/system shard: camera-relative translation only.
+                glam::Mat4::from_translation(-render_position.as_vec3())
+            };
+
+            // Extract sun direction from world state (same space as fragment world_pos).
+            let ws_ref = world.resource::<ServerWorldState>();
+            let sun_dir_world = ws_ref.latest.as_ref()
+                .and_then(|ws| ws.lighting.as_ref())
+                .map(|l| l.sun_direction.normalize().as_vec3())
+                .unwrap_or(glam::Vec3::new(0.0, -1.0, 0.0));
+
+            let params = vol.compute_params(base_transform, sun_dir_world);
+            gpu.queue.write_buffer(&vol.params_buf, 0, bytemuck::bytes_of(&params));
+
+            // Dispatch block light propagation compute shader if needed.
+            if vol.needs_propagation {
+                // Clear light texture A to prevent uninitialized data from flooding.
+                vol.clear_light_texture_a(&gpu.queue);
+
+                let world = self.ecs_app.world();
+                let gfx = world.resource::<graphics_settings::GraphicsSettings>();
+                let iterations = gfx.block_light_iterations;
+                // Round up to even so the result always lands in texture A
+                // (which is what the fragment shader reads via the voxel bind group).
+                let iterations = if iterations % 2 != 0 { iterations + 1 } else { iterations };
+                let mut encoder = gpu.device.create_command_encoder(
+                    &wgpu::CommandEncoderDescriptor { label: Some("light_propagate") },
+                );
+                vol.propagate_light(&mut encoder, iterations);
+                gpu.queue.submit(std::iter::once(encoder.finish()));
+            }
+        }
+
         // Re-read resources for render_frame call.
         let world = self.ecs_app.world();
         let ws = world.resource::<ServerWorldState>();
         let ap = world.resource::<ClientAutopilot>();
         let sys_params = world.resource::<SystemParamsCache>();
+        let gfx_settings = world.resource::<graphics_settings::GraphicsSettings>().clone();
 
         let panel_action = render::render_frame(
             gpu,
@@ -1590,6 +1671,7 @@ impl ClientApp {
             world.resource::<BlockTarget>().hit.as_ref(),
             &world.resource::<ClientBlockIndex>().entries,
             config_for_panel.as_mut(),
+            &gfx_settings,
         );
 
         // Handle config panel actions.

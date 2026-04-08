@@ -151,8 +151,6 @@ pub struct ChunkGpuMesh {
 pub struct BlockRenderer {
     /// Render pipeline for opaque block meshes (backface culling, PBR lighting).
     pub pipeline: wgpu::RenderPipeline,
-    /// Render pipeline for block shadow pass (depth-only, block vertex layout).
-    pub shadow_pipeline: wgpu::RenderPipeline,
     /// Per-source, per-chunk GPU mesh buffers for full blocks.
     chunk_meshes: HashMap<ChunkKey, ChunkGpuMesh>,
     /// Per-source, per-chunk GPU mesh buffers for sub-block elements.
@@ -167,7 +165,7 @@ impl BlockRenderer {
         surface_format: wgpu::TextureFormat,
         bind_group_layout: &wgpu::BindGroupLayout,
         scene_bind_group_layout: &wgpu::BindGroupLayout,
-        shadow_bind_group_layout: &wgpu::BindGroupLayout,
+        voxel_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         let block_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("block_shader"),
@@ -200,7 +198,7 @@ impl BlockRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("block_pipeline_layout"),
-            bind_group_layouts: &[bind_group_layout, scene_bind_group_layout, shadow_bind_group_layout],
+            bind_group_layouts: &[bind_group_layout, scene_bind_group_layout, voxel_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -241,47 +239,8 @@ impl BlockRenderer {
             cache: None,
         });
 
-        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("block_shadow_pipeline_layout"),
-            bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("block_shadow_pipeline"),
-            layout: Some(&shadow_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &block_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[block_vertex_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: None,
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
-
         Self {
             pipeline,
-            shadow_pipeline,
             chunk_meshes: HashMap::new(),
             sub_block_meshes: HashMap::new(),
         }
