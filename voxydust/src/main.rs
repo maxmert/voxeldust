@@ -275,20 +275,15 @@ struct LocalPlayer {
     ship_rotation: DQuat,
 }
 
+/// Interpolated render state — output of snapshot interpolation, consumed by camera + renderer.
 #[derive(Resource)]
 struct RenderSmoothing {
-    // --- Walking ---
     render_position: DVec3,
-    prev_server_position: DVec3,
-    walk_velocity: DVec3,
-    last_server_update_time: Instant,
-    has_prev_server_pos: bool,
-
-    // --- Piloting ---
     render_rotation: DQuat,
-    ship_velocity: DVec3,
+    /// Interpolated ship system-space origin (for exterior rendering / cam_system_pos).
+    ship_origin: DVec3,
 
-    // --- Galaxy warp ---
+    // --- Galaxy warp (separate interpolation, kept for warp travel) ---
     galaxy_render_position: DVec3,
     galaxy_render_rotation: DQuat,
     galaxy_velocity: DVec3,
@@ -296,6 +291,25 @@ struct RenderSmoothing {
     prev_galaxy_rotation: DQuat,
     last_galaxy_update_time: Instant,
     has_prev_galaxy_pos: bool,
+}
+
+/// A server snapshot stored for interpolation.
+#[derive(Clone)]
+struct InterpolationSnapshot {
+    player_position: DVec3,
+    ship_rotation: DQuat,
+    ship_origin: DVec3,
+    velocity: DVec3,
+}
+
+/// Double-buffer of the two most recent server snapshots for smooth interpolation.
+/// Each frame, `smooth_render_position` lerps between `prev` and `current`.
+#[derive(Resource)]
+struct SnapshotBuffer {
+    prev: Option<InterpolationSnapshot>,
+    current: Option<InterpolationSnapshot>,
+    current_arrival_time: Instant,
+    prev_arrival_time: Instant,
 }
 
 #[derive(Resource)]
@@ -463,6 +477,7 @@ fn poll_network(
     mut ws: ResMut<ServerWorldState>,
     mut player: ResMut<LocalPlayer>,
     mut smooth: ResMut<RenderSmoothing>,
+    mut snapshots: ResMut<SnapshotBuffer>,
     mut cam: ResMut<CameraControl>,
     mut ap: ResMut<ClientAutopilot>,
     mut warp: ResMut<ClientWarp>,
@@ -498,31 +513,35 @@ fn poll_network(
                     warp.target_star_index = None;
                 }
 
-                // Update player position from server.
+                // Update player position + push snapshot for interpolation.
                 if let Some(p) = world_state.players.first() {
-                    // Derive walking velocity from position deltas for
-                    // smooth inter-tick extrapolation on the client.
                     let new_pos = p.position;
-                    let now_ws = Instant::now();
-                    if smooth.has_prev_server_pos {
-                        let elapsed = (now_ws - smooth.last_server_update_time).as_secs_f64();
-                        if elapsed > 0.01 && elapsed < 0.15 {
-                            smooth.walk_velocity = (new_pos - smooth.prev_server_position) / elapsed;
-                        } else {
-                            smooth.walk_velocity = DVec3::ZERO;
-                        }
-                    } else {
-                        smooth.walk_velocity = DVec3::ZERO;
-                        smooth.has_prev_server_pos = true;
-                    }
-                    smooth.prev_server_position = new_pos;
-                    smooth.last_server_update_time = now_ws;
-                    // Only snap render_position on large corrections (teleport/shard change).
-                    // Small corrections are handled by per-frame lerp for smoothness.
-                    if (new_pos - smooth.render_position).length() > 2.0 {
+
+                    // Push to snapshot buffer for smooth interpolation.
+                    let new_snapshot = InterpolationSnapshot {
+                        player_position: new_pos,
+                        ship_rotation: p.rotation,
+                        ship_origin: world_state.origin,
+                        velocity: p.velocity,
+                    };
+                    // Teleport detection: snap both slots on large jumps.
+                    let is_teleport = snapshots.current.as_ref()
+                        .map(|c| (new_pos - c.player_position).length() > 10.0)
+                        .unwrap_or(false);
+                    if is_teleport {
+                        snapshots.prev = Some(new_snapshot.clone());
+                        snapshots.current = Some(new_snapshot);
                         smooth.render_position = new_pos;
+                        smooth.render_rotation = p.rotation;
+                        smooth.ship_origin = world_state.origin;
+                    } else {
+                        snapshots.prev = snapshots.current.take();
+                        snapshots.prev_arrival_time = snapshots.current_arrival_time;
+                        snapshots.current = Some(new_snapshot);
+                        snapshots.current_arrival_time = Instant::now();
                     }
 
+                    // Game logic (non-rendering).
                     player.position = new_pos;
                     player.velocity = p.velocity;
                     let was_piloting = player.is_piloting;
@@ -532,42 +551,21 @@ fn poll_network(
                         info!(piloting = player.is_piloting, grounded = p.grounded, frame = ft.count, "pilot mode changed");
                     }
 
-                    // Always update ship_rotation on a ship shard — needed for
-                    // correct floating-origin rendering of celestial bodies
-                    // even while walking inside the ship.
                     if conn.current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
                         player.ship_rotation = p.rotation;
                     }
 
-                    // Piloting smoothing: use server velocity for extrapolation,
-                    // snap on large corrections (shard change, warp arrival).
-                    if player.is_piloting {
-                        smooth.ship_velocity = p.velocity;
-                        if (new_pos - smooth.render_position).length() > 50.0 {
-                            smooth.render_position = new_pos;
-                            smooth.render_rotation = p.rotation;
-                        }
-                    }
-
                     if player.is_piloting && !was_piloting {
-                        // Walk → Pilot: snap rotation and velocity to prevent
-                        // stale walking state from bleeding into piloting.
-                        smooth.render_rotation = p.rotation;
-                        smooth.ship_velocity = p.velocity;
-                        // Sync camera yaw to ship heading so there's no visual snap.
+                        // Walk → Pilot: sync camera yaw to ship heading.
                         let fwd = p.rotation * DVec3::NEG_Z;
                         cam.yaw = fwd.z.atan2(fwd.x) as f64;
                         cam.pitch = fwd.y.asin() as f64;
                     }
 
-                    // Pilot → walk transition: reset camera to ship-local forward.
-                    // Autopilot continues running on the system shard — preserve
-                    // local tracking so the HUD can display it when re-entering.
                     if was_piloting && !player.is_piloting {
+                        // Pilot → Walk: reset camera to ship-local forward.
                         cam.yaw = -std::f64::consts::FRAC_PI_2;
                         cam.pitch = 0.0;
-                        smooth.has_prev_server_pos = false;
-                        smooth.walk_velocity = DVec3::ZERO;
                     }
                 }
                 // Extract server-authoritative autopilot state.
@@ -592,13 +590,12 @@ fn poll_network(
                 conn.connected = true;
                 conn.system_seed = system_seed;
                 conn.galaxy_seed = galaxy_seed;
-                // Reset all smoothing — coordinate systems differ between shards.
-                smooth.has_prev_server_pos = false;
-                smooth.walk_velocity = DVec3::ZERO;
-                smooth.ship_velocity = DVec3::ZERO;
+                // Reset interpolation — coordinate systems differ between shards.
                 smooth.render_rotation = reference_rotation;
                 smooth.has_prev_galaxy_pos = false;
                 smooth.galaxy_velocity = DVec3::ZERO;
+                snapshots.prev = None;
+                snapshots.current = None;
 
                 // Clear warp state on any new shard connection.
                 warp.galaxy_position = None;
@@ -745,8 +742,8 @@ fn poll_network(
             }
             NetEvent::Transitioning => {
                 info!("transitioning to new shard...");
-                smooth.has_prev_server_pos = false;
-                smooth.walk_velocity = DVec3::ZERO;
+                snapshots.prev = None;
+                snapshots.current = None;
 
                 // Transition to new shard: the OLD source's chunks remain in the
                 // cache (e.g., ship chunks stay visible as exterior after exiting).
@@ -824,37 +821,44 @@ fn poll_network(
     }
 }
 
+/// Snapshot interpolation: lerp between the two most recent server states.
+/// Produces smooth render_position, render_rotation, and ship_origin at display framerate.
+/// Unified for walking, piloting, and galaxy warp — no special cases.
 fn smooth_render_position(
     mut smooth: ResMut<RenderSmoothing>,
-    player: Res<LocalPlayer>,
-    warp: Res<ClientWarp>,
+    snapshots: Res<SnapshotBuffer>,
     ft: Res<FrameTime>,
 ) {
-    // Exponential smoothing: converges ~90% within 2 server ticks (100ms).
-    // Frame-rate independent via dt-scaled blend factor.
-    let blend = 1.0 - (-20.0 * ft.dt).exp();
+    let (prev, curr) = match (&snapshots.prev, &snapshots.current) {
+        (Some(p), Some(c)) => (p, c),
+        (None, Some(c)) => {
+            // Only one snapshot — snap to it (first tick after connect).
+            smooth.render_position = c.player_position;
+            smooth.render_rotation = c.ship_rotation;
+            smooth.ship_origin = c.ship_origin;
+            return;
+        }
+        _ => return,
+    };
 
-    if warp.galaxy_position.is_some() {
-        // Galaxy warp mode: smooth galaxy-scale position + rotation.
-        let elapsed = (ft.last_time - smooth.last_galaxy_update_time).as_secs_f64().min(0.06);
-        let target = smooth.prev_galaxy_position + smooth.galaxy_velocity * elapsed;
-        let delta = (target - smooth.galaxy_render_position) * blend;
-        smooth.galaxy_render_position = smooth.galaxy_render_position + delta;
-        let rot = smooth.galaxy_render_rotation.slerp(smooth.prev_galaxy_rotation, blend);
-        smooth.galaxy_render_rotation = rot;
-    } else if player.is_piloting {
-        // Piloting mode: player's ship-local position is static while seated —
-        // no velocity extrapolation needed.  Only rotation is smoothed via slerp.
-        smooth.render_position = player.position;
-        let rot = smooth.render_rotation.slerp(player.ship_rotation, blend);
-        smooth.render_rotation = rot;
-    } else {
-        // Walking mode: smooth player position between server ticks.
-        let elapsed = (ft.last_time - smooth.last_server_update_time).as_secs_f64().min(0.06);
-        let target = player.position + smooth.walk_velocity * elapsed;
-        let delta = (target - smooth.render_position) * blend;
-        smooth.render_position = smooth.render_position + delta;
-    }
+    // Time between the two server snapshots.
+    let tick_duration = snapshots.current_arrival_time
+        .saturating_duration_since(snapshots.prev_arrival_time)
+        .as_secs_f64()
+        .max(0.01);
+
+    // Time since the current (latest) snapshot arrived.
+    let elapsed = ft.last_time
+        .saturating_duration_since(snapshots.current_arrival_time)
+        .as_secs_f64();
+
+    // Interpolation factor: 0.0 = at prev, 1.0 = at current.
+    // Renders ONE tick behind — both endpoints are known, no prediction.
+    let t = (elapsed / tick_duration).clamp(0.0, 1.0);
+
+    smooth.render_position = prev.player_position.lerp(curr.player_position, t);
+    smooth.render_rotation = prev.ship_rotation.slerp(curr.ship_rotation, t);
+    smooth.ship_origin = prev.ship_origin.lerp(curr.ship_origin, t);
 }
 
 fn check_autopilot_timeout(
@@ -1082,12 +1086,8 @@ impl ClientApp {
         });
         ecs_app.insert_resource(RenderSmoothing {
             render_position: DVec3::new(0.0, 1.0, 0.0),
-            prev_server_position: DVec3::ZERO,
-            walk_velocity: DVec3::ZERO,
-            last_server_update_time: Instant::now(),
-            has_prev_server_pos: false,
             render_rotation: DQuat::IDENTITY,
-            ship_velocity: DVec3::ZERO,
+            ship_origin: DVec3::ZERO,
             galaxy_render_position: DVec3::ZERO,
             galaxy_render_rotation: DQuat::IDENTITY,
             galaxy_velocity: DVec3::ZERO,
@@ -1095,6 +1095,12 @@ impl ClientApp {
             prev_galaxy_rotation: DQuat::IDENTITY,
             last_galaxy_update_time: Instant::now(),
             has_prev_galaxy_pos: false,
+        });
+        ecs_app.insert_resource(SnapshotBuffer {
+            prev: None,
+            current: None,
+            current_arrival_time: Instant::now(),
+            prev_arrival_time: Instant::now(),
         });
         ecs_app.insert_resource(CameraControl {
             yaw: 0.0,
@@ -1298,6 +1304,7 @@ impl ClientApp {
                 gpu.config.width,
                 gpu.config.height,
                 ws.latest.as_ref(),
+                Some(smooth.ship_origin),
             );
 
             (
@@ -1307,7 +1314,7 @@ impl ClientApp {
                 conn.secondary_shard_type,
                 cam_position,
                 player.velocity,
-                player.ship_rotation,
+                smooth.render_rotation,
                 player.is_piloting,
                 conn.connected,
                 conn.current_shard_type,

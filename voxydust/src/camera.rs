@@ -27,6 +27,8 @@ pub fn compute_camera(
     gpu_width: u32,
     gpu_height: u32,
     latest_world_state: Option<&voxeldust_core::client_message::WorldStateData>,
+    // Interpolated ship origin for smooth cam_system_pos (None = use ws.origin).
+    interpolated_ship_origin: Option<DVec3>,
 ) -> CameraParams {
     use winit::keyboard::KeyCode;
 
@@ -105,7 +107,12 @@ pub fn compute_camera(
     // we must add the ship's system-space position (ws.origin) to get the
     // true camera position for correct body offsets.
     let cam_system_pos = if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
-        latest_world_state.map_or(cam_pos, |ws| ws.origin + cam_pos)
+        // Use interpolated origin if available (smooth), otherwise fall back to WorldState.
+        if let Some(origin) = interpolated_ship_origin {
+            origin + cam_pos
+        } else {
+            latest_world_state.map_or(cam_pos, |ws| ws.origin + cam_pos)
+        }
     } else {
         cam_pos
     };
