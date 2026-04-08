@@ -23,6 +23,7 @@ use wgpu::util::DeviceExt;
 
 use voxeldust_core::block::chunk_mesher::{self, ChunkQuads, MesherQuad, FACE_NORMALS};
 use voxeldust_core::block::client_chunks::{ChunkKey, ChunkSourceId};
+use voxeldust_core::block::sub_block_mesher::{self, SubBlockMeshData};
 use voxeldust_core::block::{BlockId, BlockRegistry, ChunkStorage};
 
 // ---------------------------------------------------------------------------
@@ -152,8 +153,11 @@ pub struct BlockRenderer {
     pub pipeline: wgpu::RenderPipeline,
     /// Render pipeline for block shadow pass (depth-only, block vertex layout).
     pub shadow_pipeline: wgpu::RenderPipeline,
-    /// Per-source, per-chunk GPU mesh buffers.
+    /// Per-source, per-chunk GPU mesh buffers for full blocks.
     chunk_meshes: HashMap<ChunkKey, ChunkGpuMesh>,
+    /// Per-source, per-chunk GPU mesh buffers for sub-block elements.
+    /// Uses the same vertex format and pipeline as full blocks.
+    sub_block_meshes: HashMap<ChunkKey, ChunkGpuMesh>,
 }
 
 impl BlockRenderer {
@@ -279,6 +283,7 @@ impl BlockRenderer {
             pipeline,
             shadow_pipeline,
             chunk_meshes: HashMap::new(),
+            sub_block_meshes: HashMap::new(),
         }
     }
 
@@ -325,6 +330,7 @@ impl BlockRenderer {
     /// Remove ALL GPU buffers belonging to a source (when source is disconnected).
     pub fn remove_source(&mut self, source: ChunkSourceId) {
         self.chunk_meshes.retain(|k, _| k.source != source);
+        self.sub_block_meshes.retain(|k, _| k.source != source);
     }
 
     /// Total number of chunks with active GPU meshes across all sources.
@@ -352,6 +358,54 @@ impl BlockRenderer {
         sources.sort_unstable_by_key(|s| s.0);
         sources.dedup();
         sources
+    }
+
+    // -----------------------------------------------------------------------
+    // Sub-block mesh management
+    // -----------------------------------------------------------------------
+
+    /// Upload sub-block mesh data to the GPU for a specific chunk.
+    pub fn upload_sub_block_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        key: ChunkKey,
+        mesh: &SubBlockMeshData,
+    ) {
+        if mesh.is_empty() {
+            self.sub_block_meshes.remove(&key);
+            return;
+        }
+
+        // SubBlockVertex has the same layout as BlockVertex (position, normal, color).
+        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("subblock_vb_s{}_c{}", key.source.0, key.chunk)),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("subblock_ib_s{}_c{}", key.source.0, key.chunk)),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        self.sub_block_meshes.insert(key, ChunkGpuMesh {
+            vertex_buf,
+            index_buf,
+            index_count: mesh.indices.len() as u32,
+        });
+    }
+
+    /// Remove sub-block GPU buffers for a specific chunk.
+    pub fn remove_sub_block_mesh(&mut self, key: ChunkKey) {
+        self.sub_block_meshes.remove(&key);
+    }
+
+    /// Iterate all sub-block meshes belonging to a specific source.
+    pub fn sub_blocks_for_source(&self, source: ChunkSourceId) -> impl Iterator<Item = (IVec3, &ChunkGpuMesh)> {
+        self.sub_block_meshes.iter()
+            .filter(move |(k, _)| k.source == source)
+            .map(|(k, m)| (k.chunk, m))
     }
 
     // -----------------------------------------------------------------------

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [features]
 rapier = ["dep:rapier3d"]
+bytemuck = ["dep:bytemuck"]
 
 [dependencies]
 glam = { workspace = true }
@@ -18,3 +19,4 @@ gooding-lambert = { workspace = true }
 bevy_ecs = { workspace = true }
 rapier3d = { workspace = true, optional = true }
 binary-greedy-meshing = { workspace = true }
+bytemuck = { workspace = true, optional = true }

@@ -56,6 +56,7 @@ pub async fn run_network(
     event_tx: mpsc::UnboundedSender<NetEvent>,
     input_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<PlayerInputData>>>,
     block_edit_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<BlockEditData>>>,
+    tcp_out_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
     direct: Option<String>,
 ) {
     // Resolve initial shard addresses (via gateway or direct).
@@ -129,13 +130,15 @@ pub async fn run_network(
 
         // TCP outbound channel: block/sub-block edits and config updates
         // are sent reliably via TCP (not UDP) to guarantee delivery.
-        let (tcp_out_tx, mut tcp_out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // The sender lives in the ECS world (NetworkChannels.tcp_out_tx);
+        // the receiver is consumed here for writing to the TCP stream.
+        let tcp_out_rx_clone = tcp_out_rx.clone();
 
-        // Input sender task (20Hz via UDP) + TCP outbound drain.
+        // Input sender task (20Hz via UDP) + block edit drain → TCP.
         let udp_send = udp.clone();
         let input_rx_clone = input_rx.clone();
-        let block_edit_rx_clone = block_edit_rx.clone();
-        let tcp_out_tx_edit = tcp_out_tx.clone();
+        let _block_edit_rx_clone = block_edit_rx.clone(); // kept for future UDP fallback
+        let _tcp_out_rx_for_edit = tcp_out_rx.clone();
         let mut cancel_input = cancel_tx.subscribe();
         let send_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -160,14 +163,8 @@ pub async fn run_network(
                             ticks_since_send += 1;
                         }
 
-                        // Drain block edit requests → send via TCP (reliable).
-                        {
-                            let mut rx = block_edit_rx_clone.lock().await;
-                            while let Ok(edit) = rx.try_recv() {
-                                let pkt = build_block_edit(&edit);
-                                let _ = tcp_out_tx_edit.send(pkt);
-                            }
-                        }
+                        // Block edits now go through tcp_out_tx from the ECS world.
+                        // No need to drain block_edit_rx here.
                     }
                     _ = cancel_input.recv() => { return; }
                 }
@@ -227,9 +224,14 @@ pub async fn run_network(
             loop {
                 tokio::select! {
                     // Outbound: send block/sub-block edits via TCP (reliable).
-                    Some(pkt) = tcp_out_rx.recv() => {
-                        let _ = tcp_write.write_all(&pkt).await;
-                        let _ = tcp_write.flush().await;
+                    pkt = async {
+                        let mut rx = tcp_out_rx_clone.lock().await;
+                        rx.recv().await
+                    } => {
+                        if let Some(pkt) = pkt {
+                            let _ = tcp_write.write_all(&pkt).await;
+                            let _ = tcp_write.flush().await;
+                        }
                     }
                     _ = keepalive_interval.tick() => {
                         let _ = tcp_write.write_all(&0u32.to_be_bytes()).await;

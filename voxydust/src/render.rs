@@ -424,8 +424,11 @@ pub fn render_frame(
                 let mut chunk_idx = 0usize;
 
                 // For each ship, draw all cached chunks with that ship's transform.
-                // Currently all sources share the same chunk data (own ship).
-                // In the future, each ship would have its own chunk source.
+                // Build a map of (source, chunk_pos) → uniform_idx for sub-block draw reuse.
+                let mut chunk_uniform_map: std::collections::HashMap<
+                    voxeldust_core::block::client_chunks::ChunkKey, usize
+                > = std::collections::HashMap::new();
+
                 for ship_transform in &ro.block_ships {
                     for source in br.active_sources() {
                         for (chunk_pos, chunk_mesh) in br.chunks_for_source(source) {
@@ -445,6 +448,9 @@ pub fn render_frame(
                             obj.color = [1.0, 1.0, 1.0, 0.0];
                             obj.material = [0.1, 0.7, 0.0, 0.0];
                             uniform_data[uniform_idx] = obj;
+
+                            let key = voxeldust_core::block::client_chunks::ChunkKey { source, chunk: chunk_pos };
+                            chunk_uniform_map.insert(key, uniform_idx);
 
                             block_draws.push((uniform_idx, chunk_mesh));
                             chunk_idx += 1;
@@ -470,6 +476,19 @@ pub fn render_frame(
                         pass.set_vertex_buffer(0, chunk_mesh.vertex_buf.slice(..));
                         pass.set_index_buffer(chunk_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
+                    }
+
+                    // Draw sub-block meshes (same pipeline + uniform as their parent chunk).
+                    for source in br.active_sources() {
+                        for (chunk_pos, sub_mesh) in br.sub_blocks_for_source(source) {
+                            let key = voxeldust_core::block::client_chunks::ChunkKey { source, chunk: chunk_pos };
+                            if let Some(&uniform_idx) = chunk_uniform_map.get(&key) {
+                                pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
+                                pass.set_vertex_buffer(0, sub_mesh.vertex_buf.slice(..));
+                                pass.set_index_buffer(sub_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                                pass.draw_indexed(0..sub_mesh.index_count, 0, 0..1);
+                            }
+                        }
                     }
                 }
             }

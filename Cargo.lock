@@ -6861,6 +6861,7 @@ dependencies = [
  "bevy_ecs",
  "binary-greedy-meshing",
  "brahe",
+ "bytemuck",
  "flatbuffers",
  "glam 0.29.3",
  "gooding-lambert",

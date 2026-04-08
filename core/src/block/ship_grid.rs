@@ -345,7 +345,7 @@ impl ShipGrid {
             key.z as f32 * cs,
         );
 
-        solids
+        let mut result: Vec<(glam::Vec3, glam::Vec3)> = solids
             .iter()
             .map(|&(lx, ly, lz)| {
                 let world_pos = chunk_origin + glam::Vec3::new(lx as f32 + 0.5, ly as f32 + 0.5, lz as f32 + 0.5);
@@ -353,7 +353,25 @@ impl ShipGrid {
                 let half_extents = glam::Vec3::splat(0.5);
                 (pos, half_extents)
             })
-            .collect()
+            .collect();
+
+        // Sub-block element colliders: thin boxes on block faces.
+        if let Some(chunk) = self.chunks.get(&key) {
+            for (flat_idx, elements) in chunk.iter_sub_blocks() {
+                let (lx, ly, lz) = super::palette::index_to_xyz(flat_idx as usize);
+                let block_center = chunk_origin
+                    + glam::Vec3::new(lx as f32 + 0.5, ly as f32 + 0.5, lz as f32 + 0.5)
+                    - origin_offset;
+
+                for elem in elements {
+                    let (offset, half_extents) =
+                        sub_block_collider_shape(elem.face, &elem.element_type);
+                    result.push((block_center + offset, half_extents));
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -386,6 +404,63 @@ impl super::block_grid::BlockGridView for ShipGrid {
         let (key, lx, ly, lz) = Self::world_to_chunk(x, y, z);
         self.chunks.get(&key)?.get_meta(lx, ly, lz)
     }
+}
+
+/// Compute the collider offset and half-extents for a sub-block element on a face.
+/// Returns (offset_from_block_center, half_extents).
+fn sub_block_collider_shape(
+    face: u8,
+    element_type: &sub_block::SubBlockType,
+) -> (glam::Vec3, glam::Vec3) {
+    use sub_block::SubBlockType;
+
+    // Element thickness and size on the face, depending on type.
+    let (face_half_u, face_half_v, thickness) = match element_type {
+        SubBlockType::PowerWire | SubBlockType::SignalWire | SubBlockType::Cable => {
+            (0.4, 0.04, 0.04)
+        }
+        SubBlockType::Rail | SubBlockType::ConveyorBelt => {
+            (0.4, 0.15, 0.06)
+        }
+        SubBlockType::Pipe | SubBlockType::PipeValve | SubBlockType::PipePump => {
+            (0.4, 0.1, 0.1)
+        }
+        SubBlockType::Ladder => {
+            (0.35, 0.45, 0.05)
+        }
+        SubBlockType::RotorMount | SubBlockType::HingeMount => {
+            (0.2, 0.2, 0.08)
+        }
+        SubBlockType::PistonMount | SubBlockType::SliderMount => {
+            (0.15, 0.3, 0.08)
+        }
+        _ => {
+            (0.15, 0.15, 0.05)
+        }
+    };
+
+    // Offset from block center to the face surface + half thickness outward.
+    let face_offset = 0.5 + thickness * 0.5;
+    let offset = match face {
+        0 => glam::Vec3::new(face_offset, 0.0, 0.0),   // +X
+        1 => glam::Vec3::new(-face_offset, 0.0, 0.0),  // -X
+        2 => glam::Vec3::new(0.0, face_offset, 0.0),   // +Y
+        3 => glam::Vec3::new(0.0, -face_offset, 0.0),  // -Y
+        4 => glam::Vec3::new(0.0, 0.0, face_offset),   // +Z
+        5 => glam::Vec3::new(0.0, 0.0, -face_offset),  // -Z
+        _ => glam::Vec3::ZERO,
+    };
+
+    // Half-extents: face_half_u and face_half_v are in the plane of the face,
+    // thickness/2 is perpendicular. Map to XYZ based on which axis the face is on.
+    let half_extents = match face {
+        0 | 1 => glam::Vec3::new(thickness * 0.5, face_half_v, face_half_u), // X face: thin in X
+        2 | 3 => glam::Vec3::new(face_half_u, thickness * 0.5, face_half_v), // Y face: thin in Y
+        4 | 5 => glam::Vec3::new(face_half_u, face_half_v, thickness * 0.5), // Z face: thin in Z
+        _ => glam::Vec3::splat(0.1),
+    };
+
+    (offset, half_extents)
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +610,50 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     set_thruster(&mut grid, x_max, y_max + 1, z_min, IVec3::new(0, 1, 0));
     set_thruster(&mut grid, x_min, y_max + 1, z_max, IVec3::new(0, 1, 0));
     set_thruster(&mut grid, x_max, y_max + 1, z_max, IVec3::new(0, 1, 0));
+
+    // --- Sub-block elements for demonstration ---
+    use sub_block::{SubBlockElement, SubBlockType};
+
+    // Power wire running along the interior ceiling (face 3 = -Y).
+    // Face 3 (-Y) tangents: u=+X, v=-Z. Wire runs along Z → rotation=1 (swap to v axis).
+    for z in (z_min + 2)..=(z_max - 2) {
+        grid.add_sub_block(0, y_max, z, SubBlockElement {
+            face: 3,
+            element_type: SubBlockType::PowerWire,
+            rotation: 1,
+            flags: 0,
+        });
+    }
+
+    // Ladder on the interior left wall (face 0 = +X).
+    // Face 0 (+X) tangents: u=-Z, v=+Y. Side rails run along v (vertical), rungs along u (horizontal).
+    for y in 1..y_max {
+        grid.add_sub_block(x_min, y, 0, SubBlockElement {
+            face: 0,
+            element_type: SubBlockType::Ladder,
+            rotation: 0, // rails vertical (v=+Y), rungs horizontal (u=-Z)
+            flags: 0,
+        });
+    }
+
+    // Rail on the floor near the door (face 2 = +Y).
+    // Face 2 (+Y) tangents: u=+X, v=+Z. Rail chain runs along Z → rotation=1 (swap to v axis).
+    for z in -3..=3 {
+        grid.add_sub_block(x_max - 1, y_min, z, SubBlockElement {
+            face: 2,
+            element_type: SubBlockType::Rail,
+            rotation: 1,
+            flags: 0,
+        });
+    }
+
+    // Surface light near the cockpit.
+    grid.add_sub_block(0, y_max, z_min + 2, SubBlockElement {
+        face: 3, // -Y (ceiling underside)
+        element_type: SubBlockType::SurfaceLight,
+        rotation: 0,
+        flags: 0,
+    });
 
     grid
 }

@@ -65,6 +65,9 @@ struct NetworkChannels {
     event_rx: Option<mpsc::UnboundedReceiver<NetEvent>>,
     input_tx: Option<mpsc::UnboundedSender<PlayerInputData>>,
     block_edit_tx: Option<mpsc::UnboundedSender<voxeldust_core::client_message::BlockEditData>>,
+    /// TCP outbound channel for reliable messages (block edits, sub-block edits, config updates).
+    /// Packets sent here are written to the TCP stream by the network task.
+    tcp_out_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 /// Block type selection hotbar. Keys 1-9 select the active slot (when not piloting).
@@ -104,6 +107,28 @@ impl BlockHotbar {
 #[derive(Resource, Default)]
 struct BlockTarget {
     hit: Option<voxeldust_core::block::raycast::BlockHit>,
+}
+
+/// Sub-block placement tool state. When active, clicks place/remove sub-block elements
+/// instead of full blocks. Toggled with Tab key.
+#[derive(Resource)]
+struct SubBlockTool {
+    /// Whether sub-block placement mode is active (vs. normal block mode).
+    active: bool,
+    /// Currently selected sub-block type.
+    selected_type: voxeldust_core::block::sub_block::SubBlockType,
+    /// Rotation on face (0-3).
+    rotation: u8,
+}
+
+impl Default for SubBlockTool {
+    fn default() -> Self {
+        Self {
+            active: false,
+            selected_type: voxeldust_core::block::sub_block::SubBlockType::PowerWire,
+            rotation: 0,
+        }
+    }
 }
 
 /// Client-side index of functional block positions. Updated only when chunks change.
@@ -943,9 +968,11 @@ impl ClientApp {
             event_rx: None,
             input_tx: None,
             block_edit_tx: None,
+            tcp_out_tx: None,
         });
         ecs_app.insert_resource(BlockHotbar::default());
         ecs_app.insert_resource(BlockTarget::default());
+        ecs_app.insert_resource(SubBlockTool::default());
         ecs_app.insert_resource(ClientBlockIndex::default());
         ecs_app.insert_resource(BlockConfigUIState::default());
         ecs_app.insert_resource(events::InputContext::default());
@@ -1086,8 +1113,10 @@ impl ClientApp {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (block_edit_tx, block_edit_rx) = mpsc::unbounded_channel();
+        let (tcp_out_tx, tcp_out_rx) = mpsc::unbounded_channel();
         let input_rx = Arc::new(tokio::sync::Mutex::new(input_rx));
         let block_edit_rx = Arc::new(tokio::sync::Mutex::new(block_edit_rx));
+        let tcp_out_rx = Arc::new(tokio::sync::Mutex::new(tcp_out_rx));
 
         let gateway = self.args.gateway;
         let name = self.args.name.clone();
@@ -1095,7 +1124,7 @@ impl ClientApp {
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(network::run_network(gateway, name, event_tx, input_rx, block_edit_rx, direct));
+            rt.block_on(network::run_network(gateway, name, event_tx, input_rx, block_edit_rx, tcp_out_rx, direct));
         });
 
         let world = self.ecs_app.world_mut();
@@ -1103,6 +1132,7 @@ impl ClientApp {
         net.event_rx = Some(event_rx);
         net.input_tx = Some(input_tx);
         net.block_edit_tx = Some(block_edit_tx);
+        net.tcp_out_tx = Some(tcp_out_tx);
     }
 
     fn render(&mut self) {
@@ -1324,8 +1354,13 @@ impl ClientApp {
                             "meshed chunk for GPU"
                         );
                         br.upload_chunk_mesh(&gpu.device, dk, &mesh);
+
+                        // Generate and upload sub-block mesh for this chunk.
+                        let sub_mesh = voxeldust_core::block::sub_block_mesher::mesh_sub_blocks(chunk);
+                        br.upload_sub_block_mesh(&gpu.device, dk, &sub_mesh);
                     } else {
                         br.remove_chunk_mesh(dk);
+                        br.remove_sub_block_mesh(dk);
                     }
                 }
                 tracing::info!(
@@ -1547,6 +1582,16 @@ impl ClientApp {
 // Config animation helpers
 // ---------------------------------------------------------------------------
 
+/// Serialize a ClientMsg and send via the TCP outbound channel (reliable delivery).
+fn send_tcp_msg(net: &NetworkChannels, msg: voxeldust_core::client_message::ClientMsg) {
+    if let Some(ref tx) = net.tcp_out_tx {
+        let data = msg.serialize();
+        let mut pkt = Vec::new();
+        voxeldust_core::wire_codec::encode(&data, &mut pkt);
+        let _ = tx.send(pkt);
+    }
+}
+
 /// Smoothstep for [0,1] — ease in/out.
 fn smooth_step(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -1606,6 +1651,7 @@ struct GameActionCtx<'w> {
     net: Res<'w, NetworkChannels>,
     flight: ResMut<'w, FlightControl>,
     hotbar: ResMut<'w, BlockHotbar>,
+    sub_block_tool: ResMut<'w, SubBlockTool>,
     ap: ResMut<'w, ClientAutopilot>,
     warp: ResMut<'w, ClientWarp>,
     ws: Res<'w, ServerWorldState>,
@@ -1705,8 +1751,24 @@ fn interpret_key_system(
                     info!(engines_off = actions.flight.engines_off, "engine cutoff toggled");
                 }
 
-                // Block hotbar selection (1-9) — only when walking.
+                // Tab: toggle sub-block placement mode.
+                if key == KeyCode::Tab && !is_piloting {
+                    actions.sub_block_tool.active = !actions.sub_block_tool.active;
+                    info!(
+                        active = actions.sub_block_tool.active,
+                        element = actions.sub_block_tool.selected_type.label(),
+                        "sub-block tool toggled",
+                    );
+                }
+
+                // R: rotate sub-block element on face (0→1→2→3→0).
+                if key == KeyCode::KeyR && !is_piloting && actions.sub_block_tool.active {
+                    actions.sub_block_tool.rotation = (actions.sub_block_tool.rotation + 1) & 0x03;
+                }
+
+                // Digit keys: select block hotbar (normal mode) or sub-block type (sub-block mode).
                 if !is_piloting {
+                    use voxeldust_core::block::sub_block::SubBlockType;
                     let slot = match key {
                         KeyCode::Digit1 => Some(0usize),
                         KeyCode::Digit2 => Some(1),
@@ -1720,7 +1782,26 @@ fn interpret_key_system(
                         _ => None,
                     };
                     if let Some(s) = slot {
-                        actions.hotbar.selected_slot = s;
+                        if actions.sub_block_tool.active {
+                            // Sub-block type selection.
+                            const SUB_BLOCK_PALETTE: [SubBlockType; 9] = [
+                                SubBlockType::PowerWire,
+                                SubBlockType::Rail,
+                                SubBlockType::Pipe,
+                                SubBlockType::Ladder,
+                                SubBlockType::RotorMount,
+                                SubBlockType::PistonMount,
+                                SubBlockType::HingeMount,
+                                SubBlockType::SurfaceLight,
+                                SubBlockType::Cable,
+                            ];
+                            if s < SUB_BLOCK_PALETTE.len() {
+                                actions.sub_block_tool.selected_type = SUB_BLOCK_PALETTE[s];
+                                info!(element = SUB_BLOCK_PALETTE[s].label(), "sub-block type selected");
+                            }
+                        } else {
+                            actions.hotbar.selected_slot = s;
+                        }
                     }
                 }
 
@@ -1733,9 +1814,7 @@ fn interpret_key_system(
                     let edit = voxeldust_core::client_message::BlockEditData {
                         action: voxeldust_core::client_message::action::INTERACT, eye, look, block_type: 0,
                     };
-                    if let Some(ref tx) = actions.net.block_edit_tx {
-                        let _ = tx.send(edit);
-                    }
+                    send_tcp_msg(&actions.net, voxeldust_core::client_message::ClientMsg::BlockEditRequest(edit));
                 }
 
                 // F key: exit seat (when piloting) or open config UI (when walking).
@@ -1744,9 +1823,7 @@ fn interpret_key_system(
                     let edit = voxeldust_core::client_message::BlockEditData {
                         action: voxeldust_core::client_message::action::EXIT_SEAT, eye: DVec3::ZERO, look: DVec3::ZERO, block_type: 0,
                     };
-                    if let Some(ref tx) = actions.net.block_edit_tx {
-                        let _ = tx.send(edit);
-                    }
+                    send_tcp_msg(&actions.net, voxeldust_core::client_message::ClientMsg::BlockEditRequest(edit));
                 }
                 if key == KeyCode::KeyF && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed && !is_piloting {
                     let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
@@ -1756,9 +1833,7 @@ fn interpret_key_system(
                     let edit = voxeldust_core::client_message::BlockEditData {
                         action: voxeldust_core::client_message::action::OPEN_CONFIG, eye, look, block_type: 0,
                     };
-                    if let Some(ref tx) = actions.net.block_edit_tx {
-                        let _ = tx.send(edit);
-                    }
+                    send_tcp_msg(&actions.net, voxeldust_core::client_message::ClientMsg::BlockEditRequest(edit));
                 }
 
                 // Enter key: confirm warp.
@@ -1794,6 +1869,7 @@ fn interpret_key_system(
 fn interpret_mouse_system(
     ctx: PlayerCtx,
     mut actions: GameActionCtx,
+    block_target: Res<BlockTarget>,
     mut mouse_events: MessageReader<events::MouseButtonMsg>,
     mut scroll_events: MessageReader<events::MouseScrollMsg>,
     mut input_ctx: ResMut<events::InputContext>,
@@ -1816,22 +1892,46 @@ fn interpret_mouse_system(
                     let is_piloting = ctx.player.is_piloting;
                     let shard_type = ctx.conn.current_shard_type;
                     if !is_piloting && shard_type == voxeldust_core::client_message::shard_type::SHIP {
-                        let action = match ev.button {
-                            winit::event::MouseButton::Left => 1u8,
-                            winit::event::MouseButton::Right => 2u8,
-                            _ => 0u8,
-                        };
-                        if action > 0 {
-                            let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
-                            let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
-                            let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
-                            let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
-                            let block_type = if action == 2 { actions.hotbar.selected_block().as_u16() } else { 0 };
-                            let edit = voxeldust_core::client_message::BlockEditData {
-                                action, eye, look, block_type,
+                        if actions.sub_block_tool.active {
+                            // Sub-block mode: LMB places, RMB removes.
+                            if let Some(ref hit) = block_target.hit {
+                                use voxeldust_core::client_message::{action, SubBlockEditData};
+                                let sub_action = match ev.button {
+                                    winit::event::MouseButton::Left => action::PLACE_SUB,
+                                    winit::event::MouseButton::Right => action::REMOVE_SUB,
+                                    _ => 0u8,
+                                };
+                                if sub_action != 0 {
+                                    let face = voxeldust_core::block::sub_block::face_from_normal(hit.face_normal);
+                                    let edit = SubBlockEditData {
+                                        block_pos: hit.world_pos,
+                                        face,
+                                        element_type: actions.sub_block_tool.selected_type as u8,
+                                        rotation: actions.sub_block_tool.rotation,
+                                        action: sub_action,
+                                    };
+                                    send_tcp_msg(&actions.net, voxeldust_core::client_message::ClientMsg::SubBlockEdit(edit));
+                                }
+                            }
+                        } else {
+                            // Normal block mode: LMB breaks, RMB places.
+                            let action = match ev.button {
+                                winit::event::MouseButton::Left => voxeldust_core::client_message::action::BREAK,
+                                winit::event::MouseButton::Right => voxeldust_core::client_message::action::PLACE,
+                                _ => 0u8,
                             };
-                            if let Some(ref tx) = actions.net.block_edit_tx {
-                                let _ = tx.send(edit);
+                            if action > 0 {
+                                let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
+                                let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
+                                let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
+                                let look = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+                                let block_type = if action == voxeldust_core::client_message::action::PLACE {
+                                    actions.hotbar.selected_block().as_u16()
+                                } else { 0 };
+                                let edit = voxeldust_core::client_message::BlockEditData {
+                                    action, eye, look, block_type,
+                                };
+                                send_tcp_msg(&actions.net, voxeldust_core::client_message::ClientMsg::BlockEditRequest(edit));
                             }
                         }
                     }
