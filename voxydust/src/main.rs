@@ -103,6 +103,10 @@ impl BlockHotbar {
     }
 }
 
+/// Cached block registry — built once at startup, not per frame.
+#[derive(Resource)]
+struct ClientBlockRegistry(voxeldust_core::block::BlockRegistry);
+
 /// Currently targeted block (client-side prediction raycast, updated each frame).
 #[derive(Resource, Default)]
 struct BlockTarget {
@@ -273,11 +277,25 @@ struct LocalPlayer {
 
 #[derive(Resource)]
 struct RenderSmoothing {
+    // --- Walking ---
     render_position: DVec3,
     prev_server_position: DVec3,
     walk_velocity: DVec3,
     last_server_update_time: Instant,
     has_prev_server_pos: bool,
+
+    // --- Piloting ---
+    render_rotation: DQuat,
+    ship_velocity: DVec3,
+
+    // --- Galaxy warp ---
+    galaxy_render_position: DVec3,
+    galaxy_render_rotation: DQuat,
+    galaxy_velocity: DVec3,
+    prev_galaxy_position: DVec3,
+    prev_galaxy_rotation: DQuat,
+    last_galaxy_update_time: Instant,
+    has_prev_galaxy_pos: bool,
 }
 
 #[derive(Resource)]
@@ -521,9 +539,22 @@ fn poll_network(
                         player.ship_rotation = p.rotation;
                     }
 
+                    // Piloting smoothing: use server velocity for extrapolation,
+                    // snap on large corrections (shard change, warp arrival).
+                    if player.is_piloting {
+                        smooth.ship_velocity = p.velocity;
+                        if (new_pos - smooth.render_position).length() > 50.0 {
+                            smooth.render_position = new_pos;
+                            smooth.render_rotation = p.rotation;
+                        }
+                    }
+
                     if player.is_piloting && !was_piloting {
-                        // First frame of piloting: sync camera yaw to ship heading
-                        // so there's no visual snap.
+                        // Walk → Pilot: snap rotation and velocity to prevent
+                        // stale walking state from bleeding into piloting.
+                        smooth.render_rotation = p.rotation;
+                        smooth.ship_velocity = p.velocity;
+                        // Sync camera yaw to ship heading so there's no visual snap.
                         let fwd = p.rotation * DVec3::NEG_Z;
                         cam.yaw = fwd.z.atan2(fwd.x) as f64;
                         cam.pitch = fwd.y.asin() as f64;
@@ -561,8 +592,13 @@ fn poll_network(
                 conn.connected = true;
                 conn.system_seed = system_seed;
                 conn.galaxy_seed = galaxy_seed;
+                // Reset all smoothing — coordinate systems differ between shards.
                 smooth.has_prev_server_pos = false;
                 smooth.walk_velocity = DVec3::ZERO;
+                smooth.ship_velocity = DVec3::ZERO;
+                smooth.render_rotation = reference_rotation;
+                smooth.has_prev_galaxy_pos = false;
+                smooth.galaxy_velocity = DVec3::ZERO;
 
                 // Clear warp state on any new shard connection.
                 warp.galaxy_position = None;
@@ -625,6 +661,30 @@ fn poll_network(
                 if conn.secondary_shard_type != Some(3) {
                     continue;
                 }
+
+                // Galaxy smoothing: derive velocity from position deltas.
+                let now_gws = Instant::now();
+                if smooth.has_prev_galaxy_pos {
+                    let elapsed = (now_gws - smooth.last_galaxy_update_time).as_secs_f64();
+                    if elapsed > 0.01 && elapsed < 0.15 {
+                        smooth.galaxy_velocity = (gws.ship_position - smooth.prev_galaxy_position) / elapsed;
+                    }
+                    // Snap on large corrections (warp phase transitions).
+                    if (gws.ship_position - smooth.galaxy_render_position).length() > 1e6 {
+                        smooth.galaxy_render_position = gws.ship_position;
+                        smooth.galaxy_render_rotation = gws.ship_rotation;
+                    }
+                } else {
+                    // First galaxy update: snap render state.
+                    smooth.galaxy_render_position = gws.ship_position;
+                    smooth.galaxy_render_rotation = gws.ship_rotation;
+                    smooth.galaxy_velocity = DVec3::ZERO;
+                    smooth.has_prev_galaxy_pos = true;
+                }
+                smooth.prev_galaxy_position = gws.ship_position;
+                smooth.prev_galaxy_rotation = gws.ship_rotation;
+                smooth.last_galaxy_update_time = now_gws;
+
                 let was_none = warp.galaxy_position.is_none();
                 warp.galaxy_position = Some(gws.ship_position);
                 warp.galaxy_rotation = Some(gws.ship_rotation);
@@ -767,17 +827,33 @@ fn poll_network(
 fn smooth_render_position(
     mut smooth: ResMut<RenderSmoothing>,
     player: Res<LocalPlayer>,
+    warp: Res<ClientWarp>,
     ft: Res<FrameTime>,
 ) {
-    // Smooth render position: lerp toward extrapolated target each frame.
-    // This handles start/stop transitions gracefully — no snapping.
-    if !player.is_piloting {
-        let elapsed = (ft.last_time - smooth.last_server_update_time).as_secs_f64();
-        let clamped = elapsed.min(0.06);
-        let target = player.position + smooth.walk_velocity * clamped;
-        // Exponential smoothing: converges ~90% within 2 server ticks (100ms).
-        let blend = 1.0 - (-20.0 * ft.dt).exp();
-        smooth.render_position = smooth.render_position + (target - smooth.render_position) * blend;
+    // Exponential smoothing: converges ~90% within 2 server ticks (100ms).
+    // Frame-rate independent via dt-scaled blend factor.
+    let blend = 1.0 - (-20.0 * ft.dt).exp();
+
+    if warp.galaxy_position.is_some() {
+        // Galaxy warp mode: smooth galaxy-scale position + rotation.
+        let elapsed = (ft.last_time - smooth.last_galaxy_update_time).as_secs_f64().min(0.06);
+        let target = smooth.prev_galaxy_position + smooth.galaxy_velocity * elapsed;
+        let delta = (target - smooth.galaxy_render_position) * blend;
+        smooth.galaxy_render_position = smooth.galaxy_render_position + delta;
+        let rot = smooth.galaxy_render_rotation.slerp(smooth.prev_galaxy_rotation, blend);
+        smooth.galaxy_render_rotation = rot;
+    } else if player.is_piloting {
+        // Piloting mode: player's ship-local position is static while seated —
+        // no velocity extrapolation needed.  Only rotation is smoothed via slerp.
+        smooth.render_position = player.position;
+        let rot = smooth.render_rotation.slerp(player.ship_rotation, blend);
+        smooth.render_rotation = rot;
+    } else {
+        // Walking mode: smooth player position between server ticks.
+        let elapsed = (ft.last_time - smooth.last_server_update_time).as_secs_f64().min(0.06);
+        let target = player.position + smooth.walk_velocity * elapsed;
+        let delta = (target - smooth.render_position) * blend;
+        smooth.render_position = smooth.render_position + delta;
     }
 }
 
@@ -914,13 +990,14 @@ fn engage_autopilot_to_nearest(
 fn build_warp_target_info(
     warp: &ClientWarp,
     sf_res: &StarFieldRes,
+    smooth_galaxy_pos: Option<DVec3>,
 ) -> Option<hud::WarpTargetInfo> {
     let target_idx = warp.target_star_index?;
     let sf = sf_res.0.as_ref()?;
     let star = sf.get_star(target_idx)?;
 
     // Reference position: warp camera position during warp, current star otherwise.
-    let ref_pos = warp.galaxy_position.unwrap_or_else(|| {
+    let ref_pos = smooth_galaxy_pos.or(warp.galaxy_position).unwrap_or_else(|| {
         sf.current_star_index
             .and_then(|idx| sf.catalog.iter().find(|s| s.index == idx))
             .map(|s| s.galaxy_position)
@@ -956,6 +1033,9 @@ struct ClientApp {
     gpu: Option<GpuState>,
     block_renderer: Option<block_render::BlockRenderer>,
     uniform_data: Vec<ObjectUniforms>,
+    /// Cached block registry — built once, used for meshing and raycast.
+    /// Stored outside the ECS world to avoid borrow conflicts with chunk cache.
+    registry: voxeldust_core::block::BlockRegistry,
     args: Args,
 }
 
@@ -1006,6 +1086,15 @@ impl ClientApp {
             walk_velocity: DVec3::ZERO,
             last_server_update_time: Instant::now(),
             has_prev_server_pos: false,
+            render_rotation: DQuat::IDENTITY,
+            ship_velocity: DVec3::ZERO,
+            galaxy_render_position: DVec3::ZERO,
+            galaxy_render_rotation: DQuat::IDENTITY,
+            galaxy_velocity: DVec3::ZERO,
+            prev_galaxy_position: DVec3::ZERO,
+            prev_galaxy_rotation: DQuat::IDENTITY,
+            last_galaxy_update_time: Instant::now(),
+            has_prev_galaxy_pos: false,
         });
         ecs_app.insert_resource(CameraControl {
             yaw: 0.0,
@@ -1093,6 +1182,7 @@ impl ClientApp {
             gpu: None,
             block_renderer: None,
             uniform_data: vec![bytemuck::Zeroable::zeroed(); MAX_OBJECTS],
+            registry: voxeldust_core::block::BlockRegistry::new(),
             args,
         }
     }
@@ -1182,7 +1272,8 @@ impl ClientApp {
             let sf_res = world.resource::<StarFieldRes>();
             let ft = world.resource::<FrameTime>();
 
-            let warp_target_info = build_warp_target_info(warp, sf_res);
+            let smooth_gal = if warp.galaxy_position.is_some() { Some(smooth.galaxy_render_position) } else { None };
+            let warp_target_info = build_warp_target_info(warp, sf_res, smooth_gal);
 
             // Apply config panel zoom offset to camera position.
             let zoom = world.resource::<CameraZoomOffset>();
@@ -1202,7 +1293,7 @@ impl ClientApp {
                 cam_ctrl.pitch,
                 player.is_piloting,
                 conn.current_shard_type,
-                player.ship_rotation,
+                smooth.render_rotation,
                 &kb.keys_held,
                 gpu.config.width,
                 gpu.config.height,
@@ -1223,8 +1314,8 @@ impl ClientApp {
                 flight.selected_thrust_tier,
                 flight.engines_off,
                 ap.target,
-                warp.galaxy_position,
-                warp.galaxy_rotation,
+                if warp.galaxy_position.is_some() { Some(smooth.galaxy_render_position) } else { None },
+                if warp.galaxy_rotation.is_some() { Some(smooth.galaxy_render_rotation) } else { None },
                 warp.target_star_index,
                 cam_ctrl.yaw,
                 cam_ctrl.pitch,
@@ -1331,9 +1422,9 @@ impl ClientApp {
         // This bridges the ECS chunk cache (populated by poll_network) with
         // the GPU block renderer (consumed by render_frame).
         if let Some(ref mut br) = self.block_renderer {
+            let registry = &self.registry;
             let world_mut = self.ecs_app.world_mut();
             let mut chunk_cache = world_mut.resource_mut::<ClientChunkCacheRes>();
-            let registry = voxeldust_core::block::BlockRegistry::new();
 
             // Clean up GPU buffers for removed sources.
             for source in chunk_cache.drain_removed_sources() {
@@ -1418,7 +1509,7 @@ impl ClientApp {
         if current_shard_type == voxeldust_core::client_message::shard_type::SHIP && !is_piloting {
             let world_mut = self.ecs_app.world_mut();
             let chunk_cache = world_mut.resource::<ClientChunkCacheRes>();
-            let registry = voxeldust_core::block::BlockRegistry::new();
+            let registry = &self.registry;
             let source = chunk_cache.primary_source;
 
             let eye = glam::Vec3::new(
