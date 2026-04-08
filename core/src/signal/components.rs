@@ -1,24 +1,29 @@
 //! Signal-related ECS components for functional block entities.
+//!
+//! Runtime binding structs use `ChannelId` for O(1) lookups.  String-based
+//! channel names are resolved to IDs at the config/spawn boundary and live
+//! only in `SignalChannelTable::name_to_id`.
 
 use bevy_ecs::prelude::*;
 
+use super::channel::ChannelId;
 use super::converter::SignalRule;
 use super::types::SignalProperty;
 
-/// A single publish binding: this block writes a property to a named channel.
+/// A single publish binding: this block writes a property to a channel.
 #[derive(Clone, Debug)]
 pub struct PublishBinding {
-    /// Channel name to publish to.
-    pub channel_name: String,
+    /// Resolved channel ID (O(1) table lookup).
+    pub channel_id: ChannelId,
     /// Which property of this block to read and publish.
     pub property: SignalProperty,
 }
 
-/// A single subscribe binding: this block reads a named channel and applies to a property.
+/// A single subscribe binding: this block reads a channel and applies to a property.
 #[derive(Clone, Debug)]
 pub struct SubscribeBinding {
-    /// Channel name to subscribe from.
-    pub channel_name: String,
+    /// Resolved channel ID (O(1) table lookup).
+    pub channel_id: ChannelId,
     /// Which property of this block to drive from the channel value.
     pub property: SignalProperty,
 }
@@ -140,36 +145,49 @@ impl SeatControl {
     }
 }
 
-/// Maps a seat control to a signal channel.
+/// Maps a seat control to a signal channel (runtime, ID-based).
 #[derive(Clone, Debug)]
 pub struct SeatInputBinding {
     /// Which typed control this binding reads.
     pub control: SeatControl,
-    /// Channel to publish to (free-text, user-defined).
-    pub channel_name: String,
+    /// Resolved channel ID.
+    pub channel_id: ChannelId,
     /// What type of value to publish.
     pub property: SignalProperty,
 }
 
-impl Default for SeatChannelMapping {
-    fn default() -> Self {
-        use SeatControl::*;
+/// Default channel names for seat controls.  Used by
+/// `SeatChannelMapping::resolve_defaults` to create bindings with IDs.
+pub const DEFAULT_SEAT_CHANNEL_NAMES: &[(&str, SeatControl, SignalProperty)] = &[
+    ("thrust-forward",    SeatControl::ThrustForward,   SignalProperty::Throttle),
+    ("thrust-reverse",    SeatControl::ThrustReverse,   SignalProperty::Throttle),
+    ("thrust-right",      SeatControl::ThrustRight,     SignalProperty::Throttle),
+    ("thrust-left",       SeatControl::ThrustLeft,      SignalProperty::Throttle),
+    ("thrust-up",         SeatControl::ThrustUp,        SignalProperty::Throttle),
+    ("thrust-down",       SeatControl::ThrustDown,      SignalProperty::Throttle),
+    ("torque-yaw-cw",     SeatControl::TorqueYawCW,     SignalProperty::Throttle),
+    ("torque-yaw-ccw",    SeatControl::TorqueYawCCW,    SignalProperty::Throttle),
+    ("torque-pitch-up",   SeatControl::TorquePitchUp,   SignalProperty::Throttle),
+    ("torque-pitch-down", SeatControl::TorquePitchDown, SignalProperty::Throttle),
+    ("thrust-limiter",    SeatControl::ThrustLimiter,   SignalProperty::Throttle),
+    ("torque-roll-cw",    SeatControl::TorqueRollCW,    SignalProperty::Throttle),
+    ("torque-roll-ccw",   SeatControl::TorqueRollCCW,   SignalProperty::Throttle),
+];
+
+impl SeatChannelMapping {
+    /// Create the default seat mapping by resolving channel names to IDs.
+    pub fn resolve_defaults(table: &mut super::channel::SignalChannelTable) -> Self {
+        use super::types::{ChannelMergeStrategy, SignalScope};
         Self {
-            bindings: vec![
-                SeatInputBinding { control: ThrustForward,   channel_name: "thrust-forward".into(),      property: SignalProperty::Throttle },
-                SeatInputBinding { control: ThrustReverse,    channel_name: "thrust-reverse".into(),      property: SignalProperty::Throttle },
-                SeatInputBinding { control: ThrustRight,      channel_name: "thrust-right".into(),        property: SignalProperty::Throttle },
-                SeatInputBinding { control: ThrustLeft,       channel_name: "thrust-left".into(),         property: SignalProperty::Throttle },
-                SeatInputBinding { control: ThrustUp,         channel_name: "thrust-up".into(),           property: SignalProperty::Throttle },
-                SeatInputBinding { control: ThrustDown,       channel_name: "thrust-down".into(),         property: SignalProperty::Throttle },
-                SeatInputBinding { control: TorqueYawCW,      channel_name: "torque-yaw-cw".into(),      property: SignalProperty::Throttle },
-                SeatInputBinding { control: TorqueYawCCW,     channel_name: "torque-yaw-ccw".into(),     property: SignalProperty::Throttle },
-                SeatInputBinding { control: TorquePitchUp,    channel_name: "torque-pitch-up".into(),    property: SignalProperty::Throttle },
-                SeatInputBinding { control: TorquePitchDown,  channel_name: "torque-pitch-down".into(),  property: SignalProperty::Throttle },
-                SeatInputBinding { control: ThrustLimiter,    channel_name: "thrust-limiter".into(),     property: SignalProperty::Throttle },
-                SeatInputBinding { control: TorqueRollCW,     channel_name: "torque-roll-cw".into(),     property: SignalProperty::Throttle },
-                SeatInputBinding { control: TorqueRollCCW,    channel_name: "torque-roll-ccw".into(),    property: SignalProperty::Throttle },
-            ],
+            bindings: DEFAULT_SEAT_CHANNEL_NAMES.iter().map(|&(name, control, property)| {
+                let channel_id = table.resolve_or_create(
+                    name,
+                    SignalScope::Local,
+                    ChannelMergeStrategy::LastWrite,
+                    0,
+                );
+                SeatInputBinding { control, channel_id, property }
+            }).collect(),
         }
     }
 }

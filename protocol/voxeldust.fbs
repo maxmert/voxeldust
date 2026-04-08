@@ -243,8 +243,7 @@ table SystemSceneUpdate {
     lighting: LightingInfoMsg;
 }
 
-/// Cross-shard signal broadcast (ShortRange or LongRange scope).
-/// Any shard with antenna-equipped blocks can send/receive.
+/// Cross-shard signal broadcast — single signal (legacy, kept for backward compat).
 table SignalBroadcast {
     source_shard_id: uint64;
     channel_name: string;
@@ -252,12 +251,37 @@ table SignalBroadcast {
     value_type: uint8;
     /// Signal value data (bool as 0.0/1.0, state as float cast).
     value_data: float;
-    /// Scope: 1=ShortRange, 2=LongRange
+    /// Scope: 1=ShortRange, 2=LongRange, 3=Radio
     scope: uint8;
     /// Range in meters (for ShortRange proximity check).
     range_m: double;
     /// World position of the broadcasting antenna (for distance checks).
     source_position: Vec3d;
+}
+
+/// A single signal entry within a batched broadcast.
+table SignalBroadcastEntry {
+    channel_name: string;
+    /// Signal value type: 0=Bool, 1=Float, 2=State
+    value_type: uint8;
+    /// Signal value data (bool as 0.0/1.0, state as float cast).
+    value_data: float;
+    /// Scope: 1=ShortRange, 2=LongRange, 3=Radio
+    scope: uint8;
+    /// Range in meters (ShortRange only; 0.0 for LongRange/Radio).
+    range_m: double;
+    /// Radio frequency (Radio scope only; 0 for other scopes).
+    frequency: uint32;
+}
+
+/// Batched signal broadcast — multiple signals in one message.
+/// Reduces QUIC sends from (signals × peers) to (peers) per tick.
+table SignalBroadcastBatch {
+    source_shard_id: uint64;
+    /// World position of the broadcasting structure.
+    source_position: Vec3d;
+    /// All dirty signals in this batch.
+    entries: [SignalBroadcastEntry];
 }
 
 // Union of all inter-shard message payloads.
@@ -278,6 +302,7 @@ union ShardPayload {
     HostSwitch,
     ShipPropertiesUpdate,
     SignalBroadcast,
+    SignalBroadcastBatch,
 }
 
 /// Root type for all inter-shard QUIC messages.

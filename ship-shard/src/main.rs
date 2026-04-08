@@ -18,7 +18,7 @@ use voxeldust_core::block::{
 use voxeldust_core::ecs::components::FunctionalBlockRef;
 use voxeldust_core::signal::{
     self, SignalChannelTable, SignalPublisher, SignalSubscriber, SignalConverterConfig,
-    SeatChannelMapping, PublishBinding, SubscribeBinding, SignalProperty,
+    SeatChannelMapping, SeatInputBinding, PublishBinding, SubscribeBinding, SignalProperty,
 };
 use voxeldust_core::shard_message::AutopilotSnapshotData;
 use voxeldust_core::client_message::{
@@ -278,6 +278,21 @@ struct IncomingSignalBuffer {
     signals: Vec<(String, signal::SignalValue)>,
 }
 
+/// Last-known world positions of peer shards, learned from incoming signal
+/// broadcasts.  Used for spatial filtering in `signal_broadcast_remote` so
+/// ShortRange signals are only sent to peers within range.
+///
+/// Populated opportunistically: every incoming `SignalBroadcastBatch` carries
+/// `source_shard_id` + `source_position`, so peers' positions are learned from
+/// normal signal traffic without any additional messages.
+///
+/// Peers without a known position are included conservatively in broadcasts
+/// (same as current behavior) — the receiver still does its own distance check.
+#[derive(Resource, Default)]
+struct PeerPositionCache {
+    positions: std::collections::HashMap<voxeldust_core::shard_types::ShardId, glam::DVec3>,
+}
+
 /// Handles of per-chunk compound colliders. Keyed by chunk key.
 /// When blocks change in a chunk, we remove the old collider and insert a new one.
 #[derive(Resource, Default)]
@@ -451,6 +466,7 @@ fn drain_quic(
     mut pilot_mode: ResMut<PilotMode>,
     tick: Res<ecs::TickCounter>,
     mut incoming_signals: ResMut<IncomingSignalBuffer>,
+    mut peer_positions: ResMut<PeerPositionCache>,
 ) {
     for _ in 0..32 {
         let queued = match bridge.quic_msg_rx.try_recv() {
@@ -615,23 +631,42 @@ fn drain_quic(
                 }
             }
             ShardMsg::SignalBroadcast(data) => {
-                // Distance check for ShortRange signals.
+                // Legacy single-signal path (backward compat).
                 if data.scope == 1 {
                     let dist = (exterior.position - data.source_position).length();
                     if dist > data.range_m {
                         continue;
                     }
                 }
-
                 let value = match data.value_type {
                     0 => signal::SignalValue::Bool(data.value_data > 0.5),
                     1 => signal::SignalValue::Float(data.value_data),
                     2 => signal::SignalValue::State(data.value_data as u8),
                     _ => signal::SignalValue::Float(data.value_data),
                 };
-
-                // Buffer for processing in signal_publish next tick.
                 incoming_signals.signals.push((data.channel_name.clone(), value));
+            }
+            ShardMsg::SignalBroadcastBatch(batch) => {
+                // Learn peer position from the batch header (zero-cost spatial data).
+                let source_id = voxeldust_core::shard_types::ShardId(batch.source_shard_id);
+                peer_positions.positions.insert(source_id, batch.source_position);
+
+                for entry in &batch.entries {
+                    // Distance check for ShortRange signals.
+                    if entry.scope == 1 {
+                        let dist = (exterior.position - batch.source_position).length();
+                        if dist > entry.range_m {
+                            continue;
+                        }
+                    }
+                    let value = match entry.value_type {
+                        0 => signal::SignalValue::Bool(entry.value_data > 0.5),
+                        1 => signal::SignalValue::Float(entry.value_data),
+                        2 => signal::SignalValue::State(entry.value_data as u8),
+                        _ => signal::SignalValue::Float(entry.value_data),
+                    };
+                    incoming_signals.signals.push((entry.channel_name.clone(), value));
+                }
             }
             _ => {}
         }
@@ -1535,11 +1570,17 @@ fn drain_config_updates(
 }
 
 /// Apply config updates received from clients to entity signal components.
+/// Resolves string channel names → ChannelId at this boundary.
 fn apply_config_updates(
     mut events: MessageReader<ConfigUpdateMsg>,
     block_index: Res<FunctionalBlockIndex>,
     mut commands: Commands,
+    mut channels: ResMut<SignalChannelTable>,
 ) {
+    use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
+    let default_scope = SignalScope::Local;
+    let default_merge = ChannelMergeStrategy::LastWrite;
+
     for event in events.read() {
         let update = &event.update;
         let entity = match block_index.0.get(&update.block_pos) {
@@ -1550,26 +1591,40 @@ fn apply_config_updates(
             }
         };
 
-        // Replace signal components on the entity.
-        // Using insert() overwrites existing components.
+        // Resolve config types (string) → runtime types (ChannelId).
         if !update.publish_bindings.is_empty() {
             commands.entity(entity).insert(SignalPublisher {
-                bindings: update.publish_bindings.clone(),
+                bindings: update.publish_bindings.iter().map(|b| PublishBinding {
+                    channel_id: channels.resolve_or_create(&b.channel_name, default_scope, default_merge, 0),
+                    property: b.property,
+                }).collect(),
             });
         }
         if !update.subscribe_bindings.is_empty() {
             commands.entity(entity).insert(SignalSubscriber {
-                bindings: update.subscribe_bindings.clone(),
+                bindings: update.subscribe_bindings.iter().map(|b| SubscribeBinding {
+                    channel_id: channels.resolve_or_create(&b.channel_name, default_scope, default_merge, 0),
+                    property: b.property,
+                }).collect(),
             });
         }
         if !update.converter_rules.is_empty() {
             commands.entity(entity).insert(SignalConverterConfig {
-                rules: update.converter_rules.clone(),
+                rules: update.converter_rules.iter().map(|r| signal::SignalRule {
+                    input_channel_id: channels.resolve_or_create(&r.input_channel, default_scope, default_merge, 0),
+                    condition: r.condition.clone(),
+                    output_channel_id: channels.resolve_or_create(&r.output_channel, default_scope, default_merge, 0),
+                    expression: r.expression.clone(),
+                }).collect(),
             });
         }
         if !update.seat_mappings.is_empty() {
             commands.entity(entity).insert(SeatChannelMapping {
-                bindings: update.seat_mappings.clone(),
+                bindings: update.seat_mappings.iter().map(|s| SeatInputBinding {
+                    control: s.control,
+                    channel_id: channels.resolve_or_create(&s.channel_name, default_scope, default_merge, 0),
+                    property: s.property,
+                }).collect(),
             });
         }
 
@@ -1940,6 +1995,7 @@ fn produce_player_edits(
 }
 
 /// Build a config snapshot from entity components for the client UI.
+/// Converts runtime types (ChannelId) → config types (String) for serialization.
 fn build_config_snapshot(
     entity: Entity,
     pos: glam::IVec3,
@@ -1951,27 +2007,49 @@ fn build_config_snapshot(
     seat_query: &Query<&SeatChannelMapping>,
     channels: &SignalChannelTable,
 ) -> voxeldust_core::signal::config::BlockSignalConfig {
+    use voxeldust_core::signal::config::*;
+
+    let id_to_name = |id: signal::ChannelId| -> String {
+        channels.name_of(id).unwrap_or("?").to_string()
+    };
+
     let publish_bindings = pub_query.get(entity)
-        .map(|p| p.bindings.clone())
-        .unwrap_or_default();
-    let subscribe_bindings = sub_query.get(entity)
-        .map(|s| s.bindings.clone())
-        .unwrap_or_default();
-    let converter_rules = converter_query.get(entity)
-        .map(|c| c.rules.clone())
-        .unwrap_or_default();
-    let seat_mappings = seat_query.get(entity)
-        .map(|s| s.bindings.clone())
+        .map(|p| p.bindings.iter().map(|b| PublishBindingConfig {
+            channel_name: id_to_name(b.channel_id),
+            property: b.property,
+        }).collect())
         .unwrap_or_default();
 
-    let mut available_channels: Vec<String> = Vec::new();
-    // Collect all channel names from the channel table for the dropdown.
-    for name in channels.channel_names() {
-        available_channels.push(name.to_string());
-    }
+    let subscribe_bindings = sub_query.get(entity)
+        .map(|s| s.bindings.iter().map(|b| SubscribeBindingConfig {
+            channel_name: id_to_name(b.channel_id),
+            property: b.property,
+        }).collect())
+        .unwrap_or_default();
+
+    let converter_rules = converter_query.get(entity)
+        .map(|c| c.rules.iter().map(|r| SignalRuleConfig {
+            input_channel: id_to_name(r.input_channel_id),
+            condition: r.condition.clone(),
+            output_channel: id_to_name(r.output_channel_id),
+            expression: r.expression.clone(),
+        }).collect())
+        .unwrap_or_default();
+
+    let seat_mappings = seat_query.get(entity)
+        .map(|s| s.bindings.iter().map(|b| SeatInputBindingConfig {
+            control: b.control,
+            channel_name: id_to_name(b.channel_id),
+            property: b.property,
+        }).collect())
+        .unwrap_or_default();
+
+    let mut available_channels: Vec<String> = channels.channel_names()
+        .map(|s| s.to_string())
+        .collect();
     available_channels.sort();
 
-    voxeldust_core::signal::config::BlockSignalConfig {
+    BlockSignalConfig {
         block_pos: pos,
         block_type: block_id.as_u16(),
         kind: kind as u8,
@@ -2102,6 +2180,7 @@ fn init_functional_blocks(
     registry: Res<BlockRegistryResource>,
     mut block_index: ResMut<FunctionalBlockIndex>,
     mut dirty: ResMut<AggregationDirty>,
+    mut channels: ResMut<SignalChannelTable>,
 ) {
     let cs = block::CHUNK_SIZE as i32;
     for (chunk_key, chunk) in grid.0.iter_chunks() {
@@ -2122,7 +2201,7 @@ fn init_functional_blocks(
                             block_id: id,
                             kind,
                         });
-                        add_default_signal_bindings(&mut entity_cmds, kind, id, wp, &grid.0, &registry.0);
+                        add_default_signal_bindings(&mut entity_cmds, kind, id, wp, &grid.0, &registry.0, &mut channels);
                         let entity = entity_cmds.id();
                         block_index.0.insert(wp, entity);
                     }
@@ -2146,6 +2225,7 @@ fn process_entity_ops(
     registry: Res<BlockRegistryResource>,
     mut block_index: ResMut<FunctionalBlockIndex>,
     mut pending: ResMut<PendingEntityOps>,
+    mut channels: ResMut<SignalChannelTable>,
 ) {
     for op in pending.ops.drain(..) {
         match op {
@@ -2158,7 +2238,7 @@ fn process_entity_ops(
                     });
 
                     // Add default signal bindings based on block kind.
-                    add_default_signal_bindings(&mut entity_cmds, kind, block_id, pos, &grid.0, &registry.0);
+                    add_default_signal_bindings(&mut entity_cmds, kind, block_id, pos, &grid.0, &registry.0, &mut channels);
 
                     let entity = entity_cmds.id();
 
@@ -2273,6 +2353,7 @@ fn aggregate_ship_properties(
 
 /// Add default signal publisher/subscriber components to a functional block entity
 /// based on its kind. Players can reconfigure these via the block config UI.
+/// Resolves channel names → IDs via the channel table.
 fn add_default_signal_bindings(
     entity_cmds: &mut bevy_ecs::system::EntityCommands,
     kind: FunctionalBlockKind,
@@ -2280,7 +2361,10 @@ fn add_default_signal_bindings(
     pos: glam::IVec3,
     grid: &voxeldust_core::block::ShipGrid,
     registry: &voxeldust_core::block::BlockRegistry,
+    channels: &mut SignalChannelTable,
 ) {
+    use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
+
     match kind {
         FunctionalBlockKind::Thruster => {
             // Determine thrust direction from block orientation.
@@ -2300,9 +2384,12 @@ fn add_default_signal_bindings(
                 if dir.y > 0.0 { "thrust-down" } else { "thrust-up" }
             };
 
+            let channel_id = channels.resolve_or_create(
+                default_channel, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0,
+            );
             entity_cmds.insert(SignalSubscriber {
                 bindings: vec![SubscribeBinding {
-                    channel_name: default_channel.into(),
+                    channel_id,
                     property: SignalProperty::Throttle,
                 }],
             });
@@ -2314,23 +2401,27 @@ fn add_default_signal_bindings(
             });
         }
         FunctionalBlockKind::Reactor => {
-            // Reactors publish their power level.
+            let channel_id = channels.resolve_or_create(
+                "power", SignalScope::Local, ChannelMergeStrategy::LastWrite, 0,
+            );
             entity_cmds.insert(SignalPublisher {
                 bindings: vec![PublishBinding {
-                    channel_name: "power".into(),
+                    channel_id,
                     property: SignalProperty::Level,
                 }],
             });
         }
         FunctionalBlockKind::Seat => {
-            // Seats get the full channel mapping for pilot controls.
-            entity_cmds.insert(SeatChannelMapping::default());
+            // Seats get the full channel mapping for pilot controls, resolved to IDs.
+            entity_cmds.insert(SeatChannelMapping::resolve_defaults(channels));
         }
         FunctionalBlockKind::Sensor => {
-            // Sensors publish their readings.
+            let channel_id = channels.resolve_or_create(
+                "sensor", SignalScope::Local, ChannelMergeStrategy::LastWrite, 0,
+            );
             entity_cmds.insert(SignalPublisher {
                 bindings: vec![PublishBinding {
-                    channel_name: "sensor".into(),
+                    channel_id,
                     property: SignalProperty::Active,
                 }],
             });
@@ -2392,7 +2483,7 @@ fn signal_publish(
                 } else {
                     0.0 // Zero-publish when pilot exits seat.
                 };
-                channels.push_pending(&binding.channel_name, signal::SignalValue::Float(value));
+                channels.push_pending_id(binding.channel_id, signal::SignalValue::Float(value));
             }
         }
         // Clear seat tracking after zero-publish (pilot exited).
@@ -2411,7 +2502,7 @@ fn signal_publish(
                 SignalProperty::Pressure => signal::SignalValue::Float(101.3),
                 _ => signal::SignalValue::Float(0.0),
             };
-            channels.push_pending(&binding.channel_name, value);
+            channels.push_pending_id(binding.channel_id, value);
         }
     }
 
@@ -2426,7 +2517,7 @@ fn signal_evaluate(
 ) {
     for config in &converters {
         for rule in &config.rules {
-            let (input_value, is_dirty) = match channels.get(&rule.input_channel) {
+            let (input_value, is_dirty) = match channels.get_by_id(rule.input_channel_id) {
                 Some(ch) => (ch.value, ch.dirty),
                 None => continue,
             };
@@ -2438,23 +2529,27 @@ fn signal_evaluate(
 
             if rule.condition.evaluate(input_value, is_dirty) {
                 let output = rule.expression.compute(input_value);
-                channels.publish_direct(&rule.output_channel, output);
+                channels.publish_direct_id(rule.output_channel_id, output);
             }
         }
     }
 }
 
+/// Threshold above which par_iter_mut outperforms sequential iteration.
+/// Below this, thread pool dispatch overhead exceeds per-entity work.
+/// Tuned for O(1) channel lookups (Vec index) + f32 assignment per entity.
+const PAR_SUBSCRIBE_THRESHOLD: usize = 256;
+
 /// Phase 3: Functional blocks with SignalSubscriber read channels and act.
-/// For now, actions are logged. Future phases will apply to block-specific state
-/// (thruster throttle, piston extension, rotor angle, etc.).
+/// Adaptive parallelism: uses par_iter_mut for large entity counts,
+/// sequential iteration for small ships where dispatch overhead dominates.
 fn signal_subscribe(
     channels: Res<SignalChannelTable>,
     mut subscribers: Query<(&SignalSubscriber, Option<&mut ThrusterState>)>,
 ) {
-    for (subscriber, mut thruster_state) in &mut subscribers {
+    let apply = |(subscriber, mut thruster_state): (&SignalSubscriber, Option<Mut<ThrusterState>>)| {
         for binding in &subscriber.bindings {
-            if let Some(ch) = channels.get(&binding.channel_name) {
-                // Apply signal value to the appropriate component.
+            if let Some(ch) = channels.get_by_id(binding.channel_id) {
                 if binding.property == SignalProperty::Throttle {
                     if let Some(ref mut ts) = thruster_state {
                         ts.throttle = ch.value.as_f32();
@@ -2462,6 +2557,12 @@ fn signal_subscribe(
                 }
             }
         }
+    };
+
+    if subscribers.iter().len() >= PAR_SUBSCRIBE_THRESHOLD {
+        subscribers.par_iter_mut().for_each(apply);
+    } else {
+        subscribers.iter_mut().for_each(apply);
     }
 }
 
@@ -2588,64 +2689,104 @@ fn signal_clear_dirty(mut channels: ResMut<SignalChannelTable>) {
 }
 
 /// Broadcast non-Local dirty signals to other shards via QUIC.
-/// Runs in the Send set (after signal processing, before broadcast).
+/// Batches all dirty signals into one message per destination per tick,
+/// reducing QUIC sends from (signals × peers) to just (peers).
 fn signal_broadcast_remote(
     channels: Res<SignalChannelTable>,
     exterior: Res<ShipExterior>,
     config: Res<ShipConfig>,
     bridge: Res<NetworkBridge>,
+    peer_positions: Res<PeerPositionCache>,
 ) {
+    use voxeldust_core::shard_message::{
+        ShardMsg, SignalBroadcastBatchData, SignalBroadcastEntry,
+    };
+
     let remote_signals = channels.drain_remote_dirty();
     if remote_signals.is_empty() {
         return;
     }
 
-    for (channel_name, value, scope) in &remote_signals {
-        let (scope_code, range_m) = match scope {
-            signal::SignalScope::ShortRange { range_m } => (1u8, *range_m),
-            signal::SignalScope::LongRange => (2u8, 0.0),
-            signal::SignalScope::Local => continue, // shouldn't happen (filtered)
+    // Encode each dirty signal into a broadcast entry and partition by destination.
+    let mut peer_entries = Vec::new();   // ShortRange → all peers
+    let mut host_entries = Vec::new();   // LongRange + Radio → system shard
+
+    for (channel_name, value, scope) in remote_signals {
+        let (scope_code, range_m, frequency) = match scope {
+            signal::SignalScope::ShortRange { range_m } => (1u8, range_m, 0u32),
+            signal::SignalScope::LongRange => (2u8, 0.0, 0u32),
+            signal::SignalScope::Radio { frequency } => (3u8, 0.0, frequency),
+            signal::SignalScope::Local => continue,
         };
 
         let (value_type, value_data) = match value {
-            signal::SignalValue::Bool(b) => (0u8, if *b { 1.0f32 } else { 0.0 }),
-            signal::SignalValue::Float(f) => (1u8, *f),
-            signal::SignalValue::State(s) => (2u8, *s as f32),
+            signal::SignalValue::Bool(b) => (0u8, if b { 1.0f32 } else { 0.0 }),
+            signal::SignalValue::Float(f) => (1u8, f),
+            signal::SignalValue::State(s) => (2u8, s as f32),
         };
 
-        let msg = voxeldust_core::shard_message::ShardMsg::SignalBroadcast(
-            voxeldust_core::shard_message::SignalBroadcastData {
-                source_shard_id: config.shard_id.0,
-                channel_name: channel_name.clone(),
-                value_type,
-                value_data,
-                scope: scope_code,
-                range_m,
-                source_position: exterior.position,
-            },
-        );
+        let entry = SignalBroadcastEntry {
+            channel_name,
+            value_type,
+            value_data,
+            scope: scope_code,
+            range_m,
+            frequency,
+        };
 
-        // For ShortRange: send to all known shards (they distance-check on receive).
-        // For LongRange: send to the host (system) shard for relay.
-        if scope_code == 2 {
-            // LongRange → system shard relay.
-            if let Some(host_id) = config.host_shard_id {
-                if let Ok(reg) = bridge.peer_registry.try_read() {
-                    if let Some(addr) = reg.quic_addr(host_id) {
-                        let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
+        match scope_code {
+            1 => peer_entries.push(entry),       // ShortRange
+            _ => host_entries.push(entry),       // LongRange (2) + Radio (3)
+        }
+    }
+
+    let source_shard_id = config.shard_id.0;
+    let source_position = exterior.position;
+
+    // Send ShortRange batch to peer shards within range (spatial filtering).
+    // Peers without a known position are included conservatively — the receiver
+    // still does its own distance check as a safety net.
+    if !peer_entries.is_empty() {
+        // Maximum range across all ShortRange entries in the batch.
+        let max_range = peer_entries.iter()
+            .map(|e| e.range_m)
+            .fold(0.0f64, f64::max);
+
+        let batch_msg = ShardMsg::SignalBroadcastBatch(SignalBroadcastBatchData {
+            source_shard_id,
+            source_position,
+            entries: peer_entries,
+        });
+        if let Ok(reg) = bridge.peer_registry.try_read() {
+            for peer in reg.all() {
+                if peer.id == config.shard_id {
+                    continue;
+                }
+                // Spatial filter: skip peers that are definitely out of range.
+                if let Some(&peer_pos) = peer_positions.positions.get(&peer.id) {
+                    if (peer_pos - source_position).length() > max_range {
+                        continue;
                     }
                 }
+                // Peer without known position → include conservatively.
+                if let Some(addr) = reg.quic_addr(peer.id) {
+                    let _ = bridge.quic_send_tx.try_send((peer.id, addr, batch_msg.clone()));
+                }
             }
-        } else {
-            // ShortRange → broadcast to all known peer shards.
+        }
+    }
+
+    // Send LongRange + Radio batch to host (system) shard.
+    if !host_entries.is_empty() {
+        if let Some(host_id) = config.host_shard_id {
+            let batch_msg = ShardMsg::SignalBroadcastBatch(SignalBroadcastBatchData {
+                source_shard_id,
+                source_position,
+                entries: host_entries,
+            });
             if let Ok(reg) = bridge.peer_registry.try_read() {
-                for peer in reg.all() {
-                    if peer.id == config.shard_id {
-                        continue; // don't send to self
-                    }
-                    if let Some(addr) = reg.quic_addr(peer.id) {
-                        let _ = bridge.quic_send_tx.try_send((peer.id, addr, msg.clone()));
-                    }
+                if let Some(addr) = reg.quic_addr(host_id) {
+                    let _ = bridge.quic_send_tx.try_send((host_id, addr, batch_msg));
                 }
             }
         }
@@ -2907,6 +3048,7 @@ fn build_ship_interior(
     app.insert_resource(AggregationDirty(false));
     app.insert_resource(SignalChannelTable::new());
     app.insert_resource(IncomingSignalBuffer::default());
+    app.insert_resource(PeerPositionCache::default());
     app.insert_resource(ship_persistence);
 
     // Messages.

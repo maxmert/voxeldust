@@ -676,6 +676,7 @@ dependencies = [
  "async-task",
  "atomic-waker",
  "bevy_platform",
+ "concurrent-queue",
  "crossbeam-queue",
  "derive_more",
  "futures-lite",
@@ -5834,6 +5835,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "bevy_tasks",
  "clap 4.6.0",
  "glam 0.29.3",
  "rapier3d",
@@ -6879,6 +6881,7 @@ dependencies = [
  "axum",
  "bevy_app",
  "bevy_ecs",
+ "bevy_tasks",
  "flatbuffers",
  "glam 0.29.3",
  "lz4_flex",
@@ -6901,6 +6904,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "bevy_tasks",
  "bytemuck",
  "clap 4.6.0",
  "egui",

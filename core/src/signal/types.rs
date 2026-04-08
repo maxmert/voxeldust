@@ -46,6 +46,10 @@ pub enum SignalScope {
     ShortRange { range_m: f64 },
     /// System-wide broadcast. Requires antenna block + power. System shard relay.
     LongRange,
+    /// Galaxy-wide, topic-routed via Galaxy Relay Shard. Requires antenna block.
+    /// Until the relay shard exists, travels the same path as LongRange but is
+    /// tagged separately (scope code 3) so it can be routed differently later.
+    Radio { frequency: u32 },
 }
 
 impl Default for SignalScope {

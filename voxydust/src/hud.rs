@@ -854,7 +854,7 @@ fn draw_block_config_panel(
                     }
                     if ui.button(egui::RichText::new("+ Add Publish").color(accent)).clicked() {
                         config.publish_bindings.push(
-                            voxeldust_core::signal::components::PublishBinding {
+                            voxeldust_core::signal::config::PublishBindingConfig {
                                 channel_name: "new-channel".into(),
                                 property: SignalProperty::Active,
                             },
@@ -893,7 +893,7 @@ fn draw_block_config_panel(
                     }
                     if ui.button(egui::RichText::new("+ Add Subscribe").color(accent)).clicked() {
                         config.subscribe_bindings.push(
-                            voxeldust_core::signal::components::SubscribeBinding {
+                            voxeldust_core::signal::config::SubscribeBindingConfig {
                                 channel_name: "new-channel".into(),
                                 property: SignalProperty::Throttle,
                             },
@@ -931,7 +931,7 @@ fn draw_block_config_panel(
                         }
                         if ui.button(egui::RichText::new("+ Add Rule").color(accent)).clicked() {
                             config.converter_rules.push(
-                                voxeldust_core::signal::converter::SignalRule {
+                                voxeldust_core::signal::config::SignalRuleConfig {
                                     input_channel: "input".into(),
                                     condition: voxeldust_core::signal::converter::SignalCondition::Always,
                                     output_channel: "output".into(),
@@ -987,7 +987,7 @@ fn draw_block_config_panel(
                         }
                         if ui.button(egui::RichText::new("+ Add Binding").color(accent)).clicked() {
                             config.seat_mappings.push(
-                                voxeldust_core::signal::components::SeatInputBinding {
+                                voxeldust_core::signal::config::SeatInputBindingConfig {
                                     control: SeatControl::ThrustForward,
                                     channel_name: "new-channel".into(),
                                     property: SignalProperty::Throttle,

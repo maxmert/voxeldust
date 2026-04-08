@@ -1,16 +1,17 @@
 //! Signal converter — condition → action rules for transforming signals.
 
+use super::channel::ChannelId;
 use super::types::SignalValue;
 
-/// A single condition → action rule in a Signal Converter block.
+/// A single condition → action rule in a Signal Converter block (runtime, ID-based).
 #[derive(Clone, Debug)]
 pub struct SignalRule {
-    /// Channel to read input from.
-    pub input_channel: String,
+    /// Input channel (resolved ID).
+    pub input_channel_id: ChannelId,
     /// Condition to evaluate on the input value.
     pub condition: SignalCondition,
-    /// Channel to write output to.
-    pub output_channel: String,
+    /// Output channel (resolved ID).
+    pub output_channel_id: ChannelId,
     /// Expression to compute the output value.
     pub expression: SignalExpression,
 }
@@ -166,9 +167,9 @@ mod tests {
     #[test]
     fn full_rule_evaluation() {
         let rule = SignalRule {
-            input_channel: "pressure".into(),
+            input_channel_id: ChannelId(0),
             condition: SignalCondition::LessThan(50.0),
-            output_channel: "alarm".into(),
+            output_channel_id: ChannelId(1),
             expression: SignalExpression::Constant(SignalValue::Bool(true)),
         };
 

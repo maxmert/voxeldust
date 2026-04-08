@@ -26,9 +26,10 @@ pub enum ShardMsg {
     /// Ship physical properties update (ship shard → system shard).
     /// Sent when block composition changes (aggregation recomputes).
     ShipPropertiesUpdate(ShipPropertiesUpdateData),
-    /// Cross-shard signal broadcast (ShortRange or LongRange).
-    /// Any shard with antenna blocks can send/receive.
+    /// Cross-shard signal broadcast — single signal (legacy).
     SignalBroadcast(SignalBroadcastData),
+    /// Batched signal broadcast — multiple signals in one message.
+    SignalBroadcastBatch(SignalBroadcastBatchData),
 }
 
 #[derive(Debug, Clone)]
@@ -173,8 +174,7 @@ pub struct ShipPropertiesUpdateData {
     pub dimensions: (f64, f64, f64),
 }
 
-/// Cross-shard signal broadcast for ShortRange/LongRange channels.
-/// Any shard with antenna-equipped blocks can send/receive.
+/// Cross-shard signal broadcast — single signal (legacy, kept for backward compat).
 #[derive(Debug, Clone)]
 pub struct SignalBroadcastData {
     pub source_shard_id: u64,
@@ -182,10 +182,34 @@ pub struct SignalBroadcastData {
     /// 0=Bool, 1=Float, 2=State
     pub value_type: u8,
     pub value_data: f32,
-    /// 1=ShortRange, 2=LongRange
+    /// 1=ShortRange, 2=LongRange, 3=Radio
     pub scope: u8,
     pub range_m: f64,
     pub source_position: DVec3,
+}
+
+/// A single signal entry within a batched broadcast.
+#[derive(Debug, Clone)]
+pub struct SignalBroadcastEntry {
+    pub channel_name: String,
+    /// 0=Bool, 1=Float, 2=State
+    pub value_type: u8,
+    pub value_data: f32,
+    /// 1=ShortRange, 2=LongRange, 3=Radio
+    pub scope: u8,
+    /// Range in meters (ShortRange only; 0.0 for LongRange/Radio).
+    pub range_m: f64,
+    /// Radio frequency (Radio scope only; 0 for other scopes).
+    pub frequency: u32,
+}
+
+/// Batched signal broadcast — multiple dirty signals packed into one message.
+/// Sent once per destination per tick instead of once per signal per destination.
+#[derive(Debug, Clone)]
+pub struct SignalBroadcastBatchData {
+    pub source_shard_id: u64,
+    pub source_position: DVec3,
+    pub entries: Vec<SignalBroadcastEntry>,
 }
 
 /// Block edits affecting chunks on adjacent shard boundaries.
@@ -663,6 +687,40 @@ impl ShardMsg {
                 );
                 builder.finish(msg, None);
             }
+            ShardMsg::SignalBroadcastBatch(data) => {
+                let entries: Vec<_> = data.entries.iter().map(|e| {
+                    let name = builder.create_string(&e.channel_name);
+                    fb::SignalBroadcastEntry::create(
+                        &mut builder,
+                        &fb::SignalBroadcastEntryArgs {
+                            channel_name: Some(name),
+                            value_type: e.value_type,
+                            value_data: e.value_data,
+                            scope: e.scope,
+                            range_m: e.range_m,
+                            frequency: e.frequency,
+                        },
+                    )
+                }).collect();
+                let entries_vec = builder.create_vector(&entries);
+                let src_pos = to_fb_vec3d(&data.source_position);
+                let batch = fb::SignalBroadcastBatch::create(
+                    &mut builder,
+                    &fb::SignalBroadcastBatchArgs {
+                        source_shard_id: data.source_shard_id,
+                        source_position: Some(&src_pos),
+                        entries: Some(entries_vec),
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::SignalBroadcastBatch,
+                        payload: Some(batch.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -1017,6 +1075,30 @@ impl ShardMsg {
                     scope: sb.scope(),
                     range_m: sb.range_m(),
                     source_position: from_fb_vec3d(src_pos),
+                }))
+            }
+
+            fb::ShardPayload::SignalBroadcastBatch => {
+                let batch = msg
+                    .payload_as_signal_broadcast_batch()
+                    .ok_or(MessageError::MissingField("SignalBroadcastBatch payload"))?;
+                let src_pos = batch.source_position()
+                    .ok_or(MessageError::MissingField("source_position"))?;
+                let entries = batch.entries().map(|v| {
+                    v.iter().map(|e| SignalBroadcastEntry {
+                        channel_name: e.channel_name().unwrap_or("").to_string(),
+                        value_type: e.value_type(),
+                        value_data: e.value_data(),
+                        scope: e.scope(),
+                        range_m: e.range_m(),
+                        frequency: e.frequency(),
+                    }).collect()
+                }).unwrap_or_default();
+
+                Ok(ShardMsg::SignalBroadcastBatch(SignalBroadcastBatchData {
+                    source_shard_id: batch.source_shard_id(),
+                    source_position: from_fb_vec3d(src_pos),
+                    entries,
                 }))
             }
 

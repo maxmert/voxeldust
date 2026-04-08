@@ -542,19 +542,19 @@ impl ClientMsg {
                 let bcu = msg.payload_as_block_config_update()
                     .ok_or(MessageError::MissingField("BlockConfigUpdate payload"))?;
                 let pub_b = bcu.publish_bindings().map(|v| v.iter().map(|b| {
-                    crate::signal::components::PublishBinding {
+                    crate::signal::config::PublishBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
                     }
                 }).collect()).unwrap_or_default();
                 let sub_b = bcu.subscribe_bindings().map(|v| v.iter().map(|b| {
-                    crate::signal::components::SubscribeBinding {
+                    crate::signal::config::SubscribeBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
                     }
                 }).collect()).unwrap_or_default();
                 let rules = bcu.converter_rules().map(|v| v.iter().map(|r| {
-                    crate::signal::converter::SignalRule {
+                    crate::signal::config::SignalRuleConfig {
                         input_channel: r.input_channel().unwrap_or("").to_string(),
                         condition: deserialize_condition(r.condition_type(), r.condition_value()),
                         output_channel: r.output_channel().unwrap_or("").to_string(),
@@ -563,7 +563,7 @@ impl ClientMsg {
                 }).collect()).unwrap_or_default();
                 let seats = bcu.seat_mappings().map(|v| v.iter().filter_map(|s| {
                     let control = crate::signal::components::SeatControl::from_u8(s.control())?;
-                    Some(crate::signal::components::SeatInputBinding {
+                    Some(crate::signal::config::SeatInputBindingConfig {
                         control,
                         channel_name: s.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(s.property()),
@@ -1189,19 +1189,19 @@ impl ServerMsg {
                 let bcs = msg.payload_as_block_config_state()
                     .ok_or(MessageError::MissingField("BlockConfigState payload"))?;
                 let pub_b = bcs.publish_bindings().map(|v| v.iter().map(|b| {
-                    crate::signal::components::PublishBinding {
+                    crate::signal::config::PublishBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
                     }
                 }).collect()).unwrap_or_default();
                 let sub_b = bcs.subscribe_bindings().map(|v| v.iter().map(|b| {
-                    crate::signal::components::SubscribeBinding {
+                    crate::signal::config::SubscribeBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
                     }
                 }).collect()).unwrap_or_default();
                 let rules = bcs.converter_rules().map(|v| v.iter().map(|r| {
-                    crate::signal::converter::SignalRule {
+                    crate::signal::config::SignalRuleConfig {
                         input_channel: r.input_channel().unwrap_or("").to_string(),
                         condition: deserialize_condition(r.condition_type(), r.condition_value()),
                         output_channel: r.output_channel().unwrap_or("").to_string(),
@@ -1210,7 +1210,7 @@ impl ServerMsg {
                 }).collect()).unwrap_or_default();
                 let seats = bcs.seat_mappings().map(|v| v.iter().filter_map(|s| {
                     let control = crate::signal::components::SeatControl::from_u8(s.control())?;
-                    Some(crate::signal::components::SeatInputBinding {
+                    Some(crate::signal::config::SeatInputBindingConfig {
                         control,
                         channel_name: s.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(s.property()),

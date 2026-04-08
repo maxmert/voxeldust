@@ -525,6 +525,22 @@ impl ShardHarness {
         };
         app.insert_resource(bridge);
 
+        // Initialize the compute task pool for par_iter_mut() within systems.
+        // This is a global singleton — safe to call multiple times (idempotent).
+        bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::default);
+
+        // Force single-threaded schedule executor.  Systems must run on the main
+        // (tokio) thread because they use tokio::spawn and async channels that
+        // require a tokio runtime context.  par_iter_mut() within systems still
+        // uses the ComputeTaskPool for data-parallel work — this only affects
+        // system-level scheduling, not within-system parallelism.
+        {
+            use bevy_ecs::schedule::ExecutorKind;
+            app.get_schedule_mut(bevy_app::Update)
+                .expect("Update schedule must exist")
+                .set_executor_kind(ExecutorKind::SingleThreaded);
+        }
+
         // Main tick loop — drives bevy App at 20Hz with per-tick timing diagnostics.
         let cancel = self.cancel.clone();
         let tick_interval = Duration::from_millis(50); // 20Hz

@@ -13,10 +13,10 @@ pub mod protocol {
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 16;
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 17;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 17] = [
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 18] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -34,6 +34,7 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 17] = [
   ShardPayload::HostSwitch,
   ShardPayload::ShipPropertiesUpdate,
   ShardPayload::SignalBroadcast,
+  ShardPayload::SignalBroadcastBatch,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -58,9 +59,10 @@ impl ShardPayload {
   pub const HostSwitch: Self = Self(14);
   pub const ShipPropertiesUpdate: Self = Self(15);
   pub const SignalBroadcast: Self = Self(16);
+  pub const SignalBroadcastBatch: Self = Self(17);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 16;
+  pub const ENUM_MAX: u8 = 17;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -79,6 +81,7 @@ impl ShardPayload {
     Self::HostSwitch,
     Self::ShipPropertiesUpdate,
     Self::SignalBroadcast,
+    Self::SignalBroadcastBatch,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -100,6 +103,7 @@ impl ShardPayload {
       Self::HostSwitch => Some("HostSwitch"),
       Self::ShipPropertiesUpdate => Some("ShipPropertiesUpdate"),
       Self::SignalBroadcast => Some("SignalBroadcast"),
+      Self::SignalBroadcastBatch => Some("SignalBroadcastBatch"),
       _ => None,
     }
   }
@@ -4517,8 +4521,7 @@ impl ::core::fmt::Debug for SystemSceneUpdate<'_> {
 pub enum SignalBroadcastOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// Cross-shard signal broadcast (ShortRange or LongRange scope).
-/// Any shard with antenna-equipped blocks can send/receive.
+/// Cross-shard signal broadcast — single signal (legacy, kept for backward compat).
 pub struct SignalBroadcast<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -4591,7 +4594,7 @@ impl<'a> SignalBroadcast<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(SignalBroadcast::VT_VALUE_DATA, Some(0.0)).unwrap()}
   }
-  /// Scope: 1=ShortRange, 2=LongRange
+  /// Scope: 1=ShortRange, 2=LongRange, 3=Radio
   #[inline]
   pub fn scope(&self) -> u8 {
     // Safety:
@@ -4716,6 +4719,327 @@ impl ::core::fmt::Debug for SignalBroadcast<'_> {
       ds.field("scope", &self.scope());
       ds.field("range_m", &self.range_m());
       ds.field("source_position", &self.source_position());
+      ds.finish()
+  }
+}
+pub enum SignalBroadcastEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// A single signal entry within a batched broadcast.
+pub struct SignalBroadcastEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SignalBroadcastEntry<'a> {
+  type Inner = SignalBroadcastEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SignalBroadcastEntry<'a> {
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VALUE_TYPE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_VALUE_DATA: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SCOPE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_RANGE_M: ::flatbuffers::VOffsetT = 12;
+  pub const VT_FREQUENCY: ::flatbuffers::VOffsetT = 14;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SignalBroadcastEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SignalBroadcastEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SignalBroadcastEntry<'bldr>> {
+    let mut builder = SignalBroadcastEntryBuilder::new(_fbb);
+    builder.add_range_m(args.range_m);
+    builder.add_frequency(args.frequency);
+    builder.add_value_data(args.value_data);
+    if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    builder.add_scope(args.scope);
+    builder.add_value_type(args.value_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SignalBroadcastEntry::VT_CHANNEL_NAME, None)}
+  }
+  /// Signal value type: 0=Bool, 1=Float, 2=State
+  #[inline]
+  pub fn value_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalBroadcastEntry::VT_VALUE_TYPE, Some(0)).unwrap()}
+  }
+  /// Signal value data (bool as 0.0/1.0, state as float cast).
+  #[inline]
+  pub fn value_data(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(SignalBroadcastEntry::VT_VALUE_DATA, Some(0.0)).unwrap()}
+  }
+  /// Scope: 1=ShortRange, 2=LongRange, 3=Radio
+  #[inline]
+  pub fn scope(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalBroadcastEntry::VT_SCOPE, Some(0)).unwrap()}
+  }
+  /// Range in meters (ShortRange only; 0.0 for LongRange/Radio).
+  #[inline]
+  pub fn range_m(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(SignalBroadcastEntry::VT_RANGE_M, Some(0.0)).unwrap()}
+  }
+  /// Radio frequency (Radio scope only; 0 for other scopes).
+  #[inline]
+  pub fn frequency(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SignalBroadcastEntry::VT_FREQUENCY, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SignalBroadcastEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
+     .visit_field::<u8>("value_type", Self::VT_VALUE_TYPE, false)?
+     .visit_field::<f32>("value_data", Self::VT_VALUE_DATA, false)?
+     .visit_field::<u8>("scope", Self::VT_SCOPE, false)?
+     .visit_field::<f64>("range_m", Self::VT_RANGE_M, false)?
+     .visit_field::<u32>("frequency", Self::VT_FREQUENCY, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SignalBroadcastEntryArgs<'a> {
+    pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub value_type: u8,
+    pub value_data: f32,
+    pub scope: u8,
+    pub range_m: f64,
+    pub frequency: u32,
+}
+impl<'a> Default for SignalBroadcastEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SignalBroadcastEntryArgs {
+      channel_name: None,
+      value_type: 0,
+      value_data: 0.0,
+      scope: 0,
+      range_m: 0.0,
+      frequency: 0,
+    }
+  }
+}
+
+pub struct SignalBroadcastEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SignalBroadcastEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SignalBroadcastEntry::VT_CHANNEL_NAME, channel_name);
+  }
+  #[inline]
+  pub fn add_value_type(&mut self, value_type: u8) {
+    self.fbb_.push_slot::<u8>(SignalBroadcastEntry::VT_VALUE_TYPE, value_type, 0);
+  }
+  #[inline]
+  pub fn add_value_data(&mut self, value_data: f32) {
+    self.fbb_.push_slot::<f32>(SignalBroadcastEntry::VT_VALUE_DATA, value_data, 0.0);
+  }
+  #[inline]
+  pub fn add_scope(&mut self, scope: u8) {
+    self.fbb_.push_slot::<u8>(SignalBroadcastEntry::VT_SCOPE, scope, 0);
+  }
+  #[inline]
+  pub fn add_range_m(&mut self, range_m: f64) {
+    self.fbb_.push_slot::<f64>(SignalBroadcastEntry::VT_RANGE_M, range_m, 0.0);
+  }
+  #[inline]
+  pub fn add_frequency(&mut self, frequency: u32) {
+    self.fbb_.push_slot::<u32>(SignalBroadcastEntry::VT_FREQUENCY, frequency, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SignalBroadcastEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SignalBroadcastEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SignalBroadcastEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SignalBroadcastEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SignalBroadcastEntry");
+      ds.field("channel_name", &self.channel_name());
+      ds.field("value_type", &self.value_type());
+      ds.field("value_data", &self.value_data());
+      ds.field("scope", &self.scope());
+      ds.field("range_m", &self.range_m());
+      ds.field("frequency", &self.frequency());
+      ds.finish()
+  }
+}
+pub enum SignalBroadcastBatchOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Batched signal broadcast — multiple signals in one message.
+/// Reduces QUIC sends from (signals × peers) to (peers) per tick.
+pub struct SignalBroadcastBatch<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SignalBroadcastBatch<'a> {
+  type Inner = SignalBroadcastBatch<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SignalBroadcastBatch<'a> {
+  pub const VT_SOURCE_SHARD_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SOURCE_POSITION: ::flatbuffers::VOffsetT = 6;
+  pub const VT_ENTRIES: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SignalBroadcastBatch { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SignalBroadcastBatchArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SignalBroadcastBatch<'bldr>> {
+    let mut builder = SignalBroadcastBatchBuilder::new(_fbb);
+    builder.add_source_shard_id(args.source_shard_id);
+    if let Some(x) = args.entries { builder.add_entries(x); }
+    if let Some(x) = args.source_position { builder.add_source_position(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn source_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SignalBroadcastBatch::VT_SOURCE_SHARD_ID, Some(0)).unwrap()}
+  }
+  /// World position of the broadcasting structure.
+  #[inline]
+  pub fn source_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(SignalBroadcastBatch::VT_SOURCE_POSITION, None)}
+  }
+  /// All dirty signals in this batch.
+  #[inline]
+  pub fn entries(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBroadcastEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBroadcastEntry>>>>(SignalBroadcastBatch::VT_ENTRIES, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SignalBroadcastBatch<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("source_shard_id", Self::VT_SOURCE_SHARD_ID, false)?
+     .visit_field::<Vec3d>("source_position", Self::VT_SOURCE_POSITION, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalBroadcastEntry>>>>("entries", Self::VT_ENTRIES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SignalBroadcastBatchArgs<'a> {
+    pub source_shard_id: u64,
+    pub source_position: Option<&'a Vec3d>,
+    pub entries: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBroadcastEntry<'a>>>>>,
+}
+impl<'a> Default for SignalBroadcastBatchArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SignalBroadcastBatchArgs {
+      source_shard_id: 0,
+      source_position: None,
+      entries: None,
+    }
+  }
+}
+
+pub struct SignalBroadcastBatchBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SignalBroadcastBatchBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_source_shard_id(&mut self, source_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(SignalBroadcastBatch::VT_SOURCE_SHARD_ID, source_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_source_position(&mut self, source_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(SignalBroadcastBatch::VT_SOURCE_POSITION, source_position);
+  }
+  #[inline]
+  pub fn add_entries(&mut self, entries: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SignalBroadcastEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SignalBroadcastBatch::VT_ENTRIES, entries);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SignalBroadcastBatchBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SignalBroadcastBatchBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SignalBroadcastBatch<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SignalBroadcastBatch<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SignalBroadcastBatch");
+      ds.field("source_shard_id", &self.source_shard_id());
+      ds.field("source_position", &self.source_position());
+      ds.field("entries", &self.entries());
       ds.finish()
   }
 }
@@ -5009,6 +5333,21 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_signal_broadcast_batch(&self) -> Option<SignalBroadcastBatch<'a>> {
+    if self.payload_type() == ShardPayload::SignalBroadcastBatch {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { SignalBroadcastBatch::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -5035,6 +5374,7 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::HostSwitch => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<HostSwitch>>("ShardPayload::HostSwitch", pos),
           ShardPayload::ShipPropertiesUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipPropertiesUpdate>>("ShardPayload::ShipPropertiesUpdate", pos),
           ShardPayload::SignalBroadcast => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SignalBroadcast>>("ShardPayload::SignalBroadcast", pos),
+          ShardPayload::SignalBroadcastBatch => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SignalBroadcastBatch>>("ShardPayload::SignalBroadcastBatch", pos),
           _ => Ok(()),
         }
      })?
@@ -5196,6 +5536,13 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::SignalBroadcast => {
           if let Some(x) = self.payload_as_signal_broadcast() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::SignalBroadcastBatch => {
+          if let Some(x) = self.payload_as_signal_broadcast_batch() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

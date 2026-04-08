@@ -1,5 +1,6 @@
 //! Signal channel table — named pub/sub channels with merge strategies,
-//! scoping, and access control.
+//! scoping, and access control.  Channels are indexed by `ChannelId` (u16)
+//! for O(1) hot-path access; a string→id registry handles config-time resolution.
 
 use std::collections::HashMap;
 
@@ -7,17 +8,81 @@ use bevy_ecs::prelude::*;
 
 use super::types::*;
 
+// ---------------------------------------------------------------------------
+// ChannelId
+// ---------------------------------------------------------------------------
+
+/// Compact channel identifier — O(1) Vec index on the hot path.
+/// Assigned monotonically per `SignalChannelTable`; shard-local (not stable
+/// across shards or serialization — names are used on the wire).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ChannelId(pub u16);
+
+// ---------------------------------------------------------------------------
+// PendingAgg
+// ---------------------------------------------------------------------------
+
+/// Running aggregation state — replaces `Vec<SignalValue>` with O(1) inline
+/// accumulation.  Each variant holds only the fields relevant to its merge
+/// strategy, so there are no ambiguous "unused" fields.
+#[derive(Clone, Debug)]
+pub enum PendingAgg {
+    /// No values pushed this tick (idle state for LastWrite).
+    Idle,
+    /// Most recent value wins (LastWrite strategy).
+    LastWrite(SignalValue),
+    /// Running sum and count (Sum and Average strategies).
+    Sum { total: f64, count: u32 },
+    /// Running extreme value (Max or Min — direction from `ChannelMergeStrategy`).
+    Extreme { value: f64, count: u32 },
+    /// Running boolean (AnyTrue = OR seed false, AllTrue = AND seed true).
+    Bool { result: bool, count: u32 },
+}
+
+impl PendingAgg {
+    /// Return the idle (zero-value) state appropriate for a merge strategy.
+    fn idle_for(merge: ChannelMergeStrategy) -> Self {
+        match merge {
+            ChannelMergeStrategy::LastWrite => Self::Idle,
+            ChannelMergeStrategy::Sum | ChannelMergeStrategy::Average => {
+                Self::Sum { total: 0.0, count: 0 }
+            }
+            ChannelMergeStrategy::Max => Self::Extreme { value: f64::NEG_INFINITY, count: 0 },
+            ChannelMergeStrategy::Min => Self::Extreme { value: f64::INFINITY, count: 0 },
+            ChannelMergeStrategy::AnyTrue => Self::Bool { result: false, count: 0 },
+            ChannelMergeStrategy::AllTrue => Self::Bool { result: true, count: 0 },
+        }
+    }
+
+    /// Whether any values have been pushed this tick.
+    fn has_values(&self) -> bool {
+        match self {
+            Self::Idle => false,
+            Self::LastWrite(_) => true,
+            Self::Sum { count, .. }
+            | Self::Extreme { count, .. }
+            | Self::Bool { count, .. } => *count > 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SignalChannel
+// ---------------------------------------------------------------------------
+
 /// A named signal channel with scope, access control, and merge strategy.
 #[derive(Clone, Debug)]
 pub struct SignalChannel {
-    /// Channel name.
+    /// Unique ID within this table.
+    pub id: ChannelId,
+    /// Channel name (kept for UI display and cross-shard serialization).
     pub name: String,
     /// Current aggregated value (after merge).
     pub value: SignalValue,
     /// Previous tick's value (for change detection).
     prev_value: SignalValue,
-    /// Accumulated values from publishers this tick (pre-merge).
-    pending_values: Vec<SignalValue>,
+    /// Running aggregation accumulator.
+    pending: PendingAgg,
     /// How multiple publishers merge into one value.
     pub merge: ChannelMergeStrategy,
     /// Whether the value changed this tick.
@@ -32,21 +97,122 @@ pub struct SignalChannel {
     pub owner_id: u64,
 }
 
+// ---------------------------------------------------------------------------
+// SignalChannelTable
+// ---------------------------------------------------------------------------
+
 /// All signal channels on a structure (ship, station, planet base).
 /// One instance per shard that manages block data.
+///
+/// Channels are stored in a `Vec` indexed by `ChannelId` for O(1) access.
+/// A `HashMap<String, ChannelId>` handles name→id resolution at config time.
 #[derive(Resource)]
 pub struct SignalChannelTable {
-    channels: HashMap<String, SignalChannel>,
+    /// Slot array indexed by `ChannelId.0`.  `None` = freed slot.
+    channels: Vec<Option<SignalChannel>>,
+    /// Name → id registry for config-time resolution.
+    name_to_id: HashMap<String, ChannelId>,
+    /// Next id to allocate.
+    next_id: u16,
+    /// Channels marked dirty this tick. Avoids full-table scans in
+    /// `drain_remote_dirty` and `clear_dirty`.
+    dirty_set: Vec<ChannelId>,
 }
 
 impl SignalChannelTable {
     pub fn new() -> Self {
         Self {
-            channels: HashMap::new(),
+            channels: Vec::new(),
+            name_to_id: HashMap::new(),
+            next_id: 0,
+            dirty_set: Vec::new(),
         }
     }
 
-    /// Create or get a channel. If it doesn't exist, creates with defaults.
+    // -- ID-based hot-path API (O(1)) --------------------------------------
+
+    /// Get a channel by ID (read-only).
+    #[inline]
+    pub fn get_by_id(&self, id: ChannelId) -> Option<&SignalChannel> {
+        self.channels.get(id.0 as usize).and_then(|slot| slot.as_ref())
+    }
+
+    /// Get a channel by ID (mutable).
+    #[inline]
+    pub fn get_by_id_mut(&mut self, id: ChannelId) -> Option<&mut SignalChannel> {
+        self.channels.get_mut(id.0 as usize).and_then(|slot| slot.as_mut())
+    }
+
+    /// Push a value into a channel's running aggregation by ID (O(1)).
+    #[inline]
+    pub fn push_pending_id(&mut self, id: ChannelId, value: SignalValue) {
+        if let Some(ch) = self.channels.get_mut(id.0 as usize).and_then(|s| s.as_mut()) {
+            Self::accumulate(&mut ch.pending, ch.merge, value);
+        }
+    }
+
+    /// Directly publish a value to a channel by ID (bypasses merge).
+    pub fn publish_direct_id(&mut self, id: ChannelId, value: SignalValue) {
+        if let Some(ch) = self.channels.get_mut(id.0 as usize).and_then(|s| s.as_mut()) {
+            ch.prev_value = ch.value;
+            ch.value = value;
+            if ch.value != ch.prev_value {
+                if !ch.dirty {
+                    self.dirty_set.push(id);
+                }
+                ch.dirty = true;
+            }
+        }
+    }
+
+    // -- Name-based API (thin wrappers for config/cross-shard boundaries) --
+
+    /// Resolve a channel name to its ID, or create a new channel.
+    /// Primary entry point for config-time name→id resolution.
+    pub fn resolve_or_create(
+        &mut self,
+        name: &str,
+        scope: SignalScope,
+        merge: ChannelMergeStrategy,
+        owner_id: u64,
+    ) -> ChannelId {
+        if let Some(&id) = self.name_to_id.get(name) {
+            return id;
+        }
+        let id = ChannelId(self.next_id);
+        self.next_id += 1;
+        let ch = SignalChannel {
+            id,
+            name: name.to_string(),
+            value: SignalValue::default(),
+            prev_value: SignalValue::default(),
+            pending: PendingAgg::idle_for(merge),
+            merge,
+            dirty: false,
+            scope,
+            publish_policy: AccessPolicy::default(),
+            subscribe_policy: AccessPolicy::default(),
+            owner_id,
+        };
+        if (id.0 as usize) >= self.channels.len() {
+            self.channels.resize_with(id.0 as usize + 1, || None);
+        }
+        self.channels[id.0 as usize] = Some(ch);
+        self.name_to_id.insert(name.to_string(), id);
+        id
+    }
+
+    /// Resolve a name to its ID without creating.
+    pub fn resolve(&self, name: &str) -> Option<ChannelId> {
+        self.name_to_id.get(name).copied()
+    }
+
+    /// Reverse lookup: ID → name (for UI / serialization).
+    pub fn name_of(&self, id: ChannelId) -> Option<&str> {
+        self.get_by_id(id).map(|ch| ch.name.as_str())
+    }
+
+    /// Create or get a channel by name.  Returns `&mut SignalChannel`.
     pub fn get_or_create(
         &mut self,
         name: &str,
@@ -54,127 +220,176 @@ impl SignalChannelTable {
         merge: ChannelMergeStrategy,
         owner_id: u64,
     ) -> &mut SignalChannel {
-        self.channels.entry(name.to_string()).or_insert_with(|| SignalChannel {
-            name: name.to_string(),
-            value: SignalValue::default(),
-            prev_value: SignalValue::default(),
-            pending_values: Vec::new(),
-            merge,
-            dirty: false,
-            scope,
-            publish_policy: AccessPolicy::default(),
-            subscribe_policy: AccessPolicy::default(),
-            owner_id,
-        })
+        let id = self.resolve_or_create(name, scope, merge, owner_id);
+        self.channels[id.0 as usize].as_mut().unwrap()
     }
 
     /// Get a channel by name (read-only).
     pub fn get(&self, name: &str) -> Option<&SignalChannel> {
-        self.channels.get(name)
+        let id = self.name_to_id.get(name)?;
+        self.get_by_id(*id)
     }
 
     /// Get a channel by name (mutable).
     pub fn get_mut(&mut self, name: &str) -> Option<&mut SignalChannel> {
-        self.channels.get_mut(name)
+        let id = *self.name_to_id.get(name)?;
+        self.get_by_id_mut(id)
     }
 
-    /// Push a value to a channel's pending list (pre-merge).
-    /// Creates the channel with defaults if it doesn't exist.
+    /// Push a value by channel name (resolves or auto-creates with defaults).
     pub fn push_pending(&mut self, name: &str, value: SignalValue) {
-        let ch = self.channels.entry(name.to_string()).or_insert_with(|| SignalChannel {
-            name: name.to_string(),
-            value: SignalValue::default(),
-            prev_value: SignalValue::default(),
-            pending_values: Vec::new(),
-            merge: ChannelMergeStrategy::default(),
-            dirty: false,
-            scope: SignalScope::default(),
-            publish_policy: AccessPolicy::default(),
-            subscribe_policy: AccessPolicy::default(),
-            owner_id: 0,
-        });
-        ch.pending_values.push(value);
+        let id = self.resolve_or_create(
+            name,
+            SignalScope::default(),
+            ChannelMergeStrategy::default(),
+            0,
+        );
+        self.push_pending_id(id, value);
     }
 
-    /// Clear all pending values (called at start of publish phase).
-    pub fn clear_pending(&mut self) {
-        for ch in self.channels.values_mut() {
-            ch.pending_values.clear();
+    /// Directly publish a value by channel name (bypasses merge).
+    pub fn publish_direct(&mut self, name: &str, value: SignalValue) {
+        if let Some(&id) = self.name_to_id.get(name) {
+            self.publish_direct_id(id, value);
+        } else {
+            // Auto-create with the published value.
+            let id = self.resolve_or_create(
+                name,
+                SignalScope::default(),
+                ChannelMergeStrategy::default(),
+                0,
+            );
+            let ch = self.channels[id.0 as usize].as_mut().unwrap();
+            ch.value = value;
+            ch.dirty = true;
+            self.dirty_set.push(id);
         }
     }
 
-    /// Merge all pending values using each channel's merge strategy.
+    // -- Tick lifecycle -----------------------------------------------------
+
+    /// Update a running accumulator with a new value.
+    fn accumulate(pending: &mut PendingAgg, merge: ChannelMergeStrategy, value: SignalValue) {
+        match pending {
+            PendingAgg::Idle => {
+                *pending = PendingAgg::LastWrite(value);
+            }
+            PendingAgg::LastWrite(last) => {
+                *last = value;
+            }
+            PendingAgg::Sum { total, count } => {
+                *total += value.as_f32() as f64;
+                *count += 1;
+            }
+            PendingAgg::Extreme { value: extreme, count } => {
+                let v = value.as_f32() as f64;
+                *extreme = match merge {
+                    ChannelMergeStrategy::Max => extreme.max(v),
+                    _ => extreme.min(v),
+                };
+                *count += 1;
+            }
+            PendingAgg::Bool { result, count } => {
+                let b = value.as_bool();
+                *result = match merge {
+                    ChannelMergeStrategy::AnyTrue => *result || b,
+                    _ => *result && b,
+                };
+                *count += 1;
+            }
+        }
+    }
+
+    /// Reset all pending accumulators (called at start of publish phase).
+    pub fn clear_pending(&mut self) {
+        for slot in &mut self.channels {
+            if let Some(ch) = slot {
+                ch.pending = PendingAgg::idle_for(ch.merge);
+            }
+        }
+    }
+
+    /// Finalize all pending aggregations into channel values.
     /// Marks channels as dirty only if the merged value differs from the previous tick.
     pub fn merge_pending(&mut self) {
-        for ch in self.channels.values_mut() {
-            if ch.pending_values.is_empty() {
+        for slot in &mut self.channels {
+            let Some(ch) = slot else { continue };
+            if !ch.pending.has_values() {
                 continue;
             }
+            let merged = match &ch.pending {
+                PendingAgg::Idle => unreachable!(),
+                PendingAgg::LastWrite(v) => *v,
+                PendingAgg::Sum { total, count } => match ch.merge {
+                    ChannelMergeStrategy::Average => {
+                        SignalValue::Float((*total / *count as f64) as f32)
+                    }
+                    _ => SignalValue::Float(*total as f32),
+                },
+                PendingAgg::Extreme { value, .. } => SignalValue::Float(*value as f32),
+                PendingAgg::Bool { result, .. } => SignalValue::Bool(*result),
+            };
             ch.prev_value = ch.value;
-            ch.value = ch.merge.merge(&ch.pending_values);
-            ch.dirty = ch.value != ch.prev_value;
-        }
-    }
-
-    /// Directly publish a value to a channel (bypasses merge — used by converters
-    /// which write a single computed value, not accumulated).
-    pub fn publish_direct(&mut self, name: &str, value: SignalValue) {
-        if let Some(ch) = self.channels.get_mut(name) {
-            ch.prev_value = ch.value;
-            ch.value = value;
-            ch.dirty = ch.value != ch.prev_value;
-        } else {
-            // Auto-create channel with the published value.
-            self.channels.insert(name.to_string(), SignalChannel {
-                name: name.to_string(),
-                value,
-                prev_value: SignalValue::default(),
-                pending_values: Vec::new(),
-                merge: ChannelMergeStrategy::default(),
-                dirty: true,
-                scope: SignalScope::default(),
-                publish_policy: AccessPolicy::default(),
-                subscribe_policy: AccessPolicy::default(),
-                owner_id: 0,
-            });
+            ch.value = merged;
+            if ch.value != ch.prev_value {
+                if !ch.dirty {
+                    self.dirty_set.push(ch.id);
+                }
+                ch.dirty = true;
+            }
         }
     }
 
     /// Clear all dirty flags (called after subscribe phase).
+    /// Only iterates channels that were actually dirty — O(dirty_count).
     pub fn clear_dirty(&mut self) {
-        for ch in self.channels.values_mut() {
-            ch.dirty = false;
+        for id in self.dirty_set.drain(..) {
+            if let Some(Some(ch)) = self.channels.get_mut(id.0 as usize) {
+                ch.dirty = false;
+            }
         }
     }
 
     /// Collect all dirty channels with non-Local scope (for network broadcast).
+    /// Only iterates the dirty set — O(dirty_count) instead of O(total_channels).
     pub fn drain_remote_dirty(&self) -> Vec<(String, SignalValue, SignalScope)> {
-        self.channels.values()
-            .filter(|ch| ch.dirty && !matches!(ch.scope, SignalScope::Local))
+        self.dirty_set.iter()
+            .filter_map(|id| self.channels.get(id.0 as usize)?.as_ref())
+            .filter(|ch| !matches!(ch.scope, SignalScope::Local))
             .map(|ch| (ch.name.clone(), ch.value, ch.scope))
             .collect()
     }
 
-    /// Number of channels.
+    // -- Introspection ------------------------------------------------------
+
+    /// Number of live channels.
     pub fn channel_count(&self) -> usize {
-        self.channels.len()
+        self.name_to_id.len()
     }
 
     /// Number of dirty channels.
     pub fn dirty_count(&self) -> usize {
-        self.channels.values().filter(|ch| ch.dirty).count()
+        self.dirty_set.len()
     }
 
     /// Remove a channel by name.
     pub fn remove(&mut self, name: &str) {
-        self.channels.remove(name);
+        if let Some(id) = self.name_to_id.remove(name) {
+            if let Some(slot) = self.channels.get_mut(id.0 as usize) {
+                *slot = None;
+            }
+        }
     }
 
     /// All channel names (for UI dropdowns).
     pub fn channel_names(&self) -> impl Iterator<Item = &str> {
-        self.channels.keys().map(|s| s.as_str())
+        self.name_to_id.keys().map(|s| s.as_str())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -189,7 +404,40 @@ mod tests {
     }
 
     #[test]
+    fn resolve_assigns_stable_ids() {
+        let mut table = SignalChannelTable::new();
+        let id1 = table.resolve_or_create("a", SignalScope::Local, ChannelMergeStrategy::Sum, 1);
+        let id2 = table.resolve_or_create("b", SignalScope::Local, ChannelMergeStrategy::Sum, 1);
+        let id1_again = table.resolve_or_create("a", SignalScope::Local, ChannelMergeStrategy::Sum, 1);
+        assert_eq!(id1, id1_again);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn get_by_id_roundtrip() {
+        let mut table = SignalChannelTable::new();
+        let id = table.resolve_or_create("ch", SignalScope::Local, ChannelMergeStrategy::LastWrite, 1);
+        assert_eq!(table.get_by_id(id).unwrap().name, "ch");
+        assert_eq!(table.name_of(id), Some("ch"));
+    }
+
+    #[test]
     fn push_and_merge_sum() {
+        let mut table = SignalChannelTable::new();
+        let id = table.resolve_or_create("thrust", SignalScope::Local, ChannelMergeStrategy::Sum, 1);
+
+        table.clear_pending();
+        table.push_pending_id(id, SignalValue::Float(100.0));
+        table.push_pending_id(id, SignalValue::Float(200.0));
+        table.merge_pending();
+
+        let ch = table.get_by_id(id).unwrap();
+        assert_eq!(ch.value, SignalValue::Float(300.0));
+        assert!(ch.dirty);
+    }
+
+    #[test]
+    fn push_pending_by_name() {
         let mut table = SignalChannelTable::new();
         table.get_or_create("thrust", SignalScope::Local, ChannelMergeStrategy::Sum, 1);
 

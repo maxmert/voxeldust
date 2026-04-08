@@ -961,6 +961,9 @@ struct ClientApp {
 
 impl ClientApp {
     fn new(args: Args) -> Self {
+        // Initialize compute task pool for bevy's MultiThreadedExecutor.
+        bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::default);
+
         let mut ecs_app = bevy_app::App::new();
 
         // Insert resources with initial values.

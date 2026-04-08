@@ -354,12 +354,12 @@ fn drain_quic(
                 });
             }
             ShardMsg::SignalBroadcast(data) => {
-                // LongRange relay: forward to all other shards in the system.
-                if data.scope == 2 {
+                // Legacy single-signal relay (backward compat).
+                if data.scope >= 2 {
                     if let Ok(reg) = bridge.peer_registry.try_read() {
                         for peer in reg.all() {
                             if peer.id.0 == data.source_shard_id {
-                                continue; // don't relay back to sender
+                                continue;
                             }
                             if let Some(addr) = reg.quic_addr(peer.id) {
                                 let relay_msg = ShardMsg::SignalBroadcast(data.clone());
@@ -368,7 +368,36 @@ fn drain_quic(
                         }
                     }
                 }
-                // ShortRange signals are sent directly between shards, not relayed.
+            }
+            ShardMsg::SignalBroadcastBatch(batch) => {
+                // Relay LongRange (scope=2) and Radio (scope=3) entries to all peers.
+                // ShortRange entries (scope=1) should not arrive here but are filtered
+                // out defensively to avoid unnecessary relay.
+                let relay_entries: Vec<_> = batch.entries.iter()
+                    .filter(|e| e.scope >= 2)
+                    .cloned()
+                    .collect();
+                if !relay_entries.is_empty() {
+                    let relay_batch = ShardMsg::SignalBroadcastBatch(
+                        voxeldust_core::shard_message::SignalBroadcastBatchData {
+                            source_shard_id: batch.source_shard_id,
+                            source_position: batch.source_position,
+                            entries: relay_entries,
+                        },
+                    );
+                    if let Ok(reg) = bridge.peer_registry.try_read() {
+                        for peer in reg.all() {
+                            if peer.id.0 == batch.source_shard_id {
+                                continue;
+                            }
+                            if let Some(addr) = reg.quic_addr(peer.id) {
+                                let _ = bridge.quic_send_tx.try_send((
+                                    peer.id, addr, relay_batch.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
             other => {
                 if tick.0 % 100 == 0 {
