@@ -562,6 +562,12 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     // Place ownership core at center of ship
     grid.set_block(0, 1, 0, BlockId::OWNERSHIP_CORE);
 
+    // Reactor and battery placed inside the hull for power generation.
+    // No default wiring — the no-wire fallback grants full power until
+    // the player places their first PowerWire sub-block.
+    grid.set_block(0, 1, 1, BlockId::REACTOR_SMALL);
+    grid.set_block(0, 1, 2, BlockId::BATTERY);
+
     // Thrusters placed one block OUTSIDE the hull — they protrude from the surface.
     // facing_direction = exhaust direction; thrust (reaction) = -facing.
     // 4 thrusters per direction at the corners of each face for zero net torque.
@@ -611,8 +617,65 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     set_thruster(&mut grid, x_min, y_max + 1, z_max, IVec3::new(0, 1, 0));
     set_thruster(&mut grid, x_max, y_max + 1, z_max, IVec3::new(0, 1, 0));
 
-    // --- Sub-block elements for demonstration ---
+    // --- Sub-block elements: power wiring + decoration ---
     use sub_block::{SubBlockElement, SubBlockType};
+
+    // Power wiring: reactor (0,1,1) → along floor to left wall → up left wall → ceiling bus.
+    // Route along SOLID blocks only (floor, walls, ceiling — never through air).
+
+    // Step 1: Reactor (0,1,1) → wire along floor to left wall (x_min,1,1).
+    // Floor blocks at y_min=0 are solid. Wire on +Y face (top of floor).
+    for x in (x_min..0).rev() {
+        grid.add_sub_block(x, y_min, 1, SubBlockElement {
+            face: 2, // +Y (floor top)
+            element_type: SubBlockType::PowerWire,
+            rotation: 0, // runs along X axis
+            flags: 0,
+        });
+    }
+    // Wire on reactor block itself (floor-level, connects to floor wire).
+    grid.add_sub_block(0, 1, 1, SubBlockElement {
+        face: 1, // -X (toward left wall)
+        element_type: SubBlockType::PowerWire,
+        rotation: 0,
+        flags: 0,
+    });
+    // Reactor → battery wire.
+    grid.add_sub_block(0, 1, 1, SubBlockElement {
+        face: 4, // +Z (toward battery)
+        element_type: SubBlockType::PowerWire,
+        rotation: 0,
+        flags: 0,
+    });
+    grid.add_sub_block(0, 1, 2, SubBlockElement {
+        face: 5, // -Z (battery connects back to reactor)
+        element_type: SubBlockType::PowerWire,
+        rotation: 0,
+        flags: 0,
+    });
+
+    // Step 2: Up the left wall (x_min) from floor to ceiling.
+    // Left wall blocks are solid from y_min to y_max.
+    // Wire on interior face (+X, face 0) going vertically.
+    for y in y_min..=y_max {
+        grid.add_sub_block(x_min, y, 1, SubBlockElement {
+            face: 0, // +X (interior face of left wall)
+            element_type: SubBlockType::PowerWire,
+            rotation: 0, // runs vertically (v=+Y on face 0)
+            flags: 0,
+        });
+    }
+
+    // Step 3: Along ceiling from left wall (x_min) to center (x=0).
+    // Ceiling blocks at y_max are solid. Wire on -Y face (underside).
+    for x in x_min..=0 {
+        grid.add_sub_block(x, y_max, 1, SubBlockElement {
+            face: 3, // -Y (ceiling underside)
+            element_type: SubBlockType::PowerWire,
+            rotation: 0,
+            flags: 0,
+        });
+    }
 
     // Power wire running along the interior ceiling (face 3 = -Y).
     // Face 3 (-Y) tangents: u=+X, v=-Z. Wire runs along Z → rotation=1 (swap to v axis).

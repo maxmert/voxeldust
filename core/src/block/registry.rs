@@ -41,6 +41,19 @@ pub struct ThrusterProps {
     pub fuel_rate: f64,
 }
 
+/// Per-block static power properties (generation, consumption, storage).
+#[derive(Clone, Copy, Debug)]
+pub struct PowerProps {
+    /// Power generation capacity in Watts. 0 for consumers.
+    pub generation_w: f64,
+    /// Power consumption at full load in Watts. 0 for sources.
+    pub consumption_w: f64,
+    /// Energy storage capacity in Joules. 0 for non-batteries.
+    pub storage_j: f64,
+    /// Maximum charge/discharge rate in Watts. 0 for non-batteries.
+    pub charge_rate_w: f64,
+}
+
 /// What an interaction does when triggered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractionType {
@@ -105,6 +118,8 @@ pub struct BlockRegistry {
     functional_kinds: Vec<Option<FunctionalBlockKind>>,
     /// Per-thruster-block properties. None = not a thruster.
     thruster_props: Vec<Option<ThrusterProps>>,
+    /// Per-block power properties. None = not power-relevant.
+    power_props: Vec<Option<PowerProps>>,
 }
 
 impl BlockRegistry {
@@ -114,6 +129,7 @@ impl BlockRegistry {
         defs.resize_with(MAX_BLOCK_TYPES, || BlockDef::UNDEFINED.clone());
         let mut functional_kinds = vec![None; MAX_BLOCK_TYPES];
         let mut thruster_props_vec: Vec<Option<ThrusterProps>> = vec![None; MAX_BLOCK_TYPES];
+        let mut power_props_vec: Vec<Option<PowerProps>> = vec![None; MAX_BLOCK_TYPES];
 
         let r = &mut defs;
 
@@ -663,7 +679,36 @@ impl BlockRegistry {
         tp[BlockId::THRUSTER_MEDIUM_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 500_000.0, fuel_rate: 4.0 });
         tp[BlockId::THRUSTER_LARGE_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 2_000_000.0, fuel_rate: 12.0 });
 
-        Self { defs, functional_kinds, thruster_props: thruster_props_vec }
+        // Populate power properties.
+        let pp = &mut power_props_vec;
+        // Reactors: power sources.
+        pp[BlockId::REACTOR_SMALL.as_u16() as usize]  = Some(PowerProps { generation_w: 500_000.0,     consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::REACTOR_MEDIUM.as_u16() as usize]  = Some(PowerProps { generation_w: 2_000_000.0,  consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::REACTOR_LARGE.as_u16() as usize]   = Some(PowerProps { generation_w: 10_000_000.0, consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::SOLAR_PANEL.as_u16() as usize]     = Some(PowerProps { generation_w: 50_000.0,     consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
+        // Battery: energy storage.
+        pp[BlockId::BATTERY.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 0.0, storage_j: 36_000_000.0, charge_rate_w: 500_000.0 });
+        // Thrusters: power consumers (chemical cheap, ion moderate, fusion efficient).
+        pp[BlockId::THRUSTER_SMALL_CHEMICAL.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 100_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_MEDIUM_CHEMICAL.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 400_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_LARGE_CHEMICAL.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 1_500_000.0, storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_SMALL_ION.as_u16() as usize]       = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_MEDIUM_ION.as_u16() as usize]      = Some(PowerProps { generation_w: 0.0, consumption_w: 800_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_LARGE_ION.as_u16() as usize]       = Some(PowerProps { generation_w: 0.0, consumption_w: 4_000_000.0, storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_SMALL_FUSION.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 50_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_MEDIUM_FUSION.as_u16() as usize]   = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_LARGE_FUSION.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 800_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        // Other consumers.
+        pp[BlockId::SHIELD_EMITTER.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 300_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::SHIELD_GENERATOR.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 500_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::GRAVITY_GENERATOR.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::AIR_COMPRESSOR.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 50_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::ROTOR.as_u16() as usize]             = Some(PowerProps { generation_w: 0.0, consumption_w: 100_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::PISTON.as_u16() as usize]            = Some(PowerProps { generation_w: 0.0, consumption_w: 80_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::ANTENNA.as_u16() as usize]           = Some(PowerProps { generation_w: 0.0, consumption_w: 10_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::COMPUTER.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 20_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
+
+        Self { defs, functional_kinds, thruster_props: thruster_props_vec, power_props: power_props_vec }
     }
 
     /// O(1) lookup by `BlockId`.
@@ -698,6 +743,12 @@ impl BlockRegistry {
     #[inline]
     pub fn thruster_props(&self, id: BlockId) -> Option<ThrusterProps> {
         self.thruster_props[id.as_u16() as usize]
+    }
+
+    /// Get power-specific properties for a block ID. None = not power-relevant.
+    #[inline]
+    pub fn power_props(&self, id: BlockId) -> Option<PowerProps> {
+        self.power_props[id.as_u16() as usize]
     }
 
     /// Get the interaction schema for a functional block kind.

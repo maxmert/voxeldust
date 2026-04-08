@@ -219,6 +219,112 @@ struct ThrusterBlock {
     direction: DVec3,
 }
 
+// ---------------------------------------------------------------------------
+// Power network components
+// ---------------------------------------------------------------------------
+
+/// Reactor runtime state. Toggled via E key interaction.
+#[derive(Component)]
+struct ReactorState {
+    active: bool,
+    throttle: f32,
+}
+
+impl Default for ReactorState {
+    fn default() -> Self {
+        Self { active: true, throttle: 1.0 }
+    }
+}
+
+/// Battery runtime state. Automatically charges when surplus, discharges when deficit.
+#[derive(Component)]
+struct BatteryState {
+    energy_j: f64,
+    capacity_j: f64,
+    max_rate_w: f64,
+}
+
+/// Marks a block as a power source. Attached to reactors and solar panels.
+#[derive(Component)]
+struct PowerSource {
+    max_generation_w: f64,
+}
+
+/// Marks a block as a power consumer. Tracks effective load.
+#[derive(Component, Default)]
+struct PowerConsumer {
+    base_consumption_w: f64,
+    load_factor: f32,
+}
+
+/// Which power network a functional block belongs to.
+/// Assigned by `rebuild_power_networks`. None = not connected to any wires = no power.
+#[derive(Component, Default)]
+struct PowerNetworkMembership {
+    network_id: Option<u16>,
+}
+
+/// A single isolated power network formed by connected PowerWire sub-blocks.
+#[derive(Clone, Debug, Default)]
+struct PowerNetwork {
+    connected_entities: Vec<Entity>,
+    total_supply_w: f64,
+    total_demand_w: f64,
+    power_ratio: f32,
+    surplus_w: f64,
+}
+
+/// All power networks on this shard. Rebuilt when wire/block topology changes.
+#[derive(Resource, Default)]
+struct PowerNetworkTable {
+    networks: Vec<PowerNetwork>,
+    dirty: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Union-Find (for power network graph building)
+// ---------------------------------------------------------------------------
+
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new() -> Self {
+        Self { parent: Vec::new(), rank: Vec::new() }
+    }
+
+    fn make_set(&mut self) -> usize {
+        let id = self.parent.len();
+        self.parent.push(id);
+        self.rank.push(0);
+        id
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]]; // path halving
+            x = self.parent[x];
+        }
+        x
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb { return; }
+        if self.rank[ra] < self.rank[rb] {
+            self.parent[ra] = rb;
+        } else if self.rank[ra] > self.rank[rb] {
+            self.parent[rb] = ra;
+        } else {
+            self.parent[rb] = ra;
+            self.rank[ra] += 1;
+        }
+    }
+}
+
 /// Ship center of mass (block coordinates). Updated by aggregate_ship_properties.
 #[derive(Resource, Default)]
 struct ShipCenterOfMass(DVec3);
@@ -385,7 +491,7 @@ struct BlockEditMsg {
 // SystemParam bundles
 // ---------------------------------------------------------------------------
 
-/// Signal-related queries bundled to stay within the 16-param system limit.
+/// Signal + power queries bundled to stay within the 16-param system limit.
 #[derive(SystemParam)]
 struct SignalQueryCtx<'w, 's> {
     channels: Res<'w, SignalChannelTable>,
@@ -393,6 +499,7 @@ struct SignalQueryCtx<'w, 's> {
     sub_query: Query<'w, 's, &'static SignalSubscriber>,
     converter_query: Query<'w, 's, &'static SignalConverterConfig>,
     seat_query: Query<'w, 's, &'static SeatChannelMapping>,
+    reactor_query: Query<'w, 's, &'static mut ReactorState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1674,6 +1781,7 @@ fn process_sub_block_edits(
     connected: Res<ConnectedPlayer>,
     bridge: Res<NetworkBridge>,
     mut persistence: Option<ResMut<ShipPersistence>>,
+    mut power_nets: ResMut<PowerNetworkTable>,
 ) {
     use voxeldust_core::block::sub_block::{SubBlockElement, SubBlockType};
     use voxeldust_core::client_message::{action, SubBlockModData, ChunkDeltaData, ServerMsg};
@@ -1751,6 +1859,11 @@ fn process_sub_block_edits(
             persist.pending_saves.insert(chunk_key);
         }
 
+        // Trigger power network rebuild when wiring changes.
+        if element_type == SubBlockType::PowerWire {
+            power_nets.dirty = true;
+        }
+
         // Broadcast sub-block delta to clients.
         if let Some(session) = connected.session {
             let seq = grid.0.get_chunk_mut(chunk_key)
@@ -1802,7 +1915,7 @@ fn produce_player_edits(
     mut rapier: ResMut<RapierContext>,
     body_handle: Res<PlayerBodyHandle>,
     bridge: Res<NetworkBridge>,
-    signal_ctx: SignalQueryCtx,
+    mut signal_ctx: SignalQueryCtx,
 ) {
     if connected.session.is_none() || connected.handoff_pending {
         return;
@@ -1947,8 +2060,13 @@ fn produce_player_edits(
                                         info!("exited pilot mode");
                                     }
                                 }
+                                FunctionalBlockKind::Reactor => {
+                                    if let Ok(mut rs) = signal_ctx.reactor_query.get_mut(entity) {
+                                        rs.active = !rs.active;
+                                        info!(active = rs.active, block = ?hit.world_pos, "reactor toggled");
+                                    }
+                                }
                                 _ => {
-                                    // Future phases: dispatch to kind-specific handlers.
                                     info!(
                                         kind = ?kind,
                                         interaction = interaction_def.label,
@@ -2435,6 +2553,237 @@ fn add_default_signal_bindings(
             // Players can add bindings via the config UI.
         }
     }
+
+    // Attach power components based on PowerProps (applies to ALL functional blocks).
+    if let Some(pp) = registry.power_props(block_id) {
+        if pp.generation_w > 0.0 {
+            entity_cmds.insert(PowerSource { max_generation_w: pp.generation_w });
+        }
+        if pp.consumption_w > 0.0 {
+            entity_cmds.insert(PowerConsumer {
+                base_consumption_w: pp.consumption_w,
+                load_factor: 0.0,
+            });
+        }
+        if pp.storage_j > 0.0 {
+            entity_cmds.insert(BatteryState {
+                energy_j: pp.storage_j, // start fully charged
+                capacity_j: pp.storage_j,
+                max_rate_w: pp.charge_rate_w,
+            });
+        }
+    }
+    // Every functional block gets network membership (None = no power).
+    entity_cmds.insert(PowerNetworkMembership::default());
+
+    // Reactors get runtime state for toggle/throttle.
+    if kind == FunctionalBlockKind::Reactor {
+        entity_cmds.insert(ReactorState::default());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signal pipeline systems
+// ---------------------------------------------------------------------------
+// Power network systems
+// ---------------------------------------------------------------------------
+
+/// Rebuild the power network graph from PowerWire sub-blocks.
+/// Uses Union-Find to group connected wires into networks, then assigns
+/// each functional block to the network touching it.
+fn rebuild_power_networks(
+    mut net_table: ResMut<PowerNetworkTable>,
+    grid: Res<ShipGridResource>,
+    block_index: Res<FunctionalBlockIndex>,
+    mut membership_query: Query<&mut PowerNetworkMembership>,
+) {
+    if !net_table.dirty { return; }
+    net_table.dirty = false;
+
+    use voxeldust_core::block::sub_block::{SubBlockType, face_to_offset, opposite_face};
+    use voxeldust_core::block::palette::{CHUNK_SIZE, index_to_xyz};
+    use std::collections::HashMap;
+
+    let cs = CHUNK_SIZE as i32;
+
+    // Step 1: Collect all PowerWire sub-blocks and assign union-find IDs.
+    let mut uf = UnionFind::new();
+    let mut wire_map: HashMap<(glam::IVec3, u8), usize> = HashMap::new();
+
+    for (chunk_key, chunk) in grid.0.iter_chunks() {
+        for (flat_idx, elements) in chunk.iter_sub_blocks() {
+            let (lx, ly, lz) = index_to_xyz(flat_idx as usize);
+            let world_pos = glam::IVec3::new(
+                chunk_key.x * cs + lx as i32,
+                chunk_key.y * cs + ly as i32,
+                chunk_key.z * cs + lz as i32,
+            );
+            for elem in elements {
+                if elem.element_type == SubBlockType::PowerWire {
+                    let id = uf.make_set();
+                    wire_map.insert((world_pos, elem.face), id);
+                }
+            }
+        }
+    }
+
+    // Step 2: Union wires on opposing faces of adjacent blocks.
+    let keys: Vec<_> = wire_map.keys().cloned().collect();
+    for (pos, face) in keys {
+        let adj_pos = pos + face_to_offset(face);
+        let opp_face = opposite_face(face);
+        if let Some(&adj_id) = wire_map.get(&(adj_pos, opp_face)) {
+            let my_id = wire_map[&(pos, face)];
+            uf.union(my_id, adj_id);
+        }
+    }
+
+    // Step 3: Group wires by root → network index.
+    let mut root_to_network: HashMap<usize, u16> = HashMap::new();
+    let mut networks: Vec<PowerNetwork> = Vec::new();
+
+    for (&(pos, face), &uf_id) in &wire_map {
+        let root = uf.find(uf_id);
+        let net_idx = *root_to_network.entry(root).or_insert_with(|| {
+            let idx = networks.len() as u16;
+            networks.push(PowerNetwork::default());
+            idx
+        });
+        let _ = (pos, face); // wire positions tracked implicitly via entity membership
+    }
+
+    // Step 4: Assign functional blocks to networks.
+    // A block connects to a network if it has a PowerWire on any of its faces.
+    // First, build a map of block positions that have wires → network ID.
+    let mut block_pos_to_network: HashMap<glam::IVec3, u16> = HashMap::new();
+    for (&(pos, _face), &uf_id) in &wire_map {
+        let root = uf.find(uf_id);
+        if let Some(&net_idx) = root_to_network.get(&root) {
+            block_pos_to_network.insert(pos, net_idx);
+        }
+    }
+
+    // Clear all memberships first.
+    for mut m in &mut membership_query {
+        m.network_id = None;
+    }
+
+    // Assign entities to networks based on their block position having a wire.
+    for (&pos, &entity) in block_index.0.iter() {
+        if let Some(&net_idx) = block_pos_to_network.get(&pos) {
+            if let Ok(mut m) = membership_query.get_mut(entity) {
+                m.network_id = Some(net_idx);
+            }
+            if let Some(net) = networks.get_mut(net_idx as usize) {
+                net.connected_entities.push(entity);
+            }
+        } else {
+            // Check adjacent blocks for wires facing toward this block.
+            for face in 0..6u8 {
+                let adj_pos = pos + face_to_offset(face);
+                let opp_face = opposite_face(face);
+                if wire_map.contains_key(&(adj_pos, opp_face)) {
+                    let root = uf.find(wire_map[&(adj_pos, opp_face)]);
+                    if let Some(&net_idx) = root_to_network.get(&root) {
+                        if let Ok(mut m) = membership_query.get_mut(entity) {
+                            m.network_id = Some(net_idx);
+                        }
+                        if let Some(net) = networks.get_mut(net_idx as usize) {
+                            net.connected_entities.push(entity);
+                        }
+                        break; // connected to first matching network
+                    }
+                }
+            }
+        }
+    }
+
+    net_table.networks = networks;
+    tracing::info!(
+        network_count = net_table.networks.len(),
+        wire_count = wire_map.len(),
+        "power networks rebuilt",
+    );
+}
+
+/// Compute power budget per network: supply, demand, battery charge/discharge, ratio.
+/// Two-pass approach: first compute supply/demand/surplus, then handle batteries.
+fn compute_power_budget(
+    mut net_table: ResMut<PowerNetworkTable>,
+    sources: Query<(&PowerSource, &PowerNetworkMembership, Option<&ReactorState>)>,
+    consumers: Query<(&PowerConsumer, &PowerNetworkMembership)>,
+    mut batteries: Query<(&mut BatteryState, &PowerNetworkMembership)>,
+) {
+    const TICK_DT: f64 = 1.0 / 20.0; // 50ms per tick
+    let net_count = net_table.networks.len();
+    if net_count == 0 { return; }
+
+    // Pass 1: Sum supply and demand per network.
+    for net in &mut net_table.networks {
+        net.total_supply_w = 0.0;
+        net.total_demand_w = 0.0;
+        net.surplus_w = 0.0;
+        net.power_ratio = 1.0;
+    }
+
+    for (source, membership, reactor_state) in &sources {
+        if let Some(idx) = membership.network_id {
+            if let Some(net) = net_table.networks.get_mut(idx as usize) {
+                let output = match reactor_state {
+                    Some(rs) if rs.active => source.max_generation_w * rs.throttle as f64,
+                    Some(_) => 0.0,
+                    None => source.max_generation_w, // solar panel
+                };
+                net.total_supply_w += output;
+            }
+        }
+    }
+
+    for (consumer, membership) in &consumers {
+        if let Some(idx) = membership.network_id {
+            if let Some(net) = net_table.networks.get_mut(idx as usize) {
+                net.total_demand_w += consumer.base_consumption_w * consumer.load_factor as f64;
+            }
+        }
+    }
+
+    // Compute surplus per network (positive = excess, negative = deficit).
+    for net in &mut net_table.networks {
+        net.surplus_w = net.total_supply_w - net.total_demand_w;
+    }
+
+    // Pass 2: Battery charge/discharge. Build per-network discharge totals.
+    let mut discharge_per_network = vec![0.0f64; net_count];
+
+    for (mut battery, membership) in &mut batteries {
+        let idx = match membership.network_id {
+            Some(i) if (i as usize) < net_count => i as usize,
+            _ => continue,
+        };
+        let surplus = net_table.networks[idx].surplus_w;
+
+        if surplus > 0.0 {
+            // Charge battery with surplus.
+            let charge = surplus.min(battery.max_rate_w) * TICK_DT;
+            battery.energy_j = (battery.energy_j + charge).min(battery.capacity_j);
+        } else if surplus < 0.0 {
+            // Discharge battery to cover deficit.
+            let available = battery.max_rate_w.min(battery.energy_j / TICK_DT);
+            let discharge = available.min(-surplus);
+            battery.energy_j = (battery.energy_j - discharge * TICK_DT).max(0.0);
+            discharge_per_network[idx] += discharge;
+        }
+    }
+
+    // Pass 3: Final ratio = (supply + battery_discharge) / demand.
+    for (i, net) in net_table.networks.iter_mut().enumerate() {
+        if net.total_demand_w > 0.0 {
+            let effective_supply = net.total_supply_w + discharge_per_network[i];
+            net.power_ratio = (effective_supply / net.total_demand_w).min(1.0) as f32;
+        } else {
+            net.power_ratio = 1.0;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2445,7 +2794,7 @@ fn add_default_signal_bindings(
 /// Values accumulate in pending_values, merged after all publishers write.
 fn signal_publish(
     mut channels: ResMut<SignalChannelTable>,
-    publishers: Query<(&FunctionalBlockRef, &SignalPublisher)>,
+    publishers: Query<(&FunctionalBlockRef, &SignalPublisher, Option<&ReactorState>)>,
     mut incoming: ResMut<IncomingSignalBuffer>,
     pilot_mode: Res<PilotMode>,
     mut active_seat: ResMut<ActiveSeatEntity>,
@@ -2493,12 +2842,18 @@ fn signal_publish(
     }
 
     // Block publishers (reactors, sensors, etc.).
-    for (_block_ref, publisher) in &publishers {
+    for (_block_ref, publisher, reactor_state) in &publishers {
         for binding in &publisher.bindings {
             let value = match binding.property {
                 SignalProperty::Active => signal::SignalValue::Bool(true),
                 SignalProperty::Throttle => signal::SignalValue::Float(0.0),
-                SignalProperty::Level => signal::SignalValue::Float(1.0),
+                SignalProperty::Level => {
+                    // Reactors publish their actual output; others default to 1.0.
+                    match reactor_state {
+                        Some(rs) => signal::SignalValue::Float(if rs.active { rs.throttle } else { 0.0 }),
+                        None => signal::SignalValue::Float(1.0),
+                    }
+                }
                 SignalProperty::Pressure => signal::SignalValue::Float(101.3),
                 _ => signal::SignalValue::Float(0.0),
             };
@@ -2572,7 +2927,8 @@ fn signal_subscribe(
 fn compute_ship_thrust(
     pilot_mode: Res<PilotMode>,
     mut pilot_acc: ResMut<PilotAccumulator>,
-    thrusters: Query<(&ThrusterBlock, &ThrusterState)>,
+    thrusters: Query<(&ThrusterBlock, &ThrusterState, Option<&PowerNetworkMembership>)>,
+    net_table: Res<PowerNetworkTable>,
     channels: Res<SignalChannelTable>,
     raw_input: Res<RawPilotInput>,
     ship_props: Res<ShipProps>,
@@ -2598,11 +2954,41 @@ fn compute_ship_thrust(
     // Rotation is controlled exclusively through the torque channels.
     let mut total_thrust = DVec3::ZERO;
 
-    for (thruster, state) in &thrusters {
+    // No-wire fallback: if no power networks exist, grant full power.
+    // This prevents the starter ship from being dead before wiring is set up.
+    let has_any_network = !net_table.networks.is_empty();
+
+    for (thruster, state, membership) in &thrusters {
         if state.throttle.abs() < 0.001 { continue; }
-        // Reaction force: opposite to exhaust (facing) direction.
-        let thrust_vec = -thruster.direction * thruster.thrust_n * state.throttle as f64 * limiter;
+
+        // Power scaling: block must be on a powered network.
+        let power_ratio = if has_any_network {
+            membership
+                .and_then(|m| m.network_id)
+                .and_then(|id| net_table.networks.get(id as usize))
+                .map(|net| net.power_ratio as f64)
+                .unwrap_or(0.0) // No network = no power
+        } else {
+            1.0 // No networks at all = legacy/fallback full power
+        };
+
+        let thrust_vec = -thruster.direction * thruster.thrust_n
+            * state.throttle as f64 * limiter * power_ratio;
         total_thrust += thrust_vec;
+
+        // Diagnostic: log power ratio for first thruster once every 2 seconds.
+        static DIAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tick = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if tick % 40 == 0 {
+            tracing::info!(
+                power_ratio,
+                has_any_network,
+                has_membership = membership.is_some(),
+                network_id = ?membership.map(|m| m.network_id),
+                throttle = state.throttle,
+                "thruster power diagnostic",
+            );
+        }
     }
 
     // Rotation torque from dedicated channels (yaw/pitch/roll).
@@ -3030,6 +3416,7 @@ fn build_ship_interior(
     app.insert_resource(PilotAccumulator::default());
     app.insert_resource(RawPilotInput { thrust_limiter: 0.75, ..Default::default() });
     app.insert_resource(ShipCenterOfMass::default());
+    app.insert_resource(PowerNetworkTable { networks: Vec::new(), dirty: true });
     app.insert_resource(ActiveSeatEntity::default());
     app.insert_resource(AutopilotState::default());
     app.insert_resource(WarpTargetState::default());
@@ -3093,7 +3480,7 @@ fn build_ship_interior(
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
         Update,
-        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, aggregate_ship_properties)
+        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, rebuild_power_networks, aggregate_ship_properties)
             .chain()
             .in_set(ShipSet::BlockEdit),
     );
@@ -3101,7 +3488,7 @@ fn build_ship_interior(
     // Signal pipeline: publish → evaluate → subscribe → clear dirty.
     app.add_systems(
         Update,
-        (signal_publish, signal_evaluate, signal_subscribe, compute_ship_thrust, signal_clear_dirty)
+        (signal_publish, signal_evaluate, signal_subscribe, compute_power_budget, compute_ship_thrust, signal_clear_dirty)
             .chain()
             .in_set(ShipSet::Signal),
     );

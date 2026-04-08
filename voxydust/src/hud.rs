@@ -72,9 +72,10 @@ pub fn run_hud(
         draw_trajectory(&painter, ctx, logical_w, logical_h);
 
         // Block status indicators (functional blocks).
-        if config_state.is_none() {
-            draw_block_indicators(&painter, ctx, logical_w, logical_h);
-        }
+        // TODO: revisit indicator design — disabled for now.
+        // if config_state.is_none() {
+        //     draw_block_indicators(&painter, ctx, logical_w, logical_h);
+        // }
 
         // Info panel.
         draw_info_panel(ectx, ctx);

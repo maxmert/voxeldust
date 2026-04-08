@@ -855,12 +855,23 @@ fn smooth_render_position(
         .as_secs_f64();
 
     // Interpolation factor: 0.0 = at prev, 1.0 = at current.
-    // Renders ONE tick behind — both endpoints are known, no prediction.
+    // Clamped — no extrapolation past the known endpoint (extrapolation
+    // causes backward snaps when the next snapshot arrives).
     let t = (elapsed / tick_duration).clamp(0.0, 1.0);
 
-    smooth.render_position = prev.player_position.lerp(curr.player_position, t);
-    smooth.render_rotation = prev.ship_rotation.slerp(curr.ship_rotation, t);
-    smooth.ship_origin = prev.ship_origin.lerp(curr.ship_origin, t);
+    // Snapshot target: where the player should be based on server state.
+    let target_pos = prev.player_position.lerp(curr.player_position, t);
+    let target_rot = prev.ship_rotation.slerp(curr.ship_rotation, t);
+    let target_origin = prev.ship_origin.lerp(curr.ship_origin, t);
+
+    // Exponential decay blend toward target — eliminates micro-freezes at
+    // tick boundaries while never overshooting.  Converges ~90% in 100ms.
+    let blend = 1.0 - (-20.0 * ft.dt).exp();
+    let pos_delta = (target_pos - smooth.render_position) * blend;
+    smooth.render_position = smooth.render_position + pos_delta;
+    smooth.render_rotation = smooth.render_rotation.slerp(target_rot, blend);
+    let origin_delta = (target_origin - smooth.ship_origin) * blend;
+    smooth.ship_origin = smooth.ship_origin + origin_delta;
 }
 
 fn check_autopilot_timeout(
