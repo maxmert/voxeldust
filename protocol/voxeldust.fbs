@@ -393,6 +393,29 @@ table BlockEditRequest {
     block_type: uint16;
 }
 
+/// Sub-block element modification within a chunk delta.
+table SubBlockMod {
+    bx: uint8;
+    by: uint8;
+    bz: uint8;
+    face: uint8;
+    element_type: uint8;
+    rotation: uint8;
+    action: uint8;  // 0=remove, 1=place
+}
+
+/// Client → server: place or remove a sub-block element.
+table SubBlockEditRequest {
+    /// Host block world position (signed, ship-local or planet-space).
+    block_x: int32;
+    block_y: int32;
+    block_z: int32;
+    face: uint8;          // 0-5: which face of the host block
+    element_type: uint8;  // SubBlockType discriminant
+    rotation: uint8;      // 0-3: rotation on face
+    action: uint8;        // action::PLACE_SUB or action::REMOVE_SUB
+}
+
 /// Generic chunk address using signed 32-bit Cartesian coordinates.
 /// Works for both ship grids (direct IVec3) and planets (derived from cubic sphere).
 /// This is the unified address format used by ChunkSnapshot and ChunkDelta.
@@ -418,6 +441,7 @@ table ChunkDelta {
     addr: ChunkAddr;
     seq: uint64;
     mods: [BlockMod];
+    sub_block_mods: [SubBlockMod];
 }
 
 table ShardRedirectMsg {
@@ -537,6 +561,7 @@ union ClientPayload {
     PlayerInput,
     BlockEditRequest,
     BlockConfigUpdate,
+    SubBlockEditRequest,
 }
 
 /// Root type for client → server messages.

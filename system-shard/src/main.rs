@@ -193,7 +193,7 @@ struct GalaxyProvisionReceiver(mpsc::Receiver<ShardId>);
 struct ClientConnectedMsg {
     session_token: SessionToken,
     player_name: String,
-    tcp_stream: Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+    tcp_write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 }
 
 /// Ship control input from a ship shard via QUIC.
@@ -287,7 +287,7 @@ fn drain_connects(
         events.write(ClientConnectedMsg {
             session_token: conn.session_token,
             player_name: conn.player_name.clone(),
-            tcp_stream: conn.tcp_stream.clone(),
+            tcp_write: conn.tcp_write.clone(),
         });
         info!(
             player = %conn.player_name,
@@ -471,7 +471,7 @@ fn process_connects(
         }
 
         // Send JoinResponse via TCP.
-        let tcp_stream = event.tcp_stream.clone();
+        let tcp_write = event.tcp_write.clone();
         let seed = system_seed.0;
         let galaxy_seed = galaxy_ctx.seed;
         let game_time = celestial_time.0;
@@ -492,8 +492,8 @@ fn process_connects(
                 reference_position: DVec3::ZERO,
                 reference_rotation: DQuat::IDENTITY,
             });
-            let mut stream = tcp_stream.lock().await;
-            let _ = client_listener::send_tcp_msg(&mut *stream, &jr).await;
+            let mut writer = tcp_write.lock().await;
+            let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
         });
 
         info!(ship_id, "spawned ship for direct TCP client");

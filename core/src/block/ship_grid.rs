@@ -7,6 +7,7 @@ use super::block_meta::{BlockMeta, BlockOrientation};
 use super::chunk_storage::{ChunkStorage, DamageResult};
 use super::palette::CHUNK_SIZE;
 use super::registry::BlockRegistry;
+use super::sub_block;
 
 /// Multi-chunk Cartesian block grid for ships and stations.
 ///
@@ -118,6 +119,41 @@ impl ShipGrid {
             .entry(key)
             .or_insert_with(ChunkStorage::new_empty);
         chunk.set_orientation(lx, ly, lz, orientation);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sub-block elements
+    // -----------------------------------------------------------------------
+
+    /// Add a sub-block element at a world-space position.
+    pub fn add_sub_block(&mut self, wx: i32, wy: i32, wz: i32, element: sub_block::SubBlockElement) -> bool {
+        let (key, lx, ly, lz) = Self::world_to_chunk(wx, wy, wz);
+        let chunk = self.chunks.entry(key).or_insert_with(ChunkStorage::new_empty);
+        chunk.add_sub_block(lx, ly, lz, element)
+    }
+
+    /// Remove a sub-block element from a face at world-space position.
+    pub fn remove_sub_block(&mut self, wx: i32, wy: i32, wz: i32, face: u8) -> Option<sub_block::SubBlockElement> {
+        let (key, lx, ly, lz) = Self::world_to_chunk(wx, wy, wz);
+        self.chunks.get_mut(&key)?.remove_sub_block(lx, ly, lz, face)
+    }
+
+    /// Get sub-block elements at a world-space position.
+    pub fn get_sub_blocks(&self, wx: i32, wy: i32, wz: i32) -> &[sub_block::SubBlockElement] {
+        let (key, lx, ly, lz) = Self::world_to_chunk(wx, wy, wz);
+        match self.chunks.get(&key) {
+            Some(chunk) => chunk.get_sub_blocks(lx, ly, lz),
+            None => &[],
+        }
+    }
+
+    /// Check if a face at world-space position has a sub-block.
+    pub fn has_sub_block(&self, wx: i32, wy: i32, wz: i32, face: u8) -> bool {
+        let (key, lx, ly, lz) = Self::world_to_chunk(wx, wy, wz);
+        match self.chunks.get(&key) {
+            Some(chunk) => chunk.has_sub_block(lx, ly, lz, face),
+            None => false,
+        }
     }
 
     /// Apply damage to a block at world-space position.

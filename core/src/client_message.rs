@@ -74,6 +74,8 @@ pub enum ClientMsg {
     BlockEditRequest(BlockEditData),
     /// Signal config update for a functional block (client → server).
     BlockConfigUpdate(crate::signal::config::BlockConfigUpdateData),
+    /// Place or remove a sub-block element on a block face.
+    SubBlockEdit(SubBlockEditData),
 }
 
 /// Server → client messages.
@@ -166,6 +168,8 @@ pub mod action {
     pub const INTERACT: u8 = 3;
     pub const OPEN_CONFIG: u8 = 8;
     pub const EXIT_SEAT: u8 = 9;
+    pub const PLACE_SUB: u8 = 10;
+    pub const REMOVE_SUB: u8 = 11;
 }
 
 /// Shard type identifiers.
@@ -182,6 +186,16 @@ pub struct BlockEditData {
     pub eye: DVec3,
     pub look: DVec3,
     pub block_type: u16,
+}
+
+/// Client → server: place or remove a sub-block element on a block face.
+#[derive(Debug, Clone)]
+pub struct SubBlockEditData {
+    pub block_pos: glam::IVec3,
+    pub face: u8,
+    pub element_type: u8,
+    pub rotation: u8,
+    pub action: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +298,20 @@ pub struct ChunkDeltaData {
     pub seq: u64,
     /// Block modifications within this chunk.
     pub mods: Vec<BlockModData>,
+    /// Sub-block element modifications within this chunk.
+    pub sub_block_mods: Vec<SubBlockModData>,
+}
+
+/// A single sub-block modification within a chunk delta.
+#[derive(Debug, Clone)]
+pub struct SubBlockModData {
+    pub bx: u8,
+    pub by: u8,
+    pub bz: u8,
+    pub face: u8,
+    pub element_type: u8,
+    pub rotation: u8,
+    pub action: u8, // 0=remove, 1=place
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +466,25 @@ impl ClientMsg {
                 });
                 builder.finish(msg, None);
             }
+            ClientMsg::SubBlockEdit(data) => {
+                let req = fb::SubBlockEditRequest::create(
+                    &mut builder,
+                    &fb::SubBlockEditRequestArgs {
+                        block_x: data.block_pos.x,
+                        block_y: data.block_pos.y,
+                        block_z: data.block_pos.z,
+                        face: data.face,
+                        element_type: data.element_type,
+                        rotation: data.rotation,
+                        action: data.action,
+                    },
+                );
+                let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
+                    payload_type: fb::ClientPayload::SubBlockEditRequest,
+                    payload: Some(req.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -528,6 +575,17 @@ impl ClientMsg {
                     subscribe_bindings: sub_b,
                     converter_rules: rules,
                     seat_mappings: seats,
+                }))
+            }
+            fb::ClientPayload::SubBlockEditRequest => {
+                let req = msg.payload_as_sub_block_edit_request()
+                    .ok_or(MessageError::MissingField("SubBlockEditRequest payload"))?;
+                Ok(ClientMsg::SubBlockEdit(SubBlockEditData {
+                    block_pos: glam::IVec3::new(req.block_x(), req.block_y(), req.block_z()),
+                    face: req.face(),
+                    element_type: req.element_type(),
+                    rotation: req.rotation(),
+                    action: req.action(),
                 }))
             }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),
@@ -796,10 +854,19 @@ impl ServerMsg {
                     })
                 }).collect();
                 let mods_vec = builder.create_vector(&mods);
+                let sb_mods: Vec<_> = data.sub_block_mods.iter().map(|m| {
+                    fb::SubBlockMod::create(&mut builder, &fb::SubBlockModArgs {
+                        bx: m.bx, by: m.by, bz: m.bz,
+                        face: m.face, element_type: m.element_type,
+                        rotation: m.rotation, action: m.action,
+                    })
+                }).collect();
+                let sb_mods_vec = if sb_mods.is_empty() { None } else { Some(builder.create_vector(&sb_mods)) };
                 let cd = fb::ChunkDelta::create(&mut builder, &fb::ChunkDeltaArgs {
                     addr: Some(&addr),
                     seq: data.seq,
                     mods: Some(mods_vec),
+                    sub_block_mods: sb_mods_vec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::ChunkDelta,
@@ -1102,12 +1169,20 @@ impl ServerMsg {
                         bx: m.bx(), by: m.by(), bz: m.bz(), block_type: m.block_type(),
                     }).collect()
                 }).unwrap_or_default();
+                let sub_block_mods = cd.sub_block_mods().map(|v| {
+                    v.iter().map(|m| SubBlockModData {
+                        bx: m.bx(), by: m.by(), bz: m.bz(),
+                        face: m.face(), element_type: m.element_type(),
+                        rotation: m.rotation(), action: m.action(),
+                    }).collect()
+                }).unwrap_or_default();
                 Ok(ServerMsg::ChunkDelta(ChunkDeltaData {
                     chunk_x: addr.x(),
                     chunk_y: addr.y(),
                     chunk_z: addr.z(),
                     seq: cd.seq(),
                     mods,
+                    sub_block_mods,
                 }))
             }
             fb::ServerPayload::BlockConfigState => {

@@ -173,6 +173,45 @@ impl ClientChunkCache {
         true
     }
 
+    /// Apply incremental sub-block edits to a chunk.
+    pub fn apply_sub_block_delta(
+        &mut self,
+        source: ChunkSourceId,
+        chunk_pos: IVec3,
+        mods: &[crate::client_message::SubBlockModData],
+    ) {
+        use crate::block::sub_block::{SubBlockElement, SubBlockType};
+        use crate::client_message::action;
+
+        let key = ChunkKey { source, chunk: chunk_pos };
+        let chunk = match self.chunks.get_mut(&key) {
+            Some(c) => c,
+            None => return,
+        };
+
+        for m in mods {
+            match m.action {
+                action::PLACE_SUB => {
+                    if let Some(element_type) = SubBlockType::from_u8(m.element_type) {
+                        chunk.add_sub_block(m.bx, m.by, m.bz, SubBlockElement {
+                            face: m.face,
+                            element_type,
+                            rotation: m.rotation,
+                            flags: 0,
+                        });
+                    }
+                }
+                action::REMOVE_SUB => {
+                    chunk.remove_sub_block(m.bx, m.by, m.bz, m.face);
+                }
+                _ => {}
+            }
+        }
+
+        // Mark chunk dirty for mesh rebuild.
+        self.dirty.insert(key);
+    }
+
     /// Get a chunk by source and position.
     pub fn get_chunk(&self, source: ChunkSourceId, chunk_pos: IVec3) -> Option<&ChunkStorage> {
         self.chunks.get(&ChunkKey { source, chunk: chunk_pos })

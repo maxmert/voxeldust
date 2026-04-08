@@ -14,6 +14,7 @@ pub mod raycast;
 pub mod registry;
 pub mod serialization;
 pub mod ship_grid;
+pub mod sub_block;
 
 pub use block_id::BlockId;
 pub use block_def::{BlockDef, MaterialType, ToolType, LiquidProperties, HARDNESS_HP_MULTIPLIER, DAMAGE_STAGES};

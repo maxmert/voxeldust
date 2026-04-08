@@ -219,7 +219,7 @@ struct ShipEntityIndex(HashMap<u64, Entity>);
 struct ClientConnectedMsg {
     session_token: SessionToken,
     player_name: String,
-    tcp_stream: Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+    tcp_write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 }
 
 /// Player input from UDP.
@@ -284,7 +284,7 @@ fn drain_connects(
         events.write(ClientConnectedMsg {
             session_token: conn.session_token,
             player_name: conn.player_name.clone(),
-            tcp_stream: conn.tcp_stream.clone(),
+            tcp_write: conn.tcp_write.clone(),
         });
     }
 }
@@ -381,7 +381,7 @@ fn process_connects(
 ) {
     for event in events.read() {
         let token = event.session_token;
-        let tcp_stream = event.tcp_stream.clone();
+        let tcp_write = event.tcp_write.clone();
         let sys_seed = config.system_seed.unwrap_or(0);
         let game_time = celestial_time.0;
         let planet_pos_val = planet_pos.0;
@@ -429,8 +429,8 @@ fn process_connects(
                 reference_position: planet_pos_val,
                 reference_rotation: DQuat::IDENTITY,
             });
-            let mut stream = tcp_stream.lock().await;
-            let _ = client_listener::send_tcp_msg(&mut *stream, &jr).await;
+            let mut writer = tcp_write.lock().await;
+            let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
         });
     }
 }

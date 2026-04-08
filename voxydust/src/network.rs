@@ -127,10 +127,15 @@ pub async fn run_network(
         // Channel to signal shutdown to child tasks.
         let (cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
-        // Input sender task (20Hz) + block edit sender (immediate).
+        // TCP outbound channel: block/sub-block edits and config updates
+        // are sent reliably via TCP (not UDP) to guarantee delivery.
+        let (tcp_out_tx, mut tcp_out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        // Input sender task (20Hz via UDP) + TCP outbound drain.
         let udp_send = udp.clone();
         let input_rx_clone = input_rx.clone();
         let block_edit_rx_clone = block_edit_rx.clone();
+        let tcp_out_tx_edit = tcp_out_tx.clone();
         let mut cancel_input = cancel_tx.subscribe();
         let send_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -155,12 +160,12 @@ pub async fn run_network(
                             ticks_since_send += 1;
                         }
 
-                        // Drain and send any pending block edit requests (immediate, not rate-limited).
+                        // Drain block edit requests → send via TCP (reliable).
                         {
                             let mut rx = block_edit_rx_clone.lock().await;
                             while let Ok(edit) = rx.try_recv() {
                                 let pkt = build_block_edit(&edit);
-                                let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
+                                let _ = tcp_out_tx_edit.send(pkt);
                             }
                         }
                     }
@@ -206,7 +211,8 @@ pub async fn run_network(
         let (redirect_tx, mut redirect_rx) = mpsc::channel::<ShardRedirect>(1);
         let mut cancel_tcp = cancel_tx.subscribe();
         let tcp_handle = tokio::spawn(async move {
-            let mut stream = tcp_stream;
+            let (tcp_read, mut tcp_write) = tokio::io::split(tcp_stream);
+            let mut tcp_read = tokio::io::BufReader::new(tcp_read);
             let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(60));
             keepalive_interval.tick().await; // skip first immediate tick
 
@@ -220,11 +226,16 @@ pub async fn run_network(
 
             loop {
                 tokio::select! {
-                    _ = keepalive_interval.tick() => {
-                        let _ = stream.write_all(&0u32.to_be_bytes()).await;
-                        let _ = stream.flush().await;
+                    // Outbound: send block/sub-block edits via TCP (reliable).
+                    Some(pkt) = tcp_out_rx.recv() => {
+                        let _ = tcp_write.write_all(&pkt).await;
+                        let _ = tcp_write.flush().await;
                     }
-                    result = recv_server_msg(&mut stream) => {
+                    _ = keepalive_interval.tick() => {
+                        let _ = tcp_write.write_all(&0u32.to_be_bytes()).await;
+                        let _ = tcp_write.flush().await;
+                    }
+                    result = recv_server_msg(&mut tcp_read) => {
                         match result {
                             Ok(ServerMsg::ShardRedirect(r)) => {
                                 info!(target_tcp = %r.target_tcp_addr, "received ShardRedirect");
@@ -443,7 +454,7 @@ async fn send_msg(stream: &mut TcpStream, msg: &ClientMsg) -> Result<(), std::io
     Ok(())
 }
 
-async fn recv_server_msg(stream: &mut TcpStream) -> Result<ServerMsg, Box<dyn std::error::Error + Send + Sync>> {
+async fn recv_server_msg(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Result<ServerMsg, Box<dyn std::error::Error + Send + Sync>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;

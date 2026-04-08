@@ -353,7 +353,7 @@ struct InputActions {
 struct ClientConnectedMsg {
     session_token: SessionToken,
     player_name: String,
-    tcp_stream: Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+    tcp_write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 }
 
 #[derive(Message)]
@@ -418,7 +418,7 @@ fn drain_connects(
         events.write(ClientConnectedMsg {
             session_token: conn.session_token,
             player_name: conn.player_name.clone(),
-            tcp_stream: conn.tcp_stream.clone(),
+            tcp_write: conn.tcp_write.clone(),
         });
     }
 }
@@ -657,7 +657,7 @@ fn process_connects(
         connected.handoff_pending = false;
 
         let token = event.session_token;
-        let tcp_stream = event.tcp_stream.clone();
+        let tcp_write = event.tcp_write.clone();
         let ship_pos = exterior.position;
         let ship_rot = exterior.rotation;
         let game_time = scene.game_time;
@@ -702,12 +702,12 @@ fn process_connects(
                 reference_position: ship_pos,
                 reference_rotation: ship_rot,
             });
-            let mut stream = tcp_stream.lock().await;
-            let _ = client_listener::send_tcp_msg(&mut *stream, &jr).await;
+            let mut writer = tcp_write.lock().await;
+            let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
 
             // Send all chunk snapshots immediately after JoinResponse.
             for snapshot_msg in &chunk_snapshots {
-                let _ = client_listener::send_tcp_msg(&mut *stream, snapshot_msg).await;
+                let _ = client_listener::send_tcp_msg(&mut *writer, snapshot_msg).await;
             }
             info!(chunks = chunk_snapshots.len(), "sent initial chunk snapshots to client");
         });
@@ -1591,6 +1591,140 @@ fn drain_block_edits(
     }
 }
 
+/// ECS message for incoming sub-block edits.
+#[derive(Message)]
+struct SubBlockEditMsg {
+    edit: voxeldust_core::client_message::SubBlockEditData,
+}
+
+/// Bridge system: drain SubBlockEditRequest messages from the UDP channel.
+fn drain_sub_block_edits(
+    mut bridge: ResMut<NetworkBridge>,
+    mut events: MessageWriter<SubBlockEditMsg>,
+) {
+    for _ in 0..64 {
+        let edit = match bridge.sub_block_edit_rx.try_recv() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+        events.write(SubBlockEditMsg { edit });
+    }
+}
+
+/// Process sub-block edit requests: validate, apply to grid, broadcast delta.
+fn process_sub_block_edits(
+    mut events: MessageReader<SubBlockEditMsg>,
+    mut grid: ResMut<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    connected: Res<ConnectedPlayer>,
+    bridge: Res<NetworkBridge>,
+    mut persistence: Option<ResMut<ShipPersistence>>,
+) {
+    use voxeldust_core::block::sub_block::{SubBlockElement, SubBlockType};
+    use voxeldust_core::client_message::{action, SubBlockModData, ChunkDeltaData, ServerMsg};
+
+    for event in events.read() {
+        let edit = &event.edit;
+        let pos = edit.block_pos;
+
+        // Validate: host block must be solid (can't place sub-blocks on air).
+        let host_block = grid.0.get_block(pos.x, pos.y, pos.z);
+        if host_block.is_air() && edit.action == action::PLACE_SUB {
+            tracing::warn!(
+                block = ?pos, face = edit.face,
+                "sub-block edit rejected: host block is air"
+            );
+            continue;
+        }
+
+        // Validate: face index in range.
+        if edit.face >= block::sub_block::FACE_COUNT {
+            tracing::warn!(face = edit.face, "sub-block edit rejected: invalid face");
+            continue;
+        }
+
+        // Validate: element type is known.
+        let element_type = match SubBlockType::from_u8(edit.element_type) {
+            Some(t) => t,
+            None => {
+                tracing::warn!(
+                    element_type = edit.element_type,
+                    "sub-block edit rejected: unknown element type"
+                );
+                continue;
+            }
+        };
+
+        let chunk_key = block::ShipGrid::world_to_chunk(pos.x, pos.y, pos.z).0;
+        let (_, lx, ly, lz) = block::ShipGrid::world_to_chunk(pos.x, pos.y, pos.z);
+
+        match edit.action {
+            action::PLACE_SUB => {
+                let element = SubBlockElement {
+                    face: edit.face,
+                    element_type,
+                    rotation: edit.rotation & 0x03,
+                    flags: 0,
+                };
+                if !grid.0.add_sub_block(pos.x, pos.y, pos.z, element) {
+                    tracing::warn!(
+                        block = ?pos, face = edit.face,
+                        "sub-block edit rejected: face already occupied"
+                    );
+                    continue;
+                }
+                tracing::info!(
+                    block = ?pos, face = edit.face,
+                    element = element_type.label(),
+                    "placed sub-block"
+                );
+            }
+            action::REMOVE_SUB => {
+                if grid.0.remove_sub_block(pos.x, pos.y, pos.z, edit.face).is_none() {
+                    continue; // Nothing to remove.
+                }
+                tracing::info!(
+                    block = ?pos, face = edit.face,
+                    "removed sub-block"
+                );
+            }
+            _ => continue,
+        }
+
+        // Mark chunk dirty for persistence.
+        if let Some(ref mut persist) = persistence {
+            persist.pending_saves.insert(chunk_key);
+        }
+
+        // Broadcast sub-block delta to clients.
+        if let Some(session) = connected.session {
+            let seq = grid.0.get_chunk_mut(chunk_key)
+                .map(|c| c.next_edit_seq())
+                .unwrap_or(1);
+            let delta = ServerMsg::ChunkDelta(ChunkDeltaData {
+                chunk_x: chunk_key.x,
+                chunk_y: chunk_key.y,
+                chunk_z: chunk_key.z,
+                seq,
+                mods: Vec::new(), // No block mods, only sub-block mods.
+                sub_block_mods: vec![SubBlockModData {
+                    bx: lx, by: ly, bz: lz,
+                    face: edit.face,
+                    element_type: edit.element_type,
+                    rotation: edit.rotation,
+                    action: edit.action,
+                }],
+            });
+            let cr = bridge.client_registry.clone();
+            tokio::spawn(async move {
+                if let Ok(reg) = cr.try_read() {
+                    let _ = reg.send_tcp(session, &delta).await;
+                }
+            });
+        }
+    }
+}
+
 /// Damage amount per player hit. Higher-tier tools would increase this.
 const PLAYER_BREAK_DAMAGE: u16 = 20;
 
@@ -1935,6 +2069,7 @@ fn apply_block_edits(
                 chunk_z: chunk_key.z,
                 seq,
                 mods: mods.clone(),
+                sub_block_mods: Vec::new(),
             });
             let cr = bridge.client_registry.clone();
             tokio::spawn(async move {
@@ -2779,6 +2914,7 @@ fn build_ship_interior(
     app.add_message::<PlayerInputMsg>();
     app.add_message::<BlockEditMsg>();
     app.add_message::<ConfigUpdateMsg>();
+    app.add_message::<SubBlockEditMsg>();
 
     // System ordering.
     app.configure_sets(
@@ -2800,7 +2936,7 @@ fn build_ship_interior(
     // Bridge: drain async channels.
     app.add_systems(
         Update,
-        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_quic).in_set(ShipSet::Bridge),
+        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_sub_block_edits, drain_quic).in_set(ShipSet::Bridge),
     );
 
     // Input: process connects, player input, preconnect, config updates.
@@ -2815,7 +2951,7 @@ fn build_ship_interior(
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
         Update,
-        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, aggregate_ship_properties)
+        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, aggregate_ship_properties)
             .chain()
             .in_set(ShipSet::BlockEdit),
     );

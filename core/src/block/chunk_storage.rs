@@ -5,6 +5,7 @@ use super::block_id::BlockId;
 use super::block_meta::{BlockFlags, BlockMeta, BlockOrientation};
 use super::palette::{block_index, PaletteStorage, CHUNK_VOLUME};
 use super::registry::BlockRegistry;
+use super::sub_block::SubBlockElement;
 
 /// Result of applying damage to a block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,10 @@ pub struct ChunkStorage {
     /// Sparse metadata for blocks that need it (damaged, oriented, functional).
     /// Key = flat block index (`block_index(x, y, z)` cast to u32).
     meta: HashMap<u32, BlockMeta>,
+    /// Sparse sub-block elements on block faces (wires, rails, pipes, etc.).
+    /// Key = flat block index. Value = list of elements on that block's faces.
+    /// Most blocks have 0 sub-blocks; only populated when elements are placed.
+    sub_blocks: HashMap<u32, Vec<SubBlockElement>>,
     /// Monotonic edit sequence number for causality ordering.
     /// Matches the `seq` field in `ChunkBlockMods` protocol messages.
     edit_seq: u64,
@@ -38,6 +43,7 @@ impl ChunkStorage {
         Self {
             blocks: PaletteStorage::new_single(fill),
             meta: HashMap::new(),
+            sub_blocks: HashMap::new(),
             edit_seq: 0,
         }
     }
@@ -191,6 +197,62 @@ impl ChunkStorage {
     pub fn next_edit_seq(&mut self) -> u64 {
         self.edit_seq += 1;
         self.edit_seq
+    }
+
+    // -----------------------------------------------------------------------
+    // Sub-block elements
+    // -----------------------------------------------------------------------
+
+    /// Get all sub-block elements at a block position.
+    pub fn get_sub_blocks(&self, x: u8, y: u8, z: u8) -> &[SubBlockElement] {
+        let idx = block_index(x, y, z) as u32;
+        self.sub_blocks.get(&idx).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Check if a specific face has a sub-block element.
+    pub fn has_sub_block(&self, x: u8, y: u8, z: u8, face: u8) -> bool {
+        self.get_sub_blocks(x, y, z).iter().any(|e| e.face == face)
+    }
+
+    /// Add a sub-block element. Returns false if that face already has an element
+    /// of the same type.
+    pub fn add_sub_block(&mut self, x: u8, y: u8, z: u8, element: SubBlockElement) -> bool {
+        let idx = block_index(x, y, z) as u32;
+        let entries = self.sub_blocks.entry(idx).or_default();
+        // Check for duplicate (same face + same type).
+        if entries.iter().any(|e| e.face == element.face && e.element_type == element.element_type) {
+            return false;
+        }
+        entries.push(element);
+        true
+    }
+
+    /// Remove a sub-block element from a specific face. Returns the removed element, if any.
+    pub fn remove_sub_block(&mut self, x: u8, y: u8, z: u8, face: u8) -> Option<SubBlockElement> {
+        let idx = block_index(x, y, z) as u32;
+        let entries = self.sub_blocks.get_mut(&idx)?;
+        let pos = entries.iter().position(|e| e.face == face)?;
+        let removed = entries.remove(pos);
+        if entries.is_empty() {
+            self.sub_blocks.remove(&idx);
+        }
+        Some(removed)
+    }
+
+    /// Remove ALL sub-blocks at a position (used when the host block is destroyed).
+    pub fn remove_all_sub_blocks(&mut self, x: u8, y: u8, z: u8) {
+        let idx = block_index(x, y, z) as u32;
+        self.sub_blocks.remove(&idx);
+    }
+
+    /// Iterator over all sub-block entries in this chunk: (flat_index, &[SubBlockElement]).
+    pub fn iter_sub_blocks(&self) -> impl Iterator<Item = (u32, &[SubBlockElement])> {
+        self.sub_blocks.iter().map(|(&idx, elems)| (idx, elems.as_slice()))
+    }
+
+    /// Total number of sub-block elements in this chunk.
+    pub fn sub_block_count(&self) -> usize {
+        self.sub_blocks.values().map(|v| v.len()).sum()
     }
 
     // -----------------------------------------------------------------------

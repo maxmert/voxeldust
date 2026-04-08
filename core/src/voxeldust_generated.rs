@@ -289,15 +289,16 @@ pub struct ServerPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 4;
+pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 5;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 5] = [
+pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 6] = [
   ClientPayload::NONE,
   ClientPayload::Connect,
   ClientPayload::PlayerInput,
   ClientPayload::BlockEditRequest,
   ClientPayload::BlockConfigUpdate,
+  ClientPayload::SubBlockEditRequest,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -310,15 +311,17 @@ impl ClientPayload {
   pub const PlayerInput: Self = Self(2);
   pub const BlockEditRequest: Self = Self(3);
   pub const BlockConfigUpdate: Self = Self(4);
+  pub const SubBlockEditRequest: Self = Self(5);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 4;
+  pub const ENUM_MAX: u8 = 5;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::Connect,
     Self::PlayerInput,
     Self::BlockEditRequest,
     Self::BlockConfigUpdate,
+    Self::SubBlockEditRequest,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -328,6 +331,7 @@ impl ClientPayload {
       Self::PlayerInput => Some("PlayerInput"),
       Self::BlockEditRequest => Some("BlockEditRequest"),
       Self::BlockConfigUpdate => Some("BlockConfigUpdate"),
+      Self::SubBlockEditRequest => Some("SubBlockEditRequest"),
       _ => None,
     }
   }
@@ -7189,6 +7193,405 @@ impl ::core::fmt::Debug for BlockEditRequest<'_> {
       ds.finish()
   }
 }
+pub enum SubBlockModOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Sub-block element modification within a chunk delta.
+pub struct SubBlockMod<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SubBlockMod<'a> {
+  type Inner = SubBlockMod<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SubBlockMod<'a> {
+  pub const VT_BX: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BY: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BZ: ::flatbuffers::VOffsetT = 8;
+  pub const VT_FACE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_ELEMENT_TYPE: ::flatbuffers::VOffsetT = 12;
+  pub const VT_ROTATION: ::flatbuffers::VOffsetT = 14;
+  pub const VT_ACTION: ::flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SubBlockMod { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SubBlockModArgs
+  ) -> ::flatbuffers::WIPOffset<SubBlockMod<'bldr>> {
+    let mut builder = SubBlockModBuilder::new(_fbb);
+    builder.add_action(args.action);
+    builder.add_rotation(args.rotation);
+    builder.add_element_type(args.element_type);
+    builder.add_face(args.face);
+    builder.add_bz(args.bz);
+    builder.add_by(args.by);
+    builder.add_bx(args.bx);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn bx(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockMod::VT_BX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn by(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockMod::VT_BY, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn bz(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockMod::VT_BZ, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn face(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockMod::VT_FACE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn element_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockMod::VT_ELEMENT_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn rotation(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockMod::VT_ROTATION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn action(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockMod::VT_ACTION, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SubBlockMod<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u8>("bx", Self::VT_BX, false)?
+     .visit_field::<u8>("by", Self::VT_BY, false)?
+     .visit_field::<u8>("bz", Self::VT_BZ, false)?
+     .visit_field::<u8>("face", Self::VT_FACE, false)?
+     .visit_field::<u8>("element_type", Self::VT_ELEMENT_TYPE, false)?
+     .visit_field::<u8>("rotation", Self::VT_ROTATION, false)?
+     .visit_field::<u8>("action", Self::VT_ACTION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SubBlockModArgs {
+    pub bx: u8,
+    pub by: u8,
+    pub bz: u8,
+    pub face: u8,
+    pub element_type: u8,
+    pub rotation: u8,
+    pub action: u8,
+}
+impl<'a> Default for SubBlockModArgs {
+  #[inline]
+  fn default() -> Self {
+    SubBlockModArgs {
+      bx: 0,
+      by: 0,
+      bz: 0,
+      face: 0,
+      element_type: 0,
+      rotation: 0,
+      action: 0,
+    }
+  }
+}
+
+pub struct SubBlockModBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SubBlockModBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_bx(&mut self, bx: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockMod::VT_BX, bx, 0);
+  }
+  #[inline]
+  pub fn add_by(&mut self, by: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockMod::VT_BY, by, 0);
+  }
+  #[inline]
+  pub fn add_bz(&mut self, bz: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockMod::VT_BZ, bz, 0);
+  }
+  #[inline]
+  pub fn add_face(&mut self, face: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockMod::VT_FACE, face, 0);
+  }
+  #[inline]
+  pub fn add_element_type(&mut self, element_type: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockMod::VT_ELEMENT_TYPE, element_type, 0);
+  }
+  #[inline]
+  pub fn add_rotation(&mut self, rotation: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockMod::VT_ROTATION, rotation, 0);
+  }
+  #[inline]
+  pub fn add_action(&mut self, action: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockMod::VT_ACTION, action, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SubBlockModBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SubBlockModBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SubBlockMod<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SubBlockMod<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SubBlockMod");
+      ds.field("bx", &self.bx());
+      ds.field("by", &self.by());
+      ds.field("bz", &self.bz());
+      ds.field("face", &self.face());
+      ds.field("element_type", &self.element_type());
+      ds.field("rotation", &self.rotation());
+      ds.field("action", &self.action());
+      ds.finish()
+  }
+}
+pub enum SubBlockEditRequestOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Client → server: place or remove a sub-block element.
+pub struct SubBlockEditRequest<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SubBlockEditRequest<'a> {
+  type Inner = SubBlockEditRequest<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SubBlockEditRequest<'a> {
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_FACE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_ELEMENT_TYPE: ::flatbuffers::VOffsetT = 12;
+  pub const VT_ROTATION: ::flatbuffers::VOffsetT = 14;
+  pub const VT_ACTION: ::flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SubBlockEditRequest { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SubBlockEditRequestArgs
+  ) -> ::flatbuffers::WIPOffset<SubBlockEditRequest<'bldr>> {
+    let mut builder = SubBlockEditRequestBuilder::new(_fbb);
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.add_action(args.action);
+    builder.add_rotation(args.rotation);
+    builder.add_element_type(args.element_type);
+    builder.add_face(args.face);
+    builder.finish()
+  }
+
+
+  /// Host block world position (signed, ship-local or planet-space).
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubBlockEditRequest::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubBlockEditRequest::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubBlockEditRequest::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn face(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockEditRequest::VT_FACE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn element_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockEditRequest::VT_ELEMENT_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn rotation(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockEditRequest::VT_ROTATION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn action(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubBlockEditRequest::VT_ACTION, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SubBlockEditRequest<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .visit_field::<u8>("face", Self::VT_FACE, false)?
+     .visit_field::<u8>("element_type", Self::VT_ELEMENT_TYPE, false)?
+     .visit_field::<u8>("rotation", Self::VT_ROTATION, false)?
+     .visit_field::<u8>("action", Self::VT_ACTION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SubBlockEditRequestArgs {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub face: u8,
+    pub element_type: u8,
+    pub rotation: u8,
+    pub action: u8,
+}
+impl<'a> Default for SubBlockEditRequestArgs {
+  #[inline]
+  fn default() -> Self {
+    SubBlockEditRequestArgs {
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+      face: 0,
+      element_type: 0,
+      rotation: 0,
+      action: 0,
+    }
+  }
+}
+
+pub struct SubBlockEditRequestBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SubBlockEditRequestBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(SubBlockEditRequest::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(SubBlockEditRequest::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(SubBlockEditRequest::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn add_face(&mut self, face: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockEditRequest::VT_FACE, face, 0);
+  }
+  #[inline]
+  pub fn add_element_type(&mut self, element_type: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockEditRequest::VT_ELEMENT_TYPE, element_type, 0);
+  }
+  #[inline]
+  pub fn add_rotation(&mut self, rotation: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockEditRequest::VT_ROTATION, rotation, 0);
+  }
+  #[inline]
+  pub fn add_action(&mut self, action: u8) {
+    self.fbb_.push_slot::<u8>(SubBlockEditRequest::VT_ACTION, action, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SubBlockEditRequestBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SubBlockEditRequestBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SubBlockEditRequest<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SubBlockEditRequest<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SubBlockEditRequest");
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.field("face", &self.face());
+      ds.field("element_type", &self.element_type());
+      ds.field("rotation", &self.rotation());
+      ds.field("action", &self.action());
+      ds.finish()
+  }
+}
 pub enum ChunkSnapshotOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -7344,6 +7747,7 @@ impl<'a> ChunkDelta<'a> {
   pub const VT_ADDR: ::flatbuffers::VOffsetT = 4;
   pub const VT_SEQ: ::flatbuffers::VOffsetT = 6;
   pub const VT_MODS: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SUB_BLOCK_MODS: ::flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -7356,6 +7760,7 @@ impl<'a> ChunkDelta<'a> {
   ) -> ::flatbuffers::WIPOffset<ChunkDelta<'bldr>> {
     let mut builder = ChunkDeltaBuilder::new(_fbb);
     builder.add_seq(args.seq);
+    if let Some(x) = args.sub_block_mods { builder.add_sub_block_mods(x); }
     if let Some(x) = args.mods { builder.add_mods(x); }
     if let Some(x) = args.addr { builder.add_addr(x); }
     builder.finish()
@@ -7383,6 +7788,13 @@ impl<'a> ChunkDelta<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BlockMod>>>>(ChunkDelta::VT_MODS, None)}
   }
+  #[inline]
+  pub fn sub_block_mods(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubBlockMod<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubBlockMod>>>>(ChunkDelta::VT_SUB_BLOCK_MODS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ChunkDelta<'_> {
@@ -7394,6 +7806,7 @@ impl ::flatbuffers::Verifiable for ChunkDelta<'_> {
      .visit_field::<ChunkAddr>("addr", Self::VT_ADDR, false)?
      .visit_field::<u64>("seq", Self::VT_SEQ, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<BlockMod>>>>("mods", Self::VT_MODS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SubBlockMod>>>>("sub_block_mods", Self::VT_SUB_BLOCK_MODS, false)?
      .finish();
     Ok(())
   }
@@ -7402,6 +7815,7 @@ pub struct ChunkDeltaArgs<'a> {
     pub addr: Option<&'a ChunkAddr>,
     pub seq: u64,
     pub mods: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BlockMod<'a>>>>>,
+    pub sub_block_mods: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubBlockMod<'a>>>>>,
 }
 impl<'a> Default for ChunkDeltaArgs<'a> {
   #[inline]
@@ -7410,6 +7824,7 @@ impl<'a> Default for ChunkDeltaArgs<'a> {
       addr: None,
       seq: 0,
       mods: None,
+      sub_block_mods: None,
     }
   }
 }
@@ -7432,6 +7847,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ChunkDeltaBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkDelta::VT_MODS, mods);
   }
   #[inline]
+  pub fn add_sub_block_mods(&mut self, sub_block_mods: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SubBlockMod<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkDelta::VT_SUB_BLOCK_MODS, sub_block_mods);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ChunkDeltaBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ChunkDeltaBuilder {
@@ -7452,6 +7871,7 @@ impl ::core::fmt::Debug for ChunkDelta<'_> {
       ds.field("addr", &self.addr());
       ds.field("seq", &self.seq());
       ds.field("mods", &self.mods());
+      ds.field("sub_block_mods", &self.sub_block_mods());
       ds.finish()
   }
 }
@@ -9695,6 +10115,21 @@ impl<'a> ClientMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_sub_block_edit_request(&self) -> Option<SubBlockEditRequest<'a>> {
+    if self.payload_type() == ClientPayload::SubBlockEditRequest {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { SubBlockEditRequest::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ClientMessage<'_> {
@@ -9709,6 +10144,7 @@ impl ::flatbuffers::Verifiable for ClientMessage<'_> {
           ClientPayload::PlayerInput => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerInput>>("ClientPayload::PlayerInput", pos),
           ClientPayload::BlockEditRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockEditRequest>>("ClientPayload::BlockEditRequest", pos),
           ClientPayload::BlockConfigUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockConfigUpdate>>("ClientPayload::BlockConfigUpdate", pos),
+          ClientPayload::SubBlockEditRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SubBlockEditRequest>>("ClientPayload::SubBlockEditRequest", pos),
           _ => Ok(()),
         }
      })?
@@ -9786,6 +10222,13 @@ impl ::core::fmt::Debug for ClientMessage<'_> {
         },
         ClientPayload::BlockConfigUpdate => {
           if let Some(x) = self.payload_as_block_config_update() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::SubBlockEditRequest => {
+          if let Some(x) = self.payload_as_sub_block_edit_request() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

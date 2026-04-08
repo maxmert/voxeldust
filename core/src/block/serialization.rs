@@ -1,7 +1,8 @@
 use super::block_id::BlockId;
 use super::block_meta::{BlockFlags, BlockMeta, BlockOrientation};
 use super::chunk_storage::ChunkStorage;
-use super::palette::{block_index, CHUNK_SIZE, CHUNK_VOLUME};
+use super::palette::{block_index, index_to_xyz, CHUNK_SIZE, CHUNK_VOLUME};
+use super::sub_block::{SubBlockElement, SubBlockType};
 
 /// Errors during chunk deserialization.
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +32,11 @@ pub enum ChunkDeserializeError {
 ///     [1 byte]  orientation (u8)
 ///     [1 byte]  flags (u8)
 ///     [4 bytes] entity_index (u32 LE)
+/// [4 bytes] sub_block_count (u32 LE) — 0 if no sub-blocks (backward compatible)
+/// [sub_block_count × 5 bytes] sub-block entries:
+///     [3 bytes] local block pos (bx, by, bz)
+///     [1 byte]  face (low 3 bits) | rotation (bits 3-4)
+///     [1 byte]  element_type (SubBlockType as u8)
 /// ```
 ///
 /// The entire payload is lz4-compressed.
@@ -78,6 +84,21 @@ pub fn serialize_chunk(chunk: &ChunkStorage) -> Vec<u8> {
         raw.push(meta.orientation.0);
         raw.push(meta.flags.0);
         raw.extend_from_slice(&meta.entity_index.to_le_bytes());
+    }
+
+    // Sub-block elements
+    let sub_block_count = chunk.sub_block_count() as u32;
+    raw.extend_from_slice(&sub_block_count.to_le_bytes());
+    for (flat_idx, elements) in chunk.iter_sub_blocks() {
+        let (bx, by, bz) = index_to_xyz(flat_idx as usize);
+        for elem in elements {
+            raw.push(bx);
+            raw.push(by);
+            raw.push(bz);
+            // Pack face (3 bits) + rotation (2 bits) into one byte.
+            raw.push((elem.face & 0x07) | ((elem.rotation & 0x03) << 3));
+            raw.push(elem.element_type as u8);
+        }
     }
 
     // Compress with lz4
@@ -193,6 +214,39 @@ pub fn deserialize_chunk(data: &[u8]) -> Result<ChunkStorage, ChunkDeserializeEr
         }
     }
 
+    // Sub-block elements (optional section — backward compatible with older formats).
+    if raw.len() >= cursor + 4 {
+        let sub_block_count = u32::from_le_bytes([
+            raw[cursor], raw[cursor + 1], raw[cursor + 2], raw[cursor + 3],
+        ]);
+        cursor += 4;
+
+        const SUB_BLOCK_ENTRY_SIZE: usize = 5;
+        for _ in 0..sub_block_count {
+            if raw.len() < cursor + SUB_BLOCK_ENTRY_SIZE {
+                break;
+            }
+            let bx = raw[cursor];
+            let by = raw[cursor + 1];
+            let bz = raw[cursor + 2];
+            let face_rot = raw[cursor + 3];
+            let element_type_u8 = raw[cursor + 4];
+            cursor += SUB_BLOCK_ENTRY_SIZE;
+
+            let face = face_rot & 0x07;
+            let rotation = (face_rot >> 3) & 0x03;
+
+            if let Some(element_type) = SubBlockType::from_u8(element_type_u8) {
+                chunk.add_sub_block(bx, by, bz, SubBlockElement {
+                    face,
+                    element_type,
+                    rotation,
+                    flags: 0,
+                });
+            }
+        }
+    }
+
     // Reconstruct edit_seq (we only stored lower 16 bits)
     // For full fidelity the caller should set the true seq from their tracking.
     // This is a reasonable default for persistence snapshots.
@@ -299,6 +353,63 @@ mod tests {
         assert_eq!(by, 20);
         assert_eq!(bz, 30);
         assert_eq!(block_type, BlockId::HULL_ARMORED);
+    }
+
+    #[test]
+    fn serialize_deserialize_with_sub_blocks() {
+        use crate::block::sub_block::{SubBlockElement, SubBlockType};
+
+        let mut chunk = ChunkStorage::new_empty();
+        chunk.set_block(5, 5, 5, BlockId::HULL_STANDARD);
+        chunk.add_sub_block(5, 5, 5, SubBlockElement {
+            face: 0,
+            element_type: SubBlockType::PowerWire,
+            rotation: 0,
+            flags: 0,
+        });
+        chunk.add_sub_block(5, 5, 5, SubBlockElement {
+            face: 4,
+            element_type: SubBlockType::Rail,
+            rotation: 2,
+            flags: 0,
+        });
+        chunk.add_sub_block(10, 20, 30, SubBlockElement {
+            face: 2,
+            element_type: SubBlockType::Ladder,
+            rotation: 1,
+            flags: 0,
+        });
+
+        assert_eq!(chunk.sub_block_count(), 3);
+
+        let bytes = serialize_chunk(&chunk);
+        let restored = deserialize_chunk(&bytes).unwrap();
+
+        assert_eq!(restored.sub_block_count(), 3);
+
+        let subs_5 = restored.get_sub_blocks(5, 5, 5);
+        assert_eq!(subs_5.len(), 2);
+        assert_eq!(subs_5[0].face, 0);
+        assert_eq!(subs_5[0].element_type, SubBlockType::PowerWire);
+        assert_eq!(subs_5[0].rotation, 0);
+        assert_eq!(subs_5[1].face, 4);
+        assert_eq!(subs_5[1].element_type, SubBlockType::Rail);
+        assert_eq!(subs_5[1].rotation, 2);
+
+        let subs_10 = restored.get_sub_blocks(10, 20, 30);
+        assert_eq!(subs_10.len(), 1);
+        assert_eq!(subs_10[0].face, 2);
+        assert_eq!(subs_10[0].element_type, SubBlockType::Ladder);
+        assert_eq!(subs_10[0].rotation, 1);
+    }
+
+    #[test]
+    fn deserialize_old_format_without_sub_blocks() {
+        // Ensure chunks serialized before sub-blocks were added still deserialize.
+        let chunk = ChunkStorage::new_empty();
+        let bytes = serialize_chunk(&chunk);
+        let restored = deserialize_chunk(&bytes).unwrap();
+        assert_eq!(restored.sub_block_count(), 0);
     }
 
     #[test]

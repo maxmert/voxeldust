@@ -645,10 +645,17 @@ fn poll_network(
             NetEvent::ChunkDelta(cd) => {
                 if let Some(source) = chunk_cache.primary_source {
                     let chunk_pos = glam::IVec3::new(cd.chunk_x, cd.chunk_y, cd.chunk_z);
-                    let edits: Vec<_> = cd.mods.iter()
-                        .map(|m| (m.bx, m.by, m.bz, voxeldust_core::block::BlockId::from_u16(m.block_type)))
-                        .collect();
-                    chunk_cache.apply_delta(source, chunk_pos, cd.seq, &edits);
+                    // Apply block mods.
+                    if !cd.mods.is_empty() {
+                        let edits: Vec<_> = cd.mods.iter()
+                            .map(|m| (m.bx, m.by, m.bz, voxeldust_core::block::BlockId::from_u16(m.block_type)))
+                            .collect();
+                        chunk_cache.apply_delta(source, chunk_pos, cd.seq, &edits);
+                    }
+                    // Apply sub-block mods.
+                    if !cd.sub_block_mods.is_empty() {
+                        chunk_cache.apply_sub_block_delta(source, chunk_pos, &cd.sub_block_mods);
+                    }
                 }
             }
             NetEvent::Transitioning => {

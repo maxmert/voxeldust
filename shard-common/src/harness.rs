@@ -46,6 +46,8 @@ pub struct NetworkBridge {
     pub block_edit_rx: mpsc::UnboundedReceiver<BlockEditData>,
     /// Incoming block config updates from UDP.
     pub config_update_rx: mpsc::UnboundedReceiver<voxeldust_core::signal::config::BlockConfigUpdateData>,
+    /// Incoming sub-block edit requests from UDP.
+    pub sub_block_edit_rx: mpsc::UnboundedReceiver<voxeldust_core::client_message::SubBlockEditData>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
@@ -130,6 +132,8 @@ pub struct ShardHarness {
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
     block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
     config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
+    sub_block_edit_tx: mpsc::UnboundedSender<voxeldust_core::client_message::SubBlockEditData>,
+    sub_block_edit_rx: mpsc::UnboundedReceiver<voxeldust_core::client_message::SubBlockEditData>,
     quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
@@ -140,6 +144,7 @@ impl ShardHarness {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (block_edit_tx, block_edit_rx) = mpsc::unbounded_channel();
         let (config_update_tx, config_update_rx) = mpsc::unbounded_channel();
+        let (sub_block_edit_tx, sub_block_edit_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
         let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
@@ -169,6 +174,8 @@ impl ShardHarness {
             input_tx,
             block_edit_tx,
             config_update_tx,
+            sub_block_edit_tx,
+            sub_block_edit_rx,
             quic_msg_tx,
             cancel: CancellationToken::new(),
         }
@@ -201,12 +208,17 @@ impl ShardHarness {
             healthz::run_healthz_server(healthz_addr, healthz_cancel).await;
         });
 
-        // TCP client listener.
+        // TCP client listener (bidirectional: reads edits + configs from clients).
         let tcp_cancel = cancel.clone();
         let tcp_addr = self.config.tcp_addr;
         let connect_tx = self.connect_tx.clone();
+        let tcp_channels = client_listener::TcpMessageChannels {
+            block_edit_tx: self.block_edit_tx.clone(),
+            config_update_tx: self.config_update_tx.clone(),
+            sub_block_edit_tx: self.sub_block_edit_tx.clone(),
+        };
         tokio::spawn(async move {
-            client_listener::run_tcp_listener(tcp_addr, connect_tx, tcp_cancel).await;
+            client_listener::run_tcp_listener(tcp_addr, connect_tx, tcp_channels, tcp_cancel).await;
         });
 
         // Heartbeat sender.
@@ -280,8 +292,9 @@ impl ShardHarness {
         let input_tx = self.input_tx.clone();
         let block_edit_tx = self.block_edit_tx.clone();
         let config_update_tx = self.config_update_tx.clone();
+        let sub_block_edit_tx = self.sub_block_edit_tx.clone();
         tokio::spawn(async move {
-            client_listener::run_udp_receiver(udp_recv_socket, udp_registry, input_tx, block_edit_tx, config_update_tx, udp_recv_cancel).await;
+            client_listener::run_udp_receiver(udp_recv_socket, udp_registry, input_tx, block_edit_tx, config_update_tx, sub_block_edit_tx, udp_recv_cancel).await;
         });
 
         // QUIC accept loop for inter-shard messages.
@@ -502,6 +515,7 @@ impl ShardHarness {
             input_rx: self.input_rx,
             block_edit_rx: self.block_edit_rx,
             config_update_rx: self.config_update_rx,
+            sub_block_edit_rx: self.sub_block_edit_rx,
             quic_msg_rx: self.quic_msg_rx,
             broadcast_tx: self.broadcast_tx.clone(),
             quic_send_tx: self.quic_send_tx.clone(),

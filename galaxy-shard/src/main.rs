@@ -113,7 +113,7 @@ struct ShipShardDirectory(HashMap<u64, (ShardId, SocketAddr)>);
 #[derive(Message)]
 struct ClientConnectedEvent {
     session_token: SessionToken,
-    tcp_stream: Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+    tcp_write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 }
 
 /// A PlayerHandoff arrived via QUIC for a new warp ship.
@@ -178,7 +178,7 @@ fn drain_connects(
         }
         connect_events.write(ClientConnectedEvent {
             session_token: conn.session_token,
-            tcp_stream: conn.tcp_stream.clone(),
+            tcp_write: conn.tcp_write.clone(),
         });
         info!(
             player = %conn.player_name,
@@ -271,7 +271,7 @@ fn process_connect_events(
     for event in events.read() {
         let token = event.session_token;
         let gs = galaxy_seed.0;
-        let tcp_stream = event.tcp_stream.clone();
+        let tcp_write = event.tcp_write.clone();
         // Compute game time from tick (approximation — the actual celestial_time
         // would come from epoch, but for JoinResponse it only needs to be close).
         let game_time = tick.0 as f64 * 0.05;
@@ -292,8 +292,8 @@ fn process_connect_events(
                 reference_position: DVec3::ZERO,
                 reference_rotation: DQuat::IDENTITY,
             });
-            let mut stream = tcp_stream.lock().await;
-            let _ = client_listener::send_tcp_msg(&mut *stream, &jr).await;
+            let mut writer = tcp_write.lock().await;
+            let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
         });
     }
 }

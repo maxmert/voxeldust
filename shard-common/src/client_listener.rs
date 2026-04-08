@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -11,14 +12,24 @@ use tracing::{debug, info, warn};
 use voxeldust_core::client_message::{BlockEditData, ClientMsg, PlayerInputData, ServerMsg};
 use voxeldust_core::shard_types::SessionToken;
 
-/// A persistent client connection (TCP stream kept alive).
+/// A persistent client connection. The TCP write half is stored for server→client sends.
+/// The read half is consumed by a per-client `run_tcp_read_loop` task.
 pub struct ClientConnection {
     pub session_token: SessionToken,
     pub player_name: String,
-    pub tcp_stream: Arc<Mutex<TcpStream>>,
+    pub tcp_write: Arc<Mutex<OwnedWriteHalf>>,
     pub peer_addr: SocketAddr,
     /// Client's UDP address (learned from first UDP packet — hole-punch pattern).
     pub udp_addr: Option<SocketAddr>,
+}
+
+/// Channels for forwarding client TCP messages to the ECS bridge.
+/// Cloned per-client — `mpsc::UnboundedSender` is `Clone`.
+#[derive(Clone)]
+pub struct TcpMessageChannels {
+    pub block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
+    pub config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
+    pub sub_block_edit_tx: mpsc::UnboundedSender<voxeldust_core::client_message::SubBlockEditData>,
 }
 
 /// Event emitted when a client connects via TCP.
@@ -44,7 +55,7 @@ pub struct ClientRegistry {
 }
 
 struct ClientEntry {
-    tcp_stream: Arc<Mutex<TcpStream>>,
+    tcp_write: Arc<Mutex<OwnedWriteHalf>>,
     udp_addr: Option<SocketAddr>,
     player_name: String,
 }
@@ -61,7 +72,7 @@ impl ClientRegistry {
 
     pub fn register(&mut self, conn: &ClientConnection) {
         self.clients.insert(conn.session_token, ClientEntry {
-            tcp_stream: conn.tcp_stream.clone(),
+            tcp_write: conn.tcp_write.clone(),
             udp_addr: conn.udp_addr,
             player_name: conn.player_name.clone(),
         });
@@ -158,8 +169,8 @@ impl ClientRegistry {
     /// Send a TCP message to a specific client.
     pub async fn send_tcp(&self, token: SessionToken, msg: &ServerMsg) -> Result<(), std::io::Error> {
         if let Some(entry) = self.clients.get(&token) {
-            let mut stream = entry.tcp_stream.lock().await;
-            send_tcp_msg(&mut stream, msg).await?;
+            let mut writer = entry.tcp_write.lock().await;
+            send_tcp_msg(&mut *writer, msg).await?;
         }
         Ok(())
     }
@@ -175,6 +186,7 @@ impl Default for ClientRegistry {
 pub async fn run_tcp_listener(
     addr: SocketAddr,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
+    msg_channels: TcpMessageChannels,
     cancel: CancellationToken,
 ) {
     let listener = match TcpListener::bind(addr).await {
@@ -196,8 +208,9 @@ pub async fn run_tcp_listener(
                 match result {
                     Ok((stream, peer_addr)) => {
                         let tx = connect_tx.clone();
+                        let channels = msg_channels.clone();
                         tokio::spawn(async move {
-                            handle_client_connection(stream, peer_addr, tx).await;
+                            handle_client_connection(stream, peer_addr, tx, channels).await;
                         });
                     }
                     Err(e) => {
@@ -209,33 +222,35 @@ pub async fn run_tcp_listener(
     }
 }
 
+/// Handle a new TCP client connection:
+/// 1. Read the initial Connect message
+/// 2. Split the stream into read/write halves
+/// 3. Send the ClientConnectEvent with the write half
+/// 4. Run a persistent read loop on the read half (blocks until disconnect)
 async fn handle_client_connection(
     mut stream: TcpStream,
     peer_addr: SocketAddr,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
+    channels: TcpMessageChannels,
 ) {
-    // Disable Nagle's algorithm for low-latency TCP messaging.
     let _ = stream.set_nodelay(true);
 
-    // Read 4-byte length prefix.
+    // Phase 1: Read the initial Connect message (before splitting).
     let mut len_buf = [0u8; 4];
     if let Err(e) = stream.read_exact(&mut len_buf).await {
         warn!(%peer_addr, %e, "failed to read message length");
         return;
     }
     let len = u32::from_be_bytes(len_buf) as usize;
-
     if len > 65536 {
         warn!(%peer_addr, len, "message too large");
         return;
     }
-
     let mut buf = vec![0u8; len];
     if let Err(e) = stream.read_exact(&mut buf).await {
         warn!(%peer_addr, %e, "failed to read message body");
         return;
     }
-
     let decoded = match voxeldust_core::wire_codec::decode(&buf) {
         Ok(d) => d,
         Err(e) => {
@@ -243,34 +258,118 @@ async fn handle_client_connection(
             return;
         }
     };
-    match ClientMsg::deserialize(&decoded) {
-        Ok(ClientMsg::Connect { player_name }) => {
-            let token = SessionToken(rand_u64());
-            info!(%peer_addr, %player_name, session_token = token.0, "client connected");
-
-            // Keep the TCP stream alive — wrap in Arc<Mutex<>> for shared access.
-            let connection = ClientConnection {
-                session_token: token,
-                player_name,
-                tcp_stream: Arc::new(Mutex::new(stream)),
-                peer_addr,
-                udp_addr: None,
-            };
-
-            let _ = connect_tx.send(ClientConnectEvent { connection });
-        }
+    let player_name = match ClientMsg::deserialize(&decoded) {
+        Ok(ClientMsg::Connect { player_name }) => player_name,
         Ok(_) => {
             warn!(%peer_addr, "expected Connect message, got something else");
+            return;
         }
         Err(e) => {
             warn!(%peer_addr, %e, "failed to deserialize client message");
+            return;
+        }
+    };
+
+    let token = SessionToken(rand_u64());
+    info!(%peer_addr, %player_name, session_token = token.0, "client connected");
+
+    // Phase 2: Split the TCP stream into read/write halves.
+    let (read_half, write_half) = stream.into_split();
+
+    // Phase 3: Send the connect event with the write half.
+    let connection = ClientConnection {
+        session_token: token,
+        player_name: player_name.clone(),
+        tcp_write: Arc::new(Mutex::new(write_half)),
+        peer_addr,
+        udp_addr: None,
+    };
+    let _ = connect_tx.send(ClientConnectEvent { connection });
+
+    // Phase 4: Persistent read loop — blocks until client disconnects.
+    run_tcp_read_loop(read_half, peer_addr, &player_name, channels).await;
+
+    info!(%peer_addr, %player_name, "client TCP read loop ended");
+}
+
+/// Persistent per-client TCP read loop. Reads length-prefixed messages from the
+/// client and forwards them to the appropriate ECS bridge channels.
+/// Returns when the client disconnects (EOF) or on unrecoverable error.
+async fn run_tcp_read_loop(
+    mut reader: tokio::net::tcp::OwnedReadHalf,
+    peer_addr: SocketAddr,
+    player_name: &str,
+    channels: TcpMessageChannels,
+) {
+    let mut len_buf = [0u8; 4];
+
+    loop {
+        // Read 4-byte length prefix.
+        match reader.read_exact(&mut len_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                info!(%peer_addr, %player_name, "client disconnected (TCP EOF)");
+                return;
+            }
+            Err(e) => {
+                warn!(%peer_addr, %player_name, %e, "TCP read error, disconnecting");
+                return;
+            }
+        }
+
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        // Zero-length = keepalive from client.
+        if len == 0 {
+            continue;
+        }
+
+        if len > 65536 {
+            warn!(%peer_addr, len, "TCP message too large, disconnecting");
+            return;
+        }
+
+        let mut buf = vec![0u8; len];
+        if let Err(e) = reader.read_exact(&mut buf).await {
+            warn!(%peer_addr, %e, "failed to read TCP message body");
+            return;
+        }
+
+        let decoded = match voxeldust_core::wire_codec::decode(&buf) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(%peer_addr, %e, "bad TCP wire message, skipping");
+                continue;
+            }
+        };
+
+        match ClientMsg::deserialize(&decoded) {
+            Ok(ClientMsg::BlockEditRequest(edit)) => {
+                let _ = channels.block_edit_tx.send(edit);
+            }
+            Ok(ClientMsg::BlockConfigUpdate(update)) => {
+                let _ = channels.config_update_tx.send(update);
+            }
+            Ok(ClientMsg::SubBlockEdit(edit)) => {
+                let _ = channels.sub_block_edit_tx.send(edit);
+            }
+            Ok(ClientMsg::PlayerInput(_)) => {
+                // PlayerInput should go via UDP for performance. Ignore on TCP.
+            }
+            Ok(ClientMsg::Connect { .. }) => {
+                warn!(%peer_addr, "duplicate Connect on established connection");
+            }
+            Err(e) => {
+                debug!(%peer_addr, %e, "failed to deserialize TCP client message");
+            }
         }
     }
 }
 
-/// Send a length-prefixed ServerMsg over a TCP stream (with LZ4 compression).
+/// Send a length-prefixed ServerMsg over any async writer (with LZ4 compression).
+/// Works with both `TcpStream` and `OwnedWriteHalf`.
 pub async fn send_tcp_msg(
-    stream: &mut TcpStream,
+    stream: &mut (impl AsyncWriteExt + Unpin),
     msg: &ServerMsg,
 ) -> Result<(), std::io::Error> {
     let data = msg.serialize();
@@ -314,6 +413,7 @@ pub async fn run_udp_receiver(
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
     block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
     config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
+    sub_block_edit_tx: mpsc::UnboundedSender<voxeldust_core::client_message::SubBlockEditData>,
     cancel: CancellationToken,
 ) {
     let mut buf = vec![0u8; 65536];
@@ -348,6 +448,9 @@ pub async fn run_udp_receiver(
                             }
                             Ok(ClientMsg::BlockConfigUpdate(update)) => {
                                 let _ = config_update_tx.send(update);
+                            }
+                            Ok(ClientMsg::SubBlockEdit(edit)) => {
+                                let _ = sub_block_edit_tx.send(edit);
                             }
                             _ => {}
                         }
