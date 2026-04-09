@@ -6,6 +6,7 @@
 
 mod block_render;
 mod camera;
+mod cloud_system;
 mod events;
 mod gpu;
 pub mod graphics_settings;
@@ -1069,6 +1070,7 @@ struct ClientApp {
     gpu: Option<GpuState>,
     block_renderer: Option<block_render::BlockRenderer>,
     voxel_volume: Option<voxel_volume::VoxelVolume>,
+    cloud_system: Option<cloud_system::CloudSystem>,
     uniform_data: Vec<ObjectUniforms>,
     /// Cached block registry — built once, used for meshing and raycast.
     /// Stored outside the ECS world to avoid borrow conflicts with chunk cache.
@@ -1223,6 +1225,7 @@ impl ClientApp {
             gpu: None,
             block_renderer: None,
             voxel_volume: None,
+            cloud_system: None,
             uniform_data: vec![bytemuck::Zeroable::zeroed(); MAX_OBJECTS],
             registry: voxeldust_core::block::BlockRegistry::new(),
             args,
@@ -1252,6 +1255,7 @@ impl ClientApp {
             gpu_state.shadow_cascade_buf.as_ref().unwrap(),
         ));
         self.voxel_volume = Some(vol);
+        self.cloud_system = Some(cloud_system::CloudSystem::new(&gpu_state.device));
         self.window = Some(window);
         self.gpu = Some(gpu_state);
     }
@@ -1673,6 +1677,81 @@ impl ClientApp {
                 );
                 vol.propagate_light(&mut encoder, iterations);
                 gpu.queue.submit(std::iter::once(encoder.finish()));
+            }
+        }
+
+        // Generate cloud noise textures if near a cloudy planet (once per planet).
+        if let Some(cloud_sys) = &mut self.cloud_system {
+            let world = self.ecs_app.world();
+            let gfx = world.resource::<graphics_settings::GraphicsSettings>();
+            if gfx.cloud_enabled {
+                let sys_cache = world.resource::<SystemParamsCache>();
+                let ws_res = world.resource::<ServerWorldState>();
+                if let (Some(sys), Some(ws)) = (&sys_cache.0, ws_res.latest.as_ref()) {
+                    let cam_sys_pos = {
+                        let smooth = world.resource::<RenderSmoothing>();
+                        let conn = world.resource::<ConnectionInfo>();
+                        // Approximate cam_system_pos for cloud planet detection.
+                        if conn.current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
+                            ws.origin + smooth.render_position
+                        } else {
+                            smooth.render_position
+                        }
+                    };
+                    // Check for nearby cloudy planet.
+                    for body in &ws.bodies {
+                        if body.body_id == 0 { continue; }
+                        let pi = (body.body_id - 1) as usize;
+                        if pi >= sys.planets.len() { continue; }
+                        let planet = &sys.planets[pi];
+                        if !planet.clouds.has_clouds { continue; }
+                        let dist = (cam_sys_pos - body.position).length();
+                        let atmo_top = planet.radius_m + planet.atmosphere.atmosphere_height;
+                        if dist < atmo_top * 3.0 {
+                            let prev_has = cloud_sys.has_noise();
+                            cloud_sys.ensure_noise_for_planet(&gpu.device, &gpu.queue, planet.planet_seed);
+                            // Rebuild composite bind group if noise textures were just created.
+                            if !prev_has && cloud_sys.has_noise() {
+                                if let (Some(layout), Some(params_buf), Some(atmo_buf),
+                                       Some(depth_tex), Some(cloud_buf),
+                                       Some(hdr_v), Some(shape_v), Some(detail_v)) = (
+                                    &gpu.composite_bind_group_layout,
+                                    &gpu.composite_params_buf,
+                                    &gpu.atmosphere_buf,
+                                    &gpu.depth_texture,
+                                    &gpu.cloud_uniform_buf,
+                                    &gpu.hdr_view,
+                                    &cloud_sys.shape_view,
+                                    &cloud_sys.detail_view,
+                                ) {
+                                    let screen_s = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                                        label: Some("screen_sampler"),
+                                        mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
+                                        ..Default::default()
+                                    });
+                                    let depth_sv = depth_tex.create_view(&Default::default());
+                                    gpu.composite_bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                        label: Some("composite_bind_group_clouds"),
+                                        layout,
+                                        entries: &[
+                                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(hdr_v) },
+                                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&screen_s) },
+                                            wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&depth_sv) },
+                                            wgpu::BindGroupEntry { binding: 4, resource: atmo_buf.as_entire_binding() },
+                                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(shape_v) },
+                                            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(detail_v) },
+                                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&cloud_sys.noise_sampler) },
+                                            wgpu::BindGroupEntry { binding: 8, resource: cloud_buf.as_entire_binding() },
+                                        ],
+                                    }));
+                                    tracing::info!("rebuilt composite bind group with cloud noise textures");
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -2396,6 +2475,30 @@ impl ApplicationHandler for ClientApp {
                                 ..Default::default()
                             });
                             let depth_sample_view = depth_tex.create_view(&Default::default());
+                            // Dummy 3D texture for cloud bindings (will be replaced when cloud noise loads).
+                            let dummy_3d = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                                label: Some("dummy_3d"),
+                                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D3,
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                                view_formats: &[],
+                            });
+                            let dummy_3d_view = dummy_3d.create_view(&Default::default());
+                            let cloud_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                                label: Some("cloud_noise_sampler"),
+                                address_mode_u: wgpu::AddressMode::Repeat,
+                                address_mode_v: wgpu::AddressMode::Repeat,
+                                address_mode_w: wgpu::AddressMode::Repeat,
+                                mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            });
+                            let cloud_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("cloud_uniforms_resize"),
+                                size: std::mem::size_of::<cloud_system::CloudUniforms>() as u64,
+                                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            });
                             gpu.composite_bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                 label: Some("composite_bind_group"),
                                 layout,
@@ -2405,6 +2508,10 @@ impl ApplicationHandler for ClientApp {
                                     wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
                                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&depth_sample_view) },
                                     wgpu::BindGroupEntry { binding: 4, resource: atmo_buf.as_entire_binding() },
+                                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&dummy_3d_view) },
+                                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&dummy_3d_view) },
+                                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&cloud_sampler) },
+                                    wgpu::BindGroupEntry { binding: 8, resource: cloud_buf.as_entire_binding() },
                                 ],
                             }));
                         }

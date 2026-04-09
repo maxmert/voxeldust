@@ -871,6 +871,32 @@ pub fn render_frame(
             disabled_atmosphere_uniforms()
         };
         gpu.queue.write_buffer(atmo_buf, 0, bytemuck::bytes_of(&atmo_uniforms));
+
+        // Upload cloud uniforms for the same planet (if it has clouds).
+        if let (Some(sys), Some(ws)) = (system_params, latest_world_state) {
+            if let Some((planet_idx, planet_pos)) = find_atmosphere_planet(cam.cam_system_pos, sys, ws) {
+                let planet = &sys.planets[planet_idx];
+                if planet.clouds.has_clouds {
+                    let observer_m = cam.cam_system_pos - planet_pos;
+                    let observer_km = [
+                        (observer_m.x / 1000.0) as f32,
+                        (observer_m.y / 1000.0) as f32,
+                        (observer_m.z / 1000.0) as f32,
+                    ];
+                    let game_time = ws.game_time;
+                    let sun_dir = [scene_lighting.sun_direction[0], scene_lighting.sun_direction[1], scene_lighting.sun_direction[2]];
+                    let sun_int = scene_lighting.sun_color[3];
+                    let sun_col = [scene_lighting.sun_color[0], scene_lighting.sun_color[1], scene_lighting.sun_color[2]];
+
+                    let cloud_uni = crate::cloud_system::CloudSystem::build_uniforms(
+                        planet, observer_km, game_time, sun_dir, sun_int, sun_col,
+                    );
+                    if let Some(cloud_buf) = &gpu.cloud_uniform_buf {
+                        gpu.queue.write_buffer(cloud_buf, 0, bytemuck::bytes_of(&cloud_uni));
+                    }
+                }
+            }
+        }
     }
 
     // -- HDR composite pass: tonemap HDR → swapchain --

@@ -44,6 +44,30 @@ var depth_tex: texture_depth_2d;
 @group(0) @binding(4)
 var<uniform> atmo: AtmosphereUniforms;
 
+// Cloud noise textures + uniform.
+@group(0) @binding(5)
+var cloud_shape_tex: texture_3d<f32>;
+
+@group(0) @binding(6)
+var cloud_detail_tex: texture_3d<f32>;
+
+@group(0) @binding(7)
+var cloud_sampler: sampler;
+
+struct CloudUniforms {
+    observer_pos: vec4<f32>,     // xyz = observer (km), w = game_time
+    geometry: vec4<f32>,         // x=planet_r, y=cloud_base, z=cloud_thick, w=enabled
+    density_params: vec4<f32>,   // x=coverage, y=density_scale, z=cloud_type, w=absorption
+    wind: vec4<f32>,             // xyz=wind_vel (km/s), w=wind_shear
+    scatter: vec4<f32>,          // xyz=scatter_color, w=weather_scale (km)
+    sun: vec4<f32>,              // xyz=sun_dir, w=sun_intensity
+    sun_color: vec4<f32>,        // xyz=sun_color_rgb, w=base_noise_freq
+    noise_params: vec4<f32>,     // x=shape_scale, y=detail_scale, z=weather_octaves, w=unused
+}
+
+@group(0) @binding(8)
+var<uniform> clouds: CloudUniforms;
+
 // ---------------------------------------------------------------------------
 // Fullscreen vertex shader (vertexless triangle)
 // ---------------------------------------------------------------------------
@@ -276,6 +300,237 @@ fn atmosphere_ray_march(
 // ACES filmic tonemapping
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Volumetric Cloud Ray March (Nubis/HZD technique)
+//
+// Density function: Perlin-Worley base shape + Worley detail erosion
+// Lighting: Beer-Lambert + multi-scattering octave approximation
+// All parameters from CloudUniforms (per-planet, seed-derived)
+// ---------------------------------------------------------------------------
+
+fn remap_cloud(value: f32, old_lo: f32, old_hi: f32, new_lo: f32, new_hi: f32) -> f32 {
+    return new_lo + saturate((value - old_lo) / (old_hi - old_lo)) * (new_hi - new_lo);
+}
+
+/// Height gradient for cloud type blending (Nubis).
+/// type_blend: 0=stratus(flat), 0.5=cumulus(puffy), 1=cumulonimbus(towering).
+fn cloud_height_gradient(height_frac: f32, type_blend: f32) -> f32 {
+    // Stratus: thin layer concentrated at base.
+    let stratus = saturate(remap_cloud(height_frac, 0.0, 0.1, 0.0, 1.0))
+                * saturate(remap_cloud(height_frac, 0.2, 0.3, 1.0, 0.0));
+    // Cumulus: puffy, peaks in middle.
+    let cumulus = saturate(remap_cloud(height_frac, 0.0, 0.15, 0.0, 1.0))
+               * saturate(remap_cloud(height_frac, 0.5, 0.9, 1.0, 0.0));
+    // Cumulonimbus: towering, fills most of the layer.
+    let cb = saturate(remap_cloud(height_frac, 0.0, 0.1, 0.0, 1.0))
+           * saturate(remap_cloud(height_frac, 0.7, 1.0, 1.0, 0.0));
+
+    // Blend between types.
+    if type_blend < 0.5 {
+        return mix(stratus, cumulus, type_blend * 2.0);
+    }
+    return mix(cumulus, cb, (type_blend - 0.5) * 2.0);
+}
+
+/// Simple seeded hash for procedural weather coverage.
+fn hash_weather(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn weather_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash_weather(i + vec2(0.0, 0.0)), hash_weather(i + vec2(1.0, 0.0)), u.x),
+        mix(hash_weather(i + vec2(0.0, 1.0)), hash_weather(i + vec2(1.0, 1.0)), u.x),
+        u.y
+    );
+}
+
+fn weather_coverage(pos: vec3<f32>, planet_r: f32) -> f32 {
+    // Project position onto unit sphere for weather UV.
+    let dir = normalize(pos);
+    let uv = vec2(atan2(dir.z, dir.x) * (1.0 / PI) * 0.5 + 0.5, asin(dir.y) * (1.0 / PI) + 0.5);
+
+    let weather_scale = clouds.scatter.w;
+    let wind_t = clouds.observer_pos.w; // game_time
+    let wind_uv = clouds.wind.xy * wind_t * 0.1;
+    let scaled_uv = uv * weather_scale + wind_uv;
+
+    // fBm weather noise (deterministic from UV + planet position).
+    var coverage = 0.0;
+    var amp = 1.0;
+    var freq = 1.0;
+    let octaves = u32(clouds.noise_params.z);
+    for (var i = 0u; i < octaves; i++) {
+        coverage += weather_noise(scaled_uv * freq) * amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return saturate(coverage * 0.5 + 0.5); // normalize to [0, 1]
+}
+
+/// Sample cloud density at a world position (km, relative to planet center).
+fn cloud_density(pos: vec3<f32>) -> f32 {
+    let planet_r = clouds.geometry.x;
+    let cloud_base = clouds.geometry.y;
+    let cloud_thick = clouds.geometry.z;
+
+    let altitude = length(pos) - planet_r;
+    let height_frac = (altitude - cloud_base) / cloud_thick;
+    if height_frac <= 0.0 || height_frac >= 1.0 { return 0.0; }
+
+    // Height gradient for cloud type.
+    let gradient = cloud_height_gradient(height_frac, clouds.density_params.z);
+    if gradient < 0.001 { return 0.0; }
+
+    // Weather-driven coverage at this position.
+    let base_coverage = clouds.density_params.x;
+    let coverage = base_coverage * weather_coverage(pos, planet_r);
+    if coverage < 0.01 { return 0.0; }
+
+    // Wind offset for cloud scrolling.
+    let time = clouds.observer_pos.w;
+    let wind_offset = clouds.wind.xyz * time;
+
+    // Sample 3D shape noise (tileable, scrolled by wind).
+    let shape_scale = clouds.noise_params.x;
+    let shape_uv = (pos + wind_offset) * shape_scale;
+    let shape = textureSample(cloud_shape_tex, cloud_sampler, shape_uv);
+
+    // Combine shape octaves: Perlin-Worley base + Worley fBm erosion.
+    let worley_fbm = shape.g * 0.625 + shape.b * 0.25 + shape.a * 0.125;
+    let base_shape = remap_cloud(shape.r, worley_fbm - 1.0, 1.0, 0.0, 1.0);
+
+    // Apply height gradient and coverage.
+    var density = base_shape * gradient;
+    density = remap_cloud(density, 1.0 - coverage, 1.0, 0.0, 1.0) * coverage;
+    if density <= 0.0 { return 0.0; }
+
+    // Detail erosion (fine edge breakup).
+    let detail_scale = clouds.noise_params.y;
+    let sheared_wind = wind_offset * clouds.wind.w; // wind shear for upper cloud motion
+    let detail_uv = (pos + sheared_wind) * detail_scale;
+    let detail = textureSample(cloud_detail_tex, cloud_sampler, detail_uv);
+    let detail_fbm = detail.r * 0.625 + detail.g * 0.25 + detail.b * 0.125;
+
+    // Erode more at cloud tops, less at base.
+    let detail_mod = mix(detail_fbm, 1.0 - detail_fbm, saturate(height_frac * 2.0));
+    density = remap_cloud(density, detail_mod * 0.2, 1.0, 0.0, 1.0);
+
+    return max(density, 0.0) * clouds.density_params.y; // density_scale
+}
+
+/// Henyey-Greenstein phase function for cloud scattering.
+fn hg_phase(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+}
+
+struct CloudResult {
+    luminance: vec3<f32>,
+    transmittance: f32,
+}
+
+fn cloud_ray_march(
+    ray_origin: vec3<f32>,
+    ray_dir: vec3<f32>,
+    max_dist: f32,
+) -> CloudResult {
+    var result: CloudResult;
+    result.luminance = vec3(0.0);
+    result.transmittance = 1.0;
+
+    let planet_r = clouds.geometry.x;
+    let cloud_base = clouds.geometry.y;
+    let cloud_thick = clouds.geometry.z;
+    let shell_inner = planet_r + cloud_base;
+    let shell_outer = planet_r + cloud_base + cloud_thick;
+
+    // Intersect with cloud spherical shell.
+    let t_inner = ray_sphere(ray_origin, ray_dir, shell_inner);
+    let t_outer = ray_sphere(ray_origin, ray_dir, shell_outer);
+
+    // Compute ray segment through cloud layer.
+    var t_start = max(max(t_inner.x, 0.0), max(t_outer.x, 0.0));
+    var t_end = 0.0;
+    let obs_height = length(ray_origin);
+
+    if obs_height < shell_inner {
+        // Below clouds: enter at inner sphere, exit at inner sphere (up then down).
+        t_start = max(t_inner.y, 0.0); // far intersection with inner sphere
+        t_end = max(t_outer.y, 0.0);   // far intersection with outer sphere... hmm
+        // Actually below clouds: ray goes UP through inner, through cloud layer, hits outer.
+        t_start = max(t_inner.x, 0.0);
+        if t_inner.x < 0.0 { t_start = 0.0; } // inside inner sphere? shouldn't happen
+        t_end = t_outer.y;
+    } else if obs_height > shell_outer {
+        // Above clouds (space/orbit): enter at outer sphere, exit at outer sphere.
+        if t_outer.x < 0.0 { return result; } // ray misses atmosphere entirely
+        t_start = t_outer.x;
+        t_end = t_outer.y;
+        // But clamp to inner sphere if ray passes through planet.
+        if t_inner.x > 0.0 { t_end = min(t_end, t_inner.x); }
+    } else {
+        // Inside cloud layer.
+        t_start = 0.0;
+        t_end = t_outer.y;
+        if t_inner.x > 0.0 { t_end = min(t_end, t_inner.x); }
+    }
+
+    t_end = min(t_end, max_dist);
+    if t_start >= t_end || t_end <= 0.0 { return result; }
+
+    // Ray march parameters.
+    let ray_length = t_end - t_start;
+    let max_steps = 64u;
+    let dt = ray_length / f32(max_steps);
+
+    let cos_angle = dot(ray_dir, clouds.sun.xyz);
+    let phase = max(hg_phase(cos_angle, 0.8), hg_phase(cos_angle, -0.5));
+    let absorption = clouds.density_params.w;
+    let sun_color_val = clouds.sun_color.xyz * clouds.sun.w;
+    let scatter_color = clouds.scatter.xyz;
+
+    for (var i = 0u; i < max_steps; i++) {
+        let t = t_start + (f32(i) + 0.5) * dt;
+        let sample_pos = ray_origin + ray_dir * t;
+        let density = cloud_density(sample_pos);
+
+        if density > 0.001 {
+            let sample_transmittance = exp(-density * absorption * dt);
+
+            // Multi-scattering approximation (Wrenninge/Hillaire octave method).
+            // 3 octaves: each reduces attenuation, contribution, and phase eccentricity.
+            var light = vec3(0.0);
+            var oct_atten = 1.0;
+            var oct_contrib = 1.0;
+            var oct_phase = phase;
+            for (var oct = 0u; oct < 3u; oct++) {
+                let ext = density * oct_atten * absorption;
+                let beer = exp(-ext * dt * 6.0); // 6 light samples approximated as 6× step
+                let powder = 1.0 - exp(-ext * dt * 12.0);
+                light += beer * mix(0.7, 1.0, powder) * oct_phase * oct_contrib * scatter_color * sun_color_val;
+                oct_atten *= 0.5;
+                oct_contrib *= 0.5;
+                oct_phase = mix(oct_phase, 1.0 / (4.0 * PI), 0.5); // reduce eccentricity
+            }
+
+            // Analytical integration.
+            let integrated = (light - light * sample_transmittance) / max(density * absorption, 1e-6);
+            result.luminance += result.transmittance * integrated;
+            result.transmittance *= sample_transmittance;
+
+            if result.transmittance < 0.01 { break; }
+        }
+    }
+
+    return result;
+}
+
 fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
     return color * (color * 2.51 + vec3(0.03)) / (color * (color * 2.43 + vec3(0.59)) + vec3(0.14));
 }
@@ -323,6 +578,19 @@ fn fs_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
 
         // Composite: attenuate scene by transmittance, add in-scattered light.
         color = color * atmo_result.transmittance + atmo_result.inscatter;
+    }
+
+    // Volumetric cloud compositing (Nubis technique).
+    // Clouds are rendered AFTER atmosphere so they receive atmospheric lighting
+    // and are occluded by atmospheric transmittance correctly.
+    if clouds.geometry.w > 0.5 && is_exterior > 0.5 {
+        let cloud_observer = clouds.observer_pos.xyz;
+        let cloud_max_dist = select(length(world_pos) * 0.001, 1e6, is_sky);
+
+        let cloud_result = cloud_ray_march(cloud_observer, ray_dir, cloud_max_dist);
+
+        // Composite: clouds occlude scene behind them, add cloud luminance.
+        color = color * cloud_result.transmittance + cloud_result.luminance;
     }
 
     // Tonemapping: ACES filmic.

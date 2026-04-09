@@ -114,6 +114,8 @@ pub struct GpuState {
     pub depth_texture: Option<wgpu::Texture>,
     /// Atmosphere uniform buffer.
     pub atmosphere_buf: Option<wgpu::Buffer>,
+    /// Cloud uniform buffer (binding 8 in composite bind group).
+    pub cloud_uniform_buf: Option<wgpu::Buffer>,
     pub pipeline: wgpu::RenderPipeline,
     pub sphere_inside_pipeline: wgpu::RenderPipeline,
     pub sphere_vertex_buf: wgpu::Buffer,
@@ -852,7 +854,7 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
     });
 
     // -- Composite pipeline (HDR tonemapping fullscreen pass) --
-    let (composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf, atmosphere_buf) = if hdr_enabled {
+    let (composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf, atmosphere_buf, cloud_uniform_buf) = if hdr_enabled {
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
@@ -912,6 +914,48 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(
                             std::mem::size_of::<AtmosphereUniforms>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+                // binding 5: cloud shape 3D texture (Rgba8Unorm, 128³)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 6: cloud detail 3D texture (Rgba8Unorm, 32³)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 7: cloud noise sampler (trilinear, repeat)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 8: cloud uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<crate::cloud_system::CloudUniforms>() as u64,
                         ),
                     },
                     count: None,
@@ -978,36 +1022,51 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
         // Depth texture view for sampling in composite (separate from render attachment view).
         let depth_sample_view = depth_texture_obj.create_view(&Default::default());
 
+        // Dummy 1×1×1 3D texture for cloud noise bindings before clouds are loaded.
+        let dummy_3d = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dummy_3d"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let dummy_3d_view = dummy_3d.create_view(&Default::default());
+        let cloud_noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cloud_noise_sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let cloud_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud_uniforms"),
+            size: std::mem::size_of::<crate::cloud_system::CloudUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bind_group"),
             layout: &composite_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(hdr_view.as_ref().unwrap()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&screen_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&depth_sample_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: atmo_buf.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(hdr_view.as_ref().unwrap()) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&screen_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&depth_sample_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: atmo_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&dummy_3d_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&dummy_3d_view) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&cloud_noise_sampler) },
+                wgpu::BindGroupEntry { binding: 8, resource: cloud_buf.as_entire_binding() },
             ],
         });
 
-        (Some(composite_pipeline), Some(composite_bind_group_layout), Some(bind_group), Some(params_buf), Some(atmo_buf))
+        (Some(composite_pipeline), Some(composite_bind_group_layout), Some(bind_group), Some(params_buf), Some(atmo_buf), Some(cloud_buf))
     } else {
-        (None, None, None, None, None)
+        (None, None, None, None, None, None)
     };
 
     // egui.
@@ -1022,6 +1081,7 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
         composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf,
         depth_texture: Some(depth_texture_obj),
         atmosphere_buf,
+        cloud_uniform_buf,
         pipeline, sphere_inside_pipeline,
         sphere_vertex_buf, sphere_index_buf, sphere_index_count: sphere.indices.len() as u32,
         box_vertex_buf, box_index_buf, box_index_count: box_idxs.len() as u32,

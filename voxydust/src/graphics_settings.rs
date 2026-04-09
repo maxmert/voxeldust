@@ -50,6 +50,15 @@ pub struct GraphicsSettings {
     /// Enable analytical eclipse shadows for distant celestial body occultation.
     pub eclipse_shadows_enabled: bool,
 
+    // -- Volumetric clouds --
+    /// Enable volumetric cloud rendering (Nubis technique).
+    pub cloud_enabled: bool,
+    /// Cloud ray march step count. Higher = better quality, more expensive.
+    /// Low=32, Medium=48, High=64, Ultra=96.
+    pub cloud_steps: u32,
+    /// Enable cloud shadow map (Beer Shadow Map) for terrain darkening under clouds.
+    pub cloud_shadows_enabled: bool,
+
     // -- HDR + Tonemapping --
     /// Enable HDR render target with separate tonemapping pass.
     /// When false, ACES tonemapping is applied directly in fragment shaders.
@@ -78,6 +87,10 @@ impl GraphicsSettings {
 
             eclipse_shadows_enabled: false,
 
+            cloud_enabled: false,
+            cloud_steps: 32,
+            cloud_shadows_enabled: false,
+
             hdr_enabled: false,
         }
     }
@@ -102,6 +115,10 @@ impl GraphicsSettings {
             god_ray_samples: 48,
 
             eclipse_shadows_enabled: true,
+
+            cloud_enabled: true,
+            cloud_steps: 48,
+            cloud_shadows_enabled: false,
 
             hdr_enabled: true,
         }
@@ -128,6 +145,10 @@ impl GraphicsSettings {
 
             eclipse_shadows_enabled: true,
 
+            cloud_enabled: true,
+            cloud_steps: 64,
+            cloud_shadows_enabled: true,
+
             hdr_enabled: true,
         }
     }
@@ -153,6 +174,10 @@ impl GraphicsSettings {
 
             eclipse_shadows_enabled: true,
 
+            cloud_enabled: true,
+            cloud_steps: 96,
+            cloud_shadows_enabled: true,
+
             hdr_enabled: true,
         }
     }
@@ -168,6 +193,7 @@ impl GraphicsSettings {
         self.block_light_iterations = self.block_light_iterations.clamp(1, 15);
         self.atmosphere_samples = self.atmosphere_samples.clamp(4, 64);
         self.god_ray_samples = self.god_ray_samples.clamp(16, 128);
+        self.cloud_steps = self.cloud_steps.clamp(16, 128);
     }
 }
 
