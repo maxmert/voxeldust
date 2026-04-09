@@ -153,6 +153,7 @@ struct ShipExterior {
     position: DVec3,
     velocity: DVec3,
     rotation: DQuat,
+    angular_velocity: DVec3,
 }
 
 /// Cached celestial scene from the host shard.
@@ -588,6 +589,7 @@ fn drain_quic(
                 exterior.position = data.position;
                 exterior.velocity = data.velocity;
                 exterior.rotation = data.rotation;
+                exterior.angular_velocity = data.angular_velocity;
                 autopilot.snapshot = data.autopilot;
 
                 // Detect landed state: system shard zeros velocity on landing.
@@ -2988,6 +2990,106 @@ fn compute_power_budget(
 // Signal pipeline systems
 // ---------------------------------------------------------------------------
 
+/// Smoothed flight computer correction state. Prevents oscillation by
+/// limiting how fast the correction signal can change between ticks.
+#[derive(Resource, Default)]
+struct FlightComputerState {
+    yaw: f32,
+    pitch: f32,
+    roll: f32,
+}
+
+/// Flight computer: reads angular velocity and injects counter-rotation
+/// signals into RawPilotInput on axes with no pilot input. These signals
+/// flow through the normal signal pipeline → RCS thrusters → power consumption.
+/// Only active when piloting with engines on. Requires RCS thrusters on
+/// torque channels to produce actual counter-torque.
+///
+/// Uses smoothed output to prevent oscillation from network round-trip delay:
+/// correction lerps toward target at 30% per tick, giving ~5-tick response
+/// time (0.25s at 20Hz) — safely above the 3-5 tick round-trip delay.
+fn flight_computer_damping(
+    mut raw_input: ResMut<RawPilotInput>,
+    exterior: Res<ShipExterior>,
+    pilot_mode: Res<PilotMode>,
+    ship_props: Res<ShipProps>,
+    mut fc: ResMut<FlightComputerState>,
+) {
+    if !pilot_mode.0 || raw_input.engines_off {
+        // Reset state when not active so no stale correction on re-enable.
+        *fc = FlightComputerState::default();
+        return;
+    }
+
+    // Angular velocity in ship-local frame.
+    let ang_vel = exterior.rotation.inverse() * exterior.angular_velocity;
+
+    // Dead zone: ignore angular velocity below this to prevent thruster jitter.
+    // 0.005 rad/s ≈ 0.3 deg/s — barely perceptible rotation.
+    const DEAD_ZONE: f64 = 0.005;
+
+    // Smoothing factor: correction changes by this fraction per tick toward target.
+    // At 20Hz, effective response time ≈ 1/SMOOTHING ticks ≈ 3.3 ticks (0.17s).
+    // Exponential curve reaches 95% in ~10 ticks (0.5s) — well above round-trip delay.
+    const SMOOTHING: f32 = 0.3;
+
+    // Dynamic gain derived from ship properties.
+    // Critical gain for P-controller with delay τ:
+    //   K_crit = π × I / (2 × τ × T_max)
+    // Use 25% of critical for stability margin (conservative with smoothing).
+    //   gain = π × I / (8 × τ × T_max)
+    let mass = ship_props.0.mass_kg;
+    let avg_dim = 10.0_f64;
+    let moi = mass * avg_dim * avg_dim / 12.0;
+    let max_rcs_torque = ship_props.0.max_torque_nm.max(1.0);
+    let round_trip_delay = 0.25; // conservative: 5 ticks at 20Hz
+    let gain = (std::f64::consts::PI * moi) / (8.0 * round_trip_delay * max_rcs_torque);
+
+    // Signal convention: torque_yaw > 0 → fires CW thrusters → negative Y torque.
+    // So to counter positive Y angular velocity, set torque_yaw positive (same sign).
+
+    // --- Yaw (Y-axis) ---
+    if raw_input.torque_yaw.abs() < 0.01 {
+        let yaw_vel = ang_vel.y;
+        let target = if yaw_vel.abs() > DEAD_ZONE {
+            (yaw_vel * gain).clamp(-1.0, 1.0) as f32
+        } else { 0.0 };
+        fc.yaw = fc.yaw * (1.0 - SMOOTHING) + target * SMOOTHING;
+        raw_input.torque_yaw = fc.yaw;
+    } else {
+        // Pilot has input — decay state toward zero so it doesn't interfere later.
+        fc.yaw *= 1.0 - SMOOTHING;
+    }
+
+    // --- Pitch (X-axis) ---
+    if raw_input.torque_pitch.abs() < 0.01 {
+        let pitch_vel = ang_vel.x;
+        let target = if pitch_vel.abs() > DEAD_ZONE {
+            (pitch_vel * gain).clamp(-1.0, 1.0) as f32
+        } else { 0.0 };
+        fc.pitch = fc.pitch * (1.0 - SMOOTHING) + target * SMOOTHING;
+        raw_input.torque_pitch = fc.pitch;
+    } else {
+        fc.pitch *= 1.0 - SMOOTHING;
+    }
+
+    // --- Roll (Z-axis) ---
+    if raw_input.roll_cw < 0.01 && raw_input.roll_ccw < 0.01 {
+        let roll_vel = ang_vel.z;
+        let target = if roll_vel.abs() > DEAD_ZONE {
+            (roll_vel * gain).clamp(-1.0, 1.0) as f32
+        } else { 0.0 };
+        fc.roll = fc.roll * (1.0 - SMOOTHING) + target * SMOOTHING;
+        if fc.roll > 0.0 {
+            raw_input.roll_cw = fc.roll;
+        } else {
+            raw_input.roll_ccw = -fc.roll;
+        }
+    } else {
+        fc.roll *= 1.0 - SMOOTHING;
+    }
+}
+
 /// Phase 1: All functional blocks with SignalPublisher write their state to channels.
 /// Values accumulate in pending_values, merged after all publishers write.
 fn signal_publish(
@@ -3573,6 +3675,7 @@ fn build_ship_interior(
         position: ship_position,
         velocity: DVec3::ZERO,
         rotation: DQuat::IDENTITY,
+        angular_velocity: DVec3::ZERO,
     });
     app.insert_resource(SceneCache {
         bodies: scene_bodies,
@@ -3609,6 +3712,7 @@ fn build_ship_interior(
     app.insert_resource(ShipProps(ShipPhysicalProperties::starter_ship()));
     app.insert_resource(PilotAccumulator::default());
     app.insert_resource(RawPilotInput { thrust_limiter: 0.75, ..Default::default() });
+    app.insert_resource(FlightComputerState::default());
     app.insert_resource(ShipCenterOfMass::default());
     // PowerNetworkTable removed — power is wireless via ReactorState circuits.
     app.insert_resource(ActiveSeatEntity::default());
@@ -3682,7 +3786,7 @@ fn build_ship_interior(
     // Signal pipeline: publish → evaluate → subscribe → clear dirty.
     app.add_systems(
         Update,
-        (signal_publish, signal_evaluate, signal_subscribe, compute_power_budget, compute_ship_thrust, signal_clear_dirty)
+        (flight_computer_damping, signal_publish, signal_evaluate, signal_subscribe, compute_power_budget, compute_ship_thrust, signal_clear_dirty)
             .chain()
             .in_set(ShipSet::Signal),
     );

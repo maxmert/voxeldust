@@ -3200,6 +3200,7 @@ fn broadcast_scene(
         &Position,
         &Velocity,
         &Rotation,
+        &AngularVelocity,
         Option<&Autopilot>,
         Option<&AutopilotIntercept>,
     )>,
@@ -3227,7 +3228,7 @@ fn broadcast_scene(
         };
 
     // Collect known ship IDs.
-    let known_ship_ids: HashSet<u64> = ships.iter().map(|(sid, _, _, _, _, _)| sid.0).collect();
+    let known_ship_ids: HashSet<u64> = ships.iter().map(|(sid, _, _, _, _, _, _)| sid.0).collect();
 
     let hosted_ships: Vec<(ShardId, SocketAddr, Option<u64>)> = ship_shards
         .iter()
@@ -3261,7 +3262,7 @@ fn broadcast_scene(
         let observer_pos = ships
             .iter()
             .next()
-            .map(|(_, p, _, _, _, _)| p.0)
+            .map(|(_, p, _, _, _, _, _)| p.0)
             .unwrap_or(DVec3::new(1e11, 0.0, 0.0));
         let l = compute_lighting(observer_pos, &sys_config.0.star);
         let lighting = LightingInfoData {
@@ -3286,7 +3287,7 @@ fn broadcast_scene(
         }
 
         // Per-ship position updates.
-        for (ship_id, pos, vel, rot, autopilot, intercept) in &ships {
+        for (ship_id, pos, vel, rot, ang_vel, autopilot, intercept) in &ships {
             let target = hosted_ships
                 .iter()
                 .find(|(_, _, sid)| *sid == Some(ship_id.0))
@@ -3312,7 +3313,7 @@ fn broadcast_scene(
                     position: pos.0,
                     velocity: vel.0,
                     rotation: rot.0,
-                    angular_velocity: DVec3::ZERO,
+                    angular_velocity: ang_vel.0,
                     autopilot: ap_snapshot,
                 });
                 let _ = bridge.quic_send_tx.try_send((sid, addr, pos_msg));
