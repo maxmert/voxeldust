@@ -25,4 +25,4 @@ pub use chunk_storage::{ChunkStorage, DamageResult};
 pub use palette::{PaletteStorage, CHUNK_SIZE, CHUNK_VOLUME, block_index, index_to_xyz};
 pub use registry::{BlockRegistry, FunctionalBlockKind, InteractionSchema, InteractionDef, InteractionType, ThrusterProps, PowerProps};
 pub use serialization::{serialize_chunk, deserialize_chunk, serialize_edit_wal, deserialize_edit_wal};
-pub use ship_grid::{ShipGrid, build_starter_ship, StarterShipLayout};
+pub use ship_grid::{ShipGrid, build_starter_ship, StarterShipLayout, PowerConfig};

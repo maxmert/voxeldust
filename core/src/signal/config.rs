@@ -45,6 +45,62 @@ pub struct SignalRuleConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Power configuration types
+// ---------------------------------------------------------------------------
+
+/// A named power circuit on a reactor (config form, for serialization / UI).
+#[derive(Clone, Debug)]
+pub struct PowerCircuitConfig {
+    /// Circuit name (e.g., "main", "rcs", "lights").
+    pub name: String,
+    /// Fraction of reactor output allocated to this circuit (0.0–1.0).
+    pub fraction: f32,
+}
+
+/// Power access mode for a reactor (config form).
+#[derive(Clone, Debug, Default)]
+pub enum PowerAccessConfig {
+    /// Only blocks placed by the same player.
+    #[default]
+    OwnerOnly,
+    /// Owner + listed player names.
+    AllowList(Vec<String>),
+    /// Anyone in range.
+    Open,
+}
+
+/// Reactor power source configuration (sent in config snapshot / update).
+#[derive(Clone, Debug, Default)]
+pub struct PowerSourceConfig {
+    /// Named circuits with allocated fractions.
+    pub circuits: Vec<PowerCircuitConfig>,
+    /// Access control mode.
+    pub access: PowerAccessConfig,
+}
+
+/// Power consumer configuration — which reactor + circuit to draw from.
+#[derive(Clone, Debug, Default)]
+pub struct PowerConsumerConfig {
+    /// Block position of the reactor (None = not connected).
+    pub reactor_pos: Option<IVec3>,
+    /// Which circuit on that reactor.
+    pub circuit: String,
+}
+
+/// Info about a nearby reactor (for consumer dropdown in config UI).
+#[derive(Clone, Debug)]
+pub struct NearbyReactorInfo {
+    /// Block position of the reactor.
+    pub pos: IVec3,
+    /// Human-readable label (e.g., "Small Reactor").
+    pub label: String,
+    /// Distance from the consumer block in blocks.
+    pub distance: f32,
+    /// Circuit names available on this reactor.
+    pub circuits: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Config snapshots
 // ---------------------------------------------------------------------------
 
@@ -68,6 +124,12 @@ pub struct BlockSignalConfig {
     pub seat_mappings: Vec<SeatInputBindingConfig>,
     /// All channel names on this structure (for dropdown selection in UI).
     pub available_channels: Vec<String>,
+    /// Reactor power source config (only for Reactor blocks).
+    pub power_source: Option<PowerSourceConfig>,
+    /// Consumer power subscription (only for power-consuming blocks).
+    pub power_consumer: Option<PowerConsumerConfig>,
+    /// Nearby reactors in range (for consumer dropdown in config UI).
+    pub nearby_reactors: Vec<NearbyReactorInfo>,
 }
 
 /// Config update sent from client → server after the player edits bindings.
@@ -84,4 +146,8 @@ pub struct BlockConfigUpdateData {
     pub converter_rules: Vec<SignalRuleConfig>,
     /// Updated seat mappings.
     pub seat_mappings: Vec<SeatInputBindingConfig>,
+    /// Updated reactor power source config (only for Reactor blocks).
+    pub power_source: Option<PowerSourceConfig>,
+    /// Updated consumer power subscription.
+    pub power_consumer: Option<PowerConsumerConfig>,
 }

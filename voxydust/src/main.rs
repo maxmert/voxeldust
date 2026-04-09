@@ -562,6 +562,10 @@ fn poll_network(
                         let fwd = p.rotation * DVec3::NEG_Z;
                         cam.yaw = fwd.z.atan2(fwd.x) as f64;
                         cam.pitch = fwd.y.asin() as f64;
+                        // Clear pilot rates so the E key held from sitting down
+                        // doesn't trigger roll/yaw on the first frame of piloting.
+                        cam.pilot_yaw_rate = 0.0;
+                        cam.pilot_pitch_rate = 0.0;
                     }
 
                     if was_piloting && !player.is_piloting {
@@ -825,12 +829,25 @@ fn poll_network(
 
 /// Snapshot interpolation: lerp between the two most recent server states.
 /// Produces smooth render_position, render_rotation, and ship_origin at display framerate.
-/// Unified for walking, piloting, and galaxy warp — no special cases.
+/// Galaxy warp uses its own velocity-based smoothing (separate from WorldState snapshots).
 fn smooth_render_position(
     mut smooth: ResMut<RenderSmoothing>,
     snapshots: Res<SnapshotBuffer>,
+    warp: Res<ClientWarp>,
     ft: Res<FrameTime>,
 ) {
+    // Galaxy warp: separate smoothing path (GalaxyWorldState, not WorldState snapshots).
+    if warp.galaxy_position.is_some() {
+        let blend = 1.0 - (-20.0 * ft.dt).exp();
+        let elapsed = (ft.last_time - smooth.last_galaxy_update_time).as_secs_f64().min(0.06);
+        let target = smooth.prev_galaxy_position + smooth.galaxy_velocity * elapsed;
+        let delta = (target - smooth.galaxy_render_position) * blend;
+        smooth.galaxy_render_position = smooth.galaxy_render_position + delta;
+        let rot = smooth.galaxy_render_rotation.slerp(smooth.prev_galaxy_rotation, blend);
+        smooth.galaxy_render_rotation = rot;
+        return;
+    }
+
     let (prev, curr) = match (&snapshots.prev, &snapshots.current) {
         (Some(p), Some(c)) => (p, c),
         (None, Some(c)) => {
@@ -1702,6 +1719,8 @@ impl ClientApp {
                         subscribe_bindings: config.subscribe_bindings.clone(),
                         converter_rules: config.converter_rules.clone(),
                         seat_mappings: config.seat_mappings.clone(),
+                        power_source: config.power_source.clone(),
+                        power_consumer: config.power_consumer.clone(),
                     };
                     let world = self.ecs_app.world();
                     let net = world.resource::<NetworkChannels>();
@@ -1871,8 +1890,8 @@ fn interpret_camera_system(
         let sensitivity = 0.003;
         let free_look = ctx.kb.keys_held.contains(&KeyCode::AltLeft);
         if ctx.player.is_piloting && !free_look {
-            ctx.cam.pilot_yaw_rate = (ctx.cam.pilot_yaw_rate - motion.delta_x * sensitivity * 5.0).clamp(-1.0, 1.0);
-            ctx.cam.pilot_pitch_rate = (ctx.cam.pilot_pitch_rate - motion.delta_y * sensitivity * 5.0).clamp(-1.0, 1.0);
+            ctx.cam.pilot_yaw_rate = (ctx.cam.pilot_yaw_rate - motion.delta_x * sensitivity * 1.5).clamp(-1.0, 1.0);
+            ctx.cam.pilot_pitch_rate = (ctx.cam.pilot_pitch_rate - motion.delta_y * sensitivity * 1.5).clamp(-1.0, 1.0);
         } else {
             ctx.cam.yaw += motion.delta_x * sensitivity;
             ctx.cam.pitch -= motion.delta_y * sensitivity;
@@ -2006,8 +2025,8 @@ fn interpret_key_system(
                     }
                 }
 
-                // E key: primary interaction on ship shard.
-                if key == KeyCode::KeyE && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed {
+                // E key: primary interaction on ship shard (only when walking, not piloting — E is roll when piloting).
+                if key == KeyCode::KeyE && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed && !is_piloting {
                     let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
                     let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
                     let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();

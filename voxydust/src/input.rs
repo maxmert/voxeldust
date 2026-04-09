@@ -63,10 +63,10 @@ pub fn send_input_with_dt(
         };
 
         // Decay pilot rates toward zero (virtual spring centering).
-        // Frame-rate independent: decay_rate = -ln(0.95) * 60 ~ 3.08
-        // At 60fps: e^(-3.08/60) = 0.95 (matches original).
-        // At 30fps: e^(-3.08/30) = 0.9025 (correct 2-frame equivalent).
-        let decay = (-3.08 * dt).exp();
+        // Frame-rate independent: decay_rate = -ln(0.85) * 60 ~ 9.75
+        // At 60fps: e^(-9.75/60) = 0.85 (15% decay per frame → fast return to zero).
+        // At 30fps: e^(-9.75/30) = 0.7225 (correct 2-frame equivalent).
+        let decay = (-9.75 * dt).exp();
         *pilot_yaw_rate *= decay;
         *pilot_pitch_rate *= decay;
 

@@ -998,6 +998,156 @@ fn draw_block_config_panel(
                     });
             }
 
+            // ----- POWER CIRCUITS (reactor blocks only) -----
+            if config.power_source.is_some() || config.kind == voxeldust_core::block::FunctionalBlockKind::Reactor as u8 {
+                let power_color = egui::Color32::from_rgb(255, 200, 60); // amber for power
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("POWER CIRCUITS").color(power_color).strong(),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    let ps = config.power_source.get_or_insert_with(Default::default);
+                    let mut remove_idx = None;
+                    for (i, circuit) in ps.circuits.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("NAME").color(dim_text).small());
+                            ui.add(egui::TextEdit::singleline(&mut circuit.name).desired_width(100.0));
+                            ui.label(egui::RichText::new("FRAC").color(dim_text).small());
+                            ui.add(egui::DragValue::new(&mut circuit.fraction)
+                                .range(0.0..=1.0).speed(0.01).fixed_decimals(2));
+                            if ui.small_button(
+                                egui::RichText::new("-").color(egui::Color32::from_rgb(255, 100, 100)),
+                            ).clicked() {
+                                remove_idx = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_idx {
+                        ps.circuits.remove(idx);
+                    }
+                    if ui.button(egui::RichText::new("+ Add Circuit").color(power_color)).clicked() {
+                        use voxeldust_core::signal::config::PowerCircuitConfig;
+                        ps.circuits.push(PowerCircuitConfig { name: "new".into(), fraction: 0.5 });
+                    }
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("ACCESS").color(dim_text).small());
+                        use voxeldust_core::signal::config::PowerAccessConfig;
+                        let access_label = match &ps.access {
+                            PowerAccessConfig::OwnerOnly => "Owner Only",
+                            PowerAccessConfig::AllowList(_) => "Allow List",
+                            PowerAccessConfig::Open => "Open",
+                        };
+                        egui::ComboBox::from_id_salt("power_access")
+                            .selected_text(access_label)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(matches!(ps.access, PowerAccessConfig::OwnerOnly), "Owner Only").clicked() {
+                                    ps.access = PowerAccessConfig::OwnerOnly;
+                                }
+                                if ui.selectable_label(matches!(ps.access, PowerAccessConfig::AllowList(_)), "Allow List").clicked() {
+                                    if !matches!(ps.access, PowerAccessConfig::AllowList(_)) {
+                                        ps.access = PowerAccessConfig::AllowList(Vec::new());
+                                    }
+                                }
+                                if ui.selectable_label(matches!(ps.access, PowerAccessConfig::Open), "Open").clicked() {
+                                    ps.access = PowerAccessConfig::Open;
+                                }
+                            });
+                    });
+                    if let voxeldust_core::signal::config::PowerAccessConfig::AllowList(ref mut names) = ps.access {
+                        let mut remove_name = None;
+                        for (i, name) in names.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
+                                if ui.small_button(
+                                    egui::RichText::new("-").color(egui::Color32::from_rgb(255, 100, 100)),
+                                ).clicked() {
+                                    remove_name = Some(i);
+                                }
+                            });
+                        }
+                        if let Some(idx) = remove_name {
+                            names.remove(idx);
+                        }
+                        if ui.button(egui::RichText::new("+ Add Player").color(power_color)).clicked() {
+                            names.push(String::new());
+                        }
+                    }
+                });
+            }
+
+            // ----- POWER SOURCE (consumer blocks) -----
+            if config.power_consumer.is_some() || !config.nearby_reactors.is_empty() {
+                let power_color = egui::Color32::from_rgb(255, 200, 60);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("POWER SOURCE").color(power_color).strong(),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    let pc = config.power_consumer.get_or_insert_with(Default::default);
+
+                    // Reactor dropdown.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("REACTOR").color(dim_text).small());
+                        let current_label = match pc.reactor_pos {
+                            Some(pos) => {
+                                config.nearby_reactors.iter()
+                                    .find(|r| r.pos == pos)
+                                    .map(|r| format!("{} ({},{},{}) — {:.0}m", r.label, r.pos.x, r.pos.y, r.pos.z, r.distance))
+                                    .unwrap_or_else(|| format!("({},{},{})", pos.x, pos.y, pos.z))
+                            }
+                            None => "None".to_string(),
+                        };
+                        egui::ComboBox::from_id_salt("power_reactor")
+                            .selected_text(&current_label)
+                            .width(250.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(pc.reactor_pos.is_none(), "None").clicked() {
+                                    pc.reactor_pos = None;
+                                    pc.circuit.clear();
+                                }
+                                for reactor in &config.nearby_reactors {
+                                    let label = format!("{} ({},{},{}) — {:.0}m",
+                                        reactor.label, reactor.pos.x, reactor.pos.y, reactor.pos.z, reactor.distance);
+                                    let selected = pc.reactor_pos == Some(reactor.pos);
+                                    if ui.selectable_label(selected, &label).clicked() {
+                                        pc.reactor_pos = Some(reactor.pos);
+                                        // Auto-select first circuit if none selected.
+                                        if pc.circuit.is_empty() {
+                                            if let Some(first) = reactor.circuits.first() {
+                                                pc.circuit = first.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                    });
+
+                    // Circuit dropdown (from selected reactor).
+                    if let Some(reactor_pos) = pc.reactor_pos {
+                        if let Some(reactor_info) = config.nearby_reactors.iter().find(|r| r.pos == reactor_pos) {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("CIRCUIT").color(dim_text).small());
+                                egui::ComboBox::from_id_salt("power_circuit")
+                                    .selected_text(if pc.circuit.is_empty() { "—" } else { &pc.circuit })
+                                    .show_ui(ui, |ui| {
+                                        for c in &reactor_info.circuits {
+                                            let selected = pc.circuit == *c;
+                                            if ui.selectable_label(selected, c).clicked() {
+                                                pc.circuit = c.clone();
+                                            }
+                                        }
+                                    });
+                            });
+                        }
+                        ui.label(egui::RichText::new("Connected").color(egui::Color32::from_rgb(60, 255, 120)).small());
+                    } else {
+                        ui.label(egui::RichText::new("No reactor selected").color(egui::Color32::from_rgb(255, 200, 60)).small());
+                    }
+                });
+            }
+
             ui.add_space(12.0);
             // Bottom accent line.
             let rect = ui.available_rect_before_wrap();

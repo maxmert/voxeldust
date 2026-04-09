@@ -52,6 +52,110 @@ fn deserialize_expression(etype: u8, val: f32, val2: f32) -> SignalExpression {
     }
 }
 
+fn encode_power_source<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    src: &crate::signal::config::PowerSourceConfig,
+) -> flatbuffers::WIPOffset<fb::PowerSourceConfigFB<'a>> {
+    let circuits: Vec<_> = src.circuits.iter().map(|c| {
+        let name = builder.create_string(&c.name);
+        fb::PowerCircuitFB::create(builder, &fb::PowerCircuitFBArgs {
+            name: Some(name), fraction: c.fraction,
+        })
+    }).collect();
+    let circuits_vec = builder.create_vector(&circuits);
+    let (access_mode, allow_list) = match &src.access {
+        crate::signal::config::PowerAccessConfig::OwnerOnly => (0u8, None),
+        crate::signal::config::PowerAccessConfig::AllowList(names) => {
+            let strs: Vec<_> = names.iter().map(|n| builder.create_string(n)).collect();
+            (1u8, Some(builder.create_vector(&strs)))
+        }
+        crate::signal::config::PowerAccessConfig::Open => (2u8, None),
+    };
+    fb::PowerSourceConfigFB::create(builder, &fb::PowerSourceConfigFBArgs {
+        circuits: Some(circuits_vec), access_mode, allow_list,
+    })
+}
+
+fn decode_power_source(fb: &fb::PowerSourceConfigFB<'_>) -> crate::signal::config::PowerSourceConfig {
+    let circuits = fb.circuits().map(|v| v.iter().map(|c| {
+        crate::signal::config::PowerCircuitConfig {
+            name: c.name().unwrap_or("").to_string(),
+            fraction: c.fraction(),
+        }
+    }).collect()).unwrap_or_default();
+    let access = match fb.access_mode() {
+        1 => {
+            let names = fb.allow_list().map(|v| {
+                v.iter().map(|s| s.to_string()).collect()
+            }).unwrap_or_default();
+            crate::signal::config::PowerAccessConfig::AllowList(names)
+        }
+        2 => crate::signal::config::PowerAccessConfig::Open,
+        _ => crate::signal::config::PowerAccessConfig::OwnerOnly,
+    };
+    crate::signal::config::PowerSourceConfig { circuits, access }
+}
+
+fn encode_power_consumer<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    con: &crate::signal::config::PowerConsumerConfig,
+) -> flatbuffers::WIPOffset<fb::PowerConsumerConfigFB<'a>> {
+    let circuit = builder.create_string(&con.circuit);
+    let (rx, ry, rz, has) = match con.reactor_pos {
+        Some(p) => (p.x, p.y, p.z, true),
+        None => (0, 0, 0, false),
+    };
+    fb::PowerConsumerConfigFB::create(builder, &fb::PowerConsumerConfigFBArgs {
+        reactor_x: rx, reactor_y: ry, reactor_z: rz,
+        has_reactor: has, circuit: Some(circuit),
+    })
+}
+
+fn decode_power_consumer(fb: &fb::PowerConsumerConfigFB<'_>) -> crate::signal::config::PowerConsumerConfig {
+    let reactor_pos = if fb.has_reactor() {
+        Some(glam::IVec3::new(fb.reactor_x(), fb.reactor_y(), fb.reactor_z()))
+    } else {
+        None
+    };
+    crate::signal::config::PowerConsumerConfig {
+        reactor_pos,
+        circuit: fb.circuit().unwrap_or("").to_string(),
+    }
+}
+
+fn encode_nearby_reactors<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    reactors: &[crate::signal::config::NearbyReactorInfo],
+) -> Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::NearbyReactorFB<'a>>>>> {
+    if reactors.is_empty() {
+        return None;
+    }
+    let entries: Vec<_> = reactors.iter().map(|r| {
+        let label = builder.create_string(&r.label);
+        let circuit_strs: Vec<_> = r.circuits.iter().map(|c| builder.create_string(c)).collect();
+        let circuits_vec = builder.create_vector(&circuit_strs);
+        fb::NearbyReactorFB::create(builder, &fb::NearbyReactorFBArgs {
+            pos_x: r.pos.x, pos_y: r.pos.y, pos_z: r.pos.z,
+            label: Some(label), distance: r.distance,
+            circuits: Some(circuits_vec),
+        })
+    }).collect();
+    Some(builder.create_vector(&entries))
+}
+
+fn decode_nearby_reactors(
+    v: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::NearbyReactorFB<'_>>>>,
+) -> Vec<crate::signal::config::NearbyReactorInfo> {
+    v.map(|vec| vec.iter().map(|r| {
+        crate::signal::config::NearbyReactorInfo {
+            pos: glam::IVec3::new(r.pos_x(), r.pos_y(), r.pos_z()),
+            label: r.label().unwrap_or("").to_string(),
+            distance: r.distance(),
+            circuits: r.circuits().map(|c| c.iter().map(|s| s.to_string()).collect()).unwrap_or_default(),
+        }
+    }).collect()).unwrap_or_default()
+}
+
 fn u8_to_signal_property(v: u8) -> SignalProperty {
     match v {
         0 => SignalProperty::Active,
@@ -455,10 +559,13 @@ impl ClientMsg {
                 let sv = builder.create_vector(&sub_b);
                 let rv = builder.create_vector(&rules);
                 let stv = builder.create_vector(&seats);
+                let ps = data.power_source.as_ref().map(|s| encode_power_source(&mut builder, s));
+                let pc = data.power_consumer.as_ref().map(|c| encode_power_consumer(&mut builder, c));
                 let bcu = fb::BlockConfigUpdate::create(&mut builder, &fb::BlockConfigUpdateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
                     publish_bindings: Some(pv), subscribe_bindings: Some(sv),
                     converter_rules: Some(rv), seat_mappings: Some(stv),
+                    power_source: ps, power_consumer: pc,
                 });
                 let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
                     payload_type: fb::ClientPayload::BlockConfigUpdate,
@@ -569,12 +676,16 @@ impl ClientMsg {
                         property: u8_to_signal_property(s.property()),
                     })
                 }).collect()).unwrap_or_default();
+                let power_source = bcu.power_source().map(|ps| decode_power_source(&ps));
+                let power_consumer = bcu.power_consumer().map(|pc| decode_power_consumer(&pc));
                 Ok(ClientMsg::BlockConfigUpdate(crate::signal::config::BlockConfigUpdateData {
                     block_pos: glam::IVec3::new(bcu.block_x(), bcu.block_y(), bcu.block_z()),
                     publish_bindings: pub_b,
                     subscribe_bindings: sub_b,
                     converter_rules: rules,
                     seat_mappings: seats,
+                    power_source,
+                    power_consumer,
                 }))
             }
             fb::ClientPayload::SubBlockEditRequest => {
@@ -912,6 +1023,9 @@ impl ServerMsg {
                 let rules_vec = builder.create_vector(&rules);
                 let seats_vec = builder.create_vector(&seats);
                 let channels_vec = builder.create_vector(&channels);
+                let ps = data.power_source.as_ref().map(|s| encode_power_source(&mut builder, s));
+                let pc = data.power_consumer.as_ref().map(|c| encode_power_consumer(&mut builder, c));
+                let nr = encode_nearby_reactors(&mut builder, &data.nearby_reactors);
 
                 let bcs = fb::BlockConfigState::create(&mut builder, &fb::BlockConfigStateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
@@ -919,6 +1033,7 @@ impl ServerMsg {
                     publish_bindings: Some(pub_vec), subscribe_bindings: Some(sub_vec),
                     converter_rules: Some(rules_vec), seat_mappings: Some(seats_vec),
                     available_channels: Some(channels_vec),
+                    power_source: ps, power_consumer: pc, nearby_reactors: nr,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::BlockConfigState,
@@ -1219,6 +1334,9 @@ impl ServerMsg {
                 let channels = bcs.available_channels().map(|v| {
                     v.iter().map(|s| s.to_string()).collect()
                 }).unwrap_or_default();
+                let power_source = bcs.power_source().map(|ps| decode_power_source(&ps));
+                let power_consumer = bcs.power_consumer().map(|pc| decode_power_consumer(&pc));
+                let nearby_reactors = decode_nearby_reactors(bcs.nearby_reactors());
                 Ok(ServerMsg::BlockConfigState(crate::signal::config::BlockSignalConfig {
                     block_pos: glam::IVec3::new(bcs.block_x(), bcs.block_y(), bcs.block_z()),
                     block_type: bcs.block_type(),
@@ -1228,6 +1346,9 @@ impl ServerMsg {
                     converter_rules: rules,
                     seat_mappings: seats,
                     available_channels: channels,
+                    power_source,
+                    power_consumer,
+                    nearby_reactors,
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),

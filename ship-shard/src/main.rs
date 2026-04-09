@@ -228,101 +228,87 @@ struct ThrusterBlock {
 struct ReactorState {
     active: bool,
     throttle: f32,
+    max_generation_w: f64,
+    broadcast_range: f32,
+    access: PowerAccess,
+    placed_by: u64,
+    circuits: Vec<PowerCircuit>,
 }
 
 impl Default for ReactorState {
     fn default() -> Self {
-        Self { active: true, throttle: 1.0 }
+        Self {
+            active: true,
+            throttle: 1.0,
+            max_generation_w: 500_000.0,
+            broadcast_range: 50.0,
+            access: PowerAccess::OwnerOnly,
+            placed_by: 0,
+            circuits: Vec::new(),
+        }
     }
 }
 
-/// Battery runtime state. Automatically charges when surplus, discharges when deficit.
+/// A named power circuit on a reactor. Each circuit gets a fraction of the
+/// reactor's output and tracks its own supply/demand budget.
+#[derive(Clone, Debug)]
+struct PowerCircuit {
+    name: String,
+    fraction: f32,
+    supply_w: f64,
+    demand_w: f64,
+    power_ratio: f32,
+}
+
+/// Access control for wireless power broadcast.
+#[derive(Clone, Debug, Default)]
+enum PowerAccess {
+    /// Only blocks placed by the same player (default).
+    #[default]
+    OwnerOnly,
+    /// Owner + listed player session IDs.
+    AllowList(Vec<u64>),
+    /// Anyone in range.
+    Open,
+}
+
+/// Links a consumer block to a reactor for wireless power.
+/// The reactor is identified by its stable block position (survives chunk reload).
+#[derive(Component)]
+struct PoweredBy {
+    reactor_pos: glam::IVec3,
+    circuit: String,
+    consumption_w: f64,
+    placed_by: u64,
+}
+
+/// Cached consumer entry for a reactor's consumer list.
+#[derive(Clone, Debug)]
+struct CachedConsumer {
+    entity: Entity,
+    circuit_idx: usize,
+    consumption_w: f64,
+}
+
+/// Pre-computed consumer list for a reactor. Rebuilt when `dirty` is set.
+#[derive(Component)]
+struct ReactorConsumerCache {
+    entries: Vec<CachedConsumer>,
+    dirty: bool,
+}
+
+impl Default for ReactorConsumerCache {
+    fn default() -> Self {
+        Self { entries: Vec::new(), dirty: true }
+    }
+}
+
+/// Battery runtime state (dormant — reserved for future use).
 #[derive(Component)]
 struct BatteryState {
     energy_j: f64,
     capacity_j: f64,
     max_rate_w: f64,
-}
-
-/// Marks a block as a power source. Attached to reactors and solar panels.
-#[derive(Component)]
-struct PowerSource {
-    max_generation_w: f64,
-}
-
-/// Marks a block as a power consumer. Tracks effective load.
-#[derive(Component, Default)]
-struct PowerConsumer {
-    base_consumption_w: f64,
-    load_factor: f32,
-}
-
-/// Which power network a functional block belongs to.
-/// Assigned by `rebuild_power_networks`. None = not connected to any wires = no power.
-#[derive(Component, Default)]
-struct PowerNetworkMembership {
-    network_id: Option<u16>,
-}
-
-/// A single isolated power network formed by connected PowerWire sub-blocks.
-#[derive(Clone, Debug, Default)]
-struct PowerNetwork {
-    connected_entities: Vec<Entity>,
-    total_supply_w: f64,
-    total_demand_w: f64,
-    power_ratio: f32,
-    surplus_w: f64,
-}
-
-/// All power networks on this shard. Rebuilt when wire/block topology changes.
-#[derive(Resource, Default)]
-struct PowerNetworkTable {
-    networks: Vec<PowerNetwork>,
-    dirty: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Union-Find (for power network graph building)
-// ---------------------------------------------------------------------------
-
-struct UnionFind {
-    parent: Vec<usize>,
-    rank: Vec<u8>,
-}
-
-impl UnionFind {
-    fn new() -> Self {
-        Self { parent: Vec::new(), rank: Vec::new() }
-    }
-
-    fn make_set(&mut self) -> usize {
-        let id = self.parent.len();
-        self.parent.push(id);
-        self.rank.push(0);
-        id
-    }
-
-    fn find(&mut self, mut x: usize) -> usize {
-        while self.parent[x] != x {
-            self.parent[x] = self.parent[self.parent[x]]; // path halving
-            x = self.parent[x];
-        }
-        x
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra == rb { return; }
-        if self.rank[ra] < self.rank[rb] {
-            self.parent[ra] = rb;
-        } else if self.rank[ra] > self.rank[rb] {
-            self.parent[rb] = ra;
-        } else {
-            self.parent[rb] = ra;
-            self.rank[ra] += 1;
-        }
-    }
 }
 
 /// Ship center of mass (block coordinates). Updated by aggregate_ship_properties.
@@ -499,7 +485,9 @@ struct SignalQueryCtx<'w, 's> {
     sub_query: Query<'w, 's, &'static SignalSubscriber>,
     converter_query: Query<'w, 's, &'static SignalConverterConfig>,
     seat_query: Query<'w, 's, &'static SeatChannelMapping>,
-    reactor_query: Query<'w, 's, &'static mut ReactorState>,
+    reactor_query: Query<'w, 's, (&'static mut ReactorState, Option<&'static FunctionalBlockRef>)>,
+    powered_by_query: Query<'w, 's, &'static PoweredBy>,
+    cache_query: Query<'w, 's, &'static mut ReactorConsumerCache>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,6 +1521,9 @@ const SAVE_INTERVAL_TICKS: u64 = 60;
 /// redb table definition for ship chunk data.
 const SHIP_CHUNKS_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("ship_chunks");
 
+/// redb table definition for per-block power configs and channel overrides.
+const BLOCK_CONFIGS_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("block_configs");
+
 /// Encode a chunk key as bytes for redb key.
 fn chunk_key_bytes(key: glam::IVec3) -> [u8; 12] {
     let mut buf = [0u8; 12];
@@ -1549,6 +1540,225 @@ fn chunk_key_from_bytes(buf: &[u8]) -> glam::IVec3 {
         i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
         i32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
     )
+}
+
+/// Per-block config record for persistence. Stores channel override and power config.
+struct BlockConfigRecord {
+    channel_override: String,
+    power_config: Option<block::PowerConfig>,
+}
+
+/// Serialize a BlockConfigRecord to bytes.
+///
+/// Format:
+///   - channel_override: u32 LE length, then UTF-8 bytes
+///   - power_config tag: 0=None, 1=Source, 2=Consumer
+///   - Source: u32 LE circuit count, then per circuit: (u32 LE name_len, name bytes, f32 LE fraction), f32 LE broadcast_range
+///   - Consumer: 3×i32 LE reactor_pos, u32 LE circuit_len, circuit bytes
+fn serialize_block_config(record: &BlockConfigRecord) -> Vec<u8> {
+    let mut buf = Vec::new();
+    // channel_override
+    let co_bytes = record.channel_override.as_bytes();
+    buf.extend_from_slice(&(co_bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(co_bytes);
+    // power_config
+    match &record.power_config {
+        None => buf.push(0),
+        Some(block::PowerConfig::Source { circuits, broadcast_range }) => {
+            buf.push(1);
+            buf.extend_from_slice(&(circuits.len() as u32).to_le_bytes());
+            for (name, fraction) in circuits {
+                let name_bytes = name.as_bytes();
+                buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(name_bytes);
+                buf.extend_from_slice(&fraction.to_le_bytes());
+            }
+            buf.extend_from_slice(&broadcast_range.to_le_bytes());
+        }
+        Some(block::PowerConfig::Consumer { reactor_pos, circuit }) => {
+            buf.push(2);
+            buf.extend_from_slice(&reactor_pos.x.to_le_bytes());
+            buf.extend_from_slice(&reactor_pos.y.to_le_bytes());
+            buf.extend_from_slice(&reactor_pos.z.to_le_bytes());
+            let circuit_bytes = circuit.as_bytes();
+            buf.extend_from_slice(&(circuit_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(circuit_bytes);
+        }
+    }
+    buf
+}
+
+/// Deserialize a BlockConfigRecord from bytes.
+fn deserialize_block_config(data: &[u8]) -> Option<BlockConfigRecord> {
+    let mut pos = 0usize;
+    if data.len() < 4 { return None; }
+
+    // channel_override
+    let co_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize;
+    pos += 4;
+    if pos + co_len > data.len() { return None; }
+    let channel_override = std::str::from_utf8(&data[pos..pos+co_len]).ok()?.to_string();
+    pos += co_len;
+
+    if pos >= data.len() { return None; }
+    let tag = data[pos];
+    pos += 1;
+
+    let power_config = match tag {
+        0 => None,
+        1 => {
+            // Source
+            if pos + 4 > data.len() { return None; }
+            let circuit_count = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize;
+            pos += 4;
+            let mut circuits = Vec::with_capacity(circuit_count);
+            for _ in 0..circuit_count {
+                if pos + 4 > data.len() { return None; }
+                let name_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize;
+                pos += 4;
+                if pos + name_len > data.len() { return None; }
+                let name = std::str::from_utf8(&data[pos..pos+name_len]).ok()?.to_string();
+                pos += name_len;
+                if pos + 4 > data.len() { return None; }
+                let fraction = f32::from_le_bytes(data[pos..pos+4].try_into().ok()?);
+                pos += 4;
+                circuits.push((name, fraction));
+            }
+            if pos + 4 > data.len() { return None; }
+            let broadcast_range = f32::from_le_bytes(data[pos..pos+4].try_into().ok()?);
+            // pos += 4; // not needed, last field
+            Some(block::PowerConfig::Source { circuits, broadcast_range })
+        }
+        2 => {
+            // Consumer
+            if pos + 12 > data.len() { return None; }
+            let rx = i32::from_le_bytes(data[pos..pos+4].try_into().ok()?);
+            pos += 4;
+            let ry = i32::from_le_bytes(data[pos..pos+4].try_into().ok()?);
+            pos += 4;
+            let rz = i32::from_le_bytes(data[pos..pos+4].try_into().ok()?);
+            pos += 4;
+            if pos + 4 > data.len() { return None; }
+            let circuit_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize;
+            pos += 4;
+            if pos + circuit_len > data.len() { return None; }
+            let circuit = std::str::from_utf8(&data[pos..pos+circuit_len]).ok()?.to_string();
+            Some(block::PowerConfig::Consumer {
+                reactor_pos: glam::IVec3::new(rx, ry, rz),
+                circuit,
+            })
+        }
+        _ => return None,
+    };
+
+    Some(BlockConfigRecord { channel_override, power_config })
+}
+
+/// Load block configs from redb into a ShipGrid's channel_overrides and power_configs.
+fn load_block_configs(db: &redb::Database, grid: &mut ShipGrid) {
+    let txn = match db.begin_read() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let table = match txn.open_table(BLOCK_CONFIGS_TABLE) {
+        Ok(t) => t,
+        Err(_) => return, // table doesn't exist yet
+    };
+
+    let mut count = 0usize;
+    let mut iter = match table.range::<&[u8]>(..) {
+        Ok(i) => i,
+        Err(_) => return,
+    };
+    while let Some(entry) = iter.next() {
+        let (key, value) = match entry {
+            Ok(kv) => kv,
+            Err(_) => continue,
+        };
+        let key_bytes = key.value();
+        if key_bytes.len() < 12 { continue; }
+        let block_pos = chunk_key_from_bytes(key_bytes);
+        if let Some(record) = deserialize_block_config(value.value()) {
+            if !record.channel_override.is_empty() {
+                grid.set_channel_override(block_pos.x, block_pos.y, block_pos.z, &record.channel_override);
+            }
+            if let Some(cfg) = record.power_config {
+                grid.set_power_config(block_pos.x, block_pos.y, block_pos.z, cfg);
+            }
+            count += 1;
+        }
+    }
+    if count > 0 {
+        info!(configs = count, "loaded block configs from persistence");
+    }
+}
+
+/// Save ALL channel overrides and power configs from the grid to redb.
+fn save_block_configs(db: &redb::Database, grid: &ShipGrid) {
+    let txn = match db.begin_write() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("redb write transaction failed for block configs: {e}");
+            return;
+        }
+    };
+    {
+        let mut table = match txn.open_table(BLOCK_CONFIGS_TABLE) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("redb open block_configs table failed: {e}");
+                return;
+            }
+        };
+
+        // Collect all positions that have either a channel override or power config.
+        let mut positions = std::collections::HashSet::new();
+        for (pos, _) in grid.iter_channel_overrides() {
+            positions.insert(pos);
+        }
+        for (pos, _) in grid.iter_power_configs() {
+            positions.insert(pos);
+        }
+
+        for pos in &positions {
+            let record = BlockConfigRecord {
+                channel_override: grid.channel_override(*pos).unwrap_or("").to_string(),
+                power_config: grid.power_config(*pos).cloned(),
+            };
+            let key_bytes = chunk_key_bytes(*pos);
+            let data = serialize_block_config(&record);
+            let _ = table.insert(key_bytes.as_slice(), data.as_slice());
+        }
+    }
+    if let Err(e) = txn.commit() {
+        warn!("redb commit failed for block configs: {e}");
+    }
+}
+
+/// Save a single block's config to redb (called after individual config updates).
+fn save_single_block_config(db: &redb::Database, pos: glam::IVec3, record: &BlockConfigRecord) {
+    let txn = match db.begin_write() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("redb write transaction failed for single block config: {e}");
+            return;
+        }
+    };
+    {
+        let mut table = match txn.open_table(BLOCK_CONFIGS_TABLE) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("redb open block_configs table failed: {e}");
+                return;
+            }
+        };
+        let key_bytes = chunk_key_bytes(pos);
+        let data = serialize_block_config(record);
+        let _ = table.insert(key_bytes.as_slice(), data.as_slice());
+    }
+    if let Err(e) = txn.commit() {
+        warn!("redb commit failed for single block config: {e}");
+    }
 }
 
 /// Load a ShipGrid from the redb database. Returns None if the database is empty.
@@ -1683,8 +1893,14 @@ fn apply_config_updates(
     block_index: Res<FunctionalBlockIndex>,
     mut commands: Commands,
     mut channels: ResMut<SignalChannelTable>,
+    mut reactor_query: Query<(&mut ReactorState, Option<&mut ReactorConsumerCache>)>,
+    block_ref_query: Query<&FunctionalBlockRef>,
+    registry: Res<BlockRegistryResource>,
+    grid: Res<ShipGridResource>,
+    persistence: Option<Res<ShipPersistence>>,
 ) {
     use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
+    use voxeldust_core::signal::config::*;
     let default_scope = SignalScope::Local;
     let default_merge = ChannelMergeStrategy::LastWrite;
 
@@ -1735,6 +1951,86 @@ fn apply_config_updates(
             });
         }
 
+        // Apply power source config updates (reactor circuit allocation + access).
+        if let Some(ref ps) = update.power_source {
+            if let Ok((mut rs, cache_opt)) = reactor_query.get_mut(entity) {
+                rs.circuits = ps.circuits.iter().map(|c| PowerCircuit {
+                    name: c.name.clone(),
+                    fraction: c.fraction.clamp(0.0, 1.0),
+                    supply_w: 0.0,
+                    demand_w: 0.0,
+                    power_ratio: 1.0,
+                }).collect();
+                rs.access = match &ps.access {
+                    PowerAccessConfig::OwnerOnly => PowerAccess::OwnerOnly,
+                    PowerAccessConfig::AllowList(names) => PowerAccess::AllowList(
+                        names.iter().filter_map(|n| n.parse::<u64>().ok()).collect(),
+                    ),
+                    PowerAccessConfig::Open => PowerAccess::Open,
+                };
+                if let Some(mut cache) = cache_opt {
+                    cache.dirty = true;
+                }
+            }
+        }
+
+        // Apply power consumer config updates (reactor selection + circuit).
+        if let Some(ref pc) = update.power_consumer {
+            if let Some(reactor_pos) = pc.reactor_pos {
+                let consumption_w = block_ref_query.get(entity).ok()
+                    .and_then(|fb| registry.0.power_props(fb.block_id))
+                    .map(|p| p.consumption_w)
+                    .unwrap_or(0.0);
+                commands.entity(entity).insert(PoweredBy {
+                    reactor_pos,
+                    circuit: pc.circuit.clone(),
+                    consumption_w,
+                    placed_by: 0,
+                });
+                // Mark the target reactor's cache dirty so it picks up the new consumer.
+                if let Some(&reactor_entity) = block_index.0.get(&reactor_pos) {
+                    if let Ok((_, cache_opt)) = reactor_query.get_mut(reactor_entity) {
+                        if let Some(mut cache) = cache_opt {
+                            cache.dirty = true;
+                        }
+                    }
+                }
+            } else {
+                commands.entity(entity).remove::<PoweredBy>();
+                // Any reactor that had this consumer will pick up the removal
+                // when the cache is rebuilt (via dirty flag or next rebuild cycle).
+            }
+        }
+
+        // Persist config change to redb.
+        if update.power_source.is_some() || update.power_consumer.is_some() {
+            if let Some(ref persist) = persistence {
+                let power_cfg = if let Some(ref ps) = update.power_source {
+                    Some(block::PowerConfig::Source {
+                        circuits: ps.circuits.iter().map(|c| (c.name.clone(), c.fraction)).collect(),
+                        broadcast_range: reactor_query.get(entity).ok()
+                            .map(|(rs, _)| rs.broadcast_range)
+                            .unwrap_or(50.0),
+                    })
+                } else if let Some(ref pc) = update.power_consumer {
+                    pc.reactor_pos.map(|rp| block::PowerConfig::Consumer {
+                        reactor_pos: rp,
+                        circuit: pc.circuit.clone(),
+                    })
+                } else {
+                    None
+                };
+                let channel_override = grid.0.channel_override(update.block_pos)
+                    .unwrap_or("")
+                    .to_string();
+                let record = BlockConfigRecord {
+                    channel_override,
+                    power_config: power_cfg,
+                };
+                save_single_block_config(&persist.db, update.block_pos, &record);
+            }
+        }
+
         info!(block = ?update.block_pos, "applied signal config update from client");
     }
 }
@@ -1781,7 +2077,6 @@ fn process_sub_block_edits(
     connected: Res<ConnectedPlayer>,
     bridge: Res<NetworkBridge>,
     mut persistence: Option<ResMut<ShipPersistence>>,
-    mut power_nets: ResMut<PowerNetworkTable>,
 ) {
     use voxeldust_core::block::sub_block::{SubBlockElement, SubBlockType};
     use voxeldust_core::client_message::{action, SubBlockModData, ChunkDeltaData, ServerMsg};
@@ -1857,11 +2152,6 @@ fn process_sub_block_edits(
         // Mark chunk dirty for persistence.
         if let Some(ref mut persist) = persistence {
             persist.pending_saves.insert(chunk_key);
-        }
-
-        // Trigger power network rebuild when wiring changes.
-        if element_type == SubBlockType::PowerWire {
-            power_nets.dirty = true;
         }
 
         // Broadcast sub-block delta to clients.
@@ -2061,7 +2351,7 @@ fn produce_player_edits(
                                     }
                                 }
                                 FunctionalBlockKind::Reactor => {
-                                    if let Ok(mut rs) = signal_ctx.reactor_query.get_mut(entity) {
+                                    if let Ok((mut rs, _)) = signal_ctx.reactor_query.get_mut(entity) {
                                         rs.active = !rs.active;
                                         info!(active = rs.active, block = ?hit.world_pos, "reactor toggled");
                                     }
@@ -2092,6 +2382,9 @@ fn produce_player_edits(
                             &signal_ctx.pub_query, &signal_ctx.sub_query,
                             &signal_ctx.converter_query, &signal_ctx.seat_query,
                             &signal_ctx.channels,
+                            &signal_ctx.reactor_query,
+                            &signal_ctx.powered_by_query,
+                            &registry.0,
                         );
                         // Send to client via TCP.
                         if let Some(session) = connected.session {
@@ -2124,6 +2417,9 @@ fn build_config_snapshot(
     converter_query: &Query<&SignalConverterConfig>,
     seat_query: &Query<&SeatChannelMapping>,
     channels: &SignalChannelTable,
+    reactor_query: &Query<(&mut ReactorState, Option<&FunctionalBlockRef>)>,
+    powered_by_query: &Query<&PoweredBy>,
+    _registry: &BlockRegistry,
 ) -> voxeldust_core::signal::config::BlockSignalConfig {
     use voxeldust_core::signal::config::*;
 
@@ -2167,6 +2463,51 @@ fn build_config_snapshot(
         .collect();
     available_channels.sort();
 
+    // Power source config (reactors only).
+    let power_source = if kind == FunctionalBlockKind::Reactor {
+        reactor_query.get(entity).ok().map(|(rs, _)| {
+            PowerSourceConfig {
+                circuits: rs.circuits.iter().map(|c| PowerCircuitConfig {
+                    name: c.name.clone(),
+                    fraction: c.fraction,
+                }).collect(),
+                access: match &rs.access {
+                    PowerAccess::OwnerOnly => PowerAccessConfig::OwnerOnly,
+                    PowerAccess::AllowList(list) => PowerAccessConfig::AllowList(
+                        list.iter().map(|id| format!("{id}")).collect(),
+                    ),
+                    PowerAccess::Open => PowerAccessConfig::Open,
+                },
+            }
+        })
+    } else {
+        None
+    };
+
+    // Power consumer config.
+    let power_consumer = powered_by_query.get(entity).ok().map(|pb| {
+        PowerConsumerConfig {
+            reactor_pos: Some(pb.reactor_pos),
+            circuit: pb.circuit.clone(),
+        }
+    });
+
+    // Nearby reactors in range (for consumer config dropdown).
+    let mut nearby_reactors = Vec::new();
+    for (rs, fb_ref) in reactor_query.iter() {
+        let Some(reactor_ref) = fb_ref else { continue };
+        let dist = (reactor_ref.world_pos - pos).as_vec3().length();
+        if dist > rs.broadcast_range { continue; }
+        let label = format!("Reactor ({})", reactor_ref.block_id.as_u16());
+        nearby_reactors.push(NearbyReactorInfo {
+            pos: reactor_ref.world_pos,
+            label,
+            distance: dist,
+            circuits: rs.circuits.iter().map(|c| c.name.clone()).collect(),
+        });
+    }
+    nearby_reactors.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+
     BlockSignalConfig {
         block_pos: pos,
         block_type: block_id.as_u16(),
@@ -2176,6 +2517,9 @@ fn build_config_snapshot(
         converter_rules,
         seat_mappings,
         available_channels,
+        power_source,
+        power_consumer,
+        nearby_reactors,
     }
 }
 
@@ -2515,15 +2859,25 @@ fn add_default_signal_bindings(
             });
         }
         FunctionalBlockKind::Reactor => {
-            let channel_id = channels.resolve_or_create(
-                "power", SignalScope::Local, ChannelMergeStrategy::LastWrite, 0,
-            );
-            entity_cmds.insert(SignalPublisher {
-                bindings: vec![PublishBinding {
-                    channel_id,
-                    property: SignalProperty::Level,
-                }],
-            });
+            // Reactor state with wireless power config from grid or defaults.
+            let pp = registry.power_props(block_id);
+            let mut rs = ReactorState {
+                max_generation_w: pp.map(|p| p.generation_w).unwrap_or(500_000.0),
+                broadcast_range: pp.map(|p| p.broadcast_range).unwrap_or(50.0),
+                ..Default::default()
+            };
+            if let Some(block::PowerConfig::Source { circuits, broadcast_range }) = grid.power_config(pos) {
+                rs.broadcast_range = *broadcast_range;
+                rs.circuits = circuits.iter().map(|(name, frac)| PowerCircuit {
+                    name: name.clone(),
+                    fraction: *frac,
+                    supply_w: 0.0,
+                    demand_w: 0.0,
+                    power_ratio: 1.0,
+                }).collect();
+            }
+            entity_cmds.insert(rs);
+            entity_cmds.insert(ReactorConsumerCache::default());
         }
         FunctionalBlockKind::Seat => {
             // Seats get the full channel mapping for pilot controls, resolved to IDs.
@@ -2550,234 +2904,82 @@ fn add_default_signal_bindings(
         }
     }
 
-    // Attach power components based on PowerProps (applies to ALL functional blocks).
-    if let Some(pp) = registry.power_props(block_id) {
-        if pp.generation_w > 0.0 {
-            entity_cmds.insert(PowerSource { max_generation_w: pp.generation_w });
-        }
-        if pp.consumption_w > 0.0 {
-            entity_cmds.insert(PowerConsumer {
-                base_consumption_w: pp.consumption_w,
-                load_factor: 0.0,
-            });
-        }
-        if pp.storage_j > 0.0 {
-            entity_cmds.insert(BatteryState {
-                energy_j: pp.storage_j, // start fully charged
-                capacity_j: pp.storage_j,
-                max_rate_w: pp.charge_rate_w,
-            });
-        }
-    }
-    // Every functional block gets network membership (None = no power).
-    entity_cmds.insert(PowerNetworkMembership::default());
-
-    // Reactors get runtime state for toggle/throttle.
-    if kind == FunctionalBlockKind::Reactor {
-        entity_cmds.insert(ReactorState::default());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Signal pipeline systems
-// ---------------------------------------------------------------------------
-// Power network systems
-// ---------------------------------------------------------------------------
-
-/// Rebuild the power network graph from PowerWire sub-blocks.
-/// Uses Union-Find to group connected wires into networks, then assigns
-/// each functional block to the network touching it.
-fn rebuild_power_networks(
-    mut net_table: ResMut<PowerNetworkTable>,
-    grid: Res<ShipGridResource>,
-    block_index: Res<FunctionalBlockIndex>,
-    mut membership_query: Query<&mut PowerNetworkMembership>,
-) {
-    if !net_table.dirty { return; }
-    net_table.dirty = false;
-
-    use voxeldust_core::block::sub_block::{SubBlockType, face_to_offset, opposite_face};
-    use voxeldust_core::block::palette::{CHUNK_SIZE, index_to_xyz};
-    use std::collections::HashMap;
-
-    let cs = CHUNK_SIZE as i32;
-
-    // Step 1: Collect all PowerWire sub-blocks and assign union-find IDs.
-    let mut uf = UnionFind::new();
-    let mut wire_map: HashMap<(glam::IVec3, u8), usize> = HashMap::new();
-
-    for (chunk_key, chunk) in grid.0.iter_chunks() {
-        for (flat_idx, elements) in chunk.iter_sub_blocks() {
-            let (lx, ly, lz) = index_to_xyz(flat_idx as usize);
-            let world_pos = glam::IVec3::new(
-                chunk_key.x * cs + lx as i32,
-                chunk_key.y * cs + ly as i32,
-                chunk_key.z * cs + lz as i32,
-            );
-            for elem in elements {
-                if elem.element_type == SubBlockType::PowerWire {
-                    let id = uf.make_set();
-                    wire_map.insert((world_pos, elem.face), id);
-                }
-            }
-        }
-    }
-
-    // Step 2: Union wires on opposing faces of adjacent blocks.
-    let keys: Vec<_> = wire_map.keys().cloned().collect();
-    for (pos, face) in keys {
-        let adj_pos = pos + face_to_offset(face);
-        let opp_face = opposite_face(face);
-        if let Some(&adj_id) = wire_map.get(&(adj_pos, opp_face)) {
-            let my_id = wire_map[&(pos, face)];
-            uf.union(my_id, adj_id);
-        }
-    }
-
-    // Step 3: Group wires by root → network index.
-    let mut root_to_network: HashMap<usize, u16> = HashMap::new();
-    let mut networks: Vec<PowerNetwork> = Vec::new();
-
-    for (&(pos, face), &uf_id) in &wire_map {
-        let root = uf.find(uf_id);
-        let net_idx = *root_to_network.entry(root).or_insert_with(|| {
-            let idx = networks.len() as u16;
-            networks.push(PowerNetwork::default());
-            idx
+    // Attach PoweredBy for blocks with power config (thrusters, etc.).
+    if let Some(block::PowerConfig::Consumer { reactor_pos, circuit }) = grid.power_config(pos) {
+        let consumption_w = registry.power_props(block_id)
+            .map(|p| p.consumption_w)
+            .unwrap_or(0.0);
+        entity_cmds.insert(PoweredBy {
+            reactor_pos: *reactor_pos,
+            circuit: circuit.clone(),
+            consumption_w,
+            placed_by: 0, // starter ship — same owner as reactor
         });
-        let _ = (pos, face); // wire positions tracked implicitly via entity membership
     }
-
-    // Step 4: Assign functional blocks to networks.
-    // A block connects to a network if it has a PowerWire on any of its faces.
-    // First, build a map of block positions that have wires → network ID.
-    let mut block_pos_to_network: HashMap<glam::IVec3, u16> = HashMap::new();
-    for (&(pos, _face), &uf_id) in &wire_map {
-        let root = uf.find(uf_id);
-        if let Some(&net_idx) = root_to_network.get(&root) {
-            block_pos_to_network.insert(pos, net_idx);
-        }
-    }
-
-    // Clear all memberships first.
-    for mut m in &mut membership_query {
-        m.network_id = None;
-    }
-
-    // Assign entities to networks based on their block position having a wire.
-    for (&pos, &entity) in block_index.0.iter() {
-        if let Some(&net_idx) = block_pos_to_network.get(&pos) {
-            if let Ok(mut m) = membership_query.get_mut(entity) {
-                m.network_id = Some(net_idx);
-            }
-            if let Some(net) = networks.get_mut(net_idx as usize) {
-                net.connected_entities.push(entity);
-            }
-        } else {
-            // Check adjacent blocks for wires facing toward this block.
-            for face in 0..6u8 {
-                let adj_pos = pos + face_to_offset(face);
-                let opp_face = opposite_face(face);
-                if wire_map.contains_key(&(adj_pos, opp_face)) {
-                    let root = uf.find(wire_map[&(adj_pos, opp_face)]);
-                    if let Some(&net_idx) = root_to_network.get(&root) {
-                        if let Ok(mut m) = membership_query.get_mut(entity) {
-                            m.network_id = Some(net_idx);
-                        }
-                        if let Some(net) = networks.get_mut(net_idx as usize) {
-                            net.connected_entities.push(entity);
-                        }
-                        break; // connected to first matching network
-                    }
-                }
-            }
-        }
-    }
-
-    net_table.networks = networks;
-    tracing::info!(
-        network_count = net_table.networks.len(),
-        wire_count = wire_map.len(),
-        "power networks rebuilt",
-    );
 }
 
-/// Compute power budget per network: supply, demand, battery charge/discharge, ratio.
-/// Two-pass approach: first compute supply/demand/surplus, then handle batteries.
-fn compute_power_budget(
-    mut net_table: ResMut<PowerNetworkTable>,
-    sources: Query<(&PowerSource, &PowerNetworkMembership, Option<&ReactorState>)>,
-    consumers: Query<(&PowerConsumer, &PowerNetworkMembership)>,
-    mut batteries: Query<(&mut BatteryState, &PowerNetworkMembership)>,
+// ---------------------------------------------------------------------------
+// Wireless power + Signal pipeline systems
+// ---------------------------------------------------------------------------
+
+/// Rebuild the per-reactor consumer cache when dirty.
+/// Scans all PoweredBy consumers, applies range + auth checks, maps to circuit index.
+fn rebuild_reactor_consumers(
+    mut reactors: Query<(&ReactorState, &FunctionalBlockRef, &mut ReactorConsumerCache)>,
+    consumers: Query<(Entity, &PoweredBy, &FunctionalBlockRef)>,
 ) {
-    const TICK_DT: f64 = 1.0 / 20.0; // 50ms per tick
-    let net_count = net_table.networks.len();
-    if net_count == 0 { return; }
-
-    // Pass 1: Sum supply and demand per network.
-    for net in &mut net_table.networks {
-        net.total_supply_w = 0.0;
-        net.total_demand_w = 0.0;
-        net.surplus_w = 0.0;
-        net.power_ratio = 1.0;
-    }
-
-    for (source, membership, reactor_state) in &sources {
-        if let Some(idx) = membership.network_id {
-            if let Some(net) = net_table.networks.get_mut(idx as usize) {
-                let output = match reactor_state {
-                    Some(rs) if rs.active => source.max_generation_w * rs.throttle as f64,
-                    Some(_) => 0.0,
-                    None => source.max_generation_w, // solar panel
-                };
-                net.total_supply_w += output;
+    for (rs, reactor_ref, mut cache) in &mut reactors {
+        if !cache.dirty { continue; }
+        cache.dirty = false;
+        cache.entries.clear();
+        for (entity, powered_by, consumer_ref) in &consumers {
+            if powered_by.reactor_pos != reactor_ref.world_pos { continue; }
+            let dist = (consumer_ref.world_pos - reactor_ref.world_pos).as_dvec3().length();
+            if dist > rs.broadcast_range as f64 { continue; }
+            // Auth check.
+            let authorized = match &rs.access {
+                PowerAccess::OwnerOnly => powered_by.placed_by == rs.placed_by,
+                PowerAccess::AllowList(list) => powered_by.placed_by == rs.placed_by || list.contains(&powered_by.placed_by),
+                PowerAccess::Open => true,
+            };
+            if !authorized { continue; }
+            if let Some(idx) = rs.circuits.iter().position(|c| c.name == powered_by.circuit) {
+                cache.entries.push(CachedConsumer {
+                    entity,
+                    circuit_idx: idx,
+                    consumption_w: powered_by.consumption_w,
+                });
             }
         }
     }
+}
 
-    for (consumer, membership) in &consumers {
-        if let Some(idx) = membership.network_id {
-            if let Some(net) = net_table.networks.get_mut(idx as usize) {
-                net.total_demand_w += consumer.base_consumption_w * consumer.load_factor as f64;
+/// Wireless power budget: each reactor broadcasts power to consumers in range.
+/// Uses the pre-computed ReactorConsumerCache for O(consumers) instead of O(reactors * consumers).
+fn compute_power_budget(
+    mut reactors: Query<(&mut ReactorState, &ReactorConsumerCache)>,
+    thruster_states: Query<&ThrusterState>,
+) {
+    for (mut rs, cache) in &mut reactors {
+        let generation = rs.max_generation_w * if rs.active { rs.throttle as f64 } else { 0.0 };
+        for c in &mut rs.circuits {
+            c.supply_w = generation * c.fraction as f64;
+            c.demand_w = 0.0;
+        }
+        for consumer in &cache.entries {
+            let load = thruster_states.get(consumer.entity)
+                .map(|ts| ts.throttle.abs())
+                .unwrap_or(1.0);
+            if consumer.circuit_idx < rs.circuits.len() {
+                rs.circuits[consumer.circuit_idx].demand_w += consumer.consumption_w * load as f64;
             }
         }
-    }
-
-    // Compute surplus per network (positive = excess, negative = deficit).
-    for net in &mut net_table.networks {
-        net.surplus_w = net.total_supply_w - net.total_demand_w;
-    }
-
-    // Pass 2: Battery charge/discharge. Build per-network discharge totals.
-    let mut discharge_per_network = vec![0.0f64; net_count];
-
-    for (mut battery, membership) in &mut batteries {
-        let idx = match membership.network_id {
-            Some(i) if (i as usize) < net_count => i as usize,
-            _ => continue,
-        };
-        let surplus = net_table.networks[idx].surplus_w;
-
-        if surplus > 0.0 {
-            // Charge battery with surplus.
-            let charge = surplus.min(battery.max_rate_w) * TICK_DT;
-            battery.energy_j = (battery.energy_j + charge).min(battery.capacity_j);
-        } else if surplus < 0.0 {
-            // Discharge battery to cover deficit.
-            let available = battery.max_rate_w.min(battery.energy_j / TICK_DT);
-            let discharge = available.min(-surplus);
-            battery.energy_j = (battery.energy_j - discharge * TICK_DT).max(0.0);
-            discharge_per_network[idx] += discharge;
-        }
-    }
-
-    // Pass 3: Final ratio = (supply + battery_discharge) / demand.
-    for (i, net) in net_table.networks.iter_mut().enumerate() {
-        if net.total_demand_w > 0.0 {
-            let effective_supply = net.total_supply_w + discharge_per_network[i];
-            net.power_ratio = (effective_supply / net.total_demand_w).min(1.0) as f32;
-        } else {
-            net.power_ratio = 1.0;
+        for c in &mut rs.circuits {
+            c.power_ratio = if c.demand_w > 0.0 {
+                (c.supply_w / c.demand_w).min(1.0) as f32
+            } else {
+                1.0
+            };
         }
     }
 }
@@ -2923,8 +3125,9 @@ fn signal_subscribe(
 fn compute_ship_thrust(
     pilot_mode: Res<PilotMode>,
     mut pilot_acc: ResMut<PilotAccumulator>,
-    thrusters: Query<(&ThrusterBlock, &ThrusterState, Option<&PowerNetworkMembership>)>,
-    net_table: Res<PowerNetworkTable>,
+    thrusters: Query<(&ThrusterBlock, &ThrusterState, &PoweredBy)>,
+    reactors: Query<&ReactorState>,
+    block_index: Res<FunctionalBlockIndex>,
     raw_input: Res<RawPilotInput>,
     ship_props: Res<ShipProps>,
     ship_com: Res<ShipCenterOfMass>,
@@ -2939,32 +3142,26 @@ fn compute_ship_thrust(
         return;
     }
 
-    // Thrust limiter from pilot input (mouse wheel, 0.0–1.0).
     let limiter = raw_input.thrust_limiter as f64;
 
-    // ALL thrust and torque comes from thrusters. No special torque channels.
-    // Each thruster contributes force (-direction × thrust_n × throttle × limiter × power)
-    // AND torque (offset_from_CoM × force). If thrusters are asymmetric, the ship
-    // rotates unevenly — that's correct physics. The player must design properly.
     let mut total_thrust = DVec3::ZERO;
     let mut total_torque = DVec3::ZERO;
     let com = ship_com.0;
 
-    for (thruster, state, membership) in &thrusters {
+    for (thruster, state, powered_by) in &thrusters {
         if state.throttle.abs() < 0.001 { continue; }
 
-        // Power scaling: no network = no power. No exceptions.
-        let power_ratio = membership
-            .and_then(|m| m.network_id)
-            .and_then(|id| net_table.networks.get(id as usize))
-            .map(|net| net.power_ratio as f64)
+        // Wireless power: look up reactor by block position, find circuit power_ratio.
+        let power_ratio = block_index.0.get(&powered_by.reactor_pos)
+            .and_then(|&e| reactors.get(e).ok())
+            .and_then(|rs| rs.circuits.iter().find(|c| c.name == powered_by.circuit))
+            .map(|c| c.power_ratio as f64)
             .unwrap_or(0.0);
 
         let thrust_vec = -thruster.direction * thruster.thrust_n
             * state.throttle as f64 * limiter * power_ratio;
         total_thrust += thrust_vec;
 
-        // Torque from offset to center of mass.
         let block_center = DVec3::new(
             thruster.block_pos.x as f64 + 0.5,
             thruster.block_pos.y as f64 + 0.5,
@@ -2976,7 +3173,31 @@ fn compute_ship_thrust(
     // Log thrust diagnostics every ~2 seconds (40 ticks at 20Hz).
     static DIAG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tick = DIAG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if (total_thrust.length() > 0.1 || total_torque.length() > 0.001) && tick % 40 == 0 {
+    let has_thrust = total_thrust.length() > 0.1 || total_torque.length() > 0.001;
+
+    // One-shot: log every thruster's state on the first tick with input.
+    static DETAIL_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if has_thrust && !DETAIL_LOGGED.load(std::sync::atomic::Ordering::Relaxed) {
+        DETAIL_LOGGED.store(true, std::sync::atomic::Ordering::Relaxed);
+        info!(com = format!("({:.2}, {:.2}, {:.2})", com.x, com.y, com.z), "=== THRUSTER DETAIL DUMP ===");
+        for (thruster, state, powered_by) in &thrusters {
+            let pr = block_index.0.get(&powered_by.reactor_pos)
+                .and_then(|&e| reactors.get(e).ok())
+                .and_then(|rs| rs.circuits.iter().find(|c| c.name == powered_by.circuit))
+                .map(|c| c.power_ratio)
+                .unwrap_or(0.0);
+            info!(
+                pos = format!("({}, {}, {})", thruster.block_pos.x, thruster.block_pos.y, thruster.block_pos.z),
+                dir = format!("({:.0}, {:.0}, {:.0})", thruster.direction.x, thruster.direction.y, thruster.direction.z),
+                throttle = format!("{:.2}", state.throttle),
+                circuit = powered_by.circuit,
+                power = format!("{:.2}", pr),
+                "  thruster",
+            );
+        }
+    }
+
+    if has_thrust && tick % 40 == 0 {
         info!(
             thrust_x = format!("{:.1}", total_thrust.x),
             thrust_y = format!("{:.1}", total_thrust.y),
@@ -3206,7 +3427,9 @@ fn build_ship_interior(
     let registry = BlockRegistry::new();
     let loaded = load_grid_from_db(&ship_persistence.db);
     let grid = match loaded {
-        Some(saved_grid) => {
+        Some(mut saved_grid) => {
+            // Load channel overrides and power configs from the block_configs table.
+            load_block_configs(&ship_persistence.db, &mut saved_grid);
             info!(
                 blocks = saved_grid.total_block_count(),
                 chunks = saved_grid.chunk_count(),
@@ -3233,6 +3456,8 @@ fn build_ship_interior(
                 }
                 let _ = txn.commit();
             }
+            // Persist the starter ship's initial power configs and channel overrides.
+            save_block_configs(&ship_persistence.db, &starter);
             info!("built starter ship and saved to persistence");
             starter
         }
@@ -3385,7 +3610,7 @@ fn build_ship_interior(
     app.insert_resource(PilotAccumulator::default());
     app.insert_resource(RawPilotInput { thrust_limiter: 0.75, ..Default::default() });
     app.insert_resource(ShipCenterOfMass::default());
-    app.insert_resource(PowerNetworkTable { networks: Vec::new(), dirty: true });
+    // PowerNetworkTable removed — power is wireless via ReactorState circuits.
     app.insert_resource(ActiveSeatEntity::default());
     app.insert_resource(AutopilotState::default());
     app.insert_resource(WarpTargetState::default());
@@ -3449,7 +3674,7 @@ fn build_ship_interior(
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
         Update,
-        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, rebuild_power_networks, aggregate_ship_properties)
+        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, aggregate_ship_properties, rebuild_reactor_consumers)
             .chain()
             .in_set(ShipSet::BlockEdit),
     );

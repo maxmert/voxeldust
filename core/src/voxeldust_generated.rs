@@ -9505,6 +9505,598 @@ impl ::core::fmt::Debug for SeatBindingFB<'_> {
       ds.finish()
   }
 }
+pub enum PowerCircuitFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// A named power circuit on a reactor (fraction of total output).
+pub struct PowerCircuitFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for PowerCircuitFB<'a> {
+  type Inner = PowerCircuitFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> PowerCircuitFB<'a> {
+  pub const VT_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_FRACTION: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    PowerCircuitFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args PowerCircuitFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<PowerCircuitFB<'bldr>> {
+    let mut builder = PowerCircuitFBBuilder::new(_fbb);
+    builder.add_fraction(args.fraction);
+    if let Some(x) = args.name { builder.add_name(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(PowerCircuitFB::VT_NAME, None)}
+  }
+  #[inline]
+  pub fn fraction(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PowerCircuitFB::VT_FRACTION, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for PowerCircuitFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, false)?
+     .visit_field::<f32>("fraction", Self::VT_FRACTION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct PowerCircuitFBArgs<'a> {
+    pub name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub fraction: f32,
+}
+impl<'a> Default for PowerCircuitFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    PowerCircuitFBArgs {
+      name: None,
+      fraction: 0.0,
+    }
+  }
+}
+
+pub struct PowerCircuitFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PowerCircuitFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_name(&mut self, name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PowerCircuitFB::VT_NAME, name);
+  }
+  #[inline]
+  pub fn add_fraction(&mut self, fraction: f32) {
+    self.fbb_.push_slot::<f32>(PowerCircuitFB::VT_FRACTION, fraction, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PowerCircuitFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    PowerCircuitFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<PowerCircuitFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for PowerCircuitFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("PowerCircuitFB");
+      ds.field("name", &self.name());
+      ds.field("fraction", &self.fraction());
+      ds.finish()
+  }
+}
+pub enum PowerSourceConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Reactor power source configuration.
+pub struct PowerSourceConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for PowerSourceConfigFB<'a> {
+  type Inner = PowerSourceConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> PowerSourceConfigFB<'a> {
+  pub const VT_CIRCUITS: ::flatbuffers::VOffsetT = 4;
+  pub const VT_ACCESS_MODE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_ALLOW_LIST: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    PowerSourceConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args PowerSourceConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<PowerSourceConfigFB<'bldr>> {
+    let mut builder = PowerSourceConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.allow_list { builder.add_allow_list(x); }
+    if let Some(x) = args.circuits { builder.add_circuits(x); }
+    builder.add_access_mode(args.access_mode);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn circuits(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PowerCircuitFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PowerCircuitFB>>>>(PowerSourceConfigFB::VT_CIRCUITS, None)}
+  }
+  #[inline]
+  pub fn access_mode(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(PowerSourceConfigFB::VT_ACCESS_MODE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn allow_list(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(PowerSourceConfigFB::VT_ALLOW_LIST, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for PowerSourceConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PowerCircuitFB>>>>("circuits", Self::VT_CIRCUITS, false)?
+     .visit_field::<u8>("access_mode", Self::VT_ACCESS_MODE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("allow_list", Self::VT_ALLOW_LIST, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct PowerSourceConfigFBArgs<'a> {
+    pub circuits: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PowerCircuitFB<'a>>>>>,
+    pub access_mode: u8,
+    pub allow_list: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
+}
+impl<'a> Default for PowerSourceConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    PowerSourceConfigFBArgs {
+      circuits: None,
+      access_mode: 0,
+      allow_list: None,
+    }
+  }
+}
+
+pub struct PowerSourceConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PowerSourceConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_circuits(&mut self, circuits: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<PowerCircuitFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PowerSourceConfigFB::VT_CIRCUITS, circuits);
+  }
+  #[inline]
+  pub fn add_access_mode(&mut self, access_mode: u8) {
+    self.fbb_.push_slot::<u8>(PowerSourceConfigFB::VT_ACCESS_MODE, access_mode, 0);
+  }
+  #[inline]
+  pub fn add_allow_list(&mut self, allow_list: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<&'b  str>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PowerSourceConfigFB::VT_ALLOW_LIST, allow_list);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PowerSourceConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    PowerSourceConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<PowerSourceConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for PowerSourceConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("PowerSourceConfigFB");
+      ds.field("circuits", &self.circuits());
+      ds.field("access_mode", &self.access_mode());
+      ds.field("allow_list", &self.allow_list());
+      ds.finish()
+  }
+}
+pub enum PowerConsumerConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Consumer power subscription (which reactor + circuit).
+pub struct PowerConsumerConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for PowerConsumerConfigFB<'a> {
+  type Inner = PowerConsumerConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> PowerConsumerConfigFB<'a> {
+  pub const VT_REACTOR_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_REACTOR_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_REACTOR_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_HAS_REACTOR: ::flatbuffers::VOffsetT = 10;
+  pub const VT_CIRCUIT: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    PowerConsumerConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args PowerConsumerConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<PowerConsumerConfigFB<'bldr>> {
+    let mut builder = PowerConsumerConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.circuit { builder.add_circuit(x); }
+    builder.add_reactor_z(args.reactor_z);
+    builder.add_reactor_y(args.reactor_y);
+    builder.add_reactor_x(args.reactor_x);
+    builder.add_has_reactor(args.has_reactor);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn reactor_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(PowerConsumerConfigFB::VT_REACTOR_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn reactor_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(PowerConsumerConfigFB::VT_REACTOR_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn reactor_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(PowerConsumerConfigFB::VT_REACTOR_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn has_reactor(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PowerConsumerConfigFB::VT_HAS_REACTOR, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn circuit(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(PowerConsumerConfigFB::VT_CIRCUIT, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for PowerConsumerConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("reactor_x", Self::VT_REACTOR_X, false)?
+     .visit_field::<i32>("reactor_y", Self::VT_REACTOR_Y, false)?
+     .visit_field::<i32>("reactor_z", Self::VT_REACTOR_Z, false)?
+     .visit_field::<bool>("has_reactor", Self::VT_HAS_REACTOR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("circuit", Self::VT_CIRCUIT, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct PowerConsumerConfigFBArgs<'a> {
+    pub reactor_x: i32,
+    pub reactor_y: i32,
+    pub reactor_z: i32,
+    pub has_reactor: bool,
+    pub circuit: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for PowerConsumerConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    PowerConsumerConfigFBArgs {
+      reactor_x: 0,
+      reactor_y: 0,
+      reactor_z: 0,
+      has_reactor: false,
+      circuit: None,
+    }
+  }
+}
+
+pub struct PowerConsumerConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PowerConsumerConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_reactor_x(&mut self, reactor_x: i32) {
+    self.fbb_.push_slot::<i32>(PowerConsumerConfigFB::VT_REACTOR_X, reactor_x, 0);
+  }
+  #[inline]
+  pub fn add_reactor_y(&mut self, reactor_y: i32) {
+    self.fbb_.push_slot::<i32>(PowerConsumerConfigFB::VT_REACTOR_Y, reactor_y, 0);
+  }
+  #[inline]
+  pub fn add_reactor_z(&mut self, reactor_z: i32) {
+    self.fbb_.push_slot::<i32>(PowerConsumerConfigFB::VT_REACTOR_Z, reactor_z, 0);
+  }
+  #[inline]
+  pub fn add_has_reactor(&mut self, has_reactor: bool) {
+    self.fbb_.push_slot::<bool>(PowerConsumerConfigFB::VT_HAS_REACTOR, has_reactor, false);
+  }
+  #[inline]
+  pub fn add_circuit(&mut self, circuit: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PowerConsumerConfigFB::VT_CIRCUIT, circuit);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PowerConsumerConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    PowerConsumerConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<PowerConsumerConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for PowerConsumerConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("PowerConsumerConfigFB");
+      ds.field("reactor_x", &self.reactor_x());
+      ds.field("reactor_y", &self.reactor_y());
+      ds.field("reactor_z", &self.reactor_z());
+      ds.field("has_reactor", &self.has_reactor());
+      ds.field("circuit", &self.circuit());
+      ds.finish()
+  }
+}
+pub enum NearbyReactorFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Info about a nearby reactor (for consumer dropdown in config UI).
+pub struct NearbyReactorFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for NearbyReactorFB<'a> {
+  type Inner = NearbyReactorFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> NearbyReactorFB<'a> {
+  pub const VT_POS_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_POS_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_POS_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_LABEL: ::flatbuffers::VOffsetT = 10;
+  pub const VT_DISTANCE: ::flatbuffers::VOffsetT = 12;
+  pub const VT_CIRCUITS: ::flatbuffers::VOffsetT = 14;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    NearbyReactorFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args NearbyReactorFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<NearbyReactorFB<'bldr>> {
+    let mut builder = NearbyReactorFBBuilder::new(_fbb);
+    if let Some(x) = args.circuits { builder.add_circuits(x); }
+    builder.add_distance(args.distance);
+    if let Some(x) = args.label { builder.add_label(x); }
+    builder.add_pos_z(args.pos_z);
+    builder.add_pos_y(args.pos_y);
+    builder.add_pos_x(args.pos_x);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn pos_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(NearbyReactorFB::VT_POS_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn pos_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(NearbyReactorFB::VT_POS_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn pos_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(NearbyReactorFB::VT_POS_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn label(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(NearbyReactorFB::VT_LABEL, None)}
+  }
+  #[inline]
+  pub fn distance(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(NearbyReactorFB::VT_DISTANCE, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn circuits(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(NearbyReactorFB::VT_CIRCUITS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for NearbyReactorFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("pos_x", Self::VT_POS_X, false)?
+     .visit_field::<i32>("pos_y", Self::VT_POS_Y, false)?
+     .visit_field::<i32>("pos_z", Self::VT_POS_Z, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("label", Self::VT_LABEL, false)?
+     .visit_field::<f32>("distance", Self::VT_DISTANCE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("circuits", Self::VT_CIRCUITS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct NearbyReactorFBArgs<'a> {
+    pub pos_x: i32,
+    pub pos_y: i32,
+    pub pos_z: i32,
+    pub label: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub distance: f32,
+    pub circuits: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
+}
+impl<'a> Default for NearbyReactorFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    NearbyReactorFBArgs {
+      pos_x: 0,
+      pos_y: 0,
+      pos_z: 0,
+      label: None,
+      distance: 0.0,
+      circuits: None,
+    }
+  }
+}
+
+pub struct NearbyReactorFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> NearbyReactorFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_pos_x(&mut self, pos_x: i32) {
+    self.fbb_.push_slot::<i32>(NearbyReactorFB::VT_POS_X, pos_x, 0);
+  }
+  #[inline]
+  pub fn add_pos_y(&mut self, pos_y: i32) {
+    self.fbb_.push_slot::<i32>(NearbyReactorFB::VT_POS_Y, pos_y, 0);
+  }
+  #[inline]
+  pub fn add_pos_z(&mut self, pos_z: i32) {
+    self.fbb_.push_slot::<i32>(NearbyReactorFB::VT_POS_Z, pos_z, 0);
+  }
+  #[inline]
+  pub fn add_label(&mut self, label: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(NearbyReactorFB::VT_LABEL, label);
+  }
+  #[inline]
+  pub fn add_distance(&mut self, distance: f32) {
+    self.fbb_.push_slot::<f32>(NearbyReactorFB::VT_DISTANCE, distance, 0.0);
+  }
+  #[inline]
+  pub fn add_circuits(&mut self, circuits: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<&'b  str>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(NearbyReactorFB::VT_CIRCUITS, circuits);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> NearbyReactorFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    NearbyReactorFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<NearbyReactorFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for NearbyReactorFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("NearbyReactorFB");
+      ds.field("pos_x", &self.pos_x());
+      ds.field("pos_y", &self.pos_y());
+      ds.field("pos_z", &self.pos_z());
+      ds.field("label", &self.label());
+      ds.field("distance", &self.distance());
+      ds.field("circuits", &self.circuits());
+      ds.finish()
+  }
+}
 pub enum BlockConfigStateOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -9532,6 +10124,9 @@ impl<'a> BlockConfigState<'a> {
   pub const VT_CONVERTER_RULES: ::flatbuffers::VOffsetT = 18;
   pub const VT_SEAT_MAPPINGS: ::flatbuffers::VOffsetT = 20;
   pub const VT_AVAILABLE_CHANNELS: ::flatbuffers::VOffsetT = 22;
+  pub const VT_POWER_SOURCE: ::flatbuffers::VOffsetT = 24;
+  pub const VT_POWER_CONSUMER: ::flatbuffers::VOffsetT = 26;
+  pub const VT_NEARBY_REACTORS: ::flatbuffers::VOffsetT = 28;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -9543,6 +10138,9 @@ impl<'a> BlockConfigState<'a> {
     args: &'args BlockConfigStateArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BlockConfigState<'bldr>> {
     let mut builder = BlockConfigStateBuilder::new(_fbb);
+    if let Some(x) = args.nearby_reactors { builder.add_nearby_reactors(x); }
+    if let Some(x) = args.power_consumer { builder.add_power_consumer(x); }
+    if let Some(x) = args.power_source { builder.add_power_source(x); }
     if let Some(x) = args.available_channels { builder.add_available_channels(x); }
     if let Some(x) = args.seat_mappings { builder.add_seat_mappings(x); }
     if let Some(x) = args.converter_rules { builder.add_converter_rules(x); }
@@ -9627,6 +10225,27 @@ impl<'a> BlockConfigState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(BlockConfigState::VT_AVAILABLE_CHANNELS, None)}
   }
+  #[inline]
+  pub fn power_source(&self) -> Option<PowerSourceConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PowerSourceConfigFB>>(BlockConfigState::VT_POWER_SOURCE, None)}
+  }
+  #[inline]
+  pub fn power_consumer(&self) -> Option<PowerConsumerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PowerConsumerConfigFB>>(BlockConfigState::VT_POWER_CONSUMER, None)}
+  }
+  #[inline]
+  pub fn nearby_reactors(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<NearbyReactorFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<NearbyReactorFB>>>>(BlockConfigState::VT_NEARBY_REACTORS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BlockConfigState<'_> {
@@ -9645,6 +10264,9 @@ impl ::flatbuffers::Verifiable for BlockConfigState<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalRuleFB>>>>("converter_rules", Self::VT_CONVERTER_RULES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>("seat_mappings", Self::VT_SEAT_MAPPINGS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("available_channels", Self::VT_AVAILABLE_CHANNELS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<PowerSourceConfigFB>>("power_source", Self::VT_POWER_SOURCE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<PowerConsumerConfigFB>>("power_consumer", Self::VT_POWER_CONSUMER, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<NearbyReactorFB>>>>("nearby_reactors", Self::VT_NEARBY_REACTORS, false)?
      .finish();
     Ok(())
   }
@@ -9660,6 +10282,9 @@ pub struct BlockConfigStateArgs<'a> {
     pub converter_rules: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB<'a>>>>>,
     pub seat_mappings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>>>,
     pub available_channels: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
+    pub power_source: Option<::flatbuffers::WIPOffset<PowerSourceConfigFB<'a>>>,
+    pub power_consumer: Option<::flatbuffers::WIPOffset<PowerConsumerConfigFB<'a>>>,
+    pub nearby_reactors: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<NearbyReactorFB<'a>>>>>,
 }
 impl<'a> Default for BlockConfigStateArgs<'a> {
   #[inline]
@@ -9675,6 +10300,9 @@ impl<'a> Default for BlockConfigStateArgs<'a> {
       converter_rules: None,
       seat_mappings: None,
       available_channels: None,
+      power_source: None,
+      power_consumer: None,
+      nearby_reactors: None,
     }
   }
 }
@@ -9725,6 +10353,18 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigStateBuilder<'a, '
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_AVAILABLE_CHANNELS, available_channels);
   }
   #[inline]
+  pub fn add_power_source(&mut self, power_source: ::flatbuffers::WIPOffset<PowerSourceConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PowerSourceConfigFB>>(BlockConfigState::VT_POWER_SOURCE, power_source);
+  }
+  #[inline]
+  pub fn add_power_consumer(&mut self, power_consumer: ::flatbuffers::WIPOffset<PowerConsumerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PowerConsumerConfigFB>>(BlockConfigState::VT_POWER_CONSUMER, power_consumer);
+  }
+  #[inline]
+  pub fn add_nearby_reactors(&mut self, nearby_reactors: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<NearbyReactorFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_NEARBY_REACTORS, nearby_reactors);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BlockConfigStateBuilder {
@@ -9752,6 +10392,9 @@ impl ::core::fmt::Debug for BlockConfigState<'_> {
       ds.field("converter_rules", &self.converter_rules());
       ds.field("seat_mappings", &self.seat_mappings());
       ds.field("available_channels", &self.available_channels());
+      ds.field("power_source", &self.power_source());
+      ds.field("power_consumer", &self.power_consumer());
+      ds.field("nearby_reactors", &self.nearby_reactors());
       ds.finish()
   }
 }
@@ -9779,6 +10422,8 @@ impl<'a> BlockConfigUpdate<'a> {
   pub const VT_SUBSCRIBE_BINDINGS: ::flatbuffers::VOffsetT = 12;
   pub const VT_CONVERTER_RULES: ::flatbuffers::VOffsetT = 14;
   pub const VT_SEAT_MAPPINGS: ::flatbuffers::VOffsetT = 16;
+  pub const VT_POWER_SOURCE: ::flatbuffers::VOffsetT = 18;
+  pub const VT_POWER_CONSUMER: ::flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -9790,6 +10435,8 @@ impl<'a> BlockConfigUpdate<'a> {
     args: &'args BlockConfigUpdateArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BlockConfigUpdate<'bldr>> {
     let mut builder = BlockConfigUpdateBuilder::new(_fbb);
+    if let Some(x) = args.power_consumer { builder.add_power_consumer(x); }
+    if let Some(x) = args.power_source { builder.add_power_source(x); }
     if let Some(x) = args.seat_mappings { builder.add_seat_mappings(x); }
     if let Some(x) = args.converter_rules { builder.add_converter_rules(x); }
     if let Some(x) = args.subscribe_bindings { builder.add_subscribe_bindings(x); }
@@ -9850,6 +10497,20 @@ impl<'a> BlockConfigUpdate<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>(BlockConfigUpdate::VT_SEAT_MAPPINGS, None)}
   }
+  #[inline]
+  pub fn power_source(&self) -> Option<PowerSourceConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PowerSourceConfigFB>>(BlockConfigUpdate::VT_POWER_SOURCE, None)}
+  }
+  #[inline]
+  pub fn power_consumer(&self) -> Option<PowerConsumerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PowerConsumerConfigFB>>(BlockConfigUpdate::VT_POWER_CONSUMER, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BlockConfigUpdate<'_> {
@@ -9865,6 +10526,8 @@ impl ::flatbuffers::Verifiable for BlockConfigUpdate<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalBindingFB>>>>("subscribe_bindings", Self::VT_SUBSCRIBE_BINDINGS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SignalRuleFB>>>>("converter_rules", Self::VT_CONVERTER_RULES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>("seat_mappings", Self::VT_SEAT_MAPPINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<PowerSourceConfigFB>>("power_source", Self::VT_POWER_SOURCE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<PowerConsumerConfigFB>>("power_consumer", Self::VT_POWER_CONSUMER, false)?
      .finish();
     Ok(())
   }
@@ -9877,6 +10540,8 @@ pub struct BlockConfigUpdateArgs<'a> {
     pub subscribe_bindings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalBindingFB<'a>>>>>,
     pub converter_rules: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SignalRuleFB<'a>>>>>,
     pub seat_mappings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>>>,
+    pub power_source: Option<::flatbuffers::WIPOffset<PowerSourceConfigFB<'a>>>,
+    pub power_consumer: Option<::flatbuffers::WIPOffset<PowerConsumerConfigFB<'a>>>,
 }
 impl<'a> Default for BlockConfigUpdateArgs<'a> {
   #[inline]
@@ -9889,6 +10554,8 @@ impl<'a> Default for BlockConfigUpdateArgs<'a> {
       subscribe_bindings: None,
       converter_rules: None,
       seat_mappings: None,
+      power_source: None,
+      power_consumer: None,
     }
   }
 }
@@ -9927,6 +10594,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigUpdateBuilder<'a, 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigUpdate::VT_SEAT_MAPPINGS, seat_mappings);
   }
   #[inline]
+  pub fn add_power_source(&mut self, power_source: ::flatbuffers::WIPOffset<PowerSourceConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PowerSourceConfigFB>>(BlockConfigUpdate::VT_POWER_SOURCE, power_source);
+  }
+  #[inline]
+  pub fn add_power_consumer(&mut self, power_consumer: ::flatbuffers::WIPOffset<PowerConsumerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PowerConsumerConfigFB>>(BlockConfigUpdate::VT_POWER_CONSUMER, power_consumer);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigUpdateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BlockConfigUpdateBuilder {
@@ -9951,6 +10626,8 @@ impl ::core::fmt::Debug for BlockConfigUpdate<'_> {
       ds.field("subscribe_bindings", &self.subscribe_bindings());
       ds.field("converter_rules", &self.converter_rules());
       ds.field("seat_mappings", &self.seat_mappings());
+      ds.field("power_source", &self.power_source());
+      ds.field("power_consumer", &self.power_consumer());
       ds.finish()
   }
 }

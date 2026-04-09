@@ -52,6 +52,8 @@ pub struct PowerProps {
     pub storage_j: f64,
     /// Maximum charge/discharge rate in Watts. 0 for non-batteries.
     pub charge_rate_w: f64,
+    /// Wireless power broadcast range in blocks. 0 for non-sources.
+    pub broadcast_range: f32,
 }
 
 /// What an interaction does when triggered.
@@ -681,32 +683,32 @@ impl BlockRegistry {
 
         // Populate power properties.
         let pp = &mut power_props_vec;
-        // Reactors: power sources.
-        pp[BlockId::REACTOR_SMALL.as_u16() as usize]  = Some(PowerProps { generation_w: 500_000.0,     consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::REACTOR_MEDIUM.as_u16() as usize]  = Some(PowerProps { generation_w: 2_000_000.0,  consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::REACTOR_LARGE.as_u16() as usize]   = Some(PowerProps { generation_w: 10_000_000.0, consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::SOLAR_PANEL.as_u16() as usize]     = Some(PowerProps { generation_w: 50_000.0,     consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0 });
+        // Reactors: power sources with broadcast range.
+        pp[BlockId::REACTOR_SMALL.as_u16() as usize]  = Some(PowerProps { generation_w: 500_000.0,     consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 50.0 });
+        pp[BlockId::REACTOR_MEDIUM.as_u16() as usize]  = Some(PowerProps { generation_w: 2_000_000.0,  consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 100.0 });
+        pp[BlockId::REACTOR_LARGE.as_u16() as usize]   = Some(PowerProps { generation_w: 10_000_000.0, consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 200.0 });
+        pp[BlockId::SOLAR_PANEL.as_u16() as usize]     = Some(PowerProps { generation_w: 50_000.0,     consumption_w: 0.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 20.0 });
         // Battery: energy storage.
-        pp[BlockId::BATTERY.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 0.0, storage_j: 36_000_000.0, charge_rate_w: 500_000.0 });
+        pp[BlockId::BATTERY.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 0.0, storage_j: 36_000_000.0, charge_rate_w: 500_000.0, broadcast_range: 0.0 });
         // Thrusters: power consumers (chemical cheap, ion moderate, fusion efficient).
-        pp[BlockId::THRUSTER_SMALL_CHEMICAL.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 100_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_MEDIUM_CHEMICAL.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 400_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_LARGE_CHEMICAL.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 1_500_000.0, storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_SMALL_ION.as_u16() as usize]       = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_MEDIUM_ION.as_u16() as usize]      = Some(PowerProps { generation_w: 0.0, consumption_w: 800_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_LARGE_ION.as_u16() as usize]       = Some(PowerProps { generation_w: 0.0, consumption_w: 4_000_000.0, storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_SMALL_FUSION.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 50_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_MEDIUM_FUSION.as_u16() as usize]   = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::THRUSTER_LARGE_FUSION.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 800_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::THRUSTER_SMALL_CHEMICAL.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 100_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_MEDIUM_CHEMICAL.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 400_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_LARGE_CHEMICAL.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 1_500_000.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_SMALL_ION.as_u16() as usize]       = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_MEDIUM_ION.as_u16() as usize]      = Some(PowerProps { generation_w: 0.0, consumption_w: 800_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_LARGE_ION.as_u16() as usize]       = Some(PowerProps { generation_w: 0.0, consumption_w: 4_000_000.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_SMALL_FUSION.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 50_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_MEDIUM_FUSION.as_u16() as usize]   = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::THRUSTER_LARGE_FUSION.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 800_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         // Other consumers.
-        pp[BlockId::SHIELD_EMITTER.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 300_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::SHIELD_GENERATOR.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 500_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::GRAVITY_GENERATOR.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::AIR_COMPRESSOR.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 50_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::ROTOR.as_u16() as usize]             = Some(PowerProps { generation_w: 0.0, consumption_w: 100_000.0,   storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::PISTON.as_u16() as usize]            = Some(PowerProps { generation_w: 0.0, consumption_w: 80_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::ANTENNA.as_u16() as usize]           = Some(PowerProps { generation_w: 0.0, consumption_w: 10_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
-        pp[BlockId::COMPUTER.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 20_000.0,    storage_j: 0.0, charge_rate_w: 0.0 });
+        pp[BlockId::SHIELD_EMITTER.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 300_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::SHIELD_GENERATOR.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 500_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::GRAVITY_GENERATOR.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::AIR_COMPRESSOR.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 50_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::ROTOR.as_u16() as usize]             = Some(PowerProps { generation_w: 0.0, consumption_w: 100_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::PISTON.as_u16() as usize]            = Some(PowerProps { generation_w: 0.0, consumption_w: 80_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::ANTENNA.as_u16() as usize]           = Some(PowerProps { generation_w: 0.0, consumption_w: 10_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::COMPUTER.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 20_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
 
         Self { defs, functional_kinds, thruster_props: thruster_props_vec, power_props: power_props_vec }
     }

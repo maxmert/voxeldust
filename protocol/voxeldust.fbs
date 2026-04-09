@@ -536,6 +536,38 @@ table SeatBindingFB {
     property: uint8;
 }
 
+/// A named power circuit on a reactor (fraction of total output).
+table PowerCircuitFB {
+    name: string;
+    fraction: float;        // 0.0–1.0
+}
+
+/// Reactor power source configuration.
+table PowerSourceConfigFB {
+    circuits: [PowerCircuitFB];
+    access_mode: uint8;     // 0=OwnerOnly, 1=AllowList, 2=Open
+    allow_list: [string];   // player names (only if access_mode=1)
+}
+
+/// Consumer power subscription (which reactor + circuit).
+table PowerConsumerConfigFB {
+    reactor_x: int32;
+    reactor_y: int32;
+    reactor_z: int32;
+    has_reactor: bool;      // false = no reactor selected
+    circuit: string;
+}
+
+/// Info about a nearby reactor (for consumer dropdown in config UI).
+table NearbyReactorFB {
+    pos_x: int32;
+    pos_y: int32;
+    pos_z: int32;
+    label: string;          // e.g., "Small Reactor"
+    distance: float;
+    circuits: [string];
+}
+
 /// Server → client: current signal config for a functional block.
 table BlockConfigState {
     block_x: int32;
@@ -548,6 +580,10 @@ table BlockConfigState {
     converter_rules: [SignalRuleFB];
     seat_mappings: [SeatBindingFB];
     available_channels: [string];
+    // Power configuration.
+    power_source: PowerSourceConfigFB;
+    power_consumer: PowerConsumerConfigFB;
+    nearby_reactors: [NearbyReactorFB];
 }
 
 /// Client → server: updated signal config for a functional block.
@@ -559,6 +595,9 @@ table BlockConfigUpdate {
     subscribe_bindings: [SignalBindingFB];
     converter_rules: [SignalRuleFB];
     seat_mappings: [SeatBindingFB];
+    // Power configuration.
+    power_source: PowerSourceConfigFB;
+    power_consumer: PowerConsumerConfigFB;
 }
 
 union ServerPayload {

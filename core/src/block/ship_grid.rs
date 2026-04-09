@@ -9,6 +9,21 @@ use super::palette::CHUNK_SIZE;
 use super::registry::BlockRegistry;
 use super::sub_block;
 
+/// Pre-configuration for a block's power role in a ship/base blueprint.
+#[derive(Clone, Debug)]
+pub enum PowerConfig {
+    /// Reactor: defines named power circuits with allocated fractions.
+    Source {
+        circuits: Vec<(String, f32)>,
+        broadcast_range: f32,
+    },
+    /// Consumer: subscribes to a reactor's circuit for power.
+    Consumer {
+        reactor_pos: IVec3,
+        circuit: String,
+    },
+}
+
 /// Multi-chunk Cartesian block grid for ships and stations.
 ///
 /// Ships use flat Cartesian coordinates (no sphere projection). The grid is
@@ -24,6 +39,9 @@ pub struct ShipGrid {
     /// Set by ship builders (e.g., `build_starter_ship`), read by `add_default_signal_bindings`.
     /// Key = world block position, value = channel name the block should subscribe to.
     channel_overrides: HashMap<IVec3, String>,
+    /// Per-block wireless power configuration for pre-configured ships.
+    /// Sources define circuits; consumers point to a reactor and circuit.
+    power_configs: HashMap<IVec3, PowerConfig>,
 }
 
 impl ShipGrid {
@@ -31,6 +49,7 @@ impl ShipGrid {
         Self {
             chunks: HashMap::new(),
             channel_overrides: HashMap::new(),
+            power_configs: HashMap::new(),
         }
     }
 
@@ -42,6 +61,26 @@ impl ShipGrid {
     /// Get the channel override for a block position, if any.
     pub fn channel_override(&self, pos: IVec3) -> Option<&str> {
         self.channel_overrides.get(&pos).map(|s| s.as_str())
+    }
+
+    /// Set power configuration for a block position (used by ship builders).
+    pub fn set_power_config(&mut self, x: i32, y: i32, z: i32, config: PowerConfig) {
+        self.power_configs.insert(IVec3::new(x, y, z), config);
+    }
+
+    /// Get the power configuration for a block position, if any.
+    pub fn power_config(&self, pos: IVec3) -> Option<&PowerConfig> {
+        self.power_configs.get(&pos)
+    }
+
+    /// Iterate all channel overrides (position → channel name).
+    pub fn iter_channel_overrides(&self) -> impl Iterator<Item = (IVec3, &str)> {
+        self.channel_overrides.iter().map(|(&pos, name)| (pos, name.as_str()))
+    }
+
+    /// Iterate all power configs (position → config).
+    pub fn iter_power_configs(&self) -> impl Iterator<Item = (IVec3, &PowerConfig)> {
+        self.power_configs.iter().map(|(&pos, cfg)| (pos, cfg))
     }
 
     // -----------------------------------------------------------------------
@@ -578,192 +617,119 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     grid.set_block(0, 1, 0, BlockId::OWNERSHIP_CORE);
 
     // Reactor and battery placed inside the hull for power generation.
-    // No default wiring — the no-wire fallback grants full power until
-    // the player places their first PowerWire sub-block.
     grid.set_block(0, 1, 1, BlockId::REACTOR_SMALL);
     grid.set_block(0, 1, 2, BlockId::BATTERY);
+
+    // Reactor wireless power configuration: two circuits.
+    // "main" at full power for linear thrusters, "rcs" at 30% for rotation thrusters.
+    let reactor_pos = IVec3::new(0, 1, 1);
+    grid.set_power_config(0, 1, 1, PowerConfig::Source {
+        circuits: vec![("main".into(), 1.0), ("rcs".into(), 0.3)],
+        broadcast_range: 50.0,
+    });
 
     // -----------------------------------------------------------------------
     // Thrusters: 48 linear + 12 RCS = 60 total
     // -----------------------------------------------------------------------
     // Each thruster protrudes 1 block outside the hull.
     // facing_direction = exhaust direction; thrust (reaction) = -facing.
-    // Channel overrides assign each thruster to the correct signal channel.
-    // Power wiring connects each thruster to the power bus.
+    // Channel overrides assign each thruster to a throttle signal channel.
+    // PowerConfig::Consumer links each thruster to the reactor wirelessly.
 
-    // Helper: place thruster + set channel override.
-    let place_thruster = |grid: &mut ShipGrid, x: i32, y: i32, z: i32, normal: IVec3, channel: &str| {
+    // Helper: place thruster + set throttle channel + set power config.
+    let place_thruster = |grid: &mut ShipGrid, x: i32, y: i32, z: i32, normal: IVec3, channel: &str, power_circuit: &str| {
         grid.set_block(x, y, z, BlockId::THRUSTER_SMALL_CHEMICAL);
         grid.set_orientation(x, y, z, BlockOrientation::from_face_normal(normal));
         grid.set_channel_override(x, y, z, channel);
-    };
-
-    // Mid-points for 8-per-face layout (corners + mid-edges).
-    let x_mid = (x_min + x_max) / 2;
-    let y_mid = (y_min + y_max) / 2;
-    let z_mid = (z_min + z_max) / 2;
-
-    // --- LINEAR THRUSTERS (8 per direction = 48 total) ---
-
-    // Aft (z_max+1): exhaust +Z, thrust -Z (forward).
-    for &x in &[x_min, x_mid, x_max] {
-        for &y in &[y_min, y_max] {
-            place_thruster(&mut grid, x, y, z_max + 1, IVec3::new(0, 0, 1), "thrust-forward");
-        }
-    }
-    place_thruster(&mut grid, x_min, y_mid, z_max + 1, IVec3::new(0, 0, 1), "thrust-forward");
-    place_thruster(&mut grid, x_max, y_mid, z_max + 1, IVec3::new(0, 0, 1), "thrust-forward");
-
-    // Fore: on port/starboard sides near bow. Exhaust -Z, thrust +Z (reverse).
-    for &y in &[y_min, y_mid, y_max] {
-        place_thruster(&mut grid, x_min - 1, y, z_min + 1, IVec3::new(0, 0, -1), "thrust-reverse");
-        place_thruster(&mut grid, x_max + 1, y, z_min + 1, IVec3::new(0, 0, -1), "thrust-reverse");
-    }
-    place_thruster(&mut grid, x_min - 1, y_min, z_min + 2, IVec3::new(0, 0, -1), "thrust-reverse");
-    place_thruster(&mut grid, x_max + 1, y_max, z_min + 2, IVec3::new(0, 0, -1), "thrust-reverse");
-
-    // Port (x_min-1): exhaust -X, thrust +X (right).
-    for &z in &[z_min, z_mid, z_max] {
-        for &y in &[y_min, y_max] {
-            place_thruster(&mut grid, x_min - 1, y, z, IVec3::new(-1, 0, 0), "thrust-right");
-        }
-    }
-    place_thruster(&mut grid, x_min - 1, y_mid, z_min, IVec3::new(-1, 0, 0), "thrust-right");
-    place_thruster(&mut grid, x_min - 1, y_mid, z_max, IVec3::new(-1, 0, 0), "thrust-right");
-
-    // Starboard (x_max+1): exhaust +X, thrust -X (left).
-    for &z in &[z_min, z_mid, z_max] {
-        for &y in &[y_min, y_max] {
-            place_thruster(&mut grid, x_max + 1, y, z, IVec3::new(1, 0, 0), "thrust-left");
-        }
-    }
-    place_thruster(&mut grid, x_max + 1, y_mid, z_min, IVec3::new(1, 0, 0), "thrust-left");
-    place_thruster(&mut grid, x_max + 1, y_mid, z_max, IVec3::new(1, 0, 0), "thrust-left");
-
-    // Bottom (y_min-1): exhaust -Y, thrust +Y (up).
-    for &x in &[x_min, x_mid, x_max] {
-        for &z in &[z_min, z_max] {
-            place_thruster(&mut grid, x, y_min - 1, z, IVec3::new(0, -1, 0), "thrust-up");
-        }
-    }
-    place_thruster(&mut grid, x_min, y_min - 1, z_mid, IVec3::new(0, -1, 0), "thrust-up");
-    place_thruster(&mut grid, x_max, y_min - 1, z_mid, IVec3::new(0, -1, 0), "thrust-up");
-
-    // Top (y_max+1): exhaust +Y, thrust -Y (down).
-    for &x in &[x_min, x_mid, x_max] {
-        for &z in &[z_min, z_max] {
-            place_thruster(&mut grid, x, y_max + 1, z, IVec3::new(0, 1, 0), "thrust-down");
-        }
-    }
-    place_thruster(&mut grid, x_min, y_max + 1, z_mid, IVec3::new(0, 1, 0), "thrust-down");
-    place_thruster(&mut grid, x_max, y_max + 1, z_mid, IVec3::new(0, 1, 0), "thrust-down");
-
-    // --- RCS THRUSTERS (12 total: 4 per rotation axis) ---
-
-    // Yaw CW (Y-axis): front-port pushes +X, back-starboard pushes -X.
-    place_thruster(&mut grid, x_min - 1, y_mid, z_min + 1, IVec3::new(-1, 0, 0), "torque-yaw-cw");
-    place_thruster(&mut grid, x_max + 1, y_mid, z_max - 1, IVec3::new(1, 0, 0), "torque-yaw-cw");
-    // Yaw CCW: front-starboard pushes -X, back-port pushes +X.
-    place_thruster(&mut grid, x_max + 1, y_mid, z_min + 1, IVec3::new(1, 0, 0), "torque-yaw-ccw");
-    place_thruster(&mut grid, x_min - 1, y_mid, z_max - 1, IVec3::new(-1, 0, 0), "torque-yaw-ccw");
-
-    // Pitch up (X-axis): top-front pushes +Z, bottom-back pushes -Z.
-    place_thruster(&mut grid, x_mid, y_max + 1, z_min + 1, IVec3::new(0, 1, 0), "torque-pitch-up");
-    place_thruster(&mut grid, x_mid, y_min - 1, z_max - 1, IVec3::new(0, -1, 0), "torque-pitch-up");
-    // Pitch down: top-back pushes -Z, bottom-front pushes +Z.
-    place_thruster(&mut grid, x_mid, y_max + 1, z_max - 1, IVec3::new(0, 1, 0), "torque-pitch-down");
-    place_thruster(&mut grid, x_mid, y_min - 1, z_min + 1, IVec3::new(0, -1, 0), "torque-pitch-down");
-
-    // Roll CW (Z-axis): left-top pushes -Y, right-bottom pushes +Y.
-    place_thruster(&mut grid, x_min - 1, y_max, z_mid, IVec3::new(-1, 0, 0), "torque-roll-cw");
-    place_thruster(&mut grid, x_max + 1, y_min, z_mid, IVec3::new(1, 0, 0), "torque-roll-cw");
-    // Roll CCW: left-bottom pushes +Y, right-top pushes -Y.
-    place_thruster(&mut grid, x_min - 1, y_min, z_mid, IVec3::new(-1, 0, 0), "torque-roll-ccw");
-    place_thruster(&mut grid, x_max + 1, y_max, z_mid, IVec3::new(1, 0, 0), "torque-roll-ccw");
-
-    // --- Sub-block elements: power wiring + decoration ---
-    use sub_block::{SubBlockElement, SubBlockType};
-
-    // Helper to add a PowerWire on a face.
-    let pw = |grid: &mut ShipGrid, x: i32, y: i32, z: i32, face: u8| {
-        grid.add_sub_block(x, y, z, SubBlockElement {
-            face, element_type: SubBlockType::PowerWire, rotation: 0, flags: 0,
+        grid.set_power_config(x, y, z, PowerConfig::Consumer {
+            reactor_pos,
+            circuit: power_circuit.to_string(),
         });
     };
 
-    // --- Power bus: reactor → floor perimeter → wall corners → ceiling perimeter → thrusters ---
+    // Symmetric position pairs around CoM ≈ (0, 3, 0).
+    // Y pairs: (y_min=0, y_max=5) → offsets (-2.5, +2.5) ✓
+    //          (1, 4) → offsets (-1.5, +1.5) ✓
+    // X pairs: (x_min=-5, x_max=4) → centers (-4.5, 4.5) ✓
+    //          (-3, 2) → centers (-2.5, 2.5) ✓
+    // Z pairs: (z_min=-8, z_max=7) → centers (-7.5, 7.5) ✓
+    //          (-4, 3) → centers (-3.5, 3.5) ✓
 
-    // Reactor (0,1,1) connects down to floor bus.
-    pw(&mut grid, 0, 1, 1, 3); // -Y face (down to floor)
-    pw(&mut grid, 0, y_min, 1, 2); // +Y face of floor block below reactor
+    // --- LINEAR THRUSTERS (8 per direction = 48 total, fully symmetric) ---
 
-    // Battery (0,1,2) connects down to floor bus.
-    pw(&mut grid, 0, 1, 2, 3); // -Y face (down to floor)
-    pw(&mut grid, 0, y_min, 2, 2); // +Y face of floor block below battery
-
-    // Floor bus: +Y face of floor blocks running along Z axis (main bus line).
-    for z in z_min..=z_max {
-        pw(&mut grid, 0, y_min, z, 2);
-    }
-    // Floor bus: branch from center (x=0) to both walls along X.
-    for x in x_min..=x_max {
-        pw(&mut grid, x, y_min, z_min, 2);
-        pw(&mut grid, x, y_min, z_max, 2);
+    // Aft (z_max+1): exhaust +Z, thrust -Z (forward). 8 in a 4×2 grid.
+    for &x in &[x_min, -3, 2, x_max] {
+        for &y in &[y_min, y_max] {
+            place_thruster(&mut grid, x, y, z_max + 1, IVec3::new(0, 0, 1), "thrust-forward", "main");
+        }
     }
 
-    // Wall verticals: wire up all 4 wall corners (interior face).
-    // Left wall (x_min): face 0 (+X interior)
-    for y in y_min..=y_max {
-        pw(&mut grid, x_min, y, z_min, 0);
-        pw(&mut grid, x_min, y, z_max, 0);
-    }
-    // Right wall (x_max): face 1 (-X interior)
-    for y in y_min..=y_max {
-        pw(&mut grid, x_max, y, z_min, 1);
-        pw(&mut grid, x_max, y, z_max, 1);
+    // Fore: on sides near bow. Exhaust -Z, thrust +Z (reverse). 8 symmetric.
+    for &y in &[y_min, 1, 4, y_max] {
+        place_thruster(&mut grid, x_min - 1, y, z_min + 1, IVec3::new(0, 0, -1), "thrust-reverse", "main");
+        place_thruster(&mut grid, x_max + 1, y, z_min + 1, IVec3::new(0, 0, -1), "thrust-reverse", "main");
     }
 
-    // Ceiling bus: -Y face of ceiling blocks along edges.
-    for x in x_min..=x_max {
-        pw(&mut grid, x, y_max, z_min, 3);
-        pw(&mut grid, x, y_max, z_max, 3);
+    // Port (x_min-1): exhaust -X, thrust +X (right). 8 in a 4×2 grid.
+    for &z in &[z_min, -4, 3, z_max] {
+        for &y in &[y_min, y_max] {
+            place_thruster(&mut grid, x_min - 1, y, z, IVec3::new(-1, 0, 0), "thrust-right", "main");
+        }
     }
 
-    // Thruster connections: each thruster block gets a PowerWire on the face
-    // connecting it back to the hull, and the hull block gets one facing the thruster.
-    // Aft thrusters (z_max+1): thruster face 5 (-Z) connects to hull face 4 (+Z).
-    for &(tx, ty) in &[(x_min, y_min), (x_max, y_min), (x_min, y_max), (x_max, y_max)] {
-        pw(&mut grid, tx, ty, z_max + 1, 5); // thruster: -Z face
-        pw(&mut grid, tx, ty, z_max, 4);     // hull: +Z face
-    }
-    // Fore thrusters (on sides at z_min+1): face 5 (-Z) from thruster side.
-    for &(tx, ty) in &[(x_min - 1, y_min), (x_min - 1, y_max), (x_max + 1, y_min), (x_max + 1, y_max)] {
-        // These are on port/starboard walls, not front face.
-        // Connect via the wall block they're adjacent to.
-        pw(&mut grid, tx, ty, z_min + 1, 5); // thruster: -Z
-    }
-    // Port thrusters (x_min-1): face 0 (+X) connects to hull face 1 (-X).
-    for &(ty, tz) in &[(y_min, z_min), (y_max, z_min), (y_min, z_max), (y_max, z_max)] {
-        pw(&mut grid, x_min - 1, ty, tz, 0); // thruster: +X
-        pw(&mut grid, x_min, ty, tz, 1);     // hull: -X (already has wall wire)
-    }
-    // Starboard thrusters (x_max+1): face 1 (-X) connects to hull face 0 (+X).
-    for &(ty, tz) in &[(y_min, z_min), (y_max, z_min), (y_min, z_max), (y_max, z_max)] {
-        pw(&mut grid, x_max + 1, ty, tz, 1); // thruster: -X
-        pw(&mut grid, x_max, ty, tz, 0);     // hull: +X
-    }
-    // Bottom thrusters (y_min-1): face 2 (+Y) connects to hull face 3 (-Y).
-    for &(tx, tz) in &[(x_min, z_min), (x_max, z_min), (x_min, z_max), (x_max, z_max)] {
-        pw(&mut grid, tx, y_min - 1, tz, 2); // thruster: +Y
-        pw(&mut grid, tx, y_min, tz, 3);     // hull: -Y (floor bottom)
-    }
-    // Top thrusters (y_max+1): face 3 (-Y) connects to hull face 2 (+Y).
-    for &(tx, tz) in &[(x_min, z_min), (x_max, z_min), (x_min, z_max), (x_max, z_max)] {
-        pw(&mut grid, tx, y_max + 1, tz, 3); // thruster: -Y
-        pw(&mut grid, tx, y_max, tz, 2);     // hull: +Y (ceiling top)
+    // Starboard (x_max+1): exhaust +X, thrust -X (left). 8 in a 4×2 grid.
+    for &z in &[z_min, -4, 3, z_max] {
+        for &y in &[y_min, y_max] {
+            place_thruster(&mut grid, x_max + 1, y, z, IVec3::new(1, 0, 0), "thrust-left", "main");
+        }
     }
 
-    // Decorative cable along the interior ceiling center (visual only, not power).
+    // Bottom (y_min-1): exhaust -Y, thrust +Y (up). 8 in a 4×2 grid.
+    for &x in &[x_min, -3, 2, x_max] {
+        for &z in &[z_min, z_max] {
+            place_thruster(&mut grid, x, y_min - 1, z, IVec3::new(0, -1, 0), "thrust-up", "main");
+        }
+    }
+
+    // Top (y_max+1): exhaust +Y, thrust -Y (down). 8 in a 4×2 grid.
+    for &x in &[x_min, -3, 2, x_max] {
+        for &z in &[z_min, z_max] {
+            place_thruster(&mut grid, x, y_max + 1, z, IVec3::new(0, 1, 0), "thrust-down", "main");
+        }
+    }
+
+    // --- RCS THRUSTERS (12 total: 2 per rotation direction) ---
+    // Each couple pair is placed so cross-axis torque cancels to zero:
+    // - Yaw: both at same Y → no roll contamination
+    // - Pitch: both at same X → no roll contamination
+    // - Roll: both at same Z → no yaw contamination
+    // All RCS on "rcs" circuit (30% power → less responsive rotation).
+
+    // Yaw CW (-Y torque): port-bow pushes +X, starboard-stern pushes -X. Both at y=2.
+    place_thruster(&mut grid, x_min - 1, 2, z_min + 2, IVec3::new(-1, 0, 0), "torque-yaw-cw", "rcs");
+    place_thruster(&mut grid, x_max + 1, 2, z_max - 2, IVec3::new(1, 0, 0), "torque-yaw-cw", "rcs");
+    // Yaw CCW (+Y torque): starboard-bow pushes -X, port-stern pushes +X. Both at y=2.
+    place_thruster(&mut grid, x_max + 1, 2, z_min + 2, IVec3::new(1, 0, 0), "torque-yaw-ccw", "rcs");
+    place_thruster(&mut grid, x_min - 1, 2, z_max - 2, IVec3::new(-1, 0, 0), "torque-yaw-ccw", "rcs");
+
+    // Pitch up (-X torque): top-bow pushes -Y, bottom-stern pushes +Y. Both at x=0.
+    place_thruster(&mut grid, 0, y_max + 1, z_min + 2, IVec3::new(0, 1, 0), "torque-pitch-up", "rcs");
+    place_thruster(&mut grid, 0, y_min - 1, z_max - 2, IVec3::new(0, -1, 0), "torque-pitch-up", "rcs");
+    // Pitch down (+X torque): top-stern pushes -Y, bottom-bow pushes +Y. Both at x=0.
+    place_thruster(&mut grid, 0, y_max + 1, z_max - 2, IVec3::new(0, 1, 0), "torque-pitch-down", "rcs");
+    place_thruster(&mut grid, 0, y_min - 1, z_min + 2, IVec3::new(0, -1, 0), "torque-pitch-down", "rcs");
+
+    // Roll CW (-Z torque): port-top pushes +X, starboard-bottom pushes -X. Both at z=0.
+    place_thruster(&mut grid, x_min - 1, y_max, 0, IVec3::new(-1, 0, 0), "torque-roll-cw", "rcs");
+    place_thruster(&mut grid, x_max + 1, y_min, 0, IVec3::new(1, 0, 0), "torque-roll-cw", "rcs");
+    // Roll CCW (+Z torque): port-bottom pushes +X, starboard-top pushes -X. Both at z=0.
+    place_thruster(&mut grid, x_min - 1, y_min, 0, IVec3::new(-1, 0, 0), "torque-roll-ccw", "rcs");
+    place_thruster(&mut grid, x_max + 1, y_max, 0, IVec3::new(1, 0, 0), "torque-roll-ccw", "rcs");
+
+    // --- Sub-block elements: decorative only (power is wireless now) ---
+    use sub_block::{SubBlockElement, SubBlockType};
+
+    // Decorative cable along the interior ceiling center (visual only).
     for z in (z_min + 2)..=(z_max - 2) {
         grid.add_sub_block(0, y_max, z, SubBlockElement {
             face: 3,
