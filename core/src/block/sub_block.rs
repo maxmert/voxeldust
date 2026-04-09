@@ -215,6 +215,56 @@ pub fn are_connected(
 }
 
 // ---------------------------------------------------------------------------
+// Bitmask auto-tiling
+// ---------------------------------------------------------------------------
+
+/// For each face, the 4 edge directions in the face plane.
+/// Each edge direction is an IVec3 offset to the adjacent block.
+/// Order: [+u, -u, +v, -v] in the face's tangent space.
+/// Bits: 0=+u, 1=-u, 2=+v, 3=-v.
+const FACE_EDGE_OFFSETS: [[IVec3; 4]; 6] = [
+    // Face 0 (+X): tangent u=-Z, v=+Y
+    [IVec3::NEG_Z, IVec3::Z, IVec3::Y, IVec3::NEG_Y],
+    // Face 1 (-X): tangent u=+Z, v=+Y
+    [IVec3::Z, IVec3::NEG_Z, IVec3::Y, IVec3::NEG_Y],
+    // Face 2 (+Y): tangent u=+X, v=+Z
+    [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z],
+    // Face 3 (-Y): tangent u=+X, v=-Z
+    [IVec3::X, IVec3::NEG_X, IVec3::NEG_Z, IVec3::Z],
+    // Face 4 (+Z): tangent u=+X, v=+Y
+    [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y],
+    // Face 5 (-Z): tangent u=-X, v=+Y
+    [IVec3::NEG_X, IVec3::X, IVec3::Y, IVec3::NEG_Y],
+];
+
+/// Compute the 4-bit connection mask for a chainable sub-block on a face.
+/// Bit 0 = +u neighbor, bit 1 = -u neighbor, bit 2 = +v neighbor, bit 3 = -v neighbor.
+///
+/// Checks adjacent blocks on the same face plane for matching chainable sub-blocks.
+/// The `get_sub_blocks` closure returns the sub-block elements at a given world position.
+pub fn compute_connection_mask(
+    pos: IVec3,
+    face: u8,
+    element_type: SubBlockType,
+    get_sub_blocks: impl Fn(IVec3) -> Vec<SubBlockElement>,
+) -> u8 {
+    if face >= 6 { return 0; }
+    let edges = &FACE_EDGE_OFFSETS[face as usize];
+    let mut mask = 0u8;
+
+    for (bit, &offset) in edges.iter().enumerate() {
+        let neighbor_pos = pos + offset;
+        let neighbor_subs = get_sub_blocks(neighbor_pos);
+        // Check if neighbor has the same chainable type on the same face.
+        if neighbor_subs.iter().any(|e| e.face == face && e.element_type == element_type) {
+            mask |= 1 << bit;
+        }
+    }
+
+    mask
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

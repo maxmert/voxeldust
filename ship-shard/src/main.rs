@@ -2485,32 +2485,28 @@ fn add_default_signal_bindings(
 
     match kind {
         FunctionalBlockKind::Thruster => {
-            // Determine thrust direction from block orientation.
             let orientation = grid.get_meta(pos.x, pos.y, pos.z)
                 .map(|m| m.orientation)
                 .unwrap_or(block::BlockOrientation::DEFAULT);
             let dir = orientation.facing_direction();
 
-            // Map exhaust direction (facing) to thrust channel.
-            // Thrust = -facing (reaction force). Channel name = thrust direction.
-            // Exhaust +Z → thrust -Z (forward). Exhaust -Z → thrust +Z (reverse).
-            let default_channel = if dir.z.abs() > 0.5 {
-                if dir.z > 0.0 { "thrust-forward" } else { "thrust-reverse" }
-            } else if dir.x.abs() > 0.5 {
-                if dir.x > 0.0 { "thrust-left" } else { "thrust-right" }
+            // No auto-assignment: player configures channel via config UI.
+            // Pre-built ships use channel_overrides to set channels on spawn.
+            if let Some(channel_name) = grid.channel_override(pos) {
+                let channel_id = channels.resolve_or_create(
+                    channel_name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0,
+                );
+                entity_cmds.insert(SignalSubscriber {
+                    bindings: vec![SubscribeBinding {
+                        channel_id,
+                        property: SignalProperty::Throttle,
+                    }],
+                });
             } else {
-                if dir.y > 0.0 { "thrust-down" } else { "thrust-up" }
-            };
+                // Player-placed thruster: empty subscriber. Player must configure.
+                entity_cmds.insert(SignalSubscriber::default());
+            }
 
-            let channel_id = channels.resolve_or_create(
-                default_channel, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0,
-            );
-            entity_cmds.insert(SignalSubscriber {
-                bindings: vec![SubscribeBinding {
-                    channel_id,
-                    property: SignalProperty::Throttle,
-                }],
-            });
             entity_cmds.insert(ThrusterState::default());
             entity_cmds.insert(ThrusterBlock {
                 thrust_n: registry.thruster_props(block_id).map(|p| p.thrust_n).unwrap_or(50_000.0),
@@ -2929,7 +2925,6 @@ fn compute_ship_thrust(
     mut pilot_acc: ResMut<PilotAccumulator>,
     thrusters: Query<(&ThrusterBlock, &ThrusterState, Option<&PowerNetworkMembership>)>,
     net_table: Res<PowerNetworkTable>,
-    channels: Res<SignalChannelTable>,
     raw_input: Res<RawPilotInput>,
     ship_props: Res<ShipProps>,
     ship_com: Res<ShipCenterOfMass>,
@@ -2944,65 +2939,39 @@ fn compute_ship_thrust(
         return;
     }
 
-    // Read thrust limiter channel (mouse wheel control, 0.0–1.0).
-    let limiter = channels.get("thrust-limiter")
-        .map(|ch| ch.value.as_f32() as f64)
-        .unwrap_or(1.0);
+    // Thrust limiter from pilot input (mouse wheel, 0.0–1.0).
+    let limiter = raw_input.thrust_limiter as f64;
 
-    // Sum thrust from all thrusters. Force only — torque from off-CoM thrusters
-    // is NOT added here because player-built ships can't guarantee symmetric placement.
-    // Rotation is controlled exclusively through the torque channels.
+    // ALL thrust and torque comes from thrusters. No special torque channels.
+    // Each thruster contributes force (-direction × thrust_n × throttle × limiter × power)
+    // AND torque (offset_from_CoM × force). If thrusters are asymmetric, the ship
+    // rotates unevenly — that's correct physics. The player must design properly.
     let mut total_thrust = DVec3::ZERO;
-
-    // No-wire fallback: if no power networks exist, grant full power.
-    // This prevents the starter ship from being dead before wiring is set up.
-    let has_any_network = !net_table.networks.is_empty();
+    let mut total_torque = DVec3::ZERO;
+    let com = ship_com.0;
 
     for (thruster, state, membership) in &thrusters {
         if state.throttle.abs() < 0.001 { continue; }
 
-        // Power scaling: block must be on a powered network.
-        let power_ratio = if has_any_network {
-            membership
-                .and_then(|m| m.network_id)
-                .and_then(|id| net_table.networks.get(id as usize))
-                .map(|net| net.power_ratio as f64)
-                .unwrap_or(0.0) // No network = no power
-        } else {
-            1.0 // No networks at all = legacy/fallback full power
-        };
+        // Power scaling: no network = no power. No exceptions.
+        let power_ratio = membership
+            .and_then(|m| m.network_id)
+            .and_then(|id| net_table.networks.get(id as usize))
+            .map(|net| net.power_ratio as f64)
+            .unwrap_or(0.0);
 
         let thrust_vec = -thruster.direction * thruster.thrust_n
             * state.throttle as f64 * limiter * power_ratio;
         total_thrust += thrust_vec;
 
-        // Diagnostic: log power ratio for first thruster once every 2 seconds.
-        static DIAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let tick = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if tick % 40 == 0 {
-            tracing::info!(
-                power_ratio,
-                has_any_network,
-                has_membership = membership.is_some(),
-                network_id = ?membership.map(|m| m.network_id),
-                throttle = state.throttle,
-                "thruster power diagnostic",
-            );
-        }
+        // Torque from offset to center of mass.
+        let block_center = DVec3::new(
+            thruster.block_pos.x as f64 + 0.5,
+            thruster.block_pos.y as f64 + 0.5,
+            thruster.block_pos.z as f64 + 0.5,
+        );
+        total_torque += (block_center - com).cross(thrust_vec);
     }
-
-    // Rotation torque from dedicated channels (yaw/pitch/roll).
-    let yaw_cw = channels.get("torque-yaw-cw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
-    let yaw_ccw = channels.get("torque-yaw-ccw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
-    let pitch_up = channels.get("torque-pitch-up").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
-    let pitch_down = channels.get("torque-pitch-down").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
-    let roll_cw = channels.get("torque-roll-cw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
-    let roll_ccw = channels.get("torque-roll-ccw").map(|c| c.value.as_f32() as f64).unwrap_or(0.0);
-    let total_torque = DVec3::new(
-        (pitch_up - pitch_down) * limiter,
-        (yaw_cw - yaw_ccw) * limiter,
-        (roll_cw - roll_ccw) * limiter,
-    );
 
     // Log thrust diagnostics every ~2 seconds (40 ticks at 20Hz).
     static DIAG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

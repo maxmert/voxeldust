@@ -58,18 +58,49 @@ const FACE_TANGENTS: [([f32; 3], [f32; 3]); 6] = [
 ];
 
 /// Generate mesh data for all sub-block elements in a chunk.
+/// For chainable types (wires, rails, pipes), computes connection masks
+/// from neighboring sub-blocks to generate correct joint geometry.
 pub fn mesh_sub_blocks(chunk: &ChunkStorage) -> SubBlockMeshData {
+    use super::sub_block::{compute_connection_mask, SubBlockElement as SBE};
+
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
     for (flat_idx, elements) in chunk.iter_sub_blocks() {
         let (bx, by, bz) = index_to_xyz(flat_idx as usize);
         let block_origin = [bx as f32, by as f32, bz as f32];
+        let local_pos = glam::IVec3::new(bx as i32, by as i32, bz as i32);
 
         for elem in elements {
+            // For chainable types, compute connection mask from neighbors.
+            let connection_mask = if elem.element_type.is_chainable() {
+                compute_connection_mask(
+                    local_pos,
+                    elem.face,
+                    elem.element_type,
+                    |neighbor_pos| {
+                        // Clamp to chunk bounds (0..62).
+                        if neighbor_pos.x < 0 || neighbor_pos.x >= CHUNK_SIZE as i32
+                            || neighbor_pos.y < 0 || neighbor_pos.y >= CHUNK_SIZE as i32
+                            || neighbor_pos.z < 0 || neighbor_pos.z >= CHUNK_SIZE as i32
+                        {
+                            return Vec::new();
+                        }
+                        chunk.get_sub_blocks(
+                            neighbor_pos.x as u8,
+                            neighbor_pos.y as u8,
+                            neighbor_pos.z as u8,
+                        ).to_vec()
+                    },
+                )
+            } else {
+                0 // Non-chainable types don't auto-join.
+            };
+
             generate_element_mesh(
                 &block_origin,
                 elem,
+                connection_mask,
                 &mut vertices,
                 &mut indices,
             );
@@ -80,9 +111,11 @@ pub fn mesh_sub_blocks(chunk: &ChunkStorage) -> SubBlockMeshData {
 }
 
 /// Generate mesh for a single sub-block element.
+/// `connection_mask`: 4-bit mask for chainable types (bit 0=+u, 1=-u, 2=+v, 3=-v).
 fn generate_element_mesh(
     block_origin: &[f32; 3],
     elem: &SubBlockElement,
+    connection_mask: u8,
     vertices: &mut Vec<SubBlockVertex>,
     indices: &mut Vec<u32>,
 ) {
@@ -98,33 +131,30 @@ fn generate_element_mesh(
     ];
 
     // Element-specific geometry. All dimensions are fractions of a block (1.0 = 1 block).
-    // Chainable elements use half_u=0.5 to span the full face edge and connect seamlessly.
     match elem.element_type {
         SubBlockType::PowerWire | SubBlockType::SignalWire | SubBlockType::Cable => {
-            // Thin wire running full block length, narrow cross-section.
-            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,
-                0.5, 0.5,     // centered on face
-                0.5, 0.03, 0.03, // full-length, narrow, thin
-                elem.rotation,
-                vertices, indices);
+            // Bitmask auto-tiling: emit strip segments from center toward each connected edge.
+            emit_wire_from_mask(block_origin, face, &normal, &tan_u, &tan_v, &color,
+                connection_mask, 0.03, 0.03, vertices, indices);
         }
         SubBlockType::Rail | SubBlockType::ConveyorBelt => {
-            // Two parallel rails spanning full block, with cross-ties.
+            // Bitmask auto-tiling for rails (two parallel strips + cross-ties).
+            // For now, use mask to determine primary direction.
+            let rot = rotation_from_mask(connection_mask);
             emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,
-                0.5, 0.3, 0.5, 0.025, 0.05, elem.rotation, vertices, indices);
+                0.5, 0.3, 0.5, 0.025, 0.05, rot, vertices, indices);
             emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,
-                0.5, 0.7, 0.5, 0.025, 0.05, elem.rotation, vertices, indices);
-            // Cross-ties every 0.25 blocks.
+                0.5, 0.7, 0.5, 0.025, 0.05, rot, vertices, indices);
             for i in 0..4 {
                 let u = 0.125 + i as f32 * 0.25;
                 emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,
-                    u, 0.5, 0.04, 0.22, 0.03, elem.rotation, vertices, indices);
+                    u, 0.5, 0.04, 0.22, 0.03, rot, vertices, indices);
             }
         }
         SubBlockType::Pipe | SubBlockType::PipeValve | SubBlockType::PipePump => {
-            // Thicker pipe spanning full block.
-            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,
-                0.5, 0.5, 0.5, 0.08, 0.08, elem.rotation, vertices, indices);
+            // Bitmask auto-tiling for pipes.
+            emit_wire_from_mask(block_origin, face, &normal, &tan_u, &tan_v, &color,
+                connection_mask, 0.08, 0.08, vertices, indices);
         }
         SubBlockType::Ladder => {
             // Two vertical side rails spanning full block height + rungs.
@@ -161,6 +191,64 @@ fn generate_element_mesh(
                 0.5, 0.5, 0.12, 0.12, 0.05, elem.rotation, vertices, indices);
         }
     }
+}
+
+/// Determine primary rotation from connection mask (for non-wire chainable types like rails).
+/// If connections along v-axis (bits 2,3): rotation=1. Otherwise rotation=0.
+fn rotation_from_mask(mask: u8) -> u8 {
+    let has_v = (mask & 0b1100) != 0;
+    let has_u = (mask & 0b0011) != 0;
+    if has_v && !has_u { 1 } else { 0 }
+}
+
+/// Emit wire/pipe mesh based on 4-bit connection mask.
+/// Generates strip segments from the face center toward each connected edge.
+/// If no connections, emits a small dot at center.
+fn emit_wire_from_mask(
+    block_origin: &[f32; 3],
+    face: usize,
+    normal: &[f32; 3],
+    tan_u: &[f32; 3],
+    tan_v: &[f32; 3],
+    color: &[f32; 3],
+    mask: u8,
+    half_width: f32,
+    thickness: f32,
+    vertices: &mut Vec<SubBlockVertex>,
+    indices: &mut Vec<u32>,
+) {
+    if mask == 0 {
+        // No connections: small dot at center.
+        emit_face_strip(block_origin, face, normal, tan_u, tan_v, color,
+            0.5, 0.5, 0.06, 0.06, thickness, 0, vertices, indices);
+        return;
+    }
+
+    // Emit a strip segment from center (0.5, 0.5) toward each connected edge.
+    // +u (bit 0): center → right edge (u=0.5..1.0)
+    if mask & 1 != 0 {
+        emit_face_strip(block_origin, face, normal, tan_u, tan_v, color,
+            0.75, 0.5, 0.25, half_width, thickness, 0, vertices, indices);
+    }
+    // -u (bit 1): center → left edge (u=0.0..0.5)
+    if mask & 2 != 0 {
+        emit_face_strip(block_origin, face, normal, tan_u, tan_v, color,
+            0.25, 0.5, 0.25, half_width, thickness, 0, vertices, indices);
+    }
+    // +v (bit 2): center → top edge (v=0.5..1.0)
+    if mask & 4 != 0 {
+        emit_face_strip(block_origin, face, normal, tan_u, tan_v, color,
+            0.5, 0.75, half_width, 0.25, thickness, 0, vertices, indices);
+    }
+    // -v (bit 3): center → bottom edge (v=0.0..0.5)
+    if mask & 8 != 0 {
+        emit_face_strip(block_origin, face, normal, tan_u, tan_v, color,
+            0.5, 0.25, half_width, 0.25, thickness, 0, vertices, indices);
+    }
+
+    // Center junction dot (always present when any connections exist).
+    emit_face_strip(block_origin, face, normal, tan_u, tan_v, color,
+        0.5, 0.5, half_width, half_width, thickness, 0, vertices, indices);
 }
 
 /// Emit a 3D box (6 faces, 24 vertices, 36 indices) positioned on a block face.

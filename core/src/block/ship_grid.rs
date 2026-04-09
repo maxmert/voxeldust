@@ -20,13 +20,28 @@ use super::sub_block;
 /// where a block is placed in a previously-removed chunk.
 pub struct ShipGrid {
     chunks: HashMap<IVec3, ChunkStorage>,
+    /// Per-block signal channel overrides for pre-configured ships.
+    /// Set by ship builders (e.g., `build_starter_ship`), read by `add_default_signal_bindings`.
+    /// Key = world block position, value = channel name the block should subscribe to.
+    channel_overrides: HashMap<IVec3, String>,
 }
 
 impl ShipGrid {
     pub fn new() -> Self {
         Self {
             chunks: HashMap::new(),
+            channel_overrides: HashMap::new(),
         }
+    }
+
+    /// Set a channel override for a block position (used by ship builders).
+    pub fn set_channel_override(&mut self, x: i32, y: i32, z: i32, channel: &str) {
+        self.channel_overrides.insert(IVec3::new(x, y, z), channel.to_string());
+    }
+
+    /// Get the channel override for a block position, if any.
+    pub fn channel_override(&self, pos: IVec3) -> Option<&str> {
+        self.channel_overrides.get(&pos).map(|s| s.as_str())
     }
 
     // -----------------------------------------------------------------------
@@ -568,122 +583,192 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     grid.set_block(0, 1, 1, BlockId::REACTOR_SMALL);
     grid.set_block(0, 1, 2, BlockId::BATTERY);
 
-    // Thrusters placed one block OUTSIDE the hull — they protrude from the surface.
+    // -----------------------------------------------------------------------
+    // Thrusters: 48 linear + 12 RCS = 60 total
+    // -----------------------------------------------------------------------
+    // Each thruster protrudes 1 block outside the hull.
     // facing_direction = exhaust direction; thrust (reaction) = -facing.
-    // 4 thrusters per direction at the corners of each face for zero net torque.
-    //
-    // Ship: X=[-5..4], Y=[0..5], Z=[-8..7]. 4 corners of each face are symmetric
-    // around the face center, so all torques cancel perfectly.
+    // Channel overrides assign each thruster to the correct signal channel.
+    // Power wiring connects each thruster to the power bus.
 
-    let set_thruster = |grid: &mut ShipGrid, x: i32, y: i32, z: i32, normal: IVec3| {
+    // Helper: place thruster + set channel override.
+    let place_thruster = |grid: &mut ShipGrid, x: i32, y: i32, z: i32, normal: IVec3, channel: &str| {
         grid.set_block(x, y, z, BlockId::THRUSTER_SMALL_CHEMICAL);
         grid.set_orientation(x, y, z, BlockOrientation::from_face_normal(normal));
+        grid.set_channel_override(x, y, z, channel);
     };
 
-    // Aft face (z_max+1): exhaust +Z, thrust -Z (forward). 4 at corners.
-    set_thruster(&mut grid, x_min, y_min, z_max + 1, IVec3::new(0, 0, 1));
-    set_thruster(&mut grid, x_max, y_min, z_max + 1, IVec3::new(0, 0, 1));
-    set_thruster(&mut grid, x_min, y_max, z_max + 1, IVec3::new(0, 0, 1));
-    set_thruster(&mut grid, x_max, y_max, z_max + 1, IVec3::new(0, 0, 1));
+    // Mid-points for 8-per-face layout (corners + mid-edges).
+    let x_mid = (x_min + x_max) / 2;
+    let y_mid = (y_min + y_max) / 2;
+    let z_mid = (z_min + z_max) / 2;
 
-    // Fore: reverse thrusters on port/starboard sides near the bow (not on front glass).
-    // Exhaust -Z, thrust +Z (reverse).
-    set_thruster(&mut grid, x_min - 1, y_min, z_min + 1, IVec3::new(0, 0, -1));
-    set_thruster(&mut grid, x_min - 1, y_max, z_min + 1, IVec3::new(0, 0, -1));
-    set_thruster(&mut grid, x_max + 1, y_min, z_min + 1, IVec3::new(0, 0, -1));
-    set_thruster(&mut grid, x_max + 1, y_max, z_min + 1, IVec3::new(0, 0, -1));
+    // --- LINEAR THRUSTERS (8 per direction = 48 total) ---
 
-    // Port face (x_min-1): exhaust -X, thrust +X (right). 4 at corners.
-    set_thruster(&mut grid, x_min - 1, y_min, z_min, IVec3::new(-1, 0, 0));
-    set_thruster(&mut grid, x_min - 1, y_max, z_min, IVec3::new(-1, 0, 0));
-    set_thruster(&mut grid, x_min - 1, y_min, z_max, IVec3::new(-1, 0, 0));
-    set_thruster(&mut grid, x_min - 1, y_max, z_max, IVec3::new(-1, 0, 0));
+    // Aft (z_max+1): exhaust +Z, thrust -Z (forward).
+    for &x in &[x_min, x_mid, x_max] {
+        for &y in &[y_min, y_max] {
+            place_thruster(&mut grid, x, y, z_max + 1, IVec3::new(0, 0, 1), "thrust-forward");
+        }
+    }
+    place_thruster(&mut grid, x_min, y_mid, z_max + 1, IVec3::new(0, 0, 1), "thrust-forward");
+    place_thruster(&mut grid, x_max, y_mid, z_max + 1, IVec3::new(0, 0, 1), "thrust-forward");
 
-    // Starboard face (x_max+1): exhaust +X, thrust -X (left). 4 at corners.
-    set_thruster(&mut grid, x_max + 1, y_min, z_min, IVec3::new(1, 0, 0));
-    set_thruster(&mut grid, x_max + 1, y_max, z_min, IVec3::new(1, 0, 0));
-    set_thruster(&mut grid, x_max + 1, y_min, z_max, IVec3::new(1, 0, 0));
-    set_thruster(&mut grid, x_max + 1, y_max, z_max, IVec3::new(1, 0, 0));
+    // Fore: on port/starboard sides near bow. Exhaust -Z, thrust +Z (reverse).
+    for &y in &[y_min, y_mid, y_max] {
+        place_thruster(&mut grid, x_min - 1, y, z_min + 1, IVec3::new(0, 0, -1), "thrust-reverse");
+        place_thruster(&mut grid, x_max + 1, y, z_min + 1, IVec3::new(0, 0, -1), "thrust-reverse");
+    }
+    place_thruster(&mut grid, x_min - 1, y_min, z_min + 2, IVec3::new(0, 0, -1), "thrust-reverse");
+    place_thruster(&mut grid, x_max + 1, y_max, z_min + 2, IVec3::new(0, 0, -1), "thrust-reverse");
 
-    // Bottom face (y_min-1): exhaust -Y, thrust +Y (up). 4 at corners.
-    set_thruster(&mut grid, x_min, y_min - 1, z_min, IVec3::new(0, -1, 0));
-    set_thruster(&mut grid, x_max, y_min - 1, z_min, IVec3::new(0, -1, 0));
-    set_thruster(&mut grid, x_min, y_min - 1, z_max, IVec3::new(0, -1, 0));
-    set_thruster(&mut grid, x_max, y_min - 1, z_max, IVec3::new(0, -1, 0));
+    // Port (x_min-1): exhaust -X, thrust +X (right).
+    for &z in &[z_min, z_mid, z_max] {
+        for &y in &[y_min, y_max] {
+            place_thruster(&mut grid, x_min - 1, y, z, IVec3::new(-1, 0, 0), "thrust-right");
+        }
+    }
+    place_thruster(&mut grid, x_min - 1, y_mid, z_min, IVec3::new(-1, 0, 0), "thrust-right");
+    place_thruster(&mut grid, x_min - 1, y_mid, z_max, IVec3::new(-1, 0, 0), "thrust-right");
 
-    // Top face (y_max+1): exhaust +Y, thrust -Y (down). 4 at corners.
-    set_thruster(&mut grid, x_min, y_max + 1, z_min, IVec3::new(0, 1, 0));
-    set_thruster(&mut grid, x_max, y_max + 1, z_min, IVec3::new(0, 1, 0));
-    set_thruster(&mut grid, x_min, y_max + 1, z_max, IVec3::new(0, 1, 0));
-    set_thruster(&mut grid, x_max, y_max + 1, z_max, IVec3::new(0, 1, 0));
+    // Starboard (x_max+1): exhaust +X, thrust -X (left).
+    for &z in &[z_min, z_mid, z_max] {
+        for &y in &[y_min, y_max] {
+            place_thruster(&mut grid, x_max + 1, y, z, IVec3::new(1, 0, 0), "thrust-left");
+        }
+    }
+    place_thruster(&mut grid, x_max + 1, y_mid, z_min, IVec3::new(1, 0, 0), "thrust-left");
+    place_thruster(&mut grid, x_max + 1, y_mid, z_max, IVec3::new(1, 0, 0), "thrust-left");
+
+    // Bottom (y_min-1): exhaust -Y, thrust +Y (up).
+    for &x in &[x_min, x_mid, x_max] {
+        for &z in &[z_min, z_max] {
+            place_thruster(&mut grid, x, y_min - 1, z, IVec3::new(0, -1, 0), "thrust-up");
+        }
+    }
+    place_thruster(&mut grid, x_min, y_min - 1, z_mid, IVec3::new(0, -1, 0), "thrust-up");
+    place_thruster(&mut grid, x_max, y_min - 1, z_mid, IVec3::new(0, -1, 0), "thrust-up");
+
+    // Top (y_max+1): exhaust +Y, thrust -Y (down).
+    for &x in &[x_min, x_mid, x_max] {
+        for &z in &[z_min, z_max] {
+            place_thruster(&mut grid, x, y_max + 1, z, IVec3::new(0, 1, 0), "thrust-down");
+        }
+    }
+    place_thruster(&mut grid, x_min, y_max + 1, z_mid, IVec3::new(0, 1, 0), "thrust-down");
+    place_thruster(&mut grid, x_max, y_max + 1, z_mid, IVec3::new(0, 1, 0), "thrust-down");
+
+    // --- RCS THRUSTERS (12 total: 4 per rotation axis) ---
+
+    // Yaw CW (Y-axis): front-port pushes +X, back-starboard pushes -X.
+    place_thruster(&mut grid, x_min - 1, y_mid, z_min + 1, IVec3::new(-1, 0, 0), "torque-yaw-cw");
+    place_thruster(&mut grid, x_max + 1, y_mid, z_max - 1, IVec3::new(1, 0, 0), "torque-yaw-cw");
+    // Yaw CCW: front-starboard pushes -X, back-port pushes +X.
+    place_thruster(&mut grid, x_max + 1, y_mid, z_min + 1, IVec3::new(1, 0, 0), "torque-yaw-ccw");
+    place_thruster(&mut grid, x_min - 1, y_mid, z_max - 1, IVec3::new(-1, 0, 0), "torque-yaw-ccw");
+
+    // Pitch up (X-axis): top-front pushes +Z, bottom-back pushes -Z.
+    place_thruster(&mut grid, x_mid, y_max + 1, z_min + 1, IVec3::new(0, 1, 0), "torque-pitch-up");
+    place_thruster(&mut grid, x_mid, y_min - 1, z_max - 1, IVec3::new(0, -1, 0), "torque-pitch-up");
+    // Pitch down: top-back pushes -Z, bottom-front pushes +Z.
+    place_thruster(&mut grid, x_mid, y_max + 1, z_max - 1, IVec3::new(0, 1, 0), "torque-pitch-down");
+    place_thruster(&mut grid, x_mid, y_min - 1, z_min + 1, IVec3::new(0, -1, 0), "torque-pitch-down");
+
+    // Roll CW (Z-axis): left-top pushes -Y, right-bottom pushes +Y.
+    place_thruster(&mut grid, x_min - 1, y_max, z_mid, IVec3::new(-1, 0, 0), "torque-roll-cw");
+    place_thruster(&mut grid, x_max + 1, y_min, z_mid, IVec3::new(1, 0, 0), "torque-roll-cw");
+    // Roll CCW: left-bottom pushes +Y, right-top pushes -Y.
+    place_thruster(&mut grid, x_min - 1, y_min, z_mid, IVec3::new(-1, 0, 0), "torque-roll-ccw");
+    place_thruster(&mut grid, x_max + 1, y_max, z_mid, IVec3::new(1, 0, 0), "torque-roll-ccw");
 
     // --- Sub-block elements: power wiring + decoration ---
     use sub_block::{SubBlockElement, SubBlockType};
 
-    // Power wiring: reactor (0,1,1) → along floor to left wall → up left wall → ceiling bus.
-    // Route along SOLID blocks only (floor, walls, ceiling — never through air).
-
-    // Step 1: Reactor (0,1,1) → wire along floor to left wall (x_min,1,1).
-    // Floor blocks at y_min=0 are solid. Wire on +Y face (top of floor).
-    for x in (x_min..0).rev() {
-        grid.add_sub_block(x, y_min, 1, SubBlockElement {
-            face: 2, // +Y (floor top)
-            element_type: SubBlockType::PowerWire,
-            rotation: 0, // runs along X axis
-            flags: 0,
+    // Helper to add a PowerWire on a face.
+    let pw = |grid: &mut ShipGrid, x: i32, y: i32, z: i32, face: u8| {
+        grid.add_sub_block(x, y, z, SubBlockElement {
+            face, element_type: SubBlockType::PowerWire, rotation: 0, flags: 0,
         });
-    }
-    // Wire on reactor block itself (floor-level, connects to floor wire).
-    grid.add_sub_block(0, 1, 1, SubBlockElement {
-        face: 1, // -X (toward left wall)
-        element_type: SubBlockType::PowerWire,
-        rotation: 0,
-        flags: 0,
-    });
-    // Reactor → battery wire.
-    grid.add_sub_block(0, 1, 1, SubBlockElement {
-        face: 4, // +Z (toward battery)
-        element_type: SubBlockType::PowerWire,
-        rotation: 0,
-        flags: 0,
-    });
-    grid.add_sub_block(0, 1, 2, SubBlockElement {
-        face: 5, // -Z (battery connects back to reactor)
-        element_type: SubBlockType::PowerWire,
-        rotation: 0,
-        flags: 0,
-    });
+    };
 
-    // Step 2: Up the left wall (x_min) from floor to ceiling.
-    // Left wall blocks are solid from y_min to y_max.
-    // Wire on interior face (+X, face 0) going vertically.
+    // --- Power bus: reactor → floor perimeter → wall corners → ceiling perimeter → thrusters ---
+
+    // Reactor (0,1,1) connects down to floor bus.
+    pw(&mut grid, 0, 1, 1, 3); // -Y face (down to floor)
+    pw(&mut grid, 0, y_min, 1, 2); // +Y face of floor block below reactor
+
+    // Battery (0,1,2) connects down to floor bus.
+    pw(&mut grid, 0, 1, 2, 3); // -Y face (down to floor)
+    pw(&mut grid, 0, y_min, 2, 2); // +Y face of floor block below battery
+
+    // Floor bus: +Y face of floor blocks running along Z axis (main bus line).
+    for z in z_min..=z_max {
+        pw(&mut grid, 0, y_min, z, 2);
+    }
+    // Floor bus: branch from center (x=0) to both walls along X.
+    for x in x_min..=x_max {
+        pw(&mut grid, x, y_min, z_min, 2);
+        pw(&mut grid, x, y_min, z_max, 2);
+    }
+
+    // Wall verticals: wire up all 4 wall corners (interior face).
+    // Left wall (x_min): face 0 (+X interior)
     for y in y_min..=y_max {
-        grid.add_sub_block(x_min, y, 1, SubBlockElement {
-            face: 0, // +X (interior face of left wall)
-            element_type: SubBlockType::PowerWire,
-            rotation: 0, // runs vertically (v=+Y on face 0)
-            flags: 0,
-        });
+        pw(&mut grid, x_min, y, z_min, 0);
+        pw(&mut grid, x_min, y, z_max, 0);
+    }
+    // Right wall (x_max): face 1 (-X interior)
+    for y in y_min..=y_max {
+        pw(&mut grid, x_max, y, z_min, 1);
+        pw(&mut grid, x_max, y, z_max, 1);
     }
 
-    // Step 3: Along ceiling from left wall (x_min) to center (x=0).
-    // Ceiling blocks at y_max are solid. Wire on -Y face (underside).
-    for x in x_min..=0 {
-        grid.add_sub_block(x, y_max, 1, SubBlockElement {
-            face: 3, // -Y (ceiling underside)
-            element_type: SubBlockType::PowerWire,
-            rotation: 0,
-            flags: 0,
-        });
+    // Ceiling bus: -Y face of ceiling blocks along edges.
+    for x in x_min..=x_max {
+        pw(&mut grid, x, y_max, z_min, 3);
+        pw(&mut grid, x, y_max, z_max, 3);
     }
 
-    // Power wire running along the interior ceiling (face 3 = -Y).
-    // Face 3 (-Y) tangents: u=+X, v=-Z. Wire runs along Z → rotation=1 (swap to v axis).
+    // Thruster connections: each thruster block gets a PowerWire on the face
+    // connecting it back to the hull, and the hull block gets one facing the thruster.
+    // Aft thrusters (z_max+1): thruster face 5 (-Z) connects to hull face 4 (+Z).
+    for &(tx, ty) in &[(x_min, y_min), (x_max, y_min), (x_min, y_max), (x_max, y_max)] {
+        pw(&mut grid, tx, ty, z_max + 1, 5); // thruster: -Z face
+        pw(&mut grid, tx, ty, z_max, 4);     // hull: +Z face
+    }
+    // Fore thrusters (on sides at z_min+1): face 5 (-Z) from thruster side.
+    for &(tx, ty) in &[(x_min - 1, y_min), (x_min - 1, y_max), (x_max + 1, y_min), (x_max + 1, y_max)] {
+        // These are on port/starboard walls, not front face.
+        // Connect via the wall block they're adjacent to.
+        pw(&mut grid, tx, ty, z_min + 1, 5); // thruster: -Z
+    }
+    // Port thrusters (x_min-1): face 0 (+X) connects to hull face 1 (-X).
+    for &(ty, tz) in &[(y_min, z_min), (y_max, z_min), (y_min, z_max), (y_max, z_max)] {
+        pw(&mut grid, x_min - 1, ty, tz, 0); // thruster: +X
+        pw(&mut grid, x_min, ty, tz, 1);     // hull: -X (already has wall wire)
+    }
+    // Starboard thrusters (x_max+1): face 1 (-X) connects to hull face 0 (+X).
+    for &(ty, tz) in &[(y_min, z_min), (y_max, z_min), (y_min, z_max), (y_max, z_max)] {
+        pw(&mut grid, x_max + 1, ty, tz, 1); // thruster: -X
+        pw(&mut grid, x_max, ty, tz, 0);     // hull: +X
+    }
+    // Bottom thrusters (y_min-1): face 2 (+Y) connects to hull face 3 (-Y).
+    for &(tx, tz) in &[(x_min, z_min), (x_max, z_min), (x_min, z_max), (x_max, z_max)] {
+        pw(&mut grid, tx, y_min - 1, tz, 2); // thruster: +Y
+        pw(&mut grid, tx, y_min, tz, 3);     // hull: -Y (floor bottom)
+    }
+    // Top thrusters (y_max+1): face 3 (-Y) connects to hull face 2 (+Y).
+    for &(tx, tz) in &[(x_min, z_min), (x_max, z_min), (x_min, z_max), (x_max, z_max)] {
+        pw(&mut grid, tx, y_max + 1, tz, 3); // thruster: -Y
+        pw(&mut grid, tx, y_max, tz, 2);     // hull: +Y (ceiling top)
+    }
+
+    // Decorative cable along the interior ceiling center (visual only, not power).
     for z in (z_min + 2)..=(z_max - 2) {
         grid.add_sub_block(0, y_max, z, SubBlockElement {
             face: 3,
-            element_type: SubBlockType::PowerWire,
-            rotation: 1,
+            element_type: SubBlockType::Cable,
+            rotation: 0,
             flags: 0,
         });
     }
