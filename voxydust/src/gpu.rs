@@ -110,6 +110,10 @@ pub struct GpuState {
     pub composite_bind_group_layout: Option<wgpu::BindGroupLayout>,
     pub composite_bind_group: Option<wgpu::BindGroup>,
     pub composite_params_buf: Option<wgpu::Buffer>,
+    /// Depth texture stored for TEXTURE_BINDING access in composite pass.
+    pub depth_texture: Option<wgpu::Texture>,
+    /// Atmosphere uniform buffer.
+    pub atmosphere_buf: Option<wgpu::Buffer>,
     pub pipeline: wgpu::RenderPipeline,
     pub sphere_inside_pipeline: wgpu::RenderPipeline,
     pub sphere_vertex_buf: wgpu::Buffer,
@@ -164,6 +168,41 @@ pub struct GpuState {
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const NUM_CASCADES: u32 = 4;
+
+/// Atmosphere rendering uniforms. All scattering parameters are per-planet,
+/// derived deterministically from the planet seed. Units: kilometers for radii
+/// and scale heights, 1/km for scattering coefficients (matching Hillaire 2020
+/// and webgpu-sky-atmosphere conventions).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AtmosphereUniforms {
+    /// Observer position relative to planet center (km). w = unused.
+    pub observer_pos: [f32; 4],
+    /// x = planet surface radius (km), y = atmosphere top radius (km),
+    /// z = 1.0 if atmosphere enabled, w = unused.
+    pub radii: [f32; 4],
+    /// Rayleigh scattering coefficients at sea level (1/km). w = density exp scale (-1/scale_height_km).
+    pub rayleigh: [f32; 4],
+    /// x = Mie scattering (1/km), y = Mie absorption (1/km),
+    /// z = Mie density exp scale (-1/scale_height_km), w = Mie asymmetry (g).
+    pub mie: [f32; 4],
+    /// Ozone absorption coefficients (1/km). w = layer center altitude (km).
+    pub ozone: [f32; 4],
+    /// x = ozone layer width (km), y = ground albedo, z = multi_scattering_factor, w = unused.
+    pub ozone_extra: [f32; 4],
+    /// Sun direction (toward sun, normalized). w = sun disk angular diameter (radians).
+    pub sun_dir: [f32; 4],
+    /// Sun illuminance (linear RGB). w = unused.
+    pub sun_color: [f32; 4],
+    /// Inverse view-projection for depth → world-pos reconstruction.
+    pub inv_vp: [[f32; 4]; 4],
+    /// x = screen width, y = screen height, z = 1/width, w = 1/height.
+    pub screen: [f32; 4],
+    /// x = min ray march samples, y = max ray march samples, z = weather_mie_mult, w = weather_sun_occlusion.
+    pub quality: [f32; 4],
+}
+
+const _: () = assert!(std::mem::size_of::<AtmosphereUniforms>() == 224);
 
 /// Shadow cascade data passed to the fragment shader for CSM shadow sampling.
 #[repr(C)]
@@ -479,7 +518,7 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
     });
 
     let depth_format = wgpu::TextureFormat::Depth32Float;
-    let depth_view = create_depth_texture(&device, config.width, config.height, depth_format);
+    let (depth_texture_obj, depth_view) = create_depth_texture(&device, config.width, config.height, depth_format);
 
     // HDR: 3D passes render to Rgba16Float when HDR is enabled, swapchain format otherwise.
     let render_format = if hdr_enabled { wgpu::TextureFormat::Rgba16Float } else { format };
@@ -813,7 +852,7 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
     });
 
     // -- Composite pipeline (HDR tonemapping fullscreen pass) --
-    let (composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf) = if hdr_enabled {
+    let (composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf, atmosphere_buf) = if hdr_enabled {
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
@@ -849,6 +888,30 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(
                             std::mem::size_of::<CompositeParams>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+                // binding 3: depth texture for world-pos reconstruction
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 4: atmosphere uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<AtmosphereUniforms>() as u64,
                         ),
                     },
                     count: None,
@@ -905,6 +968,16 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
             mapped_at_creation: false,
         });
 
+        let atmo_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atmosphere_uniforms"),
+            size: std::mem::size_of::<AtmosphereUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Depth texture view for sampling in composite (separate from render attachment view).
+        let depth_sample_view = depth_texture_obj.create_view(&Default::default());
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bind_group"),
             layout: &composite_bind_group_layout,
@@ -921,12 +994,20 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
                     binding: 2,
                     resource: params_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&depth_sample_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: atmo_buf.as_entire_binding(),
+                },
             ],
         });
 
-        (Some(composite_pipeline), Some(composite_bind_group_layout), Some(bind_group), Some(params_buf))
+        (Some(composite_pipeline), Some(composite_bind_group_layout), Some(bind_group), Some(params_buf), Some(atmo_buf))
     } else {
-        (None, None, None, None)
+        (None, None, None, None, None)
     };
 
     // egui.
@@ -939,6 +1020,8 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
         hdr_enabled, render_format,
         hdr_texture, hdr_view,
         composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf,
+        depth_texture: Some(depth_texture_obj),
+        atmosphere_buf,
         pipeline, sphere_inside_pipeline,
         sphere_vertex_buf, sphere_index_buf, sphere_index_count: sphere.indices.len() as u32,
         box_vertex_buf, box_index_buf, box_index_count: box_idxs.len() as u32,
@@ -1009,14 +1092,17 @@ pub fn create_voxel_bind_group(
     })
 }
 
-pub fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::TextureView {
+pub fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-        format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[],
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
     });
-    texture.create_view(&Default::default())
+    let view = texture.create_view(&Default::default());
+    (texture, view)
 }
 
 /// Generate box mesh (interior visible -- normals face inward).

@@ -5,7 +5,7 @@ use glam::{DVec3, DQuat, Mat4, Quat, Vec3};
 use crate::block_render::{BlockRenderer, ChunkGpuMesh};
 use crate::camera::CameraParams;
 use crate::gpu::{
-    GpuState, ObjectUniforms, SceneLighting, ShadowCascades,
+    GpuState, ObjectUniforms, SceneLighting, ShadowCascades, AtmosphereUniforms,
     EYE_HEIGHT, MAX_OBJECTS, SHADOW_MAP_SIZE, NUM_CASCADES,
 };
 use crate::graphics_settings::{GraphicsSettings, RenderConfig};
@@ -13,6 +13,7 @@ use crate::hud::{self, HudContext};
 
 use voxeldust_core::block::palette::CHUNK_SIZE;
 use voxeldust_core::client_message::WorldStateData;
+use voxeldust_core::system::{SystemParams, PlanetParams};
 
 /// Cascade split distances (view-space Z thresholds) and the corresponding
 /// orthographic light VP matrices for cascaded shadow maps.
@@ -256,6 +257,184 @@ fn build_uniforms(
     }
 }
 
+/// Find the planet whose atmosphere the camera is closest to.
+/// Returns (planet_index, planet_body_position) or None if no atmosphere nearby.
+fn find_atmosphere_planet(
+    cam_system_pos: DVec3,
+    system_params: &SystemParams,
+    ws: &WorldStateData,
+) -> Option<(usize, DVec3)> {
+    let mut best: Option<(usize, f64, DVec3)> = None;
+
+    for body in &ws.bodies {
+        if body.body_id == 0 { continue; } // skip star
+        let planet_idx = (body.body_id - 1) as usize;
+        if planet_idx >= system_params.planets.len() { continue; }
+
+        let planet = &system_params.planets[planet_idx];
+        if !planet.atmosphere.has_atmosphere { continue; }
+
+        let dist = (cam_system_pos - body.position).length();
+        let atmo_top = planet.radius_m + planet.atmosphere.atmosphere_height;
+
+        // Inside atmosphere sphere: use this planet immediately.
+        if dist < atmo_top {
+            return Some((planet_idx, body.position));
+        }
+
+        // Outside but close enough to render limb glow (within 3× atmosphere radius).
+        if dist < atmo_top * 3.0 {
+            match &best {
+                None => best = Some((planet_idx, dist, body.position)),
+                Some((_, best_dist, _)) if dist < *best_dist => {
+                    best = Some((planet_idx, dist, body.position));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    best.map(|(idx, _, pos)| (idx, pos))
+}
+
+/// Build AtmosphereUniforms from planet parameters and camera state.
+/// All scattering coefficients come from the planet's seed-derived AtmosphereParams.
+/// Units are converted to kilometers (matching Hillaire 2020 convention).
+fn build_atmosphere_uniforms(
+    planet: &PlanetParams,
+    planet_pos: DVec3,
+    cam: &CameraParams,
+    scene_lighting: &SceneLighting,
+    gfx: &GraphicsSettings,
+) -> AtmosphereUniforms {
+    let atmo = &planet.atmosphere;
+
+    // Observer position relative to planet center, in km.
+    let observer_m = cam.cam_system_pos - planet_pos;
+    let observer_km = observer_m * (1.0 / 1000.0);
+
+    let planet_r_km = (planet.radius_m / 1000.0) as f32;
+    let atmo_r_km = ((planet.radius_m + atmo.atmosphere_height) / 1000.0) as f32;
+
+    // Scale heights: convert from meters to km, then to exp scale (-1/H_km).
+    let rayleigh_h_km = (atmo.rayleigh_scale_height / 1000.0) as f32;
+    let mie_h_km = (atmo.mie_scale_height / 1000.0) as f32;
+
+    // Scattering coefficients: convert from 1/m to 1/km (multiply by 1000).
+    let r_coeff = atmo.rayleigh_coeff;
+    let rayleigh_scatter_km = [
+        (r_coeff[0] * 1000.0) as f32,
+        (r_coeff[1] * 1000.0) as f32,
+        (r_coeff[2] * 1000.0) as f32,
+    ];
+    let mie_scatter_km = (atmo.mie_coeff * 1000.0) as f32;
+    let mie_absorb_km = (atmo.mie_absorption * 1000.0) as f32;
+
+    let ozone_km = [
+        (atmo.ozone_coeff[0] * 1000.0) as f32,
+        (atmo.ozone_coeff[1] * 1000.0) as f32,
+        (atmo.ozone_coeff[2] * 1000.0) as f32,
+    ];
+    let ozone_center_km = (atmo.ozone_center_altitude / 1000.0) as f32;
+    let ozone_width_km = (atmo.ozone_width / 1000.0) as f32;
+
+    // Sun direction and color from scene lighting.
+    let sun_dir = [scene_lighting.sun_direction[0], scene_lighting.sun_direction[1], scene_lighting.sun_direction[2]];
+    let sun_intensity = scene_lighting.sun_color[3]; // intensity in alpha
+    let sun_color = [
+        scene_lighting.sun_color[0] * sun_intensity,
+        scene_lighting.sun_color[1] * sun_intensity,
+        scene_lighting.sun_color[2] * sun_intensity,
+    ];
+
+    // Inverse VP for depth reconstruction.
+    let inv_vp = (cam.vp).inverse();
+
+    // Quality settings.
+    let min_spp = match gfx.atmosphere_samples {
+        0..=8 => 2.0_f32,
+        9..=16 => 4.0,
+        _ => 6.0,
+    };
+    let max_spp = gfx.atmosphere_samples as f32;
+
+    AtmosphereUniforms {
+        observer_pos: [observer_km.x as f32, observer_km.y as f32, observer_km.z as f32, 0.0],
+        radii: [planet_r_km, atmo_r_km, 1.0, 0.0],
+        rayleigh: [rayleigh_scatter_km[0], rayleigh_scatter_km[1], rayleigh_scatter_km[2],
+                   -1.0 / rayleigh_h_km], // density exp scale
+        mie: [mie_scatter_km, mie_absorb_km, -1.0 / mie_h_km, atmo.mie_anisotropy as f32],
+        ozone: [ozone_km[0], ozone_km[1], ozone_km[2], ozone_center_km],
+        ozone_extra: [ozone_width_km, 0.3, 1.0, 0.0], // ground_albedo, multi_scatter_factor
+        sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.01], // w = sun disk diameter (radians)
+        sun_color: [sun_color[0], sun_color[1], sun_color[2], 0.0],
+        inv_vp: inv_vp.to_cols_array_2d(),
+        screen: [cam.aspect * 100.0, 100.0, 0.0, 0.0], // placeholder, real dims set in composite params
+        quality: [min_spp, max_spp, atmo.weather_mie_multiplier as f32, atmo.weather_sun_occlusion as f32],
+    }
+}
+
+/// Build a disabled AtmosphereUniforms (no atmosphere rendering).
+fn disabled_atmosphere_uniforms() -> AtmosphereUniforms {
+    bytemuck::Zeroable::zeroed()
+}
+
+/// Compute eclipse darkening factor. Returns 1.0 (fully lit) to 0.0 (total eclipse).
+/// Checks if any planet is between the camera and the star, using angular radii
+/// for physically correct umbra/penumbra.
+fn compute_eclipse(
+    cam_system_pos: DVec3,
+    ws: &WorldStateData,
+    star_radius: f64,
+) -> f32 {
+    // Star is always body_id 0.
+    let star_pos = ws.bodies.iter()
+        .find(|b| b.body_id == 0)
+        .map(|b| b.position)
+        .unwrap_or(DVec3::ZERO);
+
+    let to_star = star_pos - cam_system_pos;
+    let star_dist = to_star.length();
+    if star_dist < 1.0 { return 1.0; }
+    let star_dir = to_star / star_dist;
+
+    let star_angular = (star_radius / star_dist).atan();
+
+    let mut best_factor = 1.0_f32;
+
+    for body in &ws.bodies {
+        if body.body_id == 0 { continue; } // skip star
+
+        let to_body = body.position - cam_system_pos;
+        let body_dist = to_body.length();
+        if body_dist < 1.0 { continue; }
+
+        // Body must be between camera and star (projection along star direction > 0).
+        let proj = to_body.dot(star_dir);
+        if proj < 0.0 || proj > star_dist { continue; }
+
+        // Closest approach of the camera→star ray to the body center.
+        let perp = (to_body - star_dir * proj).length();
+
+        // Angular radii from camera.
+        let body_angular = (body.radius / body_dist).atan();
+        let separation = (perp / body_dist).atan();
+
+        if separation < (body_angular - star_angular).max(0.0) {
+            // Total eclipse: body fully covers star disk.
+            best_factor = 0.0;
+        } else if separation < body_angular + star_angular {
+            // Partial eclipse: penumbra region.
+            let penumbra_width = 2.0 * star_angular;
+            let t = ((separation - (body_angular - star_angular).max(0.0)) / penumbra_width)
+                .clamp(0.0, 1.0) as f32;
+            best_factor = best_factor.min(t);
+        }
+    }
+
+    best_factor
+}
+
 /// Build SceneLighting from the current WorldState.
 fn build_scene_lighting(ws: Option<&WorldStateData>) -> SceneLighting {
     if let Some(ws) = ws {
@@ -325,8 +504,14 @@ pub fn render_frame(
         current_shard_type, player_position, ship_rotation,
     );
 
-    // Write scene lighting data from server WorldState.
-    let scene_lighting = build_scene_lighting(latest_world_state);
+    // Write scene lighting data from server WorldState, with eclipse darkening.
+    let mut scene_lighting = build_scene_lighting(latest_world_state);
+    if gfx_settings.eclipse_shadows_enabled {
+        if let (Some(ws), Some(sys)) = (latest_world_state, system_params) {
+            let eclipse = compute_eclipse(cam.cam_system_pos, ws, sys.star.radius_m);
+            scene_lighting.sun_color[3] *= eclipse; // modulate sun intensity
+        }
+    }
     gpu.queue.write_buffer(&gpu.scene_lighting_buf, 0, bytemuck::bytes_of(&scene_lighting));
 
     // Write render configuration from graphics settings.
@@ -666,6 +851,26 @@ pub fn render_frame(
                 }
             }
         }
+    }
+
+    // -- Upload atmosphere uniforms --
+    if let Some(atmo_buf) = &gpu.atmosphere_buf {
+        let atmo_uniforms = if gfx_settings.atmosphere_enabled {
+            if let (Some(sys), Some(ws)) = (system_params, latest_world_state) {
+                if let Some((planet_idx, planet_pos)) = find_atmosphere_planet(cam.cam_system_pos, sys, ws) {
+                    build_atmosphere_uniforms(
+                        &sys.planets[planet_idx], planet_pos, cam, &scene_lighting, gfx_settings,
+                    )
+                } else {
+                    disabled_atmosphere_uniforms()
+                }
+            } else {
+                disabled_atmosphere_uniforms()
+            }
+        } else {
+            disabled_atmosphere_uniforms()
+        };
+        gpu.queue.write_buffer(atmo_buf, 0, bytemuck::bytes_of(&atmo_uniforms));
     }
 
     // -- HDR composite pass: tonemap HDR → swapchain --

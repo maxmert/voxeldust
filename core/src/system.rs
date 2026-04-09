@@ -119,7 +119,9 @@ pub struct StarParams {
     pub gm: f64,
 }
 
-/// Atmosphere parameters for a planet.
+/// Atmosphere parameters for a planet. Includes scattering coefficients for
+/// Rayleigh/Mie atmospheric rendering (Hillaire 2020 technique).
+/// All optical properties are derived deterministically from the planet seed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtmosphereParams {
     /// Whether this planet has a significant atmosphere.
@@ -130,6 +132,38 @@ pub struct AtmosphereParams {
     pub sea_level_density: f64,
     /// Scale height — density halves every H*ln(2) meters. Earth: ~8500 m.
     pub scale_height: f64,
+
+    // --- Rayleigh scattering (molecular) ---
+    /// Rayleigh scattering coefficients at sea level (1/m), per RGB channel.
+    /// Determines sky color: Earth [5.5e-6, 13.0e-6, 22.4e-6] produces blue sky.
+    pub rayleigh_coeff: [f64; 3],
+    /// Rayleigh density scale height (meters). Earth: ~8000.
+    pub rayleigh_scale_height: f64,
+
+    // --- Mie scattering (aerosol/particulate) ---
+    /// Mie scattering coefficient at sea level (1/m). Earth: ~3.996e-6.
+    pub mie_coeff: f64,
+    /// Mie absorption coefficient at sea level (1/m). Earth: ~4.4e-7.
+    pub mie_absorption: f64,
+    /// Mie density scale height (meters). Earth: ~1200.
+    pub mie_scale_height: f64,
+    /// Mie asymmetry factor (Henyey-Greenstein g). 0=isotropic, 1=all forward.
+    /// Earth: ~0.8. Controls sun halo shape.
+    pub mie_anisotropy: f64,
+
+    // --- Ozone absorption (Earth-like planets only) ---
+    /// Ozone absorption coefficients (1/m) per RGB. Zero for non-ozone planets.
+    pub ozone_coeff: [f64; 3],
+    /// Altitude of ozone layer center (meters). Earth: ~25000.
+    pub ozone_center_altitude: f64,
+    /// Width of ozone layer (meters). Earth: ~15000.
+    pub ozone_width: f64,
+
+    // --- Weather hooks (runtime-modulated by future weather system) ---
+    /// Mie multiplier for weather effects. 1.0=clear, 5-20=fog/haze.
+    pub weather_mie_multiplier: f64,
+    /// Sun occlusion from clouds. 1.0=clear sky, 0.0=full overcast.
+    pub weather_sun_occlusion: f64,
 }
 
 impl AtmosphereParams {
@@ -141,6 +175,36 @@ impl AtmosphereParams {
         }
         self.sea_level_density * (-altitude / self.scale_height).exp()
     }
+}
+
+/// Cloud layer parameters for a planet. All values derived deterministically
+/// from the planet seed. Controls volumetric cloud rendering (Nubis technique).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudParams {
+    /// Whether this planet has volumetric clouds.
+    pub has_clouds: bool,
+    /// Cloud layer bottom altitude above surface (meters). Earth: ~1500.
+    pub cloud_base_altitude: f64,
+    /// Cloud layer thickness (meters). Earth: ~3000-5000.
+    pub cloud_layer_thickness: f64,
+    /// Base cloud coverage (0-1). Modulated spatially by weather noise.
+    pub base_coverage: f64,
+    /// Cloud density multiplier. Higher = thicker, more opaque.
+    pub density_scale: f64,
+    /// Cloud type blend: 0=stratus (flat), 0.5=cumulus (puffy), 1=cumulonimbus (towering).
+    pub cloud_type: f64,
+    /// Wind velocity for cloud scrolling (m/s). Deterministic from seed.
+    pub wind_velocity: [f64; 3],
+    /// Wind shear: how much upper clouds move faster than lower (multiplier).
+    pub wind_shear: f64,
+    /// Absorption factor controlling rain cloud darkness. Earth: ~0.5-3.0.
+    pub absorption_factor: f64,
+    /// Scattering color tint (linear RGB). White for Earth, can be alien colors.
+    pub scatter_color: [f32; 3],
+    /// Weather spatial variation scale (meters). Controls weather zone size.
+    pub weather_scale: f64,
+    /// Number of fBm octaves for weather coverage noise (2-6).
+    pub weather_octaves: u32,
 }
 
 /// Parameters for a planet.
@@ -162,6 +226,8 @@ pub struct PlanetParams {
     pub surface_gravity: f64,
     /// Atmosphere parameters.
     pub atmosphere: AtmosphereParams,
+    /// Cloud parameters.
+    pub clouds: CloudParams,
 }
 
 /// Complete star system parameters, generated deterministically from a seed.
@@ -288,11 +354,48 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
         let scale_height = radius_m * seed_to_range(derive_seed(planet_seed, 11), 0.0008, 0.002);
         let sea_level_density = seed_to_range(derive_seed(planet_seed, 12), 0.3, 3.0);
         let atmo_height_factor = seed_to_range(derive_seed(planet_seed, 13), 5.0, 8.0);
+
+        // Rayleigh scattering: base coefficient + channel ratios for sky color variety.
+        // Varying the ratio between RGB produces different sky colors per planet.
+        let rayleigh_base = seed_to_range(derive_seed(planet_seed, 20), 3.0e-6, 8.0e-6);
+        let rayleigh_ratio_g = seed_to_range(derive_seed(planet_seed, 21), 1.8, 3.0);
+        let rayleigh_ratio_b = seed_to_range(derive_seed(planet_seed, 22), 3.0, 5.0);
+        let rayleigh_coeff = [rayleigh_base, rayleigh_base * rayleigh_ratio_g, rayleigh_base * rayleigh_ratio_b];
+        let rayleigh_scale_height = scale_height; // same as thermodynamic scale height
+
+        // Mie scattering: particulate/aerosol. Varies from clear to dusty.
+        let mie_coeff = seed_to_range(derive_seed(planet_seed, 23), 1.0e-6, 10.0e-6);
+        let mie_absorption = mie_coeff * seed_to_range(derive_seed(planet_seed, 24), 0.05, 0.15);
+        let mie_scale_height = seed_to_range(derive_seed(planet_seed, 25), 800.0, 2000.0);
+        let mie_anisotropy = seed_to_range(derive_seed(planet_seed, 26), 0.6, 0.95);
+
+        // Ozone: present on ~50% of atmosphere planets (oxygen-rich).
+        let has_ozone = seed_to_range(derive_seed(planet_seed, 27), 0.0, 1.0) > 0.5;
+        let ozone_coeff = if has_ozone {
+            let base = seed_to_range(derive_seed(planet_seed, 28), 0.3e-6, 1.0e-6);
+            [base, base * 2.9, base * 0.13]
+        } else {
+            [0.0; 3]
+        };
+        let ozone_center_altitude = radius_m * seed_to_range(derive_seed(planet_seed, 29), 0.003, 0.005);
+        let ozone_width = ozone_center_altitude * seed_to_range(derive_seed(planet_seed, 30), 0.4, 0.8);
+
         AtmosphereParams {
             has_atmosphere: true,
             atmosphere_height: scale_height * atmo_height_factor,
             sea_level_density,
             scale_height,
+            rayleigh_coeff,
+            rayleigh_scale_height,
+            mie_coeff,
+            mie_absorption,
+            mie_scale_height,
+            mie_anisotropy,
+            ozone_coeff,
+            ozone_center_altitude,
+            ozone_width,
+            weather_mie_multiplier: 1.0,
+            weather_sun_occlusion: 1.0,
         }
     } else {
         AtmosphereParams {
@@ -300,6 +403,84 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
             atmosphere_height: 0.0,
             sea_level_density: 0.0,
             scale_height: 1.0, // avoid div-by-zero
+            rayleigh_coeff: [0.0; 3],
+            rayleigh_scale_height: 1.0,
+            mie_coeff: 0.0,
+            mie_absorption: 0.0,
+            mie_scale_height: 1.0,
+            mie_anisotropy: 0.8,
+            ozone_coeff: [0.0; 3],
+            ozone_center_altitude: 0.0,
+            ozone_width: 0.0,
+            weather_mie_multiplier: 1.0,
+            weather_sun_occlusion: 1.0,
+        }
+    };
+
+    // Cloud generation: 80% of atmosphere planets have clouds.
+    let clouds = if has_atmosphere && seed_to_range(derive_seed(planet_seed, 40), 0.0, 1.0) > 0.2 {
+        let scale_height = atmosphere.scale_height;
+
+        // Cloud base altitude: proportional to atmosphere scale height (0.1-0.3×).
+        let cloud_base = scale_height * seed_to_range(derive_seed(planet_seed, 41), 0.1, 0.3);
+        // Cloud layer thickness: 2-5× base altitude.
+        let cloud_thickness = cloud_base * seed_to_range(derive_seed(planet_seed, 42), 2.0, 5.0);
+        // Base coverage: moderate to heavy.
+        let base_coverage = seed_to_range(derive_seed(planet_seed, 43), 0.3, 0.8);
+        // Cloud type: stratus to cumulonimbus.
+        let cloud_type = seed_to_range(derive_seed(planet_seed, 44), 0.0, 1.0);
+        // Density multiplier.
+        let density_scale = seed_to_range(derive_seed(planet_seed, 45), 0.5, 2.0);
+
+        // Wind: speed and direction from seed.
+        let wind_speed = seed_to_range(derive_seed(planet_seed, 46), 5.0, 50.0);
+        let wind_angle = seed_to_range(derive_seed(planet_seed, 47), 0.0, std::f64::consts::TAU);
+        let wind_elevation = seed_to_range(derive_seed(planet_seed, 48), -0.1, 0.1);
+        let wind_velocity = [
+            wind_speed * wind_angle.cos() * (1.0 - wind_elevation.abs()),
+            wind_speed * wind_elevation,
+            wind_speed * wind_angle.sin() * (1.0 - wind_elevation.abs()),
+        ];
+        let wind_shear = seed_to_range(derive_seed(planet_seed, 49), 1.0, 2.5);
+
+        // Absorption and scattering.
+        let absorption_factor = seed_to_range(derive_seed(planet_seed, 50), 0.5, 3.0);
+        // Scatter color: mostly white, can be tinted by atmosphere composition.
+        let tint = seed_to_range(derive_seed(planet_seed, 51), 0.8, 1.0) as f32;
+        let scatter_color = [tint, tint, tint]; // near-white, slight warmth variation
+
+        // Weather zone scale: size of weather systems in meters.
+        let weather_scale = seed_to_range(derive_seed(planet_seed, 52), 10_000.0, 100_000.0);
+        let weather_octaves = 3 + seed_to_u32(derive_seed(planet_seed, 53), 4); // 3-6 octaves
+
+        CloudParams {
+            has_clouds: true,
+            cloud_base_altitude: cloud_base,
+            cloud_layer_thickness: cloud_thickness,
+            base_coverage,
+            density_scale,
+            cloud_type,
+            wind_velocity,
+            wind_shear,
+            absorption_factor,
+            scatter_color,
+            weather_scale,
+            weather_octaves,
+        }
+    } else {
+        CloudParams {
+            has_clouds: false,
+            cloud_base_altitude: 0.0,
+            cloud_layer_thickness: 0.0,
+            base_coverage: 0.0,
+            density_scale: 0.0,
+            cloud_type: 0.0,
+            wind_velocity: [0.0; 3],
+            wind_shear: 1.0,
+            absorption_factor: 1.0,
+            scatter_color: [1.0; 3],
+            weather_scale: 10_000.0,
+            weather_octaves: 3,
         }
     };
 
@@ -322,6 +503,7 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
         rotation_period,
         surface_gravity,
         atmosphere,
+        clouds,
     }
 }
 

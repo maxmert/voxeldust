@@ -264,5 +264,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color = color * (color * 2.51 + vec3(0.03)) / (color * (color * 2.43 + vec3(0.59)) + vec3(0.14));
     }
 
-    return vec4(color, 1.0);
+    // Alpha channel encodes exterior flag for atmosphere mask.
+    // material.w = 1.0 for exterior/planet chunks, 0.0 for ship interior.
+    return vec4(color, u.material.w);
 }

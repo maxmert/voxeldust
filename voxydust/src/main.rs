@@ -334,6 +334,8 @@ struct FlightControl {
     engines_off: bool,
     /// Thrust limiter (0.0–1.0), adjusted by mouse wheel.
     thrust_limiter: f32,
+    /// Supercruise mode (C key toggle). 100-1000 km/s in-system travel.
+    cruise_active: bool,
 }
 
 #[derive(Resource)]
@@ -1148,6 +1150,7 @@ impl ClientApp {
             selected_thrust_tier: 3,
             engines_off: false,
             thrust_limiter: 0.75,
+            cruise_active: false,
         });
         ecs_app.insert_resource(ClientAutopilot {
             target: None,
@@ -1957,17 +1960,32 @@ fn interpret_key_system(
                     }
                 }
 
-                // WASD cancels autopilot.
-                if actions.ap.target.is_some() && matches!(key,
+                // WASD cancels autopilot and cruise.
+                if matches!(key,
                     KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD) {
-                    actions.ap.target = None;
-                    actions.ap.trajectory_plan = None;
-                    actions.ap.mode = AutopilotMode::DirectApproach;
+                    if actions.ap.target.is_some() {
+                        actions.ap.target = None;
+                        actions.ap.trajectory_plan = None;
+                        actions.ap.mode = AutopilotMode::DirectApproach;
+                    }
+                    if actions.flight.cruise_active {
+                        actions.flight.cruise_active = false;
+                        info!("cruise cancelled by manual input");
+                    }
+                }
+
+                // C key: toggle supercruise.
+                if key == KeyCode::KeyC && is_piloting && !actions.flight.engines_off {
+                    actions.flight.cruise_active = !actions.flight.cruise_active;
+                    info!(cruise = actions.flight.cruise_active, "cruise mode toggled");
                 }
 
                 // X key: toggle engine cutoff.
                 if key == KeyCode::KeyX && is_piloting {
                     actions.flight.engines_off = !actions.flight.engines_off;
+                    if actions.flight.engines_off {
+                        actions.flight.cruise_active = false;
+                    }
                     info!(engines_off = actions.flight.engines_off, "engine cutoff toggled");
                 }
 
@@ -2304,6 +2322,7 @@ fn send_input_system(
     }
     let cam = &mut *cam;
     let limiter = flight.thrust_limiter;
+    let cruise = flight.cruise_active;
     input::send_input_with_dt(
         &net.input_tx,
         &kb.keys_held,
@@ -2317,6 +2336,7 @@ fn send_input_system(
         limiter,
         ft.count,
         ft.dt,
+        cruise,
     );
 }
 
@@ -2350,7 +2370,9 @@ impl ApplicationHandler for ClientApp {
                     gpu.config.width = size.width.max(1);
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
-                    gpu.depth_view = gpu::create_depth_texture(&gpu.device, gpu.config.width, gpu.config.height, wgpu::TextureFormat::Depth32Float);
+                    let (depth_tex, depth_v) = gpu::create_depth_texture(&gpu.device, gpu.config.width, gpu.config.height, wgpu::TextureFormat::Depth32Float);
+                    gpu.depth_view = depth_v;
+                    gpu.depth_texture = Some(depth_tex);
                     // Recreate HDR texture and composite bind group on resize.
                     if gpu.hdr_enabled {
                         let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -2362,14 +2384,18 @@ impl ApplicationHandler for ClientApp {
                             view_formats: &[],
                         });
                         let view = tex.create_view(&Default::default());
-                        // Rebuild composite bind group with new HDR view.
-                        if let (Some(layout), Some(params_buf)) = (&gpu.composite_bind_group_layout, &gpu.composite_params_buf) {
+                        // Rebuild composite bind group with new HDR + depth views.
+                        if let (Some(layout), Some(params_buf), Some(atmo_buf), Some(depth_tex)) =
+                            (&gpu.composite_bind_group_layout, &gpu.composite_params_buf,
+                             &gpu.atmosphere_buf, &gpu.depth_texture)
+                        {
                             let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
                                 label: Some("screen_sampler"),
                                 mag_filter: wgpu::FilterMode::Linear,
                                 min_filter: wgpu::FilterMode::Linear,
                                 ..Default::default()
                             });
+                            let depth_sample_view = depth_tex.create_view(&Default::default());
                             gpu.composite_bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                 label: Some("composite_bind_group"),
                                 layout,
@@ -2377,6 +2403,8 @@ impl ApplicationHandler for ClientApp {
                                     wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
                                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
                                     wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&depth_sample_view) },
+                                    wgpu::BindGroupEntry { binding: 4, resource: atmo_buf.as_entire_binding() },
                                 ],
                             }));
                         }
