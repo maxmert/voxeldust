@@ -37,7 +37,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowAttributes, WindowId};
 
 use voxeldust_core::autopilot::{self, AutopilotMode, TrajectoryPlan};
-use voxeldust_core::client_message::{PlayerInputData, WorldStateData};
+use voxeldust_core::client_message::{CelestialBodyData, PlayerInputData, WorldStateData};
 use voxeldust_core::shard_message::AutopilotSnapshotData;
 use voxeldust_core::system::SystemParams;
 
@@ -238,6 +238,9 @@ const CONFIG_ANIM_DURATION: f32 = 0.35; // seconds for camera transition
 struct ConnectionInfo {
     connected: bool,
     current_shard_type: u8,
+    /// Shard seed — for ship shards this is the ship_id, used to filter
+    /// the player's own ship from secondary WorldState rendering.
+    shard_seed: u64,
     reference_position: DVec3,
     reference_rotation: DQuat,
     secondary_shard_type: Option<u8>,
@@ -285,6 +288,9 @@ struct RenderSmoothing {
     render_rotation: DQuat,
     /// Interpolated ship system-space origin (for exterior rendering / cam_system_pos).
     ship_origin: DVec3,
+    /// Interpolated celestial body positions — lerped with the same `t` as ship_origin
+    /// so body offsets and camera share the same virtual time instant.
+    bodies: Vec<CelestialBodyData>,
 
     // --- Galaxy warp (separate interpolation, kept for warp travel) ---
     galaxy_render_position: DVec3,
@@ -303,6 +309,9 @@ struct InterpolationSnapshot {
     ship_rotation: DQuat,
     ship_origin: DVec3,
     velocity: DVec3,
+    /// Celestial body positions at this snapshot's tick — interpolated alongside
+    /// the camera so all rendered positions share the same virtual time instant.
+    bodies: Vec<CelestialBodyData>,
 }
 
 /// Double-buffer of the two most recent server snapshots for smooth interpolation.
@@ -530,6 +539,7 @@ fn poll_network(
                         ship_rotation: p.rotation,
                         ship_origin: world_state.origin,
                         velocity: p.velocity,
+                        bodies: world_state.bodies.clone(),
                     };
                     // Teleport detection: snap both slots on large jumps.
                     let is_teleport = snapshots.current.as_ref()
@@ -541,6 +551,7 @@ fn poll_network(
                         smooth.render_position = new_pos;
                         smooth.render_rotation = p.rotation;
                         smooth.ship_origin = world_state.origin;
+                        smooth.bodies = world_state.bodies.clone();
                     } else {
                         snapshots.prev = snapshots.current.take();
                         snapshots.prev_arrival_time = snapshots.current_arrival_time;
@@ -591,8 +602,9 @@ fn poll_network(
                 }
                 ws.latest = Some(world_state);
             }
-            NetEvent::Connected { shard_type, reference_position, reference_rotation, system_seed, galaxy_seed, .. } => {
+            NetEvent::Connected { shard_type, seed, reference_position, reference_rotation, system_seed, galaxy_seed, .. } => {
                 conn.current_shard_type = shard_type;
+                conn.shard_seed = seed;
                 conn.reference_position = reference_position;
                 conn.reference_rotation = reference_rotation;
                 if shard_type == voxeldust_core::client_message::shard_type::SHIP {
@@ -603,6 +615,7 @@ fn poll_network(
                 conn.galaxy_seed = galaxy_seed;
                 // Reset interpolation — coordinate systems differ between shards.
                 smooth.render_rotation = reference_rotation;
+                smooth.bodies.clear();
                 smooth.has_prev_galaxy_pos = false;
                 smooth.galaxy_velocity = DVec3::ZERO;
                 snapshots.prev = None;
@@ -854,6 +867,7 @@ fn smooth_render_position(
         smooth.galaxy_render_position = smooth.galaxy_render_position + delta;
         let rot = smooth.galaxy_render_rotation.slerp(smooth.prev_galaxy_rotation, blend);
         smooth.galaxy_render_rotation = rot;
+        smooth.bodies.clear(); // bodies cleared during warp
         return;
     }
 
@@ -864,6 +878,7 @@ fn smooth_render_position(
             smooth.render_position = c.player_position;
             smooth.render_rotation = c.ship_rotation;
             smooth.ship_origin = c.ship_origin;
+            smooth.bodies = c.bodies.clone();
             return;
         }
         _ => return,
@@ -886,18 +901,35 @@ fn smooth_render_position(
     let t = (elapsed / tick_duration).clamp(0.0, 1.0);
 
     if conn.current_shard_type == voxeldust_core::client_message::shard_type::PLANET {
-        // Planet shard: snap to current snapshot.  Body positions (star, other
-        // planets) are recomputed from orbital mechanics each tick and update
-        // discretely.  Interpolating the camera between ticks desyncs it from
-        // the discrete body positions, causing atmosphere/surface dot jitter.
+        // Planet shard: snap to current snapshot.  Planet-local coordinates
+        // don't need interpolation — the player walks on the surface and the
+        // camera is already in the planet's reference frame.
         smooth.render_position = curr.player_position;
         smooth.render_rotation = curr.ship_rotation;
         smooth.ship_origin = curr.ship_origin;
+        smooth.bodies = curr.bodies.clone();
     } else {
         // Ship/system shard: interpolate between snapshots for smooth flight.
         smooth.render_position = prev.player_position.lerp(curr.player_position, t);
         smooth.render_rotation = prev.ship_rotation.slerp(curr.ship_rotation, t);
         smooth.ship_origin = prev.ship_origin.lerp(curr.ship_origin, t);
+
+        // Interpolate body positions with the same t — keeps bodies and camera
+        // at the same virtual time instant, eliminating saw-tooth jitter.
+        smooth.bodies.clear();
+        for (i, curr_body) in curr.bodies.iter().enumerate() {
+            let pos = if let Some(prev_body) = prev.bodies.get(i) {
+                prev_body.position.lerp(curr_body.position, t)
+            } else {
+                curr_body.position
+            };
+            smooth.bodies.push(CelestialBodyData {
+                body_id: curr_body.body_id,
+                position: pos,
+                radius: curr_body.radius,
+                color: curr_body.color,
+            });
+        }
     }
 }
 
@@ -1111,6 +1143,7 @@ impl ClientApp {
         ecs_app.insert_resource(ConnectionInfo {
             connected: false,
             current_shard_type: 255,
+            shard_seed: 0,
             reference_position: DVec3::ZERO,
             reference_rotation: DQuat::IDENTITY,
             secondary_shard_type: None,
@@ -1131,6 +1164,7 @@ impl ClientApp {
             render_position: DVec3::new(0.0, 1.0, 0.0),
             render_rotation: DQuat::IDENTITY,
             ship_origin: DVec3::ZERO,
+            bodies: Vec::new(),
             galaxy_render_position: DVec3::ZERO,
             galaxy_render_rotation: DQuat::IDENTITY,
             galaxy_velocity: DVec3::ZERO,
@@ -1316,15 +1350,18 @@ impl ClientApp {
             is_piloting,
             connected,
             current_shard_type,
+            shard_seed,
             selected_thrust_tier,
             engines_off,
             cruise_active,
+            atmo_comp_active,
             autopilot_target,
             warp_galaxy_position,
             warp_galaxy_rotation,
             warp_target_star_index,
             cam_yaw,
             cam_pitch,
+            interpolated_bodies,
         ) = {
             let world = self.ecs_app.world();
             let smooth = world.resource::<RenderSmoothing>();
@@ -1379,15 +1416,18 @@ impl ClientApp {
                 player.is_piloting,
                 conn.connected,
                 conn.current_shard_type,
+                conn.shard_seed,
                 flight.selected_thrust_tier,
                 flight.engines_off,
                 flight.cruise_active,
+                flight.atmo_comp_active,
                 ap.target,
                 if warp.galaxy_position.is_some() { Some(smooth.galaxy_render_position) } else { None },
                 if warp.galaxy_rotation.is_some() { Some(smooth.galaxy_render_rotation) } else { None },
                 warp.target_star_index,
                 cam_ctrl.yaw,
                 cam_ctrl.pitch,
+                smooth.bodies.clone(),
             )
         };
 
@@ -1830,7 +1870,9 @@ impl ClientApp {
             &cam,
             ws.latest.as_ref(),
             ws.secondary.as_ref(),
+            &interpolated_bodies,
             current_shard_type,
+            shard_seed,
             render_position,
             player_velocity,
             ship_rotation,
@@ -1839,6 +1881,7 @@ impl ClientApp {
             selected_thrust_tier,
             engines_off,
             cruise_active,
+            atmo_comp_active,
             autopilot_target,
             ap.trajectory_plan.as_ref(),
             ap.server_autopilot.as_ref(),

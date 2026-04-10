@@ -20,6 +20,7 @@ use voxeldust_core::handoff::{ShardPreConnect, ShardRedirect};
 pub enum NetEvent {
     Connected {
         shard_type: u8,
+        seed: u64,
         reference_position: DVec3,
         reference_rotation: DQuat,
         game_time: f64,
@@ -104,6 +105,7 @@ pub async fn run_network(
         info!(shard_type = jr.shard_type, "joined shard");
         let _ = event_tx.send(NetEvent::Connected {
             shard_type: jr.shard_type,
+            seed: jr.seed,
             reference_position: jr.reference_position,
             reference_rotation: jr.reference_rotation,
             game_time: jr.game_time,

@@ -91,20 +91,22 @@ fn build_uniforms(
     cam: &CameraParams,
     ws: Option<&WorldStateData>,
     secondary_ws: Option<&WorldStateData>,
+    interpolated_bodies: &[voxeldust_core::client_message::CelestialBodyData],
     current_shard_type: u8,
+    shard_seed: u64,
     player_position: DVec3,
     ship_rotation: DQuat,
 ) -> RenderObjects {
     let mut object_count = 0usize;
     let mut inside_sphere_indices: Vec<usize> = Vec::new();
 
-    if let Some(ws) = ws {
+    {
         // Celestial bodies -- unified rendering for all shards.
-        // Track which bodies the camera is inside (for inside-sphere pipeline).
-        // The primary always renders all celestial bodies (sphere + spots) — these are
-        // in sync with the camera's coordinate frame. The secondary shard contributes
-        // only surface-detail data (ships, future: terrain chunks) that the primary lacks.
-        for body in &ws.bodies {
+        // Uses interpolated body positions (lerped with the same t as the camera)
+        // so body offsets and camera share the same virtual time instant.
+        // The secondary shard contributes only surface-detail data (ships, future:
+        // terrain chunks) that the primary lacks.
+        for body in interpolated_bodies {
             if object_count >= MAX_OBJECTS { break; }
             let offset_f64 = body.position - cam.cam_system_pos;
             let dist_to_center = offset_f64.length();
@@ -132,7 +134,7 @@ fn build_uniforms(
         }
 
         // Surface reference grid -- ship-sized spots near the camera for movement feedback.
-        for body in &ws.bodies {
+        for body in interpolated_bodies {
             if body.body_id == 0 { continue; } // skip star
             if object_count + 200 >= MAX_OBJECTS { break; }
 
@@ -240,6 +242,13 @@ fn build_uniforms(
     // Exterior ships from secondary WorldState (dual-shard compositing).
     if let Some(sec_ws) = secondary_ws {
         for ship in &sec_ws.ships {
+            // Skip own ship: when inside a ship, the interior is already rendered
+            // by the primary shard. The secondary's copy would render as a duplicate.
+            if current_shard_type == voxeldust_core::client_message::shard_type::SHIP
+                && ship.ship_id == shard_seed
+            {
+                continue;
+            }
             let ship_system_pos = sec_ws.origin + ship.position;
             let offset = (ship_system_pos - cam.cam_system_pos).as_vec3();
             if !cam.frustum.contains_sphere(offset, 16.0) { continue; }
@@ -262,11 +271,11 @@ fn build_uniforms(
 fn find_atmosphere_planet(
     cam_system_pos: DVec3,
     system_params: &SystemParams,
-    ws: &WorldStateData,
+    bodies: &[voxeldust_core::client_message::CelestialBodyData],
 ) -> Option<(usize, DVec3)> {
     let mut best: Option<(usize, f64, DVec3)> = None;
 
-    for body in &ws.bodies {
+    for body in bodies {
         if body.body_id == 0 { continue; } // skip star
         let planet_idx = (body.body_id - 1) as usize;
         if planet_idx >= system_params.planets.len() { continue; }
@@ -384,11 +393,11 @@ fn disabled_atmosphere_uniforms() -> AtmosphereUniforms {
 /// for physically correct umbra/penumbra.
 fn compute_eclipse(
     cam_system_pos: DVec3,
-    ws: &WorldStateData,
+    bodies: &[voxeldust_core::client_message::CelestialBodyData],
     star_radius: f64,
 ) -> f32 {
     // Star is always body_id 0.
-    let star_pos = ws.bodies.iter()
+    let star_pos = bodies.iter()
         .find(|b| b.body_id == 0)
         .map(|b| b.position)
         .unwrap_or(DVec3::ZERO);
@@ -402,7 +411,7 @@ fn compute_eclipse(
 
     let mut best_factor = 1.0_f32;
 
-    for body in &ws.bodies {
+    for body in bodies {
         if body.body_id == 0 { continue; } // skip star
 
         let to_body = body.position - cam_system_pos;
@@ -474,7 +483,9 @@ pub fn render_frame(
     cam: &CameraParams,
     latest_world_state: Option<&WorldStateData>,
     secondary_world_state: Option<&WorldStateData>,
+    interpolated_bodies: &[voxeldust_core::client_message::CelestialBodyData],
     current_shard_type: u8,
+    shard_seed: u64,
     player_position: DVec3,
     player_velocity: DVec3,
     ship_rotation: DQuat,
@@ -483,6 +494,7 @@ pub fn render_frame(
     selected_thrust_tier: u8,
     engines_off: bool,
     cruise_active: bool,
+    atmo_comp_active: bool,
     autopilot_target: Option<usize>,
     trajectory_plan: Option<&voxeldust_core::autopilot::TrajectoryPlan>,
     server_autopilot: Option<&voxeldust_core::shard_message::AutopilotSnapshotData>,
@@ -502,15 +514,17 @@ pub fn render_frame(
     // Build object uniforms.
     let ro = build_uniforms(
         uniform_data, cam, latest_world_state, secondary_world_state,
-        current_shard_type, player_position, ship_rotation,
+        interpolated_bodies, current_shard_type, shard_seed, player_position, ship_rotation,
     );
 
     // Write scene lighting data from server WorldState, with eclipse darkening.
     let mut scene_lighting = build_scene_lighting(latest_world_state);
     if gfx_settings.eclipse_shadows_enabled {
-        if let (Some(ws), Some(sys)) = (latest_world_state, system_params) {
-            let eclipse = compute_eclipse(cam.cam_system_pos, ws, sys.star.radius_m);
-            scene_lighting.sun_color[3] *= eclipse; // modulate sun intensity
+        if let Some(sys) = system_params {
+            if !interpolated_bodies.is_empty() {
+                let eclipse = compute_eclipse(cam.cam_system_pos, interpolated_bodies, sys.star.radius_m);
+                scene_lighting.sun_color[3] *= eclipse; // modulate sun intensity
+            }
         }
     }
     gpu.queue.write_buffer(&gpu.scene_lighting_buf, 0, bytemuck::bytes_of(&scene_lighting));
@@ -648,7 +662,7 @@ pub fn render_frame(
         // Restore camera-space MVPs for the main pass.
         let ro = build_uniforms(
             uniform_data, cam, latest_world_state, secondary_world_state,
-            current_shard_type, player_position, ship_rotation,
+            interpolated_bodies, current_shard_type, shard_seed, player_position, ship_rotation,
         );
         if ro.object_count > 0 {
             gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
@@ -857,8 +871,8 @@ pub fn render_frame(
     // -- Upload atmosphere uniforms --
     if let Some(atmo_buf) = &gpu.atmosphere_buf {
         let atmo_uniforms = if gfx_settings.atmosphere_enabled {
-            if let (Some(sys), Some(ws)) = (system_params, latest_world_state) {
-                if let Some((planet_idx, planet_pos)) = find_atmosphere_planet(cam.cam_system_pos, sys, ws) {
+            if let Some(sys) = system_params {
+                if let Some((planet_idx, planet_pos)) = find_atmosphere_planet(cam.cam_system_pos, sys, interpolated_bodies) {
                     build_atmosphere_uniforms(
                         &sys.planets[planet_idx], planet_pos, cam, &scene_lighting, gfx_settings,
                     )
@@ -875,7 +889,7 @@ pub fn render_frame(
 
         // Upload cloud uniforms for the same planet (if it has clouds).
         if let (Some(sys), Some(ws)) = (system_params, latest_world_state) {
-            if let Some((planet_idx, planet_pos)) = find_atmosphere_planet(cam.cam_system_pos, sys, ws) {
+            if let Some((planet_idx, planet_pos)) = find_atmosphere_planet(cam.cam_system_pos, sys, interpolated_bodies) {
                 let planet = &sys.planets[planet_idx];
                 if planet.clouds.has_clouds {
                     let observer_m = cam.cam_system_pos - planet_pos;
@@ -953,6 +967,7 @@ pub fn render_frame(
     // egui HUD.
     let hud_ctx = HudContext {
         latest_world_state,
+        interpolated_bodies,
         cam_system_pos: cam.cam_system_pos,
         vp: cam.vp,
         player_position,
@@ -963,6 +978,7 @@ pub fn render_frame(
         selected_thrust_tier,
         engines_off,
         cruise_active,
+        atmo_comp_active,
         autopilot_target,
         trajectory_plan,
         server_autopilot,

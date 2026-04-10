@@ -3198,24 +3198,31 @@ fn hover_computer(
         }
     }
     hover.was_active = active;
-    if !active { return; }
+    if !active {
+        // Log why hover is inactive (every 40 ticks).
+        static DIAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let t = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if t % 40 == 0 && pilot_mode.0 {
+            tracing::warn!(
+                atmo_comp = raw_input.atmo_comp_active,
+                in_atmo = exterior.in_atmosphere,
+                engines_off = raw_input.engines_off,
+                has_autopilot = autopilot.target_body_id.is_some(),
+                "hover_computer INACTIVE"
+            );
+        }
+        return;
+    }
 
     let g = exterior.gravity_acceleration.length();
     if g < 1e-6 { return; }
 
-    // Terminal velocity: speed where drag = gravity.
-    let density = exterior.atmosphere_density;
-    let cd = ship_props.0.cd_top;
-    let area = ship_props.0.cross_section_top;
-    let v_term_sq = if density > 1e-10 && cd * area > 0.0 {
-        2.0 * ship_props.0.mass_kg * g / (density * cd * area)
-    } else {
-        return;
-    };
-
-    let speed = exterior.velocity.length();
-    let hf = (1.0 - speed * speed / v_term_sq).clamp(0.0, 1.0);
-    if hf < 0.001 { return; }
+    // No terminal velocity scaling: with real thrusters (limited capacity),
+    // the controller can't produce enough force to catapult the ship.
+    // The thrusters are the natural limiter — max ~40 m/s² vs drag at
+    // hypersonic speeds which is thousands of m/s². Hover is harmless at
+    // high speed and essential at low speed.
+    let hf = 1.0_f64;
 
     // =========================================================================
     // Layer 1: Attitude hold — target orientation from gravity + captured heading
@@ -3341,6 +3348,23 @@ fn hover_computer(
     raw_input.thrust_vertical = (raw_input.thrust_vertical + ff_y + fb_y).clamp(-1.0, 1.0);
     raw_input.thrust_lateral  = (raw_input.thrust_lateral + ff_x + fb_x).clamp(-1.0, 1.0);
     raw_input.thrust_forward  = (raw_input.thrust_forward + ff_z + fb_z).clamp(-1.0, 1.0);
+
+    // Diagnostic logging (every 20 ticks = 1 second).
+    static HOVER_DIAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tick = HOVER_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if tick % 20 == 0 {
+        let speed = exterior.velocity.length();
+        tracing::warn!(
+            g = format!("{:.2}", g),
+            speed = format!("{:.1}", speed),
+            grav_local = format!("({:.2},{:.2},{:.2})", grav_local.x, grav_local.y, grav_local.z),
+            ff = format!("({:.3},{:.3},{:.3})", ff_x, ff_y, ff_z),
+            fb = format!("({:.3},{:.3},{:.3})", fb_x, fb_y, fb_z),
+            out = format!("({:.3},{:.3},{:.3})", raw_input.thrust_lateral, raw_input.thrust_vertical, raw_input.thrust_forward),
+            limiter = format!("{:.2}", limiter),
+            "hover_computer ACTIVE"
+        );
+    }
 }
 
 /// Phase 1: All functional blocks with SignalPublisher write their state to channels.

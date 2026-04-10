@@ -7,6 +7,8 @@ use crate::gpu::GpuState;
 /// All state the HUD needs to read (borrowed from App).
 pub struct HudContext<'a> {
     pub latest_world_state: Option<&'a voxeldust_core::client_message::WorldStateData>,
+    /// Interpolated body positions (lerped with the same t as the camera).
+    pub interpolated_bodies: &'a [voxeldust_core::client_message::CelestialBodyData],
     pub cam_system_pos: DVec3,
     pub vp: Mat4,
     pub player_position: DVec3,
@@ -17,6 +19,7 @@ pub struct HudContext<'a> {
     pub selected_thrust_tier: u8,
     pub engines_off: bool,
     pub cruise_active: bool,
+    pub atmo_comp_active: bool,
     pub autopilot_target: Option<usize>,
     pub trajectory_plan: Option<&'a voxeldust_core::autopilot::TrajectoryPlan>,
     pub server_autopilot: Option<&'a voxeldust_core::shard_message::AutopilotSnapshotData>,
@@ -136,9 +139,9 @@ pub fn render_egui(
 // ---------------------------------------------------------------------------
 
 fn draw_body_labels(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, logical_h: f32) {
-    if let Some(ws) = ctx.latest_world_state {
+    {
         let body_names = ["Star", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
-        for body in &ws.bodies {
+        for body in ctx.interpolated_bodies {
             let offset = (body.position - ctx.cam_system_pos).as_vec3();
             let clip = ctx.vp * glam::Vec4::new(offset.x, offset.y, offset.z, 1.0);
             if clip.w <= 0.0 { continue; }
@@ -499,6 +502,46 @@ fn draw_pilot_hud(ui: &mut egui::Ui, ctx: &HudContext, speed: f64) {
     } else {
         if ctx.cruise_active {
             ui.colored_label(egui::Color32::from_rgb(60, 200, 255), "CRUISE ACTIVE (C to disengage)");
+        }
+        if ctx.atmo_comp_active {
+            // Show hover status with gravity info from nearest planet.
+            let grav_info = ctx.system_params.and_then(|sp| {
+                ctx.latest_world_state.and_then(|ws| {
+                    ws.bodies.iter().filter(|b| b.body_id > 0).filter_map(|b| {
+                        let pi = (b.body_id - 1) as usize;
+                        let planet = sp.planets.get(pi)?;
+                        let dist = (ws.origin - b.position).length();
+                        let alt = dist - planet.radius_m;
+                        if alt < planet.atmosphere.atmosphere_height && planet.atmosphere.has_atmosphere {
+                            let g = planet.surface_gravity;
+                            // Check if ship is level: dot(ship_up, radial_out) close to 1.0
+                            let radial_out = (ws.origin - b.position).normalize();
+                            let ship_up = ctx.player_velocity; // placeholder — rotation is in player snapshot
+                            let _ = ship_up; // we have rotation from world state
+                            Some((g, alt))
+                        } else {
+                            None
+                        }
+                    }).next()
+                })
+            });
+            if let Some((g, alt)) = grav_info {
+                let max_hover_g = 40.0; // 8 thrusters × 50kN / 10000kg = 40 m/s²
+                let can_hover = max_hover_g > g;
+                let color = if can_hover {
+                    egui::Color32::from_rgb(100, 255, 150)
+                } else {
+                    egui::Color32::from_rgb(255, 100, 100)
+                };
+                let status = if can_hover {
+                    format!("HOVER: {:.1}g / {:.1}g max  Alt: {:.0}m", g / 9.81, max_hover_g / 9.81, alt)
+                } else {
+                    format!("HOVER FAILING: {:.1}g > {:.1}g max!", g / 9.81, max_hover_g / 9.81)
+                };
+                ui.colored_label(color, status);
+            } else {
+                ui.colored_label(egui::Color32::YELLOW, "HOVER: no atmosphere (H to disable)");
+            }
         }
         if ctx.engines_off {
             ui.colored_label(egui::Color32::RED, "ENGINES OFF (X to restart)");
