@@ -2859,6 +2859,10 @@ impl<'a> ShipPositionUpdate<'a> {
   pub const VT_ROTATION: ::flatbuffers::VOffsetT = 10;
   pub const VT_ANGULAR_VELOCITY: ::flatbuffers::VOffsetT = 12;
   pub const VT_AUTOPILOT: ::flatbuffers::VOffsetT = 14;
+  pub const VT_IN_ATMOSPHERE: ::flatbuffers::VOffsetT = 16;
+  pub const VT_ATMOSPHERE_PLANET_INDEX: ::flatbuffers::VOffsetT = 18;
+  pub const VT_GRAVITY_ACCELERATION: ::flatbuffers::VOffsetT = 20;
+  pub const VT_ATMOSPHERE_DENSITY: ::flatbuffers::VOffsetT = 22;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2870,12 +2874,16 @@ impl<'a> ShipPositionUpdate<'a> {
     args: &'args ShipPositionUpdateArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ShipPositionUpdate<'bldr>> {
     let mut builder = ShipPositionUpdateBuilder::new(_fbb);
+    builder.add_atmosphere_density(args.atmosphere_density);
     builder.add_ship_id(args.ship_id);
+    if let Some(x) = args.gravity_acceleration { builder.add_gravity_acceleration(x); }
+    builder.add_atmosphere_planet_index(args.atmosphere_planet_index);
     if let Some(x) = args.autopilot { builder.add_autopilot(x); }
     if let Some(x) = args.angular_velocity { builder.add_angular_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_in_atmosphere(args.in_atmosphere);
     builder.finish()
   }
 
@@ -2922,6 +2930,37 @@ impl<'a> ShipPositionUpdate<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>(ShipPositionUpdate::VT_AUTOPILOT, None)}
   }
+  /// Authoritative atmosphere state from system-shard physics.
+  #[inline]
+  pub fn in_atmosphere(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ShipPositionUpdate::VT_IN_ATMOSPHERE, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn atmosphere_planet_index(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(ShipPositionUpdate::VT_ATMOSPHERE_PLANET_INDEX, Some(-1)).unwrap()}
+  }
+  /// Gravitational acceleration at ship position (m/s²), world frame.
+  #[inline]
+  pub fn gravity_acceleration(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ShipPositionUpdate::VT_GRAVITY_ACCELERATION, None)}
+  }
+  /// Atmospheric density at ship altitude (kg/m³), 0 if not in atmosphere.
+  #[inline]
+  pub fn atmosphere_density(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(ShipPositionUpdate::VT_ATMOSPHERE_DENSITY, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ShipPositionUpdate<'_> {
@@ -2936,6 +2975,10 @@ impl ::flatbuffers::Verifiable for ShipPositionUpdate<'_> {
      .visit_field::<Quatd>("rotation", Self::VT_ROTATION, false)?
      .visit_field::<Vec3d>("angular_velocity", Self::VT_ANGULAR_VELOCITY, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>("autopilot", Self::VT_AUTOPILOT, false)?
+     .visit_field::<bool>("in_atmosphere", Self::VT_IN_ATMOSPHERE, false)?
+     .visit_field::<i32>("atmosphere_planet_index", Self::VT_ATMOSPHERE_PLANET_INDEX, false)?
+     .visit_field::<Vec3d>("gravity_acceleration", Self::VT_GRAVITY_ACCELERATION, false)?
+     .visit_field::<f64>("atmosphere_density", Self::VT_ATMOSPHERE_DENSITY, false)?
      .finish();
     Ok(())
   }
@@ -2947,6 +2990,10 @@ pub struct ShipPositionUpdateArgs<'a> {
     pub rotation: Option<&'a Quatd>,
     pub angular_velocity: Option<&'a Vec3d>,
     pub autopilot: Option<::flatbuffers::WIPOffset<AutopilotSnapshot<'a>>>,
+    pub in_atmosphere: bool,
+    pub atmosphere_planet_index: i32,
+    pub gravity_acceleration: Option<&'a Vec3d>,
+    pub atmosphere_density: f64,
 }
 impl<'a> Default for ShipPositionUpdateArgs<'a> {
   #[inline]
@@ -2958,6 +3005,10 @@ impl<'a> Default for ShipPositionUpdateArgs<'a> {
       rotation: None,
       angular_velocity: None,
       autopilot: None,
+      in_atmosphere: false,
+      atmosphere_planet_index: -1,
+      gravity_acceleration: None,
+      atmosphere_density: 0.0,
     }
   }
 }
@@ -2992,6 +3043,22 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipPositionUpdateBuilder<'a,
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AutopilotSnapshot>>(ShipPositionUpdate::VT_AUTOPILOT, autopilot);
   }
   #[inline]
+  pub fn add_in_atmosphere(&mut self, in_atmosphere: bool) {
+    self.fbb_.push_slot::<bool>(ShipPositionUpdate::VT_IN_ATMOSPHERE, in_atmosphere, false);
+  }
+  #[inline]
+  pub fn add_atmosphere_planet_index(&mut self, atmosphere_planet_index: i32) {
+    self.fbb_.push_slot::<i32>(ShipPositionUpdate::VT_ATMOSPHERE_PLANET_INDEX, atmosphere_planet_index, -1);
+  }
+  #[inline]
+  pub fn add_gravity_acceleration(&mut self, gravity_acceleration: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ShipPositionUpdate::VT_GRAVITY_ACCELERATION, gravity_acceleration);
+  }
+  #[inline]
+  pub fn add_atmosphere_density(&mut self, atmosphere_density: f64) {
+    self.fbb_.push_slot::<f64>(ShipPositionUpdate::VT_ATMOSPHERE_DENSITY, atmosphere_density, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipPositionUpdateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ShipPositionUpdateBuilder {
@@ -3015,6 +3082,10 @@ impl ::core::fmt::Debug for ShipPositionUpdate<'_> {
       ds.field("rotation", &self.rotation());
       ds.field("angular_velocity", &self.angular_velocity());
       ds.field("autopilot", &self.autopilot());
+      ds.field("in_atmosphere", &self.in_atmosphere());
+      ds.field("atmosphere_planet_index", &self.atmosphere_planet_index());
+      ds.field("gravity_acceleration", &self.gravity_acceleration());
+      ds.field("atmosphere_density", &self.atmosphere_density());
       ds.finish()
   }
 }
@@ -6263,6 +6334,8 @@ impl<'a> PlayerInput<'a> {
   pub const VT_TICK: ::flatbuffers::VOffsetT = 26;
   pub const VT_THRUST_LIMITER: ::flatbuffers::VOffsetT = 28;
   pub const VT_ROLL: ::flatbuffers::VOffsetT = 30;
+  pub const VT_CRUISE: ::flatbuffers::VOffsetT = 32;
+  pub const VT_ATMO_COMP: ::flatbuffers::VOffsetT = 34;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6283,6 +6356,8 @@ impl<'a> PlayerInput<'a> {
     builder.add_movement_y(args.movement_y);
     builder.add_movement_x(args.movement_x);
     builder.add_block_type(args.block_type);
+    builder.add_atmo_comp(args.atmo_comp);
+    builder.add_cruise(args.cruise);
     builder.add_action(args.action);
     builder.add_speed_tier(args.speed_tier);
     builder.add_orbit_stabilizer_toggle(args.orbit_stabilizer_toggle);
@@ -6390,6 +6465,20 @@ impl<'a> PlayerInput<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(PlayerInput::VT_ROLL, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn cruise(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerInput::VT_CRUISE, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn atmo_comp(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerInput::VT_ATMO_COMP, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerInput<'_> {
@@ -6412,6 +6501,8 @@ impl ::flatbuffers::Verifiable for PlayerInput<'_> {
      .visit_field::<u64>("tick", Self::VT_TICK, false)?
      .visit_field::<f32>("thrust_limiter", Self::VT_THRUST_LIMITER, false)?
      .visit_field::<f32>("roll", Self::VT_ROLL, false)?
+     .visit_field::<bool>("cruise", Self::VT_CRUISE, false)?
+     .visit_field::<bool>("atmo_comp", Self::VT_ATMO_COMP, false)?
      .finish();
     Ok(())
   }
@@ -6431,6 +6522,8 @@ pub struct PlayerInputArgs {
     pub tick: u64,
     pub thrust_limiter: f32,
     pub roll: f32,
+    pub cruise: bool,
+    pub atmo_comp: bool,
 }
 impl<'a> Default for PlayerInputArgs {
   #[inline]
@@ -6450,6 +6543,8 @@ impl<'a> Default for PlayerInputArgs {
       tick: 0,
       thrust_limiter: 0.75,
       roll: 0.0,
+      cruise: false,
+      atmo_comp: false,
     }
   }
 }
@@ -6516,6 +6611,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerInputBuilder<'a, 'b, A>
     self.fbb_.push_slot::<f32>(PlayerInput::VT_ROLL, roll, 0.0);
   }
   #[inline]
+  pub fn add_cruise(&mut self, cruise: bool) {
+    self.fbb_.push_slot::<bool>(PlayerInput::VT_CRUISE, cruise, false);
+  }
+  #[inline]
+  pub fn add_atmo_comp(&mut self, atmo_comp: bool) {
+    self.fbb_.push_slot::<bool>(PlayerInput::VT_ATMO_COMP, atmo_comp, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerInputBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerInputBuilder {
@@ -6547,6 +6650,8 @@ impl ::core::fmt::Debug for PlayerInput<'_> {
       ds.field("tick", &self.tick());
       ds.field("thrust_limiter", &self.thrust_limiter());
       ds.field("roll", &self.roll());
+      ds.field("cruise", &self.cruise());
+      ds.field("atmo_comp", &self.atmo_comp());
       ds.finish()
   }
 }

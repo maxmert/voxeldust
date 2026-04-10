@@ -30,6 +30,7 @@ pub enum FunctionalBlockKind {
     SignalConverter,
     Sensor,
     Computer,
+    CruiseDrive,
 }
 
 /// Per-thruster-block static properties (thrust output, fuel consumption).
@@ -39,6 +40,13 @@ pub struct ThrusterProps {
     pub thrust_n: f64,
     /// Fuel consumption rate (kg/s) — future use for fuel system.
     pub fuel_rate: f64,
+}
+
+/// Per-cruise-drive-block static properties.
+#[derive(Clone, Copy, Debug)]
+pub struct CruiseDriveProps {
+    /// Thrust boost multiplier applied to subscribed thrusters when active.
+    pub boost_multiplier: f64,
 }
 
 /// Per-block static power properties (generation, consumption, storage).
@@ -122,6 +130,8 @@ pub struct BlockRegistry {
     thruster_props: Vec<Option<ThrusterProps>>,
     /// Per-block power properties. None = not power-relevant.
     power_props: Vec<Option<PowerProps>>,
+    /// Per-cruise-drive properties. None = not a cruise drive.
+    cruise_drive_props: Vec<Option<CruiseDriveProps>>,
 }
 
 impl BlockRegistry {
@@ -132,6 +142,7 @@ impl BlockRegistry {
         let mut functional_kinds = vec![None; MAX_BLOCK_TYPES];
         let mut thruster_props_vec: Vec<Option<ThrusterProps>> = vec![None; MAX_BLOCK_TYPES];
         let mut power_props_vec: Vec<Option<PowerProps>> = vec![None; MAX_BLOCK_TYPES];
+        let mut cruise_drive_props_vec: Vec<Option<CruiseDriveProps>> = vec![None; MAX_BLOCK_TYPES];
 
         let r = &mut defs;
 
@@ -621,6 +632,10 @@ impl BlockRegistry {
         set(r, BlockId::SENSOR_POWER, functional_block("sensor_power", 800, 20, [100, 200, 180]));
         set(r, BlockId::SENSOR_DAMAGE, functional_block("sensor_damage", 800, 20, [100, 200, 180]));
         set(r, BlockId::COMPUTER, functional_block("computer", 2000, 40, [40, 50, 60]));
+        // Cruise drives (propulsion boost modules)
+        set(r, BlockId::CRUISE_DRIVE_SMALL, functional_block("cruise_drive_small", 3000, 80, [80, 200, 220]));
+        set(r, BlockId::CRUISE_DRIVE_MEDIUM, functional_block("cruise_drive_medium", 8000, 120, [80, 200, 220]));
+        set(r, BlockId::CRUISE_DRIVE_LARGE, functional_block("cruise_drive_large", 20000, 200, [80, 200, 220]));
 
         // Populate functional block kinds.
         use FunctionalBlockKind::*;
@@ -632,6 +647,10 @@ impl BlockRegistry {
             BlockId::THRUSTER_SMALL_FUSION, BlockId::THRUSTER_MEDIUM_FUSION,
             BlockId::THRUSTER_LARGE_FUSION] {
             fk[id.as_u16() as usize] = Some(Thruster);
+        }
+        // Cruise drives
+        for id in [BlockId::CRUISE_DRIVE_SMALL, BlockId::CRUISE_DRIVE_MEDIUM, BlockId::CRUISE_DRIVE_LARGE] {
+            fk[id.as_u16() as usize] = Some(CruiseDrive);
         }
         // Power
         for id in [BlockId::REACTOR_SMALL, BlockId::REACTOR_MEDIUM, BlockId::REACTOR_LARGE] {
@@ -668,15 +687,16 @@ impl BlockRegistry {
 
         // Populate thruster-specific properties.
         let tp = &mut thruster_props_vec;
-        // Chemical: cheap, moderate thrust, high fuel
+        // Chemical: cheap, moderate thrust, high fuel consumption.
+        // Small: 50 kN → 8 on starter ship (10t) = 400 kN total ≈ 40 m/s² (4g).
         tp[BlockId::THRUSTER_SMALL_CHEMICAL.as_u16() as usize] = Some(ThrusterProps { thrust_n: 50_000.0, fuel_rate: 5.0 });
         tp[BlockId::THRUSTER_MEDIUM_CHEMICAL.as_u16() as usize] = Some(ThrusterProps { thrust_n: 200_000.0, fuel_rate: 15.0 });
         tp[BlockId::THRUSTER_LARGE_CHEMICAL.as_u16() as usize] = Some(ThrusterProps { thrust_n: 800_000.0, fuel_rate: 50.0 });
-        // Ion: efficient, low thrust, low fuel
+        // Ion: efficient, low thrust, low fuel.
         tp[BlockId::THRUSTER_SMALL_ION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 20_000.0, fuel_rate: 0.5 });
         tp[BlockId::THRUSTER_MEDIUM_ION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 100_000.0, fuel_rate: 2.0 });
         tp[BlockId::THRUSTER_LARGE_ION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 500_000.0, fuel_rate: 8.0 });
-        // Fusion: best power/weight ratio
+        // Fusion: best power/weight ratio, end-game.
         tp[BlockId::THRUSTER_SMALL_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 100_000.0, fuel_rate: 1.0 });
         tp[BlockId::THRUSTER_MEDIUM_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 500_000.0, fuel_rate: 4.0 });
         tp[BlockId::THRUSTER_LARGE_FUSION.as_u16() as usize] = Some(ThrusterProps { thrust_n: 2_000_000.0, fuel_rate: 12.0 });
@@ -709,8 +729,21 @@ impl BlockRegistry {
         pp[BlockId::PISTON.as_u16() as usize]            = Some(PowerProps { generation_w: 0.0, consumption_w: 80_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         pp[BlockId::ANTENNA.as_u16() as usize]           = Some(PowerProps { generation_w: 0.0, consumption_w: 10_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         pp[BlockId::COMPUTER.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 20_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        // Cruise drives: consume power when active. The real power cost comes from boosted thrusters'
+        // increased consumption, but the drive itself also draws a base amount to stay operational.
+        pp[BlockId::CRUISE_DRIVE_SMALL.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 50_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::CRUISE_DRIVE_MEDIUM.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::CRUISE_DRIVE_LARGE.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 1_000_000.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
 
-        Self { defs, functional_kinds, thruster_props: thruster_props_vec, power_props: power_props_vec }
+        // Cruise drive boost multipliers: Small=500x, Medium=2000x, Large=8000x.
+        // At 500x boost, 8 × 1.25 MN chemical thrusters produce 8 × 625 MN = 5 GN
+        // on a 2000t ship = 2500 m/s², reaching 100 km/s in 40 seconds.
+        let cd = &mut cruise_drive_props_vec;
+        cd[BlockId::CRUISE_DRIVE_SMALL.as_u16() as usize]  = Some(CruiseDriveProps { boost_multiplier: 500.0 });
+        cd[BlockId::CRUISE_DRIVE_MEDIUM.as_u16() as usize] = Some(CruiseDriveProps { boost_multiplier: 2000.0 });
+        cd[BlockId::CRUISE_DRIVE_LARGE.as_u16() as usize]  = Some(CruiseDriveProps { boost_multiplier: 8000.0 });
+
+        Self { defs, functional_kinds, thruster_props: thruster_props_vec, power_props: power_props_vec, cruise_drive_props: cruise_drive_props_vec }
     }
 
     /// O(1) lookup by `BlockId`.
@@ -753,6 +786,10 @@ impl BlockRegistry {
         self.power_props[id.as_u16() as usize]
     }
 
+    pub fn cruise_drive_props(&self, id: BlockId) -> Option<CruiseDriveProps> {
+        self.cruise_drive_props[id.as_u16() as usize]
+    }
+
     /// Get the interaction schema for a functional block kind.
     /// Returns the set of interactions (action keys + types + labels) this kind supports.
     pub fn interaction_schema(&self, kind: FunctionalBlockKind) -> &'static InteractionSchema {
@@ -765,7 +802,8 @@ impl BlockRegistry {
             FunctionalBlockKind::SignalConverter => &SCHEMA_PROGRAM,
             FunctionalBlockKind::Computer => &SCHEMA_PROGRAM,
             FunctionalBlockKind::RailJunction => &SCHEMA_JUNCTION,
-            // Blocks with no direct player interaction.
+            // Blocks with no direct player interaction (config via F key panel).
+            FunctionalBlockKind::CruiseDrive => &SCHEMA_NONE,
             _ => &SCHEMA_NONE,
         }
     }

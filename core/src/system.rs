@@ -417,8 +417,8 @@ fn generate_planet(index: u32, planet_seed: u64, star: &StarParams) -> PlanetPar
         }
     };
 
-    // Cloud generation: 80% of atmosphere planets have clouds.
-    let clouds = if has_atmosphere && seed_to_range(derive_seed(planet_seed, 40), 0.0, 1.0) > 0.2 {
+    // Cloud generation: all atmosphere planets have clouds.
+    let clouds = if has_atmosphere {
         let scale_height = atmosphere.scale_height;
 
         // Cloud base altitude: proportional to atmosphere scale height (0.1-0.3×).
@@ -976,8 +976,17 @@ pub fn compute_full_aerodynamics(
     let drag_accel_mag = (drag_force / props.mass_kg).min(0.5 * speed / dt); // stability clamp
     let drag_accel = -(ship_vel / speed) * drag_accel_mag;
 
-    // 2. Lift
-    let lift_accel = compute_aerodynamic_lift(ship_rotation, ship_vel, density, props);
+    // 2. Lift (stability clamp matching drag — at hypersonic speeds, unclamped lift
+    //    ∝ density×v² can reach tens of thousands of m/s², deflecting the trajectory
+    //    out of the atmosphere in a single tick)
+    let lift_accel_raw = compute_aerodynamic_lift(ship_rotation, ship_vel, density, props);
+    let lift_mag = lift_accel_raw.length();
+    let max_lift_accel = 0.5 * speed / dt;
+    let lift_accel = if lift_mag > max_lift_accel && lift_mag > 1e-10 {
+        lift_accel_raw * (max_lift_accel / lift_mag)
+    } else {
+        lift_accel_raw
+    };
 
     // 3. Torque (weathercock + damping)
     let aero_torque = compute_aerodynamic_torque(

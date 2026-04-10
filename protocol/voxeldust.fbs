@@ -145,6 +145,13 @@ table ShipPositionUpdate {
     rotation: Quatd;
     angular_velocity: Vec3d;
     autopilot: AutopilotSnapshot;
+    /// Authoritative atmosphere state from system-shard physics.
+    in_atmosphere: bool;
+    atmosphere_planet_index: int32 = -1;
+    /// Gravitational acceleration at ship position (m/s²), world frame.
+    gravity_acceleration: Vec3d;
+    /// Atmospheric density at ship altitude (kg/m³), 0 if not in atmosphere.
+    atmosphere_density: double;
 }
 
 /// Pilot control input sent from ship shard to system shard.
@@ -366,6 +373,8 @@ table PlayerInput {
     tick: uint64;
     thrust_limiter: float = 0.75; // 0.0–1.0, default 75%
     roll: float;                  // Q/E: -1.0 (CCW) to +1.0 (CW)
+    cruise: bool;                 // C key: supercruise active
+    atmo_comp: bool;              // H key: atmosphere compensation active
 }
 
 table PlayerSnapshot {

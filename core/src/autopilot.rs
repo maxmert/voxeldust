@@ -104,6 +104,12 @@ pub struct ShipPhysicalProperties {
     /// Maximum torque the RCS/maneuvering thrusters can apply (N·m).
     /// Derived from maneuvering thruster placement × lever arm.
     pub max_torque_nm: f64,
+    /// Per-axis max torque (X=pitch, Y=yaw, Z=roll) in N·m.
+    /// Used for per-axis torque normalization in pilot_send.
+    pub max_torque_per_axis: DVec3,
+    /// Maximum thrust per facing direction [+X, -X, +Y, -Y, +Z, -Z] in Newtons.
+    /// Used by hover flight computer for gravity compensation throttle computation.
+    pub thrust_per_axis: [f64; 6],
     /// Available engine tiers as a bitmask. Bit 0 = Maneuver, bit 4 = Emergency.
     pub available_tiers: u8,
 }
@@ -131,6 +137,8 @@ impl ShipPhysicalProperties {
             max_thrust_forward_n: 490_500_000.0, // Cruise tier baseline
             max_thrust_reverse_n: 490_500_000.0, // symmetric
             max_torque_nm: 60_833.0, // gives ~1.0 rad/s² angular acceleration for this ship
+            max_torque_per_axis: DVec3::new(60_833.0, 60_833.0, 60_833.0),
+            thrust_per_axis: [400_000.0; 6], // 8 × 50 kN per direction
             available_tiers: 0b11111, // all 5 tiers
         }
     }

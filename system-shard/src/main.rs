@@ -3203,6 +3203,7 @@ fn broadcast_scene(
         &AngularVelocity,
         Option<&Autopilot>,
         Option<&AutopilotIntercept>,
+        Option<&InSoi>,
     )>,
     sys_config: Res<SystemConfig>,
     shard_identity: Res<ShardIdentity>,
@@ -3228,7 +3229,7 @@ fn broadcast_scene(
         };
 
     // Collect known ship IDs.
-    let known_ship_ids: HashSet<u64> = ships.iter().map(|(sid, _, _, _, _, _, _)| sid.0).collect();
+    let known_ship_ids: HashSet<u64> = ships.iter().map(|(sid, _, _, _, _, _, _, _)| sid.0).collect();
 
     let hosted_ships: Vec<(ShardId, SocketAddr, Option<u64>)> = ship_shards
         .iter()
@@ -3262,7 +3263,7 @@ fn broadcast_scene(
         let observer_pos = ships
             .iter()
             .next()
-            .map(|(_, p, _, _, _, _, _)| p.0)
+            .map(|(_, p, _, _, _, _, _, _)| p.0)
             .unwrap_or(DVec3::new(1e11, 0.0, 0.0));
         let l = compute_lighting(observer_pos, &sys_config.0.star);
         let lighting = LightingInfoData {
@@ -3287,7 +3288,7 @@ fn broadcast_scene(
         }
 
         // Per-ship position updates.
-        for (ship_id, pos, vel, rot, ang_vel, autopilot, intercept) in &ships {
+        for (ship_id, pos, vel, rot, ang_vel, autopilot, intercept, in_soi) in &ships {
             let target = hosted_ships
                 .iter()
                 .find(|(_, _, sid)| *sid == Some(ship_id.0))
@@ -3308,6 +3309,27 @@ fn broadcast_scene(
                         target_orbit_altitude: ap.target_orbit_altitude,
                     })
                 });
+
+                // Authoritative atmosphere + gravity for the ship-shard.
+                let atmo = check_atmosphere(pos.0, &sys_config.0.planets, &planet_pos.0);
+                let grav = if let Some(soi) = in_soi {
+                    let r = pos.0 - planet_pos.0[soi.planet_index];
+                    let dist_sq = r.length_squared();
+                    if dist_sq > 1.0 {
+                        -r.normalize() * sys_config.0.planets[soi.planet_index].gm / dist_sq
+                    } else {
+                        DVec3::ZERO
+                    }
+                } else {
+                    compute_gravity_acceleration(
+                        pos.0,
+                        &sys_config.0.star,
+                        &sys_config.0.planets,
+                        &planet_pos.0,
+                        celestial_time.0,
+                    )
+                };
+
                 let pos_msg = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
                     ship_id: ship_id.0,
                     position: pos.0,
@@ -3315,6 +3337,12 @@ fn broadcast_scene(
                     rotation: rot.0,
                     angular_velocity: ang_vel.0,
                     autopilot: ap_snapshot,
+                    in_atmosphere: atmo.is_some(),
+                    atmosphere_planet_index: atmo.map(|(i, _)| i as i32).unwrap_or(-1),
+                    gravity_acceleration: grav,
+                    atmosphere_density: atmo.map(|(pi, alt)| {
+                        sys_config.0.planets[pi].atmosphere.density_at_altitude(alt)
+                    }).unwrap_or(0.0),
                 });
                 let _ = bridge.quic_send_tx.try_send((sid, addr, pos_msg));
             }

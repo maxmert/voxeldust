@@ -482,6 +482,7 @@ pub fn render_frame(
     connected: bool,
     selected_thrust_tier: u8,
     engines_off: bool,
+    cruise_active: bool,
     autopilot_target: Option<usize>,
     trajectory_plan: Option<&voxeldust_core::autopilot::TrajectoryPlan>,
     server_autopilot: Option<&voxeldust_core::shard_message::AutopilotSnapshotData>,
@@ -894,6 +895,24 @@ pub fn render_frame(
                     if let Some(cloud_buf) = &gpu.cloud_uniform_buf {
                         gpu.queue.write_buffer(cloud_buf, 0, bytemuck::bytes_of(&cloud_uni));
                     }
+
+                    // Log cloud params once for debugging.
+                    static CLOUD_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !CLOUD_LOGGED.load(std::sync::atomic::Ordering::Relaxed) {
+                        CLOUD_LOGGED.store(true, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            planet_r_km = cloud_uni.geometry[0],
+                            cloud_base_km = cloud_uni.geometry[1],
+                            cloud_thick_km = cloud_uni.geometry[2],
+                            coverage = cloud_uni.density_params[0],
+                            density_scale = cloud_uni.density_params[1],
+                            cloud_type = cloud_uni.density_params[2],
+                            shape_scale = cloud_uni.noise_params[0],
+                            detail_scale = cloud_uni.noise_params[1],
+                            weather_scale_km = cloud_uni.scatter[3],
+                            "cloud uniforms"
+                        );
+                    }
                 }
             }
         }
@@ -943,6 +962,7 @@ pub fn render_frame(
         connected,
         selected_thrust_tier,
         engines_off,
+        cruise_active,
         autopilot_target,
         trajectory_plan,
         server_autopilot,

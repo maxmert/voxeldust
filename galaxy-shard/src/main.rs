@@ -904,6 +904,10 @@ fn broadcast_scene_to_ship_shards(
             rotation: rot.0,
             angular_velocity: DVec3::ZERO,
             autopilot: None,
+            in_atmosphere: false,
+            atmosphere_planet_index: -1,
+            gravity_acceleration: DVec3::ZERO,
+            atmosphere_density: 0.0,
         });
         let _ = bridge
             .quic_send_tx

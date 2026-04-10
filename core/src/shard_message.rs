@@ -60,7 +60,7 @@ pub struct AutopilotSnapshotData {
     pub target_orbit_altitude: f64,
 }
 
-/// Ship exterior state synced from ship shard to system shard (and vice versa).
+/// Ship exterior state synced from system shard to ship shard.
 #[derive(Debug, Clone)]
 pub struct ShipPositionUpdate {
     pub ship_id: u64,
@@ -69,6 +69,14 @@ pub struct ShipPositionUpdate {
     pub rotation: DQuat,
     pub angular_velocity: DVec3,
     pub autopilot: Option<AutopilotSnapshotData>,
+    /// Authoritative atmosphere state from system-shard physics.
+    pub in_atmosphere: bool,
+    /// Planet index if in atmosphere, -1 otherwise.
+    pub atmosphere_planet_index: i32,
+    /// Gravitational acceleration at ship position (m/s²), world frame.
+    pub gravity_acceleration: DVec3,
+    /// Atmospheric density at ship altitude (kg/m³), 0 if not in atmosphere.
+    pub atmosphere_density: f64,
 }
 
 /// Pilot control input sent from ship shard to system shard.
@@ -446,6 +454,7 @@ impl ShardMsg {
                         },
                     )
                 });
+                let grav = to_fb_vec3d(&s.gravity_acceleration);
                 let update = fb::ShipPositionUpdate::create(
                     &mut builder,
                     &fb::ShipPositionUpdateArgs {
@@ -455,6 +464,10 @@ impl ShardMsg {
                         rotation: Some(&rot),
                         angular_velocity: Some(&ang),
                         autopilot: ap_offset,
+                        in_atmosphere: s.in_atmosphere,
+                        atmosphere_planet_index: s.atmosphere_planet_index,
+                        gravity_acceleration: Some(&grav),
+                        atmosphere_density: s.atmosphere_density,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -917,6 +930,10 @@ impl ShardMsg {
                     rotation: from_fb_quatd(rot),
                     angular_velocity: from_fb_vec3d(ang),
                     autopilot,
+                    in_atmosphere: s.in_atmosphere(),
+                    atmosphere_planet_index: s.atmosphere_planet_index(),
+                    gravity_acceleration: s.gravity_acceleration().map(|v| from_fb_vec3d(v)).unwrap_or(DVec3::ZERO),
+                    atmosphere_density: s.atmosphere_density(),
                 }))
             }
 
@@ -1275,6 +1292,10 @@ mod tests {
             rotation: DQuat::from_xyzw(0.0, 0.0, 0.707, 0.707),
             angular_velocity: DVec3::new(0.0, 0.1, 0.0),
             autopilot: None,
+            in_atmosphere: true,
+            atmosphere_planet_index: 2,
+            gravity_acceleration: DVec3::new(0.0, -9.8, 0.0),
+            atmosphere_density: 0.5,
         });
         let bytes = msg.serialize();
         let decoded = ShardMsg::deserialize(&bytes).unwrap();
@@ -1285,6 +1306,10 @@ mod tests {
             assert!((s.velocity.z - (-5.0)).abs() < 1e-10);
             assert!((s.angular_velocity.y - 0.1).abs() < 1e-10);
             assert!(s.autopilot.is_none());
+            assert!(s.in_atmosphere);
+            assert_eq!(s.atmosphere_planet_index, 2);
+            assert!((s.gravity_acceleration.y - (-9.8)).abs() < 1e-10);
+            assert!((s.atmosphere_density - 0.5).abs() < 1e-10);
         } else {
             panic!("expected ShipPositionUpdate");
         }
@@ -1298,6 +1323,10 @@ mod tests {
             velocity: DVec3::new(5000.0, 0.0, -3000.0),
             rotation: DQuat::IDENTITY,
             angular_velocity: DVec3::ZERO,
+            in_atmosphere: false,
+            atmosphere_planet_index: -1,
+            gravity_acceleration: DVec3::ZERO,
+            atmosphere_density: 0.0,
             autopilot: Some(AutopilotSnapshotData {
                 phase: 2, // Brake
                 mode: 1,  // OrbitInsertion

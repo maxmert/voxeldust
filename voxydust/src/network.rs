@@ -481,5 +481,7 @@ fn empty_input() -> PlayerInputData {
         tick: 0,
         thrust_limiter: 0.75,
         roll: 0.0,
+        cruise: false,
+        atmo_comp: false,
     }
 }

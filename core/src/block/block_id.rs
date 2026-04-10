@@ -175,6 +175,11 @@ impl BlockId {
     pub const GRAVITY_GENERATOR: Self = Self(1820);
     pub const ANTENNA: Self = Self(1830);
 
+    // Cruise drives (propulsion boost modules)
+    pub const CRUISE_DRIVE_SMALL: Self = Self(1900);
+    pub const CRUISE_DRIVE_MEDIUM: Self = Self(1910);
+    pub const CRUISE_DRIVE_LARGE: Self = Self(1920);
+
     #[inline(always)]
     pub const fn as_u16(self) -> u16 {
         self.0

@@ -180,6 +180,7 @@ impl CloudSystem {
         if self.current_planet_seed == Some(planet_seed) {
             return; // Already generated for this planet.
         }
+        tracing::info!(planet_seed, "starting cloud noise generation");
         self.current_planet_seed = Some(planet_seed);
 
         // Create shape texture (128³).
@@ -323,10 +324,13 @@ impl CloudSystem {
             (clouds.wind_velocity[2] / 1000.0) as f32,
         ];
 
-        // Noise scale: how many times the noise texture tiles within 1 km.
-        // Derived from cloud layer thickness to ensure consistent visual detail.
-        let shape_scale = 1.0 / (cloud_thickness_km * 4.0).max(1.0);
-        let detail_scale = shape_scale * 4.0;
+        // Noise scale: controls individual cloud size.
+        // Individual clouds should be ~5-20km across. The 128³ noise texture tiles
+        // at this scale, so one tile = one "cloud field" area.
+        // shape_scale = 1/cloud_field_size_km: how many tiles per km.
+        let cloud_field_km = 30.0_f32; // one noise tile covers 30km — produces ~5-15km clouds
+        let shape_scale = 1.0 / cloud_field_km;
+        let detail_scale = shape_scale * 4.0; // detail 4× finer than shape
 
         CloudUniforms {
             observer_pos: [observer_km[0], observer_km[1], observer_km[2], game_time as f32],

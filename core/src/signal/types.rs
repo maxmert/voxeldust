@@ -94,6 +94,8 @@ pub enum SignalProperty {
     Level,
     /// u8: discrete switch state (junction branch index).
     SwitchState,
+    /// Float: thrust boost multiplier (1.0 = normal). Set by cruise drives.
+    Boost,
 }
 
 /// How multiple publishers to the same channel merge their values.

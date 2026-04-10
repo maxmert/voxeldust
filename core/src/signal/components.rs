@@ -80,6 +80,10 @@ pub enum SeatControl {
     // Roll (Q/E keys when piloting)
     TorqueRollCW    = 11,  // E key (piloting)
     TorqueRollCCW   = 12,  // Q key (piloting)
+    // Cruise drive toggle
+    Cruise          = 13,  // C key (piloting)
+    // Atmosphere compensation (hover) toggle
+    AtmoComp        = 14,  // H key (piloting)
     // Future: Gunner controls (20-29)
     // AimX           = 20,
     // AimY           = 21,
@@ -108,6 +112,8 @@ impl SeatControl {
             Self::ThrustLimiter   => "Thrust Limiter",
             Self::TorqueRollCW    => "Roll CW",
             Self::TorqueRollCCW   => "Roll CCW",
+            Self::Cruise          => "Cruise",
+            Self::AtmoComp        => "Atmo Comp",
         }
     }
 
@@ -122,6 +128,7 @@ impl SeatControl {
             SeatControl::TorquePitchUp, SeatControl::TorquePitchDown,
             SeatControl::ThrustLimiter,
             SeatControl::TorqueRollCW, SeatControl::TorqueRollCCW,
+            SeatControl::Cruise,
         ]
     }
 
@@ -140,6 +147,7 @@ impl SeatControl {
             10 => Some(Self::ThrustLimiter),
             11 => Some(Self::TorqueRollCW),
             12 => Some(Self::TorqueRollCCW),
+            13 => Some(Self::Cruise),
             _  => None,
         }
     }
@@ -172,6 +180,8 @@ pub const DEFAULT_SEAT_CHANNEL_NAMES: &[(&str, SeatControl, SignalProperty)] = &
     ("thrust-limiter",    SeatControl::ThrustLimiter,   SignalProperty::Throttle),
     ("torque-roll-cw",    SeatControl::TorqueRollCW,    SignalProperty::Throttle),
     ("torque-roll-ccw",   SeatControl::TorqueRollCCW,   SignalProperty::Throttle),
+    ("cruise",            SeatControl::Cruise,          SignalProperty::Throttle),
+    ("atmo-comp",         SeatControl::AtmoComp,        SignalProperty::Throttle),
 ];
 
 impl SeatChannelMapping {

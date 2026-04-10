@@ -16,6 +16,7 @@ pub struct HudContext<'a> {
     pub connected: bool,
     pub selected_thrust_tier: u8,
     pub engines_off: bool,
+    pub cruise_active: bool,
     pub autopilot_target: Option<usize>,
     pub trajectory_plan: Option<&'a voxeldust_core::autopilot::TrajectoryPlan>,
     pub server_autopilot: Option<&'a voxeldust_core::shard_message::AutopilotSnapshotData>,
@@ -496,6 +497,9 @@ fn draw_pilot_hud(ui: &mut egui::Ui, ctx: &HudContext, speed: f64) {
         ui.label(format!("Thrust: {}", tier_label));
         ui.label("T=disengage | 1-5=thrust | WASD=cancel");
     } else {
+        if ctx.cruise_active {
+            ui.colored_label(egui::Color32::from_rgb(60, 200, 255), "CRUISE ACTIVE (C to disengage)");
+        }
         if ctx.engines_off {
             ui.colored_label(egui::Color32::RED, "ENGINES OFF (X to restart)");
         }
@@ -658,6 +662,7 @@ const SIGNAL_PROPERTY_NAMES: &[(&str, SignalProperty)] = &[
     ("Speed", SignalProperty::Speed),
     ("Level", SignalProperty::Level),
     ("SwitchState", SignalProperty::SwitchState),
+    ("Boost", SignalProperty::Boost),
 ];
 
 fn functional_kind_name(kind: u8) -> &'static str {

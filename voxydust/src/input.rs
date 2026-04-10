@@ -19,6 +19,8 @@ pub fn send_input_with_dt(
     thrust_limiter: f32,
     frame_count: u64,
     dt: f64,
+    cruise: bool,
+    atmo_comp: bool,
 ) {
     if let Some(tx) = input_tx {
         let mut movement = [0.0f32; 3];
@@ -83,6 +85,8 @@ pub fn send_input_with_dt(
             tick: frame_count,
             thrust_limiter,
             roll,
+            cruise,
+            atmo_comp,
         });
     }
 }

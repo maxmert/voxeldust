@@ -337,6 +337,8 @@ struct FlightControl {
     thrust_limiter: f32,
     /// Supercruise mode (C key toggle). 100-1000 km/s in-system travel.
     cruise_active: bool,
+    /// Atmosphere compensation (hover) mode (H key toggle).
+    atmo_comp_active: bool,
 }
 
 #[derive(Resource)]
@@ -833,10 +835,14 @@ fn poll_network(
 /// Snapshot interpolation: lerp between the two most recent server states.
 /// Produces smooth render_position, render_rotation, and ship_origin at display framerate.
 /// Galaxy warp uses its own velocity-based smoothing (separate from WorldState snapshots).
+/// Planet shards snap to current snapshot (no interpolation) — body positions update
+/// discretely from orbital mechanics, so interpolating the camera would desync it
+/// from the discrete body positions, causing visible jitter on surfaces/atmosphere.
 fn smooth_render_position(
     mut smooth: ResMut<RenderSmoothing>,
     snapshots: Res<SnapshotBuffer>,
     warp: Res<ClientWarp>,
+    conn: Res<ConnectionInfo>,
     ft: Res<FrameTime>,
 ) {
     // Galaxy warp: separate smoothing path (GalaxyWorldState, not WorldState snapshots).
@@ -879,19 +885,20 @@ fn smooth_render_position(
     // causes backward snaps when the next snapshot arrives).
     let t = (elapsed / tick_duration).clamp(0.0, 1.0);
 
-    // Snapshot target: where the player should be based on server state.
-    let target_pos = prev.player_position.lerp(curr.player_position, t);
-    let target_rot = prev.ship_rotation.slerp(curr.ship_rotation, t);
-    let target_origin = prev.ship_origin.lerp(curr.ship_origin, t);
-
-    // Exponential decay blend toward target — eliminates micro-freezes at
-    // tick boundaries while never overshooting.  Converges ~90% in 100ms.
-    let blend = 1.0 - (-20.0 * ft.dt).exp();
-    let pos_delta = (target_pos - smooth.render_position) * blend;
-    smooth.render_position = smooth.render_position + pos_delta;
-    smooth.render_rotation = smooth.render_rotation.slerp(target_rot, blend);
-    let origin_delta = (target_origin - smooth.ship_origin) * blend;
-    smooth.ship_origin = smooth.ship_origin + origin_delta;
+    if conn.current_shard_type == voxeldust_core::client_message::shard_type::PLANET {
+        // Planet shard: snap to current snapshot.  Body positions (star, other
+        // planets) are recomputed from orbital mechanics each tick and update
+        // discretely.  Interpolating the camera between ticks desyncs it from
+        // the discrete body positions, causing atmosphere/surface dot jitter.
+        smooth.render_position = curr.player_position;
+        smooth.render_rotation = curr.ship_rotation;
+        smooth.ship_origin = curr.ship_origin;
+    } else {
+        // Ship/system shard: interpolate between snapshots for smooth flight.
+        smooth.render_position = prev.player_position.lerp(curr.player_position, t);
+        smooth.render_rotation = prev.ship_rotation.slerp(curr.ship_rotation, t);
+        smooth.ship_origin = prev.ship_origin.lerp(curr.ship_origin, t);
+    }
 }
 
 fn check_autopilot_timeout(
@@ -1153,6 +1160,7 @@ impl ClientApp {
             engines_off: false,
             thrust_limiter: 0.75,
             cruise_active: false,
+            atmo_comp_active: false,
         });
         ecs_app.insert_resource(ClientAutopilot {
             target: None,
@@ -1310,6 +1318,7 @@ impl ClientApp {
             current_shard_type,
             selected_thrust_tier,
             engines_off,
+            cruise_active,
             autopilot_target,
             warp_galaxy_position,
             warp_galaxy_rotation,
@@ -1372,6 +1381,7 @@ impl ClientApp {
                 conn.current_shard_type,
                 flight.selected_thrust_tier,
                 flight.engines_off,
+                flight.cruise_active,
                 ap.target,
                 if warp.galaxy_position.is_some() { Some(smooth.galaxy_render_position) } else { None },
                 if warp.galaxy_rotation.is_some() { Some(smooth.galaxy_render_rotation) } else { None },
@@ -1699,15 +1709,20 @@ impl ClientApp {
                         }
                     };
                     // Check for nearby cloudy planet.
+                    let mut found_any_cloud_planet = false;
                     for body in &ws.bodies {
                         if body.body_id == 0 { continue; }
                         let pi = (body.body_id - 1) as usize;
                         if pi >= sys.planets.len() { continue; }
                         let planet = &sys.planets[pi];
                         if !planet.clouds.has_clouds { continue; }
+                        found_any_cloud_planet = true;
                         let dist = (cam_sys_pos - body.position).length();
-                        let atmo_top = planet.radius_m + planet.atmosphere.atmosphere_height;
-                        if dist < atmo_top * 3.0 {
+                        // Clouds are visible from far away (white patches on planet).
+                        // Use a generous range: render clouds if planet subtends > 0.5° on screen.
+                        let planet_angular = (planet.radius_m / dist).atan();
+                        let min_angular = 0.005; // ~0.3 degrees — planet clearly visible
+                        if planet_angular > min_angular {
                             let prev_has = cloud_sys.has_noise();
                             cloud_sys.ensure_noise_for_planet(&gpu.device, &gpu.queue, planet.planet_seed);
                             // Rebuild composite bind group if noise textures were just created.
@@ -1751,6 +1766,52 @@ impl ClientApp {
                             break;
                         }
                     }
+                    // Debug: log cloud detection status periodically.
+                    static LOG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let count = LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if count % 300 == 0 { // every ~5 seconds at 60fps
+                        let n_planets = sys.planets.len();
+                        let n_with_clouds = sys.planets.iter().filter(|p| p.clouds.has_clouds).count();
+                        // Find closest cloudy planet distance for debugging.
+                        let mut closest_dist = f64::MAX;
+                        let mut closest_radius = 0.0_f64;
+                        for body in &ws.bodies {
+                            if body.body_id == 0 { continue; }
+                            let pi = (body.body_id - 1) as usize;
+                            if pi >= sys.planets.len() { continue; }
+                            let planet = &sys.planets[pi];
+                            if !planet.clouds.has_clouds { continue; }
+                            let d = (cam_sys_pos - body.position).length();
+                            if d < closest_dist {
+                                closest_dist = d;
+                                closest_radius = planet.radius_m;
+                            }
+                        }
+                        // Also find the nearest planet of ANY type.
+                        let mut nearest_any_dist = f64::MAX;
+                        let mut nearest_any_id = 0u32;
+                        let mut nearest_any_has_clouds = false;
+                        for body in &ws.bodies {
+                            if body.body_id == 0 { continue; }
+                            let d = (cam_sys_pos - body.position).length();
+                            if d < nearest_any_dist {
+                                nearest_any_dist = d;
+                                nearest_any_id = body.body_id;
+                                let pi = (body.body_id - 1) as usize;
+                                nearest_any_has_clouds = pi < sys.planets.len() && sys.planets[pi].clouds.has_clouds;
+                            }
+                        }
+                        tracing::info!(
+                            planets = n_planets,
+                            cloudy = n_with_clouds,
+                            nearest_planet = nearest_any_id,
+                            nearest_km = (nearest_any_dist / 1000.0) as u64,
+                            nearest_has_clouds = nearest_any_has_clouds,
+                            closest_cloudy_km = (closest_dist / 1000.0) as u64,
+                            noise_ready = cloud_sys.has_noise(),
+                            "cloud system status"
+                        );
+                    }
                 }
             }
         }
@@ -1777,6 +1838,7 @@ impl ClientApp {
             connected,
             selected_thrust_tier,
             engines_off,
+            cruise_active,
             autopilot_target,
             ap.trajectory_plan.as_ref(),
             ap.server_autopilot.as_ref(),
@@ -2057,6 +2119,12 @@ fn interpret_key_system(
                 if key == KeyCode::KeyC && is_piloting && !actions.flight.engines_off {
                     actions.flight.cruise_active = !actions.flight.cruise_active;
                     info!(cruise = actions.flight.cruise_active, "cruise mode toggled");
+                }
+
+                // H key: toggle atmosphere compensation (hover).
+                if key == KeyCode::KeyH && is_piloting && !actions.flight.engines_off {
+                    actions.flight.atmo_comp_active = !actions.flight.atmo_comp_active;
+                    info!(atmo_comp = actions.flight.atmo_comp_active, "atmosphere compensation toggled");
                 }
 
                 // X key: toggle engine cutoff.
@@ -2402,6 +2470,7 @@ fn send_input_system(
     let cam = &mut *cam;
     let limiter = flight.thrust_limiter;
     let cruise = flight.cruise_active;
+    let atmo_comp = flight.atmo_comp_active;
     input::send_input_with_dt(
         &net.input_tx,
         &kb.keys_held,
@@ -2416,6 +2485,7 @@ fn send_input_system(
         ft.count,
         ft.dt,
         cruise,
+        atmo_comp,
     );
 }
 

@@ -213,6 +213,11 @@ pub fn build_ship_properties(
     let max_thrust_reverse = thrust.thrust_per_axis[4]; // +Z facing = pushes backward
 
     let max_torque = thrust.max_torque.length().max(1.0); // minimum 1 N·m
+    let max_torque_per_axis = DVec3::new(
+        thrust.max_torque.x.max(1.0),
+        thrust.max_torque.y.max(1.0),
+        thrust.max_torque.z.max(1.0),
+    );
 
     ShipPhysicalProperties {
         mass_kg: mass.total_mass_kg,
@@ -233,6 +238,8 @@ pub fn build_ship_properties(
         max_thrust_forward_n: max_thrust_forward,
         max_thrust_reverse_n: max_thrust_reverse,
         max_torque_nm: max_torque,
+        max_torque_per_axis,
+        thrust_per_axis: thrust.thrust_per_axis,
         available_tiers: 0b11111, // all tiers available (tier thrust × multiplier)
     }
 }

@@ -332,9 +332,9 @@ fn cloud_height_gradient(height_frac: f32, type_blend: f32) -> f32 {
     return mix(cumulus, cb, (type_blend - 0.5) * 2.0);
 }
 
-/// Simple seeded hash for procedural weather coverage.
+/// Hash function for procedural weather (better quality, avoids grid artifacts).
 fn hash_weather(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+    var p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
     p3 += dot(p3, p3.yzx + 33.33);
     return fract((p3.x + p3.y) * p3.z);
 }
@@ -342,7 +342,8 @@ fn hash_weather(p: vec2<f32>) -> f32 {
 fn weather_noise(p: vec2<f32>) -> f32 {
     let i = floor(p);
     let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
+    // Quintic interpolation for smooth, artifact-free noise.
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     return mix(
         mix(hash_weather(i + vec2(0.0, 0.0)), hash_weather(i + vec2(1.0, 0.0)), u.x),
         mix(hash_weather(i + vec2(0.0, 1.0)), hash_weather(i + vec2(1.0, 1.0)), u.x),
@@ -350,27 +351,60 @@ fn weather_noise(p: vec2<f32>) -> f32 {
     );
 }
 
-fn weather_coverage(pos: vec3<f32>, planet_r: f32) -> f32 {
-    // Project position onto unit sphere for weather UV.
+/// Domain-warped noise: produces organic swirling formations instead of uniform haze.
+/// fbm(p + fbm(p)) breaks self-similarity, creating distinct cloud masses with
+/// swirls, clear eyes, and trailing wisps. (Inigo Quilez technique.)
+fn warped_noise(p: vec3<f32>) -> f32 {
+    // First pass: compute warp offset from noise at a different frequency.
+    let q = vec3(
+        textureSample(cloud_shape_tex, cloud_sampler, p * 0.7).r,
+        textureSample(cloud_shape_tex, cloud_sampler, p * 0.7 + vec3(5.2, 1.3, 2.8)).r,
+        textureSample(cloud_shape_tex, cloud_sampler, p * 0.7 + vec3(1.7, 9.2, 3.4)).r
+    );
+    // Second pass: sample at warped coordinates. Warp strength 3.0 = moderate distortion.
+    let warped = p + (q - 0.5) * 3.0;
+    return textureSample(cloud_shape_tex, cloud_sampler, warped).r;
+}
+
+/// Hadley cell cloud probability based on latitude.
+/// Produces realistic latitude bands: cloudy at equator and ~60°, clear at ~30° and poles.
+/// This is the dominant pattern in real planetary atmospheres.
+fn hadley_cloud_probability(pos: vec3<f32>) -> f32 {
     let dir = normalize(pos);
-    let uv = vec2(atan2(dir.z, dir.x) * (1.0 / PI) * 0.5 + 0.5, asin(dir.y) * (1.0 / PI) + 0.5);
+    let abs_lat = abs(asin(clamp(dir.y, -1.0, 1.0))); // [0, PI/2]
 
-    let weather_scale = clouds.scatter.w;
-    let wind_t = clouds.observer_pos.w; // game_time
-    let wind_uv = clouds.wind.xy * wind_t * 0.1;
-    let scaled_uv = uv * weather_scale + wind_uv;
+    // 3-cell Hadley model (Earth-like):
+    //   0°  ITCZ — cloudy (tropical convergence)
+    //  30°  subtropical high — clear (horse latitudes / deserts)
+    //  60°  polar front — cloudy (storm track)
+    //  90°  polar high — clear
+    let itcz = exp(-abs_lat * abs_lat / 0.08);
+    let storm_track = exp(-(abs_lat - 1.05) * (abs_lat - 1.05) / 0.12);
+    let subtropical_clear = exp(-(abs_lat - 0.52) * (abs_lat - 0.52) / 0.06);
 
-    // fBm weather noise (deterministic from UV + planet position).
-    var coverage = 0.0;
-    var amp = 1.0;
-    var freq = 1.0;
-    let octaves = u32(clouds.noise_params.z);
-    for (var i = 0u; i < octaves; i++) {
-        coverage += weather_noise(scaled_uv * freq) * amp;
-        amp *= 0.5;
-        freq *= 2.0;
-    }
-    return saturate(coverage * 0.5 + 0.5); // normalize to [0, 1]
+    return saturate((itcz * 0.8 + storm_track * 0.6) * (1.0 - subtropical_clear * 0.7));
+}
+
+fn weather_coverage(pos: vec3<f32>, planet_r: f32) -> f32 {
+    // Layer 1: Hadley cell latitude bands (deterministic, physically motivated).
+    let hadley = hadley_cloud_probability(pos);
+
+    // Layer 2: Domain-warped noise for synoptic weather (cyclones, fronts, clear zones).
+    let weather_scale_km = clouds.scatter.w;
+    let synoptic_scale = 1.0 / max(weather_scale_km, 1.0);
+    let wind_t = clouds.observer_pos.w;
+    let weather_wind = clouds.wind.xyz * wind_t * 0.05;
+    let synoptic = warped_noise((pos + weather_wind) * synoptic_scale);
+
+    // Combine: Hadley controls WHERE clouds can form, warping controls the shape.
+    // Multiply (not add) so clear Hadley zones stay clear regardless of noise.
+    let base = clouds.density_params.x;
+    let raw_coverage = hadley * synoptic;
+
+    // Threshold to create distinct cloudy vs clear regions.
+    // base controls overall planet cloud fraction (0.3=scattered, 0.6=Earth-like).
+    let threshold = (1.0 - base) * 0.4;
+    return smoothstep(threshold, threshold + 0.2, raw_coverage);
 }
 
 /// Sample cloud density at a world position (km, relative to planet center).
@@ -387,9 +421,8 @@ fn cloud_density(pos: vec3<f32>) -> f32 {
     let gradient = cloud_height_gradient(height_frac, clouds.density_params.z);
     if gradient < 0.001 { return 0.0; }
 
-    // Weather-driven coverage at this position.
-    let base_coverage = clouds.density_params.x;
-    let coverage = base_coverage * weather_coverage(pos, planet_r);
+    // Weather-driven coverage at this position (already remapped to create patches).
+    let coverage = weather_coverage(pos, planet_r);
     if coverage < 0.01 { return 0.0; }
 
     // Wind offset for cloud scrolling.
@@ -503,25 +536,43 @@ fn cloud_ray_march(
         if density > 0.001 {
             let sample_transmittance = exp(-density * absorption * dt);
 
-            // Multi-scattering approximation (Wrenninge/Hillaire octave method).
-            // 3 octaves: each reduces attenuation, contribution, and phase eccentricity.
-            var light = vec3(0.0);
-            var oct_atten = 1.0;
-            var oct_contrib = 1.0;
-            var oct_phase = phase;
-            for (var oct = 0u; oct < 3u; oct++) {
-                let ext = density * oct_atten * absorption;
-                let beer = exp(-ext * dt * 6.0); // 6 light samples approximated as 6× step
-                let powder = 1.0 - exp(-ext * dt * 12.0);
-                light += beer * mix(0.7, 1.0, powder) * oct_phase * oct_contrib * scatter_color * sun_color_val;
-                oct_atten *= 0.5;
-                oct_contrib *= 0.5;
-                oct_phase = mix(oct_phase, 1.0 / (4.0 * PI), 0.5); // reduce eccentricity
+            // Smooth day/night terminator based on sun angle at this cloud position.
+            // Real terminators are soft (~200km transition zone from atmospheric scattering).
+            // Use dot(surface_normal, sun_direction) with a smooth falloff.
+            let sun_dir = clouds.sun.xyz;
+            let cloud_normal = normalize(sample_pos); // radial direction = surface normal
+            let sun_angle = dot(cloud_normal, sun_dir);
+            // smoothstep from -0.1 to 0.15: creates a ~25° soft transition zone.
+            // Negative threshold allows light to wrap slightly past the geometric terminator
+            // (atmospheric light bending effect).
+            let planet_shadow = smoothstep(-0.1, 0.15, sun_angle);
+
+            // Direct sun lighting with multi-scattering approximation.
+            var direct_light = vec3(0.0);
+            if planet_shadow > 0.001 {
+                var oct_atten = 1.0;
+                var oct_contrib = 1.0;
+                var oct_phase = phase;
+                for (var oct = 0u; oct < 3u; oct++) {
+                    let ext = density * oct_atten * absorption;
+                    let beer = exp(-ext * dt * 6.0);
+                    let powder = 1.0 - exp(-ext * dt * 12.0);
+                    direct_light += planet_shadow * beer * mix(0.7, 1.0, powder) * oct_phase * oct_contrib * scatter_color * sun_color_val;
+                    oct_atten *= 0.5;
+                    oct_contrib *= 0.5;
+                    oct_phase = mix(oct_phase, 1.0 / (4.0 * PI), 0.5);
+                }
             }
 
-            // Analytical integration.
-            let integrated = (light - light * sample_transmittance) / max(density * absorption, 1e-6);
-            result.luminance += result.transmittance * integrated;
+            // Analytical integration of direct lighting through the cloud segment.
+            let extinction = density * absorption;
+            let direct_integrated = (direct_light - direct_light * sample_transmittance) / max(extinction, 0.001);
+
+            // Ambient: very dim, only near the terminator (atmospheric scattering).
+            // Night side gets effectively zero — no light sources means pitch black clouds.
+            let ambient = scatter_color * 0.008 * planet_shadow * planet_shadow * (1.0 - sample_transmittance);
+
+            result.luminance += result.transmittance * (direct_integrated + ambient);
             result.transmittance *= sample_transmittance;
 
             if result.transmittance < 0.01 { break; }
@@ -549,47 +600,32 @@ fn fs_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
 
     var color = hdr_color;
 
+    // Reconstruct world-space ray for atmosphere + clouds (shared computation).
+    let is_sky = depth < 1e-6; // reverse-Z: 0 = infinity (sky)
+    let ndc = vec4(
+        in.uv.x * 2.0 - 1.0,
+        (1.0 - in.uv.y) * 2.0 - 1.0,
+        select(depth, 0.01, is_sky),
+        1.0
+    );
+    let world_h = atmo.inv_vp * ndc;
+    let world_pos = world_h.xyz / world_h.w;
+    let ray_dir = normalize(world_pos);
+    let frag_dist_km = select(length(world_pos) * 0.001, 1e6, is_sky);
+
     // Atmosphere compositing (only for exterior pixels, only when enabled).
     if atmo.radii.z > 0.5 && is_exterior > 0.5 {
-        let is_sky = depth < 1e-6; // reverse-Z: 0 = infinity (sky)
-
-        // Reconstruct world-space view ray direction from depth.
-        let ndc = vec4(
-            in.uv.x * 2.0 - 1.0,
-            (1.0 - in.uv.y) * 2.0 - 1.0,
-            select(depth, 0.01, is_sky), // use small depth for sky to get valid direction
-            1.0
-        );
-        let world_h = atmo.inv_vp * ndc;
-        let world_pos = world_h.xyz / world_h.w;
-        let ray_dir = normalize(world_pos);
-
-        // Distance from camera to fragment in km (meters → km conversion).
-        // For sky pixels, use a very large distance to ray-march the full atmosphere.
-        let frag_dist_km = select(length(world_pos) * 0.001, 1e6, is_sky);
-
-        // Observer position in km (from AtmosphereUniforms).
         let observer = atmo.observer_pos.xyz;
-
-        // Ray march atmosphere.
         let sun_dir = atmo.sun_dir.xyz;
         let sun_illum = atmo.sun_color.xyz;
         let atmo_result = atmosphere_ray_march(observer, ray_dir, frag_dist_km, sun_dir, sun_illum);
-
-        // Composite: attenuate scene by transmittance, add in-scattered light.
         color = color * atmo_result.transmittance + atmo_result.inscatter;
     }
 
     // Volumetric cloud compositing (Nubis technique).
-    // Clouds are rendered AFTER atmosphere so they receive atmospheric lighting
-    // and are occluded by atmospheric transmittance correctly.
     if clouds.geometry.w > 0.5 && is_exterior > 0.5 {
         let cloud_observer = clouds.observer_pos.xyz;
-        let cloud_max_dist = select(length(world_pos) * 0.001, 1e6, is_sky);
-
-        let cloud_result = cloud_ray_march(cloud_observer, ray_dir, cloud_max_dist);
-
-        // Composite: clouds occlude scene behind them, add cloud luminance.
+        let cloud_result = cloud_ray_march(cloud_observer, ray_dir, frag_dist_km);
         color = color * cloud_result.transmittance + cloud_result.luminance;
     }
 

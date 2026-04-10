@@ -39,6 +39,9 @@ pub struct ShipGrid {
     /// Set by ship builders (e.g., `build_starter_ship`), read by `add_default_signal_bindings`.
     /// Key = world block position, value = channel name the block should subscribe to.
     channel_overrides: HashMap<IVec3, String>,
+    /// Per-block boost channel for pre-configured ships.
+    /// Thrusters subscribing to a boost channel multiply their thrust by the published value.
+    boost_channels: HashMap<IVec3, String>,
     /// Per-block wireless power configuration for pre-configured ships.
     /// Sources define circuits; consumers point to a reactor and circuit.
     power_configs: HashMap<IVec3, PowerConfig>,
@@ -49,6 +52,7 @@ impl ShipGrid {
         Self {
             chunks: HashMap::new(),
             channel_overrides: HashMap::new(),
+            boost_channels: HashMap::new(),
             power_configs: HashMap::new(),
         }
     }
@@ -61,6 +65,16 @@ impl ShipGrid {
     /// Get the channel override for a block position, if any.
     pub fn channel_override(&self, pos: IVec3) -> Option<&str> {
         self.channel_overrides.get(&pos).map(|s| s.as_str())
+    }
+
+    /// Set the boost channel for a block position (used by ship builders).
+    pub fn set_boost_channel(&mut self, x: i32, y: i32, z: i32, channel: &str) {
+        self.boost_channels.insert(IVec3::new(x, y, z), channel.to_string());
+    }
+
+    /// Get the boost channel for a block position, if any.
+    pub fn boost_channel(&self, pos: IVec3) -> Option<&str> {
+        self.boost_channels.get(&pos).map(|s| s.as_str())
     }
 
     /// Set power configuration for a block position (used by ship builders).
@@ -76,6 +90,11 @@ impl ShipGrid {
     /// Iterate all channel overrides (position → channel name).
     pub fn iter_channel_overrides(&self) -> impl Iterator<Item = (IVec3, &str)> {
         self.channel_overrides.iter().map(|(&pos, name)| (pos, name.as_str()))
+    }
+
+    /// Iterate all boost channels (position → channel name).
+    pub fn iter_boost_channels(&self) -> impl Iterator<Item = (IVec3, &str)> {
+        self.boost_channels.iter().map(|(&pos, name)| (pos, name.as_str()))
     }
 
     /// Iterate all power configs (position → config).
@@ -725,6 +744,28 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     // Roll CCW (+Z torque): port-bottom pushes +X, starboard-top pushes -X. Both at z=0.
     place_thruster(&mut grid, x_min - 1, y_min, 0, IVec3::new(-1, 0, 0), "torque-roll-ccw", "rcs");
     place_thruster(&mut grid, x_max + 1, y_max, 0, IVec3::new(1, 0, 0), "torque-roll-ccw", "rcs");
+
+    // --- CRUISE DRIVE ---
+    // Boost module: subscribes to "cruise" (C key), publishes boost to "boost-accel".
+    grid.set_block(0, 1, 3, BlockId::CRUISE_DRIVE_SMALL);
+    grid.set_channel_override(0, 1, 3, "cruise");
+    grid.set_boost_channel(0, 1, 3, "boost-accel");
+    grid.set_power_config(0, 1, 3, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
+
+    // Forward thrusters subscribe to "boost-accel" for cruise boost.
+    for &x in &[x_min, -3, 2, x_max] {
+        for &y in &[y_min, y_max] {
+            grid.set_boost_channel(x, y, z_max + 1, "boost-accel");
+        }
+    }
+    // Reverse thrusters subscribe to "boost-brake" (future: separate brake boost).
+    for &y in &[y_min, 1, 4, y_max] {
+        grid.set_boost_channel(x_min - 1, y, z_min + 1, "boost-brake");
+        grid.set_boost_channel(x_max + 1, y, z_min + 1, "boost-brake");
+    }
 
     // --- Sub-block elements: decorative only (power is wireless now) ---
     use sub_block::{SubBlockElement, SubBlockType};

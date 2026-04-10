@@ -263,6 +263,10 @@ pub struct PlayerInputData {
     pub thrust_limiter: f32,
     /// Roll input: -1.0 (Q, CCW) to +1.0 (E, CW). 0.0 when neither pressed.
     pub roll: f32,
+    /// Supercruise active (C key toggle).
+    pub cruise: bool,
+    /// Atmosphere compensation (hover) active (H key toggle).
+    pub atmo_comp: bool,
 }
 
 /// Block edit action codes (client → server).
@@ -491,6 +495,8 @@ impl ClientMsg {
                         tick: data.tick,
                         thrust_limiter: data.thrust_limiter,
                         roll: data.roll,
+                        cruise: data.cruise,
+                        atmo_comp: data.atmo_comp,
                     },
                 );
                 let msg = fb::ClientMessage::create(
@@ -632,6 +638,8 @@ impl ClientMsg {
                     tick: p.tick(),
                     thrust_limiter: p.thrust_limiter(),
                     roll: p.roll(),
+                    cruise: p.cruise(),
+                    atmo_comp: p.atmo_comp(),
                 }))
             }
             fb::ClientPayload::BlockEditRequest => {
@@ -1448,6 +1456,8 @@ mod tests {
             tick: 1000,
             thrust_limiter: 0.75,
             roll: 0.0,
+            cruise: false,
+            atmo_comp: false,
         });
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
