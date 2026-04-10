@@ -845,9 +845,11 @@ pub fn compute_aerodynamic_torque(
         -ang_vel_local.z * damping_factor * 0.1, // less roll damping
     );
 
-    // Clamp total torque to prevent angular velocity reversal in one tick.
-    // Max angular acceleration: 5.2 rad/s² (half of max_angular_velocity / DT).
-    let max_ang_accel = 5.2;
+    // Clamp aero angular acceleration to 2× the ship's RCS capability.
+    // This ensures the weathercock is meaningful (real aerodynamic effect) but
+    // the ship's RCS can always partially resist it. Scales with ship design:
+    // strong RCS → higher clamp, weak RCS → lower clamp. No hardcoded values.
+    let max_ang_accel = props.angular_acceleration() * 2.0;
     let total_local = torque_local + damping_local;
     let clamped = DVec3::new(
         total_local.x.clamp(-max_ang_accel * ix, max_ang_accel * ix),

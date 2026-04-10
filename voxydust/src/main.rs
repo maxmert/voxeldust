@@ -57,6 +57,9 @@ struct Args {
     name: String,
     #[arg(long)]
     direct: Option<String>,
+    /// Graphics quality preset: low, medium, high, ultra
+    #[arg(long, default_value = "medium")]
+    graphics: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -613,13 +616,16 @@ fn poll_network(
                 conn.connected = true;
                 conn.system_seed = system_seed;
                 conn.galaxy_seed = galaxy_seed;
-                // Reset interpolation — coordinate systems differ between shards.
-                smooth.render_rotation = reference_rotation;
-                smooth.bodies.clear();
+                // Reset interpolation — but only if snapshots are empty
+                // (fresh connect). After a seamless transition, snapshots
+                // were already initialized from the promoted secondary WS.
+                // Clearing them would cause a blink until 2 new WorldStates arrive.
+                if snapshots.current.is_none() {
+                    smooth.render_rotation = reference_rotation;
+                    smooth.bodies.clear();
+                }
                 smooth.has_prev_galaxy_pos = false;
                 smooth.galaxy_velocity = DVec3::ZERO;
-                snapshots.prev = None;
-                snapshots.current = None;
 
                 // Clear warp state on any new shard connection.
                 warp.galaxy_position = None;
@@ -766,8 +772,6 @@ fn poll_network(
             }
             NetEvent::Transitioning => {
                 info!("transitioning to new shard...");
-                snapshots.prev = None;
-                snapshots.current = None;
 
                 // Transition to new shard: the OLD source's chunks remain in the
                 // cache (e.g., ship chunks stay visible as exterior after exiting).
@@ -829,13 +833,73 @@ fn poll_network(
                         );
                     }
 
+                    // Save ship-local state before overwriting — needed as
+                    // fallback if the secondary WS doesn't include the player.
+                    let prev_ship_origin = smooth.ship_origin;
+                    let prev_render_pos = smooth.render_position;
+
                     ws.latest = ws.secondary.take();
                     if let Some(st) = conn.secondary_shard_type.take() {
                         conn.current_shard_type = st;
                     }
                     player.is_piloting = false;
+
+                    // Snap interpolation state from promoted WorldState so
+                    // smooth_render_position has data on the very next frame.
+                    // Without this, snapshots are empty for ~100ms causing a
+                    // blink where stale ship-local coords are interpreted as
+                    // planet-local (camera inside the planet core).
+                    let mut snapped = false;
+                    if let Some(ref promoted) = ws.latest {
+                        if let Some(p) = promoted.players.first() {
+                            let snap = InterpolationSnapshot {
+                                player_position: p.position,
+                                ship_rotation: p.rotation,
+                                ship_origin: promoted.origin,
+                                velocity: p.velocity,
+                                bodies: promoted.bodies.clone(),
+                            };
+                            snapshots.prev = Some(snap.clone());
+                            snapshots.current = Some(snap);
+                            snapshots.current_arrival_time = Instant::now();
+                            smooth.render_position = p.position;
+                            smooth.render_rotation = p.rotation;
+                            smooth.ship_origin = promoted.origin;
+                            smooth.bodies = promoted.bodies.clone();
+                            snapped = true;
+                        }
+                    }
+                    if !snapped {
+                        // Secondary WS has no player yet (handoff entity not
+                        // created when the last secondary broadcast went out).
+                        // Compute planet-local from ship's last known state.
+                        if let Some(ref promoted) = ws.latest {
+                            let system_pos = prev_ship_origin + prev_render_pos;
+                            let planet_local = system_pos - promoted.origin;
+                            let snap = InterpolationSnapshot {
+                                player_position: planet_local,
+                                ship_rotation: DQuat::IDENTITY,
+                                ship_origin: promoted.origin,
+                                velocity: DVec3::ZERO,
+                                bodies: promoted.bodies.clone(),
+                            };
+                            snapshots.prev = Some(snap.clone());
+                            snapshots.current = Some(snap);
+                            snapshots.current_arrival_time = Instant::now();
+                            smooth.render_position = planet_local;
+                            smooth.render_rotation = DQuat::IDENTITY;
+                            smooth.ship_origin = promoted.origin;
+                            smooth.bodies = promoted.bodies.clone();
+                        } else {
+                            snapshots.prev = None;
+                            snapshots.current = None;
+                        }
+                    }
                 } else {
                     // Hard transition: clear and reconnect.
+                    info!("hard transition — no secondary data");
+                    snapshots.prev = None;
+                    snapshots.current = None;
                     ws.latest = None;
                 }
                 ws.secondary = None;
@@ -1131,7 +1195,24 @@ impl ClientApp {
             block_edit_tx: None,
             tcp_out_tx: None,
         });
-        ecs_app.insert_resource(graphics_settings::GraphicsSettings::default());
+        let gfx_preset = match args.graphics.to_lowercase().as_str() {
+            "low" => graphics_settings::GraphicsSettings::low(),
+            "medium" => graphics_settings::GraphicsSettings::medium(),
+            "high" => graphics_settings::GraphicsSettings::high(),
+            "ultra" => graphics_settings::GraphicsSettings::ultra(),
+            other => {
+                tracing::warn!(preset = other, "unknown graphics preset, using medium");
+                graphics_settings::GraphicsSettings::medium()
+            }
+        };
+        tracing::info!(
+            preset = args.graphics.as_str(),
+            atmosphere = gfx_preset.atmosphere_enabled,
+            clouds = gfx_preset.cloud_enabled,
+            hdr = gfx_preset.hdr_enabled,
+            "graphics settings"
+        );
+        ecs_app.insert_resource(gfx_preset);
         ecs_app.insert_resource(BlockHotbar::default());
         ecs_app.insert_resource(BlockTarget::default());
         ecs_app.insert_resource(SubBlockTool::default());
