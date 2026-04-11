@@ -45,7 +45,7 @@ pub struct NoiseGenParams {
     pub frequency: [f32; 4],  // x = base_frequency, y = persistence, z = lacunarity, w = unused
 }
 
-/// Manages cloud noise textures and compute pipelines.
+/// Manages cloud noise textures, weather map, and compute pipelines.
 pub struct CloudSystem {
     // Noise textures (generated per planet load).
     pub shape_texture: Option<wgpu::Texture>,
@@ -66,6 +66,18 @@ pub struct CloudSystem {
 
     /// The planet seed for which noise was last generated. Used to detect planet switch.
     current_planet_seed: Option<u64>,
+
+    // Weather map (2D texture, updated asynchronously per game-minute).
+    pub weather_map_texture: Option<wgpu::Texture>,
+    pub weather_map_view: Option<wgpu::TextureView>,
+    /// Background thread handle for weather map generation.
+    weather_gen_handle: Option<std::thread::JoinHandle<voxeldust_core::weather::WeatherMap>>,
+    /// Game time at which the current weather map was generated.
+    last_weather_time: f64,
+    /// Whether the weather map has been uploaded to GPU at least once.
+    pub weather_map_ready: bool,
+    /// Fallback 1×1 dummy 2D texture view for when weather map isn't ready.
+    pub dummy_2d_view: wgpu::TextureView,
 }
 
 impl CloudSystem {
@@ -166,7 +178,123 @@ impl CloudSystem {
             noise_params_buf,
             cloud_uniform_buf,
             current_planet_seed: None,
+            weather_map_texture: None,
+            weather_map_view: None,
+            weather_gen_handle: None,
+            last_weather_time: -1000.0, // force immediate generation
+            weather_map_ready: false,
+            dummy_2d_view: {
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("dummy_weather_2d"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                tex.create_view(&Default::default())
+            },
         }
+    }
+
+    /// Get the weather map view, falling back to a 1×1 dummy if not ready.
+    pub fn weather_map_view_or_dummy(&self, _device: &wgpu::Device) -> &wgpu::TextureView {
+        self.weather_map_view.as_ref().unwrap_or(&self.dummy_2d_view)
+    }
+
+    /// Kick off asynchronous weather map generation if enough time has passed.
+    /// Non-blocking: spawns a background thread. Call `poll_weather_map()` each
+    /// frame to check for completion and upload to GPU.
+    pub fn request_weather_update(
+        &mut self,
+        planet: &PlanetParams,
+        game_time: f64,
+    ) {
+        // Don't start if already generating.
+        if self.weather_gen_handle.is_some() { return; }
+
+        // Only regenerate if enough game-time has passed (60 seconds).
+        if (game_time - self.last_weather_time).abs() < 60.0 { return; }
+
+        self.last_weather_time = game_time;
+        let planet_clone = planet.clone();
+        let gt = game_time;
+
+        self.weather_gen_handle = Some(std::thread::spawn(move || {
+            voxeldust_core::weather::WeatherMap::generate(&planet_clone, gt)
+        }));
+    }
+
+    /// Check if background weather generation is complete. If so, upload to GPU.
+    /// Returns true if a new weather map was uploaded this frame.
+    pub fn poll_weather_map(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> bool {
+        let handle = match self.weather_gen_handle.take() {
+            Some(h) if h.is_finished() => h,
+            Some(h) => { self.weather_gen_handle = Some(h); return false; }
+            None => return false,
+        };
+
+        let weather_map = match handle.join() {
+            Ok(map) => map,
+            Err(_) => { tracing::error!("weather generation thread panicked"); return false; }
+        };
+
+        // Create or reuse the weather map texture.
+        let needs_create = self.weather_map_texture.is_none();
+        if needs_create {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("weather_map"),
+                size: wgpu::Extent3d {
+                    width: weather_map.width,
+                    height: weather_map.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            self.weather_map_texture = Some(tex);
+            self.weather_map_view = Some(view);
+        }
+
+        // Upload weather data to GPU.
+        if let Some(tex) = &self.weather_map_texture {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &weather_map.data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(weather_map.width * 4),
+                    rows_per_image: Some(weather_map.height),
+                },
+                wgpu::Extent3d {
+                    width: weather_map.width,
+                    height: weather_map.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        self.weather_map_ready = true;
+        tracing::info!(
+            width = weather_map.width,
+            height = weather_map.height,
+            "uploaded weather map to GPU"
+        );
+        needs_create // true if bind group needs rebuild (new texture)
     }
 
     /// Generate noise textures for a planet if not already generated for this seed.

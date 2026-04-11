@@ -6678,6 +6678,7 @@ impl<'a> PlayerSnapshot<'a> {
   pub const VT_GROUNDED: ::flatbuffers::VOffsetT = 12;
   pub const VT_HEALTH: ::flatbuffers::VOffsetT = 14;
   pub const VT_SHIELD: ::flatbuffers::VOffsetT = 16;
+  pub const VT_SEATED: ::flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6695,6 +6696,7 @@ impl<'a> PlayerSnapshot<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_seated(args.seated);
     builder.add_grounded(args.grounded);
     builder.finish()
   }
@@ -6749,6 +6751,13 @@ impl<'a> PlayerSnapshot<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_SHIELD, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn seated(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerSnapshot::VT_SEATED, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
@@ -6764,6 +6773,7 @@ impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
      .visit_field::<bool>("grounded", Self::VT_GROUNDED, false)?
      .visit_field::<f32>("health", Self::VT_HEALTH, false)?
      .visit_field::<f32>("shield", Self::VT_SHIELD, false)?
+     .visit_field::<bool>("seated", Self::VT_SEATED, false)?
      .finish();
     Ok(())
   }
@@ -6776,6 +6786,7 @@ pub struct PlayerSnapshotArgs<'a> {
     pub grounded: bool,
     pub health: f32,
     pub shield: f32,
+    pub seated: bool,
 }
 impl<'a> Default for PlayerSnapshotArgs<'a> {
   #[inline]
@@ -6788,6 +6799,7 @@ impl<'a> Default for PlayerSnapshotArgs<'a> {
       grounded: false,
       health: 0.0,
       shield: 0.0,
+      seated: false,
     }
   }
 }
@@ -6826,6 +6838,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerSnapshotBuilder<'a, 'b,
     self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_SHIELD, shield, 0.0);
   }
   #[inline]
+  pub fn add_seated(&mut self, seated: bool) {
+    self.fbb_.push_slot::<bool>(PlayerSnapshot::VT_SEATED, seated, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerSnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerSnapshotBuilder {
@@ -6850,6 +6866,7 @@ impl ::core::fmt::Debug for PlayerSnapshot<'_> {
       ds.field("grounded", &self.grounded());
       ds.field("health", &self.health());
       ds.field("shield", &self.shield());
+      ds.field("seated", &self.seated());
       ds.finish()
   }
 }

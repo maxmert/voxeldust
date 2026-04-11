@@ -32,6 +32,16 @@ pub struct Rotation(pub DQuat);
 #[derive(Component)]
 pub struct AngularVelocity(pub DVec3);
 
+/// Sub-grid identifier for mechanical systems (rotors, pistons).
+/// SubGridId(0) is the root (parent ship body). Each mechanical mount
+/// creates a new sub-grid with a unique ID.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct SubGridId(pub u32);
+
+impl SubGridId {
+    pub const ROOT: Self = Self(0);
+}
+
 /// Look/camera direction (players only).
 #[derive(Component)]
 pub struct Forward(pub DVec3);

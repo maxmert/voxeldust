@@ -10,7 +10,7 @@ use crate::graphics_settings::RenderConfig;
 use crate::mesh::IcoSphere;
 use crate::stars::{StarInstance, StarSceneUniforms, MAX_STAR_INSTANCES};
 
-pub const MAX_OBJECTS: usize = 2048;
+pub const MAX_OBJECTS: usize = 4096;
 
 /// Eye height offset from player position. Player capsule center is at ~1.0m,
 /// so eye is at capsule center + 0.5m (roughly head height of 1.5m total).
@@ -960,6 +960,17 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
                     },
                     count: None,
                 },
+                // binding 9: weather map 2D texture (Rgba8Unorm, 512×256)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1032,6 +1043,16 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
             view_formats: &[],
         });
         let dummy_3d_view = dummy_3d.create_view(&Default::default());
+        // Dummy 1×1 2D texture for weather map before it's generated.
+        let dummy_2d = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dummy_2d"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let dummy_2d_view = dummy_2d.create_view(&Default::default());
         let cloud_noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("cloud_noise_sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -1061,6 +1082,7 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&dummy_3d_view) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&cloud_noise_sampler) },
                 wgpu::BindGroupEntry { binding: 8, resource: cloud_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&dummy_2d_view) },
             ],
         });
 

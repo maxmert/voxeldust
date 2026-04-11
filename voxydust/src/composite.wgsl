@@ -68,6 +68,9 @@ struct CloudUniforms {
 @group(0) @binding(8)
 var<uniform> clouds: CloudUniforms;
 
+@group(0) @binding(9)
+var weather_map: texture_2d<f32>;
+
 // ---------------------------------------------------------------------------
 // Fullscreen vertex shader (vertexless triangle)
 // ---------------------------------------------------------------------------
@@ -221,12 +224,17 @@ fn atmosphere_ray_march(
     let t_planet = ray_sphere_nearest(ray_origin, ray_dir, planet_r);
     if t_planet > 0.0 && t_planet < t_end { t_end = t_planet; }
 
-    // Adaptive sample count: more samples for longer rays.
+    // Adaptive sample count: more samples for longer rays, fewer for nearby terrain.
     let min_spp = atmo.quality.x;
     let max_spp = atmo.quality.y;
     let ray_length = t_end - t_start;
+
+    // Skip atmosphere for very close fragments (< 0.1 km) — no visible scattering.
+    if ray_length < 0.1 { return result; }
+
+    // Tighter scaling: reach max samples only for long rays (> 200km).
     let sample_count_f = clamp(
-        mix(min_spp, max_spp, saturate(ray_length * 0.01)),
+        mix(min_spp, max_spp, saturate(ray_length * 0.005)),
         min_spp, max_spp
     );
     let sample_count = u32(sample_count_f);
@@ -332,79 +340,25 @@ fn cloud_height_gradient(height_frac: f32, type_blend: f32) -> f32 {
     return mix(cumulus, cb, (type_blend - 0.5) * 2.0);
 }
 
-/// Hash function for procedural weather (better quality, avoids grid artifacts).
-fn hash_weather(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-fn weather_noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    // Quintic interpolation for smooth, artifact-free noise.
-    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    return mix(
-        mix(hash_weather(i + vec2(0.0, 0.0)), hash_weather(i + vec2(1.0, 0.0)), u.x),
-        mix(hash_weather(i + vec2(0.0, 1.0)), hash_weather(i + vec2(1.0, 1.0)), u.x),
-        u.y
-    );
-}
-
-/// Domain-warped noise: produces organic swirling formations instead of uniform haze.
-/// fbm(p + fbm(p)) breaks self-similarity, creating distinct cloud masses with
-/// swirls, clear eyes, and trailing wisps. (Inigo Quilez technique.)
-fn warped_noise(p: vec3<f32>) -> f32 {
-    // First pass: compute warp offset from noise at a different frequency.
-    let q = vec3(
-        textureSample(cloud_shape_tex, cloud_sampler, p * 0.7).r,
-        textureSample(cloud_shape_tex, cloud_sampler, p * 0.7 + vec3(5.2, 1.3, 2.8)).r,
-        textureSample(cloud_shape_tex, cloud_sampler, p * 0.7 + vec3(1.7, 9.2, 3.4)).r
-    );
-    // Second pass: sample at warped coordinates. Warp strength 3.0 = moderate distortion.
-    let warped = p + (q - 0.5) * 3.0;
-    return textureSample(cloud_shape_tex, cloud_sampler, warped).r;
-}
-
-/// Hadley cell cloud probability based on latitude.
-/// Produces realistic latitude bands: cloudy at equator and ~60°, clear at ~30° and poles.
-/// This is the dominant pattern in real planetary atmospheres.
-fn hadley_cloud_probability(pos: vec3<f32>) -> f32 {
+/// Sample the precomputed weather map for cloud coverage and type at a world position.
+/// The weather map is generated on CPU (Hadley cells + pressure cells) and uploaded as
+/// a 2D texture in equirectangular projection. All weather complexity lives on the CPU —
+/// the shader just reads the result.
+///
+/// Returns: R=coverage, G=cloud_type, B=precipitation, A=wind_modifier
+fn sample_weather(pos: vec3<f32>) -> vec4<f32> {
     let dir = normalize(pos);
-    let abs_lat = abs(asin(clamp(dir.y, -1.0, 1.0))); // [0, PI/2]
-
-    // 3-cell Hadley model (Earth-like):
-    //   0°  ITCZ — cloudy (tropical convergence)
-    //  30°  subtropical high — clear (horse latitudes / deserts)
-    //  60°  polar front — cloudy (storm track)
-    //  90°  polar high — clear
-    let itcz = exp(-abs_lat * abs_lat / 0.08);
-    let storm_track = exp(-(abs_lat - 1.05) * (abs_lat - 1.05) / 0.12);
-    let subtropical_clear = exp(-(abs_lat - 0.52) * (abs_lat - 0.52) / 0.06);
-
-    return saturate((itcz * 0.8 + storm_track * 0.6) * (1.0 - subtropical_clear * 0.7));
+    let lon = atan2(dir.z, dir.x);                // [-PI, PI]
+    let lat = asin(clamp(dir.y, -1.0, 1.0));      // [-PI/2, PI/2]
+    let uv = vec2(
+        lon / (2.0 * PI) + 0.5,                   // [0, 1]
+        lat / PI + 0.5                             // [0, 1]
+    );
+    return textureSample(weather_map, cloud_sampler, uv);
 }
 
 fn weather_coverage(pos: vec3<f32>, planet_r: f32) -> f32 {
-    // Layer 1: Hadley cell latitude bands (deterministic, physically motivated).
-    let hadley = hadley_cloud_probability(pos);
-
-    // Layer 2: Domain-warped noise for synoptic weather (cyclones, fronts, clear zones).
-    let weather_scale_km = clouds.scatter.w;
-    let synoptic_scale = 1.0 / max(weather_scale_km, 1.0);
-    let wind_t = clouds.observer_pos.w;
-    let weather_wind = clouds.wind.xyz * wind_t * 0.05;
-    let synoptic = warped_noise((pos + weather_wind) * synoptic_scale);
-
-    // Combine: Hadley controls WHERE clouds can form, warping controls the shape.
-    // Multiply (not add) so clear Hadley zones stay clear regardless of noise.
-    let base = clouds.density_params.x;
-    let raw_coverage = hadley * synoptic;
-
-    // Threshold to create distinct cloudy vs clear regions.
-    // base controls overall planet cloud fraction (0.3=scattered, 0.6=Earth-like).
-    let threshold = (1.0 - base) * 0.4;
-    return smoothstep(threshold, threshold + 0.2, raw_coverage);
+    return sample_weather(pos).r;
 }
 
 /// Sample cloud density at a world position (km, relative to planet center).
@@ -417,13 +371,15 @@ fn cloud_density(pos: vec3<f32>) -> f32 {
     let height_frac = (altitude - cloud_base) / cloud_thick;
     if height_frac <= 0.0 || height_frac >= 1.0 { return 0.0; }
 
-    // Height gradient for cloud type.
-    let gradient = cloud_height_gradient(height_frac, clouds.density_params.z);
-    if gradient < 0.001 { return 0.0; }
-
-    // Weather-driven coverage at this position (already remapped to create patches).
-    let coverage = weather_coverage(pos, planet_r);
+    // Single weather map sample: coverage (R) + cloud_type (G).
+    // Avoids redundant texture lookup (was sampled twice before).
+    let weather = sample_weather(pos);
+    let coverage = weather.r;
     if coverage < 0.01 { return 0.0; }
+
+    let cloud_type = weather.g;
+    let gradient = cloud_height_gradient(height_frac, cloud_type);
+    if gradient < 0.001 { return 0.0; }
 
     // Wind offset for cloud scrolling.
     let time = clouds.observer_pos.w;
@@ -437,6 +393,9 @@ fn cloud_density(pos: vec3<f32>) -> f32 {
     // Combine shape octaves: Perlin-Worley base + Worley fBm erosion.
     let worley_fbm = shape.g * 0.625 + shape.b * 0.25 + shape.a * 0.125;
     let base_shape = remap_cloud(shape.r, worley_fbm - 1.0, 1.0, 0.0, 1.0);
+
+    // Early exit: skip expensive detail sampling if base shape is negligible.
+    if base_shape < 0.05 { return 0.0; }
 
     // Apply height gradient and coverage.
     var density = base_shape * gradient;

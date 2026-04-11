@@ -504,7 +504,7 @@ fn draw_pilot_hud(ui: &mut egui::Ui, ctx: &HudContext, speed: f64) {
             ui.colored_label(egui::Color32::from_rgb(60, 200, 255), "CRUISE ACTIVE (C to disengage)");
         }
         if ctx.atmo_comp_active {
-            // Show hover status with gravity info from nearest planet.
+            // Show hover status with gravity and speed from nearest planet.
             let grav_info = ctx.system_params.and_then(|sp| {
                 ctx.latest_world_state.and_then(|ws| {
                     ws.bodies.iter().filter(|b| b.body_id > 0).filter_map(|b| {
@@ -513,12 +513,7 @@ fn draw_pilot_hud(ui: &mut egui::Ui, ctx: &HudContext, speed: f64) {
                         let dist = (ws.origin - b.position).length();
                         let alt = dist - planet.radius_m;
                         if alt < planet.atmosphere.atmosphere_height && planet.atmosphere.has_atmosphere {
-                            let g = planet.surface_gravity;
-                            // Check if ship is level: dot(ship_up, radial_out) close to 1.0
-                            let radial_out = (ws.origin - b.position).normalize();
-                            let ship_up = ctx.player_velocity; // placeholder — rotation is in player snapshot
-                            let _ = ship_up; // we have rotation from world state
-                            Some((g, alt))
+                            Some((planet.surface_gravity, alt))
                         } else {
                             None
                         }
@@ -526,21 +521,15 @@ fn draw_pilot_hud(ui: &mut egui::Ui, ctx: &HudContext, speed: f64) {
                 })
             });
             if let Some((g, alt)) = grav_info {
-                let max_hover_g = 40.0; // 8 thrusters × 50kN / 10000kg = 40 m/s²
-                let can_hover = max_hover_g > g;
-                let color = if can_hover {
-                    egui::Color32::from_rgb(100, 255, 150)
-                } else {
-                    egui::Color32::from_rgb(255, 100, 100)
-                };
-                let status = if can_hover {
-                    format!("HOVER: {:.1}g / {:.1}g max  Alt: {:.0}m", g / 9.81, max_hover_g / 9.81, alt)
-                } else {
-                    format!("HOVER FAILING: {:.1}g > {:.1}g max!", g / 9.81, max_hover_g / 9.81)
-                };
-                ui.colored_label(color, status);
+                let speed = ctx.player_velocity.length();
+                let alt_text = if alt > 1000.0 { format!("{:.1} km", alt / 1000.0) }
+                    else { format!("{:.0} m", alt) };
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 200, 255),
+                    format!("ATMO COMP  {:.1}g  Alt: {}  {:.0} m/s  (H=off)", g / 9.81, alt_text, speed),
+                );
             } else {
-                ui.colored_label(egui::Color32::YELLOW, "HOVER: no atmosphere (H to disable)");
+                ui.colored_label(egui::Color32::YELLOW, "ATMO COMP: no atmosphere (H=off)");
             }
         }
         if ctx.engines_off {
@@ -706,6 +695,7 @@ const SIGNAL_PROPERTY_NAMES: &[(&str, SignalProperty)] = &[
     ("Level", SignalProperty::Level),
     ("SwitchState", SignalProperty::SwitchState),
     ("Boost", SignalProperty::Boost),
+    ("Status", SignalProperty::Status),
 ];
 
 fn functional_kind_name(kind: u8) -> &'static str {

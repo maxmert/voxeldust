@@ -93,11 +93,11 @@ impl Default for BlockHotbar {
                 BlockId::HULL_LIGHT,
                 BlockId::HULL_ARMORED,
                 BlockId::WINDOW,
-                BlockId::LAVA,
-                BlockId::ENERGY_CRYSTAL,
-                BlockId::MAGMA_ROCK,
+                BlockId::COCKPIT,             // seat (functional)
+                BlockId::REACTOR_SMALL,       // power source
+                BlockId::ROTOR,               // mechanical (also placeable as full block)
+                BlockId::PISTON,              // mechanical
                 BlockId::STONE,
-                BlockId::GRASS,
             ],
         }
     }
@@ -566,7 +566,7 @@ fn poll_network(
                     player.position = new_pos;
                     player.velocity = p.velocity;
                     let was_piloting = player.is_piloting;
-                    player.is_piloting = !p.grounded;
+                    player.is_piloting = p.seated;
 
                     if was_piloting != player.is_piloting {
                         info!(piloting = player.is_piloting, grounded = p.grounded, frame = ft.count, "pilot mode changed");
@@ -1879,14 +1879,64 @@ impl ClientApp {
                                             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(detail_v) },
                                             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&cloud_sys.noise_sampler) },
                                             wgpu::BindGroupEntry { binding: 8, resource: cloud_buf.as_entire_binding() },
+                                            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(
+                                                cloud_sys.weather_map_view_or_dummy(&gpu.device)
+                                            ) },
                                         ],
                                     }));
                                     tracing::info!("rebuilt composite bind group with cloud noise textures");
                                 }
                             }
+                            // Request async weather map generation for this planet.
+                            cloud_sys.request_weather_update(planet, ws.game_time);
+
                             break;
                         }
                     }
+
+                    // Poll for completed weather map generation (non-blocking).
+                    let weather_rebuilt = cloud_sys.poll_weather_map(&gpu.device, &gpu.queue);
+                    if weather_rebuilt {
+                        // Rebuild composite bind group with the new weather map texture.
+                        if let (Some(layout), Some(params_buf), Some(atmo_buf),
+                               Some(depth_tex), Some(cloud_buf), Some(hdr_v)) = (
+                            &gpu.composite_bind_group_layout,
+                            &gpu.composite_params_buf,
+                            &gpu.atmosphere_buf,
+                            &gpu.depth_texture,
+                            &gpu.cloud_uniform_buf,
+                            &gpu.hdr_view,
+                        ) {
+                            let screen_s = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                                label: Some("screen_sampler"),
+                                mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            });
+                            let depth_sv = depth_tex.create_view(&Default::default());
+                            let shape_v = cloud_sys.shape_view.as_ref().unwrap_or(&cloud_sys.dummy_2d_view);
+                            let detail_v = cloud_sys.detail_view.as_ref().unwrap_or(&cloud_sys.dummy_2d_view);
+                            gpu.composite_bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("composite_bind_group_weather"),
+                                layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(hdr_v) },
+                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&screen_s) },
+                                    wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&depth_sv) },
+                                    wgpu::BindGroupEntry { binding: 4, resource: atmo_buf.as_entire_binding() },
+                                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(shape_v) },
+                                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(detail_v) },
+                                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&cloud_sys.noise_sampler) },
+                                    wgpu::BindGroupEntry { binding: 8, resource: cloud_buf.as_entire_binding() },
+                                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(
+                                        cloud_sys.weather_map_view_or_dummy(&gpu.device)
+                                    ) },
+                                ],
+                            }));
+                            tracing::info!("rebuilt composite bind group with weather map");
+                        }
+                    }
+
                     // Debug: log cloud detection status periodically.
                     static LOG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                     let count = LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1990,16 +2040,11 @@ impl ClientApp {
                         power_source: config.power_source.clone(),
                         power_consumer: config.power_consumer.clone(),
                     };
+                    let msg = voxeldust_core::client_message::ClientMsg::BlockConfigUpdate(update);
                     let world = self.ecs_app.world();
                     let net = world.resource::<NetworkChannels>();
-                    if let Some(ref tx) = net.block_edit_tx {
-                        let msg = voxeldust_core::client_message::ClientMsg::BlockConfigUpdate(update);
-                        let data = msg.serialize();
-                        let mut pkt = Vec::new();
-                        voxeldust_core::wire_codec::encode(&data, &mut pkt);
-                        // TODO: add a separate config_update_tx channel for proper typing.
-                    }
-                    info!(block = ?config.block_pos, "config saved (sending to server)");
+                    send_tcp_msg(net, msg);
+                    info!(block = ?config.block_pos, "config saved (sent to server)");
                 }
                 // Fire close message → tick_config_panel_system handles animate-out.
                 let world = self.ecs_app.world_mut();
@@ -2314,8 +2359,10 @@ fn interpret_key_system(
                     }
                 }
 
-                // E key: primary interaction on ship shard (only when walking, not piloting — E is roll when piloting).
-                if key == KeyCode::KeyE && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed && !is_piloting {
+                // E key: primary interaction on ship shard.
+                // Always allowed — even while piloting (to toggle seat on/off).
+                // Roll input goes through send_input_with_dt, not through INTERACT.
+                if key == KeyCode::KeyE && shard_type == voxeldust_core::client_message::shard_type::SHIP && input_ctx.cursor_grabbed {
                     let eye = ctx.smooth.render_position + DVec3::new(0.0, gpu::EYE_HEIGHT, 0.0);
                     let (sy, cy) = (ctx.cam.yaw as f32).sin_cos();
                     let (sp, cp) = (ctx.cam.pitch as f32).sin_cos();
@@ -2406,8 +2453,8 @@ fn interpret_mouse_system(
                             if let Some(ref hit) = block_target.hit {
                                 use voxeldust_core::client_message::{action, SubBlockEditData};
                                 let sub_action = match ev.button {
-                                    winit::event::MouseButton::Left => action::PLACE_SUB,
-                                    winit::event::MouseButton::Right => action::REMOVE_SUB,
+                                    winit::event::MouseButton::Right => action::PLACE_SUB,
+                                    winit::event::MouseButton::Left => action::REMOVE_SUB,
                                     _ => 0u8,
                                 };
                                 if sub_action != 0 {
@@ -2706,6 +2753,21 @@ impl ApplicationHandler for ClientApp {
                                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&dummy_3d_view) },
                                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&cloud_sampler) },
                                     wgpu::BindGroupEntry { binding: 8, resource: cloud_buf.as_entire_binding() },
+                                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView({
+                                        // Use weather map view from cloud system if available, else dummy
+                                        if let Some(cs) = &self.cloud_system {
+                                            cs.weather_map_view_or_dummy(&gpu.device)
+                                        } else {
+                                            // No cloud system — create inline dummy 2D
+                                            let d = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                                                label: Some("dummy_weather"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                                                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                                                format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
+                                            });
+                                            // This leaks the texture, but resize is rare. Acceptable.
+                                            Box::leak(Box::new(d.create_view(&Default::default())))
+                                        }
+                                    }) },
                                 ],
                             }));
                         }

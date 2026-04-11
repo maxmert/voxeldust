@@ -19,11 +19,14 @@ use voxeldust_core::ecs::components::FunctionalBlockRef;
 use voxeldust_core::signal::{
     self, SignalChannelTable, SignalPublisher, SignalSubscriber, SignalConverterConfig,
     SeatChannelMapping, SeatInputBinding, PublishBinding, SubscribeBinding, SignalProperty,
+    FlightComputerState, HoverModuleState, AutopilotBlockState, WarpComputerState, EngineControllerState,
+    SeatInputSource, KeyMode, AxisDirection,
+    seat_presets,
 };
 use voxeldust_core::shard_message::AutopilotSnapshotData;
 use voxeldust_core::client_message::{
     BlockEditData, CelestialBodyData, ChunkDeltaData, JoinResponseData, LightingData,
-    PlayerSnapshotData, ServerMsg, WorldStateData,
+    PlayerSnapshotData, SeatBindingsNotifyData, ServerMsg, WorldStateData,
 };
 use voxeldust_core::ecs;
 use voxeldust_core::handoff;
@@ -199,22 +202,10 @@ struct PilotAccumulator {
     rotation_command: DVec3,
 }
 
-/// Normalized pilot control values, written by process_input, read by signal_publish.
+/// Per-binding float values from the client's seat input evaluation.
+/// Length matches the active seat's binding count. Written by process_input.
 #[derive(Resource, Default)]
-struct RawPilotInput {
-    thrust_forward: f32,
-    thrust_lateral: f32,
-    thrust_vertical: f32,
-    torque_yaw: f32,
-    torque_pitch: f32,
-    roll_cw: f32,
-    roll_ccw: f32,
-    thrust_limiter: f32,
-    in_atmosphere: bool,
-    engines_off: bool,
-    cruise_active: bool,
-    atmo_comp_active: bool,
-}
+struct SeatInputValues(Vec<f32>);
 
 /// Tracks which seat entity the pilot occupies (needed for SeatChannelMapping lookup).
 #[derive(Resource, Default)]
@@ -345,42 +336,105 @@ struct BatteryState {
     max_rate_w: f64,
 }
 
+// ---------------------------------------------------------------------------
+// Mechanical systems (rotors, pistons, hinges, sliders)
+// ---------------------------------------------------------------------------
+
+/// Operational status of a mechanical mount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u8)]
+enum MechanicalStatus {
+    #[default]
+    Idle = 0,
+    Moving = 1,
+    Blocked = 2,
+    Error = 3,
+}
+
+/// Generic mechanical mount state — ONE component for all joint types (rotor, piston, hinge, slider).
+/// Joint type and limits come from `MechanicalProps` in the registry. The system treats all
+/// mechanical mounts identically; behavior differs only via `joint_type` field.
+#[derive(Component)]
+struct MechanicalState {
+    /// Current value: angle (deg) for revolute, extension (m) for prismatic.
+    current: f32,
+    /// Target value from signal subscription.
+    target: f32,
+    /// Max speed from MechanicalProps (overridable via Speed signal).
+    max_speed: f32,
+    /// Max force/torque from MechanicalProps.
+    max_force: f64,
+    /// Max range from MechanicalProps.
+    max_range: f64,
+    /// Joint type (Revolute or Prismatic).
+    joint_type: block::JointType,
+    /// Sub-grid ID of the child grid this mount controls.
+    child_grid_id: voxeldust_core::ecs::components::SubGridId,
+    /// Operational status (published via signal).
+    status: MechanicalStatus,
+    /// Host block position (where the sub-block mount is placed).
+    host_pos: glam::IVec3,
+    /// Face on which the mount is placed (determines joint axis).
+    face: u8,
+    /// Ticks since last error decrease — for stuck detection.
+    stuck_ticks: u16,
+    /// Previous error magnitude for stuck detection.
+    prev_error: f32,
+}
+
+/// Data for a single sub-grid (child rigid body connected via joint).
+struct SubGridData {
+    /// Rapier rigid body handle for this sub-grid.
+    body_handle: rapier3d::dynamics::RigidBodyHandle,
+    /// Rapier joint handle connecting this sub-grid to its parent.
+    joint_handle: rapier3d::dynamics::ImpulseJointHandle,
+    /// Block positions that belong to this sub-grid.
+    members: std::collections::HashSet<glam::IVec3>,
+    /// Mechanical mount position that created this sub-grid.
+    mount_pos: glam::IVec3,
+    /// Face on which the mount sits.
+    mount_face: u8,
+    /// Parent sub-grid (for nested mounts: rotor on piston).
+    parent_grid: voxeldust_core::ecs::components::SubGridId,
+    /// Per-chunk collider handles for this sub-grid.
+    collider_handles: std::collections::HashMap<glam::IVec3, rapier3d::geometry::ColliderHandle>,
+}
+
+/// Registry of all sub-grids on this ship. One per ship shard.
+#[derive(Resource)]
+struct SubGridRegistry {
+    next_id: u32,
+    grids: std::collections::HashMap<voxeldust_core::ecs::components::SubGridId, SubGridData>,
+}
+
+impl Default for SubGridRegistry {
+    fn default() -> Self {
+        Self { next_id: 1, grids: std::collections::HashMap::new() }
+    }
+}
+
+/// Handle for the root (parent ship body) Fixed rigid body.
+/// All non-sub-grid chunk colliders are parented to this body.
+#[derive(Resource)]
+struct RootBodyHandle(rapier3d::dynamics::RigidBodyHandle);
+
+/// Tracks which sub-grids need membership re-computation after block edits.
+/// Set by `apply_block_edits` when a block is placed/removed adjacent to a
+/// mechanical mount. Read and cleared by `process_mechanical_edits`.
+#[derive(Resource, Default)]
+struct MechanicalDirtyGrids {
+    /// Sub-grid IDs that need re-BFS.
+    dirty: std::collections::HashSet<voxeldust_core::ecs::components::SubGridId>,
+}
+
 /// Ship center of mass (block coordinates). Updated by aggregate_ship_properties.
 #[derive(Resource, Default)]
 struct ShipCenterOfMass(DVec3);
 
-/// Autopilot state tracked by the ship shard.
+/// Cached autopilot snapshot from system-shard (for WorldState broadcast).
 #[derive(Resource, Default)]
-struct AutopilotState {
-    target_body_id: Option<u32>,
-    pending_cmd: Option<(u32, u8)>,
+struct AutopilotSnapshotCache {
     snapshot: Option<AutopilotSnapshotData>,
-}
-
-/// Hover flight computer state. Tracks activation edge, captured heading,
-/// and previous velocity for the PD controller's derivative term.
-#[derive(Resource)]
-struct HoverState {
-    /// Was atmo-comp active last tick? Used to detect activation edge.
-    was_active: bool,
-    /// Captured heading: ship's forward direction projected onto the horizontal
-    /// plane (perpendicular to gravity), captured when hover activates.
-    captured_heading: DVec3,
-    /// Previous tick's velocity in ship-local frame (for PD derivative term).
-    prev_velocity_local: DVec3,
-}
-
-impl Default for HoverState {
-    fn default() -> Self {
-        Self { was_active: false, captured_heading: DVec3::NEG_Z, prev_velocity_local: DVec3::ZERO }
-    }
-}
-
-/// Warp targeting state.
-#[derive(Resource, Default)]
-struct WarpTargetState {
-    target_star_index: Option<u32>,
-    pending_cmd: Option<u32>,
 }
 
 /// Connected player state.
@@ -490,9 +544,15 @@ struct PlayerPosition(Vec3);
 #[derive(Resource)]
 struct PlayerYaw(f32);
 
-/// Whether the player is in pilot mode.
-#[derive(Resource)]
-struct PilotMode(bool);
+/// Whether the player is seated and which seat they're in.
+/// Seat role (pilot/gunner/passenger) is determined by the seat's SeatChannelMapping,
+/// not by a flag here. A turret seat publishes turret channels, not thrust.
+#[derive(Resource, Default)]
+struct SeatedState {
+    seated: bool,
+    seat_entity: Option<Entity>,
+}
+
 
 /// Whether gravity is enabled in the ship.
 #[derive(Resource)]
@@ -541,6 +601,7 @@ struct SignalQueryCtx<'w, 's> {
     reactor_query: Query<'w, 's, (&'static mut ReactorState, Option<&'static FunctionalBlockRef>)>,
     powered_by_query: Query<'w, 's, &'static PoweredBy>,
     cache_query: Query<'w, 's, &'static mut ReactorConsumerCache>,
+    block_ref_query: Query<'w, 's, &'static FunctionalBlockRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -604,14 +665,13 @@ fn drain_quic(
     mut scene: ResMut<SceneCache>,
     mut exterior: ResMut<ShipExterior>,
     mut config: ResMut<ShipConfig>,
-    mut autopilot: ResMut<AutopilotState>,
+    mut autopilot_cache: ResMut<AutopilotSnapshotCache>,
     mut connected: ResMut<ConnectedPlayer>,
     mut landing: ResMut<LandingState>,
     mut rapier: ResMut<RapierContext>,
-    mut warp: ResMut<WarpTargetState>,
     body_handle: Res<PlayerBodyHandle>,
     mut player_pos: ResMut<PlayerPosition>,
-    mut pilot_mode: ResMut<PilotMode>,
+    mut pilot_mode: ResMut<SeatedState>,
     tick: Res<ecs::TickCounter>,
     mut incoming_signals: ResMut<IncomingSignalBuffer>,
     mut peer_positions: ResMut<PeerPositionCache>,
@@ -646,7 +706,7 @@ fn drain_quic(
                 exterior.atmosphere_planet_index = data.atmosphere_planet_index;
                 exterior.gravity_acceleration = data.gravity_acceleration;
                 exterior.atmosphere_density = data.atmosphere_density;
-                autopilot.snapshot = data.autopilot;
+                autopilot_cache.snapshot = data.autopilot;
 
                 // Detect landed state: system shard zeros velocity on landing.
                 let was_landed = landing.landed;
@@ -688,7 +748,7 @@ fn drain_quic(
                 connected.session = None;
                 connected.player_name = None;
                 connected.handoff_pending = false;
-                pilot_mode.0 = false;
+                pilot_mode.seated = false;
             }
             ShardMsg::PlayerHandoff(h) => {
                 // Player re-entering ship from planet.
@@ -700,7 +760,7 @@ fn drain_quic(
                 connected.session = Some(h.session_token);
                 connected.player_name = Some(h.player_name.clone());
                 connected.handoff_pending = false;
-                pilot_mode.0 = false;
+                pilot_mode.seated = false;
 
                 // Spawn player at a safe interior position.
                 // TODO: find the nearest air block inside the hull boundary.
@@ -744,9 +804,8 @@ fn drain_quic(
                 scene.last_update_tick = tick.0;
                 scene.host_switch_tick = tick.0;
 
-                if data.new_host_shard_type != 3 {
-                    warp.target_star_index = None;
-                }
+                // Warp target clearing on host switch is now handled by
+                // warp_computer_system via channel state.
 
                 info!(
                     ship_id = config.ship_id,
@@ -910,19 +969,10 @@ fn process_input(
     mut events: MessageReader<PlayerInputMsg>,
     mut actions: ResMut<InputActions>,
     mut player_yaw: ResMut<PlayerYaw>,
-    pilot_mode: Res<PilotMode>,
-    mut pilot_acc: ResMut<PilotAccumulator>,
-    mut raw_input: ResMut<RawPilotInput>,
+    pilot_mode: Res<SeatedState>,
+    mut seat_input: ResMut<SeatInputValues>,
     mut rapier: ResMut<RapierContext>,
     body_handle: Res<PlayerBodyHandle>,
-    exterior: Res<ShipExterior>,
-    scene: Res<SceneCache>,
-    cached_sys: Res<CachedSystemParams>,
-    ship_props: Res<ShipProps>,
-    mut autopilot: ResMut<AutopilotState>,
-    mut warp: ResMut<WarpTargetState>,
-    config: Res<ShipConfig>,
-    cached_galaxy: Res<CachedGalaxyMap>,
 ) {
     for event in events.read() {
         let input = &event.input;
@@ -930,152 +980,13 @@ fn process_input(
         actions.current = input.action;
         player_yaw.0 = input.look_yaw;
 
-        if pilot_mode.0 {
-            // Autopilot toggle (T key = action 4, rising edge).
-            let autopilot_pressed = input.action == 4 && actions.previous != 4;
-            if autopilot_pressed {
-                if autopilot.target_body_id.is_some() {
-                    autopilot.target_body_id = None;
-                    autopilot.pending_cmd = Some((0xFFFFFFFF, 0));
-                    info!("autopilot disengage requested");
-                } else {
-                    let ship_fwd = exterior.rotation * DVec3::NEG_Z;
-                    let mut best_body_id: Option<u32> = None;
-                    let mut best_dot = 0.9;
-                    for body in &scene.bodies {
-                        if body.body_id == 0 {
-                            continue;
-                        }
-                        let to_body = (body.position - exterior.position).normalize_or_zero();
-                        let d = ship_fwd.dot(to_body);
-                        if d > best_dot {
-                            best_dot = d;
-                            best_body_id = Some(body.body_id);
-                        }
-                    }
-                    if let Some(body_id) = best_body_id {
-                        autopilot.target_body_id = Some(body_id);
-                        autopilot.pending_cmd = Some((body_id, input.speed_tier));
-                        info!(body_id, "autopilot engage requested");
-                    }
-                }
+        if pilot_mode.seated {
+            // Copy per-binding seat values from client input.
+            // The client evaluates its local SeatBindings and sends floats.
+            // If seat_values is empty (legacy client), keep existing values.
+            if !input.seat_values.is_empty() {
+                seat_input.0 = input.seat_values.clone();
             }
-
-            // Warp targeting (G key = action 6).
-            let warp_pressed = input.action == 6 && actions.previous != 6;
-            if warp_pressed {
-                let ship_fwd = exterior.rotation * DVec3::NEG_Z;
-                if let Some(ref sys) = cached_sys.0 {
-                    if let Some(ref galaxy_map) = cached_galaxy.0 {
-                        let current_star = galaxy_map
-                            .stars
-                            .iter()
-                            .find(|s| s.system_seed == sys.system_seed);
-                        if let Some(cur) = current_star {
-                            let cur_pos = cur.position;
-
-                            if let Some(current_target) = warp.target_star_index {
-                                // Cycle to next-best aligned star.
-                                let current_dot = galaxy_map
-                                    .stars
-                                    .iter()
-                                    .find(|s| s.index == current_target)
-                                    .map(|s| {
-                                        ship_fwd.dot((s.position - cur_pos).normalize())
-                                    })
-                                    .unwrap_or(1.0);
-
-                                let mut best: Option<(u32, f64)> = None;
-                                for star in &galaxy_map.stars {
-                                    if star.index == cur.index
-                                        || star.index == current_target
-                                    {
-                                        continue;
-                                    }
-                                    let dir = (star.position - cur_pos).normalize();
-                                    let dot = ship_fwd.dot(dir);
-                                    if dot < current_dot && dot > 0.3 {
-                                        if dot > best.map(|b| b.1).unwrap_or(0.3) {
-                                            best = Some((star.index, dot));
-                                        }
-                                    }
-                                }
-                                if best.is_none() {
-                                    for star in &galaxy_map.stars {
-                                        if star.index == cur.index {
-                                            continue;
-                                        }
-                                        let dir = (star.position - cur_pos).normalize();
-                                        let dot = ship_fwd.dot(dir);
-                                        if dot > best.map(|b| b.1).unwrap_or(0.3) {
-                                            best = Some((star.index, dot));
-                                        }
-                                    }
-                                }
-                                if let Some((idx, _)) = best {
-                                    warp.target_star_index = Some(idx);
-                                    info!(target_star = idx, "warp target cycled");
-                                }
-                            } else {
-                                let mut best: Option<(u32, f64)> = None;
-                                for star in &galaxy_map.stars {
-                                    if star.index == cur.index {
-                                        continue;
-                                    }
-                                    let dir = (star.position - cur_pos).normalize();
-                                    let alignment = ship_fwd.dot(dir);
-                                    if alignment > best.map(|b| b.1).unwrap_or(0.3) {
-                                        best = Some((star.index, alignment));
-                                    }
-                                }
-                                if let Some((target_index, _)) = best {
-                                    warp.target_star_index = Some(target_index);
-                                    info!(target_star = target_index, "warp target selected");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Warp confirm (Enter = action 7).
-            let warp_confirm = input.action == 7 && actions.previous != 7;
-            if warp_confirm {
-                if let Some(target) = warp.target_star_index {
-                    warp.pending_cmd = Some(target);
-                    info!(target_star = target, "warp engage confirmed");
-                }
-            }
-
-            // Cancel autopilot on manual WASD input.
-            if autopilot.target_body_id.is_some() {
-                let has_manual = input.movement[0].abs() > 0.01
-                    || input.movement[1].abs() > 0.01
-                    || input.movement[2].abs() > 0.01;
-                if has_manual {
-                    autopilot.target_body_id = None;
-                    autopilot.pending_cmd = Some((0xFFFFFFFF, 0));
-                    info!("autopilot cancelled by manual input");
-                }
-            }
-
-            // Write normalized pilot input for the signal publish pipeline.
-            // Thrust is computed by compute_ship_thrust from per-thruster channel values.
-            // Atmosphere state is authoritative from the system-shard (via ShipPositionUpdate).
-            let in_atmosphere = exterior.in_atmosphere;
-
-            raw_input.thrust_forward = input.movement[2];
-            raw_input.thrust_lateral = input.movement[0];
-            raw_input.thrust_vertical = input.movement[1];
-            raw_input.torque_yaw = input.look_yaw;
-            raw_input.torque_pitch = input.look_pitch;
-            raw_input.in_atmosphere = in_atmosphere;
-            raw_input.engines_off = input.action == 5;
-            raw_input.thrust_limiter = input.thrust_limiter;
-            raw_input.roll_cw = input.roll.max(0.0);
-            raw_input.roll_ccw = (-input.roll).max(0.0);
-            raw_input.cruise_active = input.cruise;
-            raw_input.atmo_comp_active = input.atmo_comp;
         } else {
             // Walking mode: apply velocity to Rapier body.
             let (sin_y, cos_y) = player_yaw.0.sin_cos();
@@ -1301,10 +1212,9 @@ fn hull_exit_check(
 
 fn pilot_send(
     config: Res<ShipConfig>,
-    pilot_mode: Res<PilotMode>,
     pilot_acc: Res<PilotAccumulator>,
-    mut autopilot: ResMut<AutopilotState>,
-    mut warp: ResMut<WarpTargetState>,
+    mut autopilot_query: Query<&mut AutopilotBlockState>,
+    mut warp_query: Query<&mut WarpComputerState>,
     mut pending: ResMut<PendingMessages>,
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
@@ -1342,42 +1252,41 @@ fn pilot_send(
             .try_send((host_id, addr, handoff_msg));
     }
 
-    // Always send pending autopilot command.
-    if let Some((target, tier)) = autopilot.pending_cmd.take() {
-        let ap_msg = ShardMsg::AutopilotCommand(AutopilotCommandData {
-            ship_id: config.ship_id,
-            target_body_id: target,
-            speed_tier: tier,
-            autopilot_mode: 0,
-        });
-        let _ = bridge.quic_send_tx.try_send((host_id, addr, ap_msg));
+    // Send pending autopilot commands from all autopilot entities.
+    for mut ap in &mut autopilot_query {
+        if let Some((target, tier)) = ap.pending_cmd.take() {
+            let ap_msg = ShardMsg::AutopilotCommand(AutopilotCommandData {
+                ship_id: config.ship_id,
+                target_body_id: target,
+                speed_tier: tier,
+                autopilot_mode: 0,
+            });
+            let _ = bridge.quic_send_tx.try_send((host_id, addr, ap_msg));
+        }
     }
 
-    // Always send pending warp command.
-    if let Some(target_star) = warp.pending_cmd.take() {
-        let warp_msg = ShardMsg::WarpAutopilotCommand(WarpAutopilotCommandData {
-            ship_id: config.ship_id,
-            target_star_index: target_star,
-            galaxy_seed: config.galaxy_seed,
-        });
-        let _ = bridge.quic_send_tx.try_send((host_id, addr, warp_msg));
+    // Send pending warp commands from all warp computer entities.
+    for mut wc in &mut warp_query {
+        if let Some(target_star) = wc.pending_cmd.take() {
+            let warp_msg = ShardMsg::WarpAutopilotCommand(WarpAutopilotCommandData {
+                ship_id: config.ship_id,
+                target_star_index: target_star,
+                galaxy_seed: config.galaxy_seed,
+            });
+            let _ = bridge.quic_send_tx.try_send((host_id, addr, warp_msg));
+        }
     }
 
-    // Thrust/torque only when piloting.
-    if pilot_mode.0 {
-        // Send rotation intent as [-1, 1] rate command directly.
-        // The system shard's physics_integrate treats this as a target angular
-        // velocity fraction. No normalization needed — the values come from
-        // pilot input + flight computer, already in [-1, 1].
-        let msg = ShardMsg::ShipControlInput(ShipControlInput {
-            ship_id: config.ship_id,
-            thrust: pilot_acc.thrust,
-            torque: pilot_acc.rotation_command,
-            braking: false,
-            tick: tick.0,
-        });
-        let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
-    }
+    // Always send thrust/torque — automated systems (hover, flight computer)
+    // need thrusters to work even without a pilot in the seat.
+    let msg = ShardMsg::ShipControlInput(ShipControlInput {
+        ship_id: config.ship_id,
+        thrust: pilot_acc.thrust,
+        torque: pilot_acc.rotation_command,
+        braking: false,
+        tick: tick.0,
+    });
+    let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -1438,9 +1347,9 @@ fn broadcast_world_state(
     player_pos: Res<PlayerPosition>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
-    pilot_mode: Res<PilotMode>,
-    warp: Res<WarpTargetState>,
-    autopilot: Res<AutopilotState>,
+    pilot_mode: Res<SeatedState>,
+    warp_query: Query<&WarpComputerState>,
+    autopilot_cache: Res<AutopilotSnapshotCache>,
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
 ) {
@@ -1471,6 +1380,11 @@ fn broadcast_world_state(
         })
     };
 
+    // Read warp target from the first warp computer entity (if any).
+    let warp_target = warp_query.iter()
+        .find_map(|wc| wc.target_star_index)
+        .unwrap_or(0xFFFFFFFF);
+
     let ws = ServerMsg::WorldState(WorldStateData {
         tick: tick.0,
         origin: exterior.position,
@@ -1483,16 +1397,17 @@ fn broadcast_world_state(
             ),
             rotation: exterior.rotation,
             velocity: exterior.velocity,
-            grounded: !pilot_mode.0,
+            grounded: !pilot_mode.seated,  // TODO: use actual Rapier ground contact
             health: 100.0,
             shield: 100.0,
+            seated: pilot_mode.seated,
         }],
         bodies,
         ships: vec![],
         lighting,
         game_time: scene.game_time,
-        warp_target_star_index: warp.target_star_index.unwrap_or(0xFFFFFFFF),
-        autopilot: autopilot.snapshot.clone(),
+        warp_target_star_index: warp_target,
+        autopilot: autopilot_cache.snapshot.clone(),
     });
     let _ = bridge.broadcast_tx.try_send(ws);
 }
@@ -1503,7 +1418,7 @@ fn broadcast_world_state(
 
 fn log_state(
     player_pos: Res<PlayerPosition>,
-    pilot_mode: Res<PilotMode>,
+    pilot_mode: Res<SeatedState>,
     gravity_enabled: Res<GravityEnabled>,
     tick: Res<ecs::TickCounter>,
     scene: Res<SceneCache>,
@@ -1518,7 +1433,7 @@ fn log_state(
             "({:.1}, {:.1}, {:.1})",
             player_pos.0.x, player_pos.0.y, player_pos.0.z
         ),
-        piloting = pilot_mode.0,
+        piloting = pilot_mode.seated,
         gravity = gravity_enabled.0,
         tick = tick.0,
         "ship state"
@@ -1599,11 +1514,18 @@ fn chunk_key_from_bytes(buf: &[u8]) -> glam::IVec3 {
 
 /// Per-block config record for persistence. Stores channel override and power config.
 struct BlockConfigRecord {
-    /// Signal throttle channel name (empty = none).
+    /// Signal throttle channel name (empty = none). Used by starter ship for pre-configured blocks.
     channel_override: String,
     /// Boost channel name (empty = none).
     boost_channel: String,
     power_config: Option<block::PowerConfig>,
+    /// Full subscribe bindings (channel_name, property).
+    subscribe_bindings: Vec<(String, u8)>,
+    /// Full publish bindings (channel_name, property).
+    publish_bindings: Vec<(String, u8)>,
+    /// Full seat control mappings (control_u8, channel_name, property_u8).
+    /// If non-empty, replaces the default 13-channel SeatChannelMapping on load.
+    seat_mappings: Vec<(u8, String, u8)>,
 }
 
 /// Serialize a BlockConfigRecord to bytes.
@@ -1647,6 +1569,31 @@ fn serialize_block_config(record: &BlockConfigRecord) -> Vec<u8> {
             buf.extend_from_slice(circuit_bytes);
         }
     }
+    // subscribe_bindings: u32 count, then per binding: (u32 name_len, name, u8 property)
+    buf.extend_from_slice(&(record.subscribe_bindings.len() as u32).to_le_bytes());
+    for (name, prop) in &record.subscribe_bindings {
+        let nb = name.as_bytes();
+        buf.extend_from_slice(&(nb.len() as u32).to_le_bytes());
+        buf.extend_from_slice(nb);
+        buf.push(*prop);
+    }
+    // publish_bindings: same format
+    buf.extend_from_slice(&(record.publish_bindings.len() as u32).to_le_bytes());
+    for (name, prop) in &record.publish_bindings {
+        let nb = name.as_bytes();
+        buf.extend_from_slice(&(nb.len() as u32).to_le_bytes());
+        buf.extend_from_slice(nb);
+        buf.push(*prop);
+    }
+    // seat_mappings: u32 count, then per mapping: (u8 control, u32 name_len, name, u8 property)
+    buf.extend_from_slice(&(record.seat_mappings.len() as u32).to_le_bytes());
+    for (control, name, prop) in &record.seat_mappings {
+        buf.push(*control);
+        let nb = name.as_bytes();
+        buf.extend_from_slice(&(nb.len() as u32).to_le_bytes());
+        buf.extend_from_slice(nb);
+        buf.push(*prop);
+    }
     buf
 }
 
@@ -1663,7 +1610,7 @@ fn deserialize_block_config(data: &[u8]) -> Option<BlockConfigRecord> {
     pos += co_len;
 
     // boost_channel
-    if pos + 4 > data.len() { return Some(BlockConfigRecord { channel_override, boost_channel: String::new(), power_config: None }); }
+    if pos + 4 > data.len() { return Some(BlockConfigRecord { channel_override, boost_channel: String::new(), power_config: None, subscribe_bindings: Vec::new(), publish_bindings: Vec::new(), seat_mappings: Vec::new() }); }
     let bc_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize;
     pos += 4;
     if pos + bc_len > data.len() { return None; }
@@ -1696,7 +1643,7 @@ fn deserialize_block_config(data: &[u8]) -> Option<BlockConfigRecord> {
             }
             if pos + 4 > data.len() { return None; }
             let broadcast_range = f32::from_le_bytes(data[pos..pos+4].try_into().ok()?);
-            // pos += 4; // not needed, last field
+            pos += 4;
             Some(block::PowerConfig::Source { circuits, broadcast_range })
         }
         2 => {
@@ -1713,6 +1660,7 @@ fn deserialize_block_config(data: &[u8]) -> Option<BlockConfigRecord> {
             pos += 4;
             if pos + circuit_len > data.len() { return None; }
             let circuit = std::str::from_utf8(&data[pos..pos+circuit_len]).ok()?.to_string();
+            pos += circuit_len;
             Some(block::PowerConfig::Consumer {
                 reactor_pos: glam::IVec3::new(rx, ry, rz),
                 circuit,
@@ -1721,7 +1669,64 @@ fn deserialize_block_config(data: &[u8]) -> Option<BlockConfigRecord> {
         _ => return None,
     };
 
-    Some(BlockConfigRecord { channel_override, boost_channel, power_config })
+    // Subscribe bindings (optional — backward compatible with old records).
+    let mut subscribe_bindings = Vec::new();
+    if pos + 4 <= data.len() {
+        let count = u32::from_le_bytes(data[pos..pos+4].try_into().ok().unwrap_or([0;4])) as usize;
+        pos += 4;
+        for _ in 0..count {
+            if pos + 4 > data.len() { break; }
+            let name_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok().unwrap_or([0;4])) as usize;
+            pos += 4;
+            if pos + name_len + 1 > data.len() { break; }
+            let name = std::str::from_utf8(&data[pos..pos+name_len]).unwrap_or("").to_string();
+            pos += name_len;
+            let prop = data[pos];
+            pos += 1;
+            subscribe_bindings.push((name, prop));
+        }
+    }
+
+    // Publish bindings (optional).
+    let mut publish_bindings = Vec::new();
+    if pos + 4 <= data.len() {
+        let count = u32::from_le_bytes(data[pos..pos+4].try_into().ok().unwrap_or([0;4])) as usize;
+        pos += 4;
+        for _ in 0..count {
+            if pos + 4 > data.len() { break; }
+            let name_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok().unwrap_or([0;4])) as usize;
+            pos += 4;
+            if pos + name_len + 1 > data.len() { break; }
+            let name = std::str::from_utf8(&data[pos..pos+name_len]).unwrap_or("").to_string();
+            pos += name_len;
+            let prop = data[pos];
+            pos += 1;
+            publish_bindings.push((name, prop));
+        }
+    }
+
+    // Seat mappings (optional — backward compatible).
+    let mut seat_mappings = Vec::new();
+    if pos + 4 <= data.len() {
+        let count = u32::from_le_bytes(data[pos..pos+4].try_into().ok().unwrap_or([0;4])) as usize;
+        pos += 4;
+        for _ in 0..count {
+            if pos + 1 > data.len() { break; }
+            let control = data[pos];
+            pos += 1;
+            if pos + 4 > data.len() { break; }
+            let name_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok().unwrap_or([0;4])) as usize;
+            pos += 4;
+            if pos + name_len + 1 > data.len() { break; }
+            let name = std::str::from_utf8(&data[pos..pos+name_len]).unwrap_or("").to_string();
+            pos += name_len;
+            let prop = data[pos];
+            pos += 1;
+            seat_mappings.push((control, name, prop));
+        }
+    }
+
+    Some(BlockConfigRecord { channel_override, boost_channel, power_config, subscribe_bindings, publish_bindings, seat_mappings })
 }
 
 /// Load block configs from redb into a ShipGrid's channel_overrides and power_configs.
@@ -1757,6 +1762,12 @@ fn load_block_configs(db: &redb::Database, grid: &mut ShipGrid) {
             }
             if let Some(cfg) = record.power_config {
                 grid.set_power_config(block_pos.x, block_pos.y, block_pos.z, cfg);
+            }
+            if !record.subscribe_bindings.is_empty() || !record.publish_bindings.is_empty() {
+                grid.set_saved_signal_bindings(block_pos, record.subscribe_bindings, record.publish_bindings);
+            }
+            if !record.seat_mappings.is_empty() {
+                grid.set_saved_seat_mappings(block_pos, record.seat_mappings);
             }
             count += 1;
         }
@@ -1795,6 +1806,9 @@ fn save_block_configs(db: &redb::Database, grid: &ShipGrid) {
                 channel_override: grid.channel_override(*pos).unwrap_or("").to_string(),
                 boost_channel: grid.boost_channel(*pos).unwrap_or("").to_string(),
                 power_config: grid.power_config(*pos).cloned(),
+                subscribe_bindings: Vec::new(),
+                publish_bindings: Vec::new(),
+                seat_mappings: Vec::new(),
             };
             let key_bytes = chunk_key_bytes(*pos);
             let data = serialize_block_config(&record);
@@ -2073,35 +2087,41 @@ fn apply_config_updates(
             }
         }
 
-        // Persist config change to redb.
-        if update.power_source.is_some() || update.power_consumer.is_some() {
-            if let Some(ref persist) = persistence {
-                let power_cfg = if let Some(ref ps) = update.power_source {
-                    Some(block::PowerConfig::Source {
-                        circuits: ps.circuits.iter().map(|c| (c.name.clone(), c.fraction)).collect(),
-                        broadcast_range: reactor_query.get(entity).ok()
-                            .map(|(rs, _)| rs.broadcast_range)
-                            .unwrap_or(50.0),
-                    })
-                } else if let Some(ref pc) = update.power_consumer {
-                    pc.reactor_pos.map(|rp| block::PowerConfig::Consumer {
-                        reactor_pos: rp,
-                        circuit: pc.circuit.clone(),
-                    })
-                } else {
-                    None
-                };
-                let channel_override = grid.0.channel_override(update.block_pos)
-                    .unwrap_or("").to_string();
-                let boost_channel = grid.0.boost_channel(update.block_pos)
-                    .unwrap_or("").to_string();
-                let record = BlockConfigRecord {
-                    channel_override,
-                    boost_channel,
-                    power_config: power_cfg,
-                };
-                save_single_block_config(&persist.db, update.block_pos, &record);
-            }
+        // Persist ALL config changes to redb (signal bindings, power, everything).
+        if let Some(ref persist) = persistence {
+            let power_cfg = if let Some(ref ps) = update.power_source {
+                Some(block::PowerConfig::Source {
+                    circuits: ps.circuits.iter().map(|c| (c.name.clone(), c.fraction)).collect(),
+                    broadcast_range: reactor_query.get(entity).ok()
+                        .map(|(rs, _)| rs.broadcast_range)
+                        .unwrap_or(50.0),
+                })
+            } else if let Some(ref pc) = update.power_consumer {
+                pc.reactor_pos.map(|rp| block::PowerConfig::Consumer {
+                    reactor_pos: rp,
+                    circuit: pc.circuit.clone(),
+                })
+            } else {
+                // Preserve existing power config from grid if no power update.
+                grid.0.power_config(update.block_pos).cloned()
+            };
+            let record = BlockConfigRecord {
+                channel_override: grid.0.channel_override(update.block_pos)
+                    .unwrap_or("").to_string(),
+                boost_channel: grid.0.boost_channel(update.block_pos)
+                    .unwrap_or("").to_string(),
+                power_config: power_cfg,
+                subscribe_bindings: update.subscribe_bindings.iter()
+                    .map(|b| (b.channel_name.clone(), b.property as u8))
+                    .collect(),
+                publish_bindings: update.publish_bindings.iter()
+                    .map(|b| (b.channel_name.clone(), b.property as u8))
+                    .collect(),
+                seat_mappings: update.seat_mappings.iter()
+                    .map(|s| (s.control as u8, s.channel_name.clone(), s.property as u8))
+                    .collect(),
+            };
+            save_single_block_config(&persist.db, update.block_pos, &record);
         }
 
         info!(block = ?update.block_pos, "applied signal config update from client");
@@ -2273,7 +2293,7 @@ fn produce_player_edits(
     connected: Res<ConnectedPlayer>,
     player_pos: Res<PlayerPosition>,
     block_index: Res<FunctionalBlockIndex>,
-    mut pilot_mode: ResMut<PilotMode>,
+    mut pilot_mode: ResMut<SeatedState>,
     mut active_seat: ResMut<ActiveSeatEntity>,
     mut rapier: ResMut<RapierContext>,
     body_handle: Res<PlayerBodyHandle>,
@@ -2289,8 +2309,8 @@ fn produce_player_edits(
         let edit = &event.edit;
 
         // Action EXIT_SEAT: no raycast or position validation needed.
-        if edit.action == voxeldust_core::client_message::action::EXIT_SEAT && pilot_mode.0 {
-            pilot_mode.0 = false;
+        if edit.action == voxeldust_core::client_message::action::EXIT_SEAT && pilot_mode.seated {
+            pilot_mode.seated = false;
             info!("exited pilot mode via F key");
             continue;
         }
@@ -2410,17 +2430,19 @@ fn produce_player_edits(
                         if let Some(interaction_def) = matching_action {
                             match kind {
                                 FunctionalBlockKind::Seat => {
-                                    // Toggle pilot mode.
-                                    pilot_mode.0 = !pilot_mode.0;
-                                    if pilot_mode.0 {
+                                    // Toggle seated state.
+                                    pilot_mode.seated = !pilot_mode.seated;
+                                    if pilot_mode.seated {
+                                        pilot_mode.seat_entity = Some(entity);
                                         active_seat.0 = Some(entity);
                                         if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
                                             body.set_linvel(vector![0.0, 0.0, 0.0], true);
                                         }
-                                        info!("entered pilot mode via seat at {:?}", hit.world_pos);
+                                        info!("entered seat at {:?}", hit.world_pos);
                                     } else {
+                                        pilot_mode.seat_entity = None;
                                         // Keep active_seat for one-tick zero-publish.
-                                        info!("exited pilot mode");
+                                        info!("exited seat");
                                     }
                                 }
                                 FunctionalBlockKind::Reactor => {
@@ -2444,12 +2466,19 @@ fn produce_player_edits(
             }
             action::OPEN_CONFIG => {
                 // F key: universal config UI — open config for any functional block.
+                // The entity may be a full functional block (reactor, thruster) OR a
+                // mechanical sub-block mount (rotor, piston) registered at the host block position.
                 if let Some(&entity) = block_index.0.get(&hit.world_pos) {
                     let block_id = grid.0.get_block(
                         hit.world_pos.x, hit.world_pos.y, hit.world_pos.z,
                     );
-                    if let Some(kind) = registry.0.functional_kind(block_id) {
-                        // Build config snapshot from entity components.
+                    // Try block-level functional kind first, then fall back to the
+                    // entity's FunctionalBlockRef (for sub-block mounts on non-functional host blocks).
+                    let kind = registry.0.functional_kind(block_id)
+                        .or_else(|| {
+                            signal_ctx.block_ref_query.get(entity).ok().map(|r| r.kind)
+                        });
+                    if let Some(kind) = kind {
                         let config = build_config_snapshot(
                             entity, hit.world_pos, block_id, kind,
                             &signal_ctx.pub_query, &signal_ctx.sub_query,
@@ -2459,7 +2488,6 @@ fn produce_player_edits(
                             &signal_ctx.powered_by_query,
                             &registry.0,
                         );
-                        // Send to client via TCP.
                         if let Some(session) = connected.session {
                             let msg = ServerMsg::BlockConfigState(config);
                             let cr = bridge.client_registry.clone();
@@ -2603,8 +2631,10 @@ fn rebuild_chunk_collider(
     registry: &BlockRegistry,
     rapier: &mut RapierContext,
     collider_handles: &mut ChunkColliderHandles,
+    root_body: rapier3d::dynamics::RigidBodyHandle,
+    sub_grids: &mut SubGridRegistry,
 ) {
-    // Remove old collider for this chunk.
+    // Remove old root-grid collider for this chunk.
     if let Some(old_handle) = collider_handles.0.remove(&chunk_key) {
         rapier.collider_set.remove(
             old_handle,
@@ -2613,10 +2643,63 @@ fn rebuild_chunk_collider(
             true,
         );
     }
-    // Build and insert new collider.
-    if let Some(collider) = build_chunk_collider(grid, chunk_key, registry) {
-        let handle = rapier.collider_set.insert(collider);
+
+    // Build root-grid collider (only blocks NOT in any sub-grid).
+    let root_shapes = grid.chunk_collider_shapes_filtered(chunk_key, glam::Vec3::ZERO, registry, None);
+    if !root_shapes.is_empty() {
+        let compound: Vec<_> = root_shapes.iter().map(|&(pos, he)| {
+            (Isometry::translation(pos.x, pos.y, pos.z), SharedShape::cuboid(he.x, he.y, he.z))
+        }).collect();
+        let collider = ColliderBuilder::compound(compound).build();
+        let handle = rapier.collider_set.insert_with_parent(
+            collider, root_body, &mut rapier.rigid_body_set,
+        );
         collider_handles.0.insert(chunk_key, handle);
+    }
+
+    // Rebuild colliders for each sub-grid that has blocks in this chunk.
+    for (sg_id, sg_data) in &mut sub_grids.grids {
+        // Remove old sub-grid collider for this chunk.
+        if let Some(old_handle) = sg_data.collider_handles.remove(&chunk_key) {
+            rapier.collider_set.remove(
+                old_handle,
+                &mut rapier.island_manager,
+                &mut rapier.rigid_body_set,
+                true,
+            );
+        }
+
+        let sg_shapes = grid.chunk_collider_shapes_filtered(
+            chunk_key, glam::Vec3::ZERO, registry, Some(sg_id.0),
+        );
+        if !sg_shapes.is_empty() {
+            // Offset shapes relative to the sub-grid body position.
+            let body_pos = rapier.rigid_body_set.get(sg_data.body_handle)
+                .map(|b| *b.translation())
+                .unwrap_or_default();
+            let compound: Vec<_> = sg_shapes.iter().map(|&(pos, he)| {
+                let local = Isometry::translation(
+                    pos.x - body_pos.x,
+                    pos.y - body_pos.y,
+                    pos.z - body_pos.z,
+                );
+                (local, SharedShape::cuboid(he.x, he.y, he.z))
+            }).collect();
+
+            // Use collision groups to prevent parent-child Clang.
+            let parent_group = 1u32 << (sg_data.parent_grid.0 % 32);
+            let child_group = 1u32 << (sg_id.0 % 32);
+            let collider = ColliderBuilder::compound(compound)
+                .collision_groups(rapier3d::geometry::InteractionGroups::new(
+                    rapier3d::geometry::Group::from(child_group),
+                    rapier3d::geometry::Group::from(!parent_group),
+                ))
+                .build();
+            let handle = rapier.collider_set.insert_with_parent(
+                collider, sg_data.body_handle, &mut rapier.rigid_body_set,
+            );
+            sg_data.collider_handles.insert(chunk_key, handle);
+        }
     }
 }
 
@@ -2634,6 +2717,9 @@ fn apply_block_edits(
     mut persistence: Option<ResMut<ShipPersistence>>,
     mut pending_entity_ops: Option<ResMut<PendingEntityOps>>,
     mut agg_dirty: ResMut<AggregationDirty>,
+    root_body: Res<RootBodyHandle>,
+    mut sub_grids: ResMut<SubGridRegistry>,
+    mut mech_dirty: ResMut<MechanicalDirtyGrids>,
 ) {
     let edits = queue.drain_all();
     if edits.is_empty() {
@@ -2652,7 +2738,36 @@ fn apply_block_edits(
 
     // 2. Shard-specific: rebuild chunk colliders for all dirty chunks.
     for &chunk_key in result.dirty_chunks.keys() {
-        rebuild_chunk_collider(&grid.0, chunk_key, &registry.0, &mut rapier, &mut collider_handles);
+        rebuild_chunk_collider(&grid.0, chunk_key, &registry.0, &mut rapier, &mut collider_handles, root_body.0, &mut sub_grids);
+    }
+
+    // 2a. Check if any edited block is in or adjacent to an existing sub-grid.
+    //     If so, mark that sub-grid for membership re-computation.
+    for edit in &edits {
+        let pos = edit.pos;
+        // If the edited block itself belongs to a sub-grid, mark it dirty.
+        let sg = grid.0.sub_grid_id(pos);
+        if sg != 0 {
+            mech_dirty.dirty.insert(voxeldust_core::ecs::components::SubGridId(sg));
+        }
+        // Also check if the edited position is the output neighbor of any mount.
+        for (sg_id, sg_data) in &sub_grids.grids {
+            let output_face = block::sub_block::opposite_face(sg_data.mount_face);
+            let output_pos = sg_data.mount_pos + block::sub_block::face_to_offset(output_face);
+            // If the edit is at the output position or adjacent to any member,
+            // this sub-grid's membership might have changed.
+            if pos == output_pos || sg_data.members.contains(&pos) {
+                mech_dirty.dirty.insert(*sg_id);
+            }
+            // Check 6-neighbors of the edited position for membership in this sub-grid.
+            for face in 0..6u8 {
+                let neighbor = pos + block::sub_block::face_to_offset(face);
+                if sg_data.members.contains(&neighbor) {
+                    mech_dirty.dirty.insert(*sg_id);
+                    break;
+                }
+            }
+        }
     }
 
     // 2b. Mark dirty chunks for persistence.
@@ -2809,6 +2924,286 @@ fn process_entity_ops(
     }
 }
 
+/// Check for newly placed/removed mechanical sub-blocks (RotorMount, PistonMount, etc.)
+/// and create/destroy sub-grids, Rapier joints, and functional entities accordingly.
+fn process_mechanical_edits(
+    mut commands: Commands,
+    mut rapier: ResMut<RapierContext>,
+    mut grid: ResMut<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    mut sub_grids: ResMut<SubGridRegistry>,
+    root_body: Res<RootBodyHandle>,
+    mut channels: ResMut<SignalChannelTable>,
+    mut dirty: ResMut<AggregationDirty>,
+    mut collider_handles: ResMut<ChunkColliderHandles>,
+    mut mech_dirty: ResMut<MechanicalDirtyGrids>,
+    mut block_index: ResMut<FunctionalBlockIndex>,
+) {
+    use voxeldust_core::block::sub_block::{SubBlockType, face_to_offset};
+    use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
+
+    // Re-compute membership for dirty sub-grids (blocks placed/removed on child side).
+    let dirty_ids: Vec<_> = mech_dirty.dirty.drain().collect();
+    for sg_id in dirty_ids {
+        let Some(sg_data) = sub_grids.grids.get(&sg_id) else { continue };
+        let mount_pos = sg_data.mount_pos;
+        let mount_face = sg_data.mount_face;
+        let output_face = block::sub_block::opposite_face(mount_face);
+
+        // Re-BFS from the output face.
+        let new_members = block::ship_grid::compute_sub_grid_members(
+            &grid.0, &registry.0, mount_pos, output_face,
+        );
+
+        // Determine which chunks are affected (old members + new members).
+        let old_members = &sub_grids.grids[&sg_id].members;
+        let mut affected_chunks: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
+        for &pos in old_members.iter().chain(new_members.iter()) {
+            affected_chunks.insert(block::ShipGrid::world_to_chunk(pos.x, pos.y, pos.z).0);
+        }
+
+        // Clear old assignments.
+        for &pos in old_members {
+            grid.0.set_sub_grid(pos, 0);
+        }
+        // Set new assignments.
+        for &pos in &new_members {
+            grid.0.set_sub_grid(pos, sg_id.0);
+        }
+
+        // Update the registry entry.
+        if let Some(sg_data) = sub_grids.grids.get_mut(&sg_id) {
+            sg_data.members = new_members;
+        }
+
+        // Update child body mass from new members.
+        let mut child_mass = 0.0f64;
+        if let Some(sg_data) = sub_grids.grids.get(&sg_id) {
+            for &pos in &sg_data.members {
+                let bid = grid.0.get_block(pos.x, pos.y, pos.z);
+                child_mass += registry.0.get(bid).density as f64;
+            }
+        }
+        child_mass = child_mass.max(1.0);
+        if let Some(sg_data) = sub_grids.grids.get(&sg_id) {
+            if let Some(body) = rapier.rigid_body_set.get_mut(sg_data.body_handle) {
+                body.set_additional_mass(child_mass as f32, true);
+            }
+        }
+
+        // Rebuild colliders for all affected chunks.
+        for chunk_key in affected_chunks {
+            rebuild_chunk_collider(
+                &grid.0, chunk_key, &registry.0,
+                &mut rapier, &mut collider_handles,
+                root_body.0, &mut sub_grids,
+            );
+        }
+
+        tracing::debug!(
+            sg_id = sg_id.0,
+            members = sub_grids.grids.get(&sg_id).map(|s| s.members.len()).unwrap_or(0),
+            "re-computed sub-grid membership",
+        );
+    }
+
+    // Check for mechanical sub-blocks that don't yet have a sub-grid.
+    // Scan all chunks for RotorMount/PistonMount/HingeMount/SliderMount.
+    // On startup, init_functional_blocks handles functional blocks but not sub-block mounts.
+    // After placement, process_sub_block_edits stores the sub-block but doesn't create the joint.
+    // This system bridges that gap.
+
+    let mechanical_types = [
+        SubBlockType::RotorMount,
+        SubBlockType::PistonMount,
+        SubBlockType::HingeMount,
+        SubBlockType::SliderMount,
+    ];
+
+    // Collect all mechanical mount positions that DON'T have a sub-grid yet.
+    let mut new_mounts: Vec<(glam::IVec3, u8, SubBlockType)> = Vec::new();
+    let cs = block::CHUNK_SIZE as i32;
+
+    for (chunk_key, chunk) in grid.0.iter_chunks() {
+        for (flat_idx, elements) in chunk.iter_sub_blocks() {
+            let (lx, ly, lz) = block::index_to_xyz(flat_idx as usize);
+            let world_pos = glam::IVec3::new(
+                chunk_key.x * cs + lx as i32,
+                chunk_key.y * cs + ly as i32,
+                chunk_key.z * cs + lz as i32,
+            );
+            for elem in elements {
+                if !mechanical_types.contains(&elem.element_type) { continue; }
+                // Check if this mount already has a sub-grid.
+                let already_exists = sub_grids.grids.values()
+                    .any(|sg| sg.mount_pos == world_pos && sg.mount_face == elem.face);
+                if !already_exists {
+                    new_mounts.push((world_pos, elem.face, elem.element_type));
+                }
+            }
+        }
+    }
+
+    if new_mounts.is_empty() { return; }
+
+    for (mount_pos, face, elem_type) in new_mounts {
+        // Determine block ID for registry lookup.
+        let block_id = match elem_type {
+            SubBlockType::RotorMount | SubBlockType::HingeMount => block::BlockId::ROTOR,
+            SubBlockType::PistonMount | SubBlockType::SliderMount => block::BlockId::PISTON,
+            _ => continue,
+        };
+
+        let mech_props = match registry.0.mechanical_props(block_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Compute child sub-grid membership via BFS.
+        let output_face = block::sub_block::opposite_face(face);
+        let members = block::ship_grid::compute_sub_grid_members(
+            &grid.0, &registry.0, mount_pos, output_face,
+        );
+
+        // Allocate sub-grid ID.
+        let sg_id = voxeldust_core::ecs::components::SubGridId(sub_grids.next_id);
+        sub_grids.next_id += 1;
+
+        // Assign blocks to sub-grid.
+        for &pos in &members {
+            grid.0.set_sub_grid(pos, sg_id.0);
+        }
+
+        // Compute child mass properties.
+        let mut child_mass = 0.0f64;
+        let mut child_weighted_pos = glam::DVec3::ZERO;
+        for &pos in &members {
+            let bid = grid.0.get_block(pos.x, pos.y, pos.z);
+            let def = registry.0.get(bid);
+            let m = def.density as f64;
+            child_mass += m;
+            child_weighted_pos += glam::DVec3::new(
+                pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5,
+            ) * m;
+        }
+        child_mass = child_mass.max(1.0);
+        let child_com = child_weighted_pos / child_mass;
+
+        // Create child rigid body.
+        let face_offset = face_to_offset(output_face);
+        let anchor = rapier3d::math::Vector::new(
+            mount_pos.x as f32 + 0.5 + face_offset.x as f32 * 0.5,
+            mount_pos.y as f32 + 0.5 + face_offset.y as f32 * 0.5,
+            mount_pos.z as f32 + 0.5 + face_offset.z as f32 * 0.5,
+        );
+        let child_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
+            .translation(anchor)
+            .additional_mass(child_mass as f32)
+            .build();
+        let child_handle = rapier.rigid_body_set.insert(child_body);
+
+        // Create joint.
+        let axis_vec = face_to_offset(output_face);
+        let axis = rapier3d::math::Vector::new(
+            axis_vec.x as f32, axis_vec.y as f32, axis_vec.z as f32,
+        );
+
+        let joint_handle = match mech_props.joint_type {
+            block::JointType::Revolute => {
+                let unit_axis = rapier3d::math::UnitVector::new_normalize(axis);
+                let mut builder = rapier3d::dynamics::RevoluteJointBuilder::new(unit_axis)
+                    .local_anchor1(rapier3d::math::Point::from(anchor))
+                    .local_anchor2(rapier3d::math::Point::origin());
+                if mech_props.max_range < 360.0 {
+                    let half = (mech_props.max_range / 2.0).to_radians() as f32;
+                    builder = builder.limits([-half, half]);
+                }
+                rapier.impulse_joint_set.insert(
+                    root_body.0, child_handle, builder.build(), true,
+                )
+            }
+            block::JointType::Prismatic => {
+                let unit_axis = rapier3d::math::UnitVector::new_normalize(axis);
+                let builder = rapier3d::dynamics::PrismaticJointBuilder::new(unit_axis)
+                    .local_anchor1(rapier3d::math::Point::from(anchor))
+                    .local_anchor2(rapier3d::math::Point::origin())
+                    .limits([0.0, mech_props.max_range as f32]);
+                rapier.impulse_joint_set.insert(
+                    root_body.0, child_handle, builder.build(), true,
+                )
+            }
+        };
+
+        // Register sub-grid (colliders will be built by rebuild_chunk_collider below).
+        let members_clone = members.clone();
+        sub_grids.grids.insert(sg_id, SubGridData {
+            body_handle: child_handle,
+            joint_handle,
+            members,
+            mount_pos,
+            mount_face: face,
+            parent_grid: voxeldust_core::ecs::components::SubGridId::ROOT,
+            collider_handles: std::collections::HashMap::new(),
+        });
+
+        // Spawn functional entity for signal integration.
+        let kind = match elem_type {
+            SubBlockType::RotorMount | SubBlockType::HingeMount => block::FunctionalBlockKind::Rotor,
+            SubBlockType::PistonMount | SubBlockType::SliderMount => block::FunctionalBlockKind::Piston,
+            _ => continue,
+        };
+
+        let entity = commands.spawn((
+            voxeldust_core::ecs::components::FunctionalBlockRef {
+                world_pos: mount_pos,
+                block_id: block_id,
+                kind,
+            },
+            MechanicalState {
+                current: 0.0,
+                target: 0.0,
+                max_speed: mech_props.max_speed as f32,
+                max_force: mech_props.max_force,
+                max_range: mech_props.max_range,
+                joint_type: mech_props.joint_type,
+                child_grid_id: sg_id,
+                status: MechanicalStatus::Idle,
+                host_pos: mount_pos,
+                face,
+                stuck_ticks: 0,
+                prev_error: 0.0,
+            },
+            SignalSubscriber::default(),
+            SignalPublisher { bindings: Vec::new() },
+        )).id();
+
+        block_index.0.insert(mount_pos, entity);
+        dirty.0 = true;
+
+        // Rebuild chunk colliders for all chunks containing sub-grid members.
+        // This removes sub-grid blocks from root colliders and adds them to the
+        // sub-grid's colliders with proper collision groups.
+        let affected_chunks: std::collections::HashSet<glam::IVec3> = members_clone.iter()
+            .map(|&pos| block::ShipGrid::world_to_chunk(pos.x, pos.y, pos.z).0)
+            .collect();
+        for chunk_key in affected_chunks {
+            rebuild_chunk_collider(
+                &grid.0, chunk_key, &registry.0,
+                &mut rapier, &mut collider_handles,
+                root_body.0, &mut sub_grids,
+            );
+        }
+
+        tracing::info!(
+            mount = ?mount_pos, face = face,
+            kind = ?elem_type,
+            child_blocks = sub_grids.grids[&sg_id].members.len(),
+            sg_id = sg_id.0,
+            "created mechanical sub-grid",
+        );
+    }
+}
+
 /// Aggregation system: recomputes ship physical properties from block composition.
 /// Runs after entity lifecycle ops, only when the dirty flag is set.
 fn aggregate_ship_properties(
@@ -2886,9 +3281,23 @@ fn aggregate_ship_properties(
 // Signal default bindings
 // ---------------------------------------------------------------------------
 
-/// Add default signal publisher/subscriber components to a functional block entity
-/// based on its kind. Players can reconfigure these via the block config UI.
-/// Resolves channel names → IDs via the channel table.
+/// Convert u8 discriminant back to SignalProperty (for deserialized bindings).
+fn signal_property_from_u8(v: u8) -> SignalProperty {
+    match v {
+        0 => SignalProperty::Active,
+        1 => SignalProperty::Throttle,
+        2 => SignalProperty::Angle,
+        3 => SignalProperty::Extension,
+        4 => SignalProperty::Pressure,
+        5 => SignalProperty::Speed,
+        6 => SignalProperty::Level,
+        7 => SignalProperty::SwitchState,
+        8 => SignalProperty::Boost,
+        9 => SignalProperty::Status,
+        _ => SignalProperty::Throttle,
+    }
+}
+
 fn add_default_signal_bindings(
     entity_cmds: &mut bevy_ecs::system::EntityCommands,
     kind: FunctionalBlockKind,
@@ -2899,6 +3308,33 @@ fn add_default_signal_bindings(
     channels: &mut SignalChannelTable,
 ) {
     use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
+
+    // Check for persisted signal bindings (from a previous config panel save).
+    // If found, use them instead of the kind-specific defaults below.
+    if let Some((sub_bindings, pub_bindings)) = grid.saved_signal_bindings(pos) {
+        if !sub_bindings.is_empty() {
+            entity_cmds.insert(SignalSubscriber {
+                bindings: sub_bindings.iter().map(|(name, prop)| {
+                    SubscribeBinding {
+                        channel_id: channels.resolve_or_create(name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0),
+                        property: signal_property_from_u8(*prop),
+                    }
+                }).collect(),
+            });
+        }
+        if !pub_bindings.is_empty() {
+            entity_cmds.insert(SignalPublisher {
+                bindings: pub_bindings.iter().map(|(name, prop)| {
+                    PublishBinding {
+                        channel_id: channels.resolve_or_create(name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0),
+                        property: signal_property_from_u8(*prop),
+                    }
+                }).collect(),
+            });
+        }
+        // Still apply kind-specific non-signal components (ThrusterState, ReactorState, etc.)
+        // by falling through the match below. The signal bindings are already set.
+    }
 
     match kind {
         FunctionalBlockKind::Thruster => {
@@ -2949,8 +3385,49 @@ fn add_default_signal_bindings(
             entity_cmds.insert(ReactorConsumerCache::default());
         }
         FunctionalBlockKind::Seat => {
-            // Seats get the full channel mapping for pilot controls, resolved to IDs.
-            entity_cmds.insert(SeatChannelMapping::resolve_defaults(channels));
+            // Use saved seat config if available (player-configured via config panel).
+            // Otherwise use preset defaults based on block ID.
+            if let Some(saved) = grid.saved_seat_config(pos) {
+                let bindings = saved.bindings.iter().map(|(label, source_u8, key_name, key_mode_u8, axis_dir_u8, channel_name, property_u8)| {
+                    SeatInputBinding {
+                        label: label.clone(),
+                        source: SeatInputSource::from_u8(*source_u8).unwrap_or(SeatInputSource::Key),
+                        key_name: key_name.clone(),
+                        key_mode: KeyMode::from_u8(*key_mode_u8).unwrap_or(KeyMode::Momentary),
+                        axis_direction: AxisDirection::from_u8(*axis_dir_u8).unwrap_or(AxisDirection::Positive),
+                        channel_id: channels.resolve_or_create(channel_name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0),
+                        property: signal_property_from_u8(*property_u8),
+                    }
+                }).collect();
+                let seated_channel_id = if saved.seated_channel_name.is_empty() {
+                    None
+                } else {
+                    Some(channels.resolve_or_create(&saved.seated_channel_name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0))
+                };
+                entity_cmds.insert(SeatChannelMapping { bindings, seated_channel_id });
+            } else {
+                // Use preset defaults based on block type.
+                let preset = if block_id == BlockId::COCKPIT {
+                    seat_presets::SeatPreset::Pilot
+                } else {
+                    seat_presets::SeatPreset::Generic
+                };
+                let binding_configs = preset.default_bindings();
+                let bindings = binding_configs.iter().map(|cfg| {
+                    SeatInputBinding {
+                        label: cfg.label.clone(),
+                        source: cfg.source,
+                        key_name: cfg.key_name.clone(),
+                        key_mode: cfg.key_mode,
+                        axis_direction: cfg.axis_direction,
+                        channel_id: channels.resolve_or_create(&cfg.channel_name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0),
+                        property: cfg.property,
+                    }
+                }).collect();
+                let seated_ch_name = preset.default_seated_channel();
+                let seated_channel_id = Some(channels.resolve_or_create(seated_ch_name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0));
+                entity_cmds.insert(SeatChannelMapping { bindings, seated_channel_id });
+            }
         }
         FunctionalBlockKind::Sensor => {
             // Sensor publishes to its configured channel. Player sets via config panel.
@@ -3106,9 +3583,8 @@ fn compute_power_budget(
 fn flight_computer_damping(
     mut raw_input: ResMut<RawPilotInput>,
     exterior: Res<ShipExterior>,
-    pilot_mode: Res<PilotMode>,
 ) {
-    if !pilot_mode.0 || raw_input.engines_off { return; }
+    if raw_input.engines_off { return; }
 
     // Angular velocity in ship-local frame.
     let ang_vel = exterior.rotation.inverse() * exterior.angular_velocity;
@@ -3174,10 +3650,10 @@ fn hover_computer(
     mut hover: ResMut<HoverState>,
     exterior: Res<ShipExterior>,
     ship_props: Res<ShipProps>,
-    pilot_mode: Res<PilotMode>,
+    pilot_mode: Res<SeatedState>,
     autopilot: Res<AutopilotState>,
 ) {
-    let active = pilot_mode.0 && raw_input.atmo_comp_active && exterior.in_atmosphere
+    let active = raw_input.atmo_comp_active && exterior.in_atmosphere
         && !raw_input.engines_off && autopilot.target_body_id.is_none();
 
     // Edge detect: capture heading on activation.
@@ -3202,7 +3678,7 @@ fn hover_computer(
         // Log why hover is inactive (every 40 ticks).
         static DIAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let t = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if t % 40 == 0 && pilot_mode.0 {
+        if t % 40 == 0 && pilot_mode.seated {
             tracing::warn!(
                 atmo_comp = raw_input.atmo_comp_active,
                 in_atmo = exterior.in_atmosphere,
@@ -3266,13 +3742,14 @@ fn hover_computer(
     if raw_input.torque_yaw.abs() < 0.01 {
         raw_input.torque_yaw = (error_local.y * att_gain).clamp(-1.0, 1.0) as f32;
     }
-    // Roll: error_local.z
+    // Roll: error_local.z > 0 means need +Z rotation (CCW from pilot view = roll_ccw).
+    // rotation_command.z = roll_ccw - roll_cw, so positive Z needs roll_ccw.
     if raw_input.roll_cw < 0.01 && raw_input.roll_ccw < 0.01 {
         let roll_cmd = (error_local.z * att_gain).clamp(-1.0, 1.0) as f32;
         if roll_cmd > 0.0 {
-            raw_input.roll_cw = roll_cmd;
+            raw_input.roll_ccw = roll_cmd;
         } else {
-            raw_input.roll_ccw = -roll_cmd;
+            raw_input.roll_cw = -roll_cmd;
         }
     }
 
@@ -3371,9 +3848,9 @@ fn hover_computer(
 /// Values accumulate in pending_values, merged after all publishers write.
 fn signal_publish(
     mut channels: ResMut<SignalChannelTable>,
-    publishers: Query<(&FunctionalBlockRef, &SignalPublisher, Option<&ReactorState>, Option<&CruiseDriveState>)>,
+    publishers: Query<(&FunctionalBlockRef, &SignalPublisher, Option<&ReactorState>, Option<&CruiseDriveState>, Option<&MechanicalState>)>,
     mut incoming: ResMut<IncomingSignalBuffer>,
-    pilot_mode: Res<PilotMode>,
+    pilot_mode: Res<SeatedState>,
     mut active_seat: ResMut<ActiveSeatEntity>,
     raw_input: Res<RawPilotInput>,
     seat_query: Query<&SeatChannelMapping>,
@@ -3388,9 +3865,24 @@ fn signal_publish(
     // Seat control publishing: map pilot input to signal channels via SeatChannelMapping.
     if let Some(seat_entity) = active_seat.0 {
         if let Ok(mapping) = seat_query.get(seat_entity) {
+            // Diagnostic: log the active seat's channel bindings on every seat change.
+            static LAST_SEAT_ENTITY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+            let seat_id_bits = seat_entity.to_bits() as u64;
+            if LAST_SEAT_ENTITY.swap(seat_id_bits, std::sync::atomic::Ordering::Relaxed) != seat_id_bits {
+                let names: Vec<_> = mapping.bindings.iter().map(|b| {
+                    let ch_name = channels.name_for_id(b.channel_id).unwrap_or("?");
+                    format!("{:?}→{}", b.control, ch_name)
+                }).collect();
+                info!(
+                    seat_entity = ?seat_entity,
+                    bindings = names.len(),
+                    channels = ?names,
+                    "active seat channel dump",
+                );
+            }
             for binding in &mapping.bindings {
                 use voxeldust_core::signal::components::SeatControl;
-                let value = if pilot_mode.0 {
+                let value = if pilot_mode.seated {
                     match binding.control {
                         SeatControl::ThrustForward   => raw_input.thrust_forward.max(0.0),
                         SeatControl::ThrustReverse   => (-raw_input.thrust_forward).max(0.0),
@@ -3415,13 +3907,13 @@ fn signal_publish(
             }
         }
         // Clear seat tracking after zero-publish (pilot exited).
-        if !pilot_mode.0 {
+        if !pilot_mode.seated {
             active_seat.0 = None;
         }
     }
 
-    // Block publishers (reactors, sensors, cruise drives, etc.).
-    for (_block_ref, publisher, reactor_state, cruise_state) in &publishers {
+    // Block publishers (reactors, sensors, cruise drives, mechanical mounts, etc.).
+    for (_block_ref, publisher, reactor_state, cruise_state, mech_state) in &publishers {
         for binding in &publisher.bindings {
             let value = match binding.property {
                 SignalProperty::Active => signal::SignalValue::Bool(true),
@@ -3440,6 +3932,20 @@ fn signal_publish(
                             if cs.throttle > 0.5 { cs.boost_multiplier as f32 } else { 1.0 }
                         ),
                         None => signal::SignalValue::Float(1.0),
+                    }
+                }
+                SignalProperty::Angle | SignalProperty::Extension => {
+                    // Mechanical mounts publish their current position as feedback.
+                    match mech_state {
+                        Some(ms) => signal::SignalValue::Float(ms.current),
+                        None => signal::SignalValue::Float(0.0),
+                    }
+                }
+                SignalProperty::Status => {
+                    // Mechanical mounts publish operational status.
+                    match mech_state {
+                        Some(ms) => signal::SignalValue::Float(ms.status as u8 as f32),
+                        None => signal::SignalValue::Float(0.0),
                     }
                 }
                 SignalProperty::Pressure => signal::SignalValue::Float(101.3),
@@ -3488,9 +3994,19 @@ const PAR_SUBSCRIBE_THRESHOLD: usize = 256;
 /// sequential iteration for small ships where dispatch overhead dominates.
 fn signal_subscribe(
     channels: Res<SignalChannelTable>,
-    mut subscribers: Query<(&SignalSubscriber, Option<&mut ThrusterState>, Option<&mut CruiseDriveState>)>,
+    mut subscribers: Query<(
+        &SignalSubscriber,
+        Option<&mut ThrusterState>,
+        Option<&mut CruiseDriveState>,
+        Option<&mut MechanicalState>,
+    )>,
 ) {
-    let apply = |(subscriber, mut thruster_state, mut cruise_state): (&SignalSubscriber, Option<Mut<ThrusterState>>, Option<Mut<CruiseDriveState>>)| {
+    let apply = |(subscriber, mut thruster_state, mut cruise_state, mut mech_state): (
+        &SignalSubscriber,
+        Option<Mut<ThrusterState>>,
+        Option<Mut<CruiseDriveState>>,
+        Option<Mut<MechanicalState>>,
+    )| {
         // Reset boost each tick — only active while boost signal is published.
         if let Some(ref mut ts) = thruster_state {
             ts.boost = 1.0;
@@ -3514,6 +4030,18 @@ fn signal_subscribe(
                         cs.throttle = ch.value.as_f32();
                     }
                 }
+                // MechanicalState reads Angle, Extension, Speed, Active.
+                if let Some(ref mut ms) = mech_state {
+                    match binding.property {
+                        SignalProperty::Angle | SignalProperty::Extension => {
+                            ms.target = ch.value.as_f32();
+                        }
+                        SignalProperty::Speed => {
+                            ms.max_speed = ch.value.as_f32();
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     };
@@ -3529,7 +4057,6 @@ fn signal_subscribe(
 /// Each thruster reads its throttle from its subscribed channel and contributes
 /// thrust_n × throttle × direction. Torque is computed from offset to center of mass.
 fn compute_ship_thrust(
-    pilot_mode: Res<PilotMode>,
     mut pilot_acc: ResMut<PilotAccumulator>,
     thrusters: Query<(&ThrusterBlock, &ThrusterState, &PoweredBy)>,
     reactors: Query<&ReactorState>,
@@ -3542,11 +4069,6 @@ fn compute_ship_thrust(
     cached_sys: Res<CachedSystemParams>,
     autopilot: Res<AutopilotState>,
 ) {
-    if !pilot_mode.0 {
-        pilot_acc.thrust = DVec3::ZERO;
-        pilot_acc.torque = DVec3::ZERO;
-        return;
-    }
 
     let limiter = raw_input.thrust_limiter as f64;
 
@@ -3592,6 +4114,139 @@ fn compute_ship_thrust(
     // physics_integrate, where position/rotation/gravity are all current-tick
     // authoritative. This avoids rotation-mismatch and stale-data issues that
     // caused atmosphere catapulting when computed here.
+}
+
+/// Read actual joint positions from Rapier into MechanicalState.
+/// Runs BEFORE signal_publish so that current values are published as feedback.
+fn read_mechanical_state(
+    rapier: Res<RapierContext>,
+    mut mechanicals: Query<&mut MechanicalState>,
+    sub_grids: Res<SubGridRegistry>,
+) {
+    for mut state in &mut mechanicals {
+        let sg = match sub_grids.grids.get(&state.child_grid_id) {
+            Some(sg) => sg,
+            None => continue,
+        };
+        let joint = match rapier.impulse_joint_set.get(sg.joint_handle) {
+            Some(j) => j,
+            None => continue,
+        };
+
+        // Read body rotations for joint angle computation.
+        let rot1 = rapier.rigid_body_set.get(joint.body1)
+            .map(|b| *b.rotation())
+            .unwrap_or_default();
+        let rot2 = rapier.rigid_body_set.get(joint.body2)
+            .map(|b| *b.rotation())
+            .unwrap_or_default();
+
+        let current = match state.joint_type {
+            block::JointType::Revolute => {
+                joint.data.as_revolute()
+                    .map(|r| r.angle(&rot1, &rot2).to_degrees())
+                    .unwrap_or(0.0)
+            }
+            block::JointType::Prismatic => {
+                // Compute translation along joint axis from body positions.
+                let pos1 = rapier.rigid_body_set.get(joint.body1)
+                    .map(|b| *b.translation()).unwrap_or_default();
+                let pos2 = rapier.rigid_body_set.get(joint.body2)
+                    .map(|b| *b.translation()).unwrap_or_default();
+                let diff = pos2 - pos1;
+                // Use the local anchor difference as a proxy for extension.
+                let anchor1 = joint.data.local_anchor1();
+                let anchor2 = joint.data.local_anchor2();
+                let dir = (anchor1 - anchor2).normalize();
+                diff.dot(&dir).abs()
+            }
+        };
+        state.current = current;
+
+        // Stuck detection: if error hasn't decreased in 10 ticks, set Blocked.
+        let error = (state.target - state.current).abs();
+        if error < 0.5 {
+            state.status = MechanicalStatus::Idle;
+            state.stuck_ticks = 0;
+        } else if error < state.prev_error - 0.01 {
+            state.status = MechanicalStatus::Moving;
+            state.stuck_ticks = 0;
+        } else {
+            state.stuck_ticks = state.stuck_ticks.saturating_add(1);
+            if state.stuck_ticks > 10 {
+                state.status = MechanicalStatus::Blocked;
+            } else {
+                state.status = MechanicalStatus::Moving;
+            }
+        }
+        state.prev_error = error;
+    }
+}
+
+/// Apply Rapier joint motor targets from MechanicalState.
+/// Uses ease-in-out speed profile: motor velocity is scaled by a smoothstep
+/// function of the distance to target, giving natural acceleration/deceleration.
+fn apply_mechanical_motors(
+    mut rapier: ResMut<RapierContext>,
+    mechanicals: Query<(&MechanicalState, Option<&PoweredBy>)>,
+    reactors: Query<&ReactorState>,
+    block_index: Res<FunctionalBlockIndex>,
+    sub_grids: Res<SubGridRegistry>,
+) {
+    for (state, powered_by) in &mechanicals {
+        // Power check: no power = no motion.
+        let power_ratio = powered_by
+            .and_then(|pb| block_index.0.get(&pb.reactor_pos))
+            .and_then(|&e| reactors.get(e).ok())
+            .and_then(|rs| rs.circuits.iter().find(|c| c.name == powered_by.unwrap().circuit))
+            .map(|c| c.power_ratio as f64)
+            .unwrap_or(1.0); // default to 1.0 if no PoweredBy (unpowered mounts still work for now)
+
+        if power_ratio < 0.001 { continue; }
+
+        let sg = match sub_grids.grids.get(&state.child_grid_id) {
+            Some(sg) => sg,
+            None => continue,
+        };
+        let joint = match rapier.impulse_joint_set.get_mut(sg.joint_handle) {
+            Some(j) => j,
+            None => continue,
+        };
+
+        let effective_force = state.max_force * power_ratio;
+
+        // Ease-in-out speed profile using smoothstep:
+        // smoothstep(t) = t² × (3 - 2t) maps [0,1] → [0,1] with zero derivative at both ends.
+        // The ramp threshold defines the angular/linear distance over which speed ramps up/down.
+        // This creates natural acceleration/deceleration: slow near target, full speed in the middle.
+        let compute_eased_velocity = |error: f32, max_speed: f32, max_range: f64| -> f32 {
+            let error_abs = error.abs();
+            // Ramp distance: 10% of max range, minimum 0.5 (degrees or meters).
+            let ramp_dist = (max_range as f32 * 0.1).max(0.5);
+            let t = (error_abs / ramp_dist).min(1.0);
+            let ease = t * t * (3.0 - 2.0 * t); // smoothstep
+            error.signum() * max_speed * ease
+        };
+
+        match state.joint_type {
+            block::JointType::Revolute => {
+                if let Some(data) = joint.data.as_revolute_mut() {
+                    let error_deg = state.target - state.current;
+                    let vel_deg = compute_eased_velocity(error_deg, state.max_speed, state.max_range);
+                    let vel_rad = vel_deg.to_radians();
+                    data.set_motor_velocity(vel_rad, effective_force as f32);
+                }
+            }
+            block::JointType::Prismatic => {
+                if let Some(data) = joint.data.as_prismatic_mut() {
+                    let target_clamped = state.target.clamp(0.0, state.max_range as f32);
+                    let error = target_clamped - state.current;
+                    let vel = compute_eased_velocity(error, state.max_speed, state.max_range);
+                    data.set_motor_velocity(vel, effective_force as f32);
+                }
+            }
+        }
+    }
 }
 
 /// Phase 4: Clear dirty flags after all processing.
@@ -3748,6 +4403,14 @@ fn build_ship_interior(
     let mut rigid_body_set = RigidBodySet::new();
     let mut collider_set = ColliderSet::new();
 
+    // Root body: Fixed rigid body for the ship's static structure.
+    // All non-sub-grid chunk colliders are parented to this body.
+    // Required for mechanical joints (rotors, pistons) to have an anchor.
+    let root_body = rapier3d::dynamics::RigidBodyBuilder::fixed()
+        .translation(rapier3d::math::Vector::zeros())
+        .build();
+    let root_body_handle = rigid_body_set.insert(root_body);
+
     // Initialize block persistence and load ship data.
     let db_path = format!("/tmp/voxeldust-ship-{ship_id}.redb");
     let db = redb::Database::create(&db_path)
@@ -3798,11 +4461,13 @@ fn build_ship_interior(
         }
     };
 
-    // Generate Rapier colliders from each chunk's solid blocks.
+    // Generate Rapier colliders from each chunk's solid blocks, parented to root body.
     let mut chunk_collider_handles = std::collections::HashMap::new();
     for chunk_key in grid.chunk_keys() {
         if let Some(collider) = build_chunk_collider(&grid, chunk_key, &registry) {
-            let handle = collider_set.insert(collider);
+            let handle = collider_set.insert_with_parent(
+                collider, root_body_handle, &mut rigid_body_set,
+            );
             chunk_collider_handles.insert(chunk_key, handle);
         }
     }
@@ -3897,6 +4562,9 @@ fn build_ship_interior(
         query_pipeline: QueryPipeline::new(),
     });
     app.insert_resource(GravitySources(vec![GravitySource::default_floor_plates()]));
+    app.insert_resource(RootBodyHandle(root_body_handle));
+    app.insert_resource(SubGridRegistry::default());
+    app.insert_resource(MechanicalDirtyGrids::default());
     app.insert_resource(ShipConfig {
         shard_id,
         ship_id,
@@ -3962,7 +4630,7 @@ fn build_ship_interior(
     app.insert_resource(PlayerBodyHandle(player_handle));
     app.insert_resource(PlayerPosition(spawn_pos));
     app.insert_resource(PlayerYaw(0.0));
-    app.insert_resource(PilotMode(false));
+    app.insert_resource(SeatedState::default());
     app.insert_resource(GravityEnabled(true));
     app.insert_resource(InputActions::default());
     app.insert_resource(ecs::TickCounter::default());
@@ -4015,7 +4683,7 @@ fn build_ship_interior(
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
         Update,
-        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, aggregate_ship_properties, rebuild_reactor_consumers)
+        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, process_mechanical_edits, aggregate_ship_properties, rebuild_reactor_consumers)
             .chain()
             .in_set(ShipSet::BlockEdit),
     );
@@ -4023,7 +4691,7 @@ fn build_ship_interior(
     // Signal pipeline: publish → evaluate → subscribe → clear dirty.
     app.add_systems(
         Update,
-        (flight_computer_damping, hover_computer, signal_publish, signal_evaluate, signal_subscribe, compute_power_budget, compute_ship_thrust, signal_clear_dirty)
+        (read_mechanical_state, flight_computer_damping, hover_computer, signal_publish, signal_evaluate, signal_subscribe, apply_mechanical_motors, compute_power_budget, compute_ship_thrust, signal_clear_dirty)
             .chain()
             .in_set(ShipSet::Signal),
     );

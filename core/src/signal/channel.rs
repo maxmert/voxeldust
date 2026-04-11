@@ -143,6 +143,11 @@ impl SignalChannelTable {
         self.channels.get_mut(id.0 as usize).and_then(|slot| slot.as_mut())
     }
 
+    /// Get a channel's name by ID.
+    pub fn name_for_id(&self, id: ChannelId) -> Option<&str> {
+        self.get_by_id(id).map(|ch| ch.name.as_str())
+    }
+
     /// Push a value into a channel's running aggregation by ID (O(1)).
     #[inline]
     pub fn push_pending_id(&mut self, id: ChannelId, value: SignalValue) {
@@ -315,6 +320,17 @@ impl SignalChannelTable {
         for slot in &mut self.channels {
             let Some(ch) = slot else { continue };
             if !ch.pending.has_values() {
+                // No publisher wrote to this channel this tick.
+                // Reset to neutral value so stale data doesn't persist.
+                let neutral = SignalValue::Float(0.0);
+                if ch.value != neutral {
+                    ch.prev_value = ch.value;
+                    ch.value = neutral;
+                    if !ch.dirty {
+                        self.dirty_set.push(ch.id);
+                    }
+                    ch.dirty = true;
+                }
                 continue;
             }
             let merged = match &ch.pending {

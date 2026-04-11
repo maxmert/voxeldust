@@ -96,6 +96,8 @@ pub enum SignalProperty {
     SwitchState,
     /// Float: thrust boost multiplier (1.0 = normal). Set by cruise drives.
     Boost,
+    /// Float: mechanical status code (0=Idle, 1=Moving, 2=Blocked, 3=Error).
+    Status,
 }
 
 /// How multiple publishers to the same channel merge their values.

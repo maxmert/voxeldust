@@ -12,3 +12,4 @@ pub mod seed;
 pub mod galaxy;
 pub mod system;
 pub mod autopilot;
+pub mod weather;

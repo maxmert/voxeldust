@@ -49,6 +49,28 @@ pub struct CruiseDriveProps {
     pub boost_multiplier: f64,
 }
 
+/// Joint type for mechanical mounts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointType {
+    /// Rotation around the mount face normal (rotors, hinges).
+    Revolute,
+    /// Translation along the mount face normal (pistons, sliders).
+    Prismatic,
+}
+
+/// Per-block static mechanical properties for sub-block mounts (rotors, pistons).
+#[derive(Clone, Copy, Debug)]
+pub struct MechanicalProps {
+    /// Joint type (determines Rapier joint API).
+    pub joint_type: JointType,
+    /// Maximum torque (N·m) for revolute or force (N) for prismatic.
+    pub max_force: f64,
+    /// Maximum speed: deg/s for revolute, m/s for prismatic.
+    pub max_speed: f64,
+    /// Maximum range: degrees for revolute (360 = unlimited), meters for prismatic.
+    pub max_range: f64,
+}
+
 /// Per-block static power properties (generation, consumption, storage).
 #[derive(Clone, Copy, Debug)]
 pub struct PowerProps {
@@ -132,6 +154,8 @@ pub struct BlockRegistry {
     power_props: Vec<Option<PowerProps>>,
     /// Per-cruise-drive properties. None = not a cruise drive.
     cruise_drive_props: Vec<Option<CruiseDriveProps>>,
+    /// Per-mechanical-mount properties. None = not a mechanical mount.
+    mechanical_props: Vec<Option<MechanicalProps>>,
 }
 
 impl BlockRegistry {
@@ -143,6 +167,7 @@ impl BlockRegistry {
         let mut thruster_props_vec: Vec<Option<ThrusterProps>> = vec![None; MAX_BLOCK_TYPES];
         let mut power_props_vec: Vec<Option<PowerProps>> = vec![None; MAX_BLOCK_TYPES];
         let mut cruise_drive_props_vec: Vec<Option<CruiseDriveProps>> = vec![None; MAX_BLOCK_TYPES];
+        let mut mechanical_props_vec: Vec<Option<MechanicalProps>> = vec![None; MAX_BLOCK_TYPES];
 
         let r = &mut defs;
 
@@ -659,7 +684,7 @@ impl BlockRegistry {
         fk[BlockId::BATTERY.as_u16() as usize] = Some(Battery);
         fk[BlockId::SOLAR_PANEL.as_u16() as usize] = Some(SolarPanel);
         fk[BlockId::POWER_CONDUIT.as_u16() as usize] = Some(PowerConduit);
-        // Seats (replaces COCKPIT placeholder)
+        // Seats
         fk[BlockId::COCKPIT.as_u16() as usize] = Some(Seat);
         // Utility
         fk[BlockId::GRAVITY_GENERATOR.as_u16() as usize] = Some(GravityGenerator);
@@ -743,7 +768,28 @@ impl BlockRegistry {
         cd[BlockId::CRUISE_DRIVE_MEDIUM.as_u16() as usize] = Some(CruiseDriveProps { boost_multiplier: 2000.0 });
         cd[BlockId::CRUISE_DRIVE_LARGE.as_u16() as usize]  = Some(CruiseDriveProps { boost_multiplier: 8000.0 });
 
-        Self { defs, functional_kinds, thruster_props: thruster_props_vec, power_props: power_props_vec, cruise_drive_props: cruise_drive_props_vec }
+        // Mechanical mount properties.
+        let mp = &mut mechanical_props_vec;
+        mp[BlockId::ROTOR.as_u16() as usize] = Some(MechanicalProps {
+            joint_type: JointType::Revolute,
+            max_force: 500_000.0,   // 500 kN·m torque
+            max_speed: 30.0,        // 30 deg/s
+            max_range: 360.0,       // full rotation (no limits)
+        });
+        mp[BlockId::PISTON.as_u16() as usize] = Some(MechanicalProps {
+            joint_type: JointType::Prismatic,
+            max_force: 1_000_000.0, // 1 MN force
+            max_speed: 2.0,         // 2 m/s
+            max_range: 10.0,        // 10 meter max extension
+        });
+
+        Self {
+            defs, functional_kinds,
+            thruster_props: thruster_props_vec,
+            power_props: power_props_vec,
+            cruise_drive_props: cruise_drive_props_vec,
+            mechanical_props: mechanical_props_vec,
+        }
     }
 
     /// O(1) lookup by `BlockId`.
@@ -788,6 +834,10 @@ impl BlockRegistry {
 
     pub fn cruise_drive_props(&self, id: BlockId) -> Option<CruiseDriveProps> {
         self.cruise_drive_props[id.as_u16() as usize]
+    }
+
+    pub fn mechanical_props(&self, id: BlockId) -> Option<MechanicalProps> {
+        self.mechanical_props[id.as_u16() as usize]
     }
 
     /// Get the interaction schema for a functional block kind.

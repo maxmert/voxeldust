@@ -354,6 +354,7 @@ pub struct PlayerSnapshotData {
     pub grounded: bool,
     pub health: f32,
     pub shield: f32,
+    pub seated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -784,6 +785,7 @@ impl ServerMsg {
                         grounded: p.grounded,
                         health: p.health,
                         shield: p.shield,
+                        seated: p.seated,
                     })
                 }).collect();
                 let players = builder.create_vector(&snapshots);
@@ -1125,6 +1127,7 @@ impl ServerMsg {
                             grounded: p.grounded(),
                             health: p.health(),
                             shield: p.shield(),
+                            seated: p.seated(),
                         }
                     }).collect()
                 }).unwrap_or_default();
@@ -1485,6 +1488,7 @@ mod tests {
                 grounded: true,
                 health: 95.0,
                 shield: 50.0,
+                seated: false,
             }],
             bodies: vec![CelestialBodyData {
                 body_id: 0, position: DVec3::ZERO, radius: 6.96e8, color: [1.0, 0.95, 0.8],

@@ -385,6 +385,7 @@ table PlayerSnapshot {
     grounded: bool;
     health: float;
     shield: float;
+    seated: bool;       // player is in any seat (pilot, gunner, passenger)
 }
 
 table WorldState {

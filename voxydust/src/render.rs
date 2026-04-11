@@ -561,13 +561,12 @@ pub fn render_frame(
             gpu.queue.write_buffer(buf, 0, bytemuck::bytes_of(&cascades));
         }
 
-        // Render depth for each cascade. Each cascade gets its own command buffer
-        // submission to ensure queue.write_buffer() data is consumed before the next
-        // cascade overwrites it. (wgpu executes write_buffer before submit, but
-        // multiple writes to the same offset within a single encoder would race.)
+        // Render depth for each cascade with per-cascade command buffer submission.
+        // Each cascade reuses the same uniform buffer offsets — the per-cascade submit
+        // ensures the GPU consumes the data before the next cascade overwrites it.
         if let Some(shadow_pipeline) = &gpu.shadow_pipeline {
             for cascade_idx in 0..NUM_CASCADES as usize {
-                // Write shadow-space MVPs for this cascade.
+                // Write shadow-space MVPs for spheres.
                 for i in 0..ro.object_count {
                     let model = Mat4::from_cols_array_2d(&uniform_data[i].model);
                     uniform_data[i].mvp = (cascade_matrices[cascade_idx] * model).to_cols_array_2d();
@@ -576,21 +575,20 @@ pub fn render_frame(
                     gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
                 }
 
-                // Write block chunk shadow MVPs.
+                // Write shadow-space MVPs for block chunks.
                 if let Some(br) = block_renderer {
                     if br.has_chunks() && !ro.block_ships.is_empty() {
                         let block_start = ro.block_uniform_start;
                         let mut chunk_idx = 0usize;
                         for ship_transform in &ro.block_ships {
                             for source in br.active_sources() {
-                                for (chunk_pos, _chunk_mesh) in br.chunks_for_source(source) {
+                                for (chunk_pos, _) in br.chunks_for_source(source) {
                                     let uniform_idx = block_start + chunk_idx;
                                     if uniform_idx >= MAX_OBJECTS { break; }
                                     let chunk_model = crate::block_render::BlockRenderer::chunk_model_matrix(
                                         ship_transform.base_transform, chunk_pos, CHUNK_SIZE as f64,
                                     );
-                                    let shadow_mvp = cascade_matrices[cascade_idx] * chunk_model;
-                                    uniform_data[uniform_idx].mvp = shadow_mvp.to_cols_array_2d();
+                                    uniform_data[uniform_idx].mvp = (cascade_matrices[cascade_idx] * chunk_model).to_cols_array_2d();
                                     uniform_data[uniform_idx].model = chunk_model.to_cols_array_2d();
                                     gpu.queue.write_buffer(
                                         &gpu.uniform_buf, (uniform_idx as u64) * 256,
@@ -603,8 +601,7 @@ pub fn render_frame(
                     }
                 }
 
-                // Submit a dedicated command buffer for this cascade so the uniform
-                // data written above is consumed before the next cascade overwrites it.
+                // Submit this cascade's render pass.
                 let mut shadow_encoder = gpu.device.create_command_encoder(
                     &wgpu::CommandEncoderDescriptor { label: Some("shadow_cascade") },
                 );
@@ -623,7 +620,6 @@ pub fn render_frame(
                         ..Default::default()
                     });
 
-                    // Draw sphere objects.
                     pass.set_pipeline(shadow_pipeline);
                     pass.set_vertex_buffer(0, gpu.sphere_vertex_buf.slice(..));
                     pass.set_index_buffer(gpu.sphere_index_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -633,7 +629,6 @@ pub fn render_frame(
                         pass.draw_indexed(0..gpu.sphere_index_count, 0, 0..1);
                     }
 
-                    // Draw block chunk meshes.
                     if let Some(br) = block_renderer {
                         if br.has_chunks() && !ro.block_ships.is_empty() {
                             pass.set_pipeline(&br.shadow_pipeline);
@@ -641,7 +636,7 @@ pub fn render_frame(
                             let mut chunk_idx = 0usize;
                             for _ship_transform in &ro.block_ships {
                                 for source in br.active_sources() {
-                                    for (chunk_pos, chunk_mesh) in br.chunks_for_source(source) {
+                                    for (_, chunk_mesh) in br.chunks_for_source(source) {
                                         let uniform_idx = block_start + chunk_idx;
                                         if uniform_idx >= MAX_OBJECTS { break; }
                                         pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);

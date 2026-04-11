@@ -210,6 +210,16 @@ struct PlayerEntityIndex(HashMap<SessionToken, Entity>);
 #[derive(Resource, Default)]
 struct ShipEntityIndex(HashMap<u64, Entity>);
 
+/// Handoff spawn info stored by process_handoffs, consumed by process_connects.
+/// Avoids deferred-Commands visibility issues (Commands not materialized in same tick).
+struct HandoffSpawnInfo {
+    surface_pos: DVec3,
+}
+
+/// Pending handoffs keyed by player name. process_handoffs inserts, process_connects consumes.
+#[derive(Resource, Default)]
+struct PendingHandoffs(HashMap<String, HandoffSpawnInfo>);
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
@@ -377,7 +387,7 @@ fn process_connects(
     planet_pos: Res<PlanetPositionInSystem>,
     celestial_time: Res<CelestialTimeRes>,
     mut player_index: ResMut<PlayerEntityIndex>,
-    players: Query<(Entity, &SessionId, &Name, &PlanetPosition)>,
+    mut pending: ResMut<PendingHandoffs>,
 ) {
     for event in events.read() {
         let token = event.session_token;
@@ -386,18 +396,22 @@ fn process_connects(
         let game_time = celestial_time.0;
         let planet_pos_val = planet_pos.0;
 
-        // Check if player was already spawned by handoff (re-key by name).
-        let existing = players.iter().find(|(_, _, name, _)| name.0 == event.player_name);
-
-        let spawn_pos = if let Some((entity, old_session, _, pos)) = existing {
-            let spawn = pos.0;
-            // Re-key: remove old index entry, update session component.
-            player_index.0.remove(&old_session.0);
-            commands.entity(entity).insert(SessionId(token));
+        // Check if a handoff was received for this player (by name).
+        let spawn_pos = if let Some(handoff_info) = pending.0.remove(&event.player_name) {
+            info!(player = %event.player_name, "spawning from handoff data");
+            let entity = spawn_player(
+                &mut commands,
+                &mut rapier,
+                config.planet_radius,
+                token,
+                event.player_name.clone(),
+                handoff_info.surface_pos,
+            );
             player_index.0.insert(token, entity);
-            spawn
+            handoff_info.surface_pos
         } else {
             // New player — spawn at default position.
+            warn!(player = %event.player_name, "no handoff data — spawning at default");
             let default_pos = DVec3::new(0.0, config.planet_radius + 2.0, 0.0);
             let entity = spawn_player(
                 &mut commands,
@@ -483,13 +497,11 @@ fn spawn_player(
 }
 
 fn process_handoffs(
-    mut commands: Commands,
     mut events: MessageReader<InboundHandoffMsg>,
-    mut rapier: ResMut<RapierContext>,
     config: Res<PlanetConfig>,
     sys_params: Res<SystemParamsRes>,
     planet_pos: Res<PlanetPositionInSystem>,
-    mut player_index: ResMut<PlayerEntityIndex>,
+    mut pending: ResMut<PendingHandoffs>,
     bridge: Res<NetworkBridge>,
 ) {
     for event in events.read() {
@@ -507,18 +519,18 @@ fn process_handoffs(
         info!(
             player = %h.player_name,
             session = h.session_token.0,
-            "received player handoff, spawning at ship location on surface"
+            surface = format!("({:.1},{:.1},{:.1})", surface_pos.x, surface_pos.y, surface_pos.z),
+            height = format!("{:.1}", surface_pos.length() - config.planet_radius),
+            "handoff received"
         );
 
-        let entity = spawn_player(
-            &mut commands,
-            &mut rapier,
-            config.planet_radius,
-            h.session_token,
-            h.player_name.clone(),
+        // Store handoff data for process_connects to consume when the
+        // player's TCP connection arrives. We don't spawn here because
+        // deferred Commands aren't visible to process_connects in the
+        // same tick (bevy_ecs ApplyDeferred timing).
+        pending.0.insert(h.player_name.clone(), HandoffSpawnInfo {
             surface_pos,
-        );
-        player_index.0.insert(h.session_token, entity);
+        });
 
         // Send HandoffAccepted back to the relay system shard.
         let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
@@ -978,6 +990,7 @@ fn broadcast_world_state(
             grounded: true,
             health: 100.0,
             shield: 100.0,
+            seated: false,
         })
         .collect();
 
@@ -1136,6 +1149,7 @@ fn build_app(
     app.insert_resource(UniverseEpoch(universe_epoch));
     app.insert_resource(PlayerEntityIndex::default());
     app.insert_resource(ShipEntityIndex::default());
+    app.insert_resource(PendingHandoffs::default());
 
     // Messages.
     app.add_message::<ClientConnectedMsg>();
@@ -1165,7 +1179,8 @@ fn build_app(
         (drain_connects, drain_input, drain_quic).in_set(PlanetSet::Bridge),
     );
 
-    // Spawn.
+    // Spawn: process_handoffs stores handoff data in PendingHandoffs resource,
+    // process_connects consumes it to spawn at the correct position.
     app.add_systems(
         Update,
         (

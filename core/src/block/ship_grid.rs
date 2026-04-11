@@ -45,6 +45,20 @@ pub struct ShipGrid {
     /// Per-block wireless power configuration for pre-configured ships.
     /// Sources define circuits; consumers point to a reactor and circuit.
     power_configs: HashMap<IVec3, PowerConfig>,
+    /// Per-block sub-grid assignment for mechanical systems (rotors, pistons).
+    /// Blocks not in this map belong to SubGridId::ROOT (0).
+    /// Reconstructed from grid on startup via BFS from each mechanical mount.
+    sub_grid_assignments: HashMap<IVec3, u32>,
+    /// Persisted signal bindings per block (subscribe + publish).
+    /// Loaded from redb on startup. Used by `add_default_signal_bindings` to restore
+    /// player-configured signal bindings after shard restart.
+    /// Key = block position, Value = (subscribe_bindings, publish_bindings)
+    /// Each binding is (channel_name, property_u8).
+    saved_signal_bindings: HashMap<IVec3, (Vec<(String, u8)>, Vec<(String, u8)>)>,
+    /// Persisted seat control mappings per block.
+    /// Key = block position, Value = Vec<(control_u8, channel_name, property_u8)>.
+    /// If present, replaces the default 13-channel SeatChannelMapping on load.
+    saved_seat_mappings: HashMap<IVec3, Vec<(u8, String, u8)>>,
 }
 
 impl ShipGrid {
@@ -54,6 +68,9 @@ impl ShipGrid {
             channel_overrides: HashMap::new(),
             boost_channels: HashMap::new(),
             power_configs: HashMap::new(),
+            sub_grid_assignments: HashMap::new(),
+            saved_signal_bindings: HashMap::new(),
+            saved_seat_mappings: HashMap::new(),
         }
     }
 
@@ -85,6 +102,60 @@ impl ShipGrid {
     /// Get the power configuration for a block position, if any.
     pub fn power_config(&self, pos: IVec3) -> Option<&PowerConfig> {
         self.power_configs.get(&pos)
+    }
+
+    /// Get the sub-grid assignment for a block position (0 = root grid).
+    pub fn sub_grid_id(&self, pos: IVec3) -> u32 {
+        self.sub_grid_assignments.get(&pos).copied().unwrap_or(0)
+    }
+
+    /// Assign a block to a sub-grid.
+    pub fn set_sub_grid(&mut self, pos: IVec3, sub_grid_id: u32) {
+        if sub_grid_id == 0 {
+            self.sub_grid_assignments.remove(&pos);
+        } else {
+            self.sub_grid_assignments.insert(pos, sub_grid_id);
+        }
+    }
+
+    /// Remove all sub-grid assignments for a given sub-grid ID, returning them to root.
+    pub fn clear_sub_grid(&mut self, sub_grid_id: u32) {
+        self.sub_grid_assignments.retain(|_, &mut id| id != sub_grid_id);
+    }
+
+    /// Iterate all block positions assigned to a specific sub-grid.
+    pub fn blocks_in_sub_grid(&self, sub_grid_id: u32) -> impl Iterator<Item = IVec3> + '_ {
+        self.sub_grid_assignments.iter()
+            .filter(move |(_, id)| **id == sub_grid_id)
+            .map(|(pos, _)| *pos)
+    }
+
+    /// Set saved signal bindings for a block (loaded from persistence).
+    pub fn set_saved_signal_bindings(&mut self, pos: IVec3, subscribe: Vec<(String, u8)>, publish: Vec<(String, u8)>) {
+        if subscribe.is_empty() && publish.is_empty() {
+            self.saved_signal_bindings.remove(&pos);
+        } else {
+            self.saved_signal_bindings.insert(pos, (subscribe, publish));
+        }
+    }
+
+    /// Get saved signal bindings for a block position, if any.
+    pub fn saved_signal_bindings(&self, pos: IVec3) -> Option<&(Vec<(String, u8)>, Vec<(String, u8)>)> {
+        self.saved_signal_bindings.get(&pos)
+    }
+
+    /// Set saved seat control mappings for a block (loaded from persistence).
+    pub fn set_saved_seat_mappings(&mut self, pos: IVec3, mappings: Vec<(u8, String, u8)>) {
+        if mappings.is_empty() {
+            self.saved_seat_mappings.remove(&pos);
+        } else {
+            self.saved_seat_mappings.insert(pos, mappings);
+        }
+    }
+
+    /// Get saved seat control mappings for a block, if any.
+    pub fn saved_seat_mappings(&self, pos: IVec3) -> Option<&Vec<(u8, String, u8)>> {
+        self.saved_seat_mappings.get(&pos)
     }
 
     /// Iterate all channel overrides (position → channel name).
@@ -404,13 +475,29 @@ impl ShipGrid {
     ///
     /// `origin_offset` is subtracted from each block position to center colliders
     /// around the ship's center of mass or a chosen reference point.
+    /// Generate collider shapes for a chunk, optionally filtered by sub-grid membership.
+    ///
+    /// - `sub_grid_filter = None`: include only blocks NOT in any sub-grid (root grid).
+    /// - `sub_grid_filter = Some(id)`: include only blocks in that specific sub-grid.
     pub fn chunk_collider_shapes(
         &self,
         key: IVec3,
         origin_offset: glam::Vec3,
         registry: &BlockRegistry,
     ) -> Vec<(glam::Vec3, glam::Vec3)> {
+        self.chunk_collider_shapes_filtered(key, origin_offset, registry, None)
+    }
+
+    /// Generate collider shapes for a chunk, filtered by sub-grid membership.
+    pub fn chunk_collider_shapes_filtered(
+        &self,
+        key: IVec3,
+        origin_offset: glam::Vec3,
+        registry: &BlockRegistry,
+        sub_grid_filter: Option<u32>,
+    ) -> Vec<(glam::Vec3, glam::Vec3)> {
         let solids = self.solid_blocks_in_chunk(key, registry);
+        let cs_i = CHUNK_SIZE as i32;
         let cs = CHUNK_SIZE as f32;
         let chunk_origin = glam::Vec3::new(
             key.x as f32 * cs,
@@ -420,6 +507,18 @@ impl ShipGrid {
 
         let mut result: Vec<(glam::Vec3, glam::Vec3)> = solids
             .iter()
+            .filter(|&&(lx, ly, lz)| {
+                let world_pos = IVec3::new(
+                    key.x * cs_i + lx as i32,
+                    key.y * cs_i + ly as i32,
+                    key.z * cs_i + lz as i32,
+                );
+                let block_sg = self.sub_grid_id(world_pos);
+                match sub_grid_filter {
+                    None => block_sg == 0,       // root grid: only blocks NOT in any sub-grid
+                    Some(id) => block_sg == id,   // specific sub-grid
+                }
+            })
             .map(|&(lx, ly, lz)| {
                 let world_pos = chunk_origin + glam::Vec3::new(lx as f32 + 0.5, ly as f32 + 0.5, lz as f32 + 0.5);
                 let pos = world_pos - origin_offset;
@@ -811,6 +910,57 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     });
 
     grid
+}
+
+// ---------------------------------------------------------------------------
+// Sub-grid membership computation (BFS flood-fill)
+// ---------------------------------------------------------------------------
+
+/// Compute which blocks belong to a mechanical mount's child sub-grid.
+///
+/// Starting from the block on the output side of the mount (mount_pos + face_offset),
+/// BFS through all face-adjacent solid blocks. The mount block itself is NOT crossed.
+/// Returns the set of block positions in the child sub-grid (may be empty if nothing
+/// is attached to the output face).
+pub fn compute_sub_grid_members(
+    grid: &ShipGrid,
+    registry: &super::registry::BlockRegistry,
+    mount_pos: IVec3,
+    output_face: u8,
+) -> std::collections::HashSet<IVec3> {
+    use std::collections::{HashSet, VecDeque};
+
+    let seed = mount_pos + sub_block::face_to_offset(output_face);
+    let seed_block = grid.get_block(seed.x, seed.y, seed.z);
+    if seed_block == BlockId::AIR {
+        return HashSet::new();
+    }
+
+    let offsets = [
+        IVec3::X, IVec3::NEG_X,
+        IVec3::Y, IVec3::NEG_Y,
+        IVec3::Z, IVec3::NEG_Z,
+    ];
+
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    visited.insert(seed);
+    queue.push_back(seed);
+
+    while let Some(pos) = queue.pop_front() {
+        for &d in &offsets {
+            let neighbor = pos + d;
+            if neighbor == mount_pos { continue; } // don't cross the joint
+            if visited.contains(&neighbor) { continue; }
+            let block = grid.get_block(neighbor.x, neighbor.y, neighbor.z);
+            if block != BlockId::AIR && registry.is_solid(block) {
+                visited.insert(neighbor);
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    visited
 }
 
 #[cfg(test)]
