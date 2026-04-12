@@ -480,6 +480,7 @@ pub fn render_frame(
     gpu: &mut GpuState,
     window: &winit::window::Window,
     uniform_data: &mut [ObjectUniforms],
+    chunk_uniform_map: &mut std::collections::HashMap<voxeldust_core::block::client_chunks::ChunkKey, usize>,
     cam: &CameraParams,
     latest_world_state: Option<&WorldStateData>,
     secondary_world_state: Option<&WorldStateData>,
@@ -507,6 +508,7 @@ pub fn render_frame(
     block_indicators: &[(glam::Vec3, u8, char)],
     config_state: Option<&mut voxeldust_core::signal::config::BlockSignalConfig>,
     gfx_settings: &GraphicsSettings,
+    sub_grid_transforms: &std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
 ) -> hud::ConfigPanelAction {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -575,7 +577,7 @@ pub fn render_frame(
                     gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
                 }
 
-                // Write shadow-space MVPs for block chunks.
+                // Write shadow-space MVPs for block chunks (batched).
                 if let Some(br) = block_renderer {
                     if br.has_chunks() && !ro.block_ships.is_empty() {
                         let block_start = ro.block_uniform_start;
@@ -590,13 +592,16 @@ pub fn render_frame(
                                     );
                                     uniform_data[uniform_idx].mvp = (cascade_matrices[cascade_idx] * chunk_model).to_cols_array_2d();
                                     uniform_data[uniform_idx].model = chunk_model.to_cols_array_2d();
-                                    gpu.queue.write_buffer(
-                                        &gpu.uniform_buf, (uniform_idx as u64) * 256,
-                                        bytemuck::bytes_of(&uniform_data[uniform_idx]),
-                                    );
                                     chunk_idx += 1;
                                 }
                             }
+                        }
+                        if chunk_idx > 0 {
+                            gpu.queue.write_buffer(
+                                &gpu.uniform_buf,
+                                (block_start as u64) * 256,
+                                bytemuck::cast_slice(&uniform_data[block_start..block_start + chunk_idx]),
+                            );
                         }
                     }
                 }
@@ -745,14 +750,13 @@ pub fn render_frame(
         if let Some(br) = block_renderer {
             if br.has_chunks() && !ro.block_ships.is_empty() {
                 let block_start = ro.block_uniform_start;
-                let mut block_draws: Vec<(usize, &ChunkGpuMesh)> = Vec::new();
+                let mut block_draws: Vec<(usize, &ChunkGpuMesh)> = Vec::with_capacity(128);
                 let mut chunk_idx = 0usize;
 
                 // For each ship, draw all cached chunks with that ship's transform.
                 // Build a map of (source, chunk_pos) → uniform_idx for sub-block draw reuse.
-                let mut chunk_uniform_map: std::collections::HashMap<
-                    voxeldust_core::block::client_chunks::ChunkKey, usize
-                > = std::collections::HashMap::new();
+                // Reuses caller-owned HashMap to avoid per-frame allocation.
+                chunk_uniform_map.clear();
 
                 for ship_transform in &ro.block_ships {
                     for source in br.active_sources() {
@@ -812,6 +816,72 @@ pub fn render_frame(
                                 pass.set_vertex_buffer(0, sub_mesh.vertex_buf.slice(..));
                                 pass.set_index_buffer(sub_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                                 pass.draw_indexed(0..sub_mesh.index_count, 0, 0..1);
+                            }
+                        }
+                    }
+
+                    // Draw sub-grid meshes with per-sub-grid transforms (mechanical mounts).
+                    // Two-pass approach: first compute all uniforms, then batch-upload,
+                    // then issue draw calls — avoids per-sub-grid write_buffer overhead.
+                    if !sub_grid_transforms.is_empty() {
+                        let sg_uniform_start = block_start + chunk_idx;
+                        let mut sg_draws: Vec<(usize, &ChunkGpuMesh)> = Vec::with_capacity(32);
+
+                        for ship_transform in &ro.block_ships {
+                            for source in br.active_sources() {
+                                for (sg_key, sg_mesh) in br.sub_grid_meshes_for_source(source) {
+                                    let uniform_idx = block_start + chunk_idx;
+                                    if uniform_idx >= MAX_OBJECTS { break; }
+
+                                    // Compute sub-grid transform from world-space body isometry.
+                                    // T(world_pos) * R(world_rot) * T(-anchor_root)
+                                    // anchor_root is the fixed root-space anchor; world_pos/rot
+                                    // include parent chain (composed on server).
+                                    let sg_local = sub_grid_transforms.get(&sg_key.sub_grid_id)
+                                        .map(|sgt| {
+                                            Mat4::from_translation(sgt.translation)
+                                                * Mat4::from_quat(sgt.rotation)
+                                                * Mat4::from_translation(-sgt.anchor)
+                                        })
+                                        .unwrap_or(Mat4::IDENTITY);
+
+                                    let chunk_offset = Vec3::new(
+                                        sg_key.chunk.x as f32 * CHUNK_SIZE as f32,
+                                        sg_key.chunk.y as f32 * CHUNK_SIZE as f32,
+                                        sg_key.chunk.z as f32 * CHUNK_SIZE as f32,
+                                    );
+                                    let model = ship_transform.base_transform
+                                        * sg_local
+                                        * Mat4::from_translation(chunk_offset);
+                                    let mvp = cam.vp * model;
+
+                                    let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                                    obj.mvp = mvp.to_cols_array_2d();
+                                    obj.model = model.to_cols_array_2d();
+                                    obj.color = [1.0, 1.0, 1.0, 0.0];
+                                    obj.material = [0.1, 0.7, 0.0, 0.0];
+                                    uniform_data[uniform_idx] = obj;
+
+                                    sg_draws.push((uniform_idx, sg_mesh));
+                                    chunk_idx += 1;
+                                }
+                            }
+                        }
+
+                        // Batch-upload all sub-grid uniforms in one write_buffer call.
+                        let sg_uniform_end = block_start + chunk_idx;
+                        if sg_uniform_end > sg_uniform_start {
+                            gpu.queue.write_buffer(
+                                &gpu.uniform_buf,
+                                (sg_uniform_start as u64) * 256,
+                                bytemuck::cast_slice(&uniform_data[sg_uniform_start..sg_uniform_end]),
+                            );
+
+                            for &(uniform_idx, sg_mesh) in &sg_draws {
+                                pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
+                                pass.set_vertex_buffer(0, sg_mesh.vertex_buf.slice(..));
+                                pass.set_index_buffer(sg_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                                pass.draw_indexed(0..sg_mesh.index_count, 0, 0..1);
                             }
                         }
                     }

@@ -202,26 +202,28 @@ impl CloudSystem {
         self.weather_map_view.as_ref().unwrap_or(&self.dummy_2d_view)
     }
 
-    /// Kick off asynchronous weather map generation if enough time has passed.
+    /// Kick off asynchronous weather map generation for a planet.
     /// Non-blocking: spawns a background thread. Call `poll_weather_map()` each
     /// frame to check for completion and upload to GPU.
+    ///
+    /// Weather map is generated ONCE per planet (static large-scale pattern).
+    /// Cloud animation comes from wind scrolling the 3D noise in the shader.
+    /// Only regenerates when switching to a different planet.
     pub fn request_weather_update(
         &mut self,
         planet: &PlanetParams,
-        game_time: f64,
+        _game_time: f64,
     ) {
         // Don't start if already generating.
         if self.weather_gen_handle.is_some() { return; }
 
-        // Only regenerate if enough game-time has passed (60 seconds).
-        if (game_time - self.last_weather_time).abs() < 60.0 { return; }
+        // Only generate once per planet — skip if already generated for this seed.
+        if self.weather_map_ready && self.current_planet_seed == Some(planet.planet_seed) { return; }
 
-        self.last_weather_time = game_time;
         let planet_clone = planet.clone();
-        let gt = game_time;
-
+        // Use time=0 for static weather pattern. Cloud motion comes from wind scrolling.
         self.weather_gen_handle = Some(std::thread::spawn(move || {
-            voxeldust_core::weather::WeatherMap::generate(&planet_clone, gt)
+            voxeldust_core::weather::WeatherMap::generate(&planet_clone, 0.0)
         }));
     }
 

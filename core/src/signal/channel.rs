@@ -366,6 +366,26 @@ impl SignalChannelTable {
         }
     }
 
+    /// Directly set a channel's value (post-merge). Used by custom ship system blocks
+    /// (flight computer, hover module, autopilot, engine controller) that read-modify-write
+    /// channel values in their processing pass after signal_publish + merge_pending.
+    pub fn set_value_direct(&mut self, id: ChannelId, value: SignalValue) {
+        if let Some(ch) = self.channels.get_mut(id.0 as usize).and_then(|s| s.as_mut()) {
+            if ch.value != value {
+                ch.value = value;
+                if !ch.dirty {
+                    ch.dirty = true;
+                    self.dirty_set.push(id);
+                }
+            }
+        }
+    }
+
+    /// Read a channel's current value by ID (after merge). Returns Float(0.0) if not found.
+    pub fn read_value(&self, id: ChannelId) -> SignalValue {
+        self.get_by_id(id).map(|ch| ch.value).unwrap_or(SignalValue::Float(0.0))
+    }
+
     /// Collect all dirty channels with non-Local scope (for network broadcast).
     /// Only iterates the dirty set — O(dirty_count) instead of O(total_channels).
     pub fn drain_remote_dirty(&self) -> Vec<(String, SignalValue, SignalScope)> {

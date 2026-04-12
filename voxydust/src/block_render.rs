@@ -123,6 +123,57 @@ pub fn generate_chunk_gpu_mesh(
     quads_to_mesh(&quads, registry)
 }
 
+/// Generate a GPU mesh for a chunk filtered by sub-grid membership.
+///
+/// - `sub_grid_filter = None`: mesh only root-grid blocks.
+/// - `sub_grid_filter = Some(id)`: mesh only blocks in the specified sub-grid.
+pub fn generate_chunk_gpu_mesh_filtered(
+    chunk: &ChunkStorage,
+    chunk_key: glam::IVec3,
+    neighbors: &[Option<&ChunkStorage>; 6],
+    registry: &BlockRegistry,
+    transparent_pass: bool,
+    sub_grid_assignments: &std::collections::HashMap<glam::IVec3, u32>,
+    sub_grid_filter: Option<u32>,
+) -> ChunkMeshData {
+    let quads = chunk_mesher::mesh_chunk_filtered(
+        chunk, chunk_key, neighbors, registry, transparent_pass,
+        sub_grid_assignments, sub_grid_filter,
+    );
+    quads_to_mesh(&quads, registry)
+}
+
+/// Like `generate_chunk_gpu_mesh`, but reuses a padded voxel buffer to avoid 512KB
+/// allocation per mesh call. Use when meshing many chunks in a loop.
+pub fn generate_chunk_gpu_mesh_with_buf(
+    chunk: &ChunkStorage,
+    neighbors: &[Option<&ChunkStorage>; 6],
+    registry: &BlockRegistry,
+    transparent_pass: bool,
+    voxel_buf: &mut Vec<u16>,
+) -> ChunkMeshData {
+    let quads = chunk_mesher::mesh_chunk_with_buf(chunk, neighbors, registry, transparent_pass, voxel_buf);
+    quads_to_mesh(&quads, registry)
+}
+
+/// Like `generate_chunk_gpu_mesh_filtered`, but reuses a padded voxel buffer.
+pub fn generate_chunk_gpu_mesh_filtered_with_buf(
+    chunk: &ChunkStorage,
+    chunk_key: glam::IVec3,
+    neighbors: &[Option<&ChunkStorage>; 6],
+    registry: &BlockRegistry,
+    transparent_pass: bool,
+    sub_grid_assignments: &std::collections::HashMap<glam::IVec3, u32>,
+    sub_grid_filter: Option<u32>,
+    voxel_buf: &mut Vec<u16>,
+) -> ChunkMeshData {
+    let quads = chunk_mesher::mesh_chunk_filtered_with_buf(
+        chunk, chunk_key, neighbors, registry, transparent_pass,
+        sub_grid_assignments, sub_grid_filter, voxel_buf,
+    );
+    quads_to_mesh(&quads, registry)
+}
+
 #[inline]
 fn block_color(block_id: u16, registry: &BlockRegistry) -> [f32; 3] {
     let def = registry.get(BlockId::from_u16(block_id));
@@ -144,6 +195,14 @@ pub struct ChunkGpuMesh {
     pub index_count: u32,
 }
 
+/// Key for a sub-grid chunk mesh: identifies a specific sub-grid's blocks within a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SubGridMeshKey {
+    pub source: ChunkSourceId,
+    pub chunk: IVec3,
+    pub sub_grid_id: u32,
+}
+
 /// Manages all block-related GPU state: pipelines + per-source per-chunk mesh buffers.
 ///
 /// Chunks are keyed by `ChunkKey = (ChunkSourceId, IVec3)` so multiple sources
@@ -153,11 +212,14 @@ pub struct BlockRenderer {
     pub pipeline: wgpu::RenderPipeline,
     /// Shadow depth-only pipeline for block meshes (CSM cascade rendering).
     pub shadow_pipeline: wgpu::RenderPipeline,
-    /// Per-source, per-chunk GPU mesh buffers for full blocks.
+    /// Per-source, per-chunk GPU mesh buffers for full blocks (root grid only).
     chunk_meshes: HashMap<ChunkKey, ChunkGpuMesh>,
     /// Per-source, per-chunk GPU mesh buffers for sub-block elements.
     /// Uses the same vertex format and pipeline as full blocks.
     sub_block_meshes: HashMap<ChunkKey, ChunkGpuMesh>,
+    /// Per-sub-grid, per-chunk GPU mesh buffers for mechanical sub-grid blocks.
+    /// These are drawn with per-sub-grid transforms (rotation/translation from server).
+    sub_grid_meshes: HashMap<SubGridMeshKey, ChunkGpuMesh>,
 }
 
 impl BlockRenderer {
@@ -285,6 +347,7 @@ impl BlockRenderer {
             shadow_pipeline,
             chunk_meshes: HashMap::new(),
             sub_block_meshes: HashMap::new(),
+            sub_grid_meshes: HashMap::new(),
         }
     }
 
@@ -332,6 +395,7 @@ impl BlockRenderer {
     pub fn remove_source(&mut self, source: ChunkSourceId) {
         self.chunk_meshes.retain(|k, _| k.source != source);
         self.sub_block_meshes.retain(|k, _| k.source != source);
+        self.sub_grid_meshes.retain(|k, _| k.source != source);
     }
 
     /// Total number of chunks with active GPU meshes across all sources.
@@ -407,6 +471,57 @@ impl BlockRenderer {
         self.sub_block_meshes.iter()
             .filter(move |(k, _)| k.source == source)
             .map(|(k, m)| (k.chunk, m))
+    }
+
+    // -----------------------------------------------------------------------
+    // Sub-grid mesh management (mechanical mounts: rotors, pistons)
+    // -----------------------------------------------------------------------
+
+    /// Upload a sub-grid chunk mesh to the GPU.
+    pub fn upload_sub_grid_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        key: SubGridMeshKey,
+        mesh: &ChunkMeshData,
+    ) {
+        if mesh.vertices.is_empty() {
+            self.sub_grid_meshes.remove(&key);
+            return;
+        }
+
+        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("sg{}_vb_s{}_c{}", key.sub_grid_id, key.source.0, key.chunk)),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("sg{}_ib_s{}_c{}", key.sub_grid_id, key.source.0, key.chunk)),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        self.sub_grid_meshes.insert(key, ChunkGpuMesh {
+            vertex_buf,
+            index_buf,
+            index_count: mesh.indices.len() as u32,
+        });
+    }
+
+    /// Remove all sub-grid meshes for a specific sub-grid ID (when sub-grid is destroyed).
+    pub fn remove_sub_grid_meshes(&mut self, sub_grid_id: u32) {
+        self.sub_grid_meshes.retain(|k, _| k.sub_grid_id != sub_grid_id);
+    }
+
+    /// Remove sub-grid meshes for a specific source (when source is disconnected).
+    pub fn remove_sub_grid_source(&mut self, source: ChunkSourceId) {
+        self.sub_grid_meshes.retain(|k, _| k.source != source);
+    }
+
+    /// Iterate all sub-grid meshes belonging to a specific source.
+    pub fn sub_grid_meshes_for_source(&self, source: ChunkSourceId) -> impl Iterator<Item = (&SubGridMeshKey, &ChunkGpuMesh)> {
+        self.sub_grid_meshes.iter()
+            .filter(move |(k, _)| k.source == source)
     }
 
     // -----------------------------------------------------------------------

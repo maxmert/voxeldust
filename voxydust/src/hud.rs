@@ -681,7 +681,7 @@ fn catmull_rom(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t
 // Block signal config panel
 // ---------------------------------------------------------------------------
 
-use voxeldust_core::signal::components::SeatControl;
+use voxeldust_core::signal::components::{SeatInputSource, KeyMode, AxisDirection};
 use voxeldust_core::signal::config::BlockSignalConfig;
 use voxeldust_core::signal::types::SignalProperty;
 
@@ -705,7 +705,9 @@ fn functional_kind_name(kind: u8) -> &'static str {
         (4, "Power Conduit"), (5, "Seat"), (6, "Gravity Gen"), (7, "Shield Emitter"),
         (8, "Shield Gen"), (9, "Air Compressor"), (10, "Antenna"), (11, "Rotor"),
         (12, "Piston"), (13, "Rail"), (14, "Rail Junction"), (15, "Rail Signal"),
-        (16, "Signal Converter"), (17, "Sensor"), (18, "Computer"),
+        (16, "Signal Converter"), (17, "Sensor"), (18, "Computer"), (19, "Cruise Drive"),
+        (20, "Flight Computer"), (21, "Hover Module"), (22, "Autopilot"),
+        (23, "Warp Computer"), (24, "Engine Controller"),
     ];
     NAMES.iter().find(|(k, _)| *k == kind).map(|(_, n)| *n).unwrap_or("Unknown")
 }
@@ -931,10 +933,15 @@ fn draw_block_config_panel(
                         config.subscribe_bindings.remove(idx);
                     }
                     if ui.button(egui::RichText::new("+ Add Subscribe").color(accent)).clicked() {
+                        let default_prop = match config.kind {
+                            k if k == voxeldust_core::block::FunctionalBlockKind::Rotor as u8 => SignalProperty::Angle,
+                            k if k == voxeldust_core::block::FunctionalBlockKind::Piston as u8 => SignalProperty::Extension,
+                            _ => SignalProperty::Throttle,
+                        };
                         config.subscribe_bindings.push(
                             voxeldust_core::signal::config::SubscribeBindingConfig {
                                 channel_name: "new-channel".into(),
-                                property: SignalProperty::Throttle,
+                                property: default_prop,
                             },
                         );
                     }
@@ -983,39 +990,68 @@ fn draw_block_config_panel(
 
             ui.add_space(4.0);
 
-            // --- Seat Mappings ---
+            // --- Seat Input Bindings ---
             if !config.seat_mappings.is_empty() || config.kind == voxeldust_core::block::FunctionalBlockKind::Seat as u8 {
                 egui::CollapsingHeader::new(
-                    egui::RichText::new("SEAT CONTROL MAPPINGS").color(accent).size(13.0),
+                    egui::RichText::new("SEAT INPUT BINDINGS").color(accent).size(13.0),
                 )
                     .default_open(true)
                     .show(ui, |ui| {
+                        // Seated channel.
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("SEATED SIGNAL:").color(accent).size(11.0));
+                            channel_name_input(ui, "seated_ch", &mut config.seated_channel_name, &config.available_channels);
+                        });
+                        ui.add_space(4.0);
+
                         let mut remove_idx = None;
                         for (i, mapping) in config.seat_mappings.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
-                                // Control dropdown.
-                                egui::ComboBox::from_id_salt(format!("seat_ctrl_{i}"))
-                                    .selected_text(mapping.control.label())
-                                    .width(120.0)
+                                // Label.
+                                ui.add(egui::TextEdit::singleline(&mut mapping.label).desired_width(90.0));
+                                // Source dropdown.
+                                egui::ComboBox::from_id_salt(format!("seat_src_{i}"))
+                                    .selected_text(mapping.source.label())
+                                    .width(70.0)
                                     .show_ui(ui, |ui| {
-                                        for &ctrl in SeatControl::available_for_kind(
-                                            voxeldust_core::block::FunctionalBlockKind::Seat,
-                                        ) {
-                                            ui.selectable_value(&mut mapping.control, ctrl, ctrl.label());
+                                        for src in [SeatInputSource::Key, SeatInputSource::MouseMoveX, SeatInputSource::MouseMoveY, SeatInputSource::ScrollWheel] {
+                                            ui.selectable_value(&mut mapping.source, src, src.label());
                                         }
                                     });
-                                ui.label(egui::RichText::new("->").color(accent));
-                                // Channel name (free text).
+                                // Source-specific controls.
+                                match mapping.source {
+                                    SeatInputSource::Key => {
+                                        // Key name.
+                                        let display = voxeldust_core::signal::key_names::key_display_name(&mapping.key_name);
+                                        ui.label(egui::RichText::new(display).strong().color(egui::Color32::WHITE));
+                                        // Mode dropdown.
+                                        egui::ComboBox::from_id_salt(format!("seat_mode_{i}"))
+                                            .selected_text(mapping.key_mode.label())
+                                            .width(55.0)
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut mapping.key_mode, KeyMode::Momentary, KeyMode::Momentary.label());
+                                                ui.selectable_value(&mut mapping.key_mode, KeyMode::Toggle, KeyMode::Toggle.label());
+                                            });
+                                    }
+                                    SeatInputSource::MouseMoveX | SeatInputSource::MouseMoveY => {
+                                        // Direction toggle.
+                                        egui::ComboBox::from_id_salt(format!("seat_dir_{i}"))
+                                            .selected_text(mapping.axis_direction.label())
+                                            .width(90.0)
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut mapping.axis_direction, AxisDirection::Positive, AxisDirection::Positive.label());
+                                                ui.selectable_value(&mut mapping.axis_direction, AxisDirection::Negative, AxisDirection::Negative.label());
+                                                ui.selectable_value(&mut mapping.axis_direction, AxisDirection::Both, AxisDirection::Both.label());
+                                            });
+                                    }
+                                    SeatInputSource::ScrollWheel => {
+                                        ui.label(egui::RichText::new("accumulative").color(egui::Color32::GRAY));
+                                    }
+                                }
+                                ui.label(egui::RichText::new("\u{2192}").color(accent));
+                                // Channel name.
                                 channel_name_input(ui, &format!("seat_ch_{i}"), &mut mapping.channel_name, &config.available_channels);
-                                // Property dropdown.
-                                egui::ComboBox::from_id_salt(format!("seat_prop_{i}"))
-                                    .selected_text(property_name(mapping.property))
-                                    .width(80.0)
-                                    .show_ui(ui, |ui| {
-                                        for &(name, prop) in SIGNAL_PROPERTY_NAMES {
-                                            ui.selectable_value(&mut mapping.property, prop, name);
-                                        }
-                                    });
+                                // Remove button.
                                 if ui.small_button(egui::RichText::new("-").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
                                     remove_idx = Some(i);
                                 }
@@ -1027,7 +1063,11 @@ fn draw_block_config_panel(
                         if ui.button(egui::RichText::new("+ Add Binding").color(accent)).clicked() {
                             config.seat_mappings.push(
                                 voxeldust_core::signal::config::SeatInputBindingConfig {
-                                    control: SeatControl::ThrustForward,
+                                    label: "New".into(),
+                                    source: SeatInputSource::Key,
+                                    key_name: "KeyW".into(),
+                                    key_mode: KeyMode::Momentary,
+                                    axis_direction: AxisDirection::Both,
                                     channel_name: "new-channel".into(),
                                     property: SignalProperty::Throttle,
                                 },

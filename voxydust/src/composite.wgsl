@@ -321,23 +321,22 @@ fn remap_cloud(value: f32, old_lo: f32, old_hi: f32, new_lo: f32, new_hi: f32) -
 }
 
 /// Height gradient for cloud type blending (Nubis).
+/// Uses smoothstep for soft transitions — no visible layering.
 /// type_blend: 0=stratus(flat), 0.5=cumulus(puffy), 1=cumulonimbus(towering).
 fn cloud_height_gradient(height_frac: f32, type_blend: f32) -> f32 {
-    // Stratus: thin layer concentrated at base.
-    let stratus = saturate(remap_cloud(height_frac, 0.0, 0.1, 0.0, 1.0))
-                * saturate(remap_cloud(height_frac, 0.2, 0.3, 1.0, 0.0));
-    // Cumulus: puffy, peaks in middle.
-    let cumulus = saturate(remap_cloud(height_frac, 0.0, 0.15, 0.0, 1.0))
-               * saturate(remap_cloud(height_frac, 0.5, 0.9, 1.0, 0.0));
+    // Stratus: thin flat layer near base.
+    let stratus = smoothstep(0.0, 0.15, height_frac) * (1.0 - smoothstep(0.15, 0.4, height_frac));
+    // Cumulus: puffy, peaks in middle, tapers smoothly at top.
+    let cumulus = smoothstep(0.0, 0.2, height_frac) * (1.0 - smoothstep(0.4, 0.95, height_frac));
     // Cumulonimbus: towering, fills most of the layer.
-    let cb = saturate(remap_cloud(height_frac, 0.0, 0.1, 0.0, 1.0))
-           * saturate(remap_cloud(height_frac, 0.7, 1.0, 1.0, 0.0));
+    let cb = smoothstep(0.0, 0.15, height_frac) * (1.0 - smoothstep(0.6, 1.0, height_frac));
 
-    // Blend between types.
-    if type_blend < 0.5 {
-        return mix(stratus, cumulus, type_blend * 2.0);
-    }
-    return mix(cumulus, cb, (type_blend - 0.5) * 2.0);
+    // Smooth blend between types (no branching).
+    return mix(
+        mix(stratus, cumulus, saturate(type_blend * 2.0)),
+        cb,
+        saturate((type_blend - 0.5) * 2.0)
+    );
 }
 
 /// Sample the precomputed weather map for cloud coverage and type at a world position.
@@ -481,6 +480,15 @@ fn cloud_ray_march(
     let max_steps = 64u;
     let dt = ray_length / f32(max_steps);
 
+    // Per-pixel temporal jitter: offsets each pixel's first sample by 0-1 step.
+    // Converts regular stepping banding into imperceptible noise that averages
+    // over frames. Uses interleaved gradient noise (Jimenez 2014 / Call of Duty).
+    let pixel = vec2<f32>(
+        fract(ray_origin.x * 1000.0 + ray_dir.x * 500.0),
+        fract(ray_origin.y * 1000.0 + ray_dir.y * 500.0)
+    ) * 1000.0;
+    let jitter = fract(52.9829189 * fract(0.06711056 * pixel.x + 0.00583715 * pixel.y));
+
     let cos_angle = dot(ray_dir, clouds.sun.xyz);
     let phase = max(hg_phase(cos_angle, 0.8), hg_phase(cos_angle, -0.5));
     let absorption = clouds.density_params.w;
@@ -488,7 +496,7 @@ fn cloud_ray_march(
     let scatter_color = clouds.scatter.xyz;
 
     for (var i = 0u; i < max_steps; i++) {
-        let t = t_start + (f32(i) + 0.5) * dt;
+        let t = t_start + (f32(i) + jitter) * dt;
         let sample_pos = ray_origin + ray_dir * t;
         let density = cloud_density(sample_pos);
 

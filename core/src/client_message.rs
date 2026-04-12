@@ -156,6 +156,232 @@ fn decode_nearby_reactors(
     }).collect()).unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// Seat binding encode/decode (shared by BlockConfigState, BlockConfigUpdate, SeatBindingsNotify)
+// ---------------------------------------------------------------------------
+
+fn encode_seat_binding<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    s: &crate::signal::config::SeatInputBindingConfig,
+) -> flatbuffers::WIPOffset<fb::SeatBindingFB<'a>> {
+    let lbl = builder.create_string(&s.label);
+    let kn = builder.create_string(&s.key_name);
+    let ch = builder.create_string(&s.channel_name);
+    fb::SeatBindingFB::create(builder, &fb::SeatBindingFBArgs {
+        label: Some(lbl),
+        source: s.source as u8,
+        key_name: Some(kn),
+        key_mode: s.key_mode as u8,
+        axis_direction: s.axis_direction as u8,
+        channel_name: Some(ch),
+        property: s.property as u8,
+    })
+}
+
+fn decode_seat_binding(s: &fb::SeatBindingFB<'_>) -> crate::signal::config::SeatInputBindingConfig {
+    use crate::signal::{AxisDirection, KeyMode, SeatInputSource};
+    crate::signal::config::SeatInputBindingConfig {
+        label: s.label().unwrap_or("").to_string(),
+        source: SeatInputSource::from_u8(s.source()).unwrap_or(SeatInputSource::Key),
+        key_name: s.key_name().unwrap_or("").to_string(),
+        key_mode: KeyMode::from_u8(s.key_mode()).unwrap_or(KeyMode::Momentary),
+        axis_direction: AxisDirection::from_u8(s.axis_direction()).unwrap_or(AxisDirection::Positive),
+        channel_name: s.channel_name().unwrap_or("").to_string(),
+        property: u8_to_signal_property(s.property()),
+    }
+}
+
+fn encode_seat_bindings_vec<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    bindings: &[crate::signal::config::SeatInputBindingConfig],
+) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::SeatBindingFB<'a>>>> {
+    let entries: Vec<_> = bindings.iter().map(|s| encode_seat_binding(builder, s)).collect();
+    builder.create_vector(&entries)
+}
+
+fn decode_seat_bindings_vec(
+    v: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::SeatBindingFB<'_>>>>,
+) -> Vec<crate::signal::config::SeatInputBindingConfig> {
+    v.map(|vec| vec.iter().map(|s| decode_seat_binding(&s)).collect()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Custom block config encode/decode
+// ---------------------------------------------------------------------------
+
+fn encode_flight_computer_config<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cfg: &crate::signal::config::FlightComputerConfig,
+) -> flatbuffers::WIPOffset<fb::FlightComputerConfigFB<'a>> {
+    let yc = builder.create_string(&cfg.yaw_cw_channel);
+    let ycc = builder.create_string(&cfg.yaw_ccw_channel);
+    let pu = builder.create_string(&cfg.pitch_up_channel);
+    let pd = builder.create_string(&cfg.pitch_down_channel);
+    let rc = builder.create_string(&cfg.roll_cw_channel);
+    let rcc = builder.create_string(&cfg.roll_ccw_channel);
+    fb::FlightComputerConfigFB::create(builder, &fb::FlightComputerConfigFBArgs {
+        yaw_cw_channel: Some(yc), yaw_ccw_channel: Some(ycc),
+        pitch_up_channel: Some(pu), pitch_down_channel: Some(pd),
+        roll_cw_channel: Some(rc), roll_ccw_channel: Some(rcc),
+        damping_gain: cfg.damping_gain, dead_zone: cfg.dead_zone, max_correction: cfg.max_correction,
+    })
+}
+
+fn decode_flight_computer_config(fb: &fb::FlightComputerConfigFB<'_>) -> crate::signal::config::FlightComputerConfig {
+    crate::signal::config::FlightComputerConfig {
+        yaw_cw_channel: fb.yaw_cw_channel().unwrap_or("").into(),
+        yaw_ccw_channel: fb.yaw_ccw_channel().unwrap_or("").into(),
+        pitch_up_channel: fb.pitch_up_channel().unwrap_or("").into(),
+        pitch_down_channel: fb.pitch_down_channel().unwrap_or("").into(),
+        roll_cw_channel: fb.roll_cw_channel().unwrap_or("").into(),
+        roll_ccw_channel: fb.roll_ccw_channel().unwrap_or("").into(),
+        damping_gain: fb.damping_gain(), dead_zone: fb.dead_zone(), max_correction: fb.max_correction(),
+    }
+}
+
+fn encode_hover_module_config<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cfg: &crate::signal::config::HoverModuleConfig,
+) -> flatbuffers::WIPOffset<fb::HoverModuleConfigFB<'a>> {
+    let tf = builder.create_string(&cfg.thrust_forward_channel);
+    let tr = builder.create_string(&cfg.thrust_reverse_channel);
+    let tri = builder.create_string(&cfg.thrust_right_channel);
+    let tl = builder.create_string(&cfg.thrust_left_channel);
+    let tu = builder.create_string(&cfg.thrust_up_channel);
+    let td = builder.create_string(&cfg.thrust_down_channel);
+    let yc = builder.create_string(&cfg.yaw_cw_channel);
+    let ycc = builder.create_string(&cfg.yaw_ccw_channel);
+    let pu = builder.create_string(&cfg.pitch_up_channel);
+    let pd = builder.create_string(&cfg.pitch_down_channel);
+    let rc = builder.create_string(&cfg.roll_cw_channel);
+    let rcc = builder.create_string(&cfg.roll_ccw_channel);
+    let ac = builder.create_string(&cfg.activate_channel);
+    let cc = builder.create_string(&cfg.cutoff_channel);
+    fb::HoverModuleConfigFB::create(builder, &fb::HoverModuleConfigFBArgs {
+        thrust_forward_channel: Some(tf), thrust_reverse_channel: Some(tr),
+        thrust_right_channel: Some(tri), thrust_left_channel: Some(tl),
+        thrust_up_channel: Some(tu), thrust_down_channel: Some(td),
+        yaw_cw_channel: Some(yc), yaw_ccw_channel: Some(ycc),
+        pitch_up_channel: Some(pu), pitch_down_channel: Some(pd),
+        roll_cw_channel: Some(rc), roll_ccw_channel: Some(rcc),
+        activate_channel: Some(ac), cutoff_channel: Some(cc),
+    })
+}
+
+fn decode_hover_module_config(fb: &fb::HoverModuleConfigFB<'_>) -> crate::signal::config::HoverModuleConfig {
+    crate::signal::config::HoverModuleConfig {
+        thrust_forward_channel: fb.thrust_forward_channel().unwrap_or("").into(),
+        thrust_reverse_channel: fb.thrust_reverse_channel().unwrap_or("").into(),
+        thrust_right_channel: fb.thrust_right_channel().unwrap_or("").into(),
+        thrust_left_channel: fb.thrust_left_channel().unwrap_or("").into(),
+        thrust_up_channel: fb.thrust_up_channel().unwrap_or("").into(),
+        thrust_down_channel: fb.thrust_down_channel().unwrap_or("").into(),
+        yaw_cw_channel: fb.yaw_cw_channel().unwrap_or("").into(),
+        yaw_ccw_channel: fb.yaw_ccw_channel().unwrap_or("").into(),
+        pitch_up_channel: fb.pitch_up_channel().unwrap_or("").into(),
+        pitch_down_channel: fb.pitch_down_channel().unwrap_or("").into(),
+        roll_cw_channel: fb.roll_cw_channel().unwrap_or("").into(),
+        roll_ccw_channel: fb.roll_ccw_channel().unwrap_or("").into(),
+        activate_channel: fb.activate_channel().unwrap_or("").into(),
+        cutoff_channel: fb.cutoff_channel().unwrap_or("").into(),
+    }
+}
+
+fn encode_autopilot_config<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cfg: &crate::signal::config::AutopilotBlockConfig,
+) -> flatbuffers::WIPOffset<fb::AutopilotConfigFB<'a>> {
+    let yc = builder.create_string(&cfg.yaw_cw_channel);
+    let ycc = builder.create_string(&cfg.yaw_ccw_channel);
+    let pu = builder.create_string(&cfg.pitch_up_channel);
+    let pd = builder.create_string(&cfg.pitch_down_channel);
+    let rc = builder.create_string(&cfg.roll_cw_channel);
+    let rcc = builder.create_string(&cfg.roll_ccw_channel);
+    let ec = builder.create_string(&cfg.engage_channel);
+    fb::AutopilotConfigFB::create(builder, &fb::AutopilotConfigFBArgs {
+        yaw_cw_channel: Some(yc), yaw_ccw_channel: Some(ycc),
+        pitch_up_channel: Some(pu), pitch_down_channel: Some(pd),
+        roll_cw_channel: Some(rc), roll_ccw_channel: Some(rcc),
+        engage_channel: Some(ec),
+    })
+}
+
+fn decode_autopilot_config(fb: &fb::AutopilotConfigFB<'_>) -> crate::signal::config::AutopilotBlockConfig {
+    crate::signal::config::AutopilotBlockConfig {
+        yaw_cw_channel: fb.yaw_cw_channel().unwrap_or("").into(),
+        yaw_ccw_channel: fb.yaw_ccw_channel().unwrap_or("").into(),
+        pitch_up_channel: fb.pitch_up_channel().unwrap_or("").into(),
+        pitch_down_channel: fb.pitch_down_channel().unwrap_or("").into(),
+        roll_cw_channel: fb.roll_cw_channel().unwrap_or("").into(),
+        roll_ccw_channel: fb.roll_ccw_channel().unwrap_or("").into(),
+        engage_channel: fb.engage_channel().unwrap_or("").into(),
+    }
+}
+
+fn encode_warp_computer_config<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cfg: &crate::signal::config::WarpComputerConfig,
+) -> flatbuffers::WIPOffset<fb::WarpComputerConfigFB<'a>> {
+    let tc = builder.create_string(&cfg.target_channel);
+    let cc = builder.create_string(&cfg.confirm_channel);
+    fb::WarpComputerConfigFB::create(builder, &fb::WarpComputerConfigFBArgs {
+        target_channel: Some(tc), confirm_channel: Some(cc),
+    })
+}
+
+fn decode_warp_computer_config(fb: &fb::WarpComputerConfigFB<'_>) -> crate::signal::config::WarpComputerConfig {
+    crate::signal::config::WarpComputerConfig {
+        target_channel: fb.target_channel().unwrap_or("").into(),
+        confirm_channel: fb.confirm_channel().unwrap_or("").into(),
+    }
+}
+
+fn encode_engine_controller_config<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cfg: &crate::signal::config::EngineControllerConfig,
+) -> flatbuffers::WIPOffset<fb::EngineControllerConfigFB<'a>> {
+    let tf = builder.create_string(&cfg.thrust_forward_channel);
+    let tr = builder.create_string(&cfg.thrust_reverse_channel);
+    let tri = builder.create_string(&cfg.thrust_right_channel);
+    let tl = builder.create_string(&cfg.thrust_left_channel);
+    let tu = builder.create_string(&cfg.thrust_up_channel);
+    let td = builder.create_string(&cfg.thrust_down_channel);
+    let yc = builder.create_string(&cfg.yaw_cw_channel);
+    let ycc = builder.create_string(&cfg.yaw_ccw_channel);
+    let pu = builder.create_string(&cfg.pitch_up_channel);
+    let pd = builder.create_string(&cfg.pitch_down_channel);
+    let rc = builder.create_string(&cfg.roll_cw_channel);
+    let rcc = builder.create_string(&cfg.roll_ccw_channel);
+    let tc = builder.create_string(&cfg.toggle_channel);
+    fb::EngineControllerConfigFB::create(builder, &fb::EngineControllerConfigFBArgs {
+        thrust_forward_channel: Some(tf), thrust_reverse_channel: Some(tr),
+        thrust_right_channel: Some(tri), thrust_left_channel: Some(tl),
+        thrust_up_channel: Some(tu), thrust_down_channel: Some(td),
+        yaw_cw_channel: Some(yc), yaw_ccw_channel: Some(ycc),
+        pitch_up_channel: Some(pu), pitch_down_channel: Some(pd),
+        roll_cw_channel: Some(rc), roll_ccw_channel: Some(rcc),
+        toggle_channel: Some(tc),
+    })
+}
+
+fn decode_engine_controller_config(fb: &fb::EngineControllerConfigFB<'_>) -> crate::signal::config::EngineControllerConfig {
+    crate::signal::config::EngineControllerConfig {
+        thrust_forward_channel: fb.thrust_forward_channel().unwrap_or("").into(),
+        thrust_reverse_channel: fb.thrust_reverse_channel().unwrap_or("").into(),
+        thrust_right_channel: fb.thrust_right_channel().unwrap_or("").into(),
+        thrust_left_channel: fb.thrust_left_channel().unwrap_or("").into(),
+        thrust_up_channel: fb.thrust_up_channel().unwrap_or("").into(),
+        thrust_down_channel: fb.thrust_down_channel().unwrap_or("").into(),
+        yaw_cw_channel: fb.yaw_cw_channel().unwrap_or("").into(),
+        yaw_ccw_channel: fb.yaw_ccw_channel().unwrap_or("").into(),
+        pitch_up_channel: fb.pitch_up_channel().unwrap_or("").into(),
+        pitch_down_channel: fb.pitch_down_channel().unwrap_or("").into(),
+        roll_cw_channel: fb.roll_cw_channel().unwrap_or("").into(),
+        roll_ccw_channel: fb.roll_ccw_channel().unwrap_or("").into(),
+        toggle_channel: fb.toggle_channel().unwrap_or("").into(),
+    }
+}
+
 fn u8_to_signal_property(v: u8) -> SignalProperty {
     match v {
         0 => SignalProperty::Active,
@@ -200,6 +426,17 @@ pub enum ServerMsg {
     ChunkDelta(ChunkDeltaData),
     /// Signal config snapshot for a functional block (server → client).
     BlockConfigState(crate::signal::config::BlockSignalConfig),
+    /// Seat bindings notification (server → client when entering a seat).
+    SeatBindingsNotify(SeatBindingsNotifyData),
+    /// Sub-grid block assignment update (TCP, reliable).
+    SubGridAssignmentUpdate(SubGridAssignmentData),
+}
+
+/// Seat bindings sent to client when player enters a seat.
+#[derive(Debug, Clone)]
+pub struct SeatBindingsNotifyData {
+    pub bindings: Vec<crate::signal::config::SeatInputBindingConfig>,
+    pub seated_channel_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -263,10 +500,13 @@ pub struct PlayerInputData {
     pub thrust_limiter: f32,
     /// Roll input: -1.0 (Q, CCW) to +1.0 (E, CW). 0.0 when neither pressed.
     pub roll: f32,
-    /// Supercruise active (C key toggle).
+    /// Supercruise active (C key toggle). Legacy — use seat_values for generic seat.
     pub cruise: bool,
-    /// Atmosphere compensation (hover) active (H key toggle).
+    /// Atmosphere compensation (hover) active (H key toggle). Legacy — use seat_values.
     pub atmo_comp: bool,
+    /// Per-binding float values for the generic seat system.
+    /// Length matches the seat's binding count. Empty when walking or using legacy path.
+    pub seat_values: Vec<f32>,
 }
 
 /// Block edit action codes (client → server).
@@ -319,6 +559,8 @@ pub struct WorldStateData {
     pub warp_target_star_index: u32,
     /// Server-authoritative autopilot state (None = autopilot inactive).
     pub autopilot: Option<AutopilotSnapshotData>,
+    /// Mechanical sub-grid body transforms (ship-local, updated at 20Hz).
+    pub sub_grids: Vec<SubGridTransformData>,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +597,24 @@ pub struct PlayerSnapshotData {
     pub health: f32,
     pub shield: f32,
     pub seated: bool,
+}
+
+/// Transform of a mechanical sub-grid body (rotor, piston, hinge, slider).
+/// Ship-local coordinates — f32 precision is sufficient.
+#[derive(Debug, Clone)]
+pub struct SubGridTransformData {
+    pub sub_grid_id: u32,
+    pub translation: glam::Vec3,
+    pub rotation: glam::Quat,
+    pub parent_grid: u32,
+    /// Original root-space anchor position (mount_pos + face offset). Never changes.
+    pub anchor: glam::Vec3,
+}
+
+/// Block-to-sub-grid assignment update (sent via TCP on join + on change).
+#[derive(Debug, Clone)]
+pub struct SubGridAssignmentData {
+    pub assignments: Vec<(glam::IVec3, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +716,22 @@ fn from_fb_quatd(q: &fb::Quatd) -> DQuat {
     DQuat::from_xyzw(q.x(), q.y(), q.z(), q.w())
 }
 
+fn to_fb_vec3f(v: &glam::Vec3) -> fb::Vec3f {
+    fb::Vec3f::new(v.x, v.y, v.z)
+}
+
+fn from_fb_vec3f(v: &fb::Vec3f) -> glam::Vec3 {
+    glam::Vec3::new(v.x(), v.y(), v.z())
+}
+
+fn to_fb_quatf(q: &glam::Quat) -> fb::Quatf {
+    fb::Quatf::new(q.x, q.y, q.z, q.w)
+}
+
+fn from_fb_quatf(q: &fb::Quatf) -> glam::Quat {
+    glam::Quat::from_xyzw(q.x(), q.y(), q.z(), q.w())
+}
+
 impl ClientMsg {
     pub fn serialize(&self) -> Vec<u8> {
         let mut builder = crate::builder_pool::acquire(256);
@@ -479,6 +755,11 @@ impl ClientMsg {
                 builder.finish(msg, None);
             }
             ClientMsg::PlayerInput(data) => {
+                let sv = if data.seat_values.is_empty() {
+                    None
+                } else {
+                    Some(builder.create_vector(&data.seat_values))
+                };
                 let input = fb::PlayerInput::create(
                     &mut builder,
                     &fb::PlayerInputArgs {
@@ -498,6 +779,7 @@ impl ClientMsg {
                         roll: data.roll,
                         cruise: data.cruise,
                         atmo_comp: data.atmo_comp,
+                        seat_values: sv,
                     },
                 );
                 let msg = fb::ClientMessage::create(
@@ -556,23 +838,26 @@ impl ClientMsg {
                         expression_value: ev, expression_value2: ev2,
                     })
                 }).collect();
-                let seats: Vec<_> = data.seat_mappings.iter().map(|s| {
-                    let ch = builder.create_string(&s.channel_name);
-                    fb::SeatBindingFB::create(&mut builder, &fb::SeatBindingFBArgs {
-                        control: s.control as u8, channel_name: Some(ch), property: s.property as u8,
-                    })
-                }).collect();
+                let stv = encode_seat_bindings_vec(&mut builder, &data.seat_mappings);
                 let pv = builder.create_vector(&pub_b);
                 let sv = builder.create_vector(&sub_b);
                 let rv = builder.create_vector(&rules);
-                let stv = builder.create_vector(&seats);
                 let ps = data.power_source.as_ref().map(|s| encode_power_source(&mut builder, s));
                 let pc = data.power_consumer.as_ref().map(|c| encode_power_consumer(&mut builder, c));
+                let seated_ch = if data.seated_channel_name.is_empty() { None } else { Some(builder.create_string(&data.seated_channel_name)) };
+                let fc = data.flight_computer.as_ref().map(|c| encode_flight_computer_config(&mut builder, c));
+                let hm = data.hover_module.as_ref().map(|c| encode_hover_module_config(&mut builder, c));
+                let ap = data.autopilot.as_ref().map(|c| encode_autopilot_config(&mut builder, c));
+                let wc = data.warp_computer.as_ref().map(|c| encode_warp_computer_config(&mut builder, c));
+                let ec = data.engine_controller.as_ref().map(|c| encode_engine_controller_config(&mut builder, c));
                 let bcu = fb::BlockConfigUpdate::create(&mut builder, &fb::BlockConfigUpdateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
                     publish_bindings: Some(pv), subscribe_bindings: Some(sv),
                     converter_rules: Some(rv), seat_mappings: Some(stv),
                     power_source: ps, power_consumer: pc,
+                    seated_channel_name: seated_ch,
+                    flight_computer_config: fc, hover_module_config: hm,
+                    autopilot_config: ap, warp_computer_config: wc, engine_controller_config: ec,
                 });
                 let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
                     payload_type: fb::ClientPayload::BlockConfigUpdate,
@@ -641,6 +926,7 @@ impl ClientMsg {
                     roll: p.roll(),
                     cruise: p.cruise(),
                     atmo_comp: p.atmo_comp(),
+                    seat_values: p.seat_values().map(|v| v.iter().collect()).unwrap_or_default(),
                 }))
             }
             fb::ClientPayload::BlockEditRequest => {
@@ -677,14 +963,7 @@ impl ClientMsg {
                         expression: deserialize_expression(r.expression_type(), r.expression_value(), r.expression_value2()),
                     }
                 }).collect()).unwrap_or_default();
-                let seats = bcu.seat_mappings().map(|v| v.iter().filter_map(|s| {
-                    let control = crate::signal::components::SeatControl::from_u8(s.control())?;
-                    Some(crate::signal::config::SeatInputBindingConfig {
-                        control,
-                        channel_name: s.channel_name().unwrap_or("").to_string(),
-                        property: u8_to_signal_property(s.property()),
-                    })
-                }).collect()).unwrap_or_default();
+                let seats = decode_seat_bindings_vec(bcu.seat_mappings());
                 let power_source = bcu.power_source().map(|ps| decode_power_source(&ps));
                 let power_consumer = bcu.power_consumer().map(|pc| decode_power_consumer(&pc));
                 Ok(ClientMsg::BlockConfigUpdate(crate::signal::config::BlockConfigUpdateData {
@@ -693,8 +972,14 @@ impl ClientMsg {
                     subscribe_bindings: sub_b,
                     converter_rules: rules,
                     seat_mappings: seats,
+                    seated_channel_name: bcu.seated_channel_name().unwrap_or("").to_string(),
                     power_source,
                     power_consumer,
+                    flight_computer: bcu.flight_computer_config().map(|c| decode_flight_computer_config(&c)),
+                    hover_module: bcu.hover_module_config().map(|c| decode_hover_module_config(&c)),
+                    autopilot: bcu.autopilot_config().map(|c| decode_autopilot_config(&c)),
+                    warp_computer: bcu.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
+                    engine_controller: bcu.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
                 }))
             }
             fb::ClientPayload::SubBlockEditRequest => {
@@ -836,6 +1121,20 @@ impl ServerMsg {
                     )
                 });
 
+                let sg_fbs: Vec<_> = data.sub_grids.iter().map(|sg| {
+                    let t = to_fb_vec3f(&sg.translation);
+                    let r = to_fb_quatf(&sg.rotation);
+                    let a = to_fb_vec3f(&sg.anchor);
+                    fb::SubGridTransform::create(&mut builder, &fb::SubGridTransformArgs {
+                        sub_grid_id: sg.sub_grid_id,
+                        translation: Some(&t),
+                        rotation: Some(&r),
+                        parent_grid: sg.parent_grid,
+                        anchor: Some(&a),
+                    })
+                }).collect();
+                let sub_grids_vec = if sg_fbs.is_empty() { None } else { Some(builder.create_vector(&sg_fbs)) };
+
                 let ws = fb::WorldState::create(&mut builder, &fb::WorldStateArgs {
                     tick: data.tick,
                     origin: Some(&origin),
@@ -846,6 +1145,7 @@ impl ServerMsg {
                     game_time: data.game_time,
                     warp_target_star_index: data.warp_target_star_index,
                     autopilot: ap_offset,
+                    sub_grids: sub_grids_vec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::WorldState,
@@ -1019,23 +1319,23 @@ impl ServerMsg {
                         expression_value: expr_val, expression_value2: expr_val2,
                     })
                 }).collect();
-                let seats: Vec<_> = data.seat_mappings.iter().map(|s| {
-                    let channel = builder.create_string(&s.channel_name);
-                    fb::SeatBindingFB::create(&mut builder, &fb::SeatBindingFBArgs {
-                        control: s.control as u8, channel_name: Some(channel), property: s.property as u8,
-                    })
-                }).collect();
+                let seats_vec = encode_seat_bindings_vec(&mut builder, &data.seat_mappings);
                 let channels: Vec<_> = data.available_channels.iter()
                     .map(|c| builder.create_string(c)).collect();
 
                 let pub_vec = builder.create_vector(&pub_bindings);
                 let sub_vec = builder.create_vector(&sub_bindings);
                 let rules_vec = builder.create_vector(&rules);
-                let seats_vec = builder.create_vector(&seats);
                 let channels_vec = builder.create_vector(&channels);
                 let ps = data.power_source.as_ref().map(|s| encode_power_source(&mut builder, s));
                 let pc = data.power_consumer.as_ref().map(|c| encode_power_consumer(&mut builder, c));
                 let nr = encode_nearby_reactors(&mut builder, &data.nearby_reactors);
+                let seated_ch = if data.seated_channel_name.is_empty() { None } else { Some(builder.create_string(&data.seated_channel_name)) };
+                let fc = data.flight_computer.as_ref().map(|c| encode_flight_computer_config(&mut builder, c));
+                let hm = data.hover_module.as_ref().map(|c| encode_hover_module_config(&mut builder, c));
+                let ap = data.autopilot.as_ref().map(|c| encode_autopilot_config(&mut builder, c));
+                let wc = data.warp_computer.as_ref().map(|c| encode_warp_computer_config(&mut builder, c));
+                let ec = data.engine_controller.as_ref().map(|c| encode_engine_controller_config(&mut builder, c));
 
                 let bcs = fb::BlockConfigState::create(&mut builder, &fb::BlockConfigStateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
@@ -1044,10 +1344,45 @@ impl ServerMsg {
                     converter_rules: Some(rules_vec), seat_mappings: Some(seats_vec),
                     available_channels: Some(channels_vec),
                     power_source: ps, power_consumer: pc, nearby_reactors: nr,
+                    seated_channel_name: seated_ch,
+                    flight_computer_config: fc, hover_module_config: hm,
+                    autopilot_config: ap, warp_computer_config: wc, engine_controller_config: ec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::BlockConfigState,
                     payload: Some(bcs.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
+            ServerMsg::SeatBindingsNotify(data) => {
+                let bv = encode_seat_bindings_vec(&mut builder, &data.bindings);
+                let seated_ch = if data.seated_channel_name.is_empty() { None } else { Some(builder.create_string(&data.seated_channel_name)) };
+                let sbn = fb::SeatBindingsNotify::create(&mut builder, &fb::SeatBindingsNotifyArgs {
+                    bindings: Some(bv),
+                    seated_channel_name: seated_ch,
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::SeatBindingsNotify,
+                    payload: Some(sbn.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
+            ServerMsg::SubGridAssignmentUpdate(data) => {
+                let assign_fbs: Vec<_> = data.assignments.iter().map(|(pos, sg_id)| {
+                    fb::SubGridBlockAssignment::create(&mut builder, &fb::SubGridBlockAssignmentArgs {
+                        bx: pos.x,
+                        by: pos.y,
+                        bz: pos.z,
+                        sub_grid_id: *sg_id,
+                    })
+                }).collect();
+                let assignments = builder.create_vector(&assign_fbs);
+                let upd = fb::SubGridAssignmentUpdate::create(&mut builder, &fb::SubGridAssignmentUpdateArgs {
+                    assignments: Some(assignments),
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::SubGridAssignmentUpdate,
+                    payload: Some(upd.as_union_value()),
                 });
                 builder.finish(msg, None);
             }
@@ -1173,6 +1508,19 @@ impl ServerMsg {
                     }
                 });
 
+                let sub_grids = ws.sub_grids().map(|v| v.iter().map(|sg| {
+                    let t = sg.translation().map(|v| from_fb_vec3f(v)).unwrap_or(glam::Vec3::ZERO);
+                    let r = sg.rotation().map(|v| from_fb_quatf(v)).unwrap_or(glam::Quat::IDENTITY);
+                    let a = sg.anchor().map(|v| from_fb_vec3f(v)).unwrap_or(glam::Vec3::ZERO);
+                    SubGridTransformData {
+                        sub_grid_id: sg.sub_grid_id(),
+                        translation: t,
+                        rotation: r,
+                        parent_grid: sg.parent_grid(),
+                        anchor: a,
+                    }
+                }).collect()).unwrap_or_default();
+
                 Ok(ServerMsg::WorldState(WorldStateData {
                     tick: ws.tick(),
                     origin: from_fb_vec3d(origin),
@@ -1183,6 +1531,7 @@ impl ServerMsg {
                     game_time: ws.game_time(),
                     warp_target_star_index: ws.warp_target_star_index(),
                     autopilot,
+                    sub_grids,
                 }))
             }
             fb::ServerPayload::ChunkBlockMods => {
@@ -1334,14 +1683,7 @@ impl ServerMsg {
                         expression: deserialize_expression(r.expression_type(), r.expression_value(), r.expression_value2()),
                     }
                 }).collect()).unwrap_or_default();
-                let seats = bcs.seat_mappings().map(|v| v.iter().filter_map(|s| {
-                    let control = crate::signal::components::SeatControl::from_u8(s.control())?;
-                    Some(crate::signal::config::SeatInputBindingConfig {
-                        control,
-                        channel_name: s.channel_name().unwrap_or("").to_string(),
-                        property: u8_to_signal_property(s.property()),
-                    })
-                }).collect()).unwrap_or_default();
+                let seats = decode_seat_bindings_vec(bcs.seat_mappings());
                 let channels = bcs.available_channels().map(|v| {
                     v.iter().map(|s| s.to_string()).collect()
                 }).unwrap_or_default();
@@ -1356,11 +1698,33 @@ impl ServerMsg {
                     subscribe_bindings: sub_b,
                     converter_rules: rules,
                     seat_mappings: seats,
+                    seated_channel_name: bcs.seated_channel_name().unwrap_or("").to_string(),
                     available_channels: channels,
                     power_source,
                     power_consumer,
                     nearby_reactors,
+                    flight_computer: bcs.flight_computer_config().map(|c| decode_flight_computer_config(&c)),
+                    hover_module: bcs.hover_module_config().map(|c| decode_hover_module_config(&c)),
+                    autopilot: bcs.autopilot_config().map(|c| decode_autopilot_config(&c)),
+                    warp_computer: bcs.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
+                    engine_controller: bcs.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
                 }))
+            }
+            fb::ServerPayload::SeatBindingsNotify => {
+                let sbn = msg.payload_as_seat_bindings_notify()
+                    .ok_or(MessageError::MissingField("SeatBindingsNotify payload"))?;
+                Ok(ServerMsg::SeatBindingsNotify(SeatBindingsNotifyData {
+                    bindings: decode_seat_bindings_vec(sbn.bindings()),
+                    seated_channel_name: sbn.seated_channel_name().unwrap_or("").to_string(),
+                }))
+            }
+            fb::ServerPayload::SubGridAssignmentUpdate => {
+                let upd = msg.payload_as_sub_grid_assignment_update()
+                    .ok_or(MessageError::MissingField("SubGridAssignmentUpdate payload"))?;
+                let assignments = upd.assignments().map(|v| v.iter().map(|a| {
+                    (glam::IVec3::new(a.bx(), a.by(), a.bz()), a.sub_grid_id())
+                }).collect()).unwrap_or_default();
+                Ok(ServerMsg::SubGridAssignmentUpdate(SubGridAssignmentData { assignments }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),
             other => Err(MessageError::UnknownPayload(other.0)),
@@ -1461,6 +1825,7 @@ mod tests {
             roll: 0.0,
             cruise: false,
             atmo_comp: false,
+            seat_values: vec![0.5, 1.0, 0.0],
         });
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
@@ -1470,6 +1835,8 @@ mod tests {
             assert!(p.jump);
             assert_eq!(p.speed_tier, 2);
             assert_eq!(p.tick, 1000);
+            assert_eq!(p.seat_values.len(), 3);
+            assert!((p.seat_values[0] - 0.5).abs() < 1e-5);
         } else {
             panic!("expected PlayerInput");
         }
@@ -1503,6 +1870,13 @@ mod tests {
             game_time: 42.0,
             warp_target_star_index: 0,
             autopilot: None,
+            sub_grids: vec![SubGridTransformData {
+                sub_grid_id: 1,
+                translation: glam::Vec3::new(2.5, 0.5, -3.5),
+                rotation: glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
+                parent_grid: 0,
+                anchor: glam::Vec3::new(2.5, 0.5, -3.5),
+            }],
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();
@@ -1512,6 +1886,10 @@ mod tests {
             assert_eq!(ws.players[0].player_id, 1);
             assert!((ws.players[0].health - 95.0).abs() < 1e-5);
             assert!(ws.autopilot.is_none());
+            assert_eq!(ws.sub_grids.len(), 1);
+            assert_eq!(ws.sub_grids[0].sub_grid_id, 1);
+            assert!((ws.sub_grids[0].translation.x - 2.5).abs() < 1e-5);
+            assert_eq!(ws.sub_grids[0].parent_grid, 0);
         } else {
             panic!("expected WorldState");
         }

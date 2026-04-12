@@ -73,28 +73,83 @@ pub fn mesh_chunk(
     registry: &BlockRegistry,
     transparent_pass: bool,
 ) -> ChunkQuads {
+    let mut voxel_buf = Vec::new();
+    mesh_chunk_with_buf(chunk, neighbors, registry, transparent_pass, &mut voxel_buf)
+}
+
+/// Like `mesh_chunk`, but reuses a caller-provided padded voxel buffer (512KB)
+/// to avoid repeated heap allocation when meshing many chunks in sequence.
+pub fn mesh_chunk_with_buf(
+    chunk: &ChunkStorage,
+    neighbors: &[Option<&ChunkStorage>; 6],
+    registry: &BlockRegistry,
+    transparent_pass: bool,
+    voxel_buf: &mut Vec<u16>,
+) -> ChunkQuads {
     if chunk.is_empty() && !transparent_pass {
         return ChunkQuads { quads: Vec::new() };
     }
 
-    // Build the padded 64³ voxel buffer.
-    let voxels = super::meshing_adapter::build_padded_buffer(
-        chunk, neighbors, registry, transparent_pass,
+    // Build the padded 64³ voxel buffer (reuses caller's allocation).
+    super::meshing_adapter::build_padded_buffer_into(
+        voxel_buf, chunk, neighbors, registry, transparent_pass,
     );
 
-    // The padded buffer already handles opaque/transparent separation by
-    // remapping block IDs to 0. No additional transparent set needed.
+    run_mesher(voxel_buf)
+}
+
+/// Mesh a chunk with sub-grid filtering.
+///
+/// - `sub_grid_filter = None`: mesh only root-grid blocks (not in any sub-grid).
+/// - `sub_grid_filter = Some(id)`: mesh only blocks in the specified sub-grid.
+pub fn mesh_chunk_filtered(
+    chunk: &ChunkStorage,
+    chunk_key: glam::IVec3,
+    neighbors: &[Option<&ChunkStorage>; 6],
+    registry: &BlockRegistry,
+    transparent_pass: bool,
+    sub_grid_assignments: &std::collections::HashMap<glam::IVec3, u32>,
+    sub_grid_filter: Option<u32>,
+) -> ChunkQuads {
+    let mut voxel_buf = Vec::new();
+    mesh_chunk_filtered_with_buf(
+        chunk, chunk_key, neighbors, registry, transparent_pass,
+        sub_grid_assignments, sub_grid_filter, &mut voxel_buf,
+    )
+}
+
+/// Like `mesh_chunk_filtered`, but reuses a caller-provided padded voxel buffer (512KB)
+/// to avoid repeated heap allocation when meshing many chunks in sequence.
+pub fn mesh_chunk_filtered_with_buf(
+    chunk: &ChunkStorage,
+    chunk_key: glam::IVec3,
+    neighbors: &[Option<&ChunkStorage>; 6],
+    registry: &BlockRegistry,
+    transparent_pass: bool,
+    sub_grid_assignments: &std::collections::HashMap<glam::IVec3, u32>,
+    sub_grid_filter: Option<u32>,
+    voxel_buf: &mut Vec<u16>,
+) -> ChunkQuads {
+    if chunk.is_empty() && !transparent_pass {
+        return ChunkQuads { quads: Vec::new() };
+    }
+
+    super::meshing_adapter::build_padded_buffer_filtered_into(
+        voxel_buf, chunk, neighbors, registry, transparent_pass,
+        chunk_key, sub_grid_assignments, sub_grid_filter,
+    );
+
+    run_mesher(voxel_buf)
+}
+
+/// Run binary greedy meshing on a filled padded voxel buffer and extract quads.
+fn run_mesher(voxels: &[u16]) -> ChunkQuads {
     let transparent_ids = BTreeSet::new();
-
-    // Run the mesher.
     let mut mesher = bgm::Mesher::<{ CHUNK_SIZE }>::new();
-    let opaque_mask = bgm::compute_opaque_mask::<{ CHUNK_SIZE }>(&voxels, &transparent_ids);
-    let trans_mask = bgm::compute_transparent_mask::<{ CHUNK_SIZE }>(&voxels, &transparent_ids);
-    mesher.fast_mesh(&voxels, &opaque_mask, &trans_mask);
+    let opaque_mask = bgm::compute_opaque_mask::<{ CHUNK_SIZE }>(voxels, &transparent_ids);
+    let trans_mask = bgm::compute_transparent_mask::<{ CHUNK_SIZE }>(voxels, &transparent_ids);
+    mesher.fast_mesh(voxels, &opaque_mask, &trans_mask);
 
-    // Convert bgm quads to our format-agnostic representation.
-    // Use bgm's Face::vertices_packed() for correct vertex positions —
-    // the library's own axis mapping per face direction.
     let total_quads: usize = mesher.quads.iter().map(|v| v.len()).sum();
     let mut quads = Vec::with_capacity(total_quads);
 
@@ -102,9 +157,6 @@ pub fn mesh_chunk(
         let face = bgm::Face::from(face_idx);
         for quad in &mesher.quads[face_idx as usize] {
             let packed_verts = face.vertices_packed(*quad);
-            // bgm's vertices_packed() already returns chunk-local positions.
-            // The padding offset is internal to the mesher — the output quad
-            // positions are in the 0..62 usable range, not padded 1..63.
             let to_local = |v: &bgm::Vertex| -> [i8; 3] {
                 [v.x() as i8, v.y() as i8, v.z() as i8]
             };
@@ -123,7 +175,6 @@ pub fn mesh_chunk(
 
     ChunkQuads { quads }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,7 @@
 
 use glam::IVec3;
 
+use super::components::{AxisDirection, KeyMode, SeatInputSource};
 use super::types::SignalProperty;
 
 // ---------------------------------------------------------------------------
@@ -27,11 +28,15 @@ pub struct SubscribeBindingConfig {
     pub property: SignalProperty,
 }
 
-/// Seat input binding in config form (string channel name).
+/// Generic seat input binding in config form (string channel name).
 #[derive(Clone, Debug)]
 pub struct SeatInputBindingConfig {
+    pub label: String,
+    pub source: SeatInputSource,
+    pub key_name: String,
+    pub key_mode: KeyMode,
+    pub axis_direction: AxisDirection,
     pub channel_name: String,
-    pub control: super::components::SeatControl,
     pub property: SignalProperty,
 }
 
@@ -45,58 +50,119 @@ pub struct SignalRuleConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Custom block config types — each block has its own typed config
+// ---------------------------------------------------------------------------
+
+/// Flight computer configuration. Each channel is explicit.
+#[derive(Clone, Debug, Default)]
+pub struct FlightComputerConfig {
+    pub yaw_cw_channel: String,
+    pub yaw_ccw_channel: String,
+    pub pitch_up_channel: String,
+    pub pitch_down_channel: String,
+    pub roll_cw_channel: String,
+    pub roll_ccw_channel: String,
+    pub damping_gain: f32,
+    pub dead_zone: f32,
+    pub max_correction: f32,
+}
+
+/// Hover module configuration. Each channel is explicit.
+#[derive(Clone, Debug, Default)]
+pub struct HoverModuleConfig {
+    pub thrust_forward_channel: String,
+    pub thrust_reverse_channel: String,
+    pub thrust_right_channel: String,
+    pub thrust_left_channel: String,
+    pub thrust_up_channel: String,
+    pub thrust_down_channel: String,
+    pub yaw_cw_channel: String,
+    pub yaw_ccw_channel: String,
+    pub pitch_up_channel: String,
+    pub pitch_down_channel: String,
+    pub roll_cw_channel: String,
+    pub roll_ccw_channel: String,
+    pub activate_channel: String,
+    pub cutoff_channel: String,
+}
+
+/// Autopilot configuration. Each channel is explicit.
+#[derive(Clone, Debug, Default)]
+pub struct AutopilotBlockConfig {
+    pub yaw_cw_channel: String,
+    pub yaw_ccw_channel: String,
+    pub pitch_up_channel: String,
+    pub pitch_down_channel: String,
+    pub roll_cw_channel: String,
+    pub roll_ccw_channel: String,
+    pub engage_channel: String,
+}
+
+/// Warp computer configuration.
+#[derive(Clone, Debug, Default)]
+pub struct WarpComputerConfig {
+    pub target_channel: String,
+    pub confirm_channel: String,
+}
+
+/// Engine controller configuration. Each channel is explicit.
+#[derive(Clone, Debug, Default)]
+pub struct EngineControllerConfig {
+    pub thrust_forward_channel: String,
+    pub thrust_reverse_channel: String,
+    pub thrust_right_channel: String,
+    pub thrust_left_channel: String,
+    pub thrust_up_channel: String,
+    pub thrust_down_channel: String,
+    pub yaw_cw_channel: String,
+    pub yaw_ccw_channel: String,
+    pub pitch_up_channel: String,
+    pub pitch_down_channel: String,
+    pub roll_cw_channel: String,
+    pub roll_ccw_channel: String,
+    pub toggle_channel: String,
+}
+
+// ---------------------------------------------------------------------------
 // Power configuration types
 // ---------------------------------------------------------------------------
 
 /// A named power circuit on a reactor (config form, for serialization / UI).
 #[derive(Clone, Debug)]
 pub struct PowerCircuitConfig {
-    /// Circuit name (e.g., "main", "rcs", "lights").
     pub name: String,
-    /// Fraction of reactor output allocated to this circuit (0.0–1.0).
     pub fraction: f32,
 }
 
 /// Power access mode for a reactor (config form).
 #[derive(Clone, Debug, Default)]
 pub enum PowerAccessConfig {
-    /// Only blocks placed by the same player.
     #[default]
     OwnerOnly,
-    /// Owner + listed player names.
     AllowList(Vec<String>),
-    /// Anyone in range.
     Open,
 }
 
 /// Reactor power source configuration (sent in config snapshot / update).
 #[derive(Clone, Debug, Default)]
 pub struct PowerSourceConfig {
-    /// Named circuits with allocated fractions.
     pub circuits: Vec<PowerCircuitConfig>,
-    /// Access control mode.
     pub access: PowerAccessConfig,
 }
 
 /// Power consumer configuration — which reactor + circuit to draw from.
 #[derive(Clone, Debug, Default)]
 pub struct PowerConsumerConfig {
-    /// Block position of the reactor (None = not connected).
     pub reactor_pos: Option<IVec3>,
-    /// Which circuit on that reactor.
     pub circuit: String,
 }
 
 /// Info about a nearby reactor (for consumer dropdown in config UI).
 #[derive(Clone, Debug)]
 pub struct NearbyReactorInfo {
-    /// Block position of the reactor.
     pub pos: IVec3,
-    /// Human-readable label (e.g., "Small Reactor").
     pub label: String,
-    /// Distance from the consumer block in blocks.
     pub distance: f32,
-    /// Circuit names available on this reactor.
     pub circuits: Vec<String>,
 }
 
@@ -108,46 +174,42 @@ pub struct NearbyReactorInfo {
 /// Sent from server → client when a player opens the config UI.
 #[derive(Clone, Debug, Default)]
 pub struct BlockSignalConfig {
-    /// Block world position.
     pub block_pos: IVec3,
-    /// Block type ID.
     pub block_type: u16,
-    /// Functional block kind.
     pub kind: u8,
-    /// Publish bindings (block → channels).
     pub publish_bindings: Vec<PublishBindingConfig>,
-    /// Subscribe bindings (channels → block).
     pub subscribe_bindings: Vec<SubscribeBindingConfig>,
-    /// Converter rules (only for SignalConverter blocks).
     pub converter_rules: Vec<SignalRuleConfig>,
-    /// Seat input mappings (only for Seat blocks).
     pub seat_mappings: Vec<SeatInputBindingConfig>,
-    /// All channel names on this structure (for dropdown selection in UI).
+    pub seated_channel_name: String,
     pub available_channels: Vec<String>,
-    /// Reactor power source config (only for Reactor blocks).
     pub power_source: Option<PowerSourceConfig>,
-    /// Consumer power subscription (only for power-consuming blocks).
     pub power_consumer: Option<PowerConsumerConfig>,
-    /// Nearby reactors in range (for consumer dropdown in config UI).
     pub nearby_reactors: Vec<NearbyReactorInfo>,
+    // Custom block configs (at most one populated per block type):
+    pub flight_computer: Option<FlightComputerConfig>,
+    pub hover_module: Option<HoverModuleConfig>,
+    pub autopilot: Option<AutopilotBlockConfig>,
+    pub warp_computer: Option<WarpComputerConfig>,
+    pub engine_controller: Option<EngineControllerConfig>,
 }
 
 /// Config update sent from client → server after the player edits bindings.
 /// Server validates and applies to the entity's signal components.
 #[derive(Clone, Debug, Default)]
 pub struct BlockConfigUpdateData {
-    /// Block world position (identifies which block to update).
     pub block_pos: IVec3,
-    /// Updated publish bindings.
     pub publish_bindings: Vec<PublishBindingConfig>,
-    /// Updated subscribe bindings.
     pub subscribe_bindings: Vec<SubscribeBindingConfig>,
-    /// Updated converter rules.
     pub converter_rules: Vec<SignalRuleConfig>,
-    /// Updated seat mappings.
     pub seat_mappings: Vec<SeatInputBindingConfig>,
-    /// Updated reactor power source config (only for Reactor blocks).
+    pub seated_channel_name: String,
     pub power_source: Option<PowerSourceConfig>,
-    /// Updated consumer power subscription.
     pub power_consumer: Option<PowerConsumerConfig>,
+    // Custom block configs:
+    pub flight_computer: Option<FlightComputerConfig>,
+    pub hover_module: Option<HoverModuleConfig>,
+    pub autopilot: Option<AutopilotBlockConfig>,
+    pub warp_computer: Option<WarpComputerConfig>,
+    pub engine_controller: Option<EngineControllerConfig>,
 }

@@ -190,6 +190,10 @@ struct SystemParamsRes(Option<SystemParams>);
 #[derive(Resource)]
 struct PlanetPositionInSystem(DVec3);
 
+/// Cached system-space positions for all planets (avoids recomputing Kepler per broadcast).
+#[derive(Resource, Default)]
+struct CachedAllPlanetPositions(Vec<DVec3>);
+
 /// Celestial time derived from epoch (matches system shard).
 #[derive(Resource, Default)]
 struct CelestialTimeRes(f64);
@@ -324,6 +328,7 @@ fn drain_quic(
     mut accepted_events: MessageWriter<HandoffAcceptedMsg>,
     mut celestial_time: ResMut<CelestialTimeRes>,
     mut planet_pos: ResMut<PlanetPositionInSystem>,
+    mut cached_all_planets: ResMut<CachedAllPlanetPositions>,
     sys_params: Res<SystemParamsRes>,
     config: Res<PlanetConfig>,
 ) {
@@ -337,7 +342,7 @@ fn drain_quic(
                 // Sync celestial time from system shard authority.
                 if h.game_time > celestial_time.0 {
                     celestial_time.0 = h.game_time;
-                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos);
+                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos, &mut cached_all_planets);
                 }
                 handoff_events.write(InboundHandoffMsg {
                     handoff: h,
@@ -347,7 +352,7 @@ fn drain_quic(
             ShardMsg::ShipNearbyInfo(info) => {
                 if info.game_time > celestial_time.0 {
                     celestial_time.0 = info.game_time;
-                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos);
+                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos, &mut cached_all_planets);
                 }
                 ship_nearby_events.write(ShipNearbyMsg(info));
             }
@@ -367,10 +372,16 @@ fn update_planet_position(
     planet_index: u32,
     celestial_time: f64,
     planet_pos: &mut PlanetPositionInSystem,
+    cached_all: &mut CachedAllPlanetPositions,
 ) {
     if let Some(sys) = sys_params {
         if let Some(planet) = sys.planets.get(planet_index as usize) {
             planet_pos.0 = compute_planet_position(planet, celestial_time);
+        }
+        // Refresh all planet positions while we're computing orbits.
+        cached_all.0.clear();
+        for planet in &sys.planets {
+            cached_all.0.push(compute_planet_position(planet, celestial_time));
         }
     }
 }
@@ -724,6 +735,7 @@ fn physics_step(
     mut tick: ResMut<ecs::TickCounter>,
     sys_params: Res<SystemParamsRes>,
     mut planet_pos: ResMut<PlanetPositionInSystem>,
+    mut cached_all_planets: ResMut<CachedAllPlanetPositions>,
     epoch: Res<UniverseEpoch>,
 ) {
     physics_time.0 += 0.05;
@@ -739,6 +751,7 @@ fn physics_step(
         config.planet_index,
         celestial_time.0,
         &mut planet_pos,
+        &mut cached_all_planets,
     );
 
     // Step Rapier with surface gravity.
@@ -976,6 +989,7 @@ fn broadcast_world_state(
     config: Res<PlanetConfig>,
     sys_params: Res<SystemParamsRes>,
     planet_pos: Res<PlanetPositionInSystem>,
+    cached_all_planets: Res<CachedAllPlanetPositions>,
     celestial_time: Res<CelestialTimeRes>,
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
@@ -994,9 +1008,11 @@ fn broadcast_world_state(
         })
         .collect();
 
-    // Sky bodies from system params.
+    // Sky bodies from system params (uses cached planet positions to avoid
+    // redundant Kepler equation solving — positions are computed in physics_step).
     let mut bodies = Vec::new();
     if let Some(ref sys) = sys_params.0 {
+        bodies.reserve(sys.planets.len() + 1);
         bodies.push(CelestialBodyData {
             body_id: 0,
             position: -planet_pos.0,
@@ -1004,7 +1020,9 @@ fn broadcast_world_state(
             color: sys.star.color,
         });
         for (i, planet) in sys.planets.iter().enumerate() {
-            let planet_sys_pos = compute_planet_position(planet, celestial_time.0);
+            let planet_sys_pos = cached_all_planets.0.get(i)
+                .copied()
+                .unwrap_or_else(|| compute_planet_position(planet, celestial_time.0));
             bodies.push(CelestialBodyData {
                 body_id: (i + 1) as u32,
                 position: planet_sys_pos - planet_pos.0,
@@ -1054,6 +1072,7 @@ fn broadcast_world_state(
         game_time: celestial_time.0,
         warp_target_star_index: 0xFFFFFFFF,
         autopilot: None,
+        sub_grids: vec![],
     });
     let _ = bridge.broadcast_tx.try_send(ws);
 }
@@ -1143,6 +1162,7 @@ fn build_app(
     });
     app.insert_resource(SystemParamsRes(system_params));
     app.insert_resource(PlanetPositionInSystem(planet_position_in_system));
+    app.insert_resource(CachedAllPlanetPositions::default());
     app.insert_resource(CelestialTimeRes::default());
     app.insert_resource(PhysicsTimeRes::default());
     app.insert_resource(ecs::TickCounter::default());

@@ -97,7 +97,7 @@ impl Default for BlockHotbar {
                 BlockId::REACTOR_SMALL,       // power source
                 BlockId::ROTOR,               // mechanical (also placeable as full block)
                 BlockId::PISTON,              // mechanical
-                BlockId::STONE,
+                BlockId::SEAT,                // generic seat
             ],
         }
     }
@@ -276,6 +276,19 @@ impl std::ops::DerefMut for ClientChunkCacheRes {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.cache }
 }
 
+/// Sub-grid state: block assignments and body transforms for mechanical mounts.
+/// Updated from server via TCP (assignments) and UDP (transforms in WorldState).
+/// Stores prev/current snapshots for interpolation (matching ship position smoothing).
+#[derive(Resource, Default)]
+struct SubGridState {
+    /// Per-block sub-grid assignment: world_pos → sub_grid_id (absent = root).
+    assignments: std::collections::HashMap<glam::IVec3, u32>,
+    /// Previous WorldState tick's sub-grid transforms (for interpolation).
+    prev_transforms: std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
+    /// Current (latest) WorldState tick's sub-grid transforms.
+    current_transforms: std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
+}
+
 #[derive(Resource)]
 struct LocalPlayer {
     position: DVec3,
@@ -294,6 +307,9 @@ struct RenderSmoothing {
     /// Interpolated celestial body positions — lerped with the same `t` as ship_origin
     /// so body offsets and camera share the same virtual time instant.
     bodies: Vec<CelestialBodyData>,
+    /// Current interpolation factor (0=prev snapshot, 1=current snapshot).
+    /// Used by sub-grid rendering to match ship transform interpolation.
+    interpolation_t: f64,
 
     // --- Galaxy warp (separate interpolation, kept for warp travel) ---
     galaxy_render_position: DVec3,
@@ -338,7 +354,10 @@ struct CameraControl {
 #[derive(Resource)]
 struct KeyboardState {
     keys_held: HashSet<KeyCode>,
+    mouse_buttons_held: HashSet<winit::event::MouseButton>,
     mouse_grabbed: bool,
+    /// Accumulated scroll delta this frame (for seat scroll wheel bindings).
+    scroll_delta: f32,
 }
 
 #[derive(Resource)]
@@ -505,6 +524,8 @@ fn poll_network(
     mut chunk_cache: ResMut<ClientChunkCacheRes>,
     ft: Res<FrameTime>,
     mut config_open_msgs: MessageWriter<events::ConfigPanelOpenMsg>,
+    mut active_seat: ResMut<input::ActiveSeatBindings>,
+    mut sub_grid_state: ResMut<SubGridState>,
 ) {
     let rx = match net.event_rx.as_mut() {
         Some(rx) => rx,
@@ -591,6 +612,8 @@ fn poll_network(
                         // Pilot → Walk: reset camera to ship-local forward.
                         cam.yaw = -std::f64::consts::FRAC_PI_2;
                         cam.pitch = 0.0;
+                        // Clear seat bindings — no longer seated.
+                        active_seat.clear();
                     }
                 }
                 // Extract server-authoritative autopilot state.
@@ -602,6 +625,11 @@ fn poll_network(
                 }
                 if ws.latest.is_none() {
                     info!(bodies = world_state.bodies.len(), tick = world_state.tick, "first WorldState");
+                }
+                // Update sub-grid transforms from WorldState (prev/current for interpolation).
+                sub_grid_state.prev_transforms = std::mem::take(&mut sub_grid_state.current_transforms);
+                for sg in &world_state.sub_grids {
+                    sub_grid_state.current_transforms.insert(sg.sub_grid_id, sg.clone());
                 }
                 ws.latest = Some(world_state);
             }
@@ -730,6 +758,26 @@ fn poll_network(
             NetEvent::BlockConfigState(config) => {
                 info!(block = ?config.block_pos, "received BlockConfigState — writing ConfigPanelOpenMsg");
                 config_open_msgs.write(events::ConfigPanelOpenMsg { config });
+            }
+            NetEvent::SeatBindingsNotify(data) => {
+                info!(bindings = data.bindings.len(), "received SeatBindingsNotify — activating seat bindings");
+                *active_seat = input::ActiveSeatBindings::from_config(&data.bindings);
+            }
+            NetEvent::SubGridAssignmentUpdate(data) => {
+                // Update assignments and mark affected chunks dirty for remesh.
+                for (pos, sg_id) in &data.assignments {
+                    if *sg_id == 0 {
+                        sub_grid_state.assignments.remove(pos);
+                    } else {
+                        sub_grid_state.assignments.insert(*pos, *sg_id);
+                    }
+                    // Mark the chunk containing this block as dirty.
+                    if let Some(source) = chunk_cache.primary_source {
+                        let (chunk_key, _, _, _) = voxeldust_core::block::ShipGrid::world_to_chunk(pos.x, pos.y, pos.z);
+                        chunk_cache.mark_dirty(source, chunk_key);
+                    }
+                }
+                info!(assignments = data.assignments.len(), "received SubGridAssignmentUpdate");
             }
             NetEvent::ChunkSnapshot(cs) => {
                 // Ensure we have a source for the current primary shard.
@@ -972,8 +1020,10 @@ fn smooth_render_position(
         smooth.render_rotation = curr.ship_rotation;
         smooth.ship_origin = curr.ship_origin;
         smooth.bodies = curr.bodies.clone();
+        smooth.interpolation_t = 1.0; // planet: snap, no interpolation
     } else {
         // Ship/system shard: interpolate between snapshots for smooth flight.
+        smooth.interpolation_t = t;
         smooth.render_position = prev.player_position.lerp(curr.player_position, t);
         smooth.render_rotation = prev.ship_rotation.slerp(curr.ship_rotation, t);
         smooth.ship_origin = prev.ship_origin.lerp(curr.ship_origin, t);
@@ -1175,6 +1225,8 @@ struct ClientApp {
     voxel_volume: Option<voxel_volume::VoxelVolume>,
     cloud_system: Option<cloud_system::CloudSystem>,
     uniform_data: Vec<ObjectUniforms>,
+    /// Reused across frames to avoid per-frame HashMap allocation.
+    chunk_uniform_map: std::collections::HashMap<voxeldust_core::block::client_chunks::ChunkKey, usize>,
     /// Cached block registry — built once, used for meshing and raycast.
     /// Stored outside the ECS world to avoid borrow conflicts with chunk cache.
     registry: voxeldust_core::block::BlockRegistry,
@@ -1246,6 +1298,7 @@ impl ClientApp {
             render_rotation: DQuat::IDENTITY,
             ship_origin: DVec3::ZERO,
             bodies: Vec::new(),
+            interpolation_t: 1.0,
             galaxy_render_position: DVec3::ZERO,
             galaxy_render_rotation: DQuat::IDENTITY,
             galaxy_velocity: DVec3::ZERO,
@@ -1268,8 +1321,12 @@ impl ClientApp {
         });
         ecs_app.insert_resource(KeyboardState {
             keys_held: HashSet::new(),
+            mouse_buttons_held: HashSet::new(),
             mouse_grabbed: false,
+            scroll_delta: 0.0,
         });
+        ecs_app.insert_resource(input::ActiveSeatBindings::default());
+        ecs_app.insert_resource(SubGridState::default());
         ecs_app.insert_resource(FlightControl {
             selected_thrust_tier: 3,
             engines_off: false,
@@ -1350,6 +1407,7 @@ impl ClientApp {
             voxel_volume: None,
             cloud_system: None,
             uniform_data: vec![bytemuck::Zeroable::zeroed(); MAX_OBJECTS],
+            chunk_uniform_map: std::collections::HashMap::new(),
             registry: voxeldust_core::block::BlockRegistry::new(),
             args,
         }
@@ -1614,6 +1672,10 @@ impl ClientApp {
         if let Some(ref mut br) = self.block_renderer {
             let registry = &self.registry;
             let world_mut = self.ecs_app.world_mut();
+            let sub_grid_assignments = {
+                let sg_state = world_mut.resource::<SubGridState>();
+                sg_state.assignments.clone()
+            };
             let mut chunk_cache = world_mut.resource_mut::<ClientChunkCacheRes>();
 
             // Clean up GPU buffers for removed sources.
@@ -1624,20 +1686,52 @@ impl ClientApp {
             // Process newly dirty chunks (source-aware keys).
             if chunk_cache.has_dirty() {
                 let dirty_keys = chunk_cache.drain_dirty();
+                let has_sub_grids = !sub_grid_assignments.is_empty();
+                // Reusable 512KB padded voxel buffer — avoids repeated allocation
+                // when meshing many chunks in sequence.
+                let mut voxel_buf: Vec<u16> = Vec::new();
                 for dk in dirty_keys {
                     if let Some(chunk) = chunk_cache.get_chunk(dk.source, dk.chunk) {
                         let neighbors = chunk_cache.get_neighbors(dk.source, dk.chunk);
-                        let mesh = block_render::generate_chunk_gpu_mesh(
-                            chunk, &neighbors, &registry, false,
-                        );
-                        tracing::info!(
-                            chunk = %dk.chunk,
-                            vertices = mesh.vertices.len(),
-                            indices = mesh.indices.len(),
-                            empty = mesh.is_empty(),
-                            "meshed chunk for GPU"
-                        );
-                        br.upload_chunk_mesh(&gpu.device, dk, &mesh);
+
+                        if has_sub_grids {
+                            // Sub-grid-aware meshing: generate root mesh + per-sub-grid meshes.
+                            let root_mesh = block_render::generate_chunk_gpu_mesh_filtered_with_buf(
+                                chunk, dk.chunk, &neighbors, &registry, false,
+                                &sub_grid_assignments, None, &mut voxel_buf,
+                            );
+                            br.upload_chunk_mesh(&gpu.device, dk, &root_mesh);
+
+                            // Collect which sub-grids have blocks in this chunk.
+                            let cs = voxeldust_core::block::CHUNK_SIZE as i32;
+                            let mut sg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                            for (&pos, &sg_id) in &sub_grid_assignments {
+                                let (ck, _, _, _) = voxeldust_core::block::ShipGrid::world_to_chunk(pos.x, pos.y, pos.z);
+                                if ck == dk.chunk {
+                                    sg_ids.insert(sg_id);
+                                }
+                            }
+
+                            // Generate a separate mesh for each sub-grid in this chunk.
+                            for sg_id in sg_ids {
+                                let sg_mesh = block_render::generate_chunk_gpu_mesh_filtered_with_buf(
+                                    chunk, dk.chunk, &neighbors, &registry, false,
+                                    &sub_grid_assignments, Some(sg_id), &mut voxel_buf,
+                                );
+                                let sg_key = block_render::SubGridMeshKey {
+                                    source: dk.source,
+                                    chunk: dk.chunk,
+                                    sub_grid_id: sg_id,
+                                };
+                                br.upload_sub_grid_mesh(&gpu.device, sg_key, &sg_mesh);
+                            }
+                        } else {
+                            // No sub-grids: standard meshing (all blocks in one mesh).
+                            let mesh = block_render::generate_chunk_gpu_mesh_with_buf(
+                                chunk, &neighbors, &registry, false, &mut voxel_buf,
+                            );
+                            br.upload_chunk_mesh(&gpu.device, dk, &mesh);
+                        }
 
                         // Generate and upload sub-block mesh for this chunk.
                         let sub_mesh = voxeldust_core::block::sub_block_mesher::mesh_sub_blocks(chunk);
@@ -1994,10 +2088,13 @@ impl ClientApp {
         let sys_params = world.resource::<SystemParamsCache>();
         let gfx_settings = world.resource::<graphics_settings::GraphicsSettings>().clone();
 
+        let sg_state = world.resource::<SubGridState>();
+
         let panel_action = render::render_frame(
             gpu,
             window,
             &mut self.uniform_data,
+            &mut self.chunk_uniform_map,
             &cam,
             ws.latest.as_ref(),
             ws.secondary.as_ref(),
@@ -2025,6 +2122,7 @@ impl ClientApp {
             &world.resource::<ClientBlockIndex>().entries,
             config_for_panel.as_mut(),
             &gfx_settings,
+            &sg_state.current_transforms,
         );
 
         // Handle config panel actions.
@@ -2037,8 +2135,14 @@ impl ClientApp {
                         subscribe_bindings: config.subscribe_bindings.clone(),
                         converter_rules: config.converter_rules.clone(),
                         seat_mappings: config.seat_mappings.clone(),
+                        seated_channel_name: config.seated_channel_name.clone(),
                         power_source: config.power_source.clone(),
                         power_consumer: config.power_consumer.clone(),
+                        flight_computer: config.flight_computer.clone(),
+                        hover_module: config.hover_module.clone(),
+                        autopilot: config.autopilot.clone(),
+                        warp_computer: config.warp_computer.clone(),
+                        engine_controller: config.engine_controller.clone(),
                     };
                     let msg = voxeldust_core::client_message::ClientMsg::BlockConfigUpdate(update);
                     let world = self.ecs_app.world();
@@ -2627,12 +2731,13 @@ fn tick_config_panel_system(
 
 fn send_input_system(
     net: Res<NetworkChannels>,
-    kb: Res<KeyboardState>,
+    mut kb: ResMut<KeyboardState>,
     mut flight: ResMut<FlightControl>,
     mut cam: ResMut<CameraControl>,
     player: Res<LocalPlayer>,
     ft: Res<FrameTime>,
     input_ctx: Res<events::InputContext>,
+    mut active_seat: ResMut<input::ActiveSeatBindings>,
 ) {
     // Suppress movement input when not in Game mode.
     if input_ctx.mode != events::InputMode::Game {
@@ -2640,12 +2745,12 @@ fn send_input_system(
     }
     let cam = &mut *cam;
     let limiter = flight.thrust_limiter;
-    let cruise = flight.cruise_active;
-    let atmo_comp = flight.atmo_comp_active;
+    let scroll_delta = kb.scroll_delta;
+    kb.scroll_delta = 0.0; // Consume scroll delta this frame.
     input::send_input_with_dt(
         &net.input_tx,
         &kb.keys_held,
-        flight.engines_off,
+        &kb.mouse_buttons_held,
         player.is_piloting,
         cam.yaw,
         cam.pitch,
@@ -2655,8 +2760,8 @@ fn send_input_system(
         limiter,
         ft.count,
         ft.dt,
-        cruise,
-        atmo_comp,
+        &mut active_seat,
+        scroll_delta,
     );
 }
 

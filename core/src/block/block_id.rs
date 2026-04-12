@@ -169,11 +169,21 @@ impl BlockId {
     // -----------------------------------------------------------------------
     // Utility (1800–1899)
     // -----------------------------------------------------------------------
-    pub const COCKPIT: Self = Self(1800);
+    pub const COCKPIT: Self = Self(1800);          // Pilot seat (pre-configured bindings)
     pub const OWNERSHIP_CORE: Self = Self(1801);
+    pub const SEAT: Self = Self(1802);             // Generic seat (empty, player configures)
     pub const HUD_PANEL: Self = Self(1810);
     pub const GRAVITY_GENERATOR: Self = Self(1820);
     pub const ANTENNA: Self = Self(1830);
+
+    // -----------------------------------------------------------------------
+    // Ship system blocks (1840–1859)
+    // -----------------------------------------------------------------------
+    pub const FLIGHT_COMPUTER: Self = Self(1840);
+    pub const HOVER_MODULE: Self = Self(1841);
+    pub const AUTOPILOT: Self = Self(1842);
+    pub const WARP_COMPUTER: Self = Self(1843);
+    pub const ENGINE_CONTROLLER: Self = Self(1844);
 
     // Cruise drives (propulsion boost modules)
     pub const CRUISE_DRIVE_SMALL: Self = Self(1900);

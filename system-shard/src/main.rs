@@ -2722,15 +2722,19 @@ fn soi_detection(
     planet_pos: Res<PlanetPositions>,
     planet_vel: Res<PlanetVelocities>,
 ) {
-    let mut soi_entries: Vec<(Entity, u64, usize)> = Vec::new();
-    let mut soi_exits: Vec<(Entity, u64, usize)> = Vec::new();
+    let mut soi_entries: Vec<(Entity, u64, usize)> = Vec::with_capacity(4);
+    let mut soi_exits: Vec<(Entity, u64, usize)> = Vec::with_capacity(4);
+
+    // Cache SOI radii per planet to avoid redundant compute_soi_radius calls.
+    let soi_radii: Vec<f64> = sys_config.0.planets.iter()
+        .map(|p| compute_soi_radius(p, &sys_config.0.star))
+        .collect();
 
     for (entity, ship_id, pos, _vel, in_soi, _orbit_stab) in &ships {
         let mut found_soi = false;
-        for (i, planet) in sys_config.0.planets.iter().enumerate() {
+        for (i, _planet) in sys_config.0.planets.iter().enumerate() {
             let dist = (pos.0 - planet_pos.0[i]).length();
-            let soi = compute_soi_radius(planet, &sys_config.0.star);
-            if dist < soi {
+            if dist < soi_radii[i] {
                 found_soi = true;
                 if in_soi.map(|s| s.planet_index) != Some(i) {
                     soi_entries.push((entity, ship_id.0, i));
@@ -2742,15 +2746,14 @@ fn soi_detection(
             if let Some(soi_data) = in_soi {
                 let pi = soi_data.planet_index;
                 let dist_exit = (pos.0 - planet_pos.0[pi]).length();
-                let soi_exit = compute_soi_radius(&sys_config.0.planets[pi], &sys_config.0.star);
-                if dist_exit > soi_exit * 1.02 {
+                if dist_exit > soi_radii[pi] * 1.02 {
                     soi_exits.push((entity, ship_id.0, pi));
                 }
             }
         }
     }
 
-    // Process SOI entries.
+    // Process SOI entries — use direct entity lookup instead of scanning all ships.
     for (entity, sid, planet_index) in &soi_entries {
         let planet_real_vel = planet_vel.0[*planet_index];
         let planet_p = planet_pos.0[*planet_index];
@@ -2758,11 +2761,7 @@ fn soi_detection(
         let planet_gm = sys_config.0.planets[*planet_index].gm;
         let planet_seed = sys_config.0.planets[*planet_index].planet_seed;
 
-        for (ent, _ship_id, pos, mut vel, _in_soi, orbit_stab) in &mut ships {
-            if ent != *entity {
-                continue;
-            }
-
+        if let Ok((_ent, _ship_id, pos, mut vel, _in_soi, orbit_stab)) = ships.get_mut(*entity) {
             let rel_speed_before = (vel.0 - planet_real_vel).length();
             vel.0 -= planet_real_vel;
 
@@ -2796,35 +2795,27 @@ fn soi_detection(
             commands.entity(*entity).insert(InSoi {
                 planet_index: *planet_index,
             });
-            break;
         }
     }
 
-    // Process SOI exits.
+    // Process SOI exits — use direct entity lookup instead of scanning all ships.
     for (entity, sid, planet_index) in &soi_exits {
         let planet_real_vel = planet_vel.0[*planet_index];
         let planet_pos_exit = planet_pos.0[*planet_index];
-        let soi_exit_r =
-            compute_soi_radius(&sys_config.0.planets[*planet_index], &sys_config.0.star);
 
-        for (ent, _ship_id, pos, mut vel, _in_soi, _orbit_stab) in &mut ships {
-            if ent != *entity {
-                continue;
-            }
-
+        if let Ok((_ent, _ship_id, pos, mut vel, _in_soi, _orbit_stab)) = ships.get_mut(*entity) {
             let dist = (pos.0 - planet_pos_exit).length();
             vel.0 += planet_real_vel;
             warn!(
                 ship_id = *sid,
                 planet_index,
                 dist = format!("{:.0}", dist),
-                soi = format!("{:.0}", soi_exit_r),
+                soi = format!("{:.0}", soi_radii[*planet_index]),
                 vel = format!("{:.0}", vel.0.length()),
                 "ship LEFT planet SOI — converted to system frame"
             );
 
             commands.entity(*entity).remove::<InSoi>();
-            break;
         }
     }
 }
@@ -3456,6 +3447,7 @@ fn broadcast_udp(
         game_time: celestial_time.0,
         warp_target_star_index: 0xFFFFFFFF,
         autopilot: None,
+        sub_grids: vec![],
     });
     let _ = bridge.broadcast_tx.try_send(ws);
 }

@@ -24,6 +24,16 @@ pub enum PowerConfig {
     },
 }
 
+/// Persisted seat binding: (label, source_u8, key_name, key_mode_u8, axis_dir_u8, channel_name, property_u8).
+pub type SavedSeatBinding = (String, u8, String, u8, u8, String, u8);
+
+/// Persisted seat configuration (bindings + seated channel).
+#[derive(Clone, Debug, Default)]
+pub struct SavedSeatConfig {
+    pub bindings: Vec<SavedSeatBinding>,
+    pub seated_channel_name: String,
+}
+
 /// Multi-chunk Cartesian block grid for ships and stations.
 ///
 /// Ships use flat Cartesian coordinates (no sphere projection). The grid is
@@ -55,10 +65,9 @@ pub struct ShipGrid {
     /// Key = block position, Value = (subscribe_bindings, publish_bindings)
     /// Each binding is (channel_name, property_u8).
     saved_signal_bindings: HashMap<IVec3, (Vec<(String, u8)>, Vec<(String, u8)>)>,
-    /// Persisted seat control mappings per block.
-    /// Key = block position, Value = Vec<(control_u8, channel_name, property_u8)>.
-    /// If present, replaces the default 13-channel SeatChannelMapping on load.
-    saved_seat_mappings: HashMap<IVec3, Vec<(u8, String, u8)>>,
+    /// Persisted seat configuration per block (generic seat format).
+    /// If present, replaces the preset defaults on load.
+    saved_seat_configs: HashMap<IVec3, SavedSeatConfig>,
 }
 
 impl ShipGrid {
@@ -70,7 +79,7 @@ impl ShipGrid {
             power_configs: HashMap::new(),
             sub_grid_assignments: HashMap::new(),
             saved_signal_bindings: HashMap::new(),
-            saved_seat_mappings: HashMap::new(),
+            saved_seat_configs: HashMap::new(),
         }
     }
 
@@ -130,6 +139,11 @@ impl ShipGrid {
             .map(|(pos, _)| *pos)
     }
 
+    /// Iterate all sub-grid assignments (pos → sub_grid_id).
+    pub fn iter_sub_grid_assignments(&self) -> impl Iterator<Item = (IVec3, u32)> + '_ {
+        self.sub_grid_assignments.iter().map(|(&pos, &id)| (pos, id))
+    }
+
     /// Set saved signal bindings for a block (loaded from persistence).
     pub fn set_saved_signal_bindings(&mut self, pos: IVec3, subscribe: Vec<(String, u8)>, publish: Vec<(String, u8)>) {
         if subscribe.is_empty() && publish.is_empty() {
@@ -144,18 +158,18 @@ impl ShipGrid {
         self.saved_signal_bindings.get(&pos)
     }
 
-    /// Set saved seat control mappings for a block (loaded from persistence).
-    pub fn set_saved_seat_mappings(&mut self, pos: IVec3, mappings: Vec<(u8, String, u8)>) {
-        if mappings.is_empty() {
-            self.saved_seat_mappings.remove(&pos);
+    /// Set saved seat configuration for a block (loaded from persistence).
+    pub fn set_saved_seat_config(&mut self, pos: IVec3, config: SavedSeatConfig) {
+        if config.bindings.is_empty() && config.seated_channel_name.is_empty() {
+            self.saved_seat_configs.remove(&pos);
         } else {
-            self.saved_seat_mappings.insert(pos, mappings);
+            self.saved_seat_configs.insert(pos, config);
         }
     }
 
-    /// Get saved seat control mappings for a block, if any.
-    pub fn saved_seat_mappings(&self, pos: IVec3) -> Option<&Vec<(u8, String, u8)>> {
-        self.saved_seat_mappings.get(&pos)
+    /// Get saved seat configuration for a block, if any.
+    pub fn saved_seat_config(&self, pos: IVec3) -> Option<&SavedSeatConfig> {
+        self.saved_seat_configs.get(&pos)
     }
 
     /// Iterate all channel overrides (position → channel name).
@@ -866,6 +880,13 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
         grid.set_boost_channel(x_max + 1, y, z_min + 1, "boost-brake");
     }
 
+    // --- Ship system blocks (one each, placed along port wall interior) ---
+    grid.set_block(-2, 1, -4, BlockId::FLIGHT_COMPUTER);
+    grid.set_block(-2, 1, -3, BlockId::HOVER_MODULE);
+    grid.set_block(-2, 1, -2, BlockId::AUTOPILOT);
+    grid.set_block(-2, 1, -1, BlockId::WARP_COMPUTER);
+    grid.set_block(-2, 1, 4, BlockId::ENGINE_CONTROLLER);
+
     // --- Sub-block elements: decorative only (power is wireless now) ---
     use sub_block::{SubBlockElement, SubBlockType};
 
@@ -922,11 +943,17 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
 /// BFS through all face-adjacent solid blocks. The mount block itself is NOT crossed.
 /// Returns the set of block positions in the child sub-grid (may be empty if nothing
 /// is attached to the output face).
+/// Compute sub-grid members via BFS from a mechanical mount's output face.
+///
+/// `own_sg_id` is the sub-grid ID being computed (0 for new sub-grids).
+/// The BFS stops at blocks that belong to a DIFFERENT sub-grid (sub-grid boundary).
+/// This prevents nested mounts from having their members stolen by a parent's re-BFS.
 pub fn compute_sub_grid_members(
     grid: &ShipGrid,
     registry: &super::registry::BlockRegistry,
     mount_pos: IVec3,
     output_face: u8,
+    own_sg_id: u32,
 ) -> std::collections::HashSet<IVec3> {
     use std::collections::{HashSet, VecDeque};
 
@@ -953,10 +980,14 @@ pub fn compute_sub_grid_members(
             if neighbor == mount_pos { continue; } // don't cross the joint
             if visited.contains(&neighbor) { continue; }
             let block = grid.get_block(neighbor.x, neighbor.y, neighbor.z);
-            if block != BlockId::AIR && registry.is_solid(block) {
-                visited.insert(neighbor);
-                queue.push_back(neighbor);
+            if block == BlockId::AIR || !registry.is_solid(block) { continue; }
+            // Don't cross into blocks owned by a different sub-grid.
+            let neighbor_sg = grid.sub_grid_id(neighbor);
+            if neighbor_sg != 0 && neighbor_sg != own_sg_id {
+                continue; // belongs to another sub-grid — boundary
             }
+            visited.insert(neighbor);
+            queue.push_back(neighbor);
         }
     }
 

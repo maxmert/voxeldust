@@ -17,6 +17,19 @@ struct Quatd {
     w: double;
 }
 
+struct Vec3f {
+    x: float;
+    y: float;
+    z: float;
+}
+
+struct Quatf {
+    x: float;
+    y: float;
+    z: float;
+    w: float;
+}
+
 // ============================================================
 // Inter-shard messages (QUIC)
 // ============================================================
@@ -373,8 +386,9 @@ table PlayerInput {
     tick: uint64;
     thrust_limiter: float = 0.75; // 0.0–1.0, default 75%
     roll: float;                  // Q/E: -1.0 (CCW) to +1.0 (CW)
-    cruise: bool;                 // C key: supercruise active
-    atmo_comp: bool;              // H key: atmosphere compensation active
+    cruise: bool;                 // C key: supercruise active (legacy)
+    atmo_comp: bool;              // H key: atmosphere compensation active (legacy)
+    seat_values: [float];         // Per-binding float values when seated (generic seat)
 }
 
 table PlayerSnapshot {
@@ -388,6 +402,15 @@ table PlayerSnapshot {
     seated: bool;       // player is in any seat (pilot, gunner, passenger)
 }
 
+/// Transform of a mechanical sub-grid (rotor, piston, hinge, slider) body.
+table SubGridTransform {
+    sub_grid_id: uint32;
+    translation: Vec3f;   // world-space position of child body (after parent chain)
+    rotation: Quatf;      // world-space rotation of child body (after parent chain)
+    parent_grid: uint32;  // 0 = root, >0 = nested parent sub-grid
+    anchor: Vec3f;        // original root-space anchor (mount_pos + face offset, never changes)
+}
+
 table WorldState {
     tick: uint64;
     origin: Vec3d;
@@ -398,6 +421,21 @@ table WorldState {
     game_time: double;
     warp_target_star_index: uint32 = 4294967295;
     autopilot: AutopilotSnapshot;
+    sub_grids: [SubGridTransform];
+}
+
+/// Block-to-sub-grid assignment for mechanical mount membership.
+table SubGridBlockAssignment {
+    bx: int32;
+    by: int32;
+    bz: int32;
+    sub_grid_id: uint32;  // 0 = root (unassign)
+}
+
+/// Reliable (TCP) update of sub-grid block assignments.
+/// Sent on player join (full state) and on membership change (delta).
+table SubGridAssignmentUpdate {
+    assignments: [SubGridBlockAssignment];
 }
 
 table BlockMod {
@@ -539,11 +577,85 @@ table SignalRuleFB {
     expression_value2: float; // for Clamp max
 }
 
-/// Seat control → channel mapping.
+/// Generic seat input binding.
 table SeatBindingFB {
-    control: uint8;       // SeatControl enum discriminant
+    label: string;
+    source: uint8;           // SeatInputSource: 0=Key, 1=MouseX, 2=MouseY, 3=Scroll
+    key_name: string;        // Platform-independent key name (Key source only)
+    key_mode: uint8;         // KeyMode: 0=Momentary, 1=Toggle
+    axis_direction: uint8;   // AxisDirection: 0=Positive, 1=Negative, 2=Both
     channel_name: string;
-    property: uint8;
+    property: uint8;         // SignalProperty enum
+}
+
+// -------------------------------------------------------------------
+// Custom ship system block configs (each block has its own table)
+// -------------------------------------------------------------------
+
+table FlightComputerConfigFB {
+    yaw_cw_channel: string;
+    yaw_ccw_channel: string;
+    pitch_up_channel: string;
+    pitch_down_channel: string;
+    roll_cw_channel: string;
+    roll_ccw_channel: string;
+    damping_gain: float = 0.6;
+    dead_zone: float = 0.005;
+    max_correction: float = 0.3;
+}
+
+table HoverModuleConfigFB {
+    thrust_forward_channel: string;
+    thrust_reverse_channel: string;
+    thrust_right_channel: string;
+    thrust_left_channel: string;
+    thrust_up_channel: string;
+    thrust_down_channel: string;
+    yaw_cw_channel: string;
+    yaw_ccw_channel: string;
+    pitch_up_channel: string;
+    pitch_down_channel: string;
+    roll_cw_channel: string;
+    roll_ccw_channel: string;
+    activate_channel: string;
+    cutoff_channel: string;
+}
+
+table AutopilotConfigFB {
+    yaw_cw_channel: string;
+    yaw_ccw_channel: string;
+    pitch_up_channel: string;
+    pitch_down_channel: string;
+    roll_cw_channel: string;
+    roll_ccw_channel: string;
+    engage_channel: string;
+}
+
+table WarpComputerConfigFB {
+    target_channel: string;
+    confirm_channel: string;
+}
+
+table EngineControllerConfigFB {
+    thrust_forward_channel: string;
+    thrust_reverse_channel: string;
+    thrust_right_channel: string;
+    thrust_left_channel: string;
+    thrust_up_channel: string;
+    thrust_down_channel: string;
+    yaw_cw_channel: string;
+    yaw_ccw_channel: string;
+    pitch_up_channel: string;
+    pitch_down_channel: string;
+    roll_cw_channel: string;
+    roll_ccw_channel: string;
+    toggle_channel: string;
+}
+
+/// Server → client: seat bindings when player enters a seat.
+table SeatBindingsNotify {
+    bindings: [SeatBindingFB];
+    seated_channel_name: string;
 }
 
 /// A named power circuit on a reactor (fraction of total output).
@@ -590,10 +702,15 @@ table BlockConfigState {
     converter_rules: [SignalRuleFB];
     seat_mappings: [SeatBindingFB];
     available_channels: [string];
-    // Power configuration.
     power_source: PowerSourceConfigFB;
     power_consumer: PowerConsumerConfigFB;
     nearby_reactors: [NearbyReactorFB];
+    seated_channel_name: string;
+    flight_computer_config: FlightComputerConfigFB;
+    hover_module_config: HoverModuleConfigFB;
+    autopilot_config: AutopilotConfigFB;
+    warp_computer_config: WarpComputerConfigFB;
+    engine_controller_config: EngineControllerConfigFB;
 }
 
 /// Client → server: updated signal config for a functional block.
@@ -605,9 +722,14 @@ table BlockConfigUpdate {
     subscribe_bindings: [SignalBindingFB];
     converter_rules: [SignalRuleFB];
     seat_mappings: [SeatBindingFB];
-    // Power configuration.
     power_source: PowerSourceConfigFB;
     power_consumer: PowerConsumerConfigFB;
+    seated_channel_name: string;
+    flight_computer_config: FlightComputerConfigFB;
+    hover_module_config: HoverModuleConfigFB;
+    autopilot_config: AutopilotConfigFB;
+    warp_computer_config: WarpComputerConfigFB;
+    engine_controller_config: EngineControllerConfigFB;
 }
 
 union ServerPayload {
@@ -623,6 +745,8 @@ union ServerPayload {
     ChunkSnapshot,
     ChunkDelta,
     BlockConfigState,
+    SeatBindingsNotify,
+    SubGridAssignmentUpdate,
 }
 
 /// Root type for server → client messages.

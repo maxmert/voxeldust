@@ -248,6 +248,14 @@ impl ClientChunkCache {
         !self.dirty.is_empty()
     }
 
+    /// Explicitly mark a chunk as dirty (e.g., when sub-grid assignments change).
+    pub fn mark_dirty(&mut self, source: ChunkSourceId, chunk_pos: IVec3) {
+        let key = ChunkKey { source, chunk: chunk_pos };
+        if self.chunks.contains_key(&key) {
+            self.dirty.insert(key);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Queries
     // -----------------------------------------------------------------------

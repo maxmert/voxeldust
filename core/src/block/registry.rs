@@ -31,6 +31,11 @@ pub enum FunctionalBlockKind {
     Sensor,
     Computer,
     CruiseDrive,
+    FlightComputer,
+    HoverModule,
+    Autopilot,
+    WarpComputer,
+    EngineController,
 }
 
 /// Per-thruster-block static properties (thrust output, fuel consumption).
@@ -573,7 +578,15 @@ impl BlockRegistry {
         // Functional behavior defined in the functional block registry.
         // =================================================================
         set(r, BlockId::COCKPIT, functional_block("cockpit", 2000, 50, [60, 80, 100]));
+        set(r, BlockId::SEAT, functional_block("seat", 500, 20, [180, 180, 180]));
         set(r, BlockId::OWNERSHIP_CORE, functional_block("ownership_core", 5000, 200, [255, 215, 0]));
+
+        // Ship system blocks
+        set(r, BlockId::FLIGHT_COMPUTER, functional_block("flight_computer", 800, 30, [40, 120, 200]));
+        set(r, BlockId::HOVER_MODULE, functional_block("hover_module", 1000, 40, [60, 180, 140]));
+        set(r, BlockId::AUTOPILOT, functional_block("autopilot", 1200, 40, [180, 140, 60]));
+        set(r, BlockId::WARP_COMPUTER, functional_block("warp_computer", 1500, 50, [140, 60, 200]));
+        set(r, BlockId::ENGINE_CONTROLLER, functional_block("engine_controller", 600, 25, [200, 80, 40]));
         set(r, BlockId::HUD_PANEL, BlockDef {
             name: "hud_panel",
             is_solid: true,
@@ -686,6 +699,13 @@ impl BlockRegistry {
         fk[BlockId::POWER_CONDUIT.as_u16() as usize] = Some(PowerConduit);
         // Seats
         fk[BlockId::COCKPIT.as_u16() as usize] = Some(Seat);
+        fk[BlockId::SEAT.as_u16() as usize] = Some(Seat);
+        // Ship system blocks
+        fk[BlockId::FLIGHT_COMPUTER.as_u16() as usize] = Some(FlightComputer);
+        fk[BlockId::HOVER_MODULE.as_u16() as usize] = Some(HoverModule);
+        fk[BlockId::AUTOPILOT.as_u16() as usize] = Some(Autopilot);
+        fk[BlockId::WARP_COMPUTER.as_u16() as usize] = Some(WarpComputer);
+        fk[BlockId::ENGINE_CONTROLLER.as_u16() as usize] = Some(EngineController);
         // Utility
         fk[BlockId::GRAVITY_GENERATOR.as_u16() as usize] = Some(GravityGenerator);
         fk[BlockId::ANTENNA.as_u16() as usize] = Some(Antenna);
@@ -772,13 +792,13 @@ impl BlockRegistry {
         let mp = &mut mechanical_props_vec;
         mp[BlockId::ROTOR.as_u16() as usize] = Some(MechanicalProps {
             joint_type: JointType::Revolute,
-            max_force: 500_000.0,   // 500 kN·m torque
-            max_speed: 30.0,        // 30 deg/s
+            max_force: 10_000.0,    // 10 kN·m torque (strong enough to track fast targets)
+            max_speed: 360.0,       // 360 deg/s (1 full rotation/s at full input)
             max_range: 360.0,       // full rotation (no limits)
         });
         mp[BlockId::PISTON.as_u16() as usize] = Some(MechanicalProps {
             joint_type: JointType::Prismatic,
-            max_force: 1_000_000.0, // 1 MN force
+            max_force: 5_000.0,     // 5 kN force (hydraulic actuator scale)
             max_speed: 2.0,         // 2 m/s
             max_range: 10.0,        // 10 meter max extension
         });

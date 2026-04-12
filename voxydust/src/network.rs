@@ -41,6 +41,10 @@ pub enum NetEvent {
     GalaxyWorldState(voxeldust_core::client_message::GalaxyWorldStateData),
     /// Block signal config state from server (config UI).
     BlockConfigState(voxeldust_core::signal::config::BlockSignalConfig),
+    /// Seat bindings from server (when player enters a seat).
+    SeatBindingsNotify(voxeldust_core::client_message::SeatBindingsNotifyData),
+    /// Sub-grid block assignments from server (mechanical mount membership).
+    SubGridAssignmentUpdate(voxeldust_core::client_message::SubGridAssignmentData),
     /// Full chunk snapshot received (initial sync or resync).
     ChunkSnapshot(ChunkSnapshotData),
     /// Incremental block changes to a chunk.
@@ -339,11 +343,17 @@ pub async fn run_network(
                             Ok(ServerMsg::BlockConfigState(config)) => {
                                 let _ = event_tx_tcp.send(NetEvent::BlockConfigState(config));
                             }
+                            Ok(ServerMsg::SeatBindingsNotify(data)) => {
+                                let _ = event_tx_tcp.send(NetEvent::SeatBindingsNotify(data));
+                            }
                             Ok(ServerMsg::ChunkSnapshot(cs)) => {
                                 let _ = event_tx_tcp.send(NetEvent::ChunkSnapshot(cs));
                             }
                             Ok(ServerMsg::ChunkDelta(cd)) => {
                                 let _ = event_tx_tcp.send(NetEvent::ChunkDelta(cd));
+                            }
+                            Ok(ServerMsg::SubGridAssignmentUpdate(data)) => {
+                                let _ = event_tx_tcp.send(NetEvent::SubGridAssignmentUpdate(data));
                             }
                             Ok(_) => { /* ignore other TCP messages */ }
                             Err(e) => {
@@ -485,5 +495,6 @@ fn empty_input() -> PlayerInputData {
         roll: 0.0,
         cruise: false,
         atmo_comp: false,
+        seat_values: Vec::new(),
     }
 }

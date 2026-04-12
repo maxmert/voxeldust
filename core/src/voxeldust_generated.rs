@@ -163,10 +163,10 @@ pub struct ShardPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SERVER_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 12;
+pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 14;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 13] = [
+pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 15] = [
   ServerPayload::NONE,
   ServerPayload::JoinResponse,
   ServerPayload::WorldState,
@@ -180,6 +180,8 @@ pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 13] = [
   ServerPayload::ChunkSnapshot,
   ServerPayload::ChunkDelta,
   ServerPayload::BlockConfigState,
+  ServerPayload::SeatBindingsNotify,
+  ServerPayload::SubGridAssignmentUpdate,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -200,9 +202,11 @@ impl ServerPayload {
   pub const ChunkSnapshot: Self = Self(10);
   pub const ChunkDelta: Self = Self(11);
   pub const BlockConfigState: Self = Self(12);
+  pub const SeatBindingsNotify: Self = Self(13);
+  pub const SubGridAssignmentUpdate: Self = Self(14);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 12;
+  pub const ENUM_MAX: u8 = 14;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::JoinResponse,
@@ -217,6 +221,8 @@ impl ServerPayload {
     Self::ChunkSnapshot,
     Self::ChunkDelta,
     Self::BlockConfigState,
+    Self::SeatBindingsNotify,
+    Self::SubGridAssignmentUpdate,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -234,6 +240,8 @@ impl ServerPayload {
       Self::ChunkSnapshot => Some("ChunkSnapshot"),
       Self::ChunkDelta => Some("ChunkDelta"),
       Self::BlockConfigState => Some("BlockConfigState"),
+      Self::SeatBindingsNotify => Some("SeatBindingsNotify"),
+      Self::SubGridAssignmentUpdate => Some("SubGridAssignmentUpdate"),
       _ => None,
     }
   }
@@ -736,6 +744,356 @@ impl<'a> Quatd {
         &x_le as *const _ as *const u8,
         self.0[24..].as_mut_ptr(),
         ::core::mem::size_of::<<f64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
+// struct Vec3f, aligned to 4
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct Vec3f(pub [u8; 12]);
+impl Default for Vec3f { 
+  fn default() -> Self { 
+    Self([0; 12])
+  }
+}
+impl ::core::fmt::Debug for Vec3f {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("Vec3f")
+      .field("x", &self.x())
+      .field("y", &self.y())
+      .field("z", &self.z())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for Vec3f {}
+impl<'a> ::flatbuffers::Follow<'a> for Vec3f {
+  type Inner = &'a Vec3f;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a Vec3f>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a Vec3f {
+  type Inner = &'a Vec3f;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<Vec3f>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for Vec3f {
+    type Output = Vec3f;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const Vec3f as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(4)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for Vec3f {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> Vec3f {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    x: f32,
+    y: f32,
+    z: f32,
+  ) -> Self {
+    let mut s = Self([0; 12]);
+    s.set_x(x);
+    s.set_y(y);
+    s.set_z(z);
+    s
+  }
+
+  pub fn x(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_x(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn y(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[4..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_y(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[4..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn z(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_z(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
+// struct Quatf, aligned to 4
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct Quatf(pub [u8; 16]);
+impl Default for Quatf { 
+  fn default() -> Self { 
+    Self([0; 16])
+  }
+}
+impl ::core::fmt::Debug for Quatf {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("Quatf")
+      .field("x", &self.x())
+      .field("y", &self.y())
+      .field("z", &self.z())
+      .field("w", &self.w())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for Quatf {}
+impl<'a> ::flatbuffers::Follow<'a> for Quatf {
+  type Inner = &'a Quatf;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a Quatf>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a Quatf {
+  type Inner = &'a Quatf;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<Quatf>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for Quatf {
+    type Output = Quatf;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const Quatf as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(4)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for Quatf {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> Quatf {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+  ) -> Self {
+    let mut s = Self([0; 16]);
+    s.set_x(x);
+    s.set_y(y);
+    s.set_z(z);
+    s.set_w(w);
+    s
+  }
+
+  pub fn x(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_x(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn y(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[4..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_y(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[4..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn z(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_z(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn w(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[12..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_w(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[12..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
       );
     }
   }
@@ -6336,6 +6694,7 @@ impl<'a> PlayerInput<'a> {
   pub const VT_ROLL: ::flatbuffers::VOffsetT = 30;
   pub const VT_CRUISE: ::flatbuffers::VOffsetT = 32;
   pub const VT_ATMO_COMP: ::flatbuffers::VOffsetT = 34;
+  pub const VT_SEAT_VALUES: ::flatbuffers::VOffsetT = 36;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6344,10 +6703,11 @@ impl<'a> PlayerInput<'a> {
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args PlayerInputArgs
+    args: &'args PlayerInputArgs<'args>
   ) -> ::flatbuffers::WIPOffset<PlayerInput<'bldr>> {
     let mut builder = PlayerInputBuilder::new(_fbb);
     builder.add_tick(args.tick);
+    if let Some(x) = args.seat_values { builder.add_seat_values(x); }
     builder.add_roll(args.roll);
     builder.add_thrust_limiter(args.thrust_limiter);
     builder.add_look_pitch(args.look_pitch);
@@ -6479,6 +6839,13 @@ impl<'a> PlayerInput<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(PlayerInput::VT_ATMO_COMP, Some(false)).unwrap()}
   }
+  #[inline]
+  pub fn seat_values(&self) -> Option<::flatbuffers::Vector<'a, f32>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, f32>>>(PlayerInput::VT_SEAT_VALUES, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerInput<'_> {
@@ -6503,11 +6870,12 @@ impl ::flatbuffers::Verifiable for PlayerInput<'_> {
      .visit_field::<f32>("roll", Self::VT_ROLL, false)?
      .visit_field::<bool>("cruise", Self::VT_CRUISE, false)?
      .visit_field::<bool>("atmo_comp", Self::VT_ATMO_COMP, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, f32>>>("seat_values", Self::VT_SEAT_VALUES, false)?
      .finish();
     Ok(())
   }
 }
-pub struct PlayerInputArgs {
+pub struct PlayerInputArgs<'a> {
     pub movement_x: f32,
     pub movement_y: f32,
     pub movement_z: f32,
@@ -6524,8 +6892,9 @@ pub struct PlayerInputArgs {
     pub roll: f32,
     pub cruise: bool,
     pub atmo_comp: bool,
+    pub seat_values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, f32>>>,
 }
-impl<'a> Default for PlayerInputArgs {
+impl<'a> Default for PlayerInputArgs<'a> {
   #[inline]
   fn default() -> Self {
     PlayerInputArgs {
@@ -6545,6 +6914,7 @@ impl<'a> Default for PlayerInputArgs {
       roll: 0.0,
       cruise: false,
       atmo_comp: false,
+      seat_values: None,
     }
   }
 }
@@ -6619,6 +6989,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerInputBuilder<'a, 'b, A>
     self.fbb_.push_slot::<bool>(PlayerInput::VT_ATMO_COMP, atmo_comp, false);
   }
   #[inline]
+  pub fn add_seat_values(&mut self, seat_values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , f32>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PlayerInput::VT_SEAT_VALUES, seat_values);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerInputBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerInputBuilder {
@@ -6652,6 +7026,7 @@ impl ::core::fmt::Debug for PlayerInput<'_> {
       ds.field("roll", &self.roll());
       ds.field("cruise", &self.cruise());
       ds.field("atmo_comp", &self.atmo_comp());
+      ds.field("seat_values", &self.seat_values());
       ds.finish()
   }
 }
@@ -6870,6 +7245,171 @@ impl ::core::fmt::Debug for PlayerSnapshot<'_> {
       ds.finish()
   }
 }
+pub enum SubGridTransformOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Transform of a mechanical sub-grid (rotor, piston, hinge, slider) body.
+pub struct SubGridTransform<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SubGridTransform<'a> {
+  type Inner = SubGridTransform<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SubGridTransform<'a> {
+  pub const VT_SUB_GRID_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_TRANSLATION: ::flatbuffers::VOffsetT = 6;
+  pub const VT_ROTATION: ::flatbuffers::VOffsetT = 8;
+  pub const VT_PARENT_GRID: ::flatbuffers::VOffsetT = 10;
+  pub const VT_ANCHOR: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SubGridTransform { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SubGridTransformArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SubGridTransform<'bldr>> {
+    let mut builder = SubGridTransformBuilder::new(_fbb);
+    if let Some(x) = args.anchor { builder.add_anchor(x); }
+    builder.add_parent_grid(args.parent_grid);
+    if let Some(x) = args.rotation { builder.add_rotation(x); }
+    if let Some(x) = args.translation { builder.add_translation(x); }
+    builder.add_sub_grid_id(args.sub_grid_id);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn sub_grid_id(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SubGridTransform::VT_SUB_GRID_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn translation(&self) -> Option<&'a Vec3f> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3f>(SubGridTransform::VT_TRANSLATION, None)}
+  }
+  #[inline]
+  pub fn rotation(&self) -> Option<&'a Quatf> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Quatf>(SubGridTransform::VT_ROTATION, None)}
+  }
+  #[inline]
+  pub fn parent_grid(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SubGridTransform::VT_PARENT_GRID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn anchor(&self) -> Option<&'a Vec3f> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3f>(SubGridTransform::VT_ANCHOR, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SubGridTransform<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u32>("sub_grid_id", Self::VT_SUB_GRID_ID, false)?
+     .visit_field::<Vec3f>("translation", Self::VT_TRANSLATION, false)?
+     .visit_field::<Quatf>("rotation", Self::VT_ROTATION, false)?
+     .visit_field::<u32>("parent_grid", Self::VT_PARENT_GRID, false)?
+     .visit_field::<Vec3f>("anchor", Self::VT_ANCHOR, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SubGridTransformArgs<'a> {
+    pub sub_grid_id: u32,
+    pub translation: Option<&'a Vec3f>,
+    pub rotation: Option<&'a Quatf>,
+    pub parent_grid: u32,
+    pub anchor: Option<&'a Vec3f>,
+}
+impl<'a> Default for SubGridTransformArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SubGridTransformArgs {
+      sub_grid_id: 0,
+      translation: None,
+      rotation: None,
+      parent_grid: 0,
+      anchor: None,
+    }
+  }
+}
+
+pub struct SubGridTransformBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SubGridTransformBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_sub_grid_id(&mut self, sub_grid_id: u32) {
+    self.fbb_.push_slot::<u32>(SubGridTransform::VT_SUB_GRID_ID, sub_grid_id, 0);
+  }
+  #[inline]
+  pub fn add_translation(&mut self, translation: &Vec3f) {
+    self.fbb_.push_slot_always::<&Vec3f>(SubGridTransform::VT_TRANSLATION, translation);
+  }
+  #[inline]
+  pub fn add_rotation(&mut self, rotation: &Quatf) {
+    self.fbb_.push_slot_always::<&Quatf>(SubGridTransform::VT_ROTATION, rotation);
+  }
+  #[inline]
+  pub fn add_parent_grid(&mut self, parent_grid: u32) {
+    self.fbb_.push_slot::<u32>(SubGridTransform::VT_PARENT_GRID, parent_grid, 0);
+  }
+  #[inline]
+  pub fn add_anchor(&mut self, anchor: &Vec3f) {
+    self.fbb_.push_slot_always::<&Vec3f>(SubGridTransform::VT_ANCHOR, anchor);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SubGridTransformBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SubGridTransformBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SubGridTransform<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SubGridTransform<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SubGridTransform");
+      ds.field("sub_grid_id", &self.sub_grid_id());
+      ds.field("translation", &self.translation());
+      ds.field("rotation", &self.rotation());
+      ds.field("parent_grid", &self.parent_grid());
+      ds.field("anchor", &self.anchor());
+      ds.finish()
+  }
+}
 pub enum WorldStateOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -6895,6 +7435,7 @@ impl<'a> WorldState<'a> {
   pub const VT_GAME_TIME: ::flatbuffers::VOffsetT = 16;
   pub const VT_WARP_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 18;
   pub const VT_AUTOPILOT: ::flatbuffers::VOffsetT = 20;
+  pub const VT_SUB_GRIDS: ::flatbuffers::VOffsetT = 22;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6908,6 +7449,7 @@ impl<'a> WorldState<'a> {
     let mut builder = WorldStateBuilder::new(_fbb);
     builder.add_game_time(args.game_time);
     builder.add_tick(args.tick);
+    if let Some(x) = args.sub_grids { builder.add_sub_grids(x); }
     if let Some(x) = args.autopilot { builder.add_autopilot(x); }
     builder.add_warp_target_star_index(args.warp_target_star_index);
     if let Some(x) = args.lighting { builder.add_lighting(x); }
@@ -6982,6 +7524,13 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>(WorldState::VT_AUTOPILOT, None)}
   }
+  #[inline]
+  pub fn sub_grids(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridTransform<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridTransform>>>>(WorldState::VT_SUB_GRIDS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for WorldState<'_> {
@@ -6999,6 +7548,7 @@ impl ::flatbuffers::Verifiable for WorldState<'_> {
      .visit_field::<f64>("game_time", Self::VT_GAME_TIME, false)?
      .visit_field::<u32>("warp_target_star_index", Self::VT_WARP_TARGET_STAR_INDEX, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>("autopilot", Self::VT_AUTOPILOT, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SubGridTransform>>>>("sub_grids", Self::VT_SUB_GRIDS, false)?
      .finish();
     Ok(())
   }
@@ -7013,6 +7563,7 @@ pub struct WorldStateArgs<'a> {
     pub game_time: f64,
     pub warp_target_star_index: u32,
     pub autopilot: Option<::flatbuffers::WIPOffset<AutopilotSnapshot<'a>>>,
+    pub sub_grids: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridTransform<'a>>>>>,
 }
 impl<'a> Default for WorldStateArgs<'a> {
   #[inline]
@@ -7027,6 +7578,7 @@ impl<'a> Default for WorldStateArgs<'a> {
       game_time: 0.0,
       warp_target_star_index: 4294967295,
       autopilot: None,
+      sub_grids: None,
     }
   }
 }
@@ -7073,6 +7625,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WorldStateBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AutopilotSnapshot>>(WorldState::VT_AUTOPILOT, autopilot);
   }
   #[inline]
+  pub fn add_sub_grids(&mut self, sub_grids: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SubGridTransform<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WorldState::VT_SUB_GRIDS, sub_grids);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WorldStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     WorldStateBuilder {
@@ -7099,6 +7655,253 @@ impl ::core::fmt::Debug for WorldState<'_> {
       ds.field("game_time", &self.game_time());
       ds.field("warp_target_star_index", &self.warp_target_star_index());
       ds.field("autopilot", &self.autopilot());
+      ds.field("sub_grids", &self.sub_grids());
+      ds.finish()
+  }
+}
+pub enum SubGridBlockAssignmentOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Block-to-sub-grid assignment for mechanical mount membership.
+pub struct SubGridBlockAssignment<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SubGridBlockAssignment<'a> {
+  type Inner = SubGridBlockAssignment<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SubGridBlockAssignment<'a> {
+  pub const VT_BX: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BY: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BZ: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SUB_GRID_ID: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SubGridBlockAssignment { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SubGridBlockAssignmentArgs
+  ) -> ::flatbuffers::WIPOffset<SubGridBlockAssignment<'bldr>> {
+    let mut builder = SubGridBlockAssignmentBuilder::new(_fbb);
+    builder.add_sub_grid_id(args.sub_grid_id);
+    builder.add_bz(args.bz);
+    builder.add_by(args.by);
+    builder.add_bx(args.bx);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn bx(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubGridBlockAssignment::VT_BX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn by(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubGridBlockAssignment::VT_BY, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn bz(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubGridBlockAssignment::VT_BZ, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn sub_grid_id(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SubGridBlockAssignment::VT_SUB_GRID_ID, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SubGridBlockAssignment<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("bx", Self::VT_BX, false)?
+     .visit_field::<i32>("by", Self::VT_BY, false)?
+     .visit_field::<i32>("bz", Self::VT_BZ, false)?
+     .visit_field::<u32>("sub_grid_id", Self::VT_SUB_GRID_ID, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SubGridBlockAssignmentArgs {
+    pub bx: i32,
+    pub by: i32,
+    pub bz: i32,
+    pub sub_grid_id: u32,
+}
+impl<'a> Default for SubGridBlockAssignmentArgs {
+  #[inline]
+  fn default() -> Self {
+    SubGridBlockAssignmentArgs {
+      bx: 0,
+      by: 0,
+      bz: 0,
+      sub_grid_id: 0,
+    }
+  }
+}
+
+pub struct SubGridBlockAssignmentBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SubGridBlockAssignmentBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_bx(&mut self, bx: i32) {
+    self.fbb_.push_slot::<i32>(SubGridBlockAssignment::VT_BX, bx, 0);
+  }
+  #[inline]
+  pub fn add_by(&mut self, by: i32) {
+    self.fbb_.push_slot::<i32>(SubGridBlockAssignment::VT_BY, by, 0);
+  }
+  #[inline]
+  pub fn add_bz(&mut self, bz: i32) {
+    self.fbb_.push_slot::<i32>(SubGridBlockAssignment::VT_BZ, bz, 0);
+  }
+  #[inline]
+  pub fn add_sub_grid_id(&mut self, sub_grid_id: u32) {
+    self.fbb_.push_slot::<u32>(SubGridBlockAssignment::VT_SUB_GRID_ID, sub_grid_id, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SubGridBlockAssignmentBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SubGridBlockAssignmentBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SubGridBlockAssignment<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SubGridBlockAssignment<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SubGridBlockAssignment");
+      ds.field("bx", &self.bx());
+      ds.field("by", &self.by());
+      ds.field("bz", &self.bz());
+      ds.field("sub_grid_id", &self.sub_grid_id());
+      ds.finish()
+  }
+}
+pub enum SubGridAssignmentUpdateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Reliable (TCP) update of sub-grid block assignments.
+/// Sent on player join (full state) and on membership change (delta).
+pub struct SubGridAssignmentUpdate<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SubGridAssignmentUpdate<'a> {
+  type Inner = SubGridAssignmentUpdate<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SubGridAssignmentUpdate<'a> {
+  pub const VT_ASSIGNMENTS: ::flatbuffers::VOffsetT = 4;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SubGridAssignmentUpdate { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SubGridAssignmentUpdateArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SubGridAssignmentUpdate<'bldr>> {
+    let mut builder = SubGridAssignmentUpdateBuilder::new(_fbb);
+    if let Some(x) = args.assignments { builder.add_assignments(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn assignments(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridBlockAssignment<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridBlockAssignment>>>>(SubGridAssignmentUpdate::VT_ASSIGNMENTS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SubGridAssignmentUpdate<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SubGridBlockAssignment>>>>("assignments", Self::VT_ASSIGNMENTS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SubGridAssignmentUpdateArgs<'a> {
+    pub assignments: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridBlockAssignment<'a>>>>>,
+}
+impl<'a> Default for SubGridAssignmentUpdateArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SubGridAssignmentUpdateArgs {
+      assignments: None,
+    }
+  }
+}
+
+pub struct SubGridAssignmentUpdateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SubGridAssignmentUpdateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_assignments(&mut self, assignments: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SubGridBlockAssignment<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SubGridAssignmentUpdate::VT_ASSIGNMENTS, assignments);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SubGridAssignmentUpdateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SubGridAssignmentUpdateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SubGridAssignmentUpdate<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SubGridAssignmentUpdate<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SubGridAssignmentUpdate");
+      ds.field("assignments", &self.assignments());
       ds.finish()
   }
 }
@@ -9499,7 +10302,7 @@ impl ::core::fmt::Debug for SignalRuleFB<'_> {
 pub enum SeatBindingFBOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// Seat control → channel mapping.
+/// Generic seat input binding.
 pub struct SeatBindingFB<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -9513,9 +10316,13 @@ impl<'a> ::flatbuffers::Follow<'a> for SeatBindingFB<'a> {
 }
 
 impl<'a> SeatBindingFB<'a> {
-  pub const VT_CONTROL: ::flatbuffers::VOffsetT = 4;
-  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
-  pub const VT_PROPERTY: ::flatbuffers::VOffsetT = 8;
+  pub const VT_LABEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SOURCE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_KEY_NAME: ::flatbuffers::VOffsetT = 8;
+  pub const VT_KEY_MODE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_AXIS_DIRECTION: ::flatbuffers::VOffsetT = 12;
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 14;
+  pub const VT_PROPERTY: ::flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -9528,18 +10335,50 @@ impl<'a> SeatBindingFB<'a> {
   ) -> ::flatbuffers::WIPOffset<SeatBindingFB<'bldr>> {
     let mut builder = SeatBindingFBBuilder::new(_fbb);
     if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    if let Some(x) = args.key_name { builder.add_key_name(x); }
+    if let Some(x) = args.label { builder.add_label(x); }
     builder.add_property(args.property);
-    builder.add_control(args.control);
+    builder.add_axis_direction(args.axis_direction);
+    builder.add_key_mode(args.key_mode);
+    builder.add_source(args.source);
     builder.finish()
   }
 
 
   #[inline]
-  pub fn control(&self) -> u8 {
+  pub fn label(&self) -> Option<&'a str> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u8>(SeatBindingFB::VT_CONTROL, Some(0)).unwrap()}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SeatBindingFB::VT_LABEL, None)}
+  }
+  #[inline]
+  pub fn source(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SeatBindingFB::VT_SOURCE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn key_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SeatBindingFB::VT_KEY_NAME, None)}
+  }
+  #[inline]
+  pub fn key_mode(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SeatBindingFB::VT_KEY_MODE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn axis_direction(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SeatBindingFB::VT_AXIS_DIRECTION, Some(0)).unwrap()}
   }
   #[inline]
   pub fn channel_name(&self) -> Option<&'a str> {
@@ -9563,7 +10402,11 @@ impl ::flatbuffers::Verifiable for SeatBindingFB<'_> {
     v: &mut ::flatbuffers::Verifier, pos: usize
   ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
     v.visit_table(pos)?
-     .visit_field::<u8>("control", Self::VT_CONTROL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("label", Self::VT_LABEL, false)?
+     .visit_field::<u8>("source", Self::VT_SOURCE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("key_name", Self::VT_KEY_NAME, false)?
+     .visit_field::<u8>("key_mode", Self::VT_KEY_MODE, false)?
+     .visit_field::<u8>("axis_direction", Self::VT_AXIS_DIRECTION, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
      .visit_field::<u8>("property", Self::VT_PROPERTY, false)?
      .finish();
@@ -9571,7 +10414,11 @@ impl ::flatbuffers::Verifiable for SeatBindingFB<'_> {
   }
 }
 pub struct SeatBindingFBArgs<'a> {
-    pub control: u8,
+    pub label: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub source: u8,
+    pub key_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub key_mode: u8,
+    pub axis_direction: u8,
     pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub property: u8,
 }
@@ -9579,7 +10426,11 @@ impl<'a> Default for SeatBindingFBArgs<'a> {
   #[inline]
   fn default() -> Self {
     SeatBindingFBArgs {
-      control: 0,
+      label: None,
+      source: 0,
+      key_name: None,
+      key_mode: 0,
+      axis_direction: 0,
       channel_name: None,
       property: 0,
     }
@@ -9592,8 +10443,24 @@ pub struct SeatBindingFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SeatBindingFBBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_control(&mut self, control: u8) {
-    self.fbb_.push_slot::<u8>(SeatBindingFB::VT_CONTROL, control, 0);
+  pub fn add_label(&mut self, label: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SeatBindingFB::VT_LABEL, label);
+  }
+  #[inline]
+  pub fn add_source(&mut self, source: u8) {
+    self.fbb_.push_slot::<u8>(SeatBindingFB::VT_SOURCE, source, 0);
+  }
+  #[inline]
+  pub fn add_key_name(&mut self, key_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SeatBindingFB::VT_KEY_NAME, key_name);
+  }
+  #[inline]
+  pub fn add_key_mode(&mut self, key_mode: u8) {
+    self.fbb_.push_slot::<u8>(SeatBindingFB::VT_KEY_MODE, key_mode, 0);
+  }
+  #[inline]
+  pub fn add_axis_direction(&mut self, axis_direction: u8) {
+    self.fbb_.push_slot::<u8>(SeatBindingFB::VT_AXIS_DIRECTION, axis_direction, 0);
   }
   #[inline]
   pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
@@ -9621,9 +10488,1287 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SeatBindingFBBuilder<'a, 'b, 
 impl ::core::fmt::Debug for SeatBindingFB<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("SeatBindingFB");
-      ds.field("control", &self.control());
+      ds.field("label", &self.label());
+      ds.field("source", &self.source());
+      ds.field("key_name", &self.key_name());
+      ds.field("key_mode", &self.key_mode());
+      ds.field("axis_direction", &self.axis_direction());
       ds.field("channel_name", &self.channel_name());
       ds.field("property", &self.property());
+      ds.finish()
+  }
+}
+pub enum FlightComputerConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct FlightComputerConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for FlightComputerConfigFB<'a> {
+  type Inner = FlightComputerConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> FlightComputerConfigFB<'a> {
+  pub const VT_YAW_CW_CHANNEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_YAW_CCW_CHANNEL: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PITCH_UP_CHANNEL: ::flatbuffers::VOffsetT = 8;
+  pub const VT_PITCH_DOWN_CHANNEL: ::flatbuffers::VOffsetT = 10;
+  pub const VT_ROLL_CW_CHANNEL: ::flatbuffers::VOffsetT = 12;
+  pub const VT_ROLL_CCW_CHANNEL: ::flatbuffers::VOffsetT = 14;
+  pub const VT_DAMPING_GAIN: ::flatbuffers::VOffsetT = 16;
+  pub const VT_DEAD_ZONE: ::flatbuffers::VOffsetT = 18;
+  pub const VT_MAX_CORRECTION: ::flatbuffers::VOffsetT = 20;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    FlightComputerConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args FlightComputerConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<FlightComputerConfigFB<'bldr>> {
+    let mut builder = FlightComputerConfigFBBuilder::new(_fbb);
+    builder.add_max_correction(args.max_correction);
+    builder.add_dead_zone(args.dead_zone);
+    builder.add_damping_gain(args.damping_gain);
+    if let Some(x) = args.roll_ccw_channel { builder.add_roll_ccw_channel(x); }
+    if let Some(x) = args.roll_cw_channel { builder.add_roll_cw_channel(x); }
+    if let Some(x) = args.pitch_down_channel { builder.add_pitch_down_channel(x); }
+    if let Some(x) = args.pitch_up_channel { builder.add_pitch_up_channel(x); }
+    if let Some(x) = args.yaw_ccw_channel { builder.add_yaw_ccw_channel(x); }
+    if let Some(x) = args.yaw_cw_channel { builder.add_yaw_cw_channel(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn yaw_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_YAW_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn yaw_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_YAW_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_up_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_PITCH_UP_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_down_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_PITCH_DOWN_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_ROLL_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_ROLL_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn damping_gain(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(FlightComputerConfigFB::VT_DAMPING_GAIN, Some(0.6)).unwrap()}
+  }
+  #[inline]
+  pub fn dead_zone(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(FlightComputerConfigFB::VT_DEAD_ZONE, Some(0.005)).unwrap()}
+  }
+  #[inline]
+  pub fn max_correction(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(FlightComputerConfigFB::VT_MAX_CORRECTION, Some(0.3)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for FlightComputerConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_cw_channel", Self::VT_YAW_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_ccw_channel", Self::VT_YAW_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_up_channel", Self::VT_PITCH_UP_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_down_channel", Self::VT_PITCH_DOWN_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_cw_channel", Self::VT_ROLL_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_ccw_channel", Self::VT_ROLL_CCW_CHANNEL, false)?
+     .visit_field::<f32>("damping_gain", Self::VT_DAMPING_GAIN, false)?
+     .visit_field::<f32>("dead_zone", Self::VT_DEAD_ZONE, false)?
+     .visit_field::<f32>("max_correction", Self::VT_MAX_CORRECTION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct FlightComputerConfigFBArgs<'a> {
+    pub yaw_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub yaw_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_up_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_down_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub damping_gain: f32,
+    pub dead_zone: f32,
+    pub max_correction: f32,
+}
+impl<'a> Default for FlightComputerConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    FlightComputerConfigFBArgs {
+      yaw_cw_channel: None,
+      yaw_ccw_channel: None,
+      pitch_up_channel: None,
+      pitch_down_channel: None,
+      roll_cw_channel: None,
+      roll_ccw_channel: None,
+      damping_gain: 0.6,
+      dead_zone: 0.005,
+      max_correction: 0.3,
+    }
+  }
+}
+
+pub struct FlightComputerConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FlightComputerConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_yaw_cw_channel(&mut self, yaw_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_YAW_CW_CHANNEL, yaw_cw_channel);
+  }
+  #[inline]
+  pub fn add_yaw_ccw_channel(&mut self, yaw_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_YAW_CCW_CHANNEL, yaw_ccw_channel);
+  }
+  #[inline]
+  pub fn add_pitch_up_channel(&mut self, pitch_up_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_PITCH_UP_CHANNEL, pitch_up_channel);
+  }
+  #[inline]
+  pub fn add_pitch_down_channel(&mut self, pitch_down_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_PITCH_DOWN_CHANNEL, pitch_down_channel);
+  }
+  #[inline]
+  pub fn add_roll_cw_channel(&mut self, roll_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_ROLL_CW_CHANNEL, roll_cw_channel);
+  }
+  #[inline]
+  pub fn add_roll_ccw_channel(&mut self, roll_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_ROLL_CCW_CHANNEL, roll_ccw_channel);
+  }
+  #[inline]
+  pub fn add_damping_gain(&mut self, damping_gain: f32) {
+    self.fbb_.push_slot::<f32>(FlightComputerConfigFB::VT_DAMPING_GAIN, damping_gain, 0.6);
+  }
+  #[inline]
+  pub fn add_dead_zone(&mut self, dead_zone: f32) {
+    self.fbb_.push_slot::<f32>(FlightComputerConfigFB::VT_DEAD_ZONE, dead_zone, 0.005);
+  }
+  #[inline]
+  pub fn add_max_correction(&mut self, max_correction: f32) {
+    self.fbb_.push_slot::<f32>(FlightComputerConfigFB::VT_MAX_CORRECTION, max_correction, 0.3);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> FlightComputerConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    FlightComputerConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<FlightComputerConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for FlightComputerConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("FlightComputerConfigFB");
+      ds.field("yaw_cw_channel", &self.yaw_cw_channel());
+      ds.field("yaw_ccw_channel", &self.yaw_ccw_channel());
+      ds.field("pitch_up_channel", &self.pitch_up_channel());
+      ds.field("pitch_down_channel", &self.pitch_down_channel());
+      ds.field("roll_cw_channel", &self.roll_cw_channel());
+      ds.field("roll_ccw_channel", &self.roll_ccw_channel());
+      ds.field("damping_gain", &self.damping_gain());
+      ds.field("dead_zone", &self.dead_zone());
+      ds.field("max_correction", &self.max_correction());
+      ds.finish()
+  }
+}
+pub enum HoverModuleConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct HoverModuleConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for HoverModuleConfigFB<'a> {
+  type Inner = HoverModuleConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> HoverModuleConfigFB<'a> {
+  pub const VT_THRUST_FORWARD_CHANNEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_THRUST_REVERSE_CHANNEL: ::flatbuffers::VOffsetT = 6;
+  pub const VT_THRUST_RIGHT_CHANNEL: ::flatbuffers::VOffsetT = 8;
+  pub const VT_THRUST_LEFT_CHANNEL: ::flatbuffers::VOffsetT = 10;
+  pub const VT_THRUST_UP_CHANNEL: ::flatbuffers::VOffsetT = 12;
+  pub const VT_THRUST_DOWN_CHANNEL: ::flatbuffers::VOffsetT = 14;
+  pub const VT_YAW_CW_CHANNEL: ::flatbuffers::VOffsetT = 16;
+  pub const VT_YAW_CCW_CHANNEL: ::flatbuffers::VOffsetT = 18;
+  pub const VT_PITCH_UP_CHANNEL: ::flatbuffers::VOffsetT = 20;
+  pub const VT_PITCH_DOWN_CHANNEL: ::flatbuffers::VOffsetT = 22;
+  pub const VT_ROLL_CW_CHANNEL: ::flatbuffers::VOffsetT = 24;
+  pub const VT_ROLL_CCW_CHANNEL: ::flatbuffers::VOffsetT = 26;
+  pub const VT_ACTIVATE_CHANNEL: ::flatbuffers::VOffsetT = 28;
+  pub const VT_CUTOFF_CHANNEL: ::flatbuffers::VOffsetT = 30;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    HoverModuleConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args HoverModuleConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<HoverModuleConfigFB<'bldr>> {
+    let mut builder = HoverModuleConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.cutoff_channel { builder.add_cutoff_channel(x); }
+    if let Some(x) = args.activate_channel { builder.add_activate_channel(x); }
+    if let Some(x) = args.roll_ccw_channel { builder.add_roll_ccw_channel(x); }
+    if let Some(x) = args.roll_cw_channel { builder.add_roll_cw_channel(x); }
+    if let Some(x) = args.pitch_down_channel { builder.add_pitch_down_channel(x); }
+    if let Some(x) = args.pitch_up_channel { builder.add_pitch_up_channel(x); }
+    if let Some(x) = args.yaw_ccw_channel { builder.add_yaw_ccw_channel(x); }
+    if let Some(x) = args.yaw_cw_channel { builder.add_yaw_cw_channel(x); }
+    if let Some(x) = args.thrust_down_channel { builder.add_thrust_down_channel(x); }
+    if let Some(x) = args.thrust_up_channel { builder.add_thrust_up_channel(x); }
+    if let Some(x) = args.thrust_left_channel { builder.add_thrust_left_channel(x); }
+    if let Some(x) = args.thrust_right_channel { builder.add_thrust_right_channel(x); }
+    if let Some(x) = args.thrust_reverse_channel { builder.add_thrust_reverse_channel(x); }
+    if let Some(x) = args.thrust_forward_channel { builder.add_thrust_forward_channel(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn thrust_forward_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_THRUST_FORWARD_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_reverse_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_THRUST_REVERSE_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_right_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_THRUST_RIGHT_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_left_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_THRUST_LEFT_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_up_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_THRUST_UP_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_down_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_THRUST_DOWN_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn yaw_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_YAW_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn yaw_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_YAW_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_up_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_PITCH_UP_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_down_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_PITCH_DOWN_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_ROLL_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_ROLL_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn activate_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_ACTIVATE_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn cutoff_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HoverModuleConfigFB::VT_CUTOFF_CHANNEL, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for HoverModuleConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_forward_channel", Self::VT_THRUST_FORWARD_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_reverse_channel", Self::VT_THRUST_REVERSE_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_right_channel", Self::VT_THRUST_RIGHT_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_left_channel", Self::VT_THRUST_LEFT_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_up_channel", Self::VT_THRUST_UP_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_down_channel", Self::VT_THRUST_DOWN_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_cw_channel", Self::VT_YAW_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_ccw_channel", Self::VT_YAW_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_up_channel", Self::VT_PITCH_UP_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_down_channel", Self::VT_PITCH_DOWN_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_cw_channel", Self::VT_ROLL_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_ccw_channel", Self::VT_ROLL_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("activate_channel", Self::VT_ACTIVATE_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("cutoff_channel", Self::VT_CUTOFF_CHANNEL, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct HoverModuleConfigFBArgs<'a> {
+    pub thrust_forward_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_reverse_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_right_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_left_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_up_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_down_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub yaw_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub yaw_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_up_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_down_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub activate_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub cutoff_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for HoverModuleConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    HoverModuleConfigFBArgs {
+      thrust_forward_channel: None,
+      thrust_reverse_channel: None,
+      thrust_right_channel: None,
+      thrust_left_channel: None,
+      thrust_up_channel: None,
+      thrust_down_channel: None,
+      yaw_cw_channel: None,
+      yaw_ccw_channel: None,
+      pitch_up_channel: None,
+      pitch_down_channel: None,
+      roll_cw_channel: None,
+      roll_ccw_channel: None,
+      activate_channel: None,
+      cutoff_channel: None,
+    }
+  }
+}
+
+pub struct HoverModuleConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HoverModuleConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_thrust_forward_channel(&mut self, thrust_forward_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_THRUST_FORWARD_CHANNEL, thrust_forward_channel);
+  }
+  #[inline]
+  pub fn add_thrust_reverse_channel(&mut self, thrust_reverse_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_THRUST_REVERSE_CHANNEL, thrust_reverse_channel);
+  }
+  #[inline]
+  pub fn add_thrust_right_channel(&mut self, thrust_right_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_THRUST_RIGHT_CHANNEL, thrust_right_channel);
+  }
+  #[inline]
+  pub fn add_thrust_left_channel(&mut self, thrust_left_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_THRUST_LEFT_CHANNEL, thrust_left_channel);
+  }
+  #[inline]
+  pub fn add_thrust_up_channel(&mut self, thrust_up_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_THRUST_UP_CHANNEL, thrust_up_channel);
+  }
+  #[inline]
+  pub fn add_thrust_down_channel(&mut self, thrust_down_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_THRUST_DOWN_CHANNEL, thrust_down_channel);
+  }
+  #[inline]
+  pub fn add_yaw_cw_channel(&mut self, yaw_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_YAW_CW_CHANNEL, yaw_cw_channel);
+  }
+  #[inline]
+  pub fn add_yaw_ccw_channel(&mut self, yaw_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_YAW_CCW_CHANNEL, yaw_ccw_channel);
+  }
+  #[inline]
+  pub fn add_pitch_up_channel(&mut self, pitch_up_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_PITCH_UP_CHANNEL, pitch_up_channel);
+  }
+  #[inline]
+  pub fn add_pitch_down_channel(&mut self, pitch_down_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_PITCH_DOWN_CHANNEL, pitch_down_channel);
+  }
+  #[inline]
+  pub fn add_roll_cw_channel(&mut self, roll_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_ROLL_CW_CHANNEL, roll_cw_channel);
+  }
+  #[inline]
+  pub fn add_roll_ccw_channel(&mut self, roll_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_ROLL_CCW_CHANNEL, roll_ccw_channel);
+  }
+  #[inline]
+  pub fn add_activate_channel(&mut self, activate_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_ACTIVATE_CHANNEL, activate_channel);
+  }
+  #[inline]
+  pub fn add_cutoff_channel(&mut self, cutoff_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HoverModuleConfigFB::VT_CUTOFF_CHANNEL, cutoff_channel);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HoverModuleConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    HoverModuleConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<HoverModuleConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for HoverModuleConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("HoverModuleConfigFB");
+      ds.field("thrust_forward_channel", &self.thrust_forward_channel());
+      ds.field("thrust_reverse_channel", &self.thrust_reverse_channel());
+      ds.field("thrust_right_channel", &self.thrust_right_channel());
+      ds.field("thrust_left_channel", &self.thrust_left_channel());
+      ds.field("thrust_up_channel", &self.thrust_up_channel());
+      ds.field("thrust_down_channel", &self.thrust_down_channel());
+      ds.field("yaw_cw_channel", &self.yaw_cw_channel());
+      ds.field("yaw_ccw_channel", &self.yaw_ccw_channel());
+      ds.field("pitch_up_channel", &self.pitch_up_channel());
+      ds.field("pitch_down_channel", &self.pitch_down_channel());
+      ds.field("roll_cw_channel", &self.roll_cw_channel());
+      ds.field("roll_ccw_channel", &self.roll_ccw_channel());
+      ds.field("activate_channel", &self.activate_channel());
+      ds.field("cutoff_channel", &self.cutoff_channel());
+      ds.finish()
+  }
+}
+pub enum AutopilotConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct AutopilotConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for AutopilotConfigFB<'a> {
+  type Inner = AutopilotConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> AutopilotConfigFB<'a> {
+  pub const VT_YAW_CW_CHANNEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_YAW_CCW_CHANNEL: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PITCH_UP_CHANNEL: ::flatbuffers::VOffsetT = 8;
+  pub const VT_PITCH_DOWN_CHANNEL: ::flatbuffers::VOffsetT = 10;
+  pub const VT_ROLL_CW_CHANNEL: ::flatbuffers::VOffsetT = 12;
+  pub const VT_ROLL_CCW_CHANNEL: ::flatbuffers::VOffsetT = 14;
+  pub const VT_ENGAGE_CHANNEL: ::flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    AutopilotConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args AutopilotConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<AutopilotConfigFB<'bldr>> {
+    let mut builder = AutopilotConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.engage_channel { builder.add_engage_channel(x); }
+    if let Some(x) = args.roll_ccw_channel { builder.add_roll_ccw_channel(x); }
+    if let Some(x) = args.roll_cw_channel { builder.add_roll_cw_channel(x); }
+    if let Some(x) = args.pitch_down_channel { builder.add_pitch_down_channel(x); }
+    if let Some(x) = args.pitch_up_channel { builder.add_pitch_up_channel(x); }
+    if let Some(x) = args.yaw_ccw_channel { builder.add_yaw_ccw_channel(x); }
+    if let Some(x) = args.yaw_cw_channel { builder.add_yaw_cw_channel(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn yaw_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AutopilotConfigFB::VT_YAW_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn yaw_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AutopilotConfigFB::VT_YAW_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_up_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AutopilotConfigFB::VT_PITCH_UP_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_down_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AutopilotConfigFB::VT_PITCH_DOWN_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AutopilotConfigFB::VT_ROLL_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AutopilotConfigFB::VT_ROLL_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn engage_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AutopilotConfigFB::VT_ENGAGE_CHANNEL, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for AutopilotConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_cw_channel", Self::VT_YAW_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_ccw_channel", Self::VT_YAW_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_up_channel", Self::VT_PITCH_UP_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_down_channel", Self::VT_PITCH_DOWN_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_cw_channel", Self::VT_ROLL_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_ccw_channel", Self::VT_ROLL_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("engage_channel", Self::VT_ENGAGE_CHANNEL, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct AutopilotConfigFBArgs<'a> {
+    pub yaw_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub yaw_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_up_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_down_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub engage_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for AutopilotConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    AutopilotConfigFBArgs {
+      yaw_cw_channel: None,
+      yaw_ccw_channel: None,
+      pitch_up_channel: None,
+      pitch_down_channel: None,
+      roll_cw_channel: None,
+      roll_ccw_channel: None,
+      engage_channel: None,
+    }
+  }
+}
+
+pub struct AutopilotConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AutopilotConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_yaw_cw_channel(&mut self, yaw_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AutopilotConfigFB::VT_YAW_CW_CHANNEL, yaw_cw_channel);
+  }
+  #[inline]
+  pub fn add_yaw_ccw_channel(&mut self, yaw_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AutopilotConfigFB::VT_YAW_CCW_CHANNEL, yaw_ccw_channel);
+  }
+  #[inline]
+  pub fn add_pitch_up_channel(&mut self, pitch_up_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AutopilotConfigFB::VT_PITCH_UP_CHANNEL, pitch_up_channel);
+  }
+  #[inline]
+  pub fn add_pitch_down_channel(&mut self, pitch_down_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AutopilotConfigFB::VT_PITCH_DOWN_CHANNEL, pitch_down_channel);
+  }
+  #[inline]
+  pub fn add_roll_cw_channel(&mut self, roll_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AutopilotConfigFB::VT_ROLL_CW_CHANNEL, roll_cw_channel);
+  }
+  #[inline]
+  pub fn add_roll_ccw_channel(&mut self, roll_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AutopilotConfigFB::VT_ROLL_CCW_CHANNEL, roll_ccw_channel);
+  }
+  #[inline]
+  pub fn add_engage_channel(&mut self, engage_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AutopilotConfigFB::VT_ENGAGE_CHANNEL, engage_channel);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> AutopilotConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    AutopilotConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<AutopilotConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for AutopilotConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("AutopilotConfigFB");
+      ds.field("yaw_cw_channel", &self.yaw_cw_channel());
+      ds.field("yaw_ccw_channel", &self.yaw_ccw_channel());
+      ds.field("pitch_up_channel", &self.pitch_up_channel());
+      ds.field("pitch_down_channel", &self.pitch_down_channel());
+      ds.field("roll_cw_channel", &self.roll_cw_channel());
+      ds.field("roll_ccw_channel", &self.roll_ccw_channel());
+      ds.field("engage_channel", &self.engage_channel());
+      ds.finish()
+  }
+}
+pub enum WarpComputerConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct WarpComputerConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for WarpComputerConfigFB<'a> {
+  type Inner = WarpComputerConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> WarpComputerConfigFB<'a> {
+  pub const VT_TARGET_CHANNEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CONFIRM_CHANNEL: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    WarpComputerConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args WarpComputerConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<WarpComputerConfigFB<'bldr>> {
+    let mut builder = WarpComputerConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.confirm_channel { builder.add_confirm_channel(x); }
+    if let Some(x) = args.target_channel { builder.add_target_channel(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn target_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(WarpComputerConfigFB::VT_TARGET_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn confirm_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(WarpComputerConfigFB::VT_CONFIRM_CHANNEL, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for WarpComputerConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_channel", Self::VT_TARGET_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("confirm_channel", Self::VT_CONFIRM_CHANNEL, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct WarpComputerConfigFBArgs<'a> {
+    pub target_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub confirm_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for WarpComputerConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    WarpComputerConfigFBArgs {
+      target_channel: None,
+      confirm_channel: None,
+    }
+  }
+}
+
+pub struct WarpComputerConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WarpComputerConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_target_channel(&mut self, target_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WarpComputerConfigFB::VT_TARGET_CHANNEL, target_channel);
+  }
+  #[inline]
+  pub fn add_confirm_channel(&mut self, confirm_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WarpComputerConfigFB::VT_CONFIRM_CHANNEL, confirm_channel);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WarpComputerConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    WarpComputerConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<WarpComputerConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for WarpComputerConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("WarpComputerConfigFB");
+      ds.field("target_channel", &self.target_channel());
+      ds.field("confirm_channel", &self.confirm_channel());
+      ds.finish()
+  }
+}
+pub enum EngineControllerConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct EngineControllerConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for EngineControllerConfigFB<'a> {
+  type Inner = EngineControllerConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> EngineControllerConfigFB<'a> {
+  pub const VT_THRUST_FORWARD_CHANNEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_THRUST_REVERSE_CHANNEL: ::flatbuffers::VOffsetT = 6;
+  pub const VT_THRUST_RIGHT_CHANNEL: ::flatbuffers::VOffsetT = 8;
+  pub const VT_THRUST_LEFT_CHANNEL: ::flatbuffers::VOffsetT = 10;
+  pub const VT_THRUST_UP_CHANNEL: ::flatbuffers::VOffsetT = 12;
+  pub const VT_THRUST_DOWN_CHANNEL: ::flatbuffers::VOffsetT = 14;
+  pub const VT_YAW_CW_CHANNEL: ::flatbuffers::VOffsetT = 16;
+  pub const VT_YAW_CCW_CHANNEL: ::flatbuffers::VOffsetT = 18;
+  pub const VT_PITCH_UP_CHANNEL: ::flatbuffers::VOffsetT = 20;
+  pub const VT_PITCH_DOWN_CHANNEL: ::flatbuffers::VOffsetT = 22;
+  pub const VT_ROLL_CW_CHANNEL: ::flatbuffers::VOffsetT = 24;
+  pub const VT_ROLL_CCW_CHANNEL: ::flatbuffers::VOffsetT = 26;
+  pub const VT_TOGGLE_CHANNEL: ::flatbuffers::VOffsetT = 28;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    EngineControllerConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args EngineControllerConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<EngineControllerConfigFB<'bldr>> {
+    let mut builder = EngineControllerConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.toggle_channel { builder.add_toggle_channel(x); }
+    if let Some(x) = args.roll_ccw_channel { builder.add_roll_ccw_channel(x); }
+    if let Some(x) = args.roll_cw_channel { builder.add_roll_cw_channel(x); }
+    if let Some(x) = args.pitch_down_channel { builder.add_pitch_down_channel(x); }
+    if let Some(x) = args.pitch_up_channel { builder.add_pitch_up_channel(x); }
+    if let Some(x) = args.yaw_ccw_channel { builder.add_yaw_ccw_channel(x); }
+    if let Some(x) = args.yaw_cw_channel { builder.add_yaw_cw_channel(x); }
+    if let Some(x) = args.thrust_down_channel { builder.add_thrust_down_channel(x); }
+    if let Some(x) = args.thrust_up_channel { builder.add_thrust_up_channel(x); }
+    if let Some(x) = args.thrust_left_channel { builder.add_thrust_left_channel(x); }
+    if let Some(x) = args.thrust_right_channel { builder.add_thrust_right_channel(x); }
+    if let Some(x) = args.thrust_reverse_channel { builder.add_thrust_reverse_channel(x); }
+    if let Some(x) = args.thrust_forward_channel { builder.add_thrust_forward_channel(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn thrust_forward_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_THRUST_FORWARD_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_reverse_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_THRUST_REVERSE_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_right_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_THRUST_RIGHT_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_left_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_THRUST_LEFT_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_up_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_THRUST_UP_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn thrust_down_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_THRUST_DOWN_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn yaw_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_YAW_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn yaw_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_YAW_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_up_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_PITCH_UP_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn pitch_down_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_PITCH_DOWN_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_cw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_ROLL_CW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn roll_ccw_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_ROLL_CCW_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn toggle_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(EngineControllerConfigFB::VT_TOGGLE_CHANNEL, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for EngineControllerConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_forward_channel", Self::VT_THRUST_FORWARD_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_reverse_channel", Self::VT_THRUST_REVERSE_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_right_channel", Self::VT_THRUST_RIGHT_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_left_channel", Self::VT_THRUST_LEFT_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_up_channel", Self::VT_THRUST_UP_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("thrust_down_channel", Self::VT_THRUST_DOWN_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_cw_channel", Self::VT_YAW_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("yaw_ccw_channel", Self::VT_YAW_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_up_channel", Self::VT_PITCH_UP_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_down_channel", Self::VT_PITCH_DOWN_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_cw_channel", Self::VT_ROLL_CW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_ccw_channel", Self::VT_ROLL_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("toggle_channel", Self::VT_TOGGLE_CHANNEL, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct EngineControllerConfigFBArgs<'a> {
+    pub thrust_forward_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_reverse_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_right_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_left_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_up_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub thrust_down_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub yaw_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub yaw_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_up_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pitch_down_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub roll_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub toggle_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for EngineControllerConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    EngineControllerConfigFBArgs {
+      thrust_forward_channel: None,
+      thrust_reverse_channel: None,
+      thrust_right_channel: None,
+      thrust_left_channel: None,
+      thrust_up_channel: None,
+      thrust_down_channel: None,
+      yaw_cw_channel: None,
+      yaw_ccw_channel: None,
+      pitch_up_channel: None,
+      pitch_down_channel: None,
+      roll_cw_channel: None,
+      roll_ccw_channel: None,
+      toggle_channel: None,
+    }
+  }
+}
+
+pub struct EngineControllerConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EngineControllerConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_thrust_forward_channel(&mut self, thrust_forward_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_THRUST_FORWARD_CHANNEL, thrust_forward_channel);
+  }
+  #[inline]
+  pub fn add_thrust_reverse_channel(&mut self, thrust_reverse_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_THRUST_REVERSE_CHANNEL, thrust_reverse_channel);
+  }
+  #[inline]
+  pub fn add_thrust_right_channel(&mut self, thrust_right_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_THRUST_RIGHT_CHANNEL, thrust_right_channel);
+  }
+  #[inline]
+  pub fn add_thrust_left_channel(&mut self, thrust_left_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_THRUST_LEFT_CHANNEL, thrust_left_channel);
+  }
+  #[inline]
+  pub fn add_thrust_up_channel(&mut self, thrust_up_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_THRUST_UP_CHANNEL, thrust_up_channel);
+  }
+  #[inline]
+  pub fn add_thrust_down_channel(&mut self, thrust_down_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_THRUST_DOWN_CHANNEL, thrust_down_channel);
+  }
+  #[inline]
+  pub fn add_yaw_cw_channel(&mut self, yaw_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_YAW_CW_CHANNEL, yaw_cw_channel);
+  }
+  #[inline]
+  pub fn add_yaw_ccw_channel(&mut self, yaw_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_YAW_CCW_CHANNEL, yaw_ccw_channel);
+  }
+  #[inline]
+  pub fn add_pitch_up_channel(&mut self, pitch_up_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_PITCH_UP_CHANNEL, pitch_up_channel);
+  }
+  #[inline]
+  pub fn add_pitch_down_channel(&mut self, pitch_down_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_PITCH_DOWN_CHANNEL, pitch_down_channel);
+  }
+  #[inline]
+  pub fn add_roll_cw_channel(&mut self, roll_cw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_ROLL_CW_CHANNEL, roll_cw_channel);
+  }
+  #[inline]
+  pub fn add_roll_ccw_channel(&mut self, roll_ccw_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_ROLL_CCW_CHANNEL, roll_ccw_channel);
+  }
+  #[inline]
+  pub fn add_toggle_channel(&mut self, toggle_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EngineControllerConfigFB::VT_TOGGLE_CHANNEL, toggle_channel);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> EngineControllerConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    EngineControllerConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<EngineControllerConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for EngineControllerConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("EngineControllerConfigFB");
+      ds.field("thrust_forward_channel", &self.thrust_forward_channel());
+      ds.field("thrust_reverse_channel", &self.thrust_reverse_channel());
+      ds.field("thrust_right_channel", &self.thrust_right_channel());
+      ds.field("thrust_left_channel", &self.thrust_left_channel());
+      ds.field("thrust_up_channel", &self.thrust_up_channel());
+      ds.field("thrust_down_channel", &self.thrust_down_channel());
+      ds.field("yaw_cw_channel", &self.yaw_cw_channel());
+      ds.field("yaw_ccw_channel", &self.yaw_ccw_channel());
+      ds.field("pitch_up_channel", &self.pitch_up_channel());
+      ds.field("pitch_down_channel", &self.pitch_down_channel());
+      ds.field("roll_cw_channel", &self.roll_cw_channel());
+      ds.field("roll_ccw_channel", &self.roll_ccw_channel());
+      ds.field("toggle_channel", &self.toggle_channel());
+      ds.finish()
+  }
+}
+pub enum SeatBindingsNotifyOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Server → client: seat bindings when player enters a seat.
+pub struct SeatBindingsNotify<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SeatBindingsNotify<'a> {
+  type Inner = SeatBindingsNotify<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SeatBindingsNotify<'a> {
+  pub const VT_BINDINGS: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SEATED_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SeatBindingsNotify { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SeatBindingsNotifyArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SeatBindingsNotify<'bldr>> {
+    let mut builder = SeatBindingsNotifyBuilder::new(_fbb);
+    if let Some(x) = args.seated_channel_name { builder.add_seated_channel_name(x); }
+    if let Some(x) = args.bindings { builder.add_bindings(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn bindings(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>(SeatBindingsNotify::VT_BINDINGS, None)}
+  }
+  #[inline]
+  pub fn seated_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SeatBindingsNotify::VT_SEATED_CHANNEL_NAME, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SeatBindingsNotify<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>("bindings", Self::VT_BINDINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("seated_channel_name", Self::VT_SEATED_CHANNEL_NAME, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SeatBindingsNotifyArgs<'a> {
+    pub bindings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>>>,
+    pub seated_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for SeatBindingsNotifyArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SeatBindingsNotifyArgs {
+      bindings: None,
+      seated_channel_name: None,
+    }
+  }
+}
+
+pub struct SeatBindingsNotifyBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SeatBindingsNotifyBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_bindings(&mut self, bindings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<SeatBindingFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SeatBindingsNotify::VT_BINDINGS, bindings);
+  }
+  #[inline]
+  pub fn add_seated_channel_name(&mut self, seated_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SeatBindingsNotify::VT_SEATED_CHANNEL_NAME, seated_channel_name);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SeatBindingsNotifyBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SeatBindingsNotifyBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SeatBindingsNotify<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SeatBindingsNotify<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SeatBindingsNotify");
+      ds.field("bindings", &self.bindings());
+      ds.field("seated_channel_name", &self.seated_channel_name());
       ds.finish()
   }
 }
@@ -10249,6 +12394,12 @@ impl<'a> BlockConfigState<'a> {
   pub const VT_POWER_SOURCE: ::flatbuffers::VOffsetT = 24;
   pub const VT_POWER_CONSUMER: ::flatbuffers::VOffsetT = 26;
   pub const VT_NEARBY_REACTORS: ::flatbuffers::VOffsetT = 28;
+  pub const VT_SEATED_CHANNEL_NAME: ::flatbuffers::VOffsetT = 30;
+  pub const VT_FLIGHT_COMPUTER_CONFIG: ::flatbuffers::VOffsetT = 32;
+  pub const VT_HOVER_MODULE_CONFIG: ::flatbuffers::VOffsetT = 34;
+  pub const VT_AUTOPILOT_CONFIG: ::flatbuffers::VOffsetT = 36;
+  pub const VT_WARP_COMPUTER_CONFIG: ::flatbuffers::VOffsetT = 38;
+  pub const VT_ENGINE_CONTROLLER_CONFIG: ::flatbuffers::VOffsetT = 40;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -10260,6 +12411,12 @@ impl<'a> BlockConfigState<'a> {
     args: &'args BlockConfigStateArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BlockConfigState<'bldr>> {
     let mut builder = BlockConfigStateBuilder::new(_fbb);
+    if let Some(x) = args.engine_controller_config { builder.add_engine_controller_config(x); }
+    if let Some(x) = args.warp_computer_config { builder.add_warp_computer_config(x); }
+    if let Some(x) = args.autopilot_config { builder.add_autopilot_config(x); }
+    if let Some(x) = args.hover_module_config { builder.add_hover_module_config(x); }
+    if let Some(x) = args.flight_computer_config { builder.add_flight_computer_config(x); }
+    if let Some(x) = args.seated_channel_name { builder.add_seated_channel_name(x); }
     if let Some(x) = args.nearby_reactors { builder.add_nearby_reactors(x); }
     if let Some(x) = args.power_consumer { builder.add_power_consumer(x); }
     if let Some(x) = args.power_source { builder.add_power_source(x); }
@@ -10368,6 +12525,48 @@ impl<'a> BlockConfigState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<NearbyReactorFB>>>>(BlockConfigState::VT_NEARBY_REACTORS, None)}
   }
+  #[inline]
+  pub fn seated_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(BlockConfigState::VT_SEATED_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn flight_computer_config(&self) -> Option<FlightComputerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<FlightComputerConfigFB>>(BlockConfigState::VT_FLIGHT_COMPUTER_CONFIG, None)}
+  }
+  #[inline]
+  pub fn hover_module_config(&self) -> Option<HoverModuleConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<HoverModuleConfigFB>>(BlockConfigState::VT_HOVER_MODULE_CONFIG, None)}
+  }
+  #[inline]
+  pub fn autopilot_config(&self) -> Option<AutopilotConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AutopilotConfigFB>>(BlockConfigState::VT_AUTOPILOT_CONFIG, None)}
+  }
+  #[inline]
+  pub fn warp_computer_config(&self) -> Option<WarpComputerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<WarpComputerConfigFB>>(BlockConfigState::VT_WARP_COMPUTER_CONFIG, None)}
+  }
+  #[inline]
+  pub fn engine_controller_config(&self) -> Option<EngineControllerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<EngineControllerConfigFB>>(BlockConfigState::VT_ENGINE_CONTROLLER_CONFIG, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BlockConfigState<'_> {
@@ -10389,6 +12588,12 @@ impl ::flatbuffers::Verifiable for BlockConfigState<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<PowerSourceConfigFB>>("power_source", Self::VT_POWER_SOURCE, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<PowerConsumerConfigFB>>("power_consumer", Self::VT_POWER_CONSUMER, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<NearbyReactorFB>>>>("nearby_reactors", Self::VT_NEARBY_REACTORS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("seated_channel_name", Self::VT_SEATED_CHANNEL_NAME, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<FlightComputerConfigFB>>("flight_computer_config", Self::VT_FLIGHT_COMPUTER_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<HoverModuleConfigFB>>("hover_module_config", Self::VT_HOVER_MODULE_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotConfigFB>>("autopilot_config", Self::VT_AUTOPILOT_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<WarpComputerConfigFB>>("warp_computer_config", Self::VT_WARP_COMPUTER_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<EngineControllerConfigFB>>("engine_controller_config", Self::VT_ENGINE_CONTROLLER_CONFIG, false)?
      .finish();
     Ok(())
   }
@@ -10407,6 +12612,12 @@ pub struct BlockConfigStateArgs<'a> {
     pub power_source: Option<::flatbuffers::WIPOffset<PowerSourceConfigFB<'a>>>,
     pub power_consumer: Option<::flatbuffers::WIPOffset<PowerConsumerConfigFB<'a>>>,
     pub nearby_reactors: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<NearbyReactorFB<'a>>>>>,
+    pub seated_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub flight_computer_config: Option<::flatbuffers::WIPOffset<FlightComputerConfigFB<'a>>>,
+    pub hover_module_config: Option<::flatbuffers::WIPOffset<HoverModuleConfigFB<'a>>>,
+    pub autopilot_config: Option<::flatbuffers::WIPOffset<AutopilotConfigFB<'a>>>,
+    pub warp_computer_config: Option<::flatbuffers::WIPOffset<WarpComputerConfigFB<'a>>>,
+    pub engine_controller_config: Option<::flatbuffers::WIPOffset<EngineControllerConfigFB<'a>>>,
 }
 impl<'a> Default for BlockConfigStateArgs<'a> {
   #[inline]
@@ -10425,6 +12636,12 @@ impl<'a> Default for BlockConfigStateArgs<'a> {
       power_source: None,
       power_consumer: None,
       nearby_reactors: None,
+      seated_channel_name: None,
+      flight_computer_config: None,
+      hover_module_config: None,
+      autopilot_config: None,
+      warp_computer_config: None,
+      engine_controller_config: None,
     }
   }
 }
@@ -10487,6 +12704,30 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigStateBuilder<'a, '
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_NEARBY_REACTORS, nearby_reactors);
   }
   #[inline]
+  pub fn add_seated_channel_name(&mut self, seated_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_SEATED_CHANNEL_NAME, seated_channel_name);
+  }
+  #[inline]
+  pub fn add_flight_computer_config(&mut self, flight_computer_config: ::flatbuffers::WIPOffset<FlightComputerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<FlightComputerConfigFB>>(BlockConfigState::VT_FLIGHT_COMPUTER_CONFIG, flight_computer_config);
+  }
+  #[inline]
+  pub fn add_hover_module_config(&mut self, hover_module_config: ::flatbuffers::WIPOffset<HoverModuleConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<HoverModuleConfigFB>>(BlockConfigState::VT_HOVER_MODULE_CONFIG, hover_module_config);
+  }
+  #[inline]
+  pub fn add_autopilot_config(&mut self, autopilot_config: ::flatbuffers::WIPOffset<AutopilotConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AutopilotConfigFB>>(BlockConfigState::VT_AUTOPILOT_CONFIG, autopilot_config);
+  }
+  #[inline]
+  pub fn add_warp_computer_config(&mut self, warp_computer_config: ::flatbuffers::WIPOffset<WarpComputerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<WarpComputerConfigFB>>(BlockConfigState::VT_WARP_COMPUTER_CONFIG, warp_computer_config);
+  }
+  #[inline]
+  pub fn add_engine_controller_config(&mut self, engine_controller_config: ::flatbuffers::WIPOffset<EngineControllerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<EngineControllerConfigFB>>(BlockConfigState::VT_ENGINE_CONTROLLER_CONFIG, engine_controller_config);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BlockConfigStateBuilder {
@@ -10517,6 +12758,12 @@ impl ::core::fmt::Debug for BlockConfigState<'_> {
       ds.field("power_source", &self.power_source());
       ds.field("power_consumer", &self.power_consumer());
       ds.field("nearby_reactors", &self.nearby_reactors());
+      ds.field("seated_channel_name", &self.seated_channel_name());
+      ds.field("flight_computer_config", &self.flight_computer_config());
+      ds.field("hover_module_config", &self.hover_module_config());
+      ds.field("autopilot_config", &self.autopilot_config());
+      ds.field("warp_computer_config", &self.warp_computer_config());
+      ds.field("engine_controller_config", &self.engine_controller_config());
       ds.finish()
   }
 }
@@ -10546,6 +12793,12 @@ impl<'a> BlockConfigUpdate<'a> {
   pub const VT_SEAT_MAPPINGS: ::flatbuffers::VOffsetT = 16;
   pub const VT_POWER_SOURCE: ::flatbuffers::VOffsetT = 18;
   pub const VT_POWER_CONSUMER: ::flatbuffers::VOffsetT = 20;
+  pub const VT_SEATED_CHANNEL_NAME: ::flatbuffers::VOffsetT = 22;
+  pub const VT_FLIGHT_COMPUTER_CONFIG: ::flatbuffers::VOffsetT = 24;
+  pub const VT_HOVER_MODULE_CONFIG: ::flatbuffers::VOffsetT = 26;
+  pub const VT_AUTOPILOT_CONFIG: ::flatbuffers::VOffsetT = 28;
+  pub const VT_WARP_COMPUTER_CONFIG: ::flatbuffers::VOffsetT = 30;
+  pub const VT_ENGINE_CONTROLLER_CONFIG: ::flatbuffers::VOffsetT = 32;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -10557,6 +12810,12 @@ impl<'a> BlockConfigUpdate<'a> {
     args: &'args BlockConfigUpdateArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BlockConfigUpdate<'bldr>> {
     let mut builder = BlockConfigUpdateBuilder::new(_fbb);
+    if let Some(x) = args.engine_controller_config { builder.add_engine_controller_config(x); }
+    if let Some(x) = args.warp_computer_config { builder.add_warp_computer_config(x); }
+    if let Some(x) = args.autopilot_config { builder.add_autopilot_config(x); }
+    if let Some(x) = args.hover_module_config { builder.add_hover_module_config(x); }
+    if let Some(x) = args.flight_computer_config { builder.add_flight_computer_config(x); }
+    if let Some(x) = args.seated_channel_name { builder.add_seated_channel_name(x); }
     if let Some(x) = args.power_consumer { builder.add_power_consumer(x); }
     if let Some(x) = args.power_source { builder.add_power_source(x); }
     if let Some(x) = args.seat_mappings { builder.add_seat_mappings(x); }
@@ -10633,6 +12892,48 @@ impl<'a> BlockConfigUpdate<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PowerConsumerConfigFB>>(BlockConfigUpdate::VT_POWER_CONSUMER, None)}
   }
+  #[inline]
+  pub fn seated_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(BlockConfigUpdate::VT_SEATED_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn flight_computer_config(&self) -> Option<FlightComputerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<FlightComputerConfigFB>>(BlockConfigUpdate::VT_FLIGHT_COMPUTER_CONFIG, None)}
+  }
+  #[inline]
+  pub fn hover_module_config(&self) -> Option<HoverModuleConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<HoverModuleConfigFB>>(BlockConfigUpdate::VT_HOVER_MODULE_CONFIG, None)}
+  }
+  #[inline]
+  pub fn autopilot_config(&self) -> Option<AutopilotConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AutopilotConfigFB>>(BlockConfigUpdate::VT_AUTOPILOT_CONFIG, None)}
+  }
+  #[inline]
+  pub fn warp_computer_config(&self) -> Option<WarpComputerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<WarpComputerConfigFB>>(BlockConfigUpdate::VT_WARP_COMPUTER_CONFIG, None)}
+  }
+  #[inline]
+  pub fn engine_controller_config(&self) -> Option<EngineControllerConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<EngineControllerConfigFB>>(BlockConfigUpdate::VT_ENGINE_CONTROLLER_CONFIG, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BlockConfigUpdate<'_> {
@@ -10650,6 +12951,12 @@ impl ::flatbuffers::Verifiable for BlockConfigUpdate<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SeatBindingFB>>>>("seat_mappings", Self::VT_SEAT_MAPPINGS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<PowerSourceConfigFB>>("power_source", Self::VT_POWER_SOURCE, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<PowerConsumerConfigFB>>("power_consumer", Self::VT_POWER_CONSUMER, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("seated_channel_name", Self::VT_SEATED_CHANNEL_NAME, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<FlightComputerConfigFB>>("flight_computer_config", Self::VT_FLIGHT_COMPUTER_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<HoverModuleConfigFB>>("hover_module_config", Self::VT_HOVER_MODULE_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotConfigFB>>("autopilot_config", Self::VT_AUTOPILOT_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<WarpComputerConfigFB>>("warp_computer_config", Self::VT_WARP_COMPUTER_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<EngineControllerConfigFB>>("engine_controller_config", Self::VT_ENGINE_CONTROLLER_CONFIG, false)?
      .finish();
     Ok(())
   }
@@ -10664,6 +12971,12 @@ pub struct BlockConfigUpdateArgs<'a> {
     pub seat_mappings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SeatBindingFB<'a>>>>>,
     pub power_source: Option<::flatbuffers::WIPOffset<PowerSourceConfigFB<'a>>>,
     pub power_consumer: Option<::flatbuffers::WIPOffset<PowerConsumerConfigFB<'a>>>,
+    pub seated_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub flight_computer_config: Option<::flatbuffers::WIPOffset<FlightComputerConfigFB<'a>>>,
+    pub hover_module_config: Option<::flatbuffers::WIPOffset<HoverModuleConfigFB<'a>>>,
+    pub autopilot_config: Option<::flatbuffers::WIPOffset<AutopilotConfigFB<'a>>>,
+    pub warp_computer_config: Option<::flatbuffers::WIPOffset<WarpComputerConfigFB<'a>>>,
+    pub engine_controller_config: Option<::flatbuffers::WIPOffset<EngineControllerConfigFB<'a>>>,
 }
 impl<'a> Default for BlockConfigUpdateArgs<'a> {
   #[inline]
@@ -10678,6 +12991,12 @@ impl<'a> Default for BlockConfigUpdateArgs<'a> {
       seat_mappings: None,
       power_source: None,
       power_consumer: None,
+      seated_channel_name: None,
+      flight_computer_config: None,
+      hover_module_config: None,
+      autopilot_config: None,
+      warp_computer_config: None,
+      engine_controller_config: None,
     }
   }
 }
@@ -10724,6 +13043,30 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigUpdateBuilder<'a, 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PowerConsumerConfigFB>>(BlockConfigUpdate::VT_POWER_CONSUMER, power_consumer);
   }
   #[inline]
+  pub fn add_seated_channel_name(&mut self, seated_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigUpdate::VT_SEATED_CHANNEL_NAME, seated_channel_name);
+  }
+  #[inline]
+  pub fn add_flight_computer_config(&mut self, flight_computer_config: ::flatbuffers::WIPOffset<FlightComputerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<FlightComputerConfigFB>>(BlockConfigUpdate::VT_FLIGHT_COMPUTER_CONFIG, flight_computer_config);
+  }
+  #[inline]
+  pub fn add_hover_module_config(&mut self, hover_module_config: ::flatbuffers::WIPOffset<HoverModuleConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<HoverModuleConfigFB>>(BlockConfigUpdate::VT_HOVER_MODULE_CONFIG, hover_module_config);
+  }
+  #[inline]
+  pub fn add_autopilot_config(&mut self, autopilot_config: ::flatbuffers::WIPOffset<AutopilotConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AutopilotConfigFB>>(BlockConfigUpdate::VT_AUTOPILOT_CONFIG, autopilot_config);
+  }
+  #[inline]
+  pub fn add_warp_computer_config(&mut self, warp_computer_config: ::flatbuffers::WIPOffset<WarpComputerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<WarpComputerConfigFB>>(BlockConfigUpdate::VT_WARP_COMPUTER_CONFIG, warp_computer_config);
+  }
+  #[inline]
+  pub fn add_engine_controller_config(&mut self, engine_controller_config: ::flatbuffers::WIPOffset<EngineControllerConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<EngineControllerConfigFB>>(BlockConfigUpdate::VT_ENGINE_CONTROLLER_CONFIG, engine_controller_config);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigUpdateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BlockConfigUpdateBuilder {
@@ -10750,6 +13093,12 @@ impl ::core::fmt::Debug for BlockConfigUpdate<'_> {
       ds.field("seat_mappings", &self.seat_mappings());
       ds.field("power_source", &self.power_source());
       ds.field("power_consumer", &self.power_consumer());
+      ds.field("seated_channel_name", &self.seated_channel_name());
+      ds.field("flight_computer_config", &self.flight_computer_config());
+      ds.field("hover_module_config", &self.hover_module_config());
+      ds.field("autopilot_config", &self.autopilot_config());
+      ds.field("warp_computer_config", &self.warp_computer_config());
+      ds.field("engine_controller_config", &self.engine_controller_config());
       ds.finish()
   }
 }
@@ -10983,6 +13332,36 @@ impl<'a> ServerMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_seat_bindings_notify(&self) -> Option<SeatBindingsNotify<'a>> {
+    if self.payload_type() == ServerPayload::SeatBindingsNotify {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { SeatBindingsNotify::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_sub_grid_assignment_update(&self) -> Option<SubGridAssignmentUpdate<'a>> {
+    if self.payload_type() == ServerPayload::SubGridAssignmentUpdate {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { SubGridAssignmentUpdate::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ServerMessage<'_> {
@@ -11005,6 +13384,8 @@ impl ::flatbuffers::Verifiable for ServerMessage<'_> {
           ServerPayload::ChunkSnapshot => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChunkSnapshot>>("ServerPayload::ChunkSnapshot", pos),
           ServerPayload::ChunkDelta => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChunkDelta>>("ServerPayload::ChunkDelta", pos),
           ServerPayload::BlockConfigState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockConfigState>>("ServerPayload::BlockConfigState", pos),
+          ServerPayload::SeatBindingsNotify => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SeatBindingsNotify>>("ServerPayload::SeatBindingsNotify", pos),
+          ServerPayload::SubGridAssignmentUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SubGridAssignmentUpdate>>("ServerPayload::SubGridAssignmentUpdate", pos),
           _ => Ok(()),
         }
      })?
@@ -11138,6 +13519,20 @@ impl ::core::fmt::Debug for ServerMessage<'_> {
         },
         ServerPayload::BlockConfigState => {
           if let Some(x) = self.payload_as_block_config_state() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::SeatBindingsNotify => {
+          if let Some(x) = self.payload_as_seat_bindings_notify() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::SubGridAssignmentUpdate => {
+          if let Some(x) = self.payload_as_sub_grid_assignment_update() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
