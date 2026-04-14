@@ -1226,6 +1226,106 @@ fn draw_block_config_panel(
                 });
             }
 
+            // --- System block config panels ---
+            let sys_color = egui::Color32::from_rgb(100, 200, 255);
+
+            if let Some(ref mut fc) = config.flight_computer {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(egui::RichText::new("FLIGHT COMPUTER").color(sys_color).size(13.0))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| { ui.label("Toggle:"); channel_name_input(ui, "fc_toggle", &mut fc.toggle_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Yaw CW:"); channel_name_input(ui, "fc_ycw", &mut fc.yaw_cw_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Yaw CCW:"); channel_name_input(ui, "fc_yccw", &mut fc.yaw_ccw_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Pitch Up:"); channel_name_input(ui, "fc_pu", &mut fc.pitch_up_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Pitch Down:"); channel_name_input(ui, "fc_pd", &mut fc.pitch_down_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Roll CW:"); channel_name_input(ui, "fc_rcw", &mut fc.roll_cw_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Roll CCW:"); channel_name_input(ui, "fc_rccw", &mut fc.roll_ccw_channel, &config.available_channels); });
+                        ui.horizontal(|ui| {
+                            ui.label("Gain:"); ui.add(egui::DragValue::new(&mut fc.damping_gain).range(0.0..=5.0).speed(0.01));
+                            ui.label("Dead Zone:"); ui.add(egui::DragValue::new(&mut fc.dead_zone).range(0.0..=0.1).speed(0.001));
+                            ui.label("Max Corr:"); ui.add(egui::DragValue::new(&mut fc.max_correction).range(0.0..=1.0).speed(0.01));
+                        });
+                    });
+            }
+
+            if let Some(ref mut hm) = config.hover_module {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(egui::RichText::new("HOVER MODULE").color(sys_color).size(13.0))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| { ui.label("Activate:"); channel_name_input(ui, "hm_act", &mut hm.activate_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Cutoff:"); channel_name_input(ui, "hm_cut", &mut hm.cutoff_channel, &config.available_channels); });
+                        ui.collapsing("Thrust Channels", |ui| {
+                            ui.horizontal(|ui| { ui.label("Fwd:"); channel_name_input(ui, "hm_tf", &mut hm.thrust_forward_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Rev:"); channel_name_input(ui, "hm_tr", &mut hm.thrust_reverse_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Right:"); channel_name_input(ui, "hm_tri", &mut hm.thrust_right_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Left:"); channel_name_input(ui, "hm_tl", &mut hm.thrust_left_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Up:"); channel_name_input(ui, "hm_tu", &mut hm.thrust_up_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Down:"); channel_name_input(ui, "hm_td", &mut hm.thrust_down_channel, &config.available_channels); });
+                        });
+                        ui.collapsing("Rotation Channels", |ui| {
+                            ui.horizontal(|ui| { ui.label("Yaw CW:"); channel_name_input(ui, "hm_ycw", &mut hm.yaw_cw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Yaw CCW:"); channel_name_input(ui, "hm_yccw", &mut hm.yaw_ccw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Pitch Up:"); channel_name_input(ui, "hm_pu", &mut hm.pitch_up_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Pitch Down:"); channel_name_input(ui, "hm_pd", &mut hm.pitch_down_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Roll CW:"); channel_name_input(ui, "hm_rcw", &mut hm.roll_cw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Roll CCW:"); channel_name_input(ui, "hm_rccw", &mut hm.roll_ccw_channel, &config.available_channels); });
+                        });
+                    });
+            }
+
+            if let Some(ref mut ap) = config.autopilot {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(egui::RichText::new("AUTOPILOT").color(sys_color).size(13.0))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| { ui.label("Engage:"); channel_name_input(ui, "ap_eng", &mut ap.engage_channel, &config.available_channels); });
+                        ui.collapsing("Rotation Channels", |ui| {
+                            ui.horizontal(|ui| { ui.label("Yaw CW:"); channel_name_input(ui, "ap_ycw", &mut ap.yaw_cw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Yaw CCW:"); channel_name_input(ui, "ap_yccw", &mut ap.yaw_ccw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Pitch Up:"); channel_name_input(ui, "ap_pu", &mut ap.pitch_up_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Pitch Down:"); channel_name_input(ui, "ap_pd", &mut ap.pitch_down_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Roll CW:"); channel_name_input(ui, "ap_rcw", &mut ap.roll_cw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Roll CCW:"); channel_name_input(ui, "ap_rccw", &mut ap.roll_ccw_channel, &config.available_channels); });
+                        });
+                    });
+            }
+
+            if let Some(ref mut wc) = config.warp_computer {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(egui::RichText::new("WARP COMPUTER").color(sys_color).size(13.0))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| { ui.label("Cycle:"); channel_name_input(ui, "wc_cyc", &mut wc.cycle_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Accept:"); channel_name_input(ui, "wc_acc", &mut wc.accept_channel, &config.available_channels); });
+                        ui.horizontal(|ui| { ui.label("Cancel:"); channel_name_input(ui, "wc_can", &mut wc.cancel_channel, &config.available_channels); });
+                    });
+            }
+
+            if let Some(ref mut ec) = config.engine_controller {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(egui::RichText::new("ENGINE CONTROLLER").color(sys_color).size(13.0))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| { ui.label("Toggle:"); channel_name_input(ui, "ec_tog", &mut ec.toggle_channel, &config.available_channels); });
+                        ui.collapsing("Managed Channels", |ui| {
+                            ui.horizontal(|ui| { ui.label("Thrust Fwd:"); channel_name_input(ui, "ec_tf", &mut ec.thrust_forward_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Thrust Rev:"); channel_name_input(ui, "ec_tr", &mut ec.thrust_reverse_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Thrust R:"); channel_name_input(ui, "ec_tri", &mut ec.thrust_right_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Thrust L:"); channel_name_input(ui, "ec_tl", &mut ec.thrust_left_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Thrust Up:"); channel_name_input(ui, "ec_tu", &mut ec.thrust_up_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Thrust Dn:"); channel_name_input(ui, "ec_td", &mut ec.thrust_down_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Yaw CW:"); channel_name_input(ui, "ec_ycw", &mut ec.yaw_cw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Yaw CCW:"); channel_name_input(ui, "ec_yccw", &mut ec.yaw_ccw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Pitch Up:"); channel_name_input(ui, "ec_pu", &mut ec.pitch_up_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Pitch Dn:"); channel_name_input(ui, "ec_pd", &mut ec.pitch_down_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Roll CW:"); channel_name_input(ui, "ec_rcw", &mut ec.roll_cw_channel, &config.available_channels); });
+                            ui.horizontal(|ui| { ui.label("Roll CCW:"); channel_name_input(ui, "ec_rccw", &mut ec.roll_ccw_channel, &config.available_channels); });
+                        });
+                    });
+            }
+
             ui.add_space(12.0);
             // Bottom accent line.
             let rect = ui.available_rect_before_wrap();

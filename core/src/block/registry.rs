@@ -780,6 +780,13 @@ impl BlockRegistry {
         pp[BlockId::CRUISE_DRIVE_MEDIUM.as_u16() as usize] = Some(PowerProps { generation_w: 0.0, consumption_w: 200_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         pp[BlockId::CRUISE_DRIVE_LARGE.as_u16() as usize]  = Some(PowerProps { generation_w: 0.0, consumption_w: 1_000_000.0, storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
 
+        // Ship system blocks — power consumption when active.
+        pp[BlockId::FLIGHT_COMPUTER.as_u16() as usize]    = Some(PowerProps { generation_w: 0.0, consumption_w: 5_000.0,     storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::HOVER_MODULE.as_u16() as usize]        = Some(PowerProps { generation_w: 0.0, consumption_w: 20_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::AUTOPILOT.as_u16() as usize]           = Some(PowerProps { generation_w: 0.0, consumption_w: 5_000.0,     storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::WARP_COMPUTER.as_u16() as usize]       = Some(PowerProps { generation_w: 0.0, consumption_w: 10_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        pp[BlockId::ENGINE_CONTROLLER.as_u16() as usize]   = Some(PowerProps { generation_w: 0.0, consumption_w: 2_000.0,     storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+
         // Cruise drive boost multipliers: Small=500x, Medium=2000x, Large=8000x.
         // At 500x boost, 8 × 1.25 MN chemical thrusters produce 8 × 625 MN = 5 GN
         // on a 2000t ship = 2500 m/s², reaching 100 km/s in 40 seconds.

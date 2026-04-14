@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -45,13 +46,24 @@ pub struct ClientConnectEvent {
 /// - **Observer**: UDP-only spectator for dual-shard compositing. Receives WorldState
 ///   broadcasts but has no player entity, no input, no handoff. Created when a secondary
 ///   shard connection sends a UDP hole-punch without a preceding TCP connect.
+/// Stale observer timeout: observers not successfully sent to within this duration
+/// are removed to prevent unbounded accumulation from disconnected secondary shards.
+const OBSERVER_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct ClientRegistry {
     clients: HashMap<SessionToken, ClientEntry>,
     /// UDP-only observers (secondary/spectator connections for dual-shard compositing).
     /// These receive WorldState broadcasts but don't have player entities.
-    observers: Vec<SocketAddr>,
+    /// Each entry tracks the last successful send for timeout-based cleanup.
+    observers: Vec<ObserverEntry>,
     /// UDP addresses seen before any client registered (for late-join matching).
     pending_udp: Vec<SocketAddr>,
+}
+
+struct ObserverEntry {
+    addr: SocketAddr,
+    registered_at: Instant,
+    last_successful_send: Instant,
 }
 
 struct ClientEntry {
@@ -127,9 +139,14 @@ impl ClientRegistry {
         // observer so it receives WorldState broadcasts without a player entity.
         if self.clients.values().all(|e| e.udp_addr.is_some()) {
             // All clients already have UDP — this is a new observer connection.
-            if !self.observers.contains(&udp_addr) {
+            if !self.observers.iter().any(|o| o.addr == udp_addr) {
                 info!(%udp_addr, "registered UDP observer (dual-shard compositing)");
-                self.observers.push(udp_addr);
+                let now = Instant::now();
+                self.observers.push(ObserverEntry {
+                    addr: udp_addr,
+                    registered_at: now,
+                    last_successful_send: now,
+                });
             }
         } else {
             // There's an unmatched client waiting — store as pending for late matching.
@@ -144,13 +161,31 @@ impl ClientRegistry {
     pub fn udp_addrs(&self) -> Vec<SocketAddr> {
         let mut addrs: Vec<SocketAddr> = self.clients.values()
             .filter_map(|e| e.udp_addr).collect();
-        addrs.extend_from_slice(&self.observers);
+        addrs.extend(self.observers.iter().map(|o| o.addr));
         addrs
+    }
+
+    /// Mark an observer as having received a successful send.
+    pub fn mark_observer_active(&mut self, addr: &SocketAddr) {
+        if let Some(obs) = self.observers.iter_mut().find(|o| &o.addr == addr) {
+            obs.last_successful_send = Instant::now();
+        }
+    }
+
+    /// Remove observers that haven't received a successful send within the timeout.
+    pub fn cleanup_stale_observers(&mut self) {
+        let now = Instant::now();
+        let before = self.observers.len();
+        self.observers.retain(|obs| now.duration_since(obs.last_successful_send) < OBSERVER_TIMEOUT);
+        let removed = before - self.observers.len();
+        if removed > 0 {
+            info!(removed, remaining = self.observers.len(), "cleaned up stale UDP observers");
+        }
     }
 
     /// Remove an observer UDP address (e.g., when the secondary connection closes).
     pub fn remove_observer(&mut self, addr: &SocketAddr) {
-        self.observers.retain(|a| a != addr);
+        self.observers.retain(|o| o.addr != *addr);
     }
 
     pub fn len(&self) -> usize {
@@ -393,15 +428,33 @@ pub async fn broadcast_world_state_udp(
     voxeldust_core::wire_codec::encode(&data, packet_buf);
     let packet = &*packet_buf;
 
-    let reg = registry.read().await;
-    let addrs = reg.udp_addrs();
+    // Read phase: get addresses to broadcast to.
+    let addrs = {
+        let reg = registry.read().await;
+        reg.udp_addrs()
+    };
+
     if !addrs.is_empty() {
         tracing::info!(clients = addrs.len(), bytes = packet.len(), "broadcasting WorldState UDP");
     }
-    for addr in addrs {
-        if let Err(e) = socket.send_to(&packet, addr).await {
+
+    // Track which observer addresses succeeded for lifecycle management.
+    let mut successful_observers = Vec::new();
+    for addr in &addrs {
+        if let Err(e) = socket.send_to(packet, addr).await {
             debug!(%addr, %e, "failed to send WorldState UDP");
+        } else {
+            successful_observers.push(*addr);
         }
+    }
+
+    // Write phase: mark active observers and clean up stale ones.
+    if !successful_observers.is_empty() {
+        let mut reg = registry.write().await;
+        for addr in &successful_observers {
+            reg.mark_observer_active(addr);
+        }
+        reg.cleanup_stale_observers();
     }
 }
 

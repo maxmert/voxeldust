@@ -203,9 +203,12 @@ pub struct FlightComputerState {
     pub pitch_down_channel: Option<ChannelId>,
     pub roll_cw_channel: Option<ChannelId>,
     pub roll_ccw_channel: Option<ChannelId>,
+    pub toggle_channel: Option<ChannelId>,
     pub damping_gain: f32,
     pub dead_zone: f32,
     pub max_correction: f32,
+    pub active: bool,
+    pub prev_toggle_value: f32,
 }
 
 impl Default for FlightComputerState {
@@ -214,9 +217,12 @@ impl Default for FlightComputerState {
             yaw_cw_channel: None, yaw_ccw_channel: None,
             pitch_up_channel: None, pitch_down_channel: None,
             roll_cw_channel: None, roll_ccw_channel: None,
+            toggle_channel: None,
             damping_gain: 0.6,
             dead_zone: 0.005,
             max_correction: 0.3,
+            active: true,
+            prev_toggle_value: 0.0,
         }
     }
 }
@@ -300,12 +306,14 @@ impl Default for AutopilotBlockState {
 /// Warp computer — target selection and warp initiation.
 #[derive(Component, Clone, Debug, Default)]
 pub struct WarpComputerState {
-    pub target_channel: Option<ChannelId>,
-    pub confirm_channel: Option<ChannelId>,
+    pub cycle_channel: Option<ChannelId>,
+    pub accept_channel: Option<ChannelId>,
+    pub cancel_channel: Option<ChannelId>,
     pub target_star_index: Option<u32>,
     pub pending_cmd: Option<u32>,
-    pub prev_target_value: f32,
-    pub prev_confirm_value: f32,
+    pub prev_cycle_value: f32,
+    pub prev_accept_value: f32,
+    pub prev_cancel_value: f32,
 }
 
 /// Engine controller — master on/off toggle for all propulsion.

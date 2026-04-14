@@ -277,16 +277,12 @@ impl std::ops::DerefMut for ClientChunkCacheRes {
 }
 
 /// Sub-grid state: block assignments and body transforms for mechanical mounts.
-/// Updated from server via TCP (assignments) and UDP (transforms in WorldState).
-/// Stores prev/current snapshots for interpolation (matching ship position smoothing).
+/// Sub-grid state: block→sub-grid assignments for meshing.
+/// Transform interpolation is handled by the tick-based SnapshotBuffer/RenderSmoothing.
 #[derive(Resource, Default)]
 struct SubGridState {
     /// Per-block sub-grid assignment: world_pos → sub_grid_id (absent = root).
     assignments: std::collections::HashMap<glam::IVec3, u32>,
-    /// Previous WorldState tick's sub-grid transforms (for interpolation).
-    prev_transforms: std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
-    /// Current (latest) WorldState tick's sub-grid transforms.
-    current_transforms: std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
 }
 
 #[derive(Resource)]
@@ -310,6 +306,9 @@ struct RenderSmoothing {
     /// Current interpolation factor (0=prev snapshot, 1=current snapshot).
     /// Used by sub-grid rendering to match ship transform interpolation.
     interpolation_t: f64,
+    /// Interpolated sub-grid transforms (mechanical mounts), produced by the same
+    /// tick-based interpolation as position/rotation.
+    sub_grid_transforms: std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
 
     // --- Galaxy warp (separate interpolation, kept for warp travel) ---
     galaxy_render_position: DVec3,
@@ -321,26 +320,39 @@ struct RenderSmoothing {
     has_prev_galaxy_pos: bool,
 }
 
-/// A server snapshot stored for interpolation.
+/// Server tick duration (20Hz = 50ms).
+const TICK_DURATION_SECS: f64 = 1.0 / 20.0;
+/// Interpolation delay in server ticks. 3 ticks = 150ms — survives 2 consecutive
+/// packet losses and typical internet jitter at 20Hz.
+const INTERP_DELAY_TICKS: f64 = 3.0;
+/// Ring buffer capacity in snapshots (~1.6s of history at 20Hz).
+const SNAPSHOT_BUFFER_CAP: usize = 32;
+
+/// A server snapshot stored by tick for interpolation.
 #[derive(Clone)]
-struct InterpolationSnapshot {
+struct TimedSnapshot {
+    tick: u64,
     player_position: DVec3,
     ship_rotation: DQuat,
     ship_origin: DVec3,
     velocity: DVec3,
-    /// Celestial body positions at this snapshot's tick — interpolated alongside
-    /// the camera so all rendered positions share the same virtual time instant.
     bodies: Vec<CelestialBodyData>,
+    sub_grids: std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
 }
 
-/// Double-buffer of the two most recent server snapshots for smooth interpolation.
-/// Each frame, `smooth_render_position` lerps between `prev` and `current`.
+/// Ring buffer of recent server snapshots, sorted by tick.
+/// Interpolation uses server tick numbers (not arrival timestamps) to compute
+/// the interpolation fraction, making it immune to client-side message batching.
 #[derive(Resource)]
 struct SnapshotBuffer {
-    prev: Option<InterpolationSnapshot>,
-    current: Option<InterpolationSnapshot>,
-    current_arrival_time: Instant,
-    prev_arrival_time: Instant,
+    /// Sorted by tick ascending. Oldest at front, newest at back.
+    snapshots: std::collections::VecDeque<TimedSnapshot>,
+    /// Highest tick ever received (for rejecting stale packets).
+    highest_tick: u64,
+    /// Client's estimate of the current server tick (sub-tick precision).
+    estimated_server_tick: f64,
+    /// Whether we've received the first snapshot and synced the clock.
+    synced: bool,
 }
 
 #[derive(Resource)]
@@ -553,35 +565,59 @@ fn poll_network(
                     warp.target_star_index = None;
                 }
 
-                // Update player position + push snapshot for interpolation.
+                // Insert snapshot into ring buffer for tick-based interpolation.
                 if let Some(p) = world_state.players.first() {
+                    let tick = world_state.tick;
                     let new_pos = p.position;
 
-                    // Push to snapshot buffer for smooth interpolation.
-                    let new_snapshot = InterpolationSnapshot {
+                    let snapshot = TimedSnapshot {
+                        tick,
                         player_position: new_pos,
                         ship_rotation: p.rotation,
                         ship_origin: world_state.origin,
                         velocity: p.velocity,
                         bodies: world_state.bodies.clone(),
+                        sub_grids: world_state.sub_grids.iter()
+                            .map(|sg| (sg.sub_grid_id, sg.clone())).collect(),
                     };
-                    // Teleport detection: snap both slots on large jumps.
-                    let is_teleport = snapshots.current.as_ref()
-                        .map(|c| (new_pos - c.player_position).length() > 10.0)
+
+                    // Teleport detection: clear buffer on large jumps.
+                    let is_teleport = snapshots.snapshots.back()
+                        .map(|last| (new_pos - last.player_position).length() > 10.0)
                         .unwrap_or(false);
                     if is_teleport {
-                        snapshots.prev = Some(new_snapshot.clone());
-                        snapshots.current = Some(new_snapshot);
+                        snapshots.snapshots.clear();
+                        snapshots.estimated_server_tick = tick as f64;
                         smooth.render_position = new_pos;
                         smooth.render_rotation = p.rotation;
                         smooth.ship_origin = world_state.origin;
                         smooth.bodies = world_state.bodies.clone();
-                    } else {
-                        snapshots.prev = snapshots.current.take();
-                        snapshots.prev_arrival_time = snapshots.current_arrival_time;
-                        snapshots.current = Some(new_snapshot);
-                        snapshots.current_arrival_time = Instant::now();
                     }
+
+                    // Sorted insert (handles out-of-order UDP).
+                    if tick > snapshots.highest_tick.saturating_sub(SNAPSHOT_BUFFER_CAP as u64) {
+                        let pos = snapshots.snapshots.partition_point(|s| s.tick < tick);
+                        if snapshots.snapshots.get(pos).map_or(true, |s| s.tick != tick) {
+                            snapshots.snapshots.insert(pos, snapshot);
+                        }
+                    }
+                    snapshots.highest_tick = snapshots.highest_tick.max(tick);
+
+                    // Evict old snapshots beyond buffer capacity.
+                    let cutoff = snapshots.highest_tick.saturating_sub(SNAPSHOT_BUFFER_CAP as u64);
+                    while snapshots.snapshots.front().map_or(false, |s| s.tick < cutoff) {
+                        snapshots.snapshots.pop_front();
+                    }
+
+                    // Initialize clock on first snapshot.
+                    if !snapshots.synced {
+                        snapshots.estimated_server_tick = tick as f64;
+                        snapshots.synced = true;
+                    }
+
+                    // Gentle clock drift correction: blend toward server tick.
+                    let server_now = tick as f64;
+                    snapshots.estimated_server_tick += (server_now - snapshots.estimated_server_tick) * 0.1;
 
                     // Game logic (non-rendering).
                     player.position = new_pos;
@@ -598,21 +634,16 @@ fn poll_network(
                     }
 
                     if player.is_piloting && !was_piloting {
-                        // Walk → Pilot: sync camera yaw to ship heading.
                         let fwd = p.rotation * DVec3::NEG_Z;
                         cam.yaw = fwd.z.atan2(fwd.x) as f64;
                         cam.pitch = fwd.y.asin() as f64;
-                        // Clear pilot rates so the E key held from sitting down
-                        // doesn't trigger roll/yaw on the first frame of piloting.
                         cam.pilot_yaw_rate = 0.0;
                         cam.pilot_pitch_rate = 0.0;
                     }
 
                     if was_piloting && !player.is_piloting {
-                        // Pilot → Walk: reset camera to ship-local forward.
                         cam.yaw = -std::f64::consts::FRAC_PI_2;
                         cam.pitch = 0.0;
-                        // Clear seat bindings — no longer seated.
                         active_seat.clear();
                     }
                 }
@@ -625,11 +656,6 @@ fn poll_network(
                 }
                 if ws.latest.is_none() {
                     info!(bodies = world_state.bodies.len(), tick = world_state.tick, "first WorldState");
-                }
-                // Update sub-grid transforms from WorldState (prev/current for interpolation).
-                sub_grid_state.prev_transforms = std::mem::take(&mut sub_grid_state.current_transforms);
-                for sg in &world_state.sub_grids {
-                    sub_grid_state.current_transforms.insert(sg.sub_grid_id, sg.clone());
                 }
                 ws.latest = Some(world_state);
             }
@@ -648,7 +674,7 @@ fn poll_network(
                 // (fresh connect). After a seamless transition, snapshots
                 // were already initialized from the promoted secondary WS.
                 // Clearing them would cause a blink until 2 new WorldStates arrive.
-                if snapshots.current.is_none() {
+                if snapshots.snapshots.is_empty() {
                     smooth.render_rotation = reference_rotation;
                     smooth.bodies.clear();
                 }
@@ -900,16 +926,21 @@ fn poll_network(
                     let mut snapped = false;
                     if let Some(ref promoted) = ws.latest {
                         if let Some(p) = promoted.players.first() {
-                            let snap = InterpolationSnapshot {
+                            let snap = TimedSnapshot {
+                                tick: promoted.tick,
                                 player_position: p.position,
                                 ship_rotation: p.rotation,
                                 ship_origin: promoted.origin,
                                 velocity: p.velocity,
                                 bodies: promoted.bodies.clone(),
+                                sub_grids: promoted.sub_grids.iter()
+                                    .map(|sg| (sg.sub_grid_id, sg.clone())).collect(),
                             };
-                            snapshots.prev = Some(snap.clone());
-                            snapshots.current = Some(snap);
-                            snapshots.current_arrival_time = Instant::now();
+                            snapshots.snapshots.clear();
+                            snapshots.snapshots.push_back(snap);
+                            snapshots.highest_tick = promoted.tick;
+                            snapshots.estimated_server_tick = promoted.tick as f64;
+                            snapshots.synced = true;
                             smooth.render_position = p.position;
                             smooth.render_rotation = p.rotation;
                             smooth.ship_origin = promoted.origin;
@@ -924,30 +955,34 @@ fn poll_network(
                         if let Some(ref promoted) = ws.latest {
                             let system_pos = prev_ship_origin + prev_render_pos;
                             let planet_local = system_pos - promoted.origin;
-                            let snap = InterpolationSnapshot {
+                            let snap = TimedSnapshot {
+                                tick: promoted.tick,
                                 player_position: planet_local,
                                 ship_rotation: DQuat::IDENTITY,
                                 ship_origin: promoted.origin,
                                 velocity: DVec3::ZERO,
                                 bodies: promoted.bodies.clone(),
+                                sub_grids: std::collections::HashMap::new(),
                             };
-                            snapshots.prev = Some(snap.clone());
-                            snapshots.current = Some(snap);
-                            snapshots.current_arrival_time = Instant::now();
+                            snapshots.snapshots.clear();
+                            snapshots.snapshots.push_back(snap);
+                            snapshots.highest_tick = promoted.tick;
+                            snapshots.estimated_server_tick = promoted.tick as f64;
+                            snapshots.synced = true;
                             smooth.render_position = planet_local;
                             smooth.render_rotation = DQuat::IDENTITY;
                             smooth.ship_origin = promoted.origin;
                             smooth.bodies = promoted.bodies.clone();
                         } else {
-                            snapshots.prev = None;
-                            snapshots.current = None;
+                            snapshots.snapshots.clear();
+                            snapshots.synced = false;
                         }
                     }
                 } else {
                     // Hard transition: clear and reconnect.
                     info!("hard transition — no secondary data");
-                    snapshots.prev = None;
-                    snapshots.current = None;
+                    snapshots.snapshots.clear();
+                    snapshots.synced = false;
                     ws.latest = None;
                 }
                 ws.secondary = None;
@@ -957,15 +992,19 @@ fn poll_network(
     }
 }
 
-/// Snapshot interpolation: lerp between the two most recent server states.
-/// Produces smooth render_position, render_rotation, and ship_origin at display framerate.
+/// Tick-based snapshot interpolation (Valve Source / Overwatch style).
+///
+/// Renders at a fixed delay behind the estimated server tick (`INTERP_DELAY_TICKS`).
+/// Uses server tick numbers for timing (immune to client-side message batching).
+/// The ring buffer of `TimedSnapshot`s is searched for the two snapshots bracketing
+/// the render tick, then all state is lerped between them.
+///
 /// Galaxy warp uses its own velocity-based smoothing (separate from WorldState snapshots).
-/// Planet shards snap to current snapshot (no interpolation) — body positions update
-/// discretely from orbital mechanics, so interpolating the camera would desync it
-/// from the discrete body positions, causing visible jitter on surfaces/atmosphere.
+/// Planet shards snap to the latest snapshot (no interpolation) — body positions update
+/// discretely from orbital mechanics, so interpolating the camera would desync it.
 fn smooth_render_position(
     mut smooth: ResMut<RenderSmoothing>,
-    snapshots: Res<SnapshotBuffer>,
+    mut snapshots: ResMut<SnapshotBuffer>,
     warp: Res<ClientWarp>,
     conn: Res<ConnectionInfo>,
     ft: Res<FrameTime>,
@@ -979,70 +1018,89 @@ fn smooth_render_position(
         smooth.galaxy_render_position = smooth.galaxy_render_position + delta;
         let rot = smooth.galaxy_render_rotation.slerp(smooth.prev_galaxy_rotation, blend);
         smooth.galaxy_render_rotation = rot;
-        smooth.bodies.clear(); // bodies cleared during warp
+        smooth.bodies.clear();
         return;
     }
 
-    let (prev, curr) = match (&snapshots.prev, &snapshots.current) {
-        (Some(p), Some(c)) => (p, c),
-        (None, Some(c)) => {
-            // Only one snapshot — snap to it (first tick after connect).
-            smooth.render_position = c.player_position;
-            smooth.render_rotation = c.ship_rotation;
-            smooth.ship_origin = c.ship_origin;
-            smooth.bodies = c.bodies.clone();
-            return;
-        }
-        _ => return,
+    if !snapshots.synced || snapshots.snapshots.is_empty() {
+        return;
+    }
+
+    // Advance estimated server tick by frame delta.
+    snapshots.estimated_server_tick += ft.dt / TICK_DURATION_SECS;
+
+    // Render at a fixed delay behind the estimated server tick.
+    let render_tick = snapshots.estimated_server_tick - INTERP_DELAY_TICKS;
+
+    // Find bracketing snapshots via binary search on tick.
+    let idx = snapshots.snapshots.partition_point(|s| (s.tick as f64) <= render_tick);
+
+    let (snap_a, snap_b) = if idx == 0 {
+        // render_tick is before all snapshots — hold at oldest.
+        let a = &snapshots.snapshots[0];
+        (a, a)
+    } else if idx >= snapshots.snapshots.len() {
+        // render_tick is past all snapshots — hold at newest (no extrapolation).
+        let a = snapshots.snapshots.back().unwrap();
+        (a, a)
+    } else {
+        (&snapshots.snapshots[idx - 1], &snapshots.snapshots[idx])
     };
 
-    // Time between the two server snapshots.
-    let tick_duration = snapshots.current_arrival_time
-        .saturating_duration_since(snapshots.prev_arrival_time)
-        .as_secs_f64()
-        .max(0.01);
-
-    // Time since the current (latest) snapshot arrived.
-    let elapsed = ft.last_time
-        .saturating_duration_since(snapshots.current_arrival_time)
-        .as_secs_f64();
-
-    // Interpolation factor: 0.0 = at prev, 1.0 = at current.
-    // Clamped — no extrapolation past the known endpoint (extrapolation
-    // causes backward snaps when the next snapshot arrives).
-    let t = (elapsed / tick_duration).clamp(0.0, 1.0);
+    let t = if snap_a.tick == snap_b.tick {
+        1.0
+    } else {
+        ((render_tick - snap_a.tick as f64) / (snap_b.tick - snap_a.tick) as f64).clamp(0.0, 1.0)
+    };
 
     if conn.current_shard_type == voxeldust_core::client_message::shard_type::PLANET {
-        // Planet shard: snap to current snapshot.  Planet-local coordinates
-        // don't need interpolation — the player walks on the surface and the
-        // camera is already in the planet's reference frame.
-        smooth.render_position = curr.player_position;
-        smooth.render_rotation = curr.ship_rotation;
-        smooth.ship_origin = curr.ship_origin;
-        smooth.bodies = curr.bodies.clone();
-        smooth.interpolation_t = 1.0; // planet: snap, no interpolation
+        // Planet shard: snap to latest snapshot (no interpolation).
+        if let Some(latest) = snapshots.snapshots.back() {
+            smooth.render_position = latest.player_position;
+            smooth.render_rotation = latest.ship_rotation;
+            smooth.ship_origin = latest.ship_origin;
+            smooth.bodies = latest.bodies.clone();
+        }
+        smooth.interpolation_t = 1.0;
     } else {
-        // Ship/system shard: interpolate between snapshots for smooth flight.
+        // Ship/system shard: interpolate between bracketing snapshots.
         smooth.interpolation_t = t;
-        smooth.render_position = prev.player_position.lerp(curr.player_position, t);
-        smooth.render_rotation = prev.ship_rotation.slerp(curr.ship_rotation, t);
-        smooth.ship_origin = prev.ship_origin.lerp(curr.ship_origin, t);
+        smooth.render_position = snap_a.player_position.lerp(snap_b.player_position, t);
+        smooth.render_rotation = snap_a.ship_rotation.slerp(snap_b.ship_rotation, t);
+        smooth.ship_origin = snap_a.ship_origin.lerp(snap_b.ship_origin, t);
 
-        // Interpolate body positions with the same t — keeps bodies and camera
-        // at the same virtual time instant, eliminating saw-tooth jitter.
+        // Interpolate celestial body positions at same t.
         smooth.bodies.clear();
-        for (i, curr_body) in curr.bodies.iter().enumerate() {
-            let pos = if let Some(prev_body) = prev.bodies.get(i) {
-                prev_body.position.lerp(curr_body.position, t)
-            } else {
-                curr_body.position
-            };
+        for (i, curr_body) in snap_b.bodies.iter().enumerate() {
+            let pos = snap_a.bodies.get(i)
+                .map(|prev_body| prev_body.position.lerp(curr_body.position, t))
+                .unwrap_or(curr_body.position);
             smooth.bodies.push(CelestialBodyData {
                 body_id: curr_body.body_id,
                 position: pos,
                 radius: curr_body.radius,
                 color: curr_body.color,
             });
+        }
+
+        // Interpolate sub-grid transforms at same t.
+        smooth.sub_grid_transforms.clear();
+        for (&sg_id, sg_b) in &snap_b.sub_grids {
+            if let Some(sg_a) = snap_a.sub_grids.get(&sg_id) {
+                smooth.sub_grid_transforms.insert(sg_id, voxeldust_core::client_message::SubGridTransformData {
+                    sub_grid_id: sg_id,
+                    translation: sg_a.translation.lerp(sg_b.translation, t as f32),
+                    rotation: sg_a.rotation.slerp(sg_b.rotation, t as f32),
+                    parent_grid: sg_b.parent_grid,
+                    anchor: sg_b.anchor,
+                    mount_pos: sg_b.mount_pos,
+                    mount_face: sg_b.mount_face,
+                    joint_type: sg_b.joint_type,
+                    current_value: sg_a.current_value + (sg_b.current_value - sg_a.current_value) * t as f32,
+                });
+            } else {
+                smooth.sub_grid_transforms.insert(sg_id, sg_b.clone());
+            }
         }
     }
 }
@@ -1299,6 +1357,7 @@ impl ClientApp {
             ship_origin: DVec3::ZERO,
             bodies: Vec::new(),
             interpolation_t: 1.0,
+            sub_grid_transforms: std::collections::HashMap::new(),
             galaxy_render_position: DVec3::ZERO,
             galaxy_render_rotation: DQuat::IDENTITY,
             galaxy_velocity: DVec3::ZERO,
@@ -1308,10 +1367,10 @@ impl ClientApp {
             has_prev_galaxy_pos: false,
         });
         ecs_app.insert_resource(SnapshotBuffer {
-            prev: None,
-            current: None,
-            current_arrival_time: Instant::now(),
-            prev_arrival_time: Instant::now(),
+            snapshots: std::collections::VecDeque::with_capacity(SNAPSHOT_BUFFER_CAP),
+            highest_tick: 0,
+            estimated_server_tick: 0.0,
+            synced: false,
         });
         ecs_app.insert_resource(CameraControl {
             yaw: 0.0,
@@ -1805,8 +1864,16 @@ impl ClientApp {
             let (sp, cp) = (cam_pitch as f32).sin_cos();
             let look = glam::Vec3::new(cy * cp, sp, sy * cp);
 
-            let hit = if let Some(src) = source {
+            let sg_state = world_mut.resource::<SubGridState>();
+            let sg_assignments = &sg_state.assignments;
+            let smooth_sg = world_mut.resource::<RenderSmoothing>();
+            let sg_transforms = &smooth_sg.sub_grid_transforms;
+
+            // Root-grid raycast (blocks NOT in any sub-grid).
+            let root_hit = if let Some(src) = source {
                 voxeldust_core::block::raycast::raycast(eye, look, 8.0, |x, y, z| {
+                    let pos = glam::IVec3::new(x, y, z);
+                    if sg_assignments.contains_key(&pos) { return false; } // skip sub-grid blocks
                     let (chunk_key, lx, ly, lz) =
                         voxeldust_core::block::ShipGrid::world_to_chunk(x, y, z);
                     chunk_cache
@@ -1818,7 +1885,49 @@ impl ClientApp {
                 None
             };
 
-            world_mut.resource_mut::<BlockTarget>().hit = hit;
+            // Sub-grid raycasts: transform ray into each sub-grid's local frame.
+            let mut best_hit = root_hit;
+            // Collect unique sub-grid IDs that have blocks.
+            let mut active_sg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            for &sg_id in sg_assignments.values() {
+                active_sg_ids.insert(sg_id);
+            }
+            for sg_id in &active_sg_ids {
+                let sgt = match sg_transforms.get(sg_id) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                // Inverse transform: world → local root-space.
+                // Forward: world = T(translation) * R(rotation) * T(-anchor) * root_point
+                // Inverse: root_point = T(anchor) * R_inv * T(-translation) * world_point
+                let rot_inv = sgt.rotation.inverse();
+                let local_eye = sgt.anchor + rot_inv * (eye - sgt.translation);
+                let local_look = rot_inv * look;
+
+                let sg_id_copy = *sg_id;
+                let sg_hit = if let Some(src) = source {
+                    voxeldust_core::block::raycast::raycast(local_eye, local_look, 8.0, |x, y, z| {
+                        let pos = glam::IVec3::new(x, y, z);
+                        if sg_assignments.get(&pos).copied() != Some(sg_id_copy) { return false; }
+                        let (chunk_key, lx, ly, lz) =
+                            voxeldust_core::block::ShipGrid::world_to_chunk(x, y, z);
+                        chunk_cache
+                            .get_chunk(src, chunk_key)
+                            .map(|c| registry.is_solid(c.get_block(lx, ly, lz)))
+                            .unwrap_or(false)
+                    })
+                } else {
+                    None
+                };
+                if let Some(sh) = sg_hit {
+                    let closer = best_hit.as_ref().map_or(true, |bh| sh.distance < bh.distance);
+                    if closer {
+                        best_hit = Some(sh);
+                    }
+                }
+            }
+
+            world_mut.resource_mut::<BlockTarget>().hit = best_hit;
         } else {
             let world_mut = self.ecs_app.world_mut();
             world_mut.resource_mut::<BlockTarget>().hit = None;
@@ -2087,8 +2196,9 @@ impl ClientApp {
         let ap = world.resource::<ClientAutopilot>();
         let sys_params = world.resource::<SystemParamsCache>();
         let gfx_settings = world.resource::<graphics_settings::GraphicsSettings>().clone();
-
         let sg_state = world.resource::<SubGridState>();
+
+        let smooth = world.resource::<RenderSmoothing>();
 
         let panel_action = render::render_frame(
             gpu,
@@ -2122,7 +2232,8 @@ impl ClientApp {
             &world.resource::<ClientBlockIndex>().entries,
             config_for_panel.as_mut(),
             &gfx_settings,
-            &sg_state.current_transforms,
+            &smooth.sub_grid_transforms,
+            &sg_state.assignments,
         );
 
         // Handle config panel actions.

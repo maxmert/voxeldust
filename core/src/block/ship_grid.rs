@@ -880,12 +880,45 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
         grid.set_boost_channel(x_max + 1, y, z_min + 1, "boost-brake");
     }
 
-    // --- Ship system blocks (one each, placed along port wall interior) ---
+    // --- Ship system blocks ---
+    // Each block placed individually with its own power connection.
+    // Channel wiring is automatic via seat_presets defaults matching the pilot seat.
+
+    // Flight computer: angular damping. Toggled via F1 key → "flight-computer-toggle" channel.
     grid.set_block(-2, 1, -4, BlockId::FLIGHT_COMPUTER);
+    grid.set_power_config(-2, 1, -4, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
+
+    // Hover module: 6-DOF hover. Toggled via H key → "atmo-comp" channel.
     grid.set_block(-2, 1, -3, BlockId::HOVER_MODULE);
+    grid.set_power_config(-2, 1, -3, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
+
+    // Autopilot: target tracking. Toggled via T key → "autopilot-engage" channel.
     grid.set_block(-2, 1, -2, BlockId::AUTOPILOT);
+    grid.set_power_config(-2, 1, -2, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
+
+    // Warp computer: star selection + warp initiation.
+    // G key → "warp-cycle", Enter → "warp-accept", Backspace → "warp-cancel".
     grid.set_block(-2, 1, -1, BlockId::WARP_COMPUTER);
+    grid.set_power_config(-2, 1, -1, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
+
+    // Engine controller: master on/off toggle. X key → "engine-toggle" channel.
     grid.set_block(-2, 1, 4, BlockId::ENGINE_CONTROLLER);
+    grid.set_power_config(-2, 1, 4, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
 
     // --- Sub-block elements: decorative only (power is wireless now) ---
     use sub_block::{SubBlockElement, SubBlockType};

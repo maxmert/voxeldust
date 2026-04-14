@@ -409,6 +409,12 @@ table SubGridTransform {
     rotation: Quatf;      // world-space rotation of child body (after parent chain)
     parent_grid: uint32;  // 0 = root, >0 = nested parent sub-grid
     anchor: Vec3f;        // original root-space anchor (mount_pos + face offset, never changes)
+    mount_x: int32;       // mount block position (for mechanism arm rendering)
+    mount_y: int32;
+    mount_z: int32;
+    mount_face: uint8;    // face direction 0-5 (determines arm axis)
+    joint_type: uint8;    // 0=revolute, 1=prismatic
+    current_value: float; // current angle (deg) or extension (m)
 }
 
 table WorldState {
@@ -599,6 +605,7 @@ table FlightComputerConfigFB {
     pitch_down_channel: string;
     roll_cw_channel: string;
     roll_ccw_channel: string;
+    toggle_channel: string;
     damping_gain: float = 0.6;
     dead_zone: float = 0.005;
     max_correction: float = 0.3;
@@ -632,8 +639,9 @@ table AutopilotConfigFB {
 }
 
 table WarpComputerConfigFB {
-    target_channel: string;
-    confirm_channel: string;
+    cycle_channel: string;
+    accept_channel: string;
+    cancel_channel: string;
 }
 
 table EngineControllerConfigFB {

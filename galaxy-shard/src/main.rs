@@ -862,7 +862,9 @@ fn broadcast_galaxy_world_state(
             origin_star_index: warp.origin_star_index,
             target_star_index: warp.target_star_index,
         });
-        let _ = bridge.broadcast_tx.try_send(gws);
+        if bridge.broadcast_tx.try_send(gws).is_err() {
+            tracing::warn!("GalaxyWorldState broadcast dropped — channel full");
+        }
     }
 }
 

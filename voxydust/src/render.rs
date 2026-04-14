@@ -509,6 +509,7 @@ pub fn render_frame(
     config_state: Option<&mut voxeldust_core::signal::config::BlockSignalConfig>,
     gfx_settings: &GraphicsSettings,
     sub_grid_transforms: &std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
+    sub_grid_assignments: &std::collections::HashMap<glam::IVec3, u32>,
 ) -> hud::ConfigPanelAction {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -885,6 +886,66 @@ pub fn render_frame(
                             }
                         }
                     }
+
+                    // Draw piston arm meshes — one per prismatic sub-grid.
+                    if let Some(ref arm_mesh) = br.piston_arm_mesh {
+                        for ship_transform in &ro.block_ships {
+                            for (sg_id, sgt) in sub_grid_transforms {
+                                if sgt.joint_type != 1 { continue; } // only prismatic
+                                if sgt.current_value.abs() < 0.001 { continue; } // no arm when retracted
+
+                                let uniform_idx = block_start + chunk_idx;
+                                if uniform_idx >= MAX_OBJECTS { break; }
+
+                                // Compute arm model matrix:
+                                // 1. Translate to mount block center
+                                // 2. Rotate Z axis to align with face normal
+                                // 3. Scale Z by current extension
+                                let mount_center = Vec3::new(
+                                    sgt.mount_pos.x as f32 + 0.5,
+                                    sgt.mount_pos.y as f32 + 0.5,
+                                    sgt.mount_pos.z as f32 + 0.5,
+                                );
+                                let face_normal = match sgt.mount_face {
+                                    0 => Vec3::X,
+                                    1 => Vec3::NEG_X,
+                                    2 => Vec3::Y,
+                                    3 => Vec3::NEG_Y,
+                                    4 => Vec3::Z,
+                                    5 => Vec3::NEG_Z,
+                                    _ => Vec3::Y,
+                                };
+                                // Rotation that maps +Z to face_normal.
+                                let face_rot = glam::Quat::from_rotation_arc(Vec3::Z, face_normal);
+                                // Arm starts at the face surface (block center + 0.5 along normal)
+                                // and extends current_value meters toward the child blocks.
+                                let arm_model = ship_transform.base_transform
+                                    * Mat4::from_translation(mount_center + face_normal * 0.5)
+                                    * Mat4::from_quat(face_rot)
+                                    * Mat4::from_scale(Vec3::new(1.0, 1.0, sgt.current_value));
+
+                                let mvp = cam.vp * arm_model;
+                                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                                obj.mvp = mvp.to_cols_array_2d();
+                                obj.model = arm_model.to_cols_array_2d();
+                                obj.color = [1.0, 1.0, 1.0, 0.0];
+                                obj.material = [0.1, 0.7, 0.0, 0.0];
+                                uniform_data[uniform_idx] = obj;
+
+                                gpu.queue.write_buffer(
+                                    &gpu.uniform_buf,
+                                    (uniform_idx as u64) * 256,
+                                    bytemuck::cast_slice(&uniform_data[uniform_idx..uniform_idx + 1]),
+                                );
+                                pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
+                                pass.set_vertex_buffer(0, arm_mesh.vertex_buf.slice(..));
+                                pass.set_index_buffer(arm_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                                pass.draw_indexed(0..arm_mesh.index_count, 0, 0..1);
+
+                                chunk_idx += 1;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -894,15 +955,25 @@ pub fn render_frame(
             if current_shard_type == voxeldust_core::client_message::shard_type::SHIP && !ro.block_ships.is_empty() {
                 let base_transform = ro.block_ships[0].base_transform;
 
-                // Block center in ship-local space.
+                // Block center in ship-local space (root grid coordinates).
                 let block_center = Vec3::new(
                     target.world_pos.x as f32 + 0.5,
                     target.world_pos.y as f32 + 0.5,
                     target.world_pos.z as f32 + 0.5,
                 );
+                // Apply sub-grid transform if the block belongs to a sub-grid.
+                let sg_local = sub_grid_assignments.get(&target.world_pos)
+                    .and_then(|sg_id| sub_grid_transforms.get(sg_id))
+                    .map(|sgt| {
+                        Mat4::from_translation(sgt.translation)
+                            * Mat4::from_quat(sgt.rotation)
+                            * Mat4::from_translation(-sgt.anchor)
+                    })
+                    .unwrap_or(Mat4::IDENTITY);
                 let model = base_transform
+                    * sg_local
                     * Mat4::from_translation(block_center)
-                    * Mat4::from_scale(Vec3::splat(0.505)); // slightly larger than 0.5 half-extent
+                    * Mat4::from_scale(Vec3::splat(0.505));
                 let mvp = cam.vp * model;
 
                 // Use a uniform slot after all block chunks.

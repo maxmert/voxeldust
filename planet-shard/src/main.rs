@@ -328,7 +328,6 @@ fn drain_quic(
     mut accepted_events: MessageWriter<HandoffAcceptedMsg>,
     mut celestial_time: ResMut<CelestialTimeRes>,
     mut planet_pos: ResMut<PlanetPositionInSystem>,
-    mut cached_all_planets: ResMut<CachedAllPlanetPositions>,
     sys_params: Res<SystemParamsRes>,
     config: Res<PlanetConfig>,
 ) {
@@ -342,7 +341,7 @@ fn drain_quic(
                 // Sync celestial time from system shard authority.
                 if h.game_time > celestial_time.0 {
                     celestial_time.0 = h.game_time;
-                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos, &mut cached_all_planets);
+                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos);
                 }
                 handoff_events.write(InboundHandoffMsg {
                     handoff: h,
@@ -352,7 +351,7 @@ fn drain_quic(
             ShardMsg::ShipNearbyInfo(info) => {
                 if info.game_time > celestial_time.0 {
                     celestial_time.0 = info.game_time;
-                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos, &mut cached_all_planets);
+                    update_planet_position(&sys_params.0, config.planet_index, celestial_time.0, &mut planet_pos);
                 }
                 ship_nearby_events.write(ShipNearbyMsg(info));
             }
@@ -372,16 +371,26 @@ fn update_planet_position(
     planet_index: u32,
     celestial_time: f64,
     planet_pos: &mut PlanetPositionInSystem,
-    cached_all: &mut CachedAllPlanetPositions,
 ) {
     if let Some(sys) = sys_params {
         if let Some(planet) = sys.planets.get(planet_index as usize) {
             planet_pos.0 = compute_planet_position(planet, celestial_time);
         }
-        // Refresh all planet positions while we're computing orbits.
-        cached_all.0.clear();
+    }
+}
+
+/// Refresh all-planet position cache once per tick (after physics_step updates celestial_time).
+/// Separated from update_planet_position to avoid redundant Kepler solves in drain_quic.
+fn refresh_planet_position_cache(
+    sys_params: Res<SystemParamsRes>,
+    celestial_time: Res<CelestialTimeRes>,
+    mut cached: ResMut<CachedAllPlanetPositions>,
+) {
+    if let Some(ref sys) = sys_params.0 {
+        cached.0.clear();
+        cached.0.reserve(sys.planets.len());
         for planet in &sys.planets {
-            cached_all.0.push(compute_planet_position(planet, celestial_time));
+            cached.0.push(compute_planet_position(planet, celestial_time.0));
         }
     }
 }
@@ -735,7 +744,6 @@ fn physics_step(
     mut tick: ResMut<ecs::TickCounter>,
     sys_params: Res<SystemParamsRes>,
     mut planet_pos: ResMut<PlanetPositionInSystem>,
-    mut cached_all_planets: ResMut<CachedAllPlanetPositions>,
     epoch: Res<UniverseEpoch>,
 ) {
     physics_time.0 += 0.05;
@@ -751,7 +759,6 @@ fn physics_step(
         config.planet_index,
         celestial_time.0,
         &mut planet_pos,
-        &mut cached_all_planets,
     );
 
     // Step Rapier with surface gravity.
@@ -1074,7 +1081,9 @@ fn broadcast_world_state(
         autopilot: None,
         sub_grids: vec![],
     });
-    let _ = bridge.broadcast_tx.try_send(ws);
+    if bridge.broadcast_tx.try_send(ws).is_err() {
+        tracing::warn!("WorldState broadcast dropped — channel full");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,7 +1235,7 @@ fn build_app(
     // Physics.
     app.add_systems(
         Update,
-        (physics_step, tangent_frame_sync)
+        (physics_step, refresh_planet_position_cache, tangent_frame_sync)
             .chain()
             .in_set(PlanetSet::Physics),
     );

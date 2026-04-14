@@ -40,8 +40,10 @@ pub const CH_CRUISE: &str = "cruise";
 pub const CH_ATMO_COMP: &str = "atmo-comp";
 pub const CH_AUTOPILOT_ENGAGE: &str = "autopilot-engage";
 pub const CH_ENGINE_TOGGLE: &str = "engine-toggle";
-pub const CH_WARP_TARGET: &str = "warp-target";
-pub const CH_WARP_CONFIRM: &str = "warp-confirm";
+pub const CH_FLIGHT_COMPUTER_TOGGLE: &str = "flight-computer-toggle";
+pub const CH_WARP_CYCLE: &str = "warp-cycle";
+pub const CH_WARP_ACCEPT: &str = "warp-accept";
+pub const CH_WARP_CANCEL: &str = "warp-cancel";
 pub const CH_PILOT_SEATED: &str = "pilot-seated";
 pub const CH_SEATED: &str = "seated";
 
@@ -150,15 +152,17 @@ fn pilot_bindings() -> Vec<SeatInputBindingConfig> {
             channel_name: CH_THRUST_LIMITER.into(),
             property: SignalProperty::Throttle,
         },
-        // Toggles
+        // System block toggles
         toggle_binding("Cruise", "KeyC", CH_CRUISE),
         toggle_binding("Atmo Comp", "KeyH", CH_ATMO_COMP),
         toggle_binding("Autopilot", "KeyT", CH_AUTOPILOT_ENGAGE),
-        // Engine toggle (momentary — engine controller handles toggle logic internally)
+        toggle_binding("Flight Computer", "F1", CH_FLIGHT_COMPUTER_TOGGLE),
+        // Engine toggle (momentary — engine controller detects rising edge internally)
         key_binding("Engine Toggle", "KeyX", CH_ENGINE_TOGGLE),
-        // Warp (momentary — warp computer detects rising edges)
-        key_binding("Warp Target", "KeyG", CH_WARP_TARGET),
-        key_binding("Warp Confirm", "Enter", CH_WARP_CONFIRM),
+        // Warp computer (momentary — warp computer detects rising edges)
+        key_binding("Warp Cycle", "KeyG", CH_WARP_CYCLE),
+        key_binding("Warp Accept", "Enter", CH_WARP_ACCEPT),
+        key_binding("Warp Cancel", "Backspace", CH_WARP_CANCEL),
     ]
 }
 
@@ -174,6 +178,7 @@ pub fn default_flight_computer_config() -> FlightComputerConfig {
         pitch_down_channel: CH_TORQUE_PITCH_DOWN.into(),
         roll_cw_channel: CH_TORQUE_ROLL_CW.into(),
         roll_ccw_channel: CH_TORQUE_ROLL_CCW.into(),
+        toggle_channel: CH_FLIGHT_COMPUTER_TOGGLE.into(),
         damping_gain: 0.6,
         dead_zone: 0.005,
         max_correction: 0.3,
@@ -213,8 +218,9 @@ pub fn default_autopilot_config() -> AutopilotBlockConfig {
 
 pub fn default_warp_computer_config() -> WarpComputerConfig {
     WarpComputerConfig {
-        target_channel: CH_WARP_TARGET.into(),
-        confirm_channel: CH_WARP_CONFIRM.into(),
+        cycle_channel: CH_WARP_CYCLE.into(),
+        accept_channel: CH_WARP_ACCEPT.into(),
+        cancel_channel: CH_WARP_CANCEL.into(),
     }
 }
 

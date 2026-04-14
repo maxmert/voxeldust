@@ -176,14 +176,26 @@ fn generate_element_mesh(
                 0.5, 0.5, 0.08, 0.08, 0.02, elem.rotation, vertices, indices);
         }
         SubBlockType::RotorMount | SubBlockType::HingeMount => {
-            // Circular mount (larger, distinct protrusion).
-            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,
-                0.5, 0.5, 0.2, 0.2, 0.1, elem.rotation, vertices, indices);
+            // Bearing assembly: outer ring + axle pin.
+            let bearing_color = [0.70, 0.74, 0.78]; // metallic silver
+            let axle_color = [0.55, 0.58, 0.62]; // darker steel
+            // Outer bearing disc (thick, visible ring).
+            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &bearing_color,
+                0.5, 0.5, 0.2, 0.2, 0.06, elem.rotation, vertices, indices);
+            // Inner axle pin (thin, protruding from center).
+            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &axle_color,
+                0.5, 0.5, 0.05, 0.05, 0.12, elem.rotation, vertices, indices);
         }
         SubBlockType::PistonMount | SubBlockType::SliderMount => {
-            // Rectangular mount.
-            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,
-                0.5, 0.5, 0.15, 0.3, 0.1, elem.rotation, vertices, indices);
+            // Piston housing: outer cylinder + rod guide opening.
+            let housing_color = [0.55, 0.58, 0.62]; // dark metallic
+            let guide_color = [0.45, 0.48, 0.52]; // darker interior
+            // Outer housing box.
+            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &housing_color,
+                0.5, 0.5, 0.15, 0.15, 0.12, elem.rotation, vertices, indices);
+            // Inner rod guide (slightly recessed center).
+            emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &guide_color,
+                0.5, 0.5, 0.08, 0.08, 0.14, elem.rotation, vertices, indices);
         }
         _ => {
             // Generic small box for any unhandled type.

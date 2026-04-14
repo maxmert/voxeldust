@@ -62,6 +62,7 @@ pub struct FlightComputerConfig {
     pub pitch_down_channel: String,
     pub roll_cw_channel: String,
     pub roll_ccw_channel: String,
+    pub toggle_channel: String,
     pub damping_gain: f32,
     pub dead_zone: f32,
     pub max_correction: f32,
@@ -101,8 +102,9 @@ pub struct AutopilotBlockConfig {
 /// Warp computer configuration.
 #[derive(Clone, Debug, Default)]
 pub struct WarpComputerConfig {
-    pub target_channel: String,
-    pub confirm_channel: String,
+    pub cycle_channel: String,
+    pub accept_channel: String,
+    pub cancel_channel: String,
 }
 
 /// Engine controller configuration. Each channel is explicit.

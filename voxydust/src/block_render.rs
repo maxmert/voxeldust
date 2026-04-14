@@ -220,6 +220,9 @@ pub struct BlockRenderer {
     /// Per-sub-grid, per-chunk GPU mesh buffers for mechanical sub-grid blocks.
     /// These are drawn with per-sub-grid transforms (rotation/translation from server).
     sub_grid_meshes: HashMap<SubGridMeshKey, ChunkGpuMesh>,
+    /// Shared piston arm mesh — a unit-length rod (0 to 1 along Z, radius 0.08).
+    /// Rendered per-piston with a model matrix that scales Z by current extension.
+    pub piston_arm_mesh: Option<ChunkGpuMesh>,
 }
 
 impl BlockRenderer {
@@ -342,12 +345,72 @@ impl BlockRenderer {
             cache: None,
         });
 
+        // Generate shared piston arm mesh — unit rod along Z axis.
+        let piston_arm_mesh = {
+            let r = 0.08_f32; // arm radius
+            let color = [0.50_f32, 0.53, 0.56]; // steel gray
+            // 8 vertices: cuboid from (-r, -r, 0) to (r, r, 1)
+            let verts = [
+                // -Z face (z=0)
+                BlockVertex { position: [-r, -r, 0.0], normal: [0.0, 0.0, -1.0], color },
+                BlockVertex { position: [ r, -r, 0.0], normal: [0.0, 0.0, -1.0], color },
+                BlockVertex { position: [ r,  r, 0.0], normal: [0.0, 0.0, -1.0], color },
+                BlockVertex { position: [-r,  r, 0.0], normal: [0.0, 0.0, -1.0], color },
+                // +Z face (z=1)
+                BlockVertex { position: [-r, -r, 1.0], normal: [0.0, 0.0, 1.0], color },
+                BlockVertex { position: [ r, -r, 1.0], normal: [0.0, 0.0, 1.0], color },
+                BlockVertex { position: [ r,  r, 1.0], normal: [0.0, 0.0, 1.0], color },
+                BlockVertex { position: [-r,  r, 1.0], normal: [0.0, 0.0, 1.0], color },
+                // -Y face
+                BlockVertex { position: [-r, -r, 0.0], normal: [0.0, -1.0, 0.0], color },
+                BlockVertex { position: [ r, -r, 0.0], normal: [0.0, -1.0, 0.0], color },
+                BlockVertex { position: [ r, -r, 1.0], normal: [0.0, -1.0, 0.0], color },
+                BlockVertex { position: [-r, -r, 1.0], normal: [0.0, -1.0, 0.0], color },
+                // +Y face
+                BlockVertex { position: [-r,  r, 0.0], normal: [0.0, 1.0, 0.0], color },
+                BlockVertex { position: [ r,  r, 0.0], normal: [0.0, 1.0, 0.0], color },
+                BlockVertex { position: [ r,  r, 1.0], normal: [0.0, 1.0, 0.0], color },
+                BlockVertex { position: [-r,  r, 1.0], normal: [0.0, 1.0, 0.0], color },
+                // -X face
+                BlockVertex { position: [-r, -r, 0.0], normal: [-1.0, 0.0, 0.0], color },
+                BlockVertex { position: [-r,  r, 0.0], normal: [-1.0, 0.0, 0.0], color },
+                BlockVertex { position: [-r,  r, 1.0], normal: [-1.0, 0.0, 0.0], color },
+                BlockVertex { position: [-r, -r, 1.0], normal: [-1.0, 0.0, 0.0], color },
+                // +X face
+                BlockVertex { position: [ r, -r, 0.0], normal: [1.0, 0.0, 0.0], color },
+                BlockVertex { position: [ r,  r, 0.0], normal: [1.0, 0.0, 0.0], color },
+                BlockVertex { position: [ r,  r, 1.0], normal: [1.0, 0.0, 0.0], color },
+                BlockVertex { position: [ r, -r, 1.0], normal: [1.0, 0.0, 0.0], color },
+            ];
+            #[rustfmt::skip]
+            let idxs: [u32; 36] = [
+                0,1,2, 0,2,3,     // -Z
+                4,6,5, 4,7,6,     // +Z
+                8,10,9, 8,11,10,  // -Y
+                12,13,14, 12,14,15, // +Y
+                16,18,17, 16,19,18, // -X
+                20,21,22, 20,22,23, // +X
+            ];
+            let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("piston_arm_vb"),
+                contents: bytemuck::cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("piston_arm_ib"),
+                contents: bytemuck::cast_slice(&idxs),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            Some(ChunkGpuMesh { vertex_buf: vb, index_buf: ib, index_count: 36 })
+        };
+
         Self {
             pipeline,
             shadow_pipeline,
             chunk_meshes: HashMap::new(),
             sub_block_meshes: HashMap::new(),
             sub_grid_meshes: HashMap::new(),
+            piston_arm_mesh,
         }
     }
 

@@ -389,6 +389,8 @@ struct MechanicalState {
 struct SubGridData {
     /// Rapier rigid body handle for this sub-grid (KinematicPositionBased).
     body_handle: rapier3d::dynamics::RigidBodyHandle,
+    /// Mechanism arm collider (piston rod or rotor axle). Physical collision object.
+    arm_collider: Option<rapier3d::geometry::ColliderHandle>,
     /// Block positions that belong to this sub-grid.
     members: std::collections::HashSet<glam::IVec3>,
     /// Mechanical mount position that created this sub-grid.
@@ -413,6 +415,14 @@ impl Default for SubGridRegistry {
         Self { next_id: 1, grids: std::collections::HashMap::new() }
     }
 }
+
+/// World-space isometries for all mechanical sub-grids, computed by
+/// `apply_mechanical_transforms`. Used by other systems (raycast, broadcast)
+/// to know where sub-grid blocks are in world space.
+#[derive(Resource, Default)]
+struct MechanicalWorldIsometries(
+    std::collections::HashMap<voxeldust_core::ecs::components::SubGridId, rapier3d::math::Isometry<f32>>,
+);
 
 /// Handle for the root (parent ship body) Fixed rigid body.
 /// All non-sub-grid chunk colliders are parented to this body.
@@ -603,6 +613,12 @@ struct SignalQueryCtx<'w, 's> {
     powered_by_query: Query<'w, 's, &'static PoweredBy>,
     cache_query: Query<'w, 's, &'static mut ReactorConsumerCache>,
     block_ref_query: Query<'w, 's, &'static FunctionalBlockRef>,
+    // System block queries for config snapshot.
+    fc_query: Query<'w, 's, &'static FlightComputerState>,
+    hm_query: Query<'w, 's, &'static HoverModuleState>,
+    ap_query: Query<'w, 's, &'static AutopilotBlockState>,
+    wc_query: Query<'w, 's, &'static WarpComputerState>,
+    ec_query: Query<'w, 's, &'static EngineControllerState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,10 +1467,19 @@ fn broadcast_world_state(
                 rotation: glam::Quat::from_xyzw(r.i, r.j, r.k, r.w),
                 parent_grid: sg_data.parent_grid.0,
                 anchor,
+                mount_pos: sg_data.mount_pos,
+                mount_face: sg_data.mount_face,
+                joint_type: match state.joint_type {
+                    block::JointType::Revolute => 0,
+                    block::JointType::Prismatic => 1,
+                },
+                current_value: state.current,
             })
         }).collect();
     }
-    let _ = bridge.broadcast_tx.try_send(ws);
+    if bridge.broadcast_tx.try_send(ws).is_err() {
+        tracing::warn!("WorldState broadcast dropped — channel full");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2406,6 +2431,8 @@ fn produce_player_edits(
     body_handle: Res<PlayerBodyHandle>,
     bridge: Res<NetworkBridge>,
     mut signal_ctx: SignalQueryCtx,
+    world_isos: Res<MechanicalWorldIsometries>,
+    sub_grids: Res<SubGridRegistry>,
 ) {
     if connected.session.is_none() || connected.handoff_pending {
         return;
@@ -2433,11 +2460,60 @@ fn produce_player_edits(
         }
 
         // Server-authoritative raycast against the ShipGrid.
-        let hit = raycast::raycast(eye, look, BLOCK_EDIT_RANGE, |x, y, z| {
-            registry.0.is_solid(grid.0.get_block(x, y, z))
+        // First: raycast against root-grid blocks (not in any sub-grid).
+        let root_hit = raycast::raycast(eye, look, BLOCK_EDIT_RANGE, |x, y, z| {
+            let bid = grid.0.get_block(x, y, z);
+            if !registry.0.is_solid(bid) { return false; }
+            grid.0.sub_grid_id(glam::IVec3::new(x, y, z)) == 0 // root only
         });
 
-        let hit = match hit {
+        // Then: raycast against each sub-grid in its local (unrotated) frame.
+        // Transform the ray INTO the sub-grid's rest space using the inverse isometry.
+        let mut best_hit: Option<raycast::BlockHit> = root_hit;
+        for (sg_id, iso) in &world_isos.0 {
+            let sg_data = match sub_grids.grids.get(sg_id) {
+                Some(d) => d,
+                None => continue,
+            };
+            if sg_data.members.is_empty() { continue; }
+
+            // Compute the sub-grid's transform that maps root-space → world-space.
+            // We need the INVERSE to map the ray from world-space → root-space.
+            // The transform is: world = T(pos) * R * T(-anchor) * root_point
+            // Inverse: root_point = T(anchor) * R_inv * T(-pos) * world_point
+            let axis_offset = block::sub_block::face_to_offset(sg_data.mount_face);
+            let anchor = glam::Vec3::new(
+                sg_data.mount_pos.x as f32 + 0.5 + axis_offset.x as f32 * 0.5,
+                sg_data.mount_pos.y as f32 + 0.5 + axis_offset.y as f32 * 0.5,
+                sg_data.mount_pos.z as f32 + 0.5 + axis_offset.z as f32 * 0.5,
+            );
+            let iso_inv = iso.inverse();
+            let local_eye_pt = iso_inv * rapier3d::math::Point::new(eye.x, eye.y, eye.z);
+            let local_look_v = iso_inv.rotation * rapier3d::math::Vector::new(look.x, look.y, look.z);
+            // Shift from body-local to root-space (add anchor back).
+            let local_eye = glam::Vec3::new(
+                local_eye_pt.x + anchor.x,
+                local_eye_pt.y + anchor.y,
+                local_eye_pt.z + anchor.z,
+            );
+            let local_look = glam::Vec3::new(local_look_v.x, local_look_v.y, local_look_v.z);
+
+            let sg_id_u32 = sg_id.0;
+            let sg_hit = raycast::raycast(local_eye, local_look, BLOCK_EDIT_RANGE, |x, y, z| {
+                let pos = glam::IVec3::new(x, y, z);
+                if grid.0.sub_grid_id(pos) != sg_id_u32 { return false; }
+                registry.0.is_solid(grid.0.get_block(x, y, z))
+            });
+
+            if let Some(sh) = sg_hit {
+                let closer = best_hit.as_ref().map_or(true, |bh| sh.distance < bh.distance);
+                if closer {
+                    best_hit = Some(sh);
+                }
+            }
+        }
+
+        let hit = match best_hit {
             Some(h) => h,
             None => continue, // ray didn't hit anything
         };
@@ -2622,6 +2698,9 @@ fn produce_player_edits(
                             &signal_ctx.reactor_query,
                             &signal_ctx.powered_by_query,
                             &registry.0,
+                            &signal_ctx.fc_query, &signal_ctx.hm_query,
+                            &signal_ctx.ap_query, &signal_ctx.wc_query,
+                            &signal_ctx.ec_query,
                         );
                         if let Some(session) = connected.session {
                             let msg = ServerMsg::BlockConfigState(config);
@@ -2656,6 +2735,11 @@ fn build_config_snapshot(
     reactor_query: &Query<(&mut ReactorState, Option<&FunctionalBlockRef>)>,
     powered_by_query: &Query<&PoweredBy>,
     _registry: &BlockRegistry,
+    fc_query: &Query<&FlightComputerState>,
+    hm_query: &Query<&HoverModuleState>,
+    ap_query: &Query<&AutopilotBlockState>,
+    wc_query: &Query<&WarpComputerState>,
+    ec_query: &Query<&EngineControllerState>,
 ) -> voxeldust_core::signal::config::BlockSignalConfig {
     use voxeldust_core::signal::config::*;
 
@@ -2767,11 +2851,63 @@ fn build_config_snapshot(
         power_source,
         power_consumer,
         nearby_reactors,
-        flight_computer: None,
-        hover_module: None,
-        autopilot: None,
-        warp_computer: None,
-        engine_controller: None,
+        flight_computer: fc_query.get(entity).ok().map(|fc| FlightComputerConfig {
+            yaw_cw_channel: fc.yaw_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            yaw_ccw_channel: fc.yaw_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_up_channel: fc.pitch_up_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_down_channel: fc.pitch_down_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_cw_channel: fc.roll_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_ccw_channel: fc.roll_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            toggle_channel: fc.toggle_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            damping_gain: fc.damping_gain,
+            dead_zone: fc.dead_zone,
+            max_correction: fc.max_correction,
+        }),
+        hover_module: hm_query.get(entity).ok().map(|hm| HoverModuleConfig {
+            thrust_forward_channel: hm.thrust_forward_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_reverse_channel: hm.thrust_reverse_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_right_channel: hm.thrust_right_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_left_channel: hm.thrust_left_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_up_channel: hm.thrust_up_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_down_channel: hm.thrust_down_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            yaw_cw_channel: hm.yaw_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            yaw_ccw_channel: hm.yaw_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_up_channel: hm.pitch_up_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_down_channel: hm.pitch_down_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_cw_channel: hm.roll_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_ccw_channel: hm.roll_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            activate_channel: hm.activate_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            cutoff_channel: hm.cutoff_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+        }),
+        autopilot: ap_query.get(entity).ok().map(|ap| AutopilotBlockConfig {
+            yaw_cw_channel: ap.yaw_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            yaw_ccw_channel: ap.yaw_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_up_channel: ap.pitch_up_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_down_channel: ap.pitch_down_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_cw_channel: ap.roll_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_ccw_channel: ap.roll_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            engage_channel: ap.engage_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+        }),
+        warp_computer: wc_query.get(entity).ok().map(|wc| WarpComputerConfig {
+            cycle_channel: wc.cycle_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            accept_channel: wc.accept_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            cancel_channel: wc.cancel_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+        }),
+        engine_controller: ec_query.get(entity).ok().map(|ec| EngineControllerConfig {
+            thrust_forward_channel: ec.thrust_forward_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_reverse_channel: ec.thrust_reverse_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_right_channel: ec.thrust_right_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_left_channel: ec.thrust_left_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_up_channel: ec.thrust_up_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            thrust_down_channel: ec.thrust_down_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            yaw_cw_channel: ec.yaw_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            yaw_ccw_channel: ec.yaw_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_up_channel: ec.pitch_up_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            pitch_down_channel: ec.pitch_down_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_cw_channel: ec.roll_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            roll_ccw_channel: ec.roll_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+            toggle_channel: ec.toggle_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+        }),
     }
 }
 
@@ -2824,10 +2960,16 @@ fn rebuild_chunk_collider(
             chunk_key, glam::Vec3::ZERO, registry, Some(sg_id.0),
         );
         if !sg_shapes.is_empty() {
-            // Offset shapes relative to the sub-grid body position.
-            let body_pos = rapier.rigid_body_set.get(sg_data.body_handle)
-                .map(|b| *b.translation())
-                .unwrap_or_default();
+            // Offset shapes relative to the sub-grid's FIXED anchor position
+            // (mount_pos + face offset). NOT the body's current translation,
+            // which changes for nested sub-grids as the parent rotates.
+            // The anchor is the body's local origin — colliders rotate around it.
+            let axis_offset = block::sub_block::face_to_offset(sg_data.mount_face);
+            let body_pos = rapier3d::math::Vector::new(
+                sg_data.mount_pos.x as f32 + 0.5 + axis_offset.x as f32 * 0.5,
+                sg_data.mount_pos.y as f32 + 0.5 + axis_offset.y as f32 * 0.5,
+                sg_data.mount_pos.z as f32 + 0.5 + axis_offset.z as f32 * 0.5,
+            );
             let compound: Vec<_> = sg_shapes.iter().map(|&(pos, he)| {
                 let local = Isometry::translation(
                     pos.x - body_pos.x,
@@ -3288,10 +3430,44 @@ fn process_mechanical_edits(
             voxeldust_core::ecs::components::SubGridId::ROOT
         };
 
+        // Create mechanism arm collider (physical rod/axle at the mount).
+        let arm_radius = 0.08_f32;
+        let face_normal = glam::Vec3::new(
+            face_to_offset(output_face).x as f32,
+            face_to_offset(output_face).y as f32,
+            face_to_offset(output_face).z as f32,
+        );
+        // Arm collider starts at the face surface (block center + 0.5 along face normal).
+        let mount_face_pos = glam::Vec3::new(
+            mount_pos.x as f32 + 0.5,
+            mount_pos.y as f32 + 0.5,
+            mount_pos.z as f32 + 0.5,
+        ) + face_normal * 0.5;
+
+        let arm_collider_handle = match mech_props.joint_type {
+            block::JointType::Revolute => {
+                // Rotor axle: small fixed cuboid at the joint center (face surface).
+                let collider = rapier3d::geometry::ColliderBuilder::cuboid(arm_radius, arm_radius, 0.06)
+                    .translation(rapier3d::math::Vector::new(mount_face_pos.x, mount_face_pos.y, mount_face_pos.z))
+                    .build();
+                let RapierContext { ref mut collider_set, ref mut rigid_body_set, .. } = *rapier;
+                Some(collider_set.insert_with_parent(collider, root_body.0, rigid_body_set))
+            }
+            block::JointType::Prismatic => {
+                // Piston arm: starts at zero length at face surface, grows with extension.
+                let collider = rapier3d::geometry::ColliderBuilder::cuboid(arm_radius, arm_radius, 0.001)
+                    .translation(rapier3d::math::Vector::new(mount_face_pos.x, mount_face_pos.y, mount_face_pos.z))
+                    .build();
+                let RapierContext { ref mut collider_set, ref mut rigid_body_set, .. } = *rapier;
+                Some(collider_set.insert_with_parent(collider, root_body.0, rigid_body_set))
+            }
+        };
+
         // Register sub-grid (colliders will be built by rebuild_chunk_collider below).
         let members_clone = members.clone();
         sub_grids.grids.insert(sg_id, SubGridData {
             body_handle: child_handle,
+            arm_collider: arm_collider_handle,
             members,
             mount_pos,
             mount_face: face,
@@ -3665,9 +3841,11 @@ fn add_default_signal_bindings(
                 pitch_down_channel: resolve_ch!(&cfg.pitch_down_channel),
                 roll_cw_channel: resolve_ch!(&cfg.roll_cw_channel),
                 roll_ccw_channel: resolve_ch!(&cfg.roll_ccw_channel),
+                toggle_channel: resolve_ch!(&cfg.toggle_channel),
                 damping_gain: cfg.damping_gain,
                 dead_zone: cfg.dead_zone,
                 max_correction: cfg.max_correction,
+                ..Default::default()
             });
         }
         FunctionalBlockKind::HoverModule => {
@@ -3709,8 +3887,9 @@ fn add_default_signal_bindings(
             let cfg = seat_presets::default_warp_computer_config();
             macro_rules! resolve_ch { ($name:expr) => { Some(channels.resolve_or_create($name, SignalScope::Local, ChannelMergeStrategy::LastWrite, 0)) }; }
             entity_cmds.insert(WarpComputerState {
-                target_channel: resolve_ch!(&cfg.target_channel),
-                confirm_channel: resolve_ch!(&cfg.confirm_channel),
+                cycle_channel: resolve_ch!(&cfg.cycle_channel),
+                accept_channel: resolve_ch!(&cfg.accept_channel),
+                cancel_channel: resolve_ch!(&cfg.cancel_channel),
                 ..Default::default()
             });
         }
@@ -3839,6 +4018,25 @@ fn compute_power_budget(
 // Signal pipeline systems
 // ---------------------------------------------------------------------------
 
+/// Check if a block entity has power from its reactor circuit.
+/// Returns the circuit's power_ratio (0.0 = no power, 1.0 = full power).
+/// Returns 0.0 if the block has no PoweredBy, reactor is missing/inactive, or circuit not found.
+fn block_power_ratio(
+    entity: Entity,
+    powered_by_query: &Query<&PoweredBy>,
+    block_index: &FunctionalBlockIndex,
+    reactors: &Query<&ReactorState>,
+) -> f32 {
+    let Some(powered_by) = powered_by_query.get(entity).ok() else { return 0.0 };
+    let Some(&reactor_entity) = block_index.0.get(&powered_by.reactor_pos) else { return 0.0 };
+    let Ok(rs) = reactors.get(reactor_entity) else { return 0.0 };
+    if !rs.active { return 0.0; }
+    rs.circuits.iter()
+        .find(|c| c.name == powered_by.circuit)
+        .map(|c| c.power_ratio)
+        .unwrap_or(0.0)
+}
+
 /// Flight computer block system: reads angular velocity, injects counter-rotation
 /// into rotation channels when pilot input is near zero.
 ///
@@ -3850,12 +4048,27 @@ fn compute_power_budget(
 /// regardless of delay or ship mass.
 fn flight_computer_system(
     mut channels: ResMut<SignalChannelTable>,
-    query: Query<&FlightComputerState>,
+    mut query: Query<(Entity, &mut FlightComputerState)>,
+    powered_by_query: Query<&PoweredBy>,
+    block_index: Res<FunctionalBlockIndex>,
+    reactors: Query<&ReactorState>,
     exterior: Res<ShipExterior>,
 ) {
     let ang_vel = exterior.rotation.inverse() * exterior.angular_velocity;
 
-    for fc in &query {
+    for (entity, mut fc) in &mut query {
+        // Power check: skip if no power available.
+        if block_power_ratio(entity, &powered_by_query, &block_index, &reactors) <= 0.0 { continue; }
+
+        // Toggle: rising edge flips active state.
+        let toggle_val = fc.toggle_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
+        if toggle_val > 0.5 && fc.prev_toggle_value <= 0.5 {
+            fc.active = !fc.active;
+            info!(active = fc.active, "flight computer toggled");
+        }
+        fc.prev_toggle_value = toggle_val;
+        if !fc.active { continue; }
+
         let gain = fc.damping_gain as f64;
         let dead_zone = fc.dead_zone as f64;
         let max_corr = fc.max_correction as f64;
@@ -3896,12 +4109,18 @@ fn flight_computer_system(
 /// Runs AFTER flight_computer_system. Reads/writes channels via set_value_direct.
 fn hover_module_system(
     mut channels: ResMut<SignalChannelTable>,
-    mut query: Query<&mut HoverModuleState>,
+    mut query: Query<(Entity, &mut HoverModuleState)>,
+    powered_by_query: Query<&PoweredBy>,
+    block_index: Res<FunctionalBlockIndex>,
+    reactors: Query<&ReactorState>,
     exterior: Res<ShipExterior>,
     ship_props: Res<ShipProps>,
     autopilot_query: Query<&AutopilotBlockState>,
 ) {
-    for mut hm in &mut query {
+    for (entity, mut hm) in &mut query {
+        // Power check.
+        if block_power_ratio(entity, &powered_by_query, &block_index, &reactors) <= 0.0 { continue; }
+
         // Read activation channel.
         let activate_val = hm.activate_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
         let cutoff_val = hm.cutoff_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
@@ -4039,11 +4258,16 @@ fn hover_module_system(
 /// When target active: computes steering, writes rotation channels via set_value_direct.
 fn autopilot_system(
     mut channels: ResMut<SignalChannelTable>,
-    mut query: Query<&mut AutopilotBlockState>,
+    mut query: Query<(Entity, &mut AutopilotBlockState)>,
+    powered_by_query: Query<&PoweredBy>,
+    block_index: Res<FunctionalBlockIndex>,
+    reactors: Query<&ReactorState>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
 ) {
-    for mut ap in &mut query {
+    for (entity, mut ap) in &mut query {
+        // Power check.
+        if block_power_ratio(entity, &powered_by_query, &block_index, &reactors) <= 0.0 { continue; }
         // Read engage channel for rising-edge detection.
         let engage_val = ap.engage_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
         let rising_edge = engage_val > 0.5 && ap.prev_engage_value <= 0.5;
@@ -4114,23 +4338,39 @@ fn autopilot_system(
 /// Reads confirm channel for rising edge → initiate warp via pending_cmd.
 fn warp_computer_system(
     mut channels: ResMut<SignalChannelTable>,
-    mut query: Query<&mut WarpComputerState>,
+    mut query: Query<(Entity, &mut WarpComputerState)>,
+    powered_by_query: Query<&PoweredBy>,
+    block_index: Res<FunctionalBlockIndex>,
+    reactors: Query<&ReactorState>,
     exterior: Res<ShipExterior>,
     cached_sys: Res<CachedSystemParams>,
     cached_galaxy: Res<CachedGalaxyMap>,
 ) {
-    for mut wc in &mut query {
-        // Read target channel for rising edge.
-        let target_val = wc.target_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
-        let target_edge = target_val > 0.5 && wc.prev_target_value <= 0.5;
-        wc.prev_target_value = target_val;
+    for (entity, mut wc) in &mut query {
+        // Power check.
+        if block_power_ratio(entity, &powered_by_query, &block_index, &reactors) <= 0.0 { continue; }
+        // Read cycle channel for rising edge (G key).
+        let cycle_val = wc.cycle_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
+        let cycle_edge = cycle_val > 0.5 && wc.prev_cycle_value <= 0.5;
+        wc.prev_cycle_value = cycle_val;
 
-        // Read confirm channel for rising edge.
-        let confirm_val = wc.confirm_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
-        let confirm_edge = confirm_val > 0.5 && wc.prev_confirm_value <= 0.5;
-        wc.prev_confirm_value = confirm_val;
+        // Read accept channel for rising edge (Enter key).
+        let accept_val = wc.accept_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
+        let accept_edge = accept_val > 0.5 && wc.prev_accept_value <= 0.5;
+        wc.prev_accept_value = accept_val;
 
-        if target_edge {
+        // Read cancel channel for rising edge (Backspace key).
+        let cancel_val = wc.cancel_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
+        let cancel_edge = cancel_val > 0.5 && wc.prev_cancel_value <= 0.5;
+        wc.prev_cancel_value = cancel_val;
+
+        // Cancel: clear target selection.
+        if cancel_edge && wc.target_star_index.is_some() {
+            info!("warp target cancelled (channel edge)");
+            wc.target_star_index = None;
+        }
+
+        if cycle_edge {
             // Cycle to next warp target star.
             let ship_fwd = exterior.rotation * DVec3::NEG_Z;
             if let Some(ref sys) = cached_sys.0 {
@@ -4187,10 +4427,10 @@ fn warp_computer_system(
             }
         }
 
-        if confirm_edge {
+        if accept_edge {
             if let Some(target) = wc.target_star_index {
                 wc.pending_cmd = Some(target);
-                info!(target_star = target, "warp engage confirmed (channel edge)");
+                info!(target_star = target, "warp accepted (channel edge)");
             }
         }
     }
@@ -4202,9 +4442,14 @@ fn warp_computer_system(
 /// When engines are off, zeros ALL managed thrust and rotation channels.
 fn engine_controller_system(
     mut channels: ResMut<SignalChannelTable>,
-    mut query: Query<&mut EngineControllerState>,
+    mut query: Query<(Entity, &mut EngineControllerState)>,
+    powered_by_query: Query<&PoweredBy>,
+    block_index: Res<FunctionalBlockIndex>,
+    reactors: Query<&ReactorState>,
 ) {
-    for mut ec in &mut query {
+    for (entity, mut ec) in &mut query {
+        // Power check — engine controller without power can't toggle anything.
+        if block_power_ratio(entity, &powered_by_query, &block_index, &reactors) <= 0.0 { continue; }
         // Read toggle channel for rising edge.
         let toggle_val = ec.toggle_channel.map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0);
         let rising_edge = toggle_val > 0.5 && ec.prev_toggle_value <= 0.5;
@@ -4509,7 +4754,10 @@ fn compute_ship_thrust(
     // Capture rotation intent from signal channels as [-1, 1] rate command.
     // After all system blocks have processed (FC, hover, autopilot), the channel values
     // represent the final desired rotation. Read them to build the rate command.
+    // Rotation command requires at least one active reactor — no power = no rotation.
+    let any_reactor_active = reactors.iter().any(|rs| rs.active);
     let read_ch = |name: &str| -> f32 {
+        if !any_reactor_active { return 0.0; }
         channels.resolve(name).map(|id| channels.read_value(id).as_f32()).unwrap_or(0.0)
     };
     let pitch_up = read_ch(seat_presets::CH_TORQUE_PITCH_UP);
@@ -4540,18 +4788,17 @@ fn read_mechanical_state(
 /// Apply sub-grid transforms directly to kinematic bodies.
 /// No motors, no forces, no solver — just set the body rotation/position each tick.
 ///
-/// For nested sub-grids (e.g., turret = base rotor + side rotor), parent transforms
-/// are composed: the child's anchor and rotation are transformed through the parent's
-/// world transform. Parents must be processed before children (topological order).
+/// Computes all world transforms in a local HashMap (no Rapier reads), then writes
+/// them to kinematic bodies in one pass. This ensures parent transforms are always
+/// available when composing children, regardless of Rapier's internal update timing.
 fn apply_mechanical_transforms(
     mut rapier: ResMut<RapierContext>,
     mut mechanicals: Query<(&mut MechanicalState, &voxeldust_core::ecs::components::FunctionalBlockRef)>,
     sub_grids: Res<SubGridRegistry>,
+    mut world_isos: ResMut<MechanicalWorldIsometries>,
 ) {
     use voxeldust_core::ecs::components::SubGridId;
 
-    // Collect (sg_id, target_angle, joint_type, mount_pos, mount_face, parent_grid, body_handle)
-    // for topological processing.
     struct SgWork {
         sg_id: SubGridId,
         target: f32,
@@ -4580,16 +4827,17 @@ fn apply_mechanical_transforms(
         });
     }
 
-    // Topological sort: process ROOT children first, then deeper levels.
-    // Simple multi-pass approach (supports arbitrary depth, max 8 iterations).
-    let mut processed = std::collections::HashSet::new();
+    // Phase 1: Compute all world isometries in a local map (no Rapier dependency).
+    // Topological order: multi-pass, parents before children.
+    let mut world_isometries: std::collections::HashMap<SubGridId, rapier3d::math::Isometry<f32>> =
+        std::collections::HashMap::new();
+
     for _depth in 0..8 {
         let mut any_progress = false;
         for w in &work {
-            if processed.contains(&w.sg_id) { continue; }
-            // Can only process if parent is ROOT or already processed.
-            if w.parent_grid != SubGridId::ROOT && !processed.contains(&w.parent_grid) {
-                continue;
+            if world_isometries.contains_key(&w.sg_id) { continue; }
+            if w.parent_grid != SubGridId::ROOT && !world_isometries.contains_key(&w.parent_grid) {
+                continue; // parent not computed yet
             }
 
             let axis_offset = block::sub_block::face_to_offset(w.mount_face);
@@ -4597,15 +4845,15 @@ fn apply_mechanical_transforms(
                 axis_offset.x as f32, axis_offset.y as f32, axis_offset.z as f32,
             );
 
-            // Anchor in root-space (before any parent transform).
+            // Anchor in root-space.
             let anchor_root = rapier3d::math::Vector::new(
                 w.mount_pos.x as f32 + 0.5 + axis_f.x * 0.5,
                 w.mount_pos.y as f32 + 0.5 + axis_f.y * 0.5,
                 w.mount_pos.z as f32 + 0.5 + axis_f.z * 0.5,
             );
 
-            // Own local rotation/translation from target.
-            let (own_rot, own_translation) = match w.joint_type {
+            // Own local rotation + position from target angle.
+            let (own_rot, own_pos) = match w.joint_type {
                 block::JointType::Revolute => {
                     let unit_axis = rapier3d::math::UnitVector::new_normalize(axis_f);
                     let rot = rapier3d::math::Rotation::new(*unit_axis * w.target.to_radians());
@@ -4617,53 +4865,74 @@ fn apply_mechanical_transforms(
                 }
             };
 
-            if w.parent_grid == SubGridId::ROOT {
-                // Root-level: apply directly.
-                if let Some(body) = rapier.rigid_body_set.get_mut(w.body_handle) {
-                    body.set_next_kinematic_position(rapier3d::math::Isometry::from_parts(
-                        own_translation.into(),
-                        own_rot,
-                    ));
-                }
+            let world_iso = if w.parent_grid == SubGridId::ROOT {
+                // Root-level: own transform is the world transform.
+                rapier3d::math::Isometry::from_parts(own_pos.into(), own_rot)
             } else {
-                // Nested: compose with parent's world transform.
-                // Read parent body's current world transform (already set this tick).
-                let parent_sg = sub_grids.grids.get(&w.parent_grid);
-                if let Some(parent_sg) = parent_sg {
-                    if let Some(parent_body) = rapier.rigid_body_set.get(parent_sg.body_handle) {
-                        let parent_pos = *parent_body.translation();
-                        let parent_rot = *parent_body.rotation();
+                // Nested: compose with parent's already-computed world transform.
+                let parent_iso = world_isometries[&w.parent_grid];
+                let parent_anchor_offset = block::sub_block::face_to_offset(
+                    sub_grids.grids[&w.parent_grid].mount_face,
+                );
+                let parent_anchor = rapier3d::math::Vector::new(
+                    sub_grids.grids[&w.parent_grid].mount_pos.x as f32 + 0.5 + parent_anchor_offset.x as f32 * 0.5,
+                    sub_grids.grids[&w.parent_grid].mount_pos.y as f32 + 0.5 + parent_anchor_offset.y as f32 * 0.5,
+                    sub_grids.grids[&w.parent_grid].mount_pos.z as f32 + 0.5 + parent_anchor_offset.z as f32 * 0.5,
+                );
 
-                        // Parent's anchor in root space (the pivot it rotates around).
-                        let parent_axis_offset = block::sub_block::face_to_offset(parent_sg.mount_face);
-                        let parent_anchor = rapier3d::math::Vector::new(
-                            parent_sg.mount_pos.x as f32 + 0.5 + parent_axis_offset.x as f32 * 0.5,
-                            parent_sg.mount_pos.y as f32 + 0.5 + parent_axis_offset.y as f32 * 0.5,
-                            parent_sg.mount_pos.z as f32 + 0.5 + parent_axis_offset.z as f32 * 0.5,
-                        );
+                // Transform child anchor through parent: rotate (anchor - parent_anchor)
+                // by parent rotation, then add parent world position.
+                let child_relative = anchor_root - parent_anchor;
+                let child_world_pos = parent_iso.translation.vector + parent_iso.rotation * child_relative;
+                let child_world_rot = parent_iso.rotation * own_rot;
 
-                        // Transform child anchor through parent's rotation around parent's anchor.
-                        let child_relative = anchor_root - parent_anchor;
-                        let child_world_pos = parent_pos + parent_rot * child_relative;
+                rapier3d::math::Isometry::from_parts(child_world_pos.into(), child_world_rot)
+            };
 
-                        // Compose rotations: parent * own.
-                        let child_world_rot = parent_rot * own_rot;
-
-                        if let Some(body) = rapier.rigid_body_set.get_mut(w.body_handle) {
-                            body.set_next_kinematic_position(rapier3d::math::Isometry::from_parts(
-                                child_world_pos.into(),
-                                child_world_rot,
-                            ));
-                        }
-                    }
-                }
-            }
-
-            processed.insert(w.sg_id);
+            world_isometries.insert(w.sg_id, world_iso);
             any_progress = true;
         }
         if !any_progress { break; }
     }
+
+    // Phase 2: Write all computed isometries to Rapier kinematic bodies in one pass.
+    for w in &work {
+        if let Some(&iso) = world_isometries.get(&w.sg_id) {
+            if let Some(body) = rapier.rigid_body_set.get_mut(w.body_handle) {
+                body.set_next_kinematic_position(iso);
+            }
+        }
+    }
+
+    // Phase 3: Update mechanism arm colliders (piston rods resize, rotor axles stay fixed).
+    for w in &work {
+        let Some(sg) = sub_grids.grids.get(&w.sg_id) else { continue };
+        let Some(arm_handle) = sg.arm_collider else { continue };
+        let Some(collider) = rapier.collider_set.get_mut(arm_handle) else { continue };
+
+        if w.joint_type == block::JointType::Prismatic {
+            // Piston arm: resize to current extension.
+            let arm_radius = 0.08_f32;
+            let half_len = (w.target / 2.0).max(0.001);
+            collider.set_shape(rapier3d::geometry::SharedShape::cuboid(arm_radius, arm_radius, half_len));
+            let axis_offset = block::sub_block::face_to_offset(w.mount_face);
+            let axis_f = rapier3d::math::Vector::new(
+                axis_offset.x as f32, axis_offset.y as f32, axis_offset.z as f32,
+            );
+            // Arm starts at the face surface (block center + 0.5 along normal).
+            let mount_face_surface = rapier3d::math::Vector::new(
+                w.mount_pos.x as f32 + 0.5 + axis_f.x * 0.5,
+                w.mount_pos.y as f32 + 0.5 + axis_f.y * 0.5,
+                w.mount_pos.z as f32 + 0.5 + axis_f.z * 0.5,
+            );
+            let arm_center = mount_face_surface + axis_f * half_len;
+            collider.set_translation(arm_center);
+        }
+        // Revolute (rotor axle): fixed size, no update needed.
+    }
+
+    // Store computed isometries for use by other systems (raycast, broadcast).
+    world_isos.0 = world_isometries;
 }
 
 /// Phase 4: Clear dirty flags after all processing.
@@ -4981,6 +5250,7 @@ fn build_ship_interior(
     app.insert_resource(GravitySources(vec![GravitySource::default_floor_plates()]));
     app.insert_resource(RootBodyHandle(root_body_handle));
     app.insert_resource(SubGridRegistry::default());
+    app.insert_resource(MechanicalWorldIsometries::default());
     app.insert_resource(MechanicalDirtyGrids::default());
     app.insert_resource(ShipConfig {
         shard_id,

@@ -7267,6 +7267,12 @@ impl<'a> SubGridTransform<'a> {
   pub const VT_ROTATION: ::flatbuffers::VOffsetT = 8;
   pub const VT_PARENT_GRID: ::flatbuffers::VOffsetT = 10;
   pub const VT_ANCHOR: ::flatbuffers::VOffsetT = 12;
+  pub const VT_MOUNT_X: ::flatbuffers::VOffsetT = 14;
+  pub const VT_MOUNT_Y: ::flatbuffers::VOffsetT = 16;
+  pub const VT_MOUNT_Z: ::flatbuffers::VOffsetT = 18;
+  pub const VT_MOUNT_FACE: ::flatbuffers::VOffsetT = 20;
+  pub const VT_JOINT_TYPE: ::flatbuffers::VOffsetT = 22;
+  pub const VT_CURRENT_VALUE: ::flatbuffers::VOffsetT = 24;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -7278,11 +7284,17 @@ impl<'a> SubGridTransform<'a> {
     args: &'args SubGridTransformArgs<'args>
   ) -> ::flatbuffers::WIPOffset<SubGridTransform<'bldr>> {
     let mut builder = SubGridTransformBuilder::new(_fbb);
+    builder.add_current_value(args.current_value);
+    builder.add_mount_z(args.mount_z);
+    builder.add_mount_y(args.mount_y);
+    builder.add_mount_x(args.mount_x);
     if let Some(x) = args.anchor { builder.add_anchor(x); }
     builder.add_parent_grid(args.parent_grid);
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.translation { builder.add_translation(x); }
     builder.add_sub_grid_id(args.sub_grid_id);
+    builder.add_joint_type(args.joint_type);
+    builder.add_mount_face(args.mount_face);
     builder.finish()
   }
 
@@ -7322,6 +7334,48 @@ impl<'a> SubGridTransform<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Vec3f>(SubGridTransform::VT_ANCHOR, None)}
   }
+  #[inline]
+  pub fn mount_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubGridTransform::VT_MOUNT_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn mount_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubGridTransform::VT_MOUNT_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn mount_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(SubGridTransform::VT_MOUNT_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn mount_face(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubGridTransform::VT_MOUNT_FACE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn joint_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SubGridTransform::VT_JOINT_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn current_value(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(SubGridTransform::VT_CURRENT_VALUE, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for SubGridTransform<'_> {
@@ -7335,6 +7389,12 @@ impl ::flatbuffers::Verifiable for SubGridTransform<'_> {
      .visit_field::<Quatf>("rotation", Self::VT_ROTATION, false)?
      .visit_field::<u32>("parent_grid", Self::VT_PARENT_GRID, false)?
      .visit_field::<Vec3f>("anchor", Self::VT_ANCHOR, false)?
+     .visit_field::<i32>("mount_x", Self::VT_MOUNT_X, false)?
+     .visit_field::<i32>("mount_y", Self::VT_MOUNT_Y, false)?
+     .visit_field::<i32>("mount_z", Self::VT_MOUNT_Z, false)?
+     .visit_field::<u8>("mount_face", Self::VT_MOUNT_FACE, false)?
+     .visit_field::<u8>("joint_type", Self::VT_JOINT_TYPE, false)?
+     .visit_field::<f32>("current_value", Self::VT_CURRENT_VALUE, false)?
      .finish();
     Ok(())
   }
@@ -7345,6 +7405,12 @@ pub struct SubGridTransformArgs<'a> {
     pub rotation: Option<&'a Quatf>,
     pub parent_grid: u32,
     pub anchor: Option<&'a Vec3f>,
+    pub mount_x: i32,
+    pub mount_y: i32,
+    pub mount_z: i32,
+    pub mount_face: u8,
+    pub joint_type: u8,
+    pub current_value: f32,
 }
 impl<'a> Default for SubGridTransformArgs<'a> {
   #[inline]
@@ -7355,6 +7421,12 @@ impl<'a> Default for SubGridTransformArgs<'a> {
       rotation: None,
       parent_grid: 0,
       anchor: None,
+      mount_x: 0,
+      mount_y: 0,
+      mount_z: 0,
+      mount_face: 0,
+      joint_type: 0,
+      current_value: 0.0,
     }
   }
 }
@@ -7385,6 +7457,30 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SubGridTransformBuilder<'a, '
     self.fbb_.push_slot_always::<&Vec3f>(SubGridTransform::VT_ANCHOR, anchor);
   }
   #[inline]
+  pub fn add_mount_x(&mut self, mount_x: i32) {
+    self.fbb_.push_slot::<i32>(SubGridTransform::VT_MOUNT_X, mount_x, 0);
+  }
+  #[inline]
+  pub fn add_mount_y(&mut self, mount_y: i32) {
+    self.fbb_.push_slot::<i32>(SubGridTransform::VT_MOUNT_Y, mount_y, 0);
+  }
+  #[inline]
+  pub fn add_mount_z(&mut self, mount_z: i32) {
+    self.fbb_.push_slot::<i32>(SubGridTransform::VT_MOUNT_Z, mount_z, 0);
+  }
+  #[inline]
+  pub fn add_mount_face(&mut self, mount_face: u8) {
+    self.fbb_.push_slot::<u8>(SubGridTransform::VT_MOUNT_FACE, mount_face, 0);
+  }
+  #[inline]
+  pub fn add_joint_type(&mut self, joint_type: u8) {
+    self.fbb_.push_slot::<u8>(SubGridTransform::VT_JOINT_TYPE, joint_type, 0);
+  }
+  #[inline]
+  pub fn add_current_value(&mut self, current_value: f32) {
+    self.fbb_.push_slot::<f32>(SubGridTransform::VT_CURRENT_VALUE, current_value, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SubGridTransformBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SubGridTransformBuilder {
@@ -7407,6 +7503,12 @@ impl ::core::fmt::Debug for SubGridTransform<'_> {
       ds.field("rotation", &self.rotation());
       ds.field("parent_grid", &self.parent_grid());
       ds.field("anchor", &self.anchor());
+      ds.field("mount_x", &self.mount_x());
+      ds.field("mount_y", &self.mount_y());
+      ds.field("mount_z", &self.mount_z());
+      ds.field("mount_face", &self.mount_face());
+      ds.field("joint_type", &self.joint_type());
+      ds.field("current_value", &self.current_value());
       ds.finish()
   }
 }
@@ -10520,9 +10622,10 @@ impl<'a> FlightComputerConfigFB<'a> {
   pub const VT_PITCH_DOWN_CHANNEL: ::flatbuffers::VOffsetT = 10;
   pub const VT_ROLL_CW_CHANNEL: ::flatbuffers::VOffsetT = 12;
   pub const VT_ROLL_CCW_CHANNEL: ::flatbuffers::VOffsetT = 14;
-  pub const VT_DAMPING_GAIN: ::flatbuffers::VOffsetT = 16;
-  pub const VT_DEAD_ZONE: ::flatbuffers::VOffsetT = 18;
-  pub const VT_MAX_CORRECTION: ::flatbuffers::VOffsetT = 20;
+  pub const VT_TOGGLE_CHANNEL: ::flatbuffers::VOffsetT = 16;
+  pub const VT_DAMPING_GAIN: ::flatbuffers::VOffsetT = 18;
+  pub const VT_DEAD_ZONE: ::flatbuffers::VOffsetT = 20;
+  pub const VT_MAX_CORRECTION: ::flatbuffers::VOffsetT = 22;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -10537,6 +10640,7 @@ impl<'a> FlightComputerConfigFB<'a> {
     builder.add_max_correction(args.max_correction);
     builder.add_dead_zone(args.dead_zone);
     builder.add_damping_gain(args.damping_gain);
+    if let Some(x) = args.toggle_channel { builder.add_toggle_channel(x); }
     if let Some(x) = args.roll_ccw_channel { builder.add_roll_ccw_channel(x); }
     if let Some(x) = args.roll_cw_channel { builder.add_roll_cw_channel(x); }
     if let Some(x) = args.pitch_down_channel { builder.add_pitch_down_channel(x); }
@@ -10590,6 +10694,13 @@ impl<'a> FlightComputerConfigFB<'a> {
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_ROLL_CCW_CHANNEL, None)}
   }
   #[inline]
+  pub fn toggle_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(FlightComputerConfigFB::VT_TOGGLE_CHANNEL, None)}
+  }
+  #[inline]
   pub fn damping_gain(&self) -> f32 {
     // Safety:
     // Created from valid Table for this object
@@ -10624,6 +10735,7 @@ impl ::flatbuffers::Verifiable for FlightComputerConfigFB<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("pitch_down_channel", Self::VT_PITCH_DOWN_CHANNEL, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_cw_channel", Self::VT_ROLL_CW_CHANNEL, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("roll_ccw_channel", Self::VT_ROLL_CCW_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("toggle_channel", Self::VT_TOGGLE_CHANNEL, false)?
      .visit_field::<f32>("damping_gain", Self::VT_DAMPING_GAIN, false)?
      .visit_field::<f32>("dead_zone", Self::VT_DEAD_ZONE, false)?
      .visit_field::<f32>("max_correction", Self::VT_MAX_CORRECTION, false)?
@@ -10638,6 +10750,7 @@ pub struct FlightComputerConfigFBArgs<'a> {
     pub pitch_down_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub roll_cw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub roll_ccw_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub toggle_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub damping_gain: f32,
     pub dead_zone: f32,
     pub max_correction: f32,
@@ -10652,6 +10765,7 @@ impl<'a> Default for FlightComputerConfigFBArgs<'a> {
       pitch_down_channel: None,
       roll_cw_channel: None,
       roll_ccw_channel: None,
+      toggle_channel: None,
       damping_gain: 0.6,
       dead_zone: 0.005,
       max_correction: 0.3,
@@ -10689,6 +10803,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FlightComputerConfigFBBuilder
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_ROLL_CCW_CHANNEL, roll_ccw_channel);
   }
   #[inline]
+  pub fn add_toggle_channel(&mut self, toggle_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(FlightComputerConfigFB::VT_TOGGLE_CHANNEL, toggle_channel);
+  }
+  #[inline]
   pub fn add_damping_gain(&mut self, damping_gain: f32) {
     self.fbb_.push_slot::<f32>(FlightComputerConfigFB::VT_DAMPING_GAIN, damping_gain, 0.6);
   }
@@ -10724,6 +10842,7 @@ impl ::core::fmt::Debug for FlightComputerConfigFB<'_> {
       ds.field("pitch_down_channel", &self.pitch_down_channel());
       ds.field("roll_cw_channel", &self.roll_cw_channel());
       ds.field("roll_ccw_channel", &self.roll_ccw_channel());
+      ds.field("toggle_channel", &self.toggle_channel());
       ds.field("damping_gain", &self.damping_gain());
       ds.field("dead_zone", &self.dead_zone());
       ds.field("max_correction", &self.max_correction());
@@ -11261,8 +11380,9 @@ impl<'a> ::flatbuffers::Follow<'a> for WarpComputerConfigFB<'a> {
 }
 
 impl<'a> WarpComputerConfigFB<'a> {
-  pub const VT_TARGET_CHANNEL: ::flatbuffers::VOffsetT = 4;
-  pub const VT_CONFIRM_CHANNEL: ::flatbuffers::VOffsetT = 6;
+  pub const VT_CYCLE_CHANNEL: ::flatbuffers::VOffsetT = 4;
+  pub const VT_ACCEPT_CHANNEL: ::flatbuffers::VOffsetT = 6;
+  pub const VT_CANCEL_CHANNEL: ::flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -11274,25 +11394,33 @@ impl<'a> WarpComputerConfigFB<'a> {
     args: &'args WarpComputerConfigFBArgs<'args>
   ) -> ::flatbuffers::WIPOffset<WarpComputerConfigFB<'bldr>> {
     let mut builder = WarpComputerConfigFBBuilder::new(_fbb);
-    if let Some(x) = args.confirm_channel { builder.add_confirm_channel(x); }
-    if let Some(x) = args.target_channel { builder.add_target_channel(x); }
+    if let Some(x) = args.cancel_channel { builder.add_cancel_channel(x); }
+    if let Some(x) = args.accept_channel { builder.add_accept_channel(x); }
+    if let Some(x) = args.cycle_channel { builder.add_cycle_channel(x); }
     builder.finish()
   }
 
 
   #[inline]
-  pub fn target_channel(&self) -> Option<&'a str> {
+  pub fn cycle_channel(&self) -> Option<&'a str> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(WarpComputerConfigFB::VT_TARGET_CHANNEL, None)}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(WarpComputerConfigFB::VT_CYCLE_CHANNEL, None)}
   }
   #[inline]
-  pub fn confirm_channel(&self) -> Option<&'a str> {
+  pub fn accept_channel(&self) -> Option<&'a str> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(WarpComputerConfigFB::VT_CONFIRM_CHANNEL, None)}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(WarpComputerConfigFB::VT_ACCEPT_CHANNEL, None)}
+  }
+  #[inline]
+  pub fn cancel_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(WarpComputerConfigFB::VT_CANCEL_CHANNEL, None)}
   }
 }
 
@@ -11302,22 +11430,25 @@ impl ::flatbuffers::Verifiable for WarpComputerConfigFB<'_> {
     v: &mut ::flatbuffers::Verifier, pos: usize
   ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
     v.visit_table(pos)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_channel", Self::VT_TARGET_CHANNEL, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("confirm_channel", Self::VT_CONFIRM_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("cycle_channel", Self::VT_CYCLE_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("accept_channel", Self::VT_ACCEPT_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("cancel_channel", Self::VT_CANCEL_CHANNEL, false)?
      .finish();
     Ok(())
   }
 }
 pub struct WarpComputerConfigFBArgs<'a> {
-    pub target_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
-    pub confirm_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub cycle_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub accept_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub cancel_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for WarpComputerConfigFBArgs<'a> {
   #[inline]
   fn default() -> Self {
     WarpComputerConfigFBArgs {
-      target_channel: None,
-      confirm_channel: None,
+      cycle_channel: None,
+      accept_channel: None,
+      cancel_channel: None,
     }
   }
 }
@@ -11328,12 +11459,16 @@ pub struct WarpComputerConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator +
 }
 impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WarpComputerConfigFBBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_target_channel(&mut self, target_channel: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WarpComputerConfigFB::VT_TARGET_CHANNEL, target_channel);
+  pub fn add_cycle_channel(&mut self, cycle_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WarpComputerConfigFB::VT_CYCLE_CHANNEL, cycle_channel);
   }
   #[inline]
-  pub fn add_confirm_channel(&mut self, confirm_channel: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WarpComputerConfigFB::VT_CONFIRM_CHANNEL, confirm_channel);
+  pub fn add_accept_channel(&mut self, accept_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WarpComputerConfigFB::VT_ACCEPT_CHANNEL, accept_channel);
+  }
+  #[inline]
+  pub fn add_cancel_channel(&mut self, cancel_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WarpComputerConfigFB::VT_CANCEL_CHANNEL, cancel_channel);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WarpComputerConfigFBBuilder<'a, 'b, A> {
@@ -11353,8 +11488,9 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WarpComputerConfigFBBuilder<'
 impl ::core::fmt::Debug for WarpComputerConfigFB<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("WarpComputerConfigFB");
-      ds.field("target_channel", &self.target_channel());
-      ds.field("confirm_channel", &self.confirm_channel());
+      ds.field("cycle_channel", &self.cycle_channel());
+      ds.field("accept_channel", &self.accept_channel());
+      ds.field("cancel_channel", &self.cancel_channel());
       ds.finish()
   }
 }

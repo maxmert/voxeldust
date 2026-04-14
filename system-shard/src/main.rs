@@ -3449,7 +3449,9 @@ fn broadcast_udp(
         autopilot: None,
         sub_grids: vec![],
     });
-    let _ = bridge.broadcast_tx.try_send(ws);
+    if bridge.broadcast_tx.try_send(ws).is_err() {
+        tracing::warn!("WorldState broadcast dropped — channel full");
+    }
 }
 
 // ---------------------------------------------------------------------------

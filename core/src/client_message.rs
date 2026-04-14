@@ -219,10 +219,12 @@ fn encode_flight_computer_config<'a>(
     let pd = builder.create_string(&cfg.pitch_down_channel);
     let rc = builder.create_string(&cfg.roll_cw_channel);
     let rcc = builder.create_string(&cfg.roll_ccw_channel);
+    let tc = builder.create_string(&cfg.toggle_channel);
     fb::FlightComputerConfigFB::create(builder, &fb::FlightComputerConfigFBArgs {
         yaw_cw_channel: Some(yc), yaw_ccw_channel: Some(ycc),
         pitch_up_channel: Some(pu), pitch_down_channel: Some(pd),
         roll_cw_channel: Some(rc), roll_ccw_channel: Some(rcc),
+        toggle_channel: Some(tc),
         damping_gain: cfg.damping_gain, dead_zone: cfg.dead_zone, max_correction: cfg.max_correction,
     })
 }
@@ -235,6 +237,7 @@ fn decode_flight_computer_config(fb: &fb::FlightComputerConfigFB<'_>) -> crate::
         pitch_down_channel: fb.pitch_down_channel().unwrap_or("").into(),
         roll_cw_channel: fb.roll_cw_channel().unwrap_or("").into(),
         roll_ccw_channel: fb.roll_ccw_channel().unwrap_or("").into(),
+        toggle_channel: fb.toggle_channel().unwrap_or("").into(),
         damping_gain: fb.damping_gain(), dead_zone: fb.dead_zone(), max_correction: fb.max_correction(),
     }
 }
@@ -322,17 +325,19 @@ fn encode_warp_computer_config<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     cfg: &crate::signal::config::WarpComputerConfig,
 ) -> flatbuffers::WIPOffset<fb::WarpComputerConfigFB<'a>> {
-    let tc = builder.create_string(&cfg.target_channel);
-    let cc = builder.create_string(&cfg.confirm_channel);
+    let cyc = builder.create_string(&cfg.cycle_channel);
+    let acc = builder.create_string(&cfg.accept_channel);
+    let can = builder.create_string(&cfg.cancel_channel);
     fb::WarpComputerConfigFB::create(builder, &fb::WarpComputerConfigFBArgs {
-        target_channel: Some(tc), confirm_channel: Some(cc),
+        cycle_channel: Some(cyc), accept_channel: Some(acc), cancel_channel: Some(can),
     })
 }
 
 fn decode_warp_computer_config(fb: &fb::WarpComputerConfigFB<'_>) -> crate::signal::config::WarpComputerConfig {
     crate::signal::config::WarpComputerConfig {
-        target_channel: fb.target_channel().unwrap_or("").into(),
-        confirm_channel: fb.confirm_channel().unwrap_or("").into(),
+        cycle_channel: fb.cycle_channel().unwrap_or("").into(),
+        accept_channel: fb.accept_channel().unwrap_or("").into(),
+        cancel_channel: fb.cancel_channel().unwrap_or("").into(),
     }
 }
 
@@ -609,6 +614,14 @@ pub struct SubGridTransformData {
     pub parent_grid: u32,
     /// Original root-space anchor position (mount_pos + face offset). Never changes.
     pub anchor: glam::Vec3,
+    /// Mount block position (for mechanism arm rendering + collision).
+    pub mount_pos: glam::IVec3,
+    /// Face direction 0-5 (determines arm axis).
+    pub mount_face: u8,
+    /// Joint type: 0 = revolute (rotor), 1 = prismatic (piston).
+    pub joint_type: u8,
+    /// Current angle (degrees, revolute) or extension (meters, prismatic).
+    pub current_value: f32,
 }
 
 /// Block-to-sub-grid assignment update (sent via TCP on join + on change).
@@ -1131,6 +1144,12 @@ impl ServerMsg {
                         rotation: Some(&r),
                         parent_grid: sg.parent_grid,
                         anchor: Some(&a),
+                        mount_x: sg.mount_pos.x,
+                        mount_y: sg.mount_pos.y,
+                        mount_z: sg.mount_pos.z,
+                        mount_face: sg.mount_face,
+                        joint_type: sg.joint_type,
+                        current_value: sg.current_value,
                     })
                 }).collect();
                 let sub_grids_vec = if sg_fbs.is_empty() { None } else { Some(builder.create_vector(&sg_fbs)) };
@@ -1518,6 +1537,10 @@ impl ServerMsg {
                         rotation: r,
                         parent_grid: sg.parent_grid(),
                         anchor: a,
+                        mount_pos: glam::IVec3::new(sg.mount_x(), sg.mount_y(), sg.mount_z()),
+                        mount_face: sg.mount_face(),
+                        joint_type: sg.joint_type(),
+                        current_value: sg.current_value(),
                     }
                 }).collect()).unwrap_or_default();
 
@@ -1876,6 +1899,10 @@ mod tests {
                 rotation: glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
                 parent_grid: 0,
                 anchor: glam::Vec3::new(2.5, 0.5, -3.5),
+                mount_pos: glam::IVec3::new(2, 0, -4),
+                mount_face: 2,
+                joint_type: 0,
+                current_value: 45.0,
             }],
         });
         let bytes = msg.serialize();
