@@ -383,6 +383,8 @@ struct MechanicalState {
     prev_error: f32,
     /// Direct velocity override from Throttle signal (deg/s). 0 = use position control.
     velocity_override: f32,
+    /// Locked state: Active=false signal locks mechanism at current position.
+    locked: bool,
 }
 
 /// Data for a single sub-grid (kinematic child rigid body).
@@ -423,6 +425,17 @@ impl Default for SubGridRegistry {
 struct MechanicalWorldIsometries(
     std::collections::HashMap<voxeldust_core::ecs::components::SubGridId, rapier3d::math::Isometry<f32>>,
 );
+
+/// Tracks which sub-grid the player is currently standing on.
+/// Used to apply platform motion delta to the player each tick.
+#[derive(Resource, Default)]
+struct PlayerPlatform {
+    /// Sub-grid the player is currently riding (standing on).
+    riding: Option<voxeldust_core::ecs::components::SubGridId>,
+    /// World isometry of the sub-grid at the END of last tick.
+    /// Used to compute the delta for this tick.
+    prev_iso: Option<rapier3d::math::Isometry<f32>>,
+}
 
 /// Handle for the root (parent ship body) Fixed rigid body.
 /// All non-sub-grid chunk colliders are parented to this body.
@@ -619,6 +632,7 @@ struct SignalQueryCtx<'w, 's> {
     ap_query: Query<'w, 's, &'static AutopilotBlockState>,
     wc_query: Query<'w, 's, &'static WarpComputerState>,
     ec_query: Query<'w, 's, &'static EngineControllerState>,
+    mech_query: Query<'w, 's, &'static MechanicalState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,6 +1336,76 @@ fn pilot_send(
 // ---------------------------------------------------------------------------
 // Physics
 // ---------------------------------------------------------------------------
+
+/// Detect which sub-grid the player is standing on and apply its motion delta.
+/// Runs BEFORE physics_step so the player moves with the platform before gravity/collision.
+fn update_player_platform(
+    mut rapier: ResMut<RapierContext>,
+    body_handle: Res<PlayerBodyHandle>,
+    sub_grids: Res<SubGridRegistry>,
+    world_isos: Res<MechanicalWorldIsometries>,
+    mut platform: ResMut<PlayerPlatform>,
+) {
+    use voxeldust_core::ecs::components::SubGridId;
+
+    let player_pos = match rapier.rigid_body_set.get(body_handle.0) {
+        Some(body) => *body.translation(),
+        None => return,
+    };
+
+    // Downward raycast from player feet to detect which collider is below.
+    let ray_origin = rapier3d::math::Point::new(player_pos.x, player_pos.y - 0.1, player_pos.z);
+    let ray_dir = rapier3d::math::Vector::new(0.0, -1.0, 0.0);
+    let max_dist = 0.5; // half a block below feet
+
+    // Update query pipeline and perform raycast.
+    let ctx = &mut *rapier;
+    ctx.query_pipeline.update(&ctx.collider_set);
+    let hit = ctx.query_pipeline.cast_ray(
+        &ctx.rigid_body_set,
+        &ctx.collider_set,
+        &rapier3d::geometry::Ray::new(ray_origin, ray_dir),
+        max_dist,
+        true,
+        rapier3d::pipeline::QueryFilter::default().exclude_rigid_body(body_handle.0),
+    );
+
+    // Determine which sub-grid (if any) the hit collider belongs to.
+    let mut riding_sg: Option<SubGridId> = None;
+    if let Some((collider_handle, _dist)) = hit {
+        if let Some(collider) = ctx.collider_set.get(collider_handle) {
+            if let Some(parent_body) = collider.parent() {
+                for (sg_id, sg_data) in &sub_grids.grids {
+                    if sg_data.body_handle == parent_body {
+                        riding_sg = Some(*sg_id);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply platform delta if riding a sub-grid.
+    if let Some(sg_id) = riding_sg {
+        if let Some(&current_iso) = world_isos.0.get(&sg_id) {
+            if platform.riding == Some(sg_id) {
+                if let Some(prev_iso) = platform.prev_iso {
+                    let delta = current_iso * prev_iso.inverse();
+                    if let Some(body) = ctx.rigid_body_set.get_mut(body_handle.0) {
+                        let player_t = *body.translation();
+                        let new_pos = delta * rapier3d::math::Point::new(player_t.x, player_t.y, player_t.z);
+                        body.set_translation(rapier3d::math::Vector::new(new_pos.x, new_pos.y, new_pos.z), true);
+                    }
+                }
+            }
+            platform.prev_iso = Some(current_iso);
+        }
+        platform.riding = Some(sg_id);
+    } else {
+        platform.riding = None;
+        platform.prev_iso = None;
+    }
+}
 
 fn physics_step(
     mut rapier: ResMut<RapierContext>,
@@ -2105,6 +2189,7 @@ fn apply_config_updates(
     registry: Res<BlockRegistryResource>,
     grid: Res<ShipGridResource>,
     persistence: Option<Res<ShipPersistence>>,
+    mut mech_state_query: Query<&mut MechanicalState>,
 ) {
     use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
     use voxeldust_core::signal::config::*;
@@ -2254,6 +2339,20 @@ fn apply_config_updates(
                 },
             };
             save_single_block_config(&persist.db, update.block_pos, &record);
+        }
+
+        // Apply mechanical config (speed override).
+        if let Some(ref mc) = update.mechanical {
+            if let Ok(mut ms) = mech_state_query.get_mut(entity) {
+                if let Some(speed) = mc.speed_override {
+                    // Cap by registry max_speed for the block type.
+                    let max = block_ref_query.get(entity).ok()
+                        .and_then(|fb| registry.0.mechanical_props(fb.block_id))
+                        .map(|mp| mp.max_speed as f32)
+                        .unwrap_or(360.0);
+                    ms.max_speed = speed.clamp(0.1, max);
+                }
+            }
         }
 
         info!(block = ?update.block_pos, "applied signal config update from client");
@@ -2700,7 +2799,7 @@ fn produce_player_edits(
                             &registry.0,
                             &signal_ctx.fc_query, &signal_ctx.hm_query,
                             &signal_ctx.ap_query, &signal_ctx.wc_query,
-                            &signal_ctx.ec_query,
+                            &signal_ctx.ec_query, &signal_ctx.mech_query,
                         );
                         if let Some(session) = connected.session {
                             let msg = ServerMsg::BlockConfigState(config);
@@ -2740,6 +2839,7 @@ fn build_config_snapshot(
     ap_query: &Query<&AutopilotBlockState>,
     wc_query: &Query<&WarpComputerState>,
     ec_query: &Query<&EngineControllerState>,
+    mech_query: &Query<&MechanicalState>,
 ) -> voxeldust_core::signal::config::BlockSignalConfig {
     use voxeldust_core::signal::config::*;
 
@@ -2907,6 +3007,12 @@ fn build_config_snapshot(
             roll_cw_channel: ec.roll_cw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
             roll_ccw_channel: ec.roll_ccw_channel.map(|id| id_to_name(id)).unwrap_or_default(),
             toggle_channel: ec.toggle_channel.map(|id| id_to_name(id)).unwrap_or_default(),
+        }),
+        mechanical: mech_query.get(entity).ok().map(|ms| {
+            use voxeldust_core::signal::config::MechanicalConfig;
+            MechanicalConfig {
+                speed_override: Some(ms.max_speed),
+            }
         }),
     }
 }
@@ -3502,6 +3608,7 @@ fn process_mechanical_edits(
                 stuck_ticks: 0,
                 prev_error: 0.0,
                 velocity_override: 0.0,
+                locked: false,
             },
             SignalSubscriber::default(),
             SignalPublisher { bindings: Vec::new() },
@@ -4688,6 +4795,10 @@ fn signal_subscribe(
                         SignalProperty::Speed => {
                             ms.max_speed = ch.value.as_f32();
                         }
+                        SignalProperty::Active => {
+                            // Active=false locks the mechanism at its current position.
+                            ms.locked = !ch.value.as_bool();
+                        }
                         _ => {}
                     }
                 }
@@ -4815,10 +4926,13 @@ fn apply_mechanical_transforms(
             Some(sg) => sg,
             None => continue,
         };
-        state.current = state.target;
+        // When locked, hold current position (don't update target → current).
+        if !state.locked {
+            state.current = state.target;
+        }
         work.push(SgWork {
             sg_id: state.child_grid_id,
-            target: state.target,
+            target: state.current, // Use current (which equals target unless locked)
             joint_type: state.joint_type,
             mount_pos: sg.mount_pos,
             mount_face: sg.mount_face,
@@ -5252,6 +5366,7 @@ fn build_ship_interior(
     app.insert_resource(SubGridRegistry::default());
     app.insert_resource(MechanicalWorldIsometries::default());
     app.insert_resource(MechanicalDirtyGrids::default());
+    app.insert_resource(PlayerPlatform::default());
     app.insert_resource(ShipConfig {
         shard_id,
         ship_id,
@@ -5398,7 +5513,7 @@ fn build_ship_interior(
     // Physics.
     app.add_systems(
         Update,
-        (tick_counter, physics_step).chain().in_set(ShipSet::Physics),
+        (tick_counter, update_player_platform, physics_step).chain().in_set(ShipSet::Physics),
     );
 
     // Interaction: hull exit detection (seat interaction moved to BlockEdit via raycast).

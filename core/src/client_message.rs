@@ -993,6 +993,7 @@ impl ClientMsg {
                     autopilot: bcu.autopilot_config().map(|c| decode_autopilot_config(&c)),
                     warp_computer: bcu.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
                     engine_controller: bcu.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
+                    mechanical: None, // TODO: decode from FlatBuffers when schema is extended
                 }))
             }
             fb::ClientPayload::SubBlockEditRequest => {
@@ -1731,6 +1732,7 @@ impl ServerMsg {
                     autopilot: bcs.autopilot_config().map(|c| decode_autopilot_config(&c)),
                     warp_computer: bcs.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
                     engine_controller: bcs.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
+                    mechanical: None, // TODO: decode from FlatBuffers when schema is extended
                 }))
             }
             fb::ServerPayload::SeatBindingsNotify => {

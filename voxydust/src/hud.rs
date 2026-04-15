@@ -1326,6 +1326,36 @@ fn draw_block_config_panel(
                     });
             }
 
+            // ----- MECHANICAL SETTINGS (rotor/piston blocks) -----
+            let is_mechanical = config.kind == voxeldust_core::block::FunctionalBlockKind::Rotor as u8
+                || config.kind == voxeldust_core::block::FunctionalBlockKind::Piston as u8;
+            if is_mechanical {
+                let mech_color = egui::Color32::from_rgb(100, 200, 100); // green
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("MECHANICAL SETTINGS").color(mech_color).strong(),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    let mc = config.mechanical.get_or_insert_with(Default::default);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("SPEED").color(dim_text).small());
+                        let mut speed = mc.speed_override.unwrap_or(30.0);
+                        if ui.add(egui::DragValue::new(&mut speed)
+                            .range(0.1..=360.0)
+                            .speed(0.5)
+                            .fixed_decimals(1)
+                            .suffix(if config.kind == voxeldust_core::block::FunctionalBlockKind::Rotor as u8 {
+                                " deg/s"
+                            } else {
+                                " m/s"
+                            })
+                        ).changed() {
+                            mc.speed_override = Some(speed);
+                        }
+                    });
+                });
+            }
+
             ui.add_space(12.0);
             // Bottom accent line.
             let rect = ui.available_rect_before_wrap();

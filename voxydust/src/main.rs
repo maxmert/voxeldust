@@ -2254,6 +2254,7 @@ impl ClientApp {
                         autopilot: config.autopilot.clone(),
                         warp_computer: config.warp_computer.clone(),
                         engine_controller: config.engine_controller.clone(),
+                        mechanical: config.mechanical.clone(),
                     };
                     let msg = voxeldust_core::client_message::ClientMsg::BlockConfigUpdate(update);
                     let world = self.ecs_app.world();

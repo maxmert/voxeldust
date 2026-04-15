@@ -125,6 +125,14 @@ pub struct EngineControllerConfig {
     pub toggle_channel: String,
 }
 
+/// Mechanical mount configuration (rotor/piston speed override).
+#[derive(Clone, Debug, Default)]
+pub struct MechanicalConfig {
+    /// Speed override (deg/s for revolute, m/s for prismatic).
+    /// None = use registry default. Capped by MechanicalProps.max_speed.
+    pub speed_override: Option<f32>,
+}
+
 // ---------------------------------------------------------------------------
 // Power configuration types
 // ---------------------------------------------------------------------------
@@ -194,6 +202,7 @@ pub struct BlockSignalConfig {
     pub autopilot: Option<AutopilotBlockConfig>,
     pub warp_computer: Option<WarpComputerConfig>,
     pub engine_controller: Option<EngineControllerConfig>,
+    pub mechanical: Option<MechanicalConfig>,
 }
 
 /// Config update sent from client → server after the player edits bindings.
@@ -214,4 +223,5 @@ pub struct BlockConfigUpdateData {
     pub autopilot: Option<AutopilotBlockConfig>,
     pub warp_computer: Option<WarpComputerConfig>,
     pub engine_controller: Option<EngineControllerConfig>,
+    pub mechanical: Option<MechanicalConfig>,
 }
