@@ -30,6 +30,20 @@ pub enum ShardMsg {
     SignalBroadcast(SignalBroadcastData),
     /// Batched signal broadcast — multiple signals in one message.
     SignalBroadcastBatch(SignalBroadcastBatchData),
+    /// Visibility directive from system shard to ship shard.
+    /// Tells a ship which other ships are within visual range.
+    VisibilityDirective(VisibilityDirectiveData),
+    /// Ship collider shapes synced from ship shard to host (planet/system) shard.
+    /// Host shard builds Rapier compound colliders from these for physical collision.
+    ShipColliderSync(ShipColliderSyncData),
+    /// System shard → ship/planet shard: unified AOI entity set for a single observer.
+    /// Replaces VisibilityDirective + ShipNearbyInfo + SystemSceneUpdate.ships
+    /// with a single authoritative stream.
+    SystemEntitiesUpdate(SystemEntitiesUpdateData),
+    /// Planet shard → system shard: aggregate surface-player positions at 1 Hz.
+    /// Feeds the system shard AOI so distant observers (ships, EVA) can see
+    /// players on planets without a direct secondary connection.
+    PlanetPlayerDigest(PlanetPlayerDigestData),
 }
 
 #[derive(Debug, Clone)]
@@ -220,12 +234,92 @@ pub struct SignalBroadcastBatchData {
     pub entries: Vec<SignalBroadcastEntry>,
 }
 
+/// A single visible ship entry in a VisibilityDirective.
+#[derive(Debug, Clone)]
+pub struct VisibleShipEntryData {
+    pub ship_id: u64,
+    pub shard_id: ShardId,
+    pub tcp_addr: String,
+    pub udp_addr: String,
+    pub distance: f64,
+}
+
+/// System shard → ship shard: which other ships are visible.
+/// Sent when the visibility set changes (enter/leave events).
+#[derive(Debug, Clone)]
+pub struct VisibilityDirectiveData {
+    pub ship_id: u64,
+    pub visible_ships: Vec<VisibleShipEntryData>,
+}
+
+/// Collider shapes for one chunk of a ship grid.
+#[derive(Debug, Clone)]
+pub struct ChunkColliderData {
+    pub chunk_key: glam::IVec3,
+    /// Each pair is (center_position, half_extents) in ship-local coordinates.
+    pub shapes: Vec<(glam::Vec3, glam::Vec3)>,
+}
+
+/// Ship hull collider shapes for physical collision on host shards.
+/// Sent from ship shard to planet/system shard when blocks change.
+#[derive(Debug, Clone)]
+pub struct ShipColliderSyncData {
+    pub ship_id: u64,
+    pub chunks: Vec<ChunkColliderData>,
+    /// Tight AABB of all solid blocks (block coords).
+    pub hull_min: glam::Vec3,
+    pub hull_max: glam::Vec3,
+}
+
 /// Block edits affecting chunks on adjacent shard boundaries.
 #[derive(Debug, Clone)]
 pub struct CrossShardBlockEdits {
     pub chunk_address: Vec<u8>,
     pub edits: Vec<u8>,
     pub seq: u64,
+}
+
+/// Target of a SystemEntitiesUpdate — identifies which shard should consume it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AoiTarget {
+    /// Update is for a ship shard hosting this ship id.
+    Ship(u64),
+    /// Update is for the planet shard at this planet index.
+    Planet(u32),
+}
+
+/// Unified AOI payload: system shard → ship/planet shard.
+/// The ship/planet shard merges `entities` into its own WorldState broadcast,
+/// giving every observer a single authoritative view of nearby ships, EVA
+/// players, and surface-player aggregates.
+#[derive(Debug, Clone)]
+pub struct SystemEntitiesUpdateData {
+    pub target: AoiTarget,
+    /// Observer anchor in system coordinates (used for LOD tier computation).
+    pub observer_position: DVec3,
+    pub entities: Vec<crate::client_message::ObservableEntityData>,
+    pub tick: u64,
+}
+
+/// One entry in a PlanetPlayerDigest.
+#[derive(Debug, Clone)]
+pub struct PlanetPlayerDigestEntry {
+    pub session_token: SessionToken,
+    pub player_name: String,
+    /// System-space position (planet shard transforms before sending).
+    pub position: DVec3,
+    pub rotation: DQuat,
+    pub planet_index: u32,
+}
+
+/// Planet shard → system shard: aggregate surface-player positions at 1 Hz.
+#[derive(Debug, Clone)]
+pub struct PlanetPlayerDigestData {
+    pub planet_shard: ShardId,
+    pub planet_seed: u64,
+    pub planet_index: u32,
+    pub entries: Vec<PlanetPlayerDigestEntry>,
+    pub tick: u64,
 }
 
 #[derive(Debug, Error)]
@@ -314,6 +408,7 @@ impl ShardMsg {
                         game_time: h.game_time,
                         warp_target_star_index: h.warp_target_star_index.unwrap_or(0xFFFFFFFF),
                         warp_velocity: warp_vel.as_ref(),
+                        target_system_eva: h.target_system_eva,
                     },
                 );
 
@@ -734,6 +829,146 @@ impl ShardMsg {
                 );
                 builder.finish(msg, None);
             }
+            ShardMsg::VisibilityDirective(data) => {
+                let entries: Vec<_> = data.visible_ships.iter().map(|e| {
+                    let tcp = builder.create_string(&e.tcp_addr);
+                    let udp = builder.create_string(&e.udp_addr);
+                    fb::VisibleShipEntry::create(
+                        &mut builder,
+                        &fb::VisibleShipEntryArgs {
+                            ship_id: e.ship_id,
+                            shard_id: e.shard_id.0,
+                            tcp_addr: Some(tcp),
+                            udp_addr: Some(udp),
+                            distance: e.distance,
+                        },
+                    )
+                }).collect();
+                let entries_vec = builder.create_vector(&entries);
+                let dir = fb::VisibilityDirective::create(
+                    &mut builder,
+                    &fb::VisibilityDirectiveArgs {
+                        ship_id: data.ship_id,
+                        visible_ships: Some(entries_vec),
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::VisibilityDirective,
+                        payload: Some(dir.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::SystemEntitiesUpdate(data) => {
+                let observer = to_fb_vec3d(&data.observer_position);
+                let entities = crate::client_message::encode_observable_entities(
+                    &mut builder,
+                    &data.entities,
+                );
+                let (target_ship_id, target_planet_index) = match data.target {
+                    AoiTarget::Ship(id) => (id, u32::MAX),
+                    AoiTarget::Planet(idx) => (0, idx),
+                };
+                let upd = fb::SystemEntitiesUpdate::create(
+                    &mut builder,
+                    &fb::SystemEntitiesUpdateArgs {
+                        target_ship_id,
+                        target_planet_index,
+                        observer_position: Some(&observer),
+                        entities,
+                        tick: data.tick,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::SystemEntitiesUpdate,
+                        payload: Some(upd.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::PlanetPlayerDigest(data) => {
+                let entries: Vec<_> = data
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        let name = builder.create_string(&e.player_name);
+                        let pos = to_fb_vec3d(&e.position);
+                        let rot = to_fb_quatd(&e.rotation);
+                        fb::PlanetPlayerDigestEntry::create(
+                            &mut builder,
+                            &fb::PlanetPlayerDigestEntryArgs {
+                                session_token: e.session_token.0,
+                                player_name: Some(name),
+                                position: Some(&pos),
+                                rotation: Some(&rot),
+                                planet_index: e.planet_index,
+                            },
+                        )
+                    })
+                    .collect();
+                let entries_vec = builder.create_vector(&entries);
+                let digest = fb::PlanetPlayerDigest::create(
+                    &mut builder,
+                    &fb::PlanetPlayerDigestArgs {
+                        planet_shard_id: data.planet_shard.0,
+                        planet_seed: data.planet_seed,
+                        planet_index: data.planet_index,
+                        entries: Some(entries_vec),
+                        tick: data.tick,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::PlanetPlayerDigest,
+                        payload: Some(digest.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::ShipColliderSync(data) => {
+                let chunks: Vec<_> = data.chunks.iter().map(|chunk| {
+                    let shapes: Vec<fb::ColliderShape> = chunk.shapes.iter().map(|(c, h)| {
+                        fb::ColliderShape::new(c.x, c.y, c.z, h.x, h.y, h.z)
+                    }).collect();
+                    let shapes_vec = builder.create_vector(&shapes);
+                    fb::ChunkColliderDataMsg::create(
+                        &mut builder,
+                        &fb::ChunkColliderDataMsgArgs {
+                            cx: chunk.chunk_key.x,
+                            cy: chunk.chunk_key.y,
+                            cz: chunk.chunk_key.z,
+                            shapes: Some(shapes_vec),
+                        },
+                    )
+                }).collect();
+                let chunks_vec = builder.create_vector(&chunks);
+                let sync = fb::ShipColliderSync::create(
+                    &mut builder,
+                    &fb::ShipColliderSyncArgs {
+                        ship_id: data.ship_id,
+                        chunks: Some(chunks_vec),
+                        hull_min_x: data.hull_min.x,
+                        hull_min_y: data.hull_min.y,
+                        hull_min_z: data.hull_min.z,
+                        hull_max_x: data.hull_max.x,
+                        hull_max_y: data.hull_max.y,
+                        hull_max_z: data.hull_max.z,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::ShipColliderSync,
+                        payload: Some(sync.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -816,6 +1051,7 @@ impl ShardMsg {
                         if idx == 0xFFFFFFFF { None } else { Some(idx) }
                     },
                     warp_velocity_gu: h.warp_velocity().map(|v| from_fb_vec3d(v)),
+                    target_system_eva: h.target_system_eva(),
                 }))
             }
 
@@ -1119,6 +1355,131 @@ impl ShardMsg {
                 }))
             }
 
+            fb::ShardPayload::VisibilityDirective => {
+                let dir = msg
+                    .payload_as_visibility_directive()
+                    .ok_or(MessageError::MissingField("VisibilityDirective payload"))?;
+                let entries: Vec<VisibleShipEntryData> = dir
+                    .visible_ships()
+                    .map(|v| {
+                        v.iter()
+                            .map(|e| VisibleShipEntryData {
+                                ship_id: e.ship_id(),
+                                shard_id: ShardId(e.shard_id()),
+                                tcp_addr: e.tcp_addr().unwrap_or("").to_string(),
+                                udp_addr: e.udp_addr().unwrap_or("").to_string(),
+                                distance: e.distance(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(ShardMsg::VisibilityDirective(VisibilityDirectiveData {
+                    ship_id: dir.ship_id(),
+                    visible_ships: entries,
+                }))
+            }
+
+            fb::ShardPayload::ShipColliderSync => {
+                let sync = msg
+                    .payload_as_ship_collider_sync()
+                    .ok_or(MessageError::MissingField("ShipColliderSync payload"))?;
+                let chunks: Vec<ChunkColliderData> = sync
+                    .chunks()
+                    .map(|v| {
+                        v.iter()
+                            .map(|c| {
+                                let shapes: Vec<(glam::Vec3, glam::Vec3)> = c
+                                    .shapes()
+                                    .map(|s| {
+                                        s.iter()
+                                            .map(|shape| {
+                                                (
+                                                    glam::Vec3::new(shape.cx(), shape.cy(), shape.cz()),
+                                                    glam::Vec3::new(shape.hx(), shape.hy(), shape.hz()),
+                                                )
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                ChunkColliderData {
+                                    chunk_key: glam::IVec3::new(c.cx(), c.cy(), c.cz()),
+                                    shapes,
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(ShardMsg::ShipColliderSync(ShipColliderSyncData {
+                    ship_id: sync.ship_id(),
+                    chunks,
+                    hull_min: glam::Vec3::new(sync.hull_min_x(), sync.hull_min_y(), sync.hull_min_z()),
+                    hull_max: glam::Vec3::new(sync.hull_max_x(), sync.hull_max_y(), sync.hull_max_z()),
+                }))
+            }
+
+            fb::ShardPayload::SystemEntitiesUpdate => {
+                let upd = msg
+                    .payload_as_system_entities_update()
+                    .ok_or(MessageError::MissingField("SystemEntitiesUpdate payload"))?;
+                let observer = upd
+                    .observer_position()
+                    .map(from_fb_vec3d)
+                    .unwrap_or(DVec3::ZERO);
+                let entities =
+                    crate::client_message::decode_observable_entities(upd.entities());
+                let target = if upd.target_ship_id() != 0 {
+                    AoiTarget::Ship(upd.target_ship_id())
+                } else {
+                    AoiTarget::Planet(upd.target_planet_index())
+                };
+                Ok(ShardMsg::SystemEntitiesUpdate(SystemEntitiesUpdateData {
+                    target,
+                    observer_position: observer,
+                    entities,
+                    tick: upd.tick(),
+                }))
+            }
+
+            fb::ShardPayload::PlanetPlayerDigest => {
+                let digest = msg
+                    .payload_as_planet_player_digest()
+                    .ok_or(MessageError::MissingField("PlanetPlayerDigest payload"))?;
+                let entries: Vec<PlanetPlayerDigestEntry> = digest
+                    .entries()
+                    .map(|v| {
+                        v.iter()
+                            .map(|e| {
+                                let pos = e
+                                    .position()
+                                    .map(from_fb_vec3d)
+                                    .unwrap_or(DVec3::ZERO);
+                                let rot = e
+                                    .rotation()
+                                    .map(from_fb_quatd)
+                                    .unwrap_or(DQuat::IDENTITY);
+                                PlanetPlayerDigestEntry {
+                                    session_token: SessionToken(e.session_token()),
+                                    player_name: e
+                                        .player_name()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    position: pos,
+                                    rotation: rot,
+                                    planet_index: e.planet_index(),
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(ShardMsg::PlanetPlayerDigest(PlanetPlayerDigestData {
+                    planet_shard: ShardId(digest.planet_shard_id()),
+                    planet_seed: digest.planet_seed(),
+                    planet_index: digest.planet_index(),
+                    entries,
+                    tick: digest.tick(),
+                }))
+            }
+
             fb::ShardPayload::NONE => {
                 Err(MessageError::UnknownPayload(0))
             }
@@ -1159,6 +1520,7 @@ mod tests {
             game_time: 0.0,
             warp_target_star_index: None,
             warp_velocity_gu: None,
+            target_system_eva: false,
         }
     }
 

@@ -278,6 +278,27 @@ impl VoxelVolume {
         active_sources: &[ChunkSourceId],
     ) -> bool {
         let half = (self.size / 2) as i32;
+        let sz = self.size as i32;
+
+        // Robustness guard: during a seamless shard transition the caller may
+        // briefly pass a saturated i32 coming from a system-space float cast
+        // (`position as i32` saturates at i32::MIN/MAX for |pos| > 2.1e9).
+        // Any subtraction/addition on such an IVec3 would overflow (panic in
+        // debug mode) and crash the client. Bail out cleanly instead — the
+        // saturated-region volume has no meaningful voxels to sample anyway.
+        // Next frame's shard-type + render_position update restores normal path.
+        let max_safe = i32::MAX - sz.max(half);
+        let min_safe = i32::MIN + sz.max(half);
+        if player_block_pos.x >= max_safe
+            || player_block_pos.y >= max_safe
+            || player_block_pos.z >= max_safe
+            || player_block_pos.x <= min_safe
+            || player_block_pos.y <= min_safe
+            || player_block_pos.z <= min_safe
+        {
+            return false;
+        }
+
         let new_origin = player_block_pos - IVec3::splat(half);
 
         // Skip if player hasn't moved (origin unchanged) and no external dirty flag.
@@ -286,7 +307,6 @@ impl VoxelVolume {
         }
 
         self.origin = new_origin;
-        let sz = self.size as i32;
 
         // Clear staging buffer.
         self.staging.fill(0);

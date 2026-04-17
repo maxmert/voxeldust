@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use voxeldust_core::shard_types::{ShardId, ShardInfo, ShardState, ShardType};
+use voxeldust_core::shard_types::{SessionToken, ShardId, ShardInfo, ShardState, ShardType};
 
 use voxeldust_core::client_message::{BlockEditData, PlayerInputData, ServerMsg};
 use voxeldust_core::shard_message::ShardMsg;
@@ -42,12 +42,12 @@ pub struct NetworkBridge {
     pub connect_rx: mpsc::UnboundedReceiver<ClientConnectEvent>,
     /// Incoming player input from UDP.
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
-    /// Incoming block edit requests from UDP.
-    pub block_edit_rx: mpsc::UnboundedReceiver<BlockEditData>,
-    /// Incoming block config updates from UDP.
-    pub config_update_rx: mpsc::UnboundedReceiver<voxeldust_core::signal::config::BlockConfigUpdateData>,
-    /// Incoming sub-block edit requests from UDP.
-    pub sub_block_edit_rx: mpsc::UnboundedReceiver<voxeldust_core::client_message::SubBlockEditData>,
+    /// Incoming block edit requests with sender session (TCP or UDP).
+    pub block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, BlockEditData)>,
+    /// Incoming block config updates with sender session (TCP or UDP).
+    pub config_update_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
+    /// Incoming sub-block edit requests with sender session (TCP or UDP).
+    pub sub_block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
@@ -115,10 +115,10 @@ pub struct ShardHarness {
     pub client_registry: Arc<RwLock<ClientRegistry>>,
     /// Incoming PlayerInput from UDP clients.
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
-    /// Incoming BlockEditRequest from UDP clients.
-    pub block_edit_rx: mpsc::UnboundedReceiver<BlockEditData>,
-    /// Incoming BlockConfigUpdate from UDP clients.
-    pub config_update_rx: mpsc::UnboundedReceiver<voxeldust_core::signal::config::BlockConfigUpdateData>,
+    /// Incoming BlockEditRequest with sender session (TCP or UDP).
+    pub block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, BlockEditData)>,
+    /// Incoming BlockConfigUpdate with sender session (TCP or UDP).
+    pub config_update_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
     /// Incoming inter-shard messages from QUIC (with source peer address).
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Channel to send WorldState for UDP broadcast (bounded for backpressure).
@@ -130,10 +130,10 @@ pub struct ShardHarness {
     quic_send_rx: Option<mpsc::Receiver<(ShardId, std::net::SocketAddr, ShardMsg)>>,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
-    block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
-    config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
-    sub_block_edit_tx: mpsc::UnboundedSender<voxeldust_core::client_message::SubBlockEditData>,
-    sub_block_edit_rx: mpsc::UnboundedReceiver<voxeldust_core::client_message::SubBlockEditData>,
+    block_edit_tx: mpsc::UnboundedSender<(SessionToken, BlockEditData)>,
+    config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
+    sub_block_edit_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
+    sub_block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
     quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }

@@ -11,12 +11,109 @@ pub mod protocol {
 
 
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
+pub const ENUM_MIN_ENTITY_KIND: i8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 17;
+pub const ENUM_MAX_ENTITY_KIND: i8 = 3;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 18] = [
+pub const ENUM_VALUES_ENTITY_KIND: [EntityKind; 4] = [
+  EntityKind::Ship,
+  EntityKind::EvaPlayer,
+  EntityKind::GroundedPlayer,
+  EntityKind::Seated,
+];
+
+/// Kind of observable entity carried in WorldState.entities and AOI updates.
+/// Ship: a physical ship grid. Identified by entity_id == ship_id.
+/// EvaPlayer: a player floating in space (system shard authoritative).
+/// GroundedPlayer: a player on a planet surface (planet shard authoritative).
+/// Seated: a player seated inside a ship (ship shard authoritative).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct EntityKind(pub i8);
+#[allow(non_upper_case_globals)]
+impl EntityKind {
+  pub const Ship: Self = Self(0);
+  pub const EvaPlayer: Self = Self(1);
+  pub const GroundedPlayer: Self = Self(2);
+  pub const Seated: Self = Self(3);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 3;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::Ship,
+    Self::EvaPlayer,
+    Self::GroundedPlayer,
+    Self::Seated,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::Ship => Some("Ship"),
+      Self::EvaPlayer => Some("EvaPlayer"),
+      Self::GroundedPlayer => Some("GroundedPlayer"),
+      Self::Seated => Some("Seated"),
+      _ => None,
+    }
+  }
+}
+impl ::core::fmt::Debug for EntityKind {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for EntityKind {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = unsafe { ::flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    Self(b)
+  }
+}
+
+impl ::flatbuffers::Push for EntityKind {
+    type Output = EntityKind;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        unsafe { ::flatbuffers::emplace_scalar::<i8>(dst, self.0) };
+    }
+}
+
+impl ::flatbuffers::EndianScalar for EntityKind {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> ::flatbuffers::Verifiable for EntityKind {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for EntityKind {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 21;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 22] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -35,6 +132,10 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 18] = [
   ShardPayload::ShipPropertiesUpdate,
   ShardPayload::SignalBroadcast,
   ShardPayload::SignalBroadcastBatch,
+  ShardPayload::VisibilityDirective,
+  ShardPayload::ShipColliderSync,
+  ShardPayload::SystemEntitiesUpdate,
+  ShardPayload::PlanetPlayerDigest,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -60,9 +161,15 @@ impl ShardPayload {
   pub const ShipPropertiesUpdate: Self = Self(15);
   pub const SignalBroadcast: Self = Self(16);
   pub const SignalBroadcastBatch: Self = Self(17);
+  pub const VisibilityDirective: Self = Self(18);
+  pub const ShipColliderSync: Self = Self(19);
+  /// System shard → ship/planet shard: unified AOI entity set.
+  pub const SystemEntitiesUpdate: Self = Self(20);
+  /// Planet shard → system shard: aggregate surface-player positions at 1 Hz.
+  pub const PlanetPlayerDigest: Self = Self(21);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 17;
+  pub const ENUM_MAX: u8 = 21;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -82,6 +189,10 @@ impl ShardPayload {
     Self::ShipPropertiesUpdate,
     Self::SignalBroadcast,
     Self::SignalBroadcastBatch,
+    Self::VisibilityDirective,
+    Self::ShipColliderSync,
+    Self::SystemEntitiesUpdate,
+    Self::PlanetPlayerDigest,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -104,6 +215,10 @@ impl ShardPayload {
       Self::ShipPropertiesUpdate => Some("ShipPropertiesUpdate"),
       Self::SignalBroadcast => Some("SignalBroadcast"),
       Self::SignalBroadcastBatch => Some("SignalBroadcastBatch"),
+      Self::VisibilityDirective => Some("VisibilityDirective"),
+      Self::ShipColliderSync => Some("ShipColliderSync"),
+      Self::SystemEntitiesUpdate => Some("SystemEntitiesUpdate"),
+      Self::PlanetPlayerDigest => Some("PlanetPlayerDigest"),
       _ => None,
     }
   }
@@ -163,10 +278,10 @@ pub struct ShardPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SERVER_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 14;
+pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 16;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 15] = [
+pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 17] = [
   ServerPayload::NONE,
   ServerPayload::JoinResponse,
   ServerPayload::WorldState,
@@ -182,6 +297,8 @@ pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 15] = [
   ServerPayload::BlockConfigState,
   ServerPayload::SeatBindingsNotify,
   ServerPayload::SubGridAssignmentUpdate,
+  ServerPayload::ShardDisconnectNotify,
+  ServerPayload::ShardHandoffMsg,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -204,9 +321,12 @@ impl ServerPayload {
   pub const BlockConfigState: Self = Self(12);
   pub const SeatBindingsNotify: Self = Self(13);
   pub const SubGridAssignmentUpdate: Self = Self(14);
+  pub const ShardDisconnectNotify: Self = Self(15);
+  /// Seamless promotion handoff (replaces ShardRedirectMsg for in-game transitions).
+  pub const ShardHandoffMsg: Self = Self(16);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 14;
+  pub const ENUM_MAX: u8 = 16;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::JoinResponse,
@@ -223,6 +343,8 @@ impl ServerPayload {
     Self::BlockConfigState,
     Self::SeatBindingsNotify,
     Self::SubGridAssignmentUpdate,
+    Self::ShardDisconnectNotify,
+    Self::ShardHandoffMsg,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -242,6 +364,8 @@ impl ServerPayload {
       Self::BlockConfigState => Some("BlockConfigState"),
       Self::SeatBindingsNotify => Some("SeatBindingsNotify"),
       Self::SubGridAssignmentUpdate => Some("SubGridAssignmentUpdate"),
+      Self::ShardDisconnectNotify => Some("ShardDisconnectNotify"),
+      Self::ShardHandoffMsg => Some("ShardHandoffMsg"),
       _ => None,
     }
   }
@@ -301,16 +425,17 @@ pub struct ServerPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 5;
+pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 6;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 6] = [
+pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 7] = [
   ClientPayload::NONE,
   ClientPayload::Connect,
   ClientPayload::PlayerInput,
   ClientPayload::BlockEditRequest,
   ClientPayload::BlockConfigUpdate,
   ClientPayload::SubBlockEditRequest,
+  ClientPayload::ObserverConnect,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -324,9 +449,10 @@ impl ClientPayload {
   pub const BlockEditRequest: Self = Self(3);
   pub const BlockConfigUpdate: Self = Self(4);
   pub const SubBlockEditRequest: Self = Self(5);
+  pub const ObserverConnect: Self = Self(6);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 5;
+  pub const ENUM_MAX: u8 = 6;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::Connect,
@@ -334,6 +460,7 @@ impl ClientPayload {
     Self::BlockEditRequest,
     Self::BlockConfigUpdate,
     Self::SubBlockEditRequest,
+    Self::ObserverConnect,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -344,6 +471,7 @@ impl ClientPayload {
       Self::BlockEditRequest => Some("BlockEditRequest"),
       Self::BlockConfigUpdate => Some("BlockConfigUpdate"),
       Self::SubBlockEditRequest => Some("SubBlockEditRequest"),
+      Self::ObserverConnect => Some("ObserverConnect"),
       _ => None,
     }
   }
@@ -1100,6 +1228,263 @@ impl<'a> Quatf {
 
 }
 
+/// A single collider shape (axis-aligned box): center position + half-extents.
+/// Packed as 6 floats for minimal wire overhead.
+// struct ColliderShape, aligned to 4
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct ColliderShape(pub [u8; 24]);
+impl Default for ColliderShape { 
+  fn default() -> Self { 
+    Self([0; 24])
+  }
+}
+impl ::core::fmt::Debug for ColliderShape {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("ColliderShape")
+      .field("cx", &self.cx())
+      .field("cy", &self.cy())
+      .field("cz", &self.cz())
+      .field("hx", &self.hx())
+      .field("hy", &self.hy())
+      .field("hz", &self.hz())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for ColliderShape {}
+impl<'a> ::flatbuffers::Follow<'a> for ColliderShape {
+  type Inner = &'a ColliderShape;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a ColliderShape>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a ColliderShape {
+  type Inner = &'a ColliderShape;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<ColliderShape>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for ColliderShape {
+    type Output = ColliderShape;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const ColliderShape as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(4)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for ColliderShape {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> ColliderShape {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    hx: f32,
+    hy: f32,
+    hz: f32,
+  ) -> Self {
+    let mut s = Self([0; 24]);
+    s.set_cx(cx);
+    s.set_cy(cy);
+    s.set_cz(cz);
+    s.set_hx(hx);
+    s.set_hy(hy);
+    s.set_hz(hz);
+    s
+  }
+
+  pub fn cx(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_cx(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn cy(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[4..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_cy(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[4..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn cz(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_cz(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn hx(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[12..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_hx(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[12..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn hy(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[16..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_hy(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[16..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn hz(&self) -> f32 {
+    let mut mem = ::core::mem::MaybeUninit::<<f32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[20..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_hz(&mut self, x: f32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[20..].as_mut_ptr(),
+        ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
 /// Generic chunk address using signed 32-bit Cartesian coordinates.
 /// Works for both ship grids (direct IVec3) and planets (derived from cubic sphere).
 /// This is the unified address format used by ChunkSnapshot and ChunkDelta.
@@ -1433,6 +1818,7 @@ impl<'a> PlayerHandoff<'a> {
   pub const VT_GAME_TIME: ::flatbuffers::VOffsetT = 46;
   pub const VT_WARP_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 48;
   pub const VT_WARP_VELOCITY: ::flatbuffers::VOffsetT = 50;
+  pub const VT_TARGET_SYSTEM_EVA: ::flatbuffers::VOffsetT = 52;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1465,6 +1851,7 @@ impl<'a> PlayerHandoff<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.position { builder.add_position(x); }
     if let Some(x) = args.player_name { builder.add_player_name(x); }
+    builder.add_target_system_eva(args.target_system_eva);
     builder.add_grounded(args.grounded);
     builder.add_speed_tier(args.speed_tier);
     builder.add_fly_mode(args.fly_mode);
@@ -1651,6 +2038,15 @@ impl<'a> PlayerHandoff<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Vec3d>(PlayerHandoff::VT_WARP_VELOCITY, None)}
   }
+  /// Ship→system EVA exit: player leaves ship hull in space.
+  /// When true, the system shard spawns an EVA player entity.
+  #[inline]
+  pub fn target_system_eva(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerHandoff::VT_TARGET_SYSTEM_EVA, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
@@ -1683,6 +2079,7 @@ impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
      .visit_field::<f64>("game_time", Self::VT_GAME_TIME, false)?
      .visit_field::<u32>("warp_target_star_index", Self::VT_WARP_TARGET_STAR_INDEX, false)?
      .visit_field::<Vec3d>("warp_velocity", Self::VT_WARP_VELOCITY, false)?
+     .visit_field::<bool>("target_system_eva", Self::VT_TARGET_SYSTEM_EVA, false)?
      .finish();
     Ok(())
   }
@@ -1712,6 +2109,7 @@ pub struct PlayerHandoffArgs<'a> {
     pub game_time: f64,
     pub warp_target_star_index: u32,
     pub warp_velocity: Option<&'a Vec3d>,
+    pub target_system_eva: bool,
 }
 impl<'a> Default for PlayerHandoffArgs<'a> {
   #[inline]
@@ -1741,6 +2139,7 @@ impl<'a> Default for PlayerHandoffArgs<'a> {
       game_time: 0.0,
       warp_target_star_index: 4294967295,
       warp_velocity: None,
+      target_system_eva: false,
     }
   }
 }
@@ -1847,6 +2246,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerHandoffBuilder<'a, 'b, 
     self.fbb_.push_slot_always::<&Vec3d>(PlayerHandoff::VT_WARP_VELOCITY, warp_velocity);
   }
   #[inline]
+  pub fn add_target_system_eva(&mut self, target_system_eva: bool) {
+    self.fbb_.push_slot::<bool>(PlayerHandoff::VT_TARGET_SYSTEM_EVA, target_system_eva, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerHandoffBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerHandoffBuilder {
@@ -1888,6 +2291,7 @@ impl ::core::fmt::Debug for PlayerHandoff<'_> {
       ds.field("game_time", &self.game_time());
       ds.field("warp_target_star_index", &self.warp_target_star_index());
       ds.field("warp_velocity", &self.warp_velocity());
+      ds.field("target_system_eva", &self.target_system_eva());
       ds.finish()
   }
 }
@@ -4286,6 +4690,829 @@ impl ::core::fmt::Debug for ShipNearbyInfo<'_> {
       ds.finish()
   }
 }
+pub enum ObservableEntityOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Unified observable entity for multi-shard AOI visibility.
+/// Replaces per-type visibility messages (ShipSnapshotEntry, per-player snapshots)
+/// with a single rendering-ready entry. Generated by the system-shard AOI pass
+/// and included in every shard's WorldState broadcast.
+pub struct ObservableEntity<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ObservableEntity<'a> {
+  type Inner = ObservableEntity<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ObservableEntity<'a> {
+  pub const VT_ENTITY_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_KIND: ::flatbuffers::VOffsetT = 6;
+  pub const VT_POSITION: ::flatbuffers::VOffsetT = 8;
+  pub const VT_ROTATION: ::flatbuffers::VOffsetT = 10;
+  pub const VT_VELOCITY: ::flatbuffers::VOffsetT = 12;
+  pub const VT_BOUNDING_RADIUS: ::flatbuffers::VOffsetT = 14;
+  pub const VT_LOD_TIER: ::flatbuffers::VOffsetT = 16;
+  pub const VT_SHARD_ID: ::flatbuffers::VOffsetT = 18;
+  pub const VT_SHARD_TYPE: ::flatbuffers::VOffsetT = 20;
+  pub const VT_IS_OWN: ::flatbuffers::VOffsetT = 22;
+  pub const VT_NAME: ::flatbuffers::VOffsetT = 24;
+  pub const VT_HEALTH: ::flatbuffers::VOffsetT = 26;
+  pub const VT_SHIELD: ::flatbuffers::VOffsetT = 28;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ObservableEntity { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ObservableEntityArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ObservableEntity<'bldr>> {
+    let mut builder = ObservableEntityBuilder::new(_fbb);
+    builder.add_shard_id(args.shard_id);
+    builder.add_entity_id(args.entity_id);
+    builder.add_shield(args.shield);
+    builder.add_health(args.health);
+    if let Some(x) = args.name { builder.add_name(x); }
+    builder.add_bounding_radius(args.bounding_radius);
+    if let Some(x) = args.velocity { builder.add_velocity(x); }
+    if let Some(x) = args.rotation { builder.add_rotation(x); }
+    if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_is_own(args.is_own);
+    builder.add_shard_type(args.shard_type);
+    builder.add_lod_tier(args.lod_tier);
+    builder.add_kind(args.kind);
+    builder.finish()
+  }
+
+
+  /// For ships: ship_id. For players: session_token.
+  #[inline]
+  pub fn entity_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ObservableEntity::VT_ENTITY_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn kind(&self) -> EntityKind {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EntityKind>(ObservableEntity::VT_KIND, Some(EntityKind::Ship)).unwrap()}
+  }
+  /// Position in the WorldState.origin frame (client adds origin).
+  #[inline]
+  pub fn position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ObservableEntity::VT_POSITION, None)}
+  }
+  #[inline]
+  pub fn rotation(&self) -> Option<&'a Quatd> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Quatd>(ObservableEntity::VT_ROTATION, None)}
+  }
+  /// Velocity in the same frame as position (for interpolation / dead reckoning).
+  #[inline]
+  pub fn velocity(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ObservableEntity::VT_VELOCITY, None)}
+  }
+  /// Approximate bounding radius (meters) for LOD + frustum culling.
+  #[inline]
+  pub fn bounding_radius(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_BOUNDING_RADIUS, Some(0.0)).unwrap()}
+  }
+  /// 0=Full (0-2km ships / 0-200m players), 1=Reduced, 2=Coarse.
+  #[inline]
+  pub fn lod_tier(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ObservableEntity::VT_LOD_TIER, Some(0)).unwrap()}
+  }
+  /// Shard ID of the authoritative shard for this entity (for secondary upgrades).
+  /// 0 if no secondary connection is beneficial.
+  #[inline]
+  pub fn shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ObservableEntity::VT_SHARD_ID, Some(0)).unwrap()}
+  }
+  /// Authoritative shard type (0=Planet, 1=System, 2=Ship, 3=Galaxy).
+  #[inline]
+  pub fn shard_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ObservableEntity::VT_SHARD_TYPE, Some(0)).unwrap()}
+  }
+  /// True for the player's own ship / avatar entry.
+  #[inline]
+  pub fn is_own(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ObservableEntity::VT_IS_OWN, Some(false)).unwrap()}
+  }
+  /// Player display name. Empty for ships without a pilot context.
+  #[inline]
+  pub fn name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ObservableEntity::VT_NAME, None)}
+  }
+  /// Player health (0 for non-player kinds).
+  #[inline]
+  pub fn health(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_HEALTH, Some(0.0)).unwrap()}
+  }
+  /// Player shield (0 for non-player kinds).
+  #[inline]
+  pub fn shield(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_SHIELD, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("entity_id", Self::VT_ENTITY_ID, false)?
+     .visit_field::<EntityKind>("kind", Self::VT_KIND, false)?
+     .visit_field::<Vec3d>("position", Self::VT_POSITION, false)?
+     .visit_field::<Quatd>("rotation", Self::VT_ROTATION, false)?
+     .visit_field::<Vec3d>("velocity", Self::VT_VELOCITY, false)?
+     .visit_field::<f32>("bounding_radius", Self::VT_BOUNDING_RADIUS, false)?
+     .visit_field::<u8>("lod_tier", Self::VT_LOD_TIER, false)?
+     .visit_field::<u64>("shard_id", Self::VT_SHARD_ID, false)?
+     .visit_field::<u8>("shard_type", Self::VT_SHARD_TYPE, false)?
+     .visit_field::<bool>("is_own", Self::VT_IS_OWN, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, false)?
+     .visit_field::<f32>("health", Self::VT_HEALTH, false)?
+     .visit_field::<f32>("shield", Self::VT_SHIELD, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ObservableEntityArgs<'a> {
+    pub entity_id: u64,
+    pub kind: EntityKind,
+    pub position: Option<&'a Vec3d>,
+    pub rotation: Option<&'a Quatd>,
+    pub velocity: Option<&'a Vec3d>,
+    pub bounding_radius: f32,
+    pub lod_tier: u8,
+    pub shard_id: u64,
+    pub shard_type: u8,
+    pub is_own: bool,
+    pub name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub health: f32,
+    pub shield: f32,
+}
+impl<'a> Default for ObservableEntityArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ObservableEntityArgs {
+      entity_id: 0,
+      kind: EntityKind::Ship,
+      position: None,
+      rotation: None,
+      velocity: None,
+      bounding_radius: 0.0,
+      lod_tier: 0,
+      shard_id: 0,
+      shard_type: 0,
+      is_own: false,
+      name: None,
+      health: 0.0,
+      shield: 0.0,
+    }
+  }
+}
+
+pub struct ObservableEntityBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ObservableEntityBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_entity_id(&mut self, entity_id: u64) {
+    self.fbb_.push_slot::<u64>(ObservableEntity::VT_ENTITY_ID, entity_id, 0);
+  }
+  #[inline]
+  pub fn add_kind(&mut self, kind: EntityKind) {
+    self.fbb_.push_slot::<EntityKind>(ObservableEntity::VT_KIND, kind, EntityKind::Ship);
+  }
+  #[inline]
+  pub fn add_position(&mut self, position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ObservableEntity::VT_POSITION, position);
+  }
+  #[inline]
+  pub fn add_rotation(&mut self, rotation: &Quatd) {
+    self.fbb_.push_slot_always::<&Quatd>(ObservableEntity::VT_ROTATION, rotation);
+  }
+  #[inline]
+  pub fn add_velocity(&mut self, velocity: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ObservableEntity::VT_VELOCITY, velocity);
+  }
+  #[inline]
+  pub fn add_bounding_radius(&mut self, bounding_radius: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_BOUNDING_RADIUS, bounding_radius, 0.0);
+  }
+  #[inline]
+  pub fn add_lod_tier(&mut self, lod_tier: u8) {
+    self.fbb_.push_slot::<u8>(ObservableEntity::VT_LOD_TIER, lod_tier, 0);
+  }
+  #[inline]
+  pub fn add_shard_id(&mut self, shard_id: u64) {
+    self.fbb_.push_slot::<u64>(ObservableEntity::VT_SHARD_ID, shard_id, 0);
+  }
+  #[inline]
+  pub fn add_shard_type(&mut self, shard_type: u8) {
+    self.fbb_.push_slot::<u8>(ObservableEntity::VT_SHARD_TYPE, shard_type, 0);
+  }
+  #[inline]
+  pub fn add_is_own(&mut self, is_own: bool) {
+    self.fbb_.push_slot::<bool>(ObservableEntity::VT_IS_OWN, is_own, false);
+  }
+  #[inline]
+  pub fn add_name(&mut self, name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ObservableEntity::VT_NAME, name);
+  }
+  #[inline]
+  pub fn add_health(&mut self, health: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_HEALTH, health, 0.0);
+  }
+  #[inline]
+  pub fn add_shield(&mut self, shield: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_SHIELD, shield, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ObservableEntityBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ObservableEntityBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ObservableEntity<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ObservableEntity<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ObservableEntity");
+      ds.field("entity_id", &self.entity_id());
+      ds.field("kind", &self.kind());
+      ds.field("position", &self.position());
+      ds.field("rotation", &self.rotation());
+      ds.field("velocity", &self.velocity());
+      ds.field("bounding_radius", &self.bounding_radius());
+      ds.field("lod_tier", &self.lod_tier());
+      ds.field("shard_id", &self.shard_id());
+      ds.field("shard_type", &self.shard_type());
+      ds.field("is_own", &self.is_own());
+      ds.field("name", &self.name());
+      ds.field("health", &self.health());
+      ds.field("shield", &self.shield());
+      ds.finish()
+  }
+}
+pub enum SystemEntitiesUpdateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// System shard → ship/planet shard: AOI entity set for a single observer.
+/// Replaces the ad-hoc mix of SystemSceneUpdate.ships + VisibilityDirective
+/// + ShipNearbyInfo with a single authoritative stream.
+pub struct SystemEntitiesUpdate<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for SystemEntitiesUpdate<'a> {
+  type Inner = SystemEntitiesUpdate<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SystemEntitiesUpdate<'a> {
+  pub const VT_TARGET_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_TARGET_PLANET_INDEX: ::flatbuffers::VOffsetT = 6;
+  pub const VT_OBSERVER_POSITION: ::flatbuffers::VOffsetT = 8;
+  pub const VT_ENTITIES: ::flatbuffers::VOffsetT = 10;
+  pub const VT_TICK: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    SystemEntitiesUpdate { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SystemEntitiesUpdateArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<SystemEntitiesUpdate<'bldr>> {
+    let mut builder = SystemEntitiesUpdateBuilder::new(_fbb);
+    builder.add_tick(args.tick);
+    builder.add_target_ship_id(args.target_ship_id);
+    if let Some(x) = args.entities { builder.add_entities(x); }
+    if let Some(x) = args.observer_position { builder.add_observer_position(x); }
+    builder.add_target_planet_index(args.target_planet_index);
+    builder.finish()
+  }
+
+
+  /// If set, this update is for a ship shard hosting the ship with this id (0 = unset).
+  #[inline]
+  pub fn target_ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SystemEntitiesUpdate::VT_TARGET_SHIP_ID, Some(0)).unwrap()}
+  }
+  /// If set, this update is for the planet shard at this planet index
+  /// (0xFFFFFFFF = unset — i.e., the update targets a ship shard).
+  #[inline]
+  pub fn target_planet_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SystemEntitiesUpdate::VT_TARGET_PLANET_INDEX, Some(4294967295)).unwrap()}
+  }
+  /// Observer anchor position in system coordinates (used for LOD tier computation).
+  #[inline]
+  pub fn observer_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(SystemEntitiesUpdate::VT_OBSERVER_POSITION, None)}
+  }
+  /// Entities in the observer's AOI, ready for merging into WorldState.
+  #[inline]
+  pub fn entities(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>(SystemEntitiesUpdate::VT_ENTITIES, None)}
+  }
+  /// System-shard tick when this snapshot was taken.
+  #[inline]
+  pub fn tick(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SystemEntitiesUpdate::VT_TICK, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for SystemEntitiesUpdate<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("target_ship_id", Self::VT_TARGET_SHIP_ID, false)?
+     .visit_field::<u32>("target_planet_index", Self::VT_TARGET_PLANET_INDEX, false)?
+     .visit_field::<Vec3d>("observer_position", Self::VT_OBSERVER_POSITION, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>("entities", Self::VT_ENTITIES, false)?
+     .visit_field::<u64>("tick", Self::VT_TICK, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SystemEntitiesUpdateArgs<'a> {
+    pub target_ship_id: u64,
+    pub target_planet_index: u32,
+    pub observer_position: Option<&'a Vec3d>,
+    pub entities: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity<'a>>>>>,
+    pub tick: u64,
+}
+impl<'a> Default for SystemEntitiesUpdateArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SystemEntitiesUpdateArgs {
+      target_ship_id: 0,
+      target_planet_index: 4294967295,
+      observer_position: None,
+      entities: None,
+      tick: 0,
+    }
+  }
+}
+
+pub struct SystemEntitiesUpdateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SystemEntitiesUpdateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_target_ship_id(&mut self, target_ship_id: u64) {
+    self.fbb_.push_slot::<u64>(SystemEntitiesUpdate::VT_TARGET_SHIP_ID, target_ship_id, 0);
+  }
+  #[inline]
+  pub fn add_target_planet_index(&mut self, target_planet_index: u32) {
+    self.fbb_.push_slot::<u32>(SystemEntitiesUpdate::VT_TARGET_PLANET_INDEX, target_planet_index, 4294967295);
+  }
+  #[inline]
+  pub fn add_observer_position(&mut self, observer_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(SystemEntitiesUpdate::VT_OBSERVER_POSITION, observer_position);
+  }
+  #[inline]
+  pub fn add_entities(&mut self, entities: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<ObservableEntity<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SystemEntitiesUpdate::VT_ENTITIES, entities);
+  }
+  #[inline]
+  pub fn add_tick(&mut self, tick: u64) {
+    self.fbb_.push_slot::<u64>(SystemEntitiesUpdate::VT_TICK, tick, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SystemEntitiesUpdateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SystemEntitiesUpdateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<SystemEntitiesUpdate<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for SystemEntitiesUpdate<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("SystemEntitiesUpdate");
+      ds.field("target_ship_id", &self.target_ship_id());
+      ds.field("target_planet_index", &self.target_planet_index());
+      ds.field("observer_position", &self.observer_position());
+      ds.field("entities", &self.entities());
+      ds.field("tick", &self.tick());
+      ds.finish()
+  }
+}
+pub enum PlanetPlayerDigestEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// One player entry in a PlanetPlayerDigest.
+pub struct PlanetPlayerDigestEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for PlanetPlayerDigestEntry<'a> {
+  type Inner = PlanetPlayerDigestEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> PlanetPlayerDigestEntry<'a> {
+  pub const VT_SESSION_TOKEN: ::flatbuffers::VOffsetT = 4;
+  pub const VT_PLAYER_NAME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_POSITION: ::flatbuffers::VOffsetT = 8;
+  pub const VT_ROTATION: ::flatbuffers::VOffsetT = 10;
+  pub const VT_PLANET_INDEX: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    PlanetPlayerDigestEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args PlanetPlayerDigestEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<PlanetPlayerDigestEntry<'bldr>> {
+    let mut builder = PlanetPlayerDigestEntryBuilder::new(_fbb);
+    builder.add_session_token(args.session_token);
+    builder.add_planet_index(args.planet_index);
+    if let Some(x) = args.rotation { builder.add_rotation(x); }
+    if let Some(x) = args.position { builder.add_position(x); }
+    if let Some(x) = args.player_name { builder.add_player_name(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn session_token(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(PlanetPlayerDigestEntry::VT_SESSION_TOKEN, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn player_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(PlanetPlayerDigestEntry::VT_PLAYER_NAME, None)}
+  }
+  /// System-space position (planet shard transforms before sending).
+  #[inline]
+  pub fn position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(PlanetPlayerDigestEntry::VT_POSITION, None)}
+  }
+  #[inline]
+  pub fn rotation(&self) -> Option<&'a Quatd> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Quatd>(PlanetPlayerDigestEntry::VT_ROTATION, None)}
+  }
+  /// Planet index within the system (for fast filtering).
+  #[inline]
+  pub fn planet_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(PlanetPlayerDigestEntry::VT_PLANET_INDEX, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for PlanetPlayerDigestEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("session_token", Self::VT_SESSION_TOKEN, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("player_name", Self::VT_PLAYER_NAME, false)?
+     .visit_field::<Vec3d>("position", Self::VT_POSITION, false)?
+     .visit_field::<Quatd>("rotation", Self::VT_ROTATION, false)?
+     .visit_field::<u32>("planet_index", Self::VT_PLANET_INDEX, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct PlanetPlayerDigestEntryArgs<'a> {
+    pub session_token: u64,
+    pub player_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub position: Option<&'a Vec3d>,
+    pub rotation: Option<&'a Quatd>,
+    pub planet_index: u32,
+}
+impl<'a> Default for PlanetPlayerDigestEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    PlanetPlayerDigestEntryArgs {
+      session_token: 0,
+      player_name: None,
+      position: None,
+      rotation: None,
+      planet_index: 0,
+    }
+  }
+}
+
+pub struct PlanetPlayerDigestEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlanetPlayerDigestEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_session_token(&mut self, session_token: u64) {
+    self.fbb_.push_slot::<u64>(PlanetPlayerDigestEntry::VT_SESSION_TOKEN, session_token, 0);
+  }
+  #[inline]
+  pub fn add_player_name(&mut self, player_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PlanetPlayerDigestEntry::VT_PLAYER_NAME, player_name);
+  }
+  #[inline]
+  pub fn add_position(&mut self, position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(PlanetPlayerDigestEntry::VT_POSITION, position);
+  }
+  #[inline]
+  pub fn add_rotation(&mut self, rotation: &Quatd) {
+    self.fbb_.push_slot_always::<&Quatd>(PlanetPlayerDigestEntry::VT_ROTATION, rotation);
+  }
+  #[inline]
+  pub fn add_planet_index(&mut self, planet_index: u32) {
+    self.fbb_.push_slot::<u32>(PlanetPlayerDigestEntry::VT_PLANET_INDEX, planet_index, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlanetPlayerDigestEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    PlanetPlayerDigestEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<PlanetPlayerDigestEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for PlanetPlayerDigestEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("PlanetPlayerDigestEntry");
+      ds.field("session_token", &self.session_token());
+      ds.field("player_name", &self.player_name());
+      ds.field("position", &self.position());
+      ds.field("rotation", &self.rotation());
+      ds.field("planet_index", &self.planet_index());
+      ds.finish()
+  }
+}
+pub enum PlanetPlayerDigestOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Planet shard → system shard: aggregate positions of all surface players.
+/// Sent at 1 Hz. Feeds the system shard's AOI so distant observers (ships, EVA)
+/// can see players on planets without needing a full secondary connection.
+pub struct PlanetPlayerDigest<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for PlanetPlayerDigest<'a> {
+  type Inner = PlanetPlayerDigest<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> PlanetPlayerDigest<'a> {
+  pub const VT_PLANET_SHARD_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_PLANET_SEED: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PLANET_INDEX: ::flatbuffers::VOffsetT = 8;
+  pub const VT_ENTRIES: ::flatbuffers::VOffsetT = 10;
+  pub const VT_TICK: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    PlanetPlayerDigest { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args PlanetPlayerDigestArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<PlanetPlayerDigest<'bldr>> {
+    let mut builder = PlanetPlayerDigestBuilder::new(_fbb);
+    builder.add_tick(args.tick);
+    builder.add_planet_seed(args.planet_seed);
+    builder.add_planet_shard_id(args.planet_shard_id);
+    if let Some(x) = args.entries { builder.add_entries(x); }
+    builder.add_planet_index(args.planet_index);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn planet_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(PlanetPlayerDigest::VT_PLANET_SHARD_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn planet_seed(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(PlanetPlayerDigest::VT_PLANET_SEED, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn planet_index(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(PlanetPlayerDigest::VT_PLANET_INDEX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn entries(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PlanetPlayerDigestEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PlanetPlayerDigestEntry>>>>(PlanetPlayerDigest::VT_ENTRIES, None)}
+  }
+  #[inline]
+  pub fn tick(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(PlanetPlayerDigest::VT_TICK, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for PlanetPlayerDigest<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("planet_shard_id", Self::VT_PLANET_SHARD_ID, false)?
+     .visit_field::<u64>("planet_seed", Self::VT_PLANET_SEED, false)?
+     .visit_field::<u32>("planet_index", Self::VT_PLANET_INDEX, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PlanetPlayerDigestEntry>>>>("entries", Self::VT_ENTRIES, false)?
+     .visit_field::<u64>("tick", Self::VT_TICK, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct PlanetPlayerDigestArgs<'a> {
+    pub planet_shard_id: u64,
+    pub planet_seed: u64,
+    pub planet_index: u32,
+    pub entries: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PlanetPlayerDigestEntry<'a>>>>>,
+    pub tick: u64,
+}
+impl<'a> Default for PlanetPlayerDigestArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    PlanetPlayerDigestArgs {
+      planet_shard_id: 0,
+      planet_seed: 0,
+      planet_index: 0,
+      entries: None,
+      tick: 0,
+    }
+  }
+}
+
+pub struct PlanetPlayerDigestBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlanetPlayerDigestBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_planet_shard_id(&mut self, planet_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(PlanetPlayerDigest::VT_PLANET_SHARD_ID, planet_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_planet_seed(&mut self, planet_seed: u64) {
+    self.fbb_.push_slot::<u64>(PlanetPlayerDigest::VT_PLANET_SEED, planet_seed, 0);
+  }
+  #[inline]
+  pub fn add_planet_index(&mut self, planet_index: u32) {
+    self.fbb_.push_slot::<u32>(PlanetPlayerDigest::VT_PLANET_INDEX, planet_index, 0);
+  }
+  #[inline]
+  pub fn add_entries(&mut self, entries: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<PlanetPlayerDigestEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PlanetPlayerDigest::VT_ENTRIES, entries);
+  }
+  #[inline]
+  pub fn add_tick(&mut self, tick: u64) {
+    self.fbb_.push_slot::<u64>(PlanetPlayerDigest::VT_TICK, tick, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlanetPlayerDigestBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    PlanetPlayerDigestBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<PlanetPlayerDigest<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for PlanetPlayerDigest<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("PlanetPlayerDigest");
+      ds.field("planet_shard_id", &self.planet_shard_id());
+      ds.field("planet_seed", &self.planet_seed());
+      ds.field("planet_index", &self.planet_index());
+      ds.field("entries", &self.entries());
+      ds.field("tick", &self.tick());
+      ds.finish()
+  }
+}
 pub enum CelestialBodySnapshotOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -5472,6 +6699,652 @@ impl ::core::fmt::Debug for SignalBroadcastBatch<'_> {
       ds.finish()
   }
 }
+pub enum VisibleShipEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Entry in a VisibilityDirective — one visible ship with connection info.
+pub struct VisibleShipEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for VisibleShipEntry<'a> {
+  type Inner = VisibleShipEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> VisibleShipEntry<'a> {
+  pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SHARD_ID: ::flatbuffers::VOffsetT = 6;
+  pub const VT_TCP_ADDR: ::flatbuffers::VOffsetT = 8;
+  pub const VT_UDP_ADDR: ::flatbuffers::VOffsetT = 10;
+  pub const VT_DISTANCE: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    VisibleShipEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args VisibleShipEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<VisibleShipEntry<'bldr>> {
+    let mut builder = VisibleShipEntryBuilder::new(_fbb);
+    builder.add_distance(args.distance);
+    builder.add_shard_id(args.shard_id);
+    builder.add_ship_id(args.ship_id);
+    if let Some(x) = args.udp_addr { builder.add_udp_addr(x); }
+    if let Some(x) = args.tcp_addr { builder.add_tcp_addr(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(VisibleShipEntry::VT_SHIP_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(VisibleShipEntry::VT_SHARD_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn tcp_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(VisibleShipEntry::VT_TCP_ADDR, None)}
+  }
+  #[inline]
+  pub fn udp_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(VisibleShipEntry::VT_UDP_ADDR, None)}
+  }
+  #[inline]
+  pub fn distance(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(VisibleShipEntry::VT_DISTANCE, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for VisibleShipEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
+     .visit_field::<u64>("shard_id", Self::VT_SHARD_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("tcp_addr", Self::VT_TCP_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("udp_addr", Self::VT_UDP_ADDR, false)?
+     .visit_field::<f64>("distance", Self::VT_DISTANCE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct VisibleShipEntryArgs<'a> {
+    pub ship_id: u64,
+    pub shard_id: u64,
+    pub tcp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub udp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub distance: f64,
+}
+impl<'a> Default for VisibleShipEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    VisibleShipEntryArgs {
+      ship_id: 0,
+      shard_id: 0,
+      tcp_addr: None,
+      udp_addr: None,
+      distance: 0.0,
+    }
+  }
+}
+
+pub struct VisibleShipEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> VisibleShipEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ship_id(&mut self, ship_id: u64) {
+    self.fbb_.push_slot::<u64>(VisibleShipEntry::VT_SHIP_ID, ship_id, 0);
+  }
+  #[inline]
+  pub fn add_shard_id(&mut self, shard_id: u64) {
+    self.fbb_.push_slot::<u64>(VisibleShipEntry::VT_SHARD_ID, shard_id, 0);
+  }
+  #[inline]
+  pub fn add_tcp_addr(&mut self, tcp_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(VisibleShipEntry::VT_TCP_ADDR, tcp_addr);
+  }
+  #[inline]
+  pub fn add_udp_addr(&mut self, udp_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(VisibleShipEntry::VT_UDP_ADDR, udp_addr);
+  }
+  #[inline]
+  pub fn add_distance(&mut self, distance: f64) {
+    self.fbb_.push_slot::<f64>(VisibleShipEntry::VT_DISTANCE, distance, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> VisibleShipEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    VisibleShipEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<VisibleShipEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for VisibleShipEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("VisibleShipEntry");
+      ds.field("ship_id", &self.ship_id());
+      ds.field("shard_id", &self.shard_id());
+      ds.field("tcp_addr", &self.tcp_addr());
+      ds.field("udp_addr", &self.udp_addr());
+      ds.field("distance", &self.distance());
+      ds.finish()
+  }
+}
+pub enum VisibilityDirectiveOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// System shard → ship shard: which other ships are visible to this ship.
+/// Sent when the visibility set changes (enter/leave events).
+pub struct VisibilityDirective<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for VisibilityDirective<'a> {
+  type Inner = VisibilityDirective<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> VisibilityDirective<'a> {
+  pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VISIBLE_SHIPS: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    VisibilityDirective { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args VisibilityDirectiveArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<VisibilityDirective<'bldr>> {
+    let mut builder = VisibilityDirectiveBuilder::new(_fbb);
+    builder.add_ship_id(args.ship_id);
+    if let Some(x) = args.visible_ships { builder.add_visible_ships(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(VisibilityDirective::VT_SHIP_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn visible_ships(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<VisibleShipEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<VisibleShipEntry>>>>(VisibilityDirective::VT_VISIBLE_SHIPS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for VisibilityDirective<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<VisibleShipEntry>>>>("visible_ships", Self::VT_VISIBLE_SHIPS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct VisibilityDirectiveArgs<'a> {
+    pub ship_id: u64,
+    pub visible_ships: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<VisibleShipEntry<'a>>>>>,
+}
+impl<'a> Default for VisibilityDirectiveArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    VisibilityDirectiveArgs {
+      ship_id: 0,
+      visible_ships: None,
+    }
+  }
+}
+
+pub struct VisibilityDirectiveBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> VisibilityDirectiveBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ship_id(&mut self, ship_id: u64) {
+    self.fbb_.push_slot::<u64>(VisibilityDirective::VT_SHIP_ID, ship_id, 0);
+  }
+  #[inline]
+  pub fn add_visible_ships(&mut self, visible_ships: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<VisibleShipEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(VisibilityDirective::VT_VISIBLE_SHIPS, visible_ships);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> VisibilityDirectiveBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    VisibilityDirectiveBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<VisibilityDirective<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for VisibilityDirective<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("VisibilityDirective");
+      ds.field("ship_id", &self.ship_id());
+      ds.field("visible_ships", &self.visible_ships());
+      ds.finish()
+  }
+}
+pub enum ChunkColliderDataMsgOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Per-chunk collider shapes for one chunk of a ship grid.
+pub struct ChunkColliderDataMsg<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ChunkColliderDataMsg<'a> {
+  type Inner = ChunkColliderDataMsg<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ChunkColliderDataMsg<'a> {
+  pub const VT_CX: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CY: ::flatbuffers::VOffsetT = 6;
+  pub const VT_CZ: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SHAPES: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ChunkColliderDataMsg { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ChunkColliderDataMsgArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ChunkColliderDataMsg<'bldr>> {
+    let mut builder = ChunkColliderDataMsgBuilder::new(_fbb);
+    if let Some(x) = args.shapes { builder.add_shapes(x); }
+    builder.add_cz(args.cz);
+    builder.add_cy(args.cy);
+    builder.add_cx(args.cx);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn cx(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(ChunkColliderDataMsg::VT_CX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn cy(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(ChunkColliderDataMsg::VT_CY, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn cz(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(ChunkColliderDataMsg::VT_CZ, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn shapes(&self) -> Option<::flatbuffers::Vector<'a, ColliderShape>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ColliderShape>>>(ChunkColliderDataMsg::VT_SHAPES, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ChunkColliderDataMsg<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("cx", Self::VT_CX, false)?
+     .visit_field::<i32>("cy", Self::VT_CY, false)?
+     .visit_field::<i32>("cz", Self::VT_CZ, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ColliderShape>>>("shapes", Self::VT_SHAPES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ChunkColliderDataMsgArgs<'a> {
+    pub cx: i32,
+    pub cy: i32,
+    pub cz: i32,
+    pub shapes: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ColliderShape>>>,
+}
+impl<'a> Default for ChunkColliderDataMsgArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ChunkColliderDataMsgArgs {
+      cx: 0,
+      cy: 0,
+      cz: 0,
+      shapes: None,
+    }
+  }
+}
+
+pub struct ChunkColliderDataMsgBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ChunkColliderDataMsgBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_cx(&mut self, cx: i32) {
+    self.fbb_.push_slot::<i32>(ChunkColliderDataMsg::VT_CX, cx, 0);
+  }
+  #[inline]
+  pub fn add_cy(&mut self, cy: i32) {
+    self.fbb_.push_slot::<i32>(ChunkColliderDataMsg::VT_CY, cy, 0);
+  }
+  #[inline]
+  pub fn add_cz(&mut self, cz: i32) {
+    self.fbb_.push_slot::<i32>(ChunkColliderDataMsg::VT_CZ, cz, 0);
+  }
+  #[inline]
+  pub fn add_shapes(&mut self, shapes: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ColliderShape>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkColliderDataMsg::VT_SHAPES, shapes);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ChunkColliderDataMsgBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ChunkColliderDataMsgBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ChunkColliderDataMsg<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ChunkColliderDataMsg<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ChunkColliderDataMsg");
+      ds.field("cx", &self.cx());
+      ds.field("cy", &self.cy());
+      ds.field("cz", &self.cz());
+      ds.field("shapes", &self.shapes());
+      ds.finish()
+  }
+}
+pub enum ShipColliderSyncOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Ship shard → host shard: full set of collider shapes for the ship hull.
+/// Sent on startup and when blocks change. The host shard builds Rapier
+/// compound colliders from these shapes for physical collision.
+pub struct ShipColliderSync<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ShipColliderSync<'a> {
+  type Inner = ShipColliderSync<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ShipColliderSync<'a> {
+  pub const VT_SHIP_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CHUNKS: ::flatbuffers::VOffsetT = 6;
+  pub const VT_HULL_MIN_X: ::flatbuffers::VOffsetT = 8;
+  pub const VT_HULL_MIN_Y: ::flatbuffers::VOffsetT = 10;
+  pub const VT_HULL_MIN_Z: ::flatbuffers::VOffsetT = 12;
+  pub const VT_HULL_MAX_X: ::flatbuffers::VOffsetT = 14;
+  pub const VT_HULL_MAX_Y: ::flatbuffers::VOffsetT = 16;
+  pub const VT_HULL_MAX_Z: ::flatbuffers::VOffsetT = 18;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ShipColliderSync { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ShipColliderSyncArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ShipColliderSync<'bldr>> {
+    let mut builder = ShipColliderSyncBuilder::new(_fbb);
+    builder.add_ship_id(args.ship_id);
+    builder.add_hull_max_z(args.hull_max_z);
+    builder.add_hull_max_y(args.hull_max_y);
+    builder.add_hull_max_x(args.hull_max_x);
+    builder.add_hull_min_z(args.hull_min_z);
+    builder.add_hull_min_y(args.hull_min_y);
+    builder.add_hull_min_x(args.hull_min_x);
+    if let Some(x) = args.chunks { builder.add_chunks(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ship_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShipColliderSync::VT_SHIP_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn chunks(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ChunkColliderDataMsg<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ChunkColliderDataMsg>>>>(ShipColliderSync::VT_CHUNKS, None)}
+  }
+  #[inline]
+  pub fn hull_min_x(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ShipColliderSync::VT_HULL_MIN_X, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn hull_min_y(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ShipColliderSync::VT_HULL_MIN_Y, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn hull_min_z(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ShipColliderSync::VT_HULL_MIN_Z, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn hull_max_x(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ShipColliderSync::VT_HULL_MAX_X, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn hull_max_y(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ShipColliderSync::VT_HULL_MAX_Y, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn hull_max_z(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ShipColliderSync::VT_HULL_MAX_Z, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ShipColliderSync<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("ship_id", Self::VT_SHIP_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ChunkColliderDataMsg>>>>("chunks", Self::VT_CHUNKS, false)?
+     .visit_field::<f32>("hull_min_x", Self::VT_HULL_MIN_X, false)?
+     .visit_field::<f32>("hull_min_y", Self::VT_HULL_MIN_Y, false)?
+     .visit_field::<f32>("hull_min_z", Self::VT_HULL_MIN_Z, false)?
+     .visit_field::<f32>("hull_max_x", Self::VT_HULL_MAX_X, false)?
+     .visit_field::<f32>("hull_max_y", Self::VT_HULL_MAX_Y, false)?
+     .visit_field::<f32>("hull_max_z", Self::VT_HULL_MAX_Z, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ShipColliderSyncArgs<'a> {
+    pub ship_id: u64,
+    pub chunks: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ChunkColliderDataMsg<'a>>>>>,
+    pub hull_min_x: f32,
+    pub hull_min_y: f32,
+    pub hull_min_z: f32,
+    pub hull_max_x: f32,
+    pub hull_max_y: f32,
+    pub hull_max_z: f32,
+}
+impl<'a> Default for ShipColliderSyncArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ShipColliderSyncArgs {
+      ship_id: 0,
+      chunks: None,
+      hull_min_x: 0.0,
+      hull_min_y: 0.0,
+      hull_min_z: 0.0,
+      hull_max_x: 0.0,
+      hull_max_y: 0.0,
+      hull_max_z: 0.0,
+    }
+  }
+}
+
+pub struct ShipColliderSyncBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipColliderSyncBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ship_id(&mut self, ship_id: u64) {
+    self.fbb_.push_slot::<u64>(ShipColliderSync::VT_SHIP_ID, ship_id, 0);
+  }
+  #[inline]
+  pub fn add_chunks(&mut self, chunks: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<ChunkColliderDataMsg<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ShipColliderSync::VT_CHUNKS, chunks);
+  }
+  #[inline]
+  pub fn add_hull_min_x(&mut self, hull_min_x: f32) {
+    self.fbb_.push_slot::<f32>(ShipColliderSync::VT_HULL_MIN_X, hull_min_x, 0.0);
+  }
+  #[inline]
+  pub fn add_hull_min_y(&mut self, hull_min_y: f32) {
+    self.fbb_.push_slot::<f32>(ShipColliderSync::VT_HULL_MIN_Y, hull_min_y, 0.0);
+  }
+  #[inline]
+  pub fn add_hull_min_z(&mut self, hull_min_z: f32) {
+    self.fbb_.push_slot::<f32>(ShipColliderSync::VT_HULL_MIN_Z, hull_min_z, 0.0);
+  }
+  #[inline]
+  pub fn add_hull_max_x(&mut self, hull_max_x: f32) {
+    self.fbb_.push_slot::<f32>(ShipColliderSync::VT_HULL_MAX_X, hull_max_x, 0.0);
+  }
+  #[inline]
+  pub fn add_hull_max_y(&mut self, hull_max_y: f32) {
+    self.fbb_.push_slot::<f32>(ShipColliderSync::VT_HULL_MAX_Y, hull_max_y, 0.0);
+  }
+  #[inline]
+  pub fn add_hull_max_z(&mut self, hull_max_z: f32) {
+    self.fbb_.push_slot::<f32>(ShipColliderSync::VT_HULL_MAX_Z, hull_max_z, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipColliderSyncBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ShipColliderSyncBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ShipColliderSync<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ShipColliderSync<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ShipColliderSync");
+      ds.field("ship_id", &self.ship_id());
+      ds.field("chunks", &self.chunks());
+      ds.field("hull_min_x", &self.hull_min_x());
+      ds.field("hull_min_y", &self.hull_min_y());
+      ds.field("hull_min_z", &self.hull_min_z());
+      ds.field("hull_max_x", &self.hull_max_x());
+      ds.field("hull_max_y", &self.hull_max_y());
+      ds.field("hull_max_z", &self.hull_max_z());
+      ds.finish()
+  }
+}
 pub enum ShardMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -5777,6 +7650,66 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_visibility_directive(&self) -> Option<VisibilityDirective<'a>> {
+    if self.payload_type() == ShardPayload::VisibilityDirective {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { VisibilityDirective::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_ship_collider_sync(&self) -> Option<ShipColliderSync<'a>> {
+    if self.payload_type() == ShardPayload::ShipColliderSync {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ShipColliderSync::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_system_entities_update(&self) -> Option<SystemEntitiesUpdate<'a>> {
+    if self.payload_type() == ShardPayload::SystemEntitiesUpdate {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { SystemEntitiesUpdate::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_planet_player_digest(&self) -> Option<PlanetPlayerDigest<'a>> {
+    if self.payload_type() == ShardPayload::PlanetPlayerDigest {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { PlanetPlayerDigest::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -5804,6 +7737,10 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::ShipPropertiesUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipPropertiesUpdate>>("ShardPayload::ShipPropertiesUpdate", pos),
           ShardPayload::SignalBroadcast => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SignalBroadcast>>("ShardPayload::SignalBroadcast", pos),
           ShardPayload::SignalBroadcastBatch => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SignalBroadcastBatch>>("ShardPayload::SignalBroadcastBatch", pos),
+          ShardPayload::VisibilityDirective => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VisibilityDirective>>("ShardPayload::VisibilityDirective", pos),
+          ShardPayload::ShipColliderSync => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipColliderSync>>("ShardPayload::ShipColliderSync", pos),
+          ShardPayload::SystemEntitiesUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SystemEntitiesUpdate>>("ShardPayload::SystemEntitiesUpdate", pos),
+          ShardPayload::PlanetPlayerDigest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlanetPlayerDigest>>("ShardPayload::PlanetPlayerDigest", pos),
           _ => Ok(()),
         }
      })?
@@ -5972,6 +7909,34 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::SignalBroadcastBatch => {
           if let Some(x) = self.payload_as_signal_broadcast_batch() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::VisibilityDirective => {
+          if let Some(x) = self.payload_as_visibility_directive() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::ShipColliderSync => {
+          if let Some(x) = self.payload_as_ship_collider_sync() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::SystemEntitiesUpdate => {
+          if let Some(x) = self.payload_as_system_entities_update() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::PlanetPlayerDigest => {
+          if let Some(x) = self.payload_as_planet_player_digest() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
@@ -7538,6 +9503,7 @@ impl<'a> WorldState<'a> {
   pub const VT_WARP_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 18;
   pub const VT_AUTOPILOT: ::flatbuffers::VOffsetT = 20;
   pub const VT_SUB_GRIDS: ::flatbuffers::VOffsetT = 22;
+  pub const VT_ENTITIES: ::flatbuffers::VOffsetT = 24;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -7551,6 +9517,7 @@ impl<'a> WorldState<'a> {
     let mut builder = WorldStateBuilder::new(_fbb);
     builder.add_game_time(args.game_time);
     builder.add_tick(args.tick);
+    if let Some(x) = args.entities { builder.add_entities(x); }
     if let Some(x) = args.sub_grids { builder.add_sub_grids(x); }
     if let Some(x) = args.autopilot { builder.add_autopilot(x); }
     builder.add_warp_target_star_index(args.warp_target_star_index);
@@ -7577,6 +9544,8 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Vec3d>(WorldState::VT_ORIGIN, None)}
   }
+  /// Deprecated: kept for one version during migration to `entities`.
+  /// New code should read `entities` for all observable entities.
   #[inline]
   pub fn players(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PlayerSnapshot<'a>>>> {
     // Safety:
@@ -7591,6 +9560,8 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CelestialBodySnapshot>>>>(WorldState::VT_BODIES, None)}
   }
+  /// Deprecated: kept for one version during migration to `entities`.
+  /// New code should read `entities` for ships.
   #[inline]
   pub fn ships(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ShipSnapshotEntry<'a>>>> {
     // Safety:
@@ -7633,6 +9604,16 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridTransform>>>>(WorldState::VT_SUB_GRIDS, None)}
   }
+  /// Unified observable entities (ships, players, EVA) with LOD tiers.
+  /// Source-of-truth going forward. The legacy `ships`/`players` fields
+  /// will be removed once all shards and clients migrate.
+  #[inline]
+  pub fn entities(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>(WorldState::VT_ENTITIES, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for WorldState<'_> {
@@ -7651,6 +9632,7 @@ impl ::flatbuffers::Verifiable for WorldState<'_> {
      .visit_field::<u32>("warp_target_star_index", Self::VT_WARP_TARGET_STAR_INDEX, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>("autopilot", Self::VT_AUTOPILOT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SubGridTransform>>>>("sub_grids", Self::VT_SUB_GRIDS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>("entities", Self::VT_ENTITIES, false)?
      .finish();
     Ok(())
   }
@@ -7666,6 +9648,7 @@ pub struct WorldStateArgs<'a> {
     pub warp_target_star_index: u32,
     pub autopilot: Option<::flatbuffers::WIPOffset<AutopilotSnapshot<'a>>>,
     pub sub_grids: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridTransform<'a>>>>>,
+    pub entities: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity<'a>>>>>,
 }
 impl<'a> Default for WorldStateArgs<'a> {
   #[inline]
@@ -7681,6 +9664,7 @@ impl<'a> Default for WorldStateArgs<'a> {
       warp_target_star_index: 4294967295,
       autopilot: None,
       sub_grids: None,
+      entities: None,
     }
   }
 }
@@ -7731,6 +9715,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WorldStateBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WorldState::VT_SUB_GRIDS, sub_grids);
   }
   #[inline]
+  pub fn add_entities(&mut self, entities: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<ObservableEntity<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WorldState::VT_ENTITIES, entities);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WorldStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     WorldStateBuilder {
@@ -7758,6 +9746,7 @@ impl ::core::fmt::Debug for WorldState<'_> {
       ds.field("warp_target_star_index", &self.warp_target_star_index());
       ds.field("autopilot", &self.autopilot());
       ds.field("sub_grids", &self.sub_grids());
+      ds.field("entities", &self.entities());
       ds.finish()
   }
 }
@@ -9396,6 +11385,253 @@ impl ::core::fmt::Debug for ShardRedirectMsg<'_> {
       ds.finish()
   }
 }
+pub enum ShardHandoffMsgOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Seamless handoff: client promotes an existing secondary connection to primary.
+/// Replaces ShardRedirectMsg for shard-to-shard transitions (launch, land, board, warp).
+/// Requires the destination shard to already be streaming to the client as a secondary
+/// and to have spawned a PendingOwnership observer entity for this session_token.
+/// The destination shard flips observer → owned on receipt of the source shard's
+/// HandoffAccepted / PlayerHandoff pair.
+pub struct ShardHandoffMsg<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ShardHandoffMsg<'a> {
+  type Inner = ShardHandoffMsg<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ShardHandoffMsg<'a> {
+  pub const VT_SESSION_TOKEN: ::flatbuffers::VOffsetT = 4;
+  pub const VT_PROMOTE_SHARD_TYPE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PROMOTE_SHARD_ID: ::flatbuffers::VOffsetT = 8;
+  pub const VT_TARGET_TCP_ADDR: ::flatbuffers::VOffsetT = 10;
+  pub const VT_TARGET_UDP_ADDR: ::flatbuffers::VOffsetT = 12;
+  pub const VT_SOURCE_DEMOTE_AFTER_TICKS: ::flatbuffers::VOffsetT = 14;
+  pub const VT_HANDOFF_POSITION: ::flatbuffers::VOffsetT = 16;
+  pub const VT_HANDOFF_VELOCITY: ::flatbuffers::VOffsetT = 18;
+  pub const VT_HANDOFF_ROTATION: ::flatbuffers::VOffsetT = 20;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ShardHandoffMsg { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ShardHandoffMsgArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ShardHandoffMsg<'bldr>> {
+    let mut builder = ShardHandoffMsgBuilder::new(_fbb);
+    builder.add_promote_shard_id(args.promote_shard_id);
+    builder.add_session_token(args.session_token);
+    if let Some(x) = args.handoff_rotation { builder.add_handoff_rotation(x); }
+    if let Some(x) = args.handoff_velocity { builder.add_handoff_velocity(x); }
+    if let Some(x) = args.handoff_position { builder.add_handoff_position(x); }
+    if let Some(x) = args.target_udp_addr { builder.add_target_udp_addr(x); }
+    if let Some(x) = args.target_tcp_addr { builder.add_target_tcp_addr(x); }
+    builder.add_source_demote_after_ticks(args.source_demote_after_ticks);
+    builder.add_promote_shard_type(args.promote_shard_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn session_token(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShardHandoffMsg::VT_SESSION_TOKEN, Some(0)).unwrap()}
+  }
+  /// Which currently-active secondary the client should promote.
+  /// (0=Planet, 1=System, 2=Ship, 3=Galaxy)
+  #[inline]
+  pub fn promote_shard_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ShardHandoffMsg::VT_PROMOTE_SHARD_TYPE, Some(0)).unwrap()}
+  }
+  /// Shard ID of the secondary to promote (disambiguates multiple of same type).
+  #[inline]
+  pub fn promote_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShardHandoffMsg::VT_PROMOTE_SHARD_ID, Some(0)).unwrap()}
+  }
+  /// TCP address of the destination shard (for client input redirection).
+  /// May match an already-open secondary TCP — client reuses the existing stream.
+  #[inline]
+  pub fn target_tcp_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ShardHandoffMsg::VT_TARGET_TCP_ADDR, None)}
+  }
+  /// UDP address of the destination shard.
+  #[inline]
+  pub fn target_udp_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ShardHandoffMsg::VT_TARGET_UDP_ADDR, None)}
+  }
+  /// How long the source shard will keep ghosting this player (ticks).
+  #[inline]
+  pub fn source_demote_after_ticks(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ShardHandoffMsg::VT_SOURCE_DEMOTE_AFTER_TICKS, Some(15)).unwrap()}
+  }
+  /// Anchor at handoff tick in destination-frame coordinates
+  /// (client uses this for a short interpolation blend across the switch).
+  #[inline]
+  pub fn handoff_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ShardHandoffMsg::VT_HANDOFF_POSITION, None)}
+  }
+  #[inline]
+  pub fn handoff_velocity(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ShardHandoffMsg::VT_HANDOFF_VELOCITY, None)}
+  }
+  #[inline]
+  pub fn handoff_rotation(&self) -> Option<&'a Quatd> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Quatd>(ShardHandoffMsg::VT_HANDOFF_ROTATION, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ShardHandoffMsg<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("session_token", Self::VT_SESSION_TOKEN, false)?
+     .visit_field::<u8>("promote_shard_type", Self::VT_PROMOTE_SHARD_TYPE, false)?
+     .visit_field::<u64>("promote_shard_id", Self::VT_PROMOTE_SHARD_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_tcp_addr", Self::VT_TARGET_TCP_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_udp_addr", Self::VT_TARGET_UDP_ADDR, false)?
+     .visit_field::<u8>("source_demote_after_ticks", Self::VT_SOURCE_DEMOTE_AFTER_TICKS, false)?
+     .visit_field::<Vec3d>("handoff_position", Self::VT_HANDOFF_POSITION, false)?
+     .visit_field::<Vec3d>("handoff_velocity", Self::VT_HANDOFF_VELOCITY, false)?
+     .visit_field::<Quatd>("handoff_rotation", Self::VT_HANDOFF_ROTATION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ShardHandoffMsgArgs<'a> {
+    pub session_token: u64,
+    pub promote_shard_type: u8,
+    pub promote_shard_id: u64,
+    pub target_tcp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub target_udp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub source_demote_after_ticks: u8,
+    pub handoff_position: Option<&'a Vec3d>,
+    pub handoff_velocity: Option<&'a Vec3d>,
+    pub handoff_rotation: Option<&'a Quatd>,
+}
+impl<'a> Default for ShardHandoffMsgArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ShardHandoffMsgArgs {
+      session_token: 0,
+      promote_shard_type: 0,
+      promote_shard_id: 0,
+      target_tcp_addr: None,
+      target_udp_addr: None,
+      source_demote_after_ticks: 15,
+      handoff_position: None,
+      handoff_velocity: None,
+      handoff_rotation: None,
+    }
+  }
+}
+
+pub struct ShardHandoffMsgBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShardHandoffMsgBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_session_token(&mut self, session_token: u64) {
+    self.fbb_.push_slot::<u64>(ShardHandoffMsg::VT_SESSION_TOKEN, session_token, 0);
+  }
+  #[inline]
+  pub fn add_promote_shard_type(&mut self, promote_shard_type: u8) {
+    self.fbb_.push_slot::<u8>(ShardHandoffMsg::VT_PROMOTE_SHARD_TYPE, promote_shard_type, 0);
+  }
+  #[inline]
+  pub fn add_promote_shard_id(&mut self, promote_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(ShardHandoffMsg::VT_PROMOTE_SHARD_ID, promote_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_target_tcp_addr(&mut self, target_tcp_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ShardHandoffMsg::VT_TARGET_TCP_ADDR, target_tcp_addr);
+  }
+  #[inline]
+  pub fn add_target_udp_addr(&mut self, target_udp_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ShardHandoffMsg::VT_TARGET_UDP_ADDR, target_udp_addr);
+  }
+  #[inline]
+  pub fn add_source_demote_after_ticks(&mut self, source_demote_after_ticks: u8) {
+    self.fbb_.push_slot::<u8>(ShardHandoffMsg::VT_SOURCE_DEMOTE_AFTER_TICKS, source_demote_after_ticks, 15);
+  }
+  #[inline]
+  pub fn add_handoff_position(&mut self, handoff_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ShardHandoffMsg::VT_HANDOFF_POSITION, handoff_position);
+  }
+  #[inline]
+  pub fn add_handoff_velocity(&mut self, handoff_velocity: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ShardHandoffMsg::VT_HANDOFF_VELOCITY, handoff_velocity);
+  }
+  #[inline]
+  pub fn add_handoff_rotation(&mut self, handoff_rotation: &Quatd) {
+    self.fbb_.push_slot_always::<&Quatd>(ShardHandoffMsg::VT_HANDOFF_ROTATION, handoff_rotation);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShardHandoffMsgBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ShardHandoffMsgBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ShardHandoffMsg<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ShardHandoffMsg<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ShardHandoffMsg");
+      ds.field("session_token", &self.session_token());
+      ds.field("promote_shard_type", &self.promote_shard_type());
+      ds.field("promote_shard_id", &self.promote_shard_id());
+      ds.field("target_tcp_addr", &self.target_tcp_addr());
+      ds.field("target_udp_addr", &self.target_udp_addr());
+      ds.field("source_demote_after_ticks", &self.source_demote_after_ticks());
+      ds.field("handoff_position", &self.handoff_position());
+      ds.field("handoff_velocity", &self.handoff_velocity());
+      ds.field("handoff_rotation", &self.handoff_rotation());
+      ds.finish()
+  }
+}
 pub enum ShardPreConnectOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -9420,6 +11656,7 @@ impl<'a> ShardPreConnect<'a> {
   pub const VT_PLANET_INDEX: ::flatbuffers::VOffsetT = 12;
   pub const VT_REFERENCE_POSITION: ::flatbuffers::VOffsetT = 14;
   pub const VT_REFERENCE_ROTATION: ::flatbuffers::VOffsetT = 16;
+  pub const VT_SHARD_ID: ::flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -9431,6 +11668,7 @@ impl<'a> ShardPreConnect<'a> {
     args: &'args ShardPreConnectArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ShardPreConnect<'bldr>> {
     let mut builder = ShardPreConnectBuilder::new(_fbb);
+    builder.add_shard_id(args.shard_id);
     builder.add_seed(args.seed);
     if let Some(x) = args.reference_rotation { builder.add_reference_rotation(x); }
     if let Some(x) = args.reference_position { builder.add_reference_position(x); }
@@ -9491,6 +11729,13 @@ impl<'a> ShardPreConnect<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Quatd>(ShardPreConnect::VT_REFERENCE_ROTATION, None)}
   }
+  #[inline]
+  pub fn shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShardPreConnect::VT_SHARD_ID, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ShardPreConnect<'_> {
@@ -9506,6 +11751,7 @@ impl ::flatbuffers::Verifiable for ShardPreConnect<'_> {
      .visit_field::<u32>("planet_index", Self::VT_PLANET_INDEX, false)?
      .visit_field::<Vec3d>("reference_position", Self::VT_REFERENCE_POSITION, false)?
      .visit_field::<Quatd>("reference_rotation", Self::VT_REFERENCE_ROTATION, false)?
+     .visit_field::<u64>("shard_id", Self::VT_SHARD_ID, false)?
      .finish();
     Ok(())
   }
@@ -9518,6 +11764,7 @@ pub struct ShardPreConnectArgs<'a> {
     pub planet_index: u32,
     pub reference_position: Option<&'a Vec3d>,
     pub reference_rotation: Option<&'a Quatd>,
+    pub shard_id: u64,
 }
 impl<'a> Default for ShardPreConnectArgs<'a> {
   #[inline]
@@ -9530,6 +11777,7 @@ impl<'a> Default for ShardPreConnectArgs<'a> {
       planet_index: 0,
       reference_position: None,
       reference_rotation: None,
+      shard_id: 0,
     }
   }
 }
@@ -9568,6 +11816,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShardPreConnectBuilder<'a, 'b
     self.fbb_.push_slot_always::<&Quatd>(ShardPreConnect::VT_REFERENCE_ROTATION, reference_rotation);
   }
   #[inline]
+  pub fn add_shard_id(&mut self, shard_id: u64) {
+    self.fbb_.push_slot::<u64>(ShardPreConnect::VT_SHARD_ID, shard_id, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShardPreConnectBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ShardPreConnectBuilder {
@@ -9592,6 +11844,121 @@ impl ::core::fmt::Debug for ShardPreConnect<'_> {
       ds.field("planet_index", &self.planet_index());
       ds.field("reference_position", &self.reference_position());
       ds.field("reference_rotation", &self.reference_rotation());
+      ds.field("shard_id", &self.shard_id());
+      ds.finish()
+  }
+}
+pub enum ShardDisconnectNotifyOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Server → client: tear down a specific secondary connection.
+pub struct ShardDisconnectNotify<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ShardDisconnectNotify<'a> {
+  type Inner = ShardDisconnectNotify<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ShardDisconnectNotify<'a> {
+  pub const VT_SHARD_TYPE: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SEED: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ShardDisconnectNotify { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ShardDisconnectNotifyArgs
+  ) -> ::flatbuffers::WIPOffset<ShardDisconnectNotify<'bldr>> {
+    let mut builder = ShardDisconnectNotifyBuilder::new(_fbb);
+    builder.add_seed(args.seed);
+    builder.add_shard_type(args.shard_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn shard_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ShardDisconnectNotify::VT_SHARD_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn seed(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShardDisconnectNotify::VT_SEED, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ShardDisconnectNotify<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u8>("shard_type", Self::VT_SHARD_TYPE, false)?
+     .visit_field::<u64>("seed", Self::VT_SEED, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ShardDisconnectNotifyArgs {
+    pub shard_type: u8,
+    pub seed: u64,
+}
+impl<'a> Default for ShardDisconnectNotifyArgs {
+  #[inline]
+  fn default() -> Self {
+    ShardDisconnectNotifyArgs {
+      shard_type: 0,
+      seed: 0,
+    }
+  }
+}
+
+pub struct ShardDisconnectNotifyBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShardDisconnectNotifyBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_shard_type(&mut self, shard_type: u8) {
+    self.fbb_.push_slot::<u8>(ShardDisconnectNotify::VT_SHARD_TYPE, shard_type, 0);
+  }
+  #[inline]
+  pub fn add_seed(&mut self, seed: u64) {
+    self.fbb_.push_slot::<u64>(ShardDisconnectNotify::VT_SEED, seed, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShardDisconnectNotifyBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ShardDisconnectNotifyBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ShardDisconnectNotify<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ShardDisconnectNotify<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ShardDisconnectNotify");
+      ds.field("shard_type", &self.shard_type());
+      ds.field("seed", &self.seed());
       ds.finish()
   }
 }
@@ -13498,6 +15865,36 @@ impl<'a> ServerMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_shard_disconnect_notify(&self) -> Option<ShardDisconnectNotify<'a>> {
+    if self.payload_type() == ServerPayload::ShardDisconnectNotify {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ShardDisconnectNotify::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_shard_handoff_msg(&self) -> Option<ShardHandoffMsg<'a>> {
+    if self.payload_type() == ServerPayload::ShardHandoffMsg {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ShardHandoffMsg::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ServerMessage<'_> {
@@ -13522,6 +15919,8 @@ impl ::flatbuffers::Verifiable for ServerMessage<'_> {
           ServerPayload::BlockConfigState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockConfigState>>("ServerPayload::BlockConfigState", pos),
           ServerPayload::SeatBindingsNotify => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SeatBindingsNotify>>("ServerPayload::SeatBindingsNotify", pos),
           ServerPayload::SubGridAssignmentUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SubGridAssignmentUpdate>>("ServerPayload::SubGridAssignmentUpdate", pos),
+          ServerPayload::ShardDisconnectNotify => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShardDisconnectNotify>>("ServerPayload::ShardDisconnectNotify", pos),
+          ServerPayload::ShardHandoffMsg => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShardHandoffMsg>>("ServerPayload::ShardHandoffMsg", pos),
           _ => Ok(()),
         }
      })?
@@ -13674,11 +16073,124 @@ impl ::core::fmt::Debug for ServerMessage<'_> {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
           }
         },
+        ServerPayload::ShardDisconnectNotify => {
+          if let Some(x) = self.payload_as_shard_disconnect_notify() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::ShardHandoffMsg => {
+          if let Some(x) = self.payload_as_shard_handoff_msg() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
         _ => {
           let x: Option<()> = None;
           ds.field("payload", &x)
         },
       };
+      ds.finish()
+  }
+}
+pub enum ObserverConnectOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Client → server: open an observer-only connection (no player entity).
+/// Used for dual-shard compositing: the client receives chunk data and
+/// WorldState broadcasts but does not participate in gameplay.
+pub struct ObserverConnect<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ObserverConnect<'a> {
+  type Inner = ObserverConnect<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ObserverConnect<'a> {
+  pub const VT_OBSERVER_NAME: ::flatbuffers::VOffsetT = 4;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ObserverConnect { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ObserverConnectArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ObserverConnect<'bldr>> {
+    let mut builder = ObserverConnectBuilder::new(_fbb);
+    if let Some(x) = args.observer_name { builder.add_observer_name(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn observer_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ObserverConnect::VT_OBSERVER_NAME, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ObserverConnect<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("observer_name", Self::VT_OBSERVER_NAME, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ObserverConnectArgs<'a> {
+    pub observer_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for ObserverConnectArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ObserverConnectArgs {
+      observer_name: None,
+    }
+  }
+}
+
+pub struct ObserverConnectBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ObserverConnectBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_observer_name(&mut self, observer_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ObserverConnect::VT_OBSERVER_NAME, observer_name);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ObserverConnectBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ObserverConnectBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ObserverConnect<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ObserverConnect<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ObserverConnect");
+      ds.field("observer_name", &self.observer_name());
       ds.finish()
   }
 }
@@ -13807,6 +16319,21 @@ impl<'a> ClientMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_observer_connect(&self) -> Option<ObserverConnect<'a>> {
+    if self.payload_type() == ClientPayload::ObserverConnect {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ObserverConnect::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ClientMessage<'_> {
@@ -13822,6 +16349,7 @@ impl ::flatbuffers::Verifiable for ClientMessage<'_> {
           ClientPayload::BlockEditRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockEditRequest>>("ClientPayload::BlockEditRequest", pos),
           ClientPayload::BlockConfigUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockConfigUpdate>>("ClientPayload::BlockConfigUpdate", pos),
           ClientPayload::SubBlockEditRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SubBlockEditRequest>>("ClientPayload::SubBlockEditRequest", pos),
+          ClientPayload::ObserverConnect => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ObserverConnect>>("ClientPayload::ObserverConnect", pos),
           _ => Ok(()),
         }
      })?
@@ -13906,6 +16434,13 @@ impl ::core::fmt::Debug for ClientMessage<'_> {
         },
         ClientPayload::SubBlockEditRequest => {
           if let Some(x) = self.payload_as_sub_block_edit_request() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::ObserverConnect => {
+          if let Some(x) = self.payload_as_observer_connect() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

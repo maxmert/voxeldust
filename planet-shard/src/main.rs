@@ -9,12 +9,14 @@ use rapier3d::prelude::*;
 use tracing::{info, warn};
 
 use voxeldust_core::client_message::{
-    CelestialBodyData, JoinResponseData, LightingData, PlayerSnapshotData, ServerMsg,
-    ShipRenderData, WorldStateData,
+    CelestialBodyData, EntityKind, JoinResponseData, LightingData, LodTier, ObservableEntityData,
+    PlayerSnapshotData, ServerMsg, ShipRenderData, WorldStateData,
 };
 use voxeldust_core::ecs;
 use voxeldust_core::handoff;
-use voxeldust_core::shard_message::{ShardMsg, ShipNearbyInfoData};
+use voxeldust_core::shard_message::{
+    AoiTarget, PlanetPlayerDigestData, PlanetPlayerDigestEntry, ShardMsg, ShipNearbyInfoData,
+};
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{compute_lighting, compute_planet_position, SystemParams};
 use voxeldust_shard_common::client_listener;
@@ -149,6 +151,15 @@ struct ShipPosition(DVec3);
 #[derive(Component)]
 struct ShipRotation(DQuat);
 
+/// Rapier rigid body handle for the ship's exterior collider (KinematicPositionBased).
+/// Created when ShipColliderSync is received from the ship shard.
+#[derive(Component)]
+struct ShipColliderBody(rapier3d::dynamics::RigidBodyHandle);
+
+/// Rapier collider handle for the ship's compound hull shape.
+#[derive(Component)]
+struct ShipColliderAttached(rapier3d::geometry::ColliderHandle);
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -224,6 +235,17 @@ struct HandoffSpawnInfo {
 #[derive(Resource, Default)]
 struct PendingHandoffs(HashMap<String, HandoffSpawnInfo>);
 
+/// Latest AOI snapshot received from the system shard.
+/// System shard sends entities in system-space coordinates with `observer_position`
+/// set to this planet's system-space position. We transform to planet-local by
+/// subtracting the planet's system-space position at broadcast time.
+#[derive(Resource, Default)]
+struct ExternalEntities {
+    entities: Vec<ObservableEntityData>,
+    observer_position: DVec3,
+    tick: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
@@ -260,6 +282,10 @@ struct HandoffAcceptedMsg {
     session: SessionToken,
     target_shard: ShardId,
 }
+
+/// Ship collider shapes from ship shard (for physical collision).
+#[derive(Message)]
+struct ShipColliderSyncMsg(voxeldust_core::shard_message::ShipColliderSyncData);
 
 
 // ---------------------------------------------------------------------------
@@ -326,6 +352,8 @@ fn drain_quic(
     mut handoff_events: MessageWriter<InboundHandoffMsg>,
     mut ship_nearby_events: MessageWriter<ShipNearbyMsg>,
     mut accepted_events: MessageWriter<HandoffAcceptedMsg>,
+    mut collider_sync_events: MessageWriter<ShipColliderSyncMsg>,
+    mut external_entities: ResMut<ExternalEntities>,
     mut celestial_time: ResMut<CelestialTimeRes>,
     mut planet_pos: ResMut<PlanetPositionInSystem>,
     sys_params: Res<SystemParamsRes>,
@@ -355,11 +383,24 @@ fn drain_quic(
                 }
                 ship_nearby_events.write(ShipNearbyMsg(info));
             }
+            ShardMsg::SystemEntitiesUpdate(data) => {
+                // Accept only updates addressed to this planet.
+                if let AoiTarget::Planet(idx) = data.target {
+                    if idx == config.planet_index && data.tick >= external_entities.tick {
+                        external_entities.entities = data.entities;
+                        external_entities.observer_position = data.observer_position;
+                        external_entities.tick = data.tick;
+                    }
+                }
+            }
             ShardMsg::HandoffAccepted(accepted) => {
                 accepted_events.write(HandoffAcceptedMsg {
                     session: accepted.session_token,
                     target_shard: accepted.target_shard,
                 });
+            }
+            ShardMsg::ShipColliderSync(data) => {
+                collider_sync_events.write(ShipColliderSyncMsg(data));
             }
             _ => {}
         }
@@ -408,6 +449,7 @@ fn process_connects(
     celestial_time: Res<CelestialTimeRes>,
     mut player_index: ResMut<PlayerEntityIndex>,
     mut pending: ResMut<PendingHandoffs>,
+    bridge: Res<NetworkBridge>,
 ) {
     for event in events.read() {
         let token = event.session_token;
@@ -447,6 +489,24 @@ fn process_connects(
 
         info!(player = %event.player_name, session = token.0, "player spawned on planet");
 
+        // Look up the host system shard's endpoints (for always-on scene secondary).
+        let system_preconnect = if let Ok(reg) = bridge.peer_registry.try_read() {
+            reg.find_by_type(ShardType::System).first().map(|info| {
+                handoff::ShardPreConnect {
+                    shard_type: 1, // System
+                    tcp_addr: info.endpoint.tcp_addr.to_string(),
+                    udp_addr: info.endpoint.udp_addr.to_string(),
+                    seed: sys_seed,
+                    planet_index: 0,
+                    reference_position: DVec3::ZERO,
+                    reference_rotation: DQuat::IDENTITY,
+                    shard_id: info.id.0,
+                }
+            })
+        } else {
+            None
+        };
+
         tokio::spawn(async move {
             let jr = ServerMsg::JoinResponse(JoinResponseData {
                 seed: 0,
@@ -465,6 +525,16 @@ fn process_connects(
             });
             let mut writer = tcp_write.lock().await;
             let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
+            // Follow immediately with a ShardPreConnect for the host system shard.
+            // System and Galaxy secondaries are always-on and not counted against
+            // the client's secondary cap.
+            if let Some(pc) = system_preconnect {
+                let _ = client_listener::send_tcp_msg(
+                    &mut *writer,
+                    &ServerMsg::ShardPreConnect(pc),
+                )
+                .await;
+            }
         });
     }
 }
@@ -584,6 +654,7 @@ fn process_ship_nearby(
     config: Res<PlanetConfig>,
     mut ship_index: ResMut<ShipEntityIndex>,
     mut existing_ships: Query<(&NearbyShipId, &mut ShipPosition, &mut ShipRotation)>,
+    bridge: Res<NetworkBridge>,
 ) {
     for event in events.read() {
         let info = &event.0;
@@ -623,6 +694,150 @@ fn process_ship_nearby(
                 ))
                 .id();
             ship_index.0.insert(info.ship_id, entity);
+
+            // Send ShardPreConnect to all connected planet clients so they
+            // open observer connections to this ship shard and receive chunk data.
+            let ship_shard_id = info.ship_shard_id;
+            let ship_id = info.ship_id;
+            if let Ok(reg) = bridge.peer_registry.try_read() {
+                if let Some(peer) = reg.get(ship_shard_id) {
+                    let pc = ServerMsg::ShardPreConnect(handoff::ShardPreConnect {
+                        shard_type: 2, // Ship
+                        tcp_addr: peer.endpoint.tcp_addr.to_string(),
+                        udp_addr: peer.endpoint.udp_addr.to_string(),
+                        seed: ship_id,
+                        planet_index: 0,
+                        reference_position: DVec3::ZERO,
+                        reference_rotation: DQuat::IDENTITY,
+                        shard_id: ship_shard_id.0,
+                    });
+                    let cr = bridge.client_registry.clone();
+                    tokio::spawn(async move {
+                        if let Ok(reg) = cr.try_read() {
+                            for addr in reg.udp_addrs() {
+                                if let Some(session) = reg.session_for_udp(addr) {
+                                    let _ = reg.send_tcp(session, &pc).await;
+                                }
+                            }
+                        }
+                    });
+                    tracing::info!(ship_id, shard = ship_shard_id.0, "sent ShardPreConnect for ship to planet clients");
+                }
+            }
+        }
+    }
+}
+
+/// Build or update Rapier compound colliders for nearby ships from ShipColliderSync.
+/// Uses a KinematicPositionBased rigid body so we can update position each tick.
+fn process_ship_colliders(
+    mut events: MessageReader<ShipColliderSyncMsg>,
+    ship_index: Res<ShipEntityIndex>,
+    mut rapier: ResMut<RapierContext>,
+    mut commands: Commands,
+    ships: Query<(
+        &ShipPosition,
+        &ShipRotation,
+        Option<&ShipColliderBody>,
+        Option<&ShipColliderAttached>,
+    ), With<NearbyShip>>,
+) {
+    use rapier3d::prelude::*;
+
+    for event in events.read() {
+        let data = &event.0;
+        let Some(&entity) = ship_index.0.get(&data.ship_id) else {
+            warn!(ship_id = data.ship_id, "ShipColliderSync for unknown ship — ignoring");
+            continue;
+        };
+
+        let Ok((pos, rot, existing_body, existing_collider)) = ships.get(entity) else {
+            continue;
+        };
+
+        // Remove existing body (which also removes its attached colliders).
+        if let Some(body_comp) = existing_body {
+            let ctx = &mut *rapier;
+            ctx.rigid_body_set.remove(
+                body_comp.0,
+                &mut ctx.island_manager,
+                &mut ctx.collider_set,
+                &mut ctx.impulse_joint_set,
+                &mut ctx.multibody_joint_set,
+                true,
+            );
+        }
+
+        // Build compound shape from all chunks' collider shapes.
+        let mut shapes: Vec<(Isometry<f32>, SharedShape)> = Vec::new();
+        for chunk in &data.chunks {
+            for &(center, half_extents) in &chunk.shapes {
+                let iso = Isometry::translation(center.x, center.y, center.z);
+                let shape = SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z);
+                shapes.push((iso, shape));
+            }
+        }
+
+        if shapes.is_empty() {
+            // No solid blocks — remove collider components.
+            commands.entity(entity).remove::<ShipColliderBody>();
+            commands.entity(entity).remove::<ShipColliderAttached>();
+            continue;
+        }
+
+        // Convert ship position to Rapier coordinates.
+        // Planet shard positions are planet-local (DVec3); Rapier uses f32.
+        // For ships near the surface, planet-local coords are small enough for f32.
+        let ship_pos_f32 = glam::Vec3::new(
+            pos.0.x as f32, pos.0.y as f32, pos.0.z as f32,
+        );
+        let ship_rot_f32 = glam::Quat::from_xyzw(
+            rot.0.x as f32, rot.0.y as f32, rot.0.z as f32, rot.0.w as f32,
+        );
+
+        // Create KinematicPositionBased body (position updated each tick).
+        let rb = RigidBodyBuilder::kinematic_position_based()
+            .translation(vector![ship_pos_f32.x, ship_pos_f32.y, ship_pos_f32.z])
+            .build();
+        let ctx = &mut *rapier;
+        let body_handle = ctx.rigid_body_set.insert(rb);
+
+        // Attach compound collider.
+        let compound = ColliderBuilder::compound(shapes).build();
+        let collider_handle = ctx.collider_set.insert_with_parent(
+            compound,
+            body_handle,
+            &mut ctx.rigid_body_set,
+        );
+
+        commands.entity(entity).insert(ShipColliderBody(body_handle));
+        commands.entity(entity).insert(ShipColliderAttached(collider_handle));
+
+        info!(
+            ship_id = data.ship_id,
+            chunks = data.chunks.len(),
+            "built ship exterior compound collider"
+        );
+    }
+}
+
+/// Update Rapier body positions for ship exterior colliders when ShipNearbyInfo updates.
+fn update_ship_collider_positions(
+    ships: Query<(&ShipPosition, &ShipRotation, &ShipColliderBody), With<NearbyShip>>,
+    mut rapier: ResMut<RapierContext>,
+) {
+    for (pos, rot, body_comp) in &ships {
+        if let Some(body) = rapier.rigid_body_set.get_mut(body_comp.0) {
+            let p = glam::Vec3::new(pos.0.x as f32, pos.0.y as f32, pos.0.z as f32);
+            let r = glam::Quat::from_xyzw(
+                rot.0.x as f32, rot.0.y as f32, rot.0.z as f32, rot.0.w as f32,
+            );
+            body.set_next_kinematic_position(rapier3d::na::Isometry3::from_parts(
+                rapier3d::na::Translation3::new(p.x, p.y, p.z),
+                rapier3d::na::UnitQuaternion::new_normalize(
+                    rapier3d::na::Quaternion::new(r.w, r.x, r.y, r.z),
+                ),
+            ));
         }
     }
 }
@@ -908,6 +1123,7 @@ fn ship_proximity(
                 game_time: celestial_time.0,
                 warp_target_star_index: None,
                 warp_velocity_gu: None,
+                target_system_eva: false,
             };
 
             // Mark player as pending handoff.
@@ -991,7 +1207,7 @@ fn disconnect_cleanup(
 // ---------------------------------------------------------------------------
 
 fn broadcast_world_state(
-    players: Query<(&SessionId, &PlanetPosition), With<PlanetPlayer>>,
+    players: Query<(&SessionId, &Name, &PlanetPosition), With<PlanetPlayer>>,
     ships: Query<(&NearbyShipId, &ShipPosition, &ShipRotation), With<NearbyShip>>,
     config: Res<PlanetConfig>,
     sys_params: Res<SystemParamsRes>,
@@ -1000,10 +1216,11 @@ fn broadcast_world_state(
     celestial_time: Res<CelestialTimeRes>,
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
+    external: Res<ExternalEntities>,
 ) {
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, pos)| PlayerSnapshotData {
+        .map(|(sid, _, pos)| PlayerSnapshotData {
             player_id: sid.0.0,
             position: pos.0,
             rotation: DQuat::IDENTITY,
@@ -1043,7 +1260,7 @@ fn broadcast_world_state(
     let first_player_pos = players
         .iter()
         .next()
-        .map(|(_, p)| p.0)
+        .map(|(_, _, p)| p.0)
         .unwrap_or(DVec3::new(0.0, config.planet_radius + 2.0, 0.0));
 
     let lighting = if let Some(ref sys) = sys_params.0 {
@@ -1069,6 +1286,36 @@ fn broadcast_world_state(
         })
         .collect();
 
+    // Build unified entities list: external (system-space) entities transformed
+    // into planet-local + every local grounded player as a GroundedPlayer.
+    // Origin == planet_pos.0, so the client adds origin to reconstruct world-space.
+    let mut entities: Vec<ObservableEntityData> = Vec::with_capacity(
+        external.entities.len() + players.iter().count(),
+    );
+    for e in &external.entities {
+        let mut entity = e.clone();
+        // Convert system-space position to planet-local frame (origin = planet_pos.0).
+        entity.position = e.position - planet_pos.0;
+        entities.push(entity);
+    }
+    for (sid, name, pos) in players.iter() {
+        entities.push(ObservableEntityData {
+            entity_id: sid.0.0,
+            kind: EntityKind::GroundedPlayer,
+            position: pos.0,
+            rotation: DQuat::IDENTITY,
+            velocity: DVec3::ZERO,
+            bounding_radius: 1.0,
+            lod_tier: LodTier::Full,
+            shard_id: config.shard_id.0,
+            shard_type: ShardType::Planet as u8,
+            is_own: false,
+            name: name.0.clone(),
+            health: 100.0,
+            shield: 100.0,
+        });
+    }
+
     let ws = ServerMsg::WorldState(WorldStateData {
         tick: tick.0,
         origin: planet_pos.0,
@@ -1080,9 +1327,55 @@ fn broadcast_world_state(
         warp_target_star_index: 0xFFFFFFFF,
         autopilot: None,
         sub_grids: vec![],
+        entities,
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("WorldState broadcast dropped — channel full");
+    }
+}
+
+/// Emit a PlanetPlayerDigest at 1 Hz so the system shard can include surface
+/// players in its AOI for distant observers (ships, EVA).
+fn send_player_digest(
+    players: Query<(&SessionId, &Name, &PlanetPosition), With<PlanetPlayer>>,
+    config: Res<PlanetConfig>,
+    planet_pos: Res<PlanetPositionInSystem>,
+    tick: Res<ecs::TickCounter>,
+    bridge: Res<NetworkBridge>,
+) {
+    // ~1 Hz at 20 Hz tick.
+    if tick.0 % 20 != 0 {
+        return;
+    }
+    if players.is_empty() {
+        return;
+    }
+
+    let entries: Vec<PlanetPlayerDigestEntry> = players
+        .iter()
+        .map(|(sid, name, pos)| PlanetPlayerDigestEntry {
+            session_token: sid.0,
+            player_name: name.0.clone(),
+            // Transform planet-local position to system-space (what system shard expects).
+            position: planet_pos.0 + pos.0,
+            rotation: DQuat::IDENTITY,
+            planet_index: config.planet_index,
+        })
+        .collect();
+
+    let digest = ShardMsg::PlanetPlayerDigest(PlanetPlayerDigestData {
+        planet_shard: config.shard_id,
+        planet_seed: config.planet_seed,
+        planet_index: config.planet_index,
+        entries,
+        tick: tick.0,
+    });
+
+    // Find the system shard and send.
+    if let Ok(reg) = bridge.peer_registry.try_read() {
+        if let Some(info) = reg.find_by_type(ShardType::System).first() {
+            let _ = bridge.quic_send_tx.try_send((info.id, info.endpoint.quic_addr, digest));
+        }
     }
 }
 
@@ -1179,6 +1472,7 @@ fn build_app(
     app.insert_resource(PlayerEntityIndex::default());
     app.insert_resource(ShipEntityIndex::default());
     app.insert_resource(PendingHandoffs::default());
+    app.insert_resource(ExternalEntities::default());
 
     // Messages.
     app.add_message::<ClientConnectedMsg>();
@@ -1186,6 +1480,7 @@ fn build_app(
     app.add_message::<InboundHandoffMsg>();
     app.add_message::<ShipNearbyMsg>();
     app.add_message::<HandoffAcceptedMsg>();
+    app.add_message::<ShipColliderSyncMsg>();
 
     // System ordering.
     app.configure_sets(
@@ -1216,6 +1511,7 @@ fn build_app(
             process_connects,
             process_handoffs,
             process_ship_nearby,
+            process_ship_colliders,
             process_handoff_accepted,
         )
             .in_set(PlanetSet::Spawn),
@@ -1235,7 +1531,7 @@ fn build_app(
     // Physics.
     app.add_systems(
         Update,
-        (physics_step, refresh_planet_position_cache, tangent_frame_sync)
+        (physics_step, refresh_planet_position_cache, tangent_frame_sync, update_ship_collider_positions)
             .chain()
             .in_set(PlanetSet::Physics),
     );
@@ -1255,7 +1551,10 @@ fn build_app(
     );
 
     // Broadcast.
-    app.add_systems(Update, broadcast_world_state.in_set(PlanetSet::Broadcast));
+    app.add_systems(
+        Update,
+        (broadcast_world_state, send_player_digest).in_set(PlanetSet::Broadcast),
+    );
 
     // Diagnostics.
     app.add_systems(Update, log_state.in_set(PlanetSet::Diagnostics));

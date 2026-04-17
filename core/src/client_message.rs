@@ -411,6 +411,8 @@ pub enum ClientMsg {
     BlockConfigUpdate(crate::signal::config::BlockConfigUpdateData),
     /// Place or remove a sub-block element on a block face.
     SubBlockEdit(SubBlockEditData),
+    /// Observer-only connection (no player entity, receives chunk data + WorldState).
+    ObserverConnect { observer_name: String },
 }
 
 /// Server → client messages.
@@ -435,6 +437,12 @@ pub enum ServerMsg {
     SeatBindingsNotify(SeatBindingsNotifyData),
     /// Sub-grid block assignment update (TCP, reliable).
     SubGridAssignmentUpdate(SubGridAssignmentData),
+    /// Tear down a specific secondary connection (by shard_type + seed).
+    ShardDisconnectNotify(handoff::ShardDisconnectNotify),
+    /// Seamless promotion handoff: promote an already-open secondary to primary.
+    /// Used for in-game transitions (launch, land, board, warp) where
+    /// `ShardRedirect`'s tear-down/rebuild would cause a visible micro-freeze.
+    ShardHandoff(handoff::ShardHandoff),
 }
 
 /// Seat bindings sent to client when player enters a seat.
@@ -555,8 +563,10 @@ pub struct SubBlockEditData {
 pub struct WorldStateData {
     pub tick: u64,
     pub origin: DVec3,
+    /// Deprecated: kept during migration to `entities`. New code reads `entities`.
     pub players: Vec<PlayerSnapshotData>,
     pub bodies: Vec<CelestialBodyData>,
+    /// Deprecated: kept during migration to `entities`. New code reads `entities`.
     pub ships: Vec<ShipRenderData>,
     pub lighting: Option<LightingData>,
     pub game_time: f64,
@@ -566,6 +576,10 @@ pub struct WorldStateData {
     pub autopilot: Option<AutopilotSnapshotData>,
     /// Mechanical sub-grid body transforms (ship-local, updated at 20Hz).
     pub sub_grids: Vec<SubGridTransformData>,
+    /// Unified observable entities (ships, players, EVA) with LOD tiers.
+    /// Source-of-truth going forward; the legacy `ships`/`players` fields
+    /// mirror a subset for backward compatibility and will be removed.
+    pub entities: Vec<ObservableEntityData>,
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +596,91 @@ pub struct ShipRenderData {
     pub position: DVec3,
     pub rotation: DQuat,
     pub is_own_ship: bool,
+}
+
+/// Kind of observable entity carried in `WorldStateData.entities`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EntityKind {
+    Ship = 0,
+    EvaPlayer = 1,
+    GroundedPlayer = 2,
+    Seated = 3,
+}
+
+impl EntityKind {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => EntityKind::EvaPlayer,
+            2 => EntityKind::GroundedPlayer,
+            3 => EntityKind::Seated,
+            _ => EntityKind::Ship,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn is_player(self) -> bool {
+        matches!(
+            self,
+            EntityKind::EvaPlayer | EntityKind::GroundedPlayer | EntityKind::Seated
+        )
+    }
+}
+
+/// LOD tier for an observable entity, derived from distance to observer.
+/// Full = close-range full fidelity; Reduced = medium; Coarse = far point/sprite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LodTier {
+    Full = 0,
+    Reduced = 1,
+    Coarse = 2,
+}
+
+impl LodTier {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => LodTier::Reduced,
+            2 => LodTier::Coarse,
+            _ => LodTier::Full,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Unified observable entity for multi-shard AOI visibility.
+/// Produced by the system-shard AOI pass (for ships, EVA players, and surface
+/// player aggregates) and by ship/planet shards for their local players.
+#[derive(Debug, Clone)]
+pub struct ObservableEntityData {
+    /// Ship id for ships, session-token u64 for players.
+    pub entity_id: u64,
+    pub kind: EntityKind,
+    /// Position in the WorldState origin frame (client adds origin for render).
+    pub position: DVec3,
+    pub rotation: DQuat,
+    pub velocity: DVec3,
+    /// Approximate bounding radius (meters) — drives frustum culling and LOD.
+    pub bounding_radius: f32,
+    pub lod_tier: LodTier,
+    /// Authoritative shard id (0 if no secondary upgrade is beneficial).
+    pub shard_id: u64,
+    /// Shard type for secondary-connection routing (0=Planet, 1=System, 2=Ship, 3=Galaxy).
+    pub shard_type: u8,
+    /// True for the player's own avatar / ship entry.
+    pub is_own: bool,
+    /// Display name. Empty for ships without a pilot context.
+    pub name: String,
+    /// Health (0 for non-player kinds).
+    pub health: f32,
+    /// Shield (0 for non-player kinds).
+    pub shield: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -745,6 +844,80 @@ fn from_fb_quatf(q: &fb::Quatf) -> glam::Quat {
     glam::Quat::from_xyzw(q.x(), q.y(), q.z(), q.w())
 }
 
+/// Encode an `ObservableEntityData` slice into a FlatBuffers vector.
+/// Returns `None` when the input is empty so we don't emit a zero-length vector.
+pub(crate) fn encode_observable_entities<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    entities: &[ObservableEntityData],
+) -> Option<
+    flatbuffers::WIPOffset<
+        flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::ObservableEntity<'a>>>,
+    >,
+> {
+    if entities.is_empty() {
+        return None;
+    }
+    let offsets: Vec<_> = entities
+        .iter()
+        .map(|e| {
+            let name = builder.create_string(&e.name);
+            let pos = to_fb_vec3d(&e.position);
+            let rot = to_fb_quatd(&e.rotation);
+            let vel = to_fb_vec3d(&e.velocity);
+            fb::ObservableEntity::create(
+                builder,
+                &fb::ObservableEntityArgs {
+                    entity_id: e.entity_id,
+                    kind: fb::EntityKind(e.kind.as_u8() as i8),
+                    position: Some(&pos),
+                    rotation: Some(&rot),
+                    velocity: Some(&vel),
+                    bounding_radius: e.bounding_radius,
+                    lod_tier: e.lod_tier.as_u8(),
+                    shard_id: e.shard_id,
+                    shard_type: e.shard_type,
+                    is_own: e.is_own,
+                    name: Some(name),
+                    health: e.health,
+                    shield: e.shield,
+                },
+            )
+        })
+        .collect();
+    Some(builder.create_vector(&offsets))
+}
+
+/// Decode a FlatBuffers `entities` vector into `ObservableEntityData`.
+pub(crate) fn decode_observable_entities(
+    entities: Option<
+        flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::ObservableEntity<'_>>>,
+    >,
+) -> Vec<ObservableEntityData> {
+    let Some(v) = entities else { return Vec::new() };
+    v.iter()
+        .map(|e| {
+            let pos = e.position().map(from_fb_vec3d).unwrap_or(DVec3::ZERO);
+            let rot = e.rotation().map(from_fb_quatd).unwrap_or(DQuat::IDENTITY);
+            let vel = e.velocity().map(from_fb_vec3d).unwrap_or(DVec3::ZERO);
+            ObservableEntityData {
+                entity_id: e.entity_id(),
+                kind: EntityKind::from_u8(e.kind().0 as u8),
+                position: pos,
+                rotation: rot,
+                velocity: vel,
+                bounding_radius: e.bounding_radius(),
+                lod_tier: LodTier::from_u8(e.lod_tier()),
+                shard_id: e.shard_id(),
+                shard_type: e.shard_type(),
+                is_own: e.is_own(),
+                name: e.name().unwrap_or("").to_string(),
+                health: e.health(),
+                shield: e.shield(),
+            }
+        })
+        .collect()
+}
+
 impl ClientMsg {
     pub fn serialize(&self) -> Vec<u8> {
         let mut builder = crate::builder_pool::acquire(256);
@@ -897,6 +1070,20 @@ impl ClientMsg {
                 });
                 builder.finish(msg, None);
             }
+            ClientMsg::ObserverConnect { observer_name } => {
+                let name = builder.create_string(observer_name);
+                let oc = fb::ObserverConnect::create(
+                    &mut builder,
+                    &fb::ObserverConnectArgs {
+                        observer_name: Some(name),
+                    },
+                );
+                let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
+                    payload_type: fb::ClientPayload::ObserverConnect,
+                    payload: Some(oc.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -1006,6 +1193,14 @@ impl ClientMsg {
                     rotation: req.rotation(),
                     action: req.action(),
                 }))
+            }
+            fb::ClientPayload::ObserverConnect => {
+                let oc = msg
+                    .payload_as_observer_connect()
+                    .ok_or(MessageError::MissingField("ObserverConnect payload"))?;
+                Ok(ClientMsg::ObserverConnect {
+                    observer_name: oc.observer_name().unwrap_or("").to_string(),
+                })
             }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),
             other => Err(MessageError::UnknownPayload(other.0)),
@@ -1155,6 +1350,8 @@ impl ServerMsg {
                 }).collect();
                 let sub_grids_vec = if sg_fbs.is_empty() { None } else { Some(builder.create_vector(&sg_fbs)) };
 
+                let entities_vec = encode_observable_entities(&mut builder, &data.entities);
+
                 let ws = fb::WorldState::create(&mut builder, &fb::WorldStateArgs {
                     tick: data.tick,
                     origin: Some(&origin),
@@ -1166,6 +1363,7 @@ impl ServerMsg {
                     warp_target_star_index: data.warp_target_star_index,
                     autopilot: ap_offset,
                     sub_grids: sub_grids_vec,
+                    entities: entities_vec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::WorldState,
@@ -1246,6 +1444,7 @@ impl ServerMsg {
                     planet_index: data.planet_index,
                     reference_position: Some(&ref_pos),
                     reference_rotation: Some(&ref_rot),
+                    shard_id: data.shard_id,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::ShardPreConnect,
@@ -1406,6 +1605,46 @@ impl ServerMsg {
                 });
                 builder.finish(msg, None);
             }
+            ServerMsg::ShardHandoff(data) => {
+                let tcp = builder.create_string(&data.target_tcp_addr);
+                let udp = builder.create_string(&data.target_udp_addr);
+                let pos = to_fb_vec3d(&data.handoff_position);
+                let vel = to_fb_vec3d(&data.handoff_velocity);
+                let rot = to_fb_quatd(&data.handoff_rotation);
+                let sh = fb::ShardHandoffMsg::create(
+                    &mut builder,
+                    &fb::ShardHandoffMsgArgs {
+                        session_token: data.session_token.0,
+                        promote_shard_type: data.promote_shard_type,
+                        promote_shard_id: data.promote_shard_id.0,
+                        target_tcp_addr: Some(tcp),
+                        target_udp_addr: Some(udp),
+                        source_demote_after_ticks: data.source_demote_after_ticks,
+                        handoff_position: Some(&pos),
+                        handoff_velocity: Some(&vel),
+                        handoff_rotation: Some(&rot),
+                    },
+                );
+                let msg = fb::ServerMessage::create(
+                    &mut builder,
+                    &fb::ServerMessageArgs {
+                        payload_type: fb::ServerPayload::ShardHandoffMsg,
+                        payload: Some(sh.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ServerMsg::ShardDisconnectNotify(data) => {
+                let dn = fb::ShardDisconnectNotify::create(&mut builder, &fb::ShardDisconnectNotifyArgs {
+                    shard_type: data.shard_type,
+                    seed: data.seed,
+                });
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::ShardDisconnectNotify,
+                    payload: Some(dn.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -1545,6 +1784,8 @@ impl ServerMsg {
                     }
                 }).collect()).unwrap_or_default();
 
+                let entities = decode_observable_entities(ws.entities());
+
                 Ok(ServerMsg::WorldState(WorldStateData {
                     tick: ws.tick(),
                     origin: from_fb_vec3d(origin),
@@ -1556,6 +1797,7 @@ impl ServerMsg {
                     warp_target_star_index: ws.warp_target_star_index(),
                     autopilot,
                     sub_grids,
+                    entities,
                 }))
             }
             fb::ServerPayload::ChunkBlockMods => {
@@ -1624,6 +1866,7 @@ impl ServerMsg {
                     planet_index: pc.planet_index(),
                     reference_position: from_fb_vec3d(ref_pos),
                     reference_rotation: from_fb_quatd(ref_rot),
+                    shard_id: pc.shard_id(),
                 }))
             }
             fb::ServerPayload::GalaxyWorldState => {
@@ -1750,6 +1993,49 @@ impl ServerMsg {
                     (glam::IVec3::new(a.bx(), a.by(), a.bz()), a.sub_grid_id())
                 }).collect()).unwrap_or_default();
                 Ok(ServerMsg::SubGridAssignmentUpdate(SubGridAssignmentData { assignments }))
+            }
+            fb::ServerPayload::ShardDisconnectNotify => {
+                let dn = msg
+                    .payload_as_shard_disconnect_notify()
+                    .ok_or(MessageError::MissingField("ShardDisconnectNotify payload"))?;
+                Ok(ServerMsg::ShardDisconnectNotify(handoff::ShardDisconnectNotify {
+                    shard_type: dn.shard_type(),
+                    seed: dn.seed(),
+                }))
+            }
+            fb::ServerPayload::ShardHandoffMsg => {
+                let sh = msg
+                    .payload_as_shard_handoff_msg()
+                    .ok_or(MessageError::MissingField("ShardHandoffMsg payload"))?;
+                let pos = sh
+                    .handoff_position()
+                    .map(from_fb_vec3d)
+                    .unwrap_or(DVec3::ZERO);
+                let vel = sh
+                    .handoff_velocity()
+                    .map(from_fb_vec3d)
+                    .unwrap_or(DVec3::ZERO);
+                let rot = sh
+                    .handoff_rotation()
+                    .map(from_fb_quatd)
+                    .unwrap_or(DQuat::IDENTITY);
+                Ok(ServerMsg::ShardHandoff(handoff::ShardHandoff {
+                    session_token: SessionToken(sh.session_token()),
+                    promote_shard_type: sh.promote_shard_type(),
+                    promote_shard_id: ShardId(sh.promote_shard_id()),
+                    target_tcp_addr: sh
+                        .target_tcp_addr()
+                        .ok_or(MessageError::MissingField("target_tcp_addr"))?
+                        .to_string(),
+                    target_udp_addr: sh
+                        .target_udp_addr()
+                        .ok_or(MessageError::MissingField("target_udp_addr"))?
+                        .to_string(),
+                    source_demote_after_ticks: sh.source_demote_after_ticks(),
+                    handoff_position: pos,
+                    handoff_velocity: vel,
+                    handoff_rotation: rot,
+                }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),
             other => Err(MessageError::UnknownPayload(other.0)),
@@ -1906,6 +2192,21 @@ mod tests {
                 joint_type: 0,
                 current_value: 45.0,
             }],
+            entities: vec![ObservableEntityData {
+                entity_id: 7,
+                kind: EntityKind::Ship,
+                position: DVec3::new(100.0, 150000.0, 0.0),
+                rotation: DQuat::IDENTITY,
+                velocity: DVec3::new(5.0, 0.0, 0.0),
+                bounding_radius: 32.0,
+                lod_tier: LodTier::Reduced,
+                shard_id: 42,
+                shard_type: 2,
+                is_own: false,
+                name: String::new(),
+                health: 0.0,
+                shield: 0.0,
+            }],
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();
@@ -1919,6 +2220,11 @@ mod tests {
             assert_eq!(ws.sub_grids[0].sub_grid_id, 1);
             assert!((ws.sub_grids[0].translation.x - 2.5).abs() < 1e-5);
             assert_eq!(ws.sub_grids[0].parent_grid, 0);
+            assert_eq!(ws.entities.len(), 1);
+            assert_eq!(ws.entities[0].entity_id, 7);
+            assert_eq!(ws.entities[0].kind, EntityKind::Ship);
+            assert_eq!(ws.entities[0].lod_tier, LodTier::Reduced);
+            assert_eq!(ws.entities[0].shard_id, 42);
         } else {
             panic!("expected WorldState");
         }

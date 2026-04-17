@@ -80,9 +80,7 @@ struct Args {
 // Constants
 // ---------------------------------------------------------------------------
 
-const WALK_SPEED: f32 = 4.0;
-const JUMP_IMPULSE: f32 = 5.0;
-const INTERACT_DIST: f32 = 1.5;
+// WALK_SPEED, JUMP_IMPULSE, INTERACT_DIST moved to PlayerPhysics component.
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -203,14 +201,7 @@ struct PilotAccumulator {
     rotation_command: DVec3,
 }
 
-/// Per-binding float values from the client's seat input evaluation.
-/// Length matches the active seat's binding count. Written by process_input.
-#[derive(Resource, Default)]
-struct SeatInputValues(Vec<f32>);
-
-/// Tracks which seat entity the pilot occupies (needed for SeatChannelMapping lookup).
-#[derive(Resource, Default)]
-struct ActiveSeatEntity(Option<Entity>);
+// SeatInputValues and ActiveSeatEntity moved to per-entity Components above.
 
 /// Runtime throttle state for a thruster, driven by signal channel subscription.
 #[derive(Component)]
@@ -426,16 +417,7 @@ struct MechanicalWorldIsometries(
     std::collections::HashMap<voxeldust_core::ecs::components::SubGridId, rapier3d::math::Isometry<f32>>,
 );
 
-/// Tracks which sub-grid the player is currently standing on.
-/// Used to apply platform motion delta to the player each tick.
-#[derive(Resource, Default)]
-struct PlayerPlatform {
-    /// Sub-grid the player is currently riding (standing on).
-    riding: Option<voxeldust_core::ecs::components::SubGridId>,
-    /// World isometry of the sub-grid at the END of last tick.
-    /// Used to compute the delta for this tick.
-    prev_iso: Option<rapier3d::math::Isometry<f32>>,
-}
+// PlayerPlatform moved to per-entity PlayerPlatformState component above.
 
 /// Handle for the root (parent ship body) Fixed rigid body.
 /// All non-sub-grid chunk colliders are parented to this body.
@@ -461,13 +443,108 @@ struct AutopilotSnapshotCache {
     snapshot: Option<AutopilotSnapshotData>,
 }
 
-/// Connected player state.
-#[derive(Resource, Default)]
-struct ConnectedPlayer {
-    session: Option<SessionToken>,
-    player_name: Option<String>,
-    handoff_pending: bool,
+// ---------------------------------------------------------------------------
+// Player components (per-entity, multi-player)
+// ---------------------------------------------------------------------------
+
+/// Marker component for a player entity on this ship.
+#[derive(Component)]
+struct Player;
+
+/// Player session identity — ties this entity to a network session.
+#[derive(Component)]
+struct SessionId(SessionToken);
+
+/// Player display name.
+#[derive(Component)]
+struct PlayerName(String);
+
+/// Per-player Rapier rigid body handle.
+#[derive(Component)]
+struct PlayerBody(RigidBodyHandle);
+
+/// Per-player position in ship-local coordinates.
+#[derive(Component)]
+struct PlayerPosition(Vec3);
+
+/// Per-player yaw angle (radians).
+#[derive(Component)]
+struct PlayerYaw(f32);
+
+/// Per-player seated state. `seat_entity` points to the seat block entity.
+/// Seat role (pilot/gunner/passenger) is determined by the seat's SeatChannelMapping.
+#[derive(Component, Default)]
+struct SeatedState {
+    seated: bool,
+    seat_entity: Option<Entity>,
 }
+
+/// Per-player input action state for edge detection.
+#[derive(Component, Default)]
+struct InputActions {
+    current: u8,
+    previous: u8,
+}
+
+/// Per-binding float values from the client's seat input evaluation.
+/// Length matches the active seat's binding count. Written by process_input.
+#[derive(Component, Default)]
+struct SeatInputValues(Vec<f32>);
+
+/// Per-player physics parameters — no magic numbers.
+/// Default values are the standard humanoid parameters.
+/// Future: can vary by character type, equipment, gravity, etc.
+#[derive(Component, Clone)]
+struct PlayerPhysics {
+    walk_speed: f32,
+    jump_impulse: f32,
+    capsule_height: f32,
+    capsule_radius: f32,
+    interact_distance: f32,
+}
+
+impl Default for PlayerPhysics {
+    fn default() -> Self {
+        Self {
+            walk_speed: 4.0,
+            jump_impulse: 5.0,
+            capsule_height: 0.6,
+            capsule_radius: 0.3,
+            interact_distance: 1.5,
+        }
+    }
+}
+
+/// Marker for a player with a pending shard handoff.
+/// Prevents duplicate handoff attempts in hull_exit_check.
+#[derive(Component)]
+struct HandoffPending;
+
+/// Tracks which sub-grid the player is currently standing on.
+/// Used to apply platform motion delta to the player each tick.
+#[derive(Component, Default)]
+struct PlayerPlatformState {
+    /// Sub-grid the player is currently riding (standing on).
+    riding: Option<voxeldust_core::ecs::components::SubGridId>,
+    /// World isometry of the sub-grid at the END of last tick.
+    prev_iso: Option<rapier3d::math::Isometry<f32>>,
+}
+
+/// Component on seat entities — tracks who occupies this seat.
+/// None = vacant, Some(entity) = occupied by that player.
+#[derive(Component, Default)]
+struct SeatOccupant(Option<Entity>);
+
+/// Entity index: session_token → Entity for O(1) lookup.
+/// Synced by spawn_player/despawn_player.
+#[derive(Resource, Default)]
+struct PlayerEntityIndex(std::collections::HashMap<SessionToken, Entity>);
+
+/// Stores handoff data for players that are about to connect via TCP.
+/// When a PlayerHandoff arrives via QUIC (re-entry), we store the spawn info here.
+/// When the player's TCP Connect arrives, process_connects consumes it.
+#[derive(Resource, Default)]
+struct PendingPlayerHandoffs(std::collections::HashMap<String, handoff::PlayerHandoff>);
 
 /// Ship voxel grid — the block-based ship structure.
 #[derive(Resource)]
@@ -516,6 +593,33 @@ struct PeerPositionCache {
     positions: std::collections::HashMap<voxeldust_core::shard_types::ShardId, glam::DVec3>,
 }
 
+/// Current inter-ship visibility set received from the system shard.
+/// Tracks which other ships are visible (ship_id → connection info).
+/// Used to detect enter/leave events and manage secondary connections.
+#[derive(Resource, Default)]
+struct VisibleShipRegistry {
+    ships: std::collections::HashMap<u64, VisibleShipInfo>,
+}
+
+/// Connection info for a visible ship (from VisibilityDirective).
+#[derive(Debug, Clone)]
+struct VisibleShipInfo {
+    shard_id: ShardId,
+    tcp_addr: String,
+    udp_addr: String,
+}
+
+/// Latest unified AOI snapshot received from this ship's host system shard.
+/// The ship merges these entries into `WorldState.entities` (transformed from
+/// system-space to ship-local origin) so all connected players see every
+/// ship / EVA / surface player within the configured AOI range.
+#[derive(Resource, Default)]
+struct ExternalEntities {
+    entities: Vec<voxeldust_core::client_message::ObservableEntityData>,
+    observer_position: DVec3,
+    tick: u64,
+}
+
 /// Handles of per-chunk compound colliders. Keyed by chunk key.
 /// When blocks change in a chunk, we remove the old collider and insert a new one.
 #[derive(Resource, Default)]
@@ -537,6 +641,12 @@ struct ShipHullBounds {
     margin: f32,
 }
 
+/// Default spawn position for new players connecting to this ship.
+/// Computed at startup by scanning for the first COCKPIT block.
+/// Players spawn 1 block above the cockpit to avoid clipping into the seat.
+#[derive(Resource)]
+struct DefaultSpawnPosition(Vec3);
+
 /// Atmosphere tracking for ShardPreConnect.
 #[derive(Resource, Default)]
 struct AtmosphereState {
@@ -553,41 +663,16 @@ struct LandingState {
 /// Pending QUIC messages to send to host shard (set by interaction/input systems).
 #[derive(Resource, Default)]
 struct PendingMessages {
-    handoff: Option<ShardMsg>,
+    /// Multiple concurrent handoffs (one per player exiting).
+    handoffs: Vec<ShardMsg>,
 }
 
-/// Player Rapier body handle.
-#[derive(Resource)]
-struct PlayerBodyHandle(RigidBodyHandle);
-
-/// Player position in ship-local coordinates.
-#[derive(Resource)]
-struct PlayerPosition(Vec3);
-
-/// Player yaw angle.
-#[derive(Resource)]
-struct PlayerYaw(f32);
-
-/// Whether the player is seated and which seat they're in.
-/// Seat role (pilot/gunner/passenger) is determined by the seat's SeatChannelMapping,
-/// not by a flag here. A turret seat publishes turret channels, not thrust.
-#[derive(Resource, Default)]
-struct SeatedState {
-    seated: bool,
-    seat_entity: Option<Entity>,
-}
-
+// PlayerBodyHandle, PlayerPosition, PlayerYaw, SeatedState, InputActions
+// moved to per-entity Components above.
 
 /// Whether gravity is enabled in the ship.
 #[derive(Resource)]
 struct GravityEnabled(bool);
-
-/// Input action state for edge detection.
-#[derive(Resource, Default)]
-struct InputActions {
-    current: u8,
-    previous: u8,
-}
 
 // ---------------------------------------------------------------------------
 // Messages (ship-shard-specific)
@@ -602,12 +687,44 @@ struct ClientConnectedMsg {
 
 #[derive(Message)]
 struct PlayerInputMsg {
+    session: SessionToken,
     input: voxeldust_core::client_message::PlayerInputData,
 }
 
 #[derive(Message)]
 struct BlockEditMsg {
+    session: SessionToken,
     edit: BlockEditData,
+}
+
+#[derive(Message)]
+struct SubBlockEditMsg {
+    session: SessionToken,
+    edit: voxeldust_core::client_message::SubBlockEditData,
+}
+
+#[derive(Message)]
+struct ConfigUpdateMsg {
+    session: SessionToken,
+    update: voxeldust_core::signal::config::BlockConfigUpdateData,
+}
+
+/// Inbound handoff from another shard (player re-entering this ship).
+#[derive(Message)]
+struct InboundHandoffMsg {
+    handoff: handoff::PlayerHandoff,
+}
+
+/// HandoffAccepted confirmation from target shard.
+#[derive(Message)]
+struct HandoffAcceptedMsg {
+    accepted: handoff::HandoffAccepted,
+}
+
+/// HostSwitch directive from system/galaxy shard.
+#[derive(Message)]
+struct HostSwitchMsg {
+    data: voxeldust_core::shard_message::HostSwitchData,
 }
 
 // ---------------------------------------------------------------------------
@@ -682,12 +799,31 @@ fn drain_input(
     mut bridge: ResMut<NetworkBridge>,
     mut events: MessageWriter<PlayerInputMsg>,
 ) {
+    // Snapshot current UDP→session mapping from ClientRegistry.
+    let session_map: Vec<(std::net::SocketAddr, SessionToken)> =
+        if let Ok(reg) = bridge.client_registry.try_read() {
+            // Build a quick lookup from the registry.
+            reg.udp_addrs()
+                .iter()
+                .filter_map(|addr| reg.session_for_udp(*addr).map(|s| (*addr, s)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     for _ in 0..64 {
-        let (_src, input) = match bridge.input_rx.try_recv() {
+        let (src, input) = match bridge.input_rx.try_recv() {
             Ok(e) => e,
             Err(_) => break,
         };
-        events.write(PlayerInputMsg { input });
+        // Resolve the UDP source address to a session token.
+        let session = session_map
+            .iter()
+            .find(|(addr, _)| *addr == src)
+            .map(|(_, token)| *token);
+        if let Some(session) = session {
+            events.write(PlayerInputMsg { session, input });
+        }
     }
 }
 
@@ -697,15 +833,17 @@ fn drain_quic(
     mut exterior: ResMut<ShipExterior>,
     mut config: ResMut<ShipConfig>,
     mut autopilot_cache: ResMut<AutopilotSnapshotCache>,
-    mut connected: ResMut<ConnectedPlayer>,
     mut landing: ResMut<LandingState>,
     mut rapier: ResMut<RapierContext>,
-    body_handle: Res<PlayerBodyHandle>,
-    mut player_pos: ResMut<PlayerPosition>,
-    mut pilot_mode: ResMut<SeatedState>,
+    mut player_index: ResMut<PlayerEntityIndex>,
+    players: Query<(&SessionId, &PlayerBody), With<Player>>,
     tick: Res<ecs::TickCounter>,
     mut incoming_signals: ResMut<IncomingSignalBuffer>,
     mut peer_positions: ResMut<PeerPositionCache>,
+    mut pending_handoffs: ResMut<PendingPlayerHandoffs>,
+    mut visible_ships: ResMut<VisibleShipRegistry>,
+    mut external_entities: ResMut<ExternalEntities>,
+    mut commands: Commands,
 ) {
     for _ in 0..32 {
         let queued = match bridge.quic_msg_rx.try_recv() {
@@ -745,7 +883,7 @@ fn drain_quic(
 
             }
             ShardMsg::HandoffAccepted(accepted) => {
-                // Planet shard accepted the player. Send ShardRedirect to client.
+                // Target shard accepted the player. Send ShardRedirect, then despawn.
                 let session = accepted.session_token;
                 let target_shard = accepted.target_shard;
                 info!(
@@ -776,34 +914,24 @@ fn drain_quic(
                     }
                 }
 
-                connected.session = None;
-                connected.player_name = None;
-                connected.handoff_pending = false;
-                pilot_mode.seated = false;
+                // Despawn the player entity and remove Rapier body.
+                if let Some(&entity) = player_index.0.get(&session) {
+                    if let Ok((_, body_comp)) = players.get(entity) {
+                        remove_player_body(&mut rapier, body_comp.0);
+                    }
+                    despawn_player(&mut commands, &mut rapier, &mut player_index, entity, session);
+                }
             }
             ShardMsg::PlayerHandoff(h) => {
-                // Player re-entering ship from planet.
+                // Player re-entering ship from planet. Store for process_connects.
                 info!(
                     session = h.session_token.0,
                     player = %h.player_name,
-                    "player re-entering ship via handoff"
+                    "player re-entering ship via handoff — stored in pending"
                 );
-                connected.session = Some(h.session_token);
-                connected.player_name = Some(h.player_name.clone());
-                connected.handoff_pending = false;
-                pilot_mode.seated = false;
 
-                // Spawn player at a safe interior position.
-                // TODO: find the nearest air block inside the hull boundary.
-                let reentry_pos = Vec3::new(0.0, 1.5, 0.0);
-                if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
-                    body.set_translation(
-                        vector![reentry_pos.x, reentry_pos.y, reentry_pos.z],
-                        true,
-                    );
-                    body.set_linvel(vector![0.0, 0.0, 0.0], true);
-                }
-                player_pos.0 = reentry_pos;
+                // Store handoff for when the player's TCP connection arrives.
+                pending_handoffs.0.insert(h.player_name.clone(), h.clone());
 
                 // Send HandoffAccepted back to host shard.
                 let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
@@ -846,7 +974,7 @@ fn drain_quic(
                     "host switched — ship shard now reports to new host"
                 );
 
-                // Send ShardPreConnect to client for secondary UDP.
+                // Send ShardPreConnect to ALL connected players for secondary UDP.
                 if !data.new_host_udp_addr.is_empty() {
                     let pc = ServerMsg::ShardPreConnect(handoff::ShardPreConnect {
                         shard_type: data.new_host_shard_type,
@@ -856,14 +984,19 @@ fn drain_quic(
                         planet_index: 0,
                         reference_position: DVec3::ZERO,
                         reference_rotation: DQuat::IDENTITY,
+                        shard_id: data.new_host_shard_id.0,
                     });
-                    if let Some(session) = connected.session {
+                    let sessions: Vec<SessionToken> = players.iter().map(|(sid, _)| sid.0).collect();
+                    let player_count = sessions.len();
+                    if player_count > 0 {
                         let cr = bridge.client_registry.clone();
                         tokio::spawn(async move {
                             let reg = cr.read().await;
-                            let _ = reg.send_tcp(session, &pc).await;
+                            for session in &sessions {
+                                let _ = reg.send_tcp(*session, &pc).await;
+                            }
                         });
-                        info!("sent ShardPreConnect to client for secondary UDP");
+                        info!(players = player_count, "sent ShardPreConnect to all players for secondary UDP");
                     }
                 } else {
                     warn!(
@@ -911,6 +1044,83 @@ fn drain_quic(
                     incoming_signals.signals.push((entry.channel_name.clone(), value));
                 }
             }
+            ShardMsg::SystemEntitiesUpdate(data) => {
+                // Only accept updates addressed to our ship.
+                if let voxeldust_core::shard_message::AoiTarget::Ship(ship_id) = data.target {
+                    if ship_id == config.ship_id && data.tick >= external_entities.tick {
+                        external_entities.entities = data.entities;
+                        external_entities.observer_position = data.observer_position;
+                        external_entities.tick = data.tick;
+                    }
+                }
+            }
+            ShardMsg::VisibilityDirective(data) => {
+                if data.ship_id != config.ship_id {
+                    continue;
+                }
+
+                // Build new visibility map.
+                let new_ships: std::collections::HashMap<u64, VisibleShipInfo> = data
+                    .visible_ships
+                    .iter()
+                    .map(|e| (e.ship_id, VisibleShipInfo {
+                        shard_id: e.shard_id,
+                        tcp_addr: e.tcp_addr.clone(),
+                        udp_addr: e.udp_addr.clone(),
+                    }))
+                    .collect();
+
+                // Detect newly visible ships (entered).
+                let sessions: Vec<SessionToken> = players.iter().map(|(sid, _)| sid.0).collect();
+                for (ship_id, info) in &new_ships {
+                    if !visible_ships.ships.contains_key(ship_id) {
+                        // New ship entered visibility — send ShardPreConnect to all players.
+                        let pc = ServerMsg::ShardPreConnect(handoff::ShardPreConnect {
+                            shard_type: 2, // Ship
+                            tcp_addr: info.tcp_addr.clone(),
+                            udp_addr: info.udp_addr.clone(),
+                            seed: *ship_id,
+                            planet_index: 0,
+                            reference_position: DVec3::ZERO,
+                            reference_rotation: DQuat::IDENTITY,
+                            shard_id: info.shard_id.0,
+                        });
+                        let cr = bridge.client_registry.clone();
+                        let sess = sessions.clone();
+                        tokio::spawn(async move {
+                            if let Ok(reg) = cr.try_read() {
+                                for session in &sess {
+                                    let _ = reg.send_tcp(*session, &pc).await;
+                                }
+                            }
+                        });
+                        info!(ship_id, shard = info.shard_id.0, "ship entered visibility — sent ShardPreConnect");
+                    }
+                }
+
+                // Detect ships that left visibility.
+                for (ship_id, info) in &visible_ships.ships {
+                    if !new_ships.contains_key(ship_id) {
+                        // Ship left visibility — send ShardDisconnectNotify to all players.
+                        let dn = ServerMsg::ShardDisconnectNotify(handoff::ShardDisconnectNotify {
+                            shard_type: 2,
+                            seed: *ship_id,
+                        });
+                        let cr = bridge.client_registry.clone();
+                        let sess = sessions.clone();
+                        tokio::spawn(async move {
+                            if let Ok(reg) = cr.try_read() {
+                                for session in &sess {
+                                    let _ = reg.send_tcp(*session, &dn).await;
+                                }
+                            }
+                        });
+                        info!(ship_id, shard = info.shard_id.0, "ship left visibility — sent ShardDisconnectNotify");
+                    }
+                }
+
+                visible_ships.ships = new_ships;
+            }
             _ => {}
         }
     }
@@ -918,23 +1128,167 @@ fn drain_quic(
 
 
 // ---------------------------------------------------------------------------
+// Player spawn / despawn
+// ---------------------------------------------------------------------------
+
+/// Spawn a new player entity with Rapier body, components, and index entry.
+fn spawn_player(
+    commands: &mut Commands,
+    rapier: &mut RapierContext,
+    player_index: &mut PlayerEntityIndex,
+    token: SessionToken,
+    name: String,
+    spawn_pos: Vec3,
+    physics: PlayerPhysics,
+) -> Entity {
+    let player_rb = RigidBodyBuilder::dynamic()
+        .translation(vector![spawn_pos.x, spawn_pos.y, spawn_pos.z])
+        .lock_rotations()
+        .build();
+    let handle = rapier.rigid_body_set.insert(player_rb);
+    let player_collider = ColliderBuilder::capsule_y(physics.capsule_height, physics.capsule_radius).build();
+    rapier.collider_set.insert_with_parent(
+        player_collider,
+        handle,
+        &mut rapier.rigid_body_set,
+    );
+
+    let entity = commands
+        .spawn((
+            Player,
+            SessionId(token),
+            PlayerName(name),
+            PlayerBody(handle),
+            PlayerPosition(spawn_pos),
+            PlayerYaw(0.0),
+            SeatedState::default(),
+            InputActions::default(),
+            SeatInputValues::default(),
+            PlayerPlatformState::default(),
+            physics,
+        ))
+        .id();
+
+    player_index.0.insert(token, entity);
+    entity
+}
+
+/// Despawn a player entity: remove Rapier body, deregister from index, despawn entity.
+fn despawn_player(
+    commands: &mut Commands,
+    rapier: &mut RapierContext,
+    player_index: &mut PlayerEntityIndex,
+    entity: Entity,
+    token: SessionToken,
+) {
+    // Look up the Rapier body handle from the entity before despawning.
+    // (Caller must ensure the entity has PlayerBody component.)
+    player_index.0.remove(&token);
+    commands.entity(entity).despawn();
+}
+
+/// Remove a player's Rapier rigid body and all its attached colliders.
+fn remove_player_body(rapier: &mut RapierContext, body_handle: RigidBodyHandle) {
+    rapier.rigid_body_set.remove(
+        body_handle,
+        &mut rapier.island_manager,
+        &mut rapier.collider_set,
+        &mut rapier.impulse_joint_set,
+        &mut rapier.multibody_joint_set,
+        true,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Connect processing
 // ---------------------------------------------------------------------------
 
 fn process_connects(
     mut events: MessageReader<ClientConnectedMsg>,
-    mut connected: ResMut<ConnectedPlayer>,
+    mut commands: Commands,
+    mut rapier: ResMut<RapierContext>,
+    mut player_index: ResMut<PlayerEntityIndex>,
+    mut pending_handoffs: ResMut<PendingPlayerHandoffs>,
+    default_spawn: Res<DefaultSpawnPosition>,
     exterior: Res<ShipExterior>,
     config: Res<ShipConfig>,
     scene: Res<SceneCache>,
     ship_grid: Res<ShipGridResource>,
+    bridge: Res<NetworkBridge>,
 ) {
     for event in events.read() {
-        connected.session = Some(event.session_token);
-        connected.player_name = Some(event.player_name.clone());
-        connected.handoff_pending = false;
-
         let token = event.session_token;
+        let player_name = event.player_name.clone();
+
+        // Observer connections: send chunk snapshots but no player entity.
+        if player_name.starts_with("__observer__") {
+            let observer_name = player_name.strip_prefix("__observer__").unwrap_or(&player_name);
+            info!(%observer_name, session = token.0, "observer connected — sending chunk snapshots");
+
+            let tcp_write = event.tcp_write.clone();
+
+            // Serialize all chunk snapshots for the observer.
+            let mut chunk_snapshots: Vec<ServerMsg> = Vec::new();
+            for (chunk_key, chunk) in ship_grid.0.iter_chunks() {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let compressed = block::serialize_chunk(chunk);
+                chunk_snapshots.push(ServerMsg::ChunkSnapshot(
+                    voxeldust_core::client_message::ChunkSnapshotData {
+                        chunk_x: chunk_key.x,
+                        chunk_y: chunk_key.y,
+                        chunk_z: chunk_key.z,
+                        seq: chunk.edit_seq(),
+                        data: compressed,
+                    },
+                ));
+            }
+
+            // Collect sub-grid assignments for observer.
+            let sg_assignments: Vec<(glam::IVec3, u32)> = ship_grid.0.iter_sub_grid_assignments().collect();
+
+            tokio::spawn(async move {
+                let mut writer = tcp_write.lock().await;
+                for snapshot_msg in &chunk_snapshots {
+                    let _ = client_listener::send_tcp_msg(&mut *writer, snapshot_msg).await;
+                }
+                if !sg_assignments.is_empty() {
+                    let sg_msg = ServerMsg::SubGridAssignmentUpdate(SubGridAssignmentData {
+                        assignments: sg_assignments,
+                    });
+                    let _ = client_listener::send_tcp_msg(&mut *writer, &sg_msg).await;
+                }
+                info!(chunks = chunk_snapshots.len(), "sent chunk snapshots to observer");
+            });
+
+            continue; // Don't create a player entity for observers.
+        }
+
+        // Check if this player has a pending handoff (re-entering the ship).
+        let spawn_pos = if let Some(handoff_info) = pending_handoffs.0.remove(&player_name) {
+            // Re-entry: use the handoff position (ship-local).
+            let sys_pos = handoff_info.position;
+            let ship_pos = exterior.position;
+            let ship_rot = exterior.rotation;
+            let local = ship_rot.inverse() * (sys_pos - ship_pos);
+            Vec3::new(local.x as f32, local.y as f32, local.z as f32)
+        } else {
+            // Fresh connect: spawn at cockpit position (computed at startup).
+            default_spawn.0
+        };
+
+        // Spawn player entity with Rapier body.
+        spawn_player(
+            &mut commands,
+            &mut rapier,
+            &mut player_index,
+            token,
+            player_name,
+            spawn_pos,
+            PlayerPhysics::default(),
+        );
+
         let tcp_write = event.tcp_write.clone();
         let ship_pos = exterior.position;
         let ship_rot = exterior.rotation;
@@ -944,9 +1298,6 @@ fn process_connects(
         let system_seed = config.system_seed;
 
         // Serialize all chunk snapshots for the initial sync.
-        // Done synchronously on the ECS thread because ShipGrid is small
-        // (starter ship is 1-2 chunks). For large ships/stations, this would
-        // be moved to a background task with a read snapshot.
         let mut chunk_snapshots: Vec<ServerMsg> = Vec::new();
         for (chunk_key, chunk) in ship_grid.0.iter_chunks() {
             if chunk.is_empty() {
@@ -967,12 +1318,30 @@ fn process_connects(
         // Collect sub-grid block assignments for initial sync.
         let sg_assignments: Vec<(glam::IVec3, u32)> = ship_grid.0.iter_sub_grid_assignments().collect();
 
+        // Look up the host system shard (for always-on scene secondary).
+        let system_preconnect = if let Ok(reg) = bridge.peer_registry.try_read() {
+            reg.find_by_type(ShardType::System).first().map(|info| {
+                handoff::ShardPreConnect {
+                    shard_type: 1, // System
+                    tcp_addr: info.endpoint.tcp_addr.to_string(),
+                    udp_addr: info.endpoint.udp_addr.to_string(),
+                    seed: system_seed,
+                    planet_index: 0,
+                    reference_position: DVec3::ZERO,
+                    reference_rotation: DQuat::IDENTITY,
+                    shard_id: info.id.0,
+                }
+            })
+        } else {
+            None
+        };
+
         tokio::spawn(async move {
             let jr = ServerMsg::JoinResponse(JoinResponseData {
                 seed: ship_id,
                 planet_radius: 0,
                 player_id: token.0,
-                spawn_position: DVec3::new(0.0, 1.0, 0.0),
+                spawn_position: DVec3::new(spawn_pos.x as f64, spawn_pos.y as f64, spawn_pos.z as f64),
                 spawn_rotation: DQuat::IDENTITY,
                 spawn_forward: DVec3::NEG_Z,
                 session_token: token,
@@ -985,6 +1354,17 @@ fn process_connects(
             });
             let mut writer = tcp_write.lock().await;
             let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
+
+            // Always-on system scene secondary. Exempt from the client's
+            // secondary cap; spans the session until a different system
+            // shard takes over (e.g., after cross-system warp arrival).
+            if let Some(pc) = system_preconnect {
+                let _ = client_listener::send_tcp_msg(
+                    &mut *writer,
+                    &ServerMsg::ShardPreConnect(pc),
+                )
+                .await;
+            }
 
             // Send all chunk snapshots immediately after JoinResponse.
             for snapshot_msg in &chunk_snapshots {
@@ -1011,41 +1391,54 @@ fn process_connects(
 
 fn process_input(
     mut events: MessageReader<PlayerInputMsg>,
-    mut actions: ResMut<InputActions>,
-    mut player_yaw: ResMut<PlayerYaw>,
-    pilot_mode: Res<SeatedState>,
-    mut seat_input: ResMut<SeatInputValues>,
+    player_index: Res<PlayerEntityIndex>,
+    mut players: Query<(
+        &PlayerBody,
+        &mut PlayerYaw,
+        &mut InputActions,
+        &SeatedState,
+        &mut SeatInputValues,
+        &PlayerPhysics,
+    ), With<Player>>,
     mut rapier: ResMut<RapierContext>,
-    body_handle: Res<PlayerBodyHandle>,
 ) {
     for event in events.read() {
+        let entity = match player_index.0.get(&event.session) {
+            Some(&e) => e,
+            None => continue,
+        };
+        let Ok((body, mut yaw, mut actions, seated, mut seat_input, physics)) =
+            players.get_mut(entity)
+        else {
+            continue;
+        };
+
         let input = &event.input;
         actions.previous = actions.current;
         actions.current = input.action;
-        player_yaw.0 = input.look_yaw;
+        yaw.0 = input.look_yaw;
 
-        if pilot_mode.seated {
+        if seated.seated {
             // Copy per-binding seat values from client input.
-            // The client evaluates its local SeatBindings and sends floats.
-            // If seat_values is empty (legacy client), keep existing values.
             if !input.seat_values.is_empty() {
                 seat_input.0 = input.seat_values.clone();
             }
         } else {
             // Walking mode: apply velocity to Rapier body.
-            let (sin_y, cos_y) = player_yaw.0.sin_cos();
+            let (sin_y, cos_y) = yaw.0.sin_cos();
             let fwd = Vec3::new(cos_y, 0.0, sin_y);
             let right = Vec3::new(-sin_y, 0.0, cos_y);
 
+            let walk_speed = physics.walk_speed;
             let move_vel =
-                fwd * input.movement[2] * WALK_SPEED + right * input.movement[0] * WALK_SPEED;
+                fwd * input.movement[2] * walk_speed + right * input.movement[0] * walk_speed;
 
-            if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
-                let current_vel = *body.linvel();
-                body.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
+            if let Some(rb) = rapier.rigid_body_set.get_mut(body.0) {
+                let current_vel = *rb.linvel();
+                rb.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
 
                 if input.jump && current_vel.y.abs() < 0.1 {
-                    body.apply_impulse(vector![0.0, JUMP_IMPULSE, 0.0], true);
+                    rb.apply_impulse(vector![0.0, physics.jump_impulse, 0.0], true);
                 }
             }
         }
@@ -1058,14 +1451,14 @@ fn process_input(
 
 fn preconnect_check(
     mut atmo: ResMut<AtmosphereState>,
-    connected: Res<ConnectedPlayer>,
+    players: Query<&SessionId, With<Player>>,
     config: Res<ShipConfig>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
     cached_sys: Res<CachedSystemParams>,
     bridge: Res<NetworkBridge>,
 ) {
-    if atmo.preconnect_sent || connected.session.is_none() {
+    if atmo.preconnect_sent || players.is_empty() {
         return;
     }
     if config.system_seed == 0 {
@@ -1077,7 +1470,18 @@ fn preconnect_check(
         None => return,
     };
 
-    let in_atmo_planet = scene
+    // Fire preconnect as soon as we're CLOSE to atmosphere entry, not after.
+    // Two triggers — whichever fires first:
+    //  (a) already inside atmosphere (legacy; catches teleports / stationary spawns),
+    //  (b) time-to-atmosphere < LEAD_TIME based on radial closing velocity.
+    //
+    // Trigger (b) is critical for fast approaches (warp-brake arrival, atmospheric
+    // dives) where reaching atmosphere before the planet shard is ready would
+    // cause a visible load pop. 2 s is enough to open TCP + UDP, observer-connect,
+    // and pull the first chunk snapshots before the player enters atmosphere.
+    const LEAD_TIME_S: f64 = 2.0;
+
+    let candidate_planet = scene
         .bodies
         .iter()
         .filter(|b| b.body_id > 0)
@@ -1086,23 +1490,41 @@ fn preconnect_check(
             if pi >= sys.planets.len() {
                 return None;
             }
-            let alt = (exterior.position - b.position).length() - sys.planets[pi].radius_m;
-            if alt < sys.planets[pi].atmosphere.atmosphere_height
-                && sys.planets[pi].atmosphere.has_atmosphere
-            {
-                Some(pi)
-            } else {
-                None
+            let planet = &sys.planets[pi];
+            if !planet.atmosphere.has_atmosphere {
+                return None;
             }
+            let to_ship = exterior.position - b.position;
+            let dist = to_ship.length();
+            let atmo_top_alt = planet.atmosphere.atmosphere_height;
+            let atmo_top = planet.radius_m + atmo_top_alt;
+            let alt = dist - planet.radius_m;
+            // Already inside atmosphere → fire immediately.
+            if alt < atmo_top_alt {
+                return Some(pi);
+            }
+            // Closing velocity toward planet center (positive = approaching).
+            let dir_in = (-to_ship).normalize_or_zero();
+            let closing_speed = exterior.velocity.dot(dir_in);
+            if closing_speed <= 0.0 {
+                return None;
+            }
+            // Distance to atmosphere shell (not to planet center).
+            let dist_to_atmo = (dist - atmo_top).max(0.0);
+            let t = dist_to_atmo / closing_speed;
+            if t <= LEAD_TIME_S {
+                return Some(pi);
+            }
+            None
         });
 
     let was_in_atmo = atmo.in_atmosphere;
-    atmo.in_atmosphere = in_atmo_planet.is_some();
+    atmo.in_atmosphere = candidate_planet.is_some();
     if was_in_atmo && !atmo.in_atmosphere {
         atmo.preconnect_sent = false;
     }
 
-    let planet_index = match in_atmo_planet {
+    let planet_index = match candidate_planet {
         Some(idx) => idx,
         None => return,
     };
@@ -1131,7 +1553,6 @@ fn preconnect_check(
         None => return,
     };
 
-    let session = connected.session.unwrap();
     let pc = handoff::ShardPreConnect {
         shard_type: 0,
         tcp_addr,
@@ -1140,112 +1561,156 @@ fn preconnect_check(
         planet_index: planet_index as u32,
         reference_position: exterior.position,
         reference_rotation: DQuat::IDENTITY,
+        shard_id: 0, // Planet shards use seed for identification
     };
 
     atmo.preconnect_sent = true;
 
+    // Send to ALL connected players.
+    let sessions: Vec<SessionToken> = players.iter().map(|sid| sid.0).collect();
+    let player_count = sessions.len();
     let cr = bridge.client_registry.clone();
     let msg = ServerMsg::ShardPreConnect(pc);
     tokio::spawn(async move {
         if let Ok(reg) = cr.try_read() {
-            if let Err(e) = reg.send_tcp(session, &msg).await {
-                tracing::warn!(%e, "failed to send ShardPreConnect");
+            for session in &sessions {
+                if let Err(e) = reg.send_tcp(*session, &msg).await {
+                    tracing::warn!(%e, session = session.0, "failed to send ShardPreConnect");
+                }
             }
         }
     });
 
-    info!(planet_seed, planet_index, "sent ShardPreConnect to client");
+    info!(planet_seed, planet_index, players = player_count, "sent ShardPreConnect to all players");
 }
 
 
-/// Detect when the player has left the ship's hull volume and trigger
-/// handoff to the nearest planet shard. Works for any ship shape — checks
-/// the player's position against the tight bounding box of all solid blocks.
+/// Detect when any player has left the ship's hull volume and trigger
+/// handoff. Per-player: each player checked independently.
+/// - In atmosphere: hand off to planet shard (existing behavior).
+/// - In space: hand off to system shard as EVA (future Phase 4).
 fn hull_exit_check(
-    player_pos: Res<PlayerPosition>,
+    players: Query<
+        (Entity, &SessionId, &PlayerName, &PlayerPosition),
+        (With<Player>, Without<HandoffPending>),
+    >,
     hull_bounds: Res<ShipHullBounds>,
-    mut connected: ResMut<ConnectedPlayer>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
     cached_sys: Res<CachedSystemParams>,
     config: Res<ShipConfig>,
     tick: Res<ecs::TickCounter>,
     mut pending: ResMut<PendingMessages>,
+    mut commands: Commands,
 ) {
-    if connected.handoff_pending {
-        return;
-    }
+    for (entity, session_id, player_name, player_pos) in &players {
+        // Check if this player is outside the ship's solid block bounding box.
+        let pos = player_pos.0;
+        let margin = hull_bounds.margin;
+        let inside = pos.x >= hull_bounds.min.x as f32 - margin
+            && pos.x <= hull_bounds.max.x as f32 + 1.0 + margin
+            && pos.y >= hull_bounds.min.y as f32 - margin
+            && pos.y <= hull_bounds.max.y as f32 + 1.0 + margin
+            && pos.z >= hull_bounds.min.z as f32 - margin
+            && pos.z <= hull_bounds.max.z as f32 + 1.0 + margin;
 
-    // Check if the player is outside the ship's solid block bounding box.
-    let pos = player_pos.0;
-    let margin = hull_bounds.margin;
-    let inside = pos.x >= hull_bounds.min.x as f32 - margin
-        && pos.x <= hull_bounds.max.x as f32 + 1.0 + margin
-        && pos.y >= hull_bounds.min.y as f32 - margin
-        && pos.y <= hull_bounds.max.y as f32 + 1.0 + margin
-        && pos.z >= hull_bounds.min.z as f32 - margin
-        && pos.z <= hull_bounds.max.z as f32 + 1.0 + margin;
+        if inside {
+            continue;
+        }
 
-    if inside {
-        return;
-    }
+        let player_local = DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
+        let player_system_pos = exterior.position + exterior.rotation * player_local;
 
-    let (session, player_name) = match (connected.session, connected.player_name.clone()) {
-        (Some(s), Some(n)) => (s, n),
-        _ => return,
-    };
+        // Determine handoff target based on atmosphere state.
+        if exterior.in_atmosphere {
+            // In atmosphere: hand off to closest planet shard.
+            let closest_planet = scene
+                .bodies
+                .iter()
+                .filter(|b| b.body_id > 0)
+                .min_by_key(|b| ((b.position - exterior.position).length() * 1000.0) as u64);
 
-    let player_local = DVec3::new(
-        player_pos.0.x as f64,
-        player_pos.0.y as f64,
-        player_pos.0.z as f64,
-    );
-    let player_system_pos = exterior.position + exterior.rotation * player_local;
-
-    let closest_planet = scene
-        .bodies
-        .iter()
-        .filter(|b| b.body_id > 0)
-        .min_by_key(|b| ((b.position - exterior.position).length() * 1000.0) as u64);
-
-    if let Some(planet_body) = closest_planet {
-        let planet_index = (planet_body.body_id - 1) as usize;
-        if let Some(ref sys) = cached_sys.0 {
-            if planet_index < sys.planets.len() {
-                let planet_seed = sys.planets[planet_index].planet_seed;
-                let h = handoff::PlayerHandoff {
-                    session_token: session,
-                    player_name,
-                    position: player_system_pos,
-                    velocity: exterior.velocity,
-                    rotation: DQuat::IDENTITY,
-                    forward: exterior.rotation * DVec3::NEG_Z,
-                    fly_mode: false,
-                    speed_tier: 0,
-                    grounded: false,
-                    health: 100.0,
-                    shield: 100.0,
-                    source_shard: config.shard_id,
-                    source_tick: tick.0,
-                    target_star_index: None,
-                    galaxy_context: None,
-                    target_planet_seed: Some(planet_seed),
-                    target_planet_index: Some(planet_index as u32),
-                    target_ship_id: None,
-                    target_ship_shard_id: None,
-                    ship_system_position: Some(exterior.position),
-                    ship_rotation: Some(exterior.rotation),
-                    game_time: scene.game_time,
-                    warp_target_star_index: None,
-                    warp_velocity_gu: None,
-                };
-                connected.handoff_pending = true;
-                pending.handoff = Some(ShardMsg::PlayerHandoff(h));
-                info!(
-                    planet_index,
-                    planet_seed, "threshold crossing — auto-handoff initiated"
-                );
+            if let Some(planet_body) = closest_planet {
+                let planet_index = (planet_body.body_id - 1) as usize;
+                if let Some(ref sys) = cached_sys.0 {
+                    if planet_index < sys.planets.len() {
+                        let planet_seed = sys.planets[planet_index].planet_seed;
+                        let h = handoff::PlayerHandoff {
+                            session_token: session_id.0,
+                            player_name: player_name.0.clone(),
+                            position: player_system_pos,
+                            velocity: exterior.velocity,
+                            rotation: DQuat::IDENTITY,
+                            forward: exterior.rotation * DVec3::NEG_Z,
+                            fly_mode: false,
+                            speed_tier: 0,
+                            grounded: false,
+                            health: 100.0,
+                            shield: 100.0,
+                            source_shard: config.shard_id,
+                            source_tick: tick.0,
+                            target_star_index: None,
+                            galaxy_context: None,
+                            target_planet_seed: Some(planet_seed),
+                            target_planet_index: Some(planet_index as u32),
+                            target_ship_id: None,
+                            target_ship_shard_id: None,
+                            ship_system_position: Some(exterior.position),
+                            ship_rotation: Some(exterior.rotation),
+                            game_time: scene.game_time,
+                            warp_target_star_index: None,
+                            warp_velocity_gu: None,
+                            target_system_eva: false,
+                        };
+                        commands.entity(entity).insert(HandoffPending);
+                        pending.handoffs.push(ShardMsg::PlayerHandoff(h));
+                        info!(
+                            session = session_id.0.0,
+                            planet_index,
+                            planet_seed,
+                            "hull exit in atmosphere — planet handoff initiated"
+                        );
+                    }
+                }
             }
+        } else {
+            // In space: EVA handoff to system shard.
+            // Player inherits ship velocity + local walking velocity rotated to system frame.
+            let eva_velocity = exterior.velocity + exterior.rotation * player_local * 0.0; // local pos isn't velocity — use ship vel
+            let h = handoff::PlayerHandoff {
+                session_token: session_id.0,
+                player_name: player_name.0.clone(),
+                position: player_system_pos,
+                velocity: exterior.velocity, // inherit ship velocity for momentum continuity
+                rotation: exterior.rotation,
+                forward: exterior.rotation * DVec3::NEG_Z,
+                fly_mode: true, // EVA players start in fly mode
+                speed_tier: 0,
+                grounded: false,
+                health: 100.0,
+                shield: 100.0,
+                source_shard: config.shard_id,
+                source_tick: tick.0,
+                target_star_index: None,
+                galaxy_context: None,
+                target_planet_seed: None,
+                target_planet_index: None,
+                target_ship_id: None,
+                target_ship_shard_id: None,
+                ship_system_position: Some(exterior.position),
+                ship_rotation: Some(exterior.rotation),
+                game_time: scene.game_time,
+                warp_target_star_index: None,
+                warp_velocity_gu: None,
+                target_system_eva: true,
+            };
+            commands.entity(entity).insert(HandoffPending);
+            pending.handoffs.push(ShardMsg::PlayerHandoff(h));
+            info!(
+                session = session_id.0.0,
+                ship_vel = format!("{:.1} m/s", exterior.velocity.length()),
+                "hull exit in space — EVA handoff to system shard"
+            );
         }
     }
 }
@@ -1289,8 +1754,8 @@ fn pilot_send(
         return;
     };
 
-    // Always send pending handoff.
-    if let Some(handoff_msg) = pending.handoff.take() {
+    // Send all pending handoffs.
+    for handoff_msg in pending.handoffs.drain(..) {
         let _ = bridge
             .quic_send_tx
             .try_send((host_id, addr, handoff_msg));
@@ -1341,69 +1806,70 @@ fn pilot_send(
 /// Runs BEFORE physics_step so the player moves with the platform before gravity/collision.
 fn update_player_platform(
     mut rapier: ResMut<RapierContext>,
-    body_handle: Res<PlayerBodyHandle>,
+    mut players: Query<(&PlayerBody, &mut PlayerPlatformState), With<Player>>,
     sub_grids: Res<SubGridRegistry>,
     world_isos: Res<MechanicalWorldIsometries>,
-    mut platform: ResMut<PlayerPlatform>,
 ) {
     use voxeldust_core::ecs::components::SubGridId;
 
-    let player_pos = match rapier.rigid_body_set.get(body_handle.0) {
-        Some(body) => *body.translation(),
-        None => return,
-    };
+    for (body_comp, mut platform) in &mut players {
+        let player_pos = match rapier.rigid_body_set.get(body_comp.0) {
+            Some(body) => *body.translation(),
+            None => continue,
+        };
 
-    // Downward raycast from player feet to detect which collider is below.
-    let ray_origin = rapier3d::math::Point::new(player_pos.x, player_pos.y - 0.1, player_pos.z);
-    let ray_dir = rapier3d::math::Vector::new(0.0, -1.0, 0.0);
-    let max_dist = 0.5; // half a block below feet
+        // Downward raycast from player feet to detect which collider is below.
+        let ray_origin = rapier3d::math::Point::new(player_pos.x, player_pos.y - 0.1, player_pos.z);
+        let ray_dir = rapier3d::math::Vector::new(0.0, -1.0, 0.0);
+        let max_dist = 0.5; // half a block below feet
 
-    // Update query pipeline and perform raycast.
-    let ctx = &mut *rapier;
-    ctx.query_pipeline.update(&ctx.collider_set);
-    let hit = ctx.query_pipeline.cast_ray(
-        &ctx.rigid_body_set,
-        &ctx.collider_set,
-        &rapier3d::geometry::Ray::new(ray_origin, ray_dir),
-        max_dist,
-        true,
-        rapier3d::pipeline::QueryFilter::default().exclude_rigid_body(body_handle.0),
-    );
+        // Update query pipeline and perform raycast.
+        let ctx = &mut *rapier;
+        ctx.query_pipeline.update(&ctx.collider_set);
+        let hit = ctx.query_pipeline.cast_ray(
+            &ctx.rigid_body_set,
+            &ctx.collider_set,
+            &rapier3d::geometry::Ray::new(ray_origin, ray_dir),
+            max_dist,
+            true,
+            rapier3d::pipeline::QueryFilter::default().exclude_rigid_body(body_comp.0),
+        );
 
-    // Determine which sub-grid (if any) the hit collider belongs to.
-    let mut riding_sg: Option<SubGridId> = None;
-    if let Some((collider_handle, _dist)) = hit {
-        if let Some(collider) = ctx.collider_set.get(collider_handle) {
-            if let Some(parent_body) = collider.parent() {
-                for (sg_id, sg_data) in &sub_grids.grids {
-                    if sg_data.body_handle == parent_body {
-                        riding_sg = Some(*sg_id);
-                        break;
+        // Determine which sub-grid (if any) the hit collider belongs to.
+        let mut riding_sg: Option<SubGridId> = None;
+        if let Some((collider_handle, _dist)) = hit {
+            if let Some(collider) = ctx.collider_set.get(collider_handle) {
+                if let Some(parent_body) = collider.parent() {
+                    for (sg_id, sg_data) in &sub_grids.grids {
+                        if sg_data.body_handle == parent_body {
+                            riding_sg = Some(*sg_id);
+                            break;
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Apply platform delta if riding a sub-grid.
-    if let Some(sg_id) = riding_sg {
-        if let Some(&current_iso) = world_isos.0.get(&sg_id) {
-            if platform.riding == Some(sg_id) {
-                if let Some(prev_iso) = platform.prev_iso {
-                    let delta = current_iso * prev_iso.inverse();
-                    if let Some(body) = ctx.rigid_body_set.get_mut(body_handle.0) {
-                        let player_t = *body.translation();
-                        let new_pos = delta * rapier3d::math::Point::new(player_t.x, player_t.y, player_t.z);
-                        body.set_translation(rapier3d::math::Vector::new(new_pos.x, new_pos.y, new_pos.z), true);
+        // Apply platform delta if riding a sub-grid.
+        if let Some(sg_id) = riding_sg {
+            if let Some(&current_iso) = world_isos.0.get(&sg_id) {
+                if platform.riding == Some(sg_id) {
+                    if let Some(prev_iso) = platform.prev_iso {
+                        let delta = current_iso * prev_iso.inverse();
+                        if let Some(body) = ctx.rigid_body_set.get_mut(body_comp.0) {
+                            let player_t = *body.translation();
+                            let new_pos = delta * rapier3d::math::Point::new(player_t.x, player_t.y, player_t.z);
+                            body.set_translation(rapier3d::math::Vector::new(new_pos.x, new_pos.y, new_pos.z), true);
+                        }
                     }
                 }
+                platform.prev_iso = Some(current_iso);
             }
-            platform.prev_iso = Some(current_iso);
+            platform.riding = Some(sg_id);
+        } else {
+            platform.riding = None;
+            platform.prev_iso = None;
         }
-        platform.riding = Some(sg_id);
-    } else {
-        platform.riding = None;
-        platform.prev_iso = None;
     }
 }
 
@@ -1411,13 +1877,20 @@ fn physics_step(
     mut rapier: ResMut<RapierContext>,
     gravity_sources: Res<GravitySources>,
     gravity_enabled: Res<GravityEnabled>,
-    body_handle: Res<PlayerBodyHandle>,
-    mut player_pos: ResMut<PlayerPosition>,
+    mut players: Query<(&PlayerBody, &mut PlayerPosition), With<Player>>,
 ) {
+    // Compute gravity using the first player's position (ship-internal gravity
+    // is uniform, so any player's position gives the same result).
+    let sample_pos = players
+        .iter()
+        .next()
+        .map(|(_, p)| p.0)
+        .unwrap_or(Vec3::ZERO);
+
     let gravity = if gravity_enabled.0 {
         let mut total = vector![0.0, 0.0, 0.0];
         for source in &gravity_sources.0 {
-            total += source.gravity_at(player_pos.0);
+            total += source.gravity_at(sample_pos);
         }
         total
     } else {
@@ -1443,9 +1916,12 @@ fn physics_step(
         &(),
     );
 
-    if let Some(body) = ctx.rigid_body_set.get(body_handle.0) {
-        let t = body.translation();
-        player_pos.0 = Vec3::new(t.x, t.y, t.z);
+    // Sync positions from Rapier for all players.
+    for (body_comp, mut pos) in &mut players {
+        if let Some(body) = ctx.rigid_body_set.get(body_comp.0) {
+            let t = body.translation();
+            pos.0 = Vec3::new(t.x, t.y, t.z);
+        }
     }
 }
 
@@ -1458,10 +1934,9 @@ fn tick_counter(mut tick: ResMut<ecs::TickCounter>) {
 // ---------------------------------------------------------------------------
 
 fn broadcast_world_state(
-    player_pos: Res<PlayerPosition>,
+    players: Query<(&SessionId, &PlayerName, &PlayerPosition, &SeatedState), With<Player>>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
-    pilot_mode: Res<SeatedState>,
     warp_query: Query<&WarpComputerState>,
     autopilot_cache: Res<AutopilotSnapshotCache>,
     tick: Res<ecs::TickCounter>,
@@ -1469,6 +1944,8 @@ fn broadcast_world_state(
     rapier: Res<RapierContext>,
     sub_grids: Res<SubGridRegistry>,
     mechanicals: Query<&MechanicalState>,
+    config: Res<ShipConfig>,
+    external: Res<ExternalEntities>,
 ) {
     let scene_stale = tick.0 > scene.last_update_tick + 20;
     let bodies: Vec<CelestialBodyData> = if scene_stale {
@@ -1502,23 +1979,67 @@ fn broadcast_world_state(
         .find_map(|wc| wc.target_star_index)
         .unwrap_or(0xFFFFFFFF);
 
+    // Build player snapshots for ALL players.
+    let player_snapshots: Vec<PlayerSnapshotData> = players
+        .iter()
+        .map(|(sid, _, pos, seated)| PlayerSnapshotData {
+            player_id: sid.0.0,
+            position: DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64),
+            rotation: exterior.rotation,
+            velocity: exterior.velocity,
+            grounded: !seated.seated,
+            health: 100.0,
+            shield: 100.0,
+            seated: seated.seated,
+        })
+        .collect();
+
+    // Build unified entities list:
+    // - External entities from the host system shard (transformed ship-local).
+    // - Every seated/onboard player on this ship as a Seated entity.
+    // WorldState.origin == exterior.position (ship system-space). External
+    // entities arrive in system-space — shift by -exterior.position so the
+    // client can reconstruct world-space via `entity.position + origin`.
+    use voxeldust_core::client_message::{EntityKind, LodTier, ObservableEntityData};
+    let mut entities: Vec<ObservableEntityData> = Vec::with_capacity(
+        external.entities.len() + players.iter().count(),
+    );
+    for e in &external.entities {
+        let mut entity = e.clone();
+        entity.position = e.position - exterior.position;
+        // If this entry is our own ship, mark it — client uses this to bind camera.
+        if matches!(entity.kind, EntityKind::Ship) && entity.entity_id == config.ship_id {
+            entity.is_own = true;
+        }
+        entities.push(entity);
+    }
+    for (sid, name, pos, seated) in players.iter() {
+        let kind = if seated.seated {
+            EntityKind::Seated
+        } else {
+            EntityKind::Seated
+        };
+        entities.push(ObservableEntityData {
+            entity_id: sid.0.0,
+            kind,
+            position: DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64),
+            rotation: exterior.rotation,
+            velocity: exterior.velocity,
+            bounding_radius: 1.0,
+            lod_tier: LodTier::Full,
+            shard_id: config.shard_id.0,
+            shard_type: voxeldust_core::shard_types::ShardType::Ship as u8,
+            is_own: false,
+            name: name.0.clone(),
+            health: 100.0,
+            shield: 100.0,
+        });
+    }
+
     let mut ws = ServerMsg::WorldState(WorldStateData {
         tick: tick.0,
         origin: exterior.position,
-        players: vec![PlayerSnapshotData {
-            player_id: 0,
-            position: DVec3::new(
-                player_pos.0.x as f64,
-                player_pos.0.y as f64,
-                player_pos.0.z as f64,
-            ),
-            rotation: exterior.rotation,
-            velocity: exterior.velocity,
-            grounded: !pilot_mode.seated,  // TODO: use actual Rapier ground contact
-            health: 100.0,
-            shield: 100.0,
-            seated: pilot_mode.seated,
-        }],
+        players: player_snapshots,
         bodies,
         ships: vec![],
         lighting,
@@ -1526,6 +2047,7 @@ fn broadcast_world_state(
         warp_target_star_index: warp_target,
         autopilot: autopilot_cache.snapshot.clone(),
         sub_grids: Vec::new(), // Populated below after WorldStateData construction.
+        entities,
     });
     // Build sub-grid transforms from MechanicalState (clean joint angle + axis)
     // instead of raw Rapier body quaternions (which have solver noise on off-axes).
@@ -1571,8 +2093,7 @@ fn broadcast_world_state(
 // ---------------------------------------------------------------------------
 
 fn log_state(
-    player_pos: Res<PlayerPosition>,
-    pilot_mode: Res<SeatedState>,
+    players: Query<(&PlayerPosition, &SeatedState), With<Player>>,
     gravity_enabled: Res<GravityEnabled>,
     tick: Res<ecs::TickCounter>,
     scene: Res<SceneCache>,
@@ -1582,13 +2103,21 @@ fn log_state(
         return;
     }
 
-    info!(
-        pos = format!(
-            "({:.1}, {:.1}, {:.1})",
-            player_pos.0.x, player_pos.0.y, player_pos.0.z
+    let player_count = players.iter().count();
+    let first = players.iter().next();
+    let (pos_str, piloting) = match first {
+        Some((pos, seated)) => (
+            format!("({:.1}, {:.1}, {:.1})", pos.0.x, pos.0.y, pos.0.z),
+            seated.seated,
         ),
-        piloting = pilot_mode.seated,
+        None => ("(no players)".to_string(), false),
+    };
+
+    info!(
+        pos = pos_str,
+        piloting,
         gravity = gravity_enabled.0,
+        player_count,
         tick = tick.0,
         "ship state"
     );
@@ -2157,11 +2686,7 @@ fn persist_chunks(
 // Block edit systems
 // ---------------------------------------------------------------------------
 
-/// ECS Message for incoming config updates.
-#[derive(Message)]
-struct ConfigUpdateMsg {
-    update: voxeldust_core::signal::config::BlockConfigUpdateData,
-}
+// ConfigUpdateMsg defined in Messages section above (with session field).
 
 /// Bridge system: drain BlockConfigUpdate messages from the UDP channel.
 fn drain_config_updates(
@@ -2169,11 +2694,11 @@ fn drain_config_updates(
     mut events: MessageWriter<ConfigUpdateMsg>,
 ) {
     for _ in 0..16 {
-        let update = match bridge.config_update_rx.try_recv() {
+        let (session, update) = match bridge.config_update_rx.try_recv() {
             Ok(u) => u,
             Err(_) => break,
         };
-        events.write(ConfigUpdateMsg { update });
+        events.write(ConfigUpdateMsg { session, update });
     }
 }
 
@@ -2365,19 +2890,15 @@ fn drain_block_edits(
     mut events: MessageWriter<BlockEditMsg>,
 ) {
     for _ in 0..64 {
-        let edit = match bridge.block_edit_rx.try_recv() {
+        let (session, edit) = match bridge.block_edit_rx.try_recv() {
             Ok(e) => e,
             Err(_) => break,
         };
-        events.write(BlockEditMsg { edit });
+        events.write(BlockEditMsg { session, edit });
     }
 }
 
-/// ECS message for incoming sub-block edits.
-#[derive(Message)]
-struct SubBlockEditMsg {
-    edit: voxeldust_core::client_message::SubBlockEditData,
-}
+// SubBlockEditMsg defined in Messages section above (with session field).
 
 /// Bridge system: drain SubBlockEditRequest messages from the UDP channel.
 fn drain_sub_block_edits(
@@ -2385,11 +2906,11 @@ fn drain_sub_block_edits(
     mut events: MessageWriter<SubBlockEditMsg>,
 ) {
     for _ in 0..64 {
-        let edit = match bridge.sub_block_edit_rx.try_recv() {
+        let (session, edit) = match bridge.sub_block_edit_rx.try_recv() {
             Ok(e) => e,
             Err(_) => break,
         };
-        events.write(SubBlockEditMsg { edit });
+        events.write(SubBlockEditMsg { session, edit });
     }
 }
 
@@ -2398,7 +2919,6 @@ fn process_sub_block_edits(
     mut events: MessageReader<SubBlockEditMsg>,
     mut grid: ResMut<ShipGridResource>,
     registry: Res<BlockRegistryResource>,
-    connected: Res<ConnectedPlayer>,
     bridge: Res<NetworkBridge>,
     mut persistence: Option<ResMut<ShipPersistence>>,
 ) {
@@ -2478,8 +2998,8 @@ fn process_sub_block_edits(
             persist.pending_saves.insert(chunk_key);
         }
 
-        // Broadcast sub-block delta to clients.
-        if let Some(session) = connected.session {
+        // Broadcast sub-block delta to ALL connected clients.
+        {
             let seq = grid.0.get_chunk_mut(chunk_key)
                 .map(|c| c.next_edit_seq())
                 .unwrap_or(1);
@@ -2500,7 +3020,11 @@ fn process_sub_block_edits(
             let cr = bridge.client_registry.clone();
             tokio::spawn(async move {
                 if let Ok(reg) = cr.try_read() {
-                    let _ = reg.send_tcp(session, &delta).await;
+                    for addr in reg.udp_addrs() {
+                        if let Some(session) = reg.session_for_udp(addr) {
+                            let _ = reg.send_tcp(session, &delta).await;
+                        }
+                    }
                 }
             });
         }
@@ -2521,30 +3045,35 @@ fn produce_player_edits(
     mut queue: ResMut<BlockEditQueue>,
     mut grid: ResMut<ShipGridResource>,
     registry: Res<BlockRegistryResource>,
-    connected: Res<ConnectedPlayer>,
-    player_pos: Res<PlayerPosition>,
+    player_index: Res<PlayerEntityIndex>,
+    mut players: Query<(
+        &PlayerPosition, &PlayerBody, &mut SeatedState, &PlayerPhysics,
+    ), (With<Player>, Without<HandoffPending>)>,
     block_index: Res<FunctionalBlockIndex>,
-    mut pilot_mode: ResMut<SeatedState>,
-    mut active_seat: ResMut<ActiveSeatEntity>,
     mut rapier: ResMut<RapierContext>,
-    body_handle: Res<PlayerBodyHandle>,
     bridge: Res<NetworkBridge>,
     mut signal_ctx: SignalQueryCtx,
     world_isos: Res<MechanicalWorldIsometries>,
     sub_grids: Res<SubGridRegistry>,
 ) {
-    if connected.session.is_none() || connected.handoff_pending {
-        return;
-    }
-    let session = connected.session.unwrap();
 
     for event in events.read() {
         let edit = &event.edit;
 
+        // Resolve the editing player entity.
+        let entity = match player_index.0.get(&event.session) {
+            Some(&e) => e,
+            None => continue,
+        };
+        let Ok((player_pos, _body, mut seated_state, _physics)) = players.get_mut(entity) else {
+            continue;
+        };
+
         // Action EXIT_SEAT: no raycast or position validation needed.
-        if edit.action == voxeldust_core::client_message::action::EXIT_SEAT && pilot_mode.seated {
-            pilot_mode.seated = false;
-            info!("exited pilot mode via F key");
+        if edit.action == voxeldust_core::client_message::action::EXIT_SEAT && seated_state.seated {
+            seated_state.seated = false;
+            seated_state.seat_entity = None;
+            info!(session = event.session.0, "exited seat via F key");
             continue;
         }
 
@@ -2634,7 +3163,7 @@ fn produce_player_edits(
                         queue.push(BlockEdit {
                             pos: hit.world_pos,
                             new_block: BlockId::AIR,
-                            source: EditSource::Player(session),
+                            source: EditSource::Player(event.session),
                         });
                         // Clear metadata (damage state) for the broken block.
                         grid.0.remove_meta(
@@ -2694,7 +3223,7 @@ fn produce_player_edits(
                 queue.push(BlockEdit {
                     pos: target,
                     new_block: block_type,
-                    source: EditSource::Player(session),
+                    source: EditSource::Player(event.session),
                 });
             }
             action @ (action::INTERACT..=7 | 9) => {
@@ -2712,12 +3241,11 @@ fn produce_player_edits(
                         if let Some(interaction_def) = matching_action {
                             match kind {
                                 FunctionalBlockKind::Seat => {
-                                    // Toggle seated state.
-                                    pilot_mode.seated = !pilot_mode.seated;
-                                    if pilot_mode.seated {
-                                        pilot_mode.seat_entity = Some(entity);
-                                        active_seat.0 = Some(entity);
-                                        if let Some(body) = rapier.rigid_body_set.get_mut(body_handle.0) {
+                                    // Toggle seated state (per-player).
+                                    seated_state.seated = !seated_state.seated;
+                                    if seated_state.seated {
+                                        seated_state.seat_entity = Some(entity);
+                                        if let Some(body) = rapier.rigid_body_set.get_mut(_body.0) {
                                             body.set_linvel(vector![0.0, 0.0, 0.0], true);
                                         }
                                         // Send SeatBindingsNotify to client so it knows what inputs to evaluate.
@@ -2741,18 +3269,17 @@ fn produce_player_edits(
                                                 seated_channel_name: seated_ch,
                                             });
                                             let cr = bridge.client_registry.clone();
-                                            let s = session;
+                                            let s = event.session;
                                             tokio::spawn(async move {
                                                 if let Ok(reg) = cr.try_read() {
                                                     let _ = reg.send_tcp(s, &notify).await;
                                                 }
                                             });
                                         }
-                                        info!("entered seat at {:?}", hit.world_pos);
+                                        info!(session = event.session.0, "entered seat at {:?}", hit.world_pos);
                                     } else {
-                                        pilot_mode.seat_entity = None;
-                                        // Keep active_seat for one-tick zero-publish.
-                                        info!("exited seat");
+                                        seated_state.seat_entity = None;
+                                        info!(session = event.session.0, "exited seat");
                                     }
                                 }
                                 FunctionalBlockKind::Reactor => {
@@ -2801,7 +3328,8 @@ fn produce_player_edits(
                             &signal_ctx.ap_query, &signal_ctx.wc_query,
                             &signal_ctx.ec_query, &signal_ctx.mech_query,
                         );
-                        if let Some(session) = connected.session {
+                        {
+                            let session = event.session;
                             let msg = ServerMsg::BlockConfigState(config);
                             let cr = bridge.client_registry.clone();
                             tokio::spawn(async move {
@@ -3108,11 +3636,11 @@ fn apply_block_edits(
     mut rapier: ResMut<RapierContext>,
     mut collider_handles: ResMut<ChunkColliderHandles>,
     mut hull_bounds: ResMut<ShipHullBounds>,
-    connected: Res<ConnectedPlayer>,
     bridge: Res<NetworkBridge>,
     mut persistence: Option<ResMut<ShipPersistence>>,
     mut pending_entity_ops: Option<ResMut<PendingEntityOps>>,
     mut agg_dirty: ResMut<AggregationDirty>,
+    mut collider_dirty: ResMut<ColliderSyncDirty>,
     root_body: Res<RootBodyHandle>,
     mut sub_grids: ResMut<SubGridRegistry>,
     mut mech_dirty: ResMut<MechanicalDirtyGrids>,
@@ -3129,8 +3657,9 @@ fn apply_block_edits(
         return;
     }
 
-    // Mark aggregation as needing recomputation.
+    // Mark aggregation and collider sync as needing recomputation.
     agg_dirty.0 = true;
+    collider_dirty.0 = true;
 
     // 2. Shard-specific: rebuild chunk colliders for all dirty chunks.
     for &chunk_key in result.dirty_chunks.keys() {
@@ -3181,27 +3710,29 @@ fn apply_block_edits(
         }
     }
 
-    // 4. Broadcast ChunkDeltas to all connected clients (one per dirty chunk).
-    if let Some(session) = connected.session {
-        for (chunk_key, mods) in &result.dirty_chunks {
-            let seq = grid.0.get_chunk_mut(*chunk_key)
-                .map(|c| c.next_edit_seq())
-                .unwrap_or(1);
-            let delta = ServerMsg::ChunkDelta(ChunkDeltaData {
-                chunk_x: chunk_key.x,
-                chunk_y: chunk_key.y,
-                chunk_z: chunk_key.z,
-                seq,
-                mods: mods.clone(),
-                sub_block_mods: Vec::new(),
-            });
-            let cr = bridge.client_registry.clone();
-            tokio::spawn(async move {
-                if let Ok(reg) = cr.try_read() {
-                    let _ = reg.send_tcp(session, &delta).await;
+    // 4. Broadcast ChunkDeltas to ALL connected clients (one per dirty chunk).
+    for (chunk_key, mods) in &result.dirty_chunks {
+        let seq = grid.0.get_chunk_mut(*chunk_key)
+            .map(|c| c.next_edit_seq())
+            .unwrap_or(1);
+        let delta = ServerMsg::ChunkDelta(ChunkDeltaData {
+            chunk_x: chunk_key.x,
+            chunk_y: chunk_key.y,
+            chunk_z: chunk_key.z,
+            seq,
+            mods: mods.clone(),
+            sub_block_mods: Vec::new(),
+        });
+        let cr = bridge.client_registry.clone();
+        tokio::spawn(async move {
+            if let Ok(reg) = cr.try_read() {
+                for addr in reg.udp_addrs() {
+                    if let Some(session) = reg.session_for_udp(addr) {
+                        let _ = reg.send_tcp(session, &delta).await;
+                    }
                 }
-            });
-        }
+            }
+        });
     }
 
     // 6. Store entity lifecycle operations for process_entity_ops.
@@ -3335,7 +3866,6 @@ fn process_mechanical_edits(
     mut mech_dirty: ResMut<MechanicalDirtyGrids>,
     mut block_index: ResMut<FunctionalBlockIndex>,
     bridge: Res<NetworkBridge>,
-    connected: Res<ConnectedPlayer>,
 ) {
     use voxeldust_core::block::sub_block::{SubBlockType, face_to_offset};
     use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
@@ -3415,17 +3945,19 @@ fn process_mechanical_edits(
             })
             .collect();
         if !assignments.is_empty() {
-            if let Some(session) = connected.session {
-                let msg = ServerMsg::SubGridAssignmentUpdate(SubGridAssignmentData {
-                    assignments,
-                });
-                let cr = bridge.client_registry.clone();
-                tokio::spawn(async move {
-                    if let Ok(reg) = cr.try_read() {
-                        let _ = reg.send_tcp(session, &msg).await;
+            let msg = ServerMsg::SubGridAssignmentUpdate(SubGridAssignmentData {
+                assignments,
+            });
+            let cr = bridge.client_registry.clone();
+            tokio::spawn(async move {
+                if let Ok(reg) = cr.try_read() {
+                    for addr in reg.udp_addrs() {
+                        if let Some(session) = reg.session_for_udp(addr) {
+                            let _ = reg.send_tcp(session, &msg).await;
+                        }
                     }
-                });
-            }
+                }
+            });
         }
     }
 
@@ -3633,8 +4165,8 @@ fn process_mechanical_edits(
             );
         }
 
-        // Broadcast new sub-grid assignments to client.
-        if let Some(session) = connected.session {
+        // Broadcast new sub-grid assignments to all clients.
+        {
             let assignments: Vec<(glam::IVec3, u32)> = members_clone.iter()
                 .map(|&pos| (pos, sg_id.0))
                 .collect();
@@ -3645,7 +4177,11 @@ fn process_mechanical_edits(
                 let cr = bridge.client_registry.clone();
                 tokio::spawn(async move {
                     if let Ok(reg) = cr.try_read() {
-                        let _ = reg.send_tcp(session, &msg).await;
+                        for addr in reg.udp_addrs() {
+                            if let Some(session) = reg.session_for_udp(addr) {
+                                let _ = reg.send_tcp(session, &msg).await;
+                            }
+                        }
                     }
                 });
             }
@@ -3729,6 +4265,104 @@ fn aggregate_ship_properties(
         if let Ok(reg) = bridge.peer_registry.try_read() {
             if let Some(addr) = reg.quic_addr(host_id) {
                 let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Collider sync to host shard
+// ---------------------------------------------------------------------------
+
+/// Tracks whether collider shapes need re-syncing to the host shard.
+/// Set true alongside AggregationDirty when blocks change.
+/// Also true on first tick (initial sync).
+#[derive(Resource)]
+struct ColliderSyncDirty(bool);
+
+/// Last-sent edit sequence per chunk, for delta tracking.
+/// If a chunk's current seq differs from the stored value, it needs re-sync.
+#[derive(Resource, Default)]
+struct ColliderSyncSeqs(std::collections::HashMap<glam::IVec3, u64>);
+
+/// Sync ship collider shapes to the host shard (planet or system).
+/// Runs when blocks change (ColliderSyncDirty flag). Sends the full set of
+/// collider shapes so the host can build Rapier compound colliders for
+/// physical collision with the ship hull.
+fn sync_colliders_to_host(
+    mut dirty: ResMut<ColliderSyncDirty>,
+    grid: Res<ShipGridResource>,
+    registry: Res<BlockRegistryResource>,
+    hull_bounds: Res<ShipHullBounds>,
+    config: Res<ShipConfig>,
+    bridge: Res<NetworkBridge>,
+    mut seqs: ResMut<ColliderSyncSeqs>,
+) {
+    if !dirty.0 {
+        return;
+    }
+    dirty.0 = false;
+
+    // Build collider shapes for all non-empty chunks.
+    let origin = glam::Vec3::ZERO; // ship-local, no offset
+    let mut chunk_data: Vec<voxeldust_core::shard_message::ChunkColliderData> = Vec::new();
+    let mut total_shapes = 0usize;
+
+    for (chunk_key, chunk) in grid.0.iter_chunks() {
+        if chunk.is_empty() {
+            continue;
+        }
+        // Check if this chunk changed since last sync.
+        let current_seq = chunk.edit_seq();
+        let prev_seq = seqs.0.get(&chunk_key).copied().unwrap_or(0);
+        // Always include all chunks in the sync message (host needs the full set).
+        // The seq tracking is for future delta-only optimization.
+        seqs.0.insert(chunk_key, current_seq);
+
+        let shapes = grid.0.chunk_collider_shapes(chunk_key, origin, &registry.0);
+        if shapes.is_empty() {
+            continue;
+        }
+        total_shapes += shapes.len();
+        chunk_data.push(voxeldust_core::shard_message::ChunkColliderData {
+            chunk_key,
+            shapes,
+        });
+    }
+
+    if chunk_data.is_empty() {
+        return;
+    }
+
+    let hull_min = glam::Vec3::new(
+        hull_bounds.min.x as f32,
+        hull_bounds.min.y as f32,
+        hull_bounds.min.z as f32,
+    );
+    let hull_max = glam::Vec3::new(
+        hull_bounds.max.x as f32 + 1.0,
+        hull_bounds.max.y as f32 + 1.0,
+        hull_bounds.max.z as f32 + 1.0,
+    );
+
+    let msg = ShardMsg::ShipColliderSync(voxeldust_core::shard_message::ShipColliderSyncData {
+        ship_id: config.ship_id,
+        chunks: chunk_data,
+        hull_min,
+        hull_max,
+    });
+
+    // Send to host shard (system or planet shard that manages this ship's exterior).
+    if let Some(host_id) = config.host_shard_id {
+        if let Ok(reg) = bridge.peer_registry.try_read() {
+            if let Some(addr) = reg.quic_addr(host_id) {
+                let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
+                info!(
+                    ship_id = config.ship_id,
+                    chunks = seqs.0.len(),
+                    shapes = total_shapes,
+                    "synced collider shapes to host shard"
+                );
             }
         }
     }
@@ -4592,9 +5226,7 @@ fn signal_publish(
     mut channels: ResMut<SignalChannelTable>,
     publishers: Query<(&FunctionalBlockRef, &SignalPublisher, Option<&ReactorState>, Option<&CruiseDriveState>, Option<&MechanicalState>)>,
     mut incoming: ResMut<IncomingSignalBuffer>,
-    pilot_mode: Res<SeatedState>,
-    mut active_seat: ResMut<ActiveSeatEntity>,
-    seat_input: Res<SeatInputValues>,
+    seated_players: Query<(&SeatedState, &SeatInputValues), With<Player>>,
     seat_query: Query<&SeatChannelMapping>,
 ) {
     channels.clear_pending();
@@ -4604,44 +5236,27 @@ fn signal_publish(
         channels.push_pending(&name, value);
     }
 
-    // Generic seat publishing: iterate bindings by index, read values from SeatInputValues.
-    // Shard-agnostic — works identically in any shard with block support.
-    if let Some(seat_entity) = active_seat.0 {
-        if let Ok(mapping) = seat_query.get(seat_entity) {
-            // Diagnostic: log the active seat's channel bindings on every seat change.
-            static LAST_SEAT_ENTITY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
-            let seat_id_bits = seat_entity.to_bits() as u64;
-            if LAST_SEAT_ENTITY.swap(seat_id_bits, std::sync::atomic::Ordering::Relaxed) != seat_id_bits {
-                let names: Vec<_> = mapping.bindings.iter().map(|b| {
-                    let ch_name = channels.name_for_id(b.channel_id).unwrap_or("?");
-                    format!("{}→{}", b.label, ch_name)
-                }).collect();
-                info!(
-                    seat_entity = ?seat_entity,
-                    bindings = names.len(),
-                    channels = ?names,
-                    "active seat channel dump",
-                );
-            }
-            // Publish each binding's value from the client's seat input evaluation.
-            let values = &seat_input.0;
-            for (i, binding) in mapping.bindings.iter().enumerate() {
-                let value = if pilot_mode.seated {
-                    values.get(i).copied().unwrap_or(0.0)
-                } else {
-                    0.0 // Zero-publish when pilot exits seat.
-                };
-                channels.push_pending_id(binding.channel_id, signal::SignalValue::Float(value));
-            }
-            // Publish seated occupancy signal.
-            if let Some(ch) = mapping.seated_channel_id {
-                let occupied = if pilot_mode.seated { 1.0 } else { 0.0 };
-                channels.push_pending_id(ch, signal::SignalValue::Float(occupied));
-            }
+    // Per-player seat publishing: each seated player publishes to their seat's channels.
+    for (seated_state, seat_input) in &seated_players {
+        if !seated_state.seated {
+            continue;
         }
-        // Clear seat tracking after zero-publish (pilot exited).
-        if !pilot_mode.seated {
-            active_seat.0 = None;
+        let Some(seat_entity) = seated_state.seat_entity else {
+            continue;
+        };
+        let Ok(mapping) = seat_query.get(seat_entity) else {
+            continue;
+        };
+
+        // Publish each binding's value from the client's seat input evaluation.
+        let values = &seat_input.0;
+        for (i, binding) in mapping.bindings.iter().enumerate() {
+            let value = values.get(i).copied().unwrap_or(0.0);
+            channels.push_pending_id(binding.channel_id, signal::SignalValue::Float(value));
+        }
+        // Publish seated occupancy signal.
+        if let Some(ch) = mapping.seated_channel_id {
+            channels.push_pending_id(ch, signal::SignalValue::Float(1.0));
         }
     }
 
@@ -5297,13 +5912,8 @@ fn build_ship_interior(
             }
         }
     }
-    let player_rb = RigidBodyBuilder::dynamic()
-        .translation(vector![spawn_pos.x, spawn_pos.y, spawn_pos.z])
-        .lock_rotations()
-        .build();
-    let player_handle = rigid_body_set.insert(player_rb);
-    let player_collider = ColliderBuilder::capsule_y(0.6, 0.3).build();
-    collider_set.insert_with_parent(player_collider, player_handle, &mut rigid_body_set);
+    // Player bodies are now spawned on-demand in process_connects, not at startup.
+    // spawn_pos is stored as DefaultSpawnPosition resource below (after App creation).
 
     // Initialize ship position and scene from system seed.
     let mut ship_position = DVec3::ZERO;
@@ -5366,7 +5976,7 @@ fn build_ship_interior(
     app.insert_resource(SubGridRegistry::default());
     app.insert_resource(MechanicalWorldIsometries::default());
     app.insert_resource(MechanicalDirtyGrids::default());
-    app.insert_resource(PlayerPlatform::default());
+    // PlayerPlatform is now a per-entity PlayerPlatformState component.
     app.insert_resource(ShipConfig {
         shard_id,
         ship_id,
@@ -5418,23 +6028,26 @@ fn build_ship_interior(
     app.insert_resource(FunctionalBlockIndex::default());
     app.insert_resource(ShipProps(ShipPhysicalProperties::starter_ship()));
     app.insert_resource(PilotAccumulator::default());
-    app.insert_resource(SeatInputValues::default());
+    // SeatInputValues, ActiveSeatEntity are now per-entity Components.
     app.insert_resource(ShipCenterOfMass::default());
-    app.insert_resource(ActiveSeatEntity::default());
     app.insert_resource(AutopilotSnapshotCache::default());
-    app.insert_resource(ConnectedPlayer::default());
+    // ConnectedPlayer removed — multi-player uses per-entity Player components.
+    app.insert_resource(PlayerEntityIndex::default());
+    app.insert_resource(PendingPlayerHandoffs::default());
+    app.insert_resource(VisibleShipRegistry::default());
+    app.insert_resource(ExternalEntities::default());
     app.insert_resource(AtmosphereState::default());
     app.insert_resource(LandingState::default());
     app.insert_resource(PendingMessages::default());
-    app.insert_resource(PlayerBodyHandle(player_handle));
-    app.insert_resource(PlayerPosition(spawn_pos));
-    app.insert_resource(PlayerYaw(0.0));
-    app.insert_resource(SeatedState::default());
+    app.insert_resource(DefaultSpawnPosition(spawn_pos));
+    // PlayerBodyHandle, PlayerPosition, PlayerYaw, SeatedState, InputActions
+    // are now per-entity Components — spawned on-demand in process_connects.
     app.insert_resource(GravityEnabled(true));
-    app.insert_resource(InputActions::default());
     app.insert_resource(ecs::TickCounter::default());
     app.insert_resource(BlockEditQueue::default());
     app.insert_resource(AggregationDirty(false));
+    app.insert_resource(ColliderSyncDirty(true)); // true = initial sync on first tick
+    app.insert_resource(ColliderSyncSeqs::default());
     app.insert_resource(SignalChannelTable::new());
     app.insert_resource(IncomingSignalBuffer::default());
     app.insert_resource(PeerPositionCache::default());
@@ -5446,6 +6059,9 @@ fn build_ship_interior(
     app.add_message::<BlockEditMsg>();
     app.add_message::<ConfigUpdateMsg>();
     app.add_message::<SubBlockEditMsg>();
+    app.add_message::<InboundHandoffMsg>();
+    app.add_message::<HandoffAcceptedMsg>();
+    app.add_message::<HostSwitchMsg>();
 
     // System ordering.
     app.configure_sets(
@@ -5482,7 +6098,7 @@ fn build_ship_interior(
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
         Update,
-        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, process_mechanical_edits, aggregate_ship_properties, rebuild_reactor_consumers)
+        (produce_player_edits, apply_block_edits, bevy_ecs::schedule::ApplyDeferred, process_entity_ops, process_sub_block_edits, process_mechanical_edits, aggregate_ship_properties, sync_colliders_to_host, rebuild_reactor_consumers)
             .chain()
             .in_set(ShipSet::BlockEdit),
     );

@@ -48,11 +48,21 @@ pub fn raycast(
     let dir = direction / dir_len;
 
     // Current voxel position (floor of origin).
-    let mut voxel = IVec3::new(
-        origin.x.floor() as i32,
-        origin.y.floor() as i32,
-        origin.z.floor() as i32,
-    );
+    // Guard against origins outside i32 range (e.g. system-space coords passed
+    // by mistake). If any component would overflow i32, the ray is outside any
+    // possible block grid — return None immediately.
+    let fx = origin.x.floor();
+    let fy = origin.y.floor();
+    let fz = origin.z.floor();
+    const I32_MIN: f32 = i32::MIN as f32;
+    const I32_MAX: f32 = i32::MAX as f32;
+    if fx < I32_MIN || fx > I32_MAX || fy < I32_MIN || fy > I32_MAX
+        || fz < I32_MIN || fz > I32_MAX
+        || fx.is_nan() || fy.is_nan() || fz.is_nan()
+    {
+        return None;
+    }
+    let mut voxel = IVec3::new(fx as i32, fy as i32, fz as i32);
 
     // Step direction: +1 or -1 per axis.
     let step = IVec3::new(
@@ -90,34 +100,39 @@ pub fn raycast(
     }
 
     // DDA traversal loop.
-    loop {
+    // Cap iterations to prevent infinite loops from NaN/degenerate inputs.
+    // max_distance of 8 blocks = at most ~24 steps (diagonal), but we use a
+    // generous cap to handle edge cases.
+    let max_steps = (max_distance as u32 * 4).max(64);
+    for _ in 0..max_steps {
         // Step to the next voxel boundary on the axis with smallest t_max.
         if t_max.x < t_max.y {
             if t_max.x < t_max.z {
                 distance = t_max.x;
-                voxel.x += step.x;
+                voxel.x = voxel.x.wrapping_add(step.x);
                 t_max.x += t_delta.x;
                 last_axis = 0;
             } else {
                 distance = t_max.z;
-                voxel.z += step.z;
+                voxel.z = voxel.z.wrapping_add(step.z);
                 t_max.z += t_delta.z;
                 last_axis = 2;
             }
         } else if t_max.y < t_max.z {
             distance = t_max.y;
-            voxel.y += step.y;
+            voxel.y = voxel.y.wrapping_add(step.y);
             t_max.y += t_delta.y;
             last_axis = 1;
         } else {
             distance = t_max.z;
-            voxel.z += step.z;
+            voxel.z = voxel.z.wrapping_add(step.z);
             t_max.z += t_delta.z;
             last_axis = 2;
         }
 
-        // Check distance limit.
-        if distance > max_distance {
+        // Check distance limit. Also catches NaN (NaN > max_distance = false,
+        // but the iteration cap above prevents infinite loops).
+        if distance > max_distance || distance.is_nan() {
             return None;
         }
 
@@ -137,6 +152,9 @@ pub fn raycast(
             });
         }
     }
+
+    // Iteration cap reached (degenerate input) — no hit.
+    None
 }
 
 /// Compute the parametric distance along a ray to the next voxel boundary

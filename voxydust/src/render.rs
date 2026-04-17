@@ -214,6 +214,98 @@ fn build_uniforms(
         }
     }
 
+    // Collect ship_ids for which we have full block meshes via the legacy
+    // `ships` field (populated for ships the client has an active connection to).
+    // Ship entities in `entities` but NOT in this set will be rendered as a LOD
+    // proxy sphere sized by bounding_radius so distant ships stay visible even
+    // when their blocks aren't streamed.
+    let mut ship_ids_with_meshes: std::collections::HashSet<u64> =
+        std::collections::HashSet::new();
+    if let Some(ws) = ws {
+        for ship in &ws.ships {
+            ship_ids_with_meshes.insert(ship.ship_id);
+        }
+    }
+    if let Some(sec_ws) = secondary_ws {
+        for ship in &sec_ws.ships {
+            ship_ids_with_meshes.insert(ship.ship_id);
+        }
+    }
+
+    // Unified entity rendering: iterate ObservableEntity entries and draw a
+    // sphere per non-ship kind (avatar), plus a LOD proxy for ships without
+    // cached block meshes (distant ships, ships in Coarse tier).
+    //
+    // Skip is_own entries (own avatar — camera is mounted there).
+    let draw_entities =
+        |uniform_data: &mut [ObjectUniforms], object_count: &mut usize,
+         entities: &[voxeldust_core::client_message::ObservableEntityData],
+         origin: DVec3,
+         ships_with_meshes: &std::collections::HashSet<u64>| {
+            for e in entities {
+                if e.is_own {
+                    continue;
+                }
+                use voxeldust_core::client_message::{EntityKind, LodTier};
+                let (color, radius) = match e.kind {
+                    EntityKind::Ship => {
+                        // Skip — the block-mesh pipeline handles this ship.
+                        if ships_with_meshes.contains(&e.entity_id) {
+                            continue;
+                        }
+                        // LOD proxy: orange-tinted sphere sized by bounding_radius.
+                        // Coarse tier shrinks to a pinpoint marker so far-field
+                        // ships don't visually dominate the scene.
+                        let scale = match e.lod_tier {
+                            LodTier::Full => e.bounding_radius.max(4.0),
+                            LodTier::Reduced => e.bounding_radius.max(4.0),
+                            LodTier::Coarse => e.bounding_radius.max(2.0) * 0.5,
+                        };
+                        ([1.0, 0.6, 0.2, 0.9], scale)
+                    }
+                    EntityKind::EvaPlayer => ([1.0, 0.25, 0.85, 1.0], 1.0),
+                    EntityKind::GroundedPlayer => ([0.25, 0.65, 1.0, 1.0], 1.0),
+                    EntityKind::Seated => ([0.25, 1.0, 0.75, 1.0], 1.0),
+                };
+                if *object_count >= MAX_OBJECTS {
+                    break;
+                }
+                let world_pos = origin + e.position;
+                let offset = (world_pos - cam.cam_system_pos).as_vec3();
+                if !cam.frustum.contains_sphere(offset, radius) {
+                    continue;
+                }
+                let model = Mat4::from_translation(offset) * Mat4::from_scale(Vec3::splat(radius));
+                let mvp = cam.vp * model;
+                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                obj.mvp = mvp.to_cols_array_2d();
+                obj.model = model.to_cols_array_2d();
+                obj.color = color;
+                // Matte material (roughness 0.7, metallic 0) for now.
+                obj.material = [0.0, 0.7, 0.0, 0.0];
+                uniform_data[*object_count] = obj;
+                *object_count += 1;
+            }
+        };
+    if let Some(ws) = ws {
+        draw_entities(
+            uniform_data,
+            &mut object_count,
+            &ws.entities,
+            ws.origin,
+            &ship_ids_with_meshes,
+        );
+    }
+    if let Some(sec_ws) = secondary_ws {
+        draw_entities(
+            uniform_data,
+            &mut object_count,
+            &sec_ws.entities,
+            sec_ws.origin,
+            &ship_ids_with_meshes,
+        );
+    }
+
     // Collect ship transforms for block-based rendering.
     // All ships (interior and exterior) are rendered from block chunks.
     let block_uniform_start = object_count;
@@ -1103,6 +1195,7 @@ pub fn render_frame(
     // egui HUD.
     let hud_ctx = HudContext {
         latest_world_state,
+        secondary_world_state,
         interpolated_bodies,
         cam_system_pos: cam.cam_system_pos,
         vp: cam.vp,

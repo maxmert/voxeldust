@@ -72,6 +72,12 @@ pub struct PlayerHandoff {
     pub warp_target_star_index: Option<u32>,
     /// For system→galaxy warp: current warp velocity in GU/s.
     pub warp_velocity_gu: Option<DVec3>,
+
+    // -- EVA handoff context --
+    /// Ship→system EVA exit: player leaves ship hull in space.
+    /// When true, the system shard spawns an EVA player entity
+    /// with the inherited ship velocity.
+    pub target_system_eva: bool,
 }
 
 /// Context for handoffs between galaxy and system shards.
@@ -104,12 +110,53 @@ pub struct GhostUpdate {
 }
 
 /// Redirect message sent to client, telling it to reconnect to a new shard.
+/// Used by the gateway for initial routing (pre-game join). Also kept as the
+/// fallback path if the destination shard has no pre-opened secondary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardRedirect {
     pub session_token: SessionToken,
     pub target_tcp_addr: String,
     pub target_udp_addr: String,
     pub shard_id: ShardId,
+}
+
+/// Seamless handoff: client promotes an existing secondary connection to primary.
+/// Replaces `ShardRedirect` for in-game transitions (launch, land, board, warp).
+///
+/// Preconditions:
+/// - The destination shard is already streaming to the client as a secondary
+///   (via `ShardPreConnect` + `ObserverConnect`).
+/// - The destination shard holds a `PendingOwnership` observer entity keyed
+///   on `session_token` (created when the secondary opened).
+///
+/// On receipt the client:
+/// 1. Stops sending `PlayerInput` to the source shard and starts sending to
+///    `target_tcp_addr` / `target_udp_addr`.
+/// 2. Keeps the existing UDP socket for the destination shard open.
+/// 3. Blends the owned player's pose linearly from the last source snapshot
+///    toward `handoff_position/velocity/rotation` over 150 ms, then follows
+///    destination WorldState normally.
+///
+/// The source shard keeps the player entity alive as a ghost for
+/// `source_demote_after_ticks` ticks and broadcasts `GhostUpdate` to the
+/// destination so other observers never see a gap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardHandoff {
+    pub session_token: SessionToken,
+    /// Shard type of the secondary to promote (0=Planet, 1=System, 2=Ship, 3=Galaxy).
+    pub promote_shard_type: u8,
+    /// Shard id of the secondary to promote.
+    pub promote_shard_id: ShardId,
+    /// TCP endpoint for the new primary (may match an already-open secondary).
+    pub target_tcp_addr: String,
+    /// UDP endpoint for the new primary.
+    pub target_udp_addr: String,
+    /// Ticks the source shard will keep ghosting before despawning (default 15).
+    pub source_demote_after_ticks: u8,
+    /// Anchor at handoff tick in destination-frame coordinates.
+    pub handoff_position: DVec3,
+    pub handoff_velocity: DVec3,
+    pub handoff_rotation: DQuat,
 }
 
 /// Ship position/state sent from system shard to planet shards within SOI.
@@ -144,4 +191,17 @@ pub struct ShardPreConnect {
     pub reference_position: DVec3,
     /// Rotation of the shard's local frame.
     pub reference_rotation: DQuat,
+    /// Shard ID for multi-secondary disambiguation.
+    /// When shard_type is Ship, multiple secondaries may coexist;
+    /// this field distinguishes them (together with shard_type).
+    pub shard_id: u64,
+}
+
+/// Server → client: tear down a specific secondary connection.
+/// The client matches on (shard_type, seed) to find and close
+/// the secondary connection and remove its chunk source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardDisconnectNotify {
+    pub shard_type: u8,
+    pub seed: u64,
 }

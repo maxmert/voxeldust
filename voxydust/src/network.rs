@@ -49,6 +49,21 @@ pub enum NetEvent {
     ChunkSnapshot(ChunkSnapshotData),
     /// Incremental block changes to a chunk.
     ChunkDelta(ChunkDeltaData),
+    /// Chunk snapshot from a secondary (observer) connection.
+    SecondaryChunkSnapshot {
+        seed: u64,
+        data: ChunkSnapshotData,
+    },
+    /// Chunk delta from a secondary (observer) connection.
+    SecondaryChunkDelta {
+        seed: u64,
+        data: ChunkDeltaData,
+    },
+    /// Sub-grid assignments from a secondary (observer) connection.
+    SecondarySubGridAssignment {
+        seed: u64,
+        data: voxeldust_core::client_message::SubGridAssignmentData,
+    },
     /// Primary shard is changing (ShardRedirect received).
     Transitioning,
     Disconnected(String),
@@ -219,12 +234,21 @@ pub async fn run_network(
             let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(60));
             keepalive_interval.tick().await; // skip first immediate tick
 
-            // Active secondary connections keyed by shard type. At most ONE
-            // secondary per type exists at a time. When a new ShardPreConnect
-            // arrives for the same type, the old is cancelled before the new starts.
-            // Supports concurrent secondaries of DIFFERENT types (triple-shard).
+            // Active secondary connections keyed by (shard_type, shard_id).
+            // Multiple secondaries of the SAME type can coexist (e.g., 3 nearby ships).
+            // For planet shards, shard_id is 0 (only one planet secondary at a time).
+            //
+            // Shard type discriminants (matching core/src/client_message.rs::shard_type):
+            //   PLANET=0, SYSTEM=1, SHIP=2, GALAXY=3.
+            //
+            // System (1) and Galaxy (3) secondaries are "scene context" — they carry
+            // celestial bodies, long-range AOI entities, and warp parallax. They are
+            // always-on for the session duration and exempt from the MAX_SECONDARIES
+            // cap. Only Ship (2) and Planet (0) secondaries count toward the cap.
+            const MAX_SECONDARIES: usize = 4;
+            let is_scene_context = |shard_type: u8| shard_type == 1 || shard_type == 3;
             let mut active_secondaries: std::collections::HashMap<
-                u8, tokio::sync::broadcast::Sender<()>
+                (u8, u64), tokio::sync::broadcast::Sender<()>
             > = std::collections::HashMap::new();
 
             loop {
@@ -247,10 +271,24 @@ pub async fn run_network(
                         match result {
                             Ok(ServerMsg::ShardRedirect(r)) => {
                                 info!(target_tcp = %r.target_tcp_addr, "received ShardRedirect");
-                                // Cancel ALL active secondaries on primary transition.
-                                for (st, cancel) in active_secondaries.drain() {
-                                    let _ = cancel.send(());
-                                    info!(shard_type = st, "cancelled secondary on ShardRedirect");
+                                // Scene-context secondaries (System/Galaxy) must survive
+                                // primary transitions so the sky/starfield/AOI doesn't
+                                // pop during land/launch/board/warp. Only tear down
+                                // ship/planet secondaries here.
+                                let doomed: Vec<(u8, u64)> = active_secondaries
+                                    .keys()
+                                    .filter(|(st, _)| !is_scene_context(*st))
+                                    .copied()
+                                    .collect();
+                                for key in doomed {
+                                    if let Some(cancel) = active_secondaries.remove(&key) {
+                                        let _ = cancel.send(());
+                                        info!(
+                                            shard_type = key.0,
+                                            shard_id = key.1,
+                                            "cancelled non-scene secondary on ShardRedirect"
+                                        );
+                                    }
                                 }
                                 let _ = redirect_tx.send(r).await;
                                 return;
@@ -260,16 +298,53 @@ pub async fn run_network(
                                     tcp = %pc.tcp_addr, udp = %pc.udp_addr,
                                     "received ShardPreConnect — opening secondary connection");
 
-                                // Cancel existing secondary of the SAME shard type.
-                                // Different types coexist (triple-shard compositing).
-                                if let Some(old_cancel) = active_secondaries.remove(&pc.shard_type) {
+                                // Key: (shard_type, shard_id). For planets, shard_id = 0.
+                                let sec_key = (pc.shard_type, pc.shard_id);
+
+                                // Cancel existing secondary with the SAME key.
+                                if let Some(old_cancel) = active_secondaries.remove(&sec_key) {
                                     let _ = old_cancel.send(());
-                                    info!(shard_type = pc.shard_type, "cancelled old secondary for replacement");
+                                    info!(shard_type = pc.shard_type, shard_id = pc.shard_id,
+                                        "cancelled old secondary for replacement");
+                                }
+
+                                // Enforce maximum simultaneous secondaries, counting
+                                // only Ship/Planet secondaries (System+Galaxy are exempt).
+                                let countable = |ss: &std::collections::HashMap<(u8, u64), _>| {
+                                    ss.keys().filter(|(st, _)| !is_scene_context(*st)).count()
+                                };
+                                while countable(&active_secondaries) >= MAX_SECONDARIES
+                                    && !is_scene_context(pc.shard_type)
+                                {
+                                    // Drop the first countable entry (future: drop farthest).
+                                    let evict_key = active_secondaries
+                                        .keys()
+                                        .find(|(st, _)| !is_scene_context(*st))
+                                        .copied();
+                                    if let Some(key) = evict_key {
+                                        if let Some(cancel) = active_secondaries.remove(&key) {
+                                            let _ = cancel.send(());
+                                            info!(shard_type = key.0, shard_id = key.1,
+                                                "evicted secondary — max reached");
+                                        }
+                                    } else {
+                                        break;
+                                    }
                                 }
 
                                 // Dedicated cancel token for this secondary.
                                 let (sec_cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
-                                active_secondaries.insert(pc.shard_type, sec_cancel_tx.clone());
+                                active_secondaries.insert(sec_key, sec_cancel_tx.clone());
+
+                                // Open observer TCP connection for chunk data.
+                                if let Ok(tcp_addr) = pc.tcp_addr.parse::<SocketAddr>() {
+                                    let tcp_event_tx = event_tx_tcp.clone();
+                                    let tcp_cancel = sec_cancel_tx.subscribe();
+                                    let tcp_seed = pc.seed;
+                                    tokio::spawn(async move {
+                                        connect_observer_tcp(tcp_addr, tcp_seed, tcp_event_tx, tcp_cancel).await;
+                                    });
+                                }
 
                                 let sec_event_tx = event_tx_tcp.clone();
                                 let mut sec_cancel_own = sec_cancel_tx.subscribe();
@@ -354,6 +429,15 @@ pub async fn run_network(
                             }
                             Ok(ServerMsg::SubGridAssignmentUpdate(data)) => {
                                 let _ = event_tx_tcp.send(NetEvent::SubGridAssignmentUpdate(data));
+                            }
+                            Ok(ServerMsg::ShardDisconnectNotify(dn)) => {
+                                let key = (dn.shard_type, dn.seed);
+                                if let Some(cancel) = active_secondaries.remove(&key) {
+                                    let _ = cancel.send(());
+                                    info!(shard_type = dn.shard_type, seed = dn.seed,
+                                        "secondary disconnected via ShardDisconnectNotify");
+                                }
+                                // TODO: notify main thread to remove chunk source.
                             }
                             Ok(_) => { /* ignore other TCP messages */ }
                             Err(e) => {
@@ -456,6 +540,62 @@ async fn connect_to_shard_full(
     match response {
         ServerMsg::JoinResponse(jr) => Ok((stream, jr)),
         other => Err(format!("expected JoinResponse, got {:?}", std::mem::discriminant(&other)).into()),
+    }
+}
+
+/// Open a TCP connection to a secondary shard as an observer.
+/// Sends ObserverConnect instead of Connect, receives chunk data.
+async fn connect_observer_tcp(
+    addr: SocketAddr,
+    seed: u64,
+    event_tx: mpsc::UnboundedSender<NetEvent>,
+    mut cancel_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    let mut stream = match TcpStream::connect(addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(%e, %addr, "observer TCP connect failed");
+            return;
+        }
+    };
+    let _ = stream.set_nodelay(true);
+
+    // Send ObserverConnect instead of Connect.
+    if let Err(e) = send_msg(&mut stream, &ClientMsg::ObserverConnect {
+        observer_name: format!("observer_{}", seed),
+    }).await {
+        warn!(%e, "failed to send ObserverConnect");
+        return;
+    }
+
+    info!(%addr, seed, "observer TCP connected — receiving chunks");
+
+    // Read loop: receive ChunkSnapshots, ChunkDeltas, SubGridAssignmentUpdates.
+    loop {
+        tokio::select! {
+            result = recv_server_msg(&mut stream) => {
+                match result {
+                    Ok(ServerMsg::ChunkSnapshot(cs)) => {
+                        let _ = event_tx.send(NetEvent::SecondaryChunkSnapshot { seed, data: cs });
+                    }
+                    Ok(ServerMsg::ChunkDelta(cd)) => {
+                        let _ = event_tx.send(NetEvent::SecondaryChunkDelta { seed, data: cd });
+                    }
+                    Ok(ServerMsg::SubGridAssignmentUpdate(sg)) => {
+                        let _ = event_tx.send(NetEvent::SecondarySubGridAssignment { seed, data: sg });
+                    }
+                    Ok(_) => {} // ignore other messages
+                    Err(e) => {
+                        info!(%e, seed, "observer TCP ended");
+                        return;
+                    }
+                }
+            }
+            _ = cancel_rx.recv() => {
+                info!(seed, "observer TCP cancelled");
+                return;
+            }
+        }
     }
 }
 

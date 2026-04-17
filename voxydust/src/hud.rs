@@ -7,6 +7,10 @@ use crate::gpu::GpuState;
 /// All state the HUD needs to read (borrowed from App).
 pub struct HudContext<'a> {
     pub latest_world_state: Option<&'a voxeldust_core::client_message::WorldStateData>,
+    /// Secondary shard world state, if an active scene-context secondary is live.
+    /// Entity labels draw from both primary and secondary so distant ships/players
+    /// are locatable while in dual-shard compositing.
+    pub secondary_world_state: Option<&'a voxeldust_core::client_message::WorldStateData>,
     /// Interpolated body positions (lerped with the same t as the camera).
     pub interpolated_bodies: &'a [voxeldust_core::client_message::CelestialBodyData],
     pub cam_system_pos: DVec3,
@@ -68,6 +72,11 @@ pub fn run_hud(
 
         // Body labels.
         draw_body_labels(&painter, ctx, logical_w, logical_h);
+
+        // Observable entity labels (ships, EVA players, grounded players) — from
+        // primary + secondary WorldState. Same screen-space circle+label style as
+        // celestial bodies so distant actors are locatable across the vast system.
+        draw_entity_labels(&painter, ctx, logical_w, logical_h);
 
         // Warp target reticle (purple circle + label on targeted star).
         draw_warp_target_reticle(&painter, ctx, logical_w, logical_h);
@@ -160,6 +169,136 @@ fn draw_body_labels(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, l
             let color = if body.body_id == 0 { egui::Color32::from_rgb(255, 220, 100) } else { egui::Color32::from_rgb(100, 200, 255) };
             painter.circle_stroke(egui::pos2(sx, sy), cr, egui::Stroke::new(1.0, color));
             painter.text(egui::pos2(sx + cr + 4.0, sy - 6.0), egui::Align2::LEFT_CENTER, &label, egui::FontId::proportional(11.0), color);
+        }
+    }
+}
+
+/// Draw screen-space markers for every ObservableEntity in the primary and
+/// secondary WorldStates: ships, EVA players, grounded players, seated players.
+///
+/// Mirrors `draw_body_labels` so distant actors are locatable even when their
+/// angular size is sub-pixel. Circle stroke is clamped at 6..80 px so close-up
+/// ships don't fill the screen; off-screen entities are clamped to the viewport
+/// edge with a directional arrow so the player knows which way to look.
+fn draw_entity_labels(painter: &egui::Painter, ctx: &HudContext, logical_w: f32, logical_h: f32) {
+    use voxeldust_core::client_message::EntityKind;
+
+    let worldstates = [ctx.latest_world_state, ctx.secondary_world_state];
+
+    // Track ids already drawn so primary takes precedence over secondary on overlap.
+    let mut drawn_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    for ws_opt in worldstates.iter() {
+        let Some(ws) = ws_opt else { continue };
+        for entity in &ws.entities {
+            if entity.is_own {
+                continue;
+            }
+            if !drawn_ids.insert(entity.entity_id) {
+                continue; // already drawn from primary
+            }
+
+            // WorldState.entities are in origin-relative space.
+            let world_pos = ws.origin + entity.position;
+            let offset_d = world_pos - ctx.cam_system_pos;
+            let dist = offset_d.length();
+            let offset = offset_d.as_vec3();
+
+            let (prefix, color) = match entity.kind {
+                EntityKind::Ship => ("S", egui::Color32::from_rgb(255, 160, 60)),
+                EntityKind::EvaPlayer => ("EVA", egui::Color32::from_rgb(255, 100, 220)),
+                EntityKind::GroundedPlayer => ("PL", egui::Color32::from_rgb(100, 180, 255)),
+                EntityKind::Seated => ("SEAT", egui::Color32::from_rgb(100, 220, 180)),
+            };
+
+            let name = if entity.name.is_empty() {
+                format!("{}#{}", prefix, entity.entity_id)
+            } else {
+                format!("{} {}", prefix, entity.name)
+            };
+            let label = if dist > 1e9 {
+                format!("{} {:.1}Gm", name, dist / 1e9)
+            } else if dist > 1e6 {
+                format!("{} {:.1}Mm", name, dist / 1e6)
+            } else if dist > 1e3 {
+                format!("{} {:.1}km", name, dist / 1e3)
+            } else {
+                format!("{} {:.0}m", name, dist)
+            };
+
+            // Project to screen.
+            let clip = ctx.vp * glam::Vec4::new(offset.x, offset.y, offset.z, 1.0);
+            let behind = clip.w <= 0.0;
+
+            // Compute screen pos (raw, possibly off-screen).
+            let (mut sx, mut sy, off_screen) = if behind {
+                // Behind camera — mirror to opposite edge using direction only.
+                let to_target_2d = glam::Vec2::new(-clip.x, clip.y);
+                let dir = if to_target_2d.length_squared() > 1e-6 {
+                    to_target_2d.normalize()
+                } else {
+                    glam::Vec2::new(0.0, -1.0)
+                };
+                let edge_x = logical_w * 0.5 + dir.x * logical_w * 0.45;
+                let edge_y = logical_h * 0.5 - dir.y * logical_h * 0.45;
+                (edge_x, edge_y, true)
+            } else {
+                let ndc_x = clip.x / clip.w;
+                let ndc_y = clip.y / clip.w;
+                let sx = (ndc_x * 0.5 + 0.5) * logical_w;
+                let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * logical_h;
+                let off = ndc_x.abs() > 1.0 || ndc_y.abs() > 1.0;
+                (sx, sy, off)
+            };
+
+            // Clamp off-screen markers to a margin inside the viewport edge.
+            let margin = 24.0;
+            if off_screen {
+                sx = sx.clamp(margin, logical_w - margin);
+                sy = sy.clamp(margin, logical_h - margin);
+            }
+
+            // Circle radius from angular size (bounding_radius), clamped so
+            // close ships aren't obnoxious and distant pinpoints still visible.
+            let fov_half = 70.0_f64.to_radians() / 2.0;
+            let angular = if dist > 0.0 {
+                (entity.bounding_radius as f64 / dist).atan()
+            } else {
+                0.0
+            };
+            let cr = (angular / fov_half * logical_h as f64 * 0.5)
+                .max(5.0)
+                .min(80.0) as f32;
+
+            // Dim off-screen markers so on-screen indicators stay the focus.
+            let color = if off_screen {
+                egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 160)
+            } else {
+                color
+            };
+
+            painter.circle_stroke(
+                egui::pos2(sx, sy),
+                cr,
+                egui::Stroke::new(if off_screen { 1.5 } else { 1.0 }, color),
+            );
+            // Crosshair inside the circle so small pinpoints are still visible.
+            let tick = cr.min(6.0);
+            painter.line_segment(
+                [egui::pos2(sx - tick, sy), egui::pos2(sx + tick, sy)],
+                egui::Stroke::new(1.0, color),
+            );
+            painter.line_segment(
+                [egui::pos2(sx, sy - tick), egui::pos2(sx, sy + tick)],
+                egui::Stroke::new(1.0, color),
+            );
+            painter.text(
+                egui::pos2(sx + cr + 4.0, sy - 6.0),
+                egui::Align2::LEFT_CENTER,
+                &label,
+                egui::FontId::proportional(11.0),
+                color,
+            );
         }
     }
 }

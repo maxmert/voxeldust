@@ -25,12 +25,13 @@ pub struct ClientConnection {
 }
 
 /// Channels for forwarding client TCP messages to the ECS bridge.
+/// Each message carries the sender's SessionToken for per-player routing.
 /// Cloned per-client — `mpsc::UnboundedSender` is `Clone`.
 #[derive(Clone)]
 pub struct TcpMessageChannels {
-    pub block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
-    pub config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
-    pub sub_block_edit_tx: mpsc::UnboundedSender<voxeldust_core::client_message::SubBlockEditData>,
+    pub block_edit_tx: mpsc::UnboundedSender<(SessionToken, BlockEditData)>,
+    pub config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
+    pub sub_block_edit_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
 }
 
 /// Event emitted when a client connects via TCP.
@@ -201,6 +202,15 @@ impl ClientRegistry {
         self.clients.contains_key(token)
     }
 
+    /// Reverse lookup: find the session token for a given UDP address.
+    /// Used by multi-player shards to route input to the correct player entity.
+    pub fn session_for_udp(&self, addr: SocketAddr) -> Option<SessionToken> {
+        self.clients
+            .iter()
+            .find(|(_, entry)| entry.udp_addr == Some(addr))
+            .map(|(&token, _)| token)
+    }
+
     /// Send a TCP message to a specific client.
     pub async fn send_tcp(&self, token: SessionToken, msg: &ServerMsg) -> Result<(), std::io::Error> {
         if let Some(entry) = self.clients.get(&token) {
@@ -293,38 +303,69 @@ async fn handle_client_connection(
             return;
         }
     };
-    let player_name = match ClientMsg::deserialize(&decoded) {
-        Ok(ClientMsg::Connect { player_name }) => player_name,
-        Ok(_) => {
-            warn!(%peer_addr, "expected Connect message, got something else");
-            return;
-        }
+    let first_msg = match ClientMsg::deserialize(&decoded) {
+        Ok(msg) => msg,
         Err(e) => {
             warn!(%peer_addr, %e, "failed to deserialize client message");
             return;
         }
     };
 
-    let token = SessionToken(rand_u64());
-    info!(%peer_addr, %player_name, session_token = token.0, "client connected");
+    match first_msg {
+        ClientMsg::Connect { player_name } => {
+            let token = SessionToken(rand_u64());
+            info!(%peer_addr, %player_name, session_token = token.0, "client connected");
 
-    // Phase 2: Split the TCP stream into read/write halves.
-    let (read_half, write_half) = stream.into_split();
+            // Split the TCP stream into read/write halves.
+            let (read_half, write_half) = stream.into_split();
 
-    // Phase 3: Send the connect event with the write half.
-    let connection = ClientConnection {
-        session_token: token,
-        player_name: player_name.clone(),
-        tcp_write: Arc::new(Mutex::new(write_half)),
-        peer_addr,
-        udp_addr: None,
+            let connection = ClientConnection {
+                session_token: token,
+                player_name: player_name.clone(),
+                tcp_write: Arc::new(Mutex::new(write_half)),
+                peer_addr,
+                udp_addr: None,
+            };
+
+            let _ = connect_tx.send(ClientConnectEvent { connection });
+
+            // Persistent read loop — blocks until client disconnects.
+            run_tcp_read_loop(read_half, peer_addr, &player_name, token, channels).await;
+            info!(%peer_addr, %player_name, "client TCP read loop ended");
+            return;
+        }
+        ClientMsg::ObserverConnect { observer_name } => {
+            info!(%peer_addr, %observer_name, "observer TCP connected");
+
+            // Observer connections: split stream, store write half for chunk sync,
+            // but do NOT send a ClientConnectEvent (no player entity).
+            // The shard will detect the observer via the ObserverConnect channel.
+            let (_read_half, write_half) = stream.into_split();
+            let write = Arc::new(Mutex::new(write_half));
+
+            // Store observer TCP write half in the connect channel with a special
+            // sentinel name so the shard can distinguish observers from players.
+            let observer_token = SessionToken(rand_u64());
+            let connection = ClientConnection {
+                session_token: observer_token,
+                player_name: format!("__observer__{}", observer_name),
+                tcp_write: write,
+                peer_addr,
+                udp_addr: None,
+            };
+            let _ = connect_tx.send(ClientConnectEvent { connection });
+
+            // Observer TCP connections don't have a persistent read loop.
+            // They only receive data (ChunkSnapshots, ChunkDeltas), never send.
+            info!(%peer_addr, %observer_name, "observer TCP setup complete");
+            return;
+        }
+        _ => {
+            warn!(%peer_addr, "expected Connect or ObserverConnect, got something else");
+            return;
+        }
     };
-    let _ = connect_tx.send(ClientConnectEvent { connection });
-
-    // Phase 4: Persistent read loop — blocks until client disconnects.
-    run_tcp_read_loop(read_half, peer_addr, &player_name, channels).await;
-
-    info!(%peer_addr, %player_name, "client TCP read loop ended");
+    // All match arms return — this is unreachable.
 }
 
 /// Persistent per-client TCP read loop. Reads length-prefixed messages from the
@@ -334,6 +375,7 @@ async fn run_tcp_read_loop(
     mut reader: tokio::net::tcp::OwnedReadHalf,
     peer_addr: SocketAddr,
     player_name: &str,
+    session_token: SessionToken,
     channels: TcpMessageChannels,
 ) {
     let mut len_buf = [0u8; 4];
@@ -380,19 +422,23 @@ async fn run_tcp_read_loop(
 
         match ClientMsg::deserialize(&decoded) {
             Ok(ClientMsg::BlockEditRequest(edit)) => {
-                let _ = channels.block_edit_tx.send(edit);
+                let _ = channels.block_edit_tx.send((session_token, edit));
             }
             Ok(ClientMsg::BlockConfigUpdate(update)) => {
-                let _ = channels.config_update_tx.send(update);
+                let _ = channels.config_update_tx.send((session_token, update));
             }
             Ok(ClientMsg::SubBlockEdit(edit)) => {
-                let _ = channels.sub_block_edit_tx.send(edit);
+                let _ = channels.sub_block_edit_tx.send((session_token, edit));
             }
             Ok(ClientMsg::PlayerInput(_)) => {
                 // PlayerInput should go via UDP for performance. Ignore on TCP.
             }
             Ok(ClientMsg::Connect { .. }) => {
                 warn!(%peer_addr, "duplicate Connect on established connection");
+            }
+            Ok(ClientMsg::ObserverConnect { .. }) => {
+                // ObserverConnect on an already-established connection — ignore.
+                warn!(%peer_addr, "ObserverConnect on established connection");
             }
             Err(e) => {
                 debug!(%peer_addr, %e, "failed to deserialize TCP client message");
@@ -464,9 +510,9 @@ pub async fn run_udp_receiver(
     socket: Arc<UdpSocket>,
     registry: Arc<RwLock<ClientRegistry>>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
-    block_edit_tx: mpsc::UnboundedSender<BlockEditData>,
-    config_update_tx: mpsc::UnboundedSender<voxeldust_core::signal::config::BlockConfigUpdateData>,
-    sub_block_edit_tx: mpsc::UnboundedSender<voxeldust_core::client_message::SubBlockEditData>,
+    block_edit_tx: mpsc::UnboundedSender<(SessionToken, BlockEditData)>,
+    config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
+    sub_block_edit_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
     cancel: CancellationToken,
 ) {
     let mut buf = vec![0u8; 65536];
@@ -492,18 +538,30 @@ pub async fn run_udp_receiver(
                             Ok(p) => p,
                             Err(_) => continue,
                         };
+                        // Resolve UDP source → SessionToken for per-player routing.
+                        let session = {
+                            let reg = registry.read().await;
+                            reg.session_for_udp(src)
+                        };
+
                         match ClientMsg::deserialize(&payload) {
                             Ok(ClientMsg::PlayerInput(input)) => {
                                 let _ = input_tx.send((src, input));
                             }
                             Ok(ClientMsg::BlockEditRequest(edit)) => {
-                                let _ = block_edit_tx.send(edit);
+                                if let Some(s) = session {
+                                    let _ = block_edit_tx.send((s, edit));
+                                }
                             }
                             Ok(ClientMsg::BlockConfigUpdate(update)) => {
-                                let _ = config_update_tx.send(update);
+                                if let Some(s) = session {
+                                    let _ = config_update_tx.send((s, update));
+                                }
                             }
                             Ok(ClientMsg::SubBlockEdit(edit)) => {
-                                let _ = sub_block_edit_tx.send(edit);
+                                if let Some(s) = session {
+                                    let _ = sub_block_edit_tx.send((s, edit));
+                                }
                             }
                             _ => {}
                         }

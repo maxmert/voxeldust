@@ -265,6 +265,10 @@ struct ClientChunkCacheRes {
     /// Source ID for the current primary shard connection.
     /// Set when a new shard connection provides chunk data.
     primary_source: Option<voxeldust_core::block::client_chunks::ChunkSourceId>,
+    /// Source IDs for secondary (observer) connections, keyed by seed (ship_id).
+    /// Created on SecondaryConnected, populated by SecondaryChunkSnapshot,
+    /// removed on ShardDisconnectNotify.
+    secondary_sources: std::collections::HashMap<u64, voxeldust_core::block::client_chunks::ChunkSourceId>,
 }
 
 impl std::ops::Deref for ClientChunkCacheRes {
@@ -310,6 +314,15 @@ struct RenderSmoothing {
     /// tick-based interpolation as position/rotation.
     sub_grid_transforms: std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
 
+    // --- Handoff blend (seamless primary-switch smoothing) ---
+    /// When a primary switch occurs (secondary promoted to primary), the camera
+    /// world-space position is held at `handoff_start_world` and lerped toward
+    /// the new primary's authoritative position over `HANDOFF_BLEND_SECS`.
+    /// `None` when no blend is active.
+    handoff_start_world: Option<DVec3>,
+    /// Instant at which the handoff blend started.
+    handoff_started_at: Instant,
+
     // --- Galaxy warp (separate interpolation, kept for warp travel) ---
     galaxy_render_position: DVec3,
     galaxy_render_rotation: DQuat,
@@ -319,6 +332,11 @@ struct RenderSmoothing {
     last_galaxy_update_time: Instant,
     has_prev_galaxy_pos: bool,
 }
+
+/// Handoff blend window — matches the server's 15-tick ghost-update tail
+/// (150 ms at 20 Hz) so the source-shard ghost covers the same window the
+/// client is interpolating across. Interpolation only — no extrapolation.
+const HANDOFF_BLEND_SECS: f64 = 0.15;
 
 /// Server tick duration (20Hz = 50ms).
 const TICK_DURATION_SECS: f64 = 1.0 / 20.0;
@@ -582,9 +600,11 @@ fn poll_network(
                     };
 
                     // Teleport detection: clear buffer on large jumps.
+                    // unwrap_or(true): when snapshot buffer is empty (first WS after
+                    // shard transition), always snap to position immediately.
                     let is_teleport = snapshots.snapshots.back()
                         .map(|last| (new_pos - last.player_position).length() > 10.0)
-                        .unwrap_or(false);
+                        .unwrap_or(true);
                     if is_teleport {
                         snapshots.snapshots.clear();
                         snapshots.estimated_server_tick = tick as f64;
@@ -592,6 +612,13 @@ fn poll_network(
                         smooth.render_rotation = p.rotation;
                         smooth.ship_origin = world_state.origin;
                         smooth.bodies = world_state.bodies.clone();
+                        info!(
+                            tick,
+                            new_pos = format!("({:.0},{:.0},{:.0})", new_pos.x, new_pos.y, new_pos.z),
+                            origin = format!("({:.0},{:.0},{:.0})", world_state.origin.x, world_state.origin.y, world_state.origin.z),
+                            players = world_state.players.len(),
+                            "teleport snap — render_position updated"
+                        );
                     }
 
                     // Sorted insert (handles out-of-order UDP).
@@ -613,6 +640,12 @@ fn poll_network(
                     if !snapshots.synced {
                         snapshots.estimated_server_tick = tick as f64;
                         snapshots.synced = true;
+                        info!(
+                            tick,
+                            pos = format!("({:.0},{:.0},{:.0})", new_pos.x, new_pos.y, new_pos.z),
+                            render_pos = format!("({:.0},{:.0},{:.0})", smooth.render_position.x, smooth.render_position.y, smooth.render_position.z),
+                            "synced on first snapshot"
+                        );
                     }
 
                     // Gentle clock drift correction: blend toward server tick.
@@ -675,6 +708,13 @@ fn poll_network(
                 // were already initialized from the promoted secondary WS.
                 // Clearing them would cause a blink until 2 new WorldStates arrive.
                 if snapshots.snapshots.is_empty() {
+                    // Reset render state for the new shard's coordinate frame.
+                    // Position set to zero — the first WorldState will snap it
+                    // to the correct value via teleport detection (unwrap_or(true)).
+                    // We do NOT use reference_position here because for ship shards
+                    // it's the ship's system-space position (~1e10), not a player
+                    // position — using it would overflow the i32 raycast.
+                    smooth.render_position = DVec3::ZERO;
                     smooth.render_rotation = reference_rotation;
                     smooth.bodies.clear();
                 }
@@ -711,6 +751,16 @@ fn poll_network(
                 let shard_name = match shard_type { 0 => "Planet", 2 => "Ship", 3 => "Galaxy", _ => "?" };
                 info!(shard_name, seed, shard_type, "secondary shard connected for dual compositing");
                 conn.secondary_shard_type = Some(shard_type);
+
+                // Create a chunk source for this secondary connection's block data.
+                // Ship secondaries provide their own chunk data via observer TCP.
+                if shard_type == voxeldust_core::client_message::shard_type::SHIP {
+                    if !chunk_cache.secondary_sources.contains_key(&seed) {
+                        let source = chunk_cache.cache.add_source();
+                        chunk_cache.secondary_sources.insert(seed, source);
+                        info!(seed, source = source.0, "created secondary chunk source for ship observer");
+                    }
+                }
 
                 if shard_type == 3 {
                     // Galaxy secondary: entering warp. Keep current_star_index
@@ -844,6 +894,41 @@ fn poll_network(
                     }
                 }
             }
+            NetEvent::SecondaryChunkSnapshot { seed, data: cs } => {
+                if let Some(&source) = chunk_cache.secondary_sources.get(&seed) {
+                    let chunk_pos = glam::IVec3::new(cs.chunk_x, cs.chunk_y, cs.chunk_z);
+                    match chunk_cache.insert_snapshot(source, chunk_pos, cs.seq, &cs.data) {
+                        Ok(()) => {
+                            info!(
+                                seed,
+                                chunk = %chunk_pos,
+                                "secondary chunk snapshot received"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, seed, "failed to insert secondary chunk snapshot");
+                        }
+                    }
+                }
+            }
+            NetEvent::SecondaryChunkDelta { seed, data: cd } => {
+                if let Some(&source) = chunk_cache.secondary_sources.get(&seed) {
+                    let chunk_pos = glam::IVec3::new(cd.chunk_x, cd.chunk_y, cd.chunk_z);
+                    if !cd.mods.is_empty() {
+                        let edits: Vec<_> = cd.mods.iter()
+                            .map(|m| (m.bx, m.by, m.bz, voxeldust_core::block::BlockId::from_u16(m.block_type)))
+                            .collect();
+                        chunk_cache.apply_delta(source, chunk_pos, cd.seq, &edits);
+                    }
+                    if !cd.sub_block_mods.is_empty() {
+                        chunk_cache.apply_sub_block_delta(source, chunk_pos, &cd.sub_block_mods);
+                    }
+                }
+            }
+            NetEvent::SecondarySubGridAssignment { seed, data } => {
+                // Sub-grid assignments for secondary ships — store for rendering.
+                let _ = (seed, data); // TODO: apply to secondary source sub-grid state
+            }
             NetEvent::Transitioning => {
                 info!("transitioning to new shard...");
 
@@ -911,6 +996,13 @@ fn poll_network(
                     // fallback if the secondary WS doesn't include the player.
                     let prev_ship_origin = smooth.ship_origin;
                     let prev_render_pos = smooth.render_position;
+                    // Capture pre-switch camera world position for the 150 ms
+                    // handoff blend. smooth_render_position will lerp the
+                    // rendered camera from this world-space anchor toward the
+                    // new primary's authoritative position so the view doesn't
+                    // snap on primary switch.
+                    smooth.handoff_start_world = Some(prev_ship_origin + prev_render_pos);
+                    smooth.handoff_started_at = Instant::now();
 
                     ws.latest = ws.secondary.take();
                     if let Some(st) = conn.secondary_shard_type.take() {
@@ -1101,6 +1193,25 @@ fn smooth_render_position(
             } else {
                 smooth.sub_grid_transforms.insert(sg_id, sg_b.clone());
             }
+        }
+    }
+
+    // Handoff blend: if a primary switch just occurred, lerp the rendered
+    // camera's world-space position from the pre-switch anchor to the new
+    // primary's authoritative position over HANDOFF_BLEND_SECS. Interpolation
+    // only — we never extrapolate past either endpoint.
+    if let Some(start_world) = smooth.handoff_start_world {
+        let elapsed = smooth.handoff_started_at.elapsed().as_secs_f64();
+        if elapsed >= HANDOFF_BLEND_SECS {
+            smooth.handoff_start_world = None;
+        } else {
+            let t = (elapsed / HANDOFF_BLEND_SECS).clamp(0.0, 1.0);
+            // Smoothstep so easing feels natural (no velocity discontinuity at
+            // the endpoints).
+            let s = t * t * (3.0 - 2.0 * t);
+            let target_world = smooth.ship_origin + smooth.render_position;
+            let blended_world = start_world.lerp(target_world, s);
+            smooth.render_position = blended_world - smooth.ship_origin;
         }
     }
 }
@@ -1358,6 +1469,8 @@ impl ClientApp {
             bodies: Vec::new(),
             interpolation_t: 1.0,
             sub_grid_transforms: std::collections::HashMap::new(),
+            handoff_start_world: None,
+            handoff_started_at: Instant::now(),
             galaxy_render_position: DVec3::ZERO,
             galaxy_render_rotation: DQuat::IDENTITY,
             galaxy_velocity: DVec3::ZERO,
@@ -1412,6 +1525,7 @@ impl ClientApp {
         ecs_app.insert_resource(ClientChunkCacheRes {
             cache: voxeldust_core::block::client_chunks::ClientChunkCache::new(),
             primary_source: None,
+            secondary_sources: std::collections::HashMap::new(),
         });
         ecs_app.insert_resource(FrameTime {
             count: 0,
@@ -1962,16 +2076,25 @@ impl ClientApp {
                 ));
             }
 
-            let chunk_cache_res = world.resource::<ClientChunkCacheRes>();
-            let active: Vec<_> = chunk_cache_res.active_sources_iter().collect();
-            let player_block = glam::IVec3::new(
-                render_position.x.floor() as i32,
-                render_position.y.floor() as i32,
-                render_position.z.floor() as i32,
-            );
-            vol.populate(player_block, &*chunk_cache_res, &self.registry, &active);
-            vol.upload(&gpu.queue);
+            // Voxel volume is only meaningful on planet/ship shards where block
+            // coordinates fit i32. On system shards, render_position is in system-space
+            // (~1e10 meters) which overflows i32 on conversion to block coords.
+            let safe_for_voxel_volume = current_shard_type != voxeldust_core::client_message::shard_type::SYSTEM;
+            if safe_for_voxel_volume {
+                let chunk_cache_res = world.resource::<ClientChunkCacheRes>();
+                let active: Vec<_> = chunk_cache_res.active_sources_iter().collect();
+                let player_block = glam::IVec3::new(
+                    render_position.x.floor() as i32,
+                    render_position.y.floor() as i32,
+                    render_position.z.floor() as i32,
+                );
+                vol.populate(player_block, &*chunk_cache_res, &self.registry, &active);
+                vol.upload(&gpu.queue);
+            }
 
+            if !safe_for_voxel_volume {
+                // System shard: no voxel volume, skip transform/propagation.
+            } else {
             // Compute the base_transform matching the one used for chunk rendering,
             // so the world_to_volume matrix correctly maps fragment world_pos back
             // to volume-index coordinates.
@@ -2012,6 +2135,7 @@ impl ClientApp {
                 vol.propagate_light(&mut encoder, iterations);
                 gpu.queue.submit(std::iter::once(encoder.finish()));
             }
+            } // end safe_for_voxel_volume
         }
 
         // Generate cloud noise textures if near a cloudy planet (once per planet).

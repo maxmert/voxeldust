@@ -529,6 +529,7 @@ fn soi_detection(
         &Velocity,
         &Rotation,
         &WarpState,
+        &SourceSystemShard,
     )>,
     galaxy_map: Res<GalaxyMapResource>,
     provisioned: Res<ProvisionedSystems>,
@@ -547,7 +548,7 @@ fn soi_detection(
         return;
     }
 
-    for (entity, ship_id, player_id, player_name, pos, vel, rot, warp) in &ships {
+    for (entity, ship_id, player_id, player_name, pos, vel, rot, warp, origin_system) in &ships {
         let target_star = match galaxy_map.0.get_star(warp.target_star_index) {
             Some(s) => s,
             None => continue,
@@ -620,6 +621,7 @@ fn soi_detection(
                             planet_index: 0,
                             reference_position: DVec3::ZERO,
                             reference_rotation: DQuat::IDENTITY,
+                            shard_id: dest_shard_id.0,
                         });
                         let creg = bridge.client_registry.clone();
                         let token = player_id.0;
@@ -683,6 +685,7 @@ fn soi_detection(
             game_time: tick.0 as f64 * DT,
             warp_target_star_index: None,
             warp_velocity_gu: None,
+            target_system_eva: false,
         };
 
         // Send PlayerHandoff to destination system shard.
@@ -720,6 +723,28 @@ fn soi_detection(
                 &galaxy_map.0,
                 &bridge,
             );
+        }
+
+        // Tell the client to tear down the ORIGIN system secondary — we've
+        // arrived at the destination system and its secondary is live.
+        // The origin system's "shrink-to-dot" window was during cruise; at
+        // arrival we no longer need to stream its celestial bodies.
+        //
+        // The client's active_secondaries map is keyed by (shard_type, shard_id),
+        // so we pass the origin system shard's id in the `seed` field (the
+        // existing wire protocol reuses that field as the key value).
+        let _ = galaxy_map.0.get_star(warp.origin_star_index); // sanity: origin star exists.
+        let disconnect = ServerMsg::ShardDisconnectNotify(handoff::ShardDisconnectNotify {
+            shard_type: 1, // System
+            seed: origin_system.0.0,
+        });
+        {
+            let creg = bridge.client_registry.clone();
+            let token = player_id.0;
+            tokio::spawn(async move {
+                let r = creg.read().await;
+                let _ = r.send_tcp(token, &disconnect).await;
+            });
         }
 
         info!(
