@@ -19,7 +19,15 @@ use crate::circuit_breaker::CircuitBreaker;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum message size (64 KB).
-const MAX_MESSAGE_SIZE: usize = 65_536;
+// Raised from 64 KB to 4 MB to accommodate `ShipColliderSync` messages
+// that carry per-chunk interior-volume bitmasks (3724 u64s = ~29 KB per
+// chunk, and a ship can span 4–8 chunks → 115–235 KB easily). Before this
+// raise, ShipColliderSync was silently dropped at the QUIC boundary,
+// leaving the system shard without any collider/interior data and causing
+// EVA players to pass through ships and fail to trigger boarding. Future
+// work: compress the interior_bits payload with lz4_flex to lower the
+// wire cost (sparse bitmaps compress 10–50×).
+const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -285,9 +293,19 @@ impl IncomingConnection {
                 loop {
                     match Self::read_one_message(&mut recv).await {
                         Ok(msg) => {
-                            if tx.send(msg).is_err() { return; }
+                            if tx.send(msg).is_err() {
+                                tracing::warn!("QUIC recv: forward channel closed");
+                                return;
+                            }
                         }
-                        Err(_) => return, // stream ended or error
+                        Err(e) => {
+                            // Log non-EOF errors so mis-serialized / mis-
+                            // deserialized messages aren't silently dropped
+                            // (the ShipColliderSync schema drift was
+                            // invisible before this log).
+                            tracing::warn!(err = ?e, "QUIC recv: stream ended with error");
+                            return;
+                        }
                     }
                 }
             });

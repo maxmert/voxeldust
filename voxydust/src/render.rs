@@ -4,6 +4,8 @@ use glam::{DVec3, DQuat, Mat4, Quat, Vec3};
 
 use crate::block_render::{BlockRenderer, ChunkGpuMesh};
 use crate::camera::CameraParams;
+
+use voxeldust_core::block::client_chunks::ChunkSourceId;
 use crate::gpu::{
     GpuState, ObjectUniforms, SceneLighting, ShadowCascades, AtmosphereUniforms,
     EYE_HEIGHT, MAX_OBJECTS, SHADOW_MAP_SIZE, NUM_CASCADES,
@@ -73,6 +75,11 @@ fn compute_cascade_matrices(
 struct BlockShipTransform {
     /// Camera-relative base transform: translates chunk-local vertices to world space.
     base_transform: Mat4,
+    /// Which chunk source provides this ship's blocks. Pre-resolved so the
+    /// render loop draws chunks from exactly one source per ship — no more
+    /// all-sources-at-all-transforms cross product (which only coincidentally
+    /// worked for the single-ship case).
+    source: ChunkSourceId,
 }
 
 /// Intermediate state for the render pass: object counts and special indices.
@@ -91,11 +98,14 @@ fn build_uniforms(
     cam: &CameraParams,
     ws: Option<&WorldStateData>,
     secondary_ws: Option<&WorldStateData>,
+    grace_fallback_ws: Option<&WorldStateData>,
     interpolated_bodies: &[voxeldust_core::client_message::CelestialBodyData],
     current_shard_type: u8,
     shard_seed: u64,
     player_position: DVec3,
     ship_rotation: DQuat,
+    primary_source: Option<ChunkSourceId>,
+    secondary_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
 ) -> RenderObjects {
     let mut object_count = 0usize;
     let mut inside_sphere_indices: Vec<usize> = Vec::new();
@@ -214,31 +224,101 @@ fn build_uniforms(
         }
     }
 
-    // Collect ship_ids for which we have full block meshes via the legacy
-    // `ships` field (populated for ships the client has an active connection to).
-    // Ship entities in `entities` but NOT in this set will be rendered as a LOD
-    // proxy sphere sized by bounding_radius so distant ships stay visible even
-    // when their blocks aren't streamed.
+    // Phase 1: collect ship block-mesh transforms. This populates
+    // `ship_ids_with_meshes`, which the LOD-sphere pass below uses to skip
+    // ships that already have streamed blocks. The legacy `ws.ships` field
+    // is always `vec![]` in every shard — ships are emitted via `entities[]`
+    // with `EntityKind::Ship`.
+    //
+    // Source resolution priority:
+    //   - Own ship on SHIP shard: `primary_source`, Interior transform.
+    //   - Any other ship entity (from ws / sec_ws / last_primary entities):
+    //     `secondary_ship_sources[entity_id]`. Ships without a streamed source
+    //     still render as LOD-proxy spheres in Phase 2.
     let mut ship_ids_with_meshes: std::collections::HashSet<u64> =
         std::collections::HashSet::new();
-    if let Some(ws) = ws {
-        for ship in &ws.ships {
-            ship_ids_with_meshes.insert(ship.ship_id);
-        }
-    }
-    if let Some(sec_ws) = secondary_ws {
-        for ship in &sec_ws.ships {
-            ship_ids_with_meshes.insert(ship.ship_id);
+    let mut block_ships: Vec<BlockShipTransform> = Vec::new();
+
+    // Interior ship (player is inside — shard_type 2).
+    // Prefer `primary_source` (fresh ship-shard chunks). When primary is still
+    // empty (typical during the ~100 ms between a ShardRedirect-driven TCP
+    // reconnect and the first new ChunkSnapshot), fall back to the chunks
+    // we streamed as a secondary observer before boarding — they're already
+    // on GPU, keyed by the ship's own_id in `secondary_ship_sources`.
+    if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
+        let source = primary_source
+            .or_else(|| secondary_ship_sources.get(&shard_seed).copied());
+        if let Some(source) = source {
+            let ship_rot_mat = Mat4::from_quat(ship_rotation.as_quat());
+            let origin_local = -(player_position + DVec3::new(0.0, EYE_HEIGHT, 0.0));
+            let ship_origin_offset = (ship_rotation * origin_local).as_vec3();
+            let base_transform = Mat4::from_translation(ship_origin_offset) * ship_rot_mat;
+            block_ships.push(BlockShipTransform { base_transform, source });
+            ship_ids_with_meshes.insert(shard_seed);
         }
     }
 
-    // Unified entity rendering: iterate ObservableEntity entries and draw a
-    // sphere per non-ship kind (avatar), plus a LOD proxy for ships without
-    // cached block meshes (distant ships, ships in Coarse tier).
+    use voxeldust_core::client_message::EntityKind;
+    // Render every ship as its actual block mesh — no LOD / proxy / sphere
+    // substitution at any distance. If a ship's observer source isn't
+    // connected yet or its chunks haven't arrived, we render nothing for
+    // that ship this frame; the proactive pre-connect pipeline guarantees
+    // the gap is sub-second and (per policy) happens before the ship is
+    // close enough to be visually relevant.
+    let mut push_ship_entity = |block_ships: &mut Vec<BlockShipTransform>,
+                                 ship_ids_with_meshes: &mut std::collections::HashSet<u64>,
+                                 e: &voxeldust_core::client_message::ObservableEntityData,
+                                 origin: DVec3| {
+        if !matches!(e.kind, EntityKind::Ship) { return; }
+        if ship_ids_with_meshes.contains(&e.entity_id) { return; }
+        // Skip own ship when interior branch already rendered it.
+        if current_shard_type == voxeldust_core::client_message::shard_type::SHIP
+            && e.entity_id == shard_seed
+        {
+            return;
+        }
+        let Some(&source) = secondary_ship_sources.get(&e.entity_id) else {
+            return; // observer not connected yet — chunks arriving soon
+        };
+        let ship_system_pos = origin + e.position;
+        let offset = (ship_system_pos - cam.cam_system_pos).as_vec3();
+        if !cam.frustum.contains_sphere(offset, e.bounding_radius.max(16.0) as f32) { return; }
+        let ship_rot_mat = Mat4::from_quat(e.rotation.as_quat());
+        let base_transform = Mat4::from_translation(offset) * ship_rot_mat;
+        block_ships.push(BlockShipTransform { base_transform, source });
+        ship_ids_with_meshes.insert(e.entity_id);
+    };
+    if let Some(ws) = ws {
+        for e in &ws.entities {
+            push_ship_entity(&mut block_ships, &mut ship_ids_with_meshes, e, ws.origin);
+        }
+    }
+    if let Some(sec_ws) = secondary_ws {
+        for e in &sec_ws.entities {
+            push_ship_entity(&mut block_ships, &mut ship_ids_with_meshes, e, sec_ws.origin);
+        }
+    }
+    // Grace-window fallback: during a seamless promotion, the new primary
+    // marks its own ship `is_own` (skipped below) but we still want the
+    // block mesh on screen; the stashed `last_primary` carries the ship as
+    // a normal Ship entity at its system-space position.
+    if let Some(grace_ws) = grace_fallback_ws {
+        for e in &grace_ws.entities {
+            push_ship_entity(&mut block_ships, &mut ship_ids_with_meshes, e, grace_ws.origin);
+        }
+    }
+
+    // Phase 2: LOD-sphere / avatar entity rendering. Runs AFTER block_ships
+    // so `ship_ids_with_meshes` reflects which ships are already rendered as
+    // full meshes and therefore shouldn't also get an orange proxy sphere.
     //
     // Skip is_own entries (own avatar — camera is mounted there).
+    // `drawn_ids` tracks entity_ids already rendered so the grace-fallback
+    // pass doesn't double-draw entities that also appear in the live WS.
+    let mut drawn_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let draw_entities =
         |uniform_data: &mut [ObjectUniforms], object_count: &mut usize,
+         drawn: &mut std::collections::HashSet<u64>,
          entities: &[voxeldust_core::client_message::ObservableEntityData],
          origin: DVec3,
          ships_with_meshes: &std::collections::HashSet<u64>| {
@@ -246,27 +326,22 @@ fn build_uniforms(
                 if e.is_own {
                     continue;
                 }
-                use voxeldust_core::client_message::{EntityKind, LodTier};
+                if !drawn.insert(e.entity_id) {
+                    continue;
+                }
                 let (color, radius) = match e.kind {
-                    EntityKind::Ship => {
-                        // Skip — the block-mesh pipeline handles this ship.
-                        if ships_with_meshes.contains(&e.entity_id) {
-                            continue;
-                        }
-                        // LOD proxy: orange-tinted sphere sized by bounding_radius.
-                        // Coarse tier shrinks to a pinpoint marker so far-field
-                        // ships don't visually dominate the scene.
-                        let scale = match e.lod_tier {
-                            LodTier::Full => e.bounding_radius.max(4.0),
-                            LodTier::Reduced => e.bounding_radius.max(4.0),
-                            LodTier::Coarse => e.bounding_radius.max(2.0) * 0.5,
-                        };
-                        ([1.0, 0.6, 0.2, 0.9], scale)
-                    }
+                    // Ships are ALWAYS rendered as their actual block mesh
+                    // via `push_ship_entity` — never as a proxy sphere. If
+                    // the mesh isn't on the GPU yet, render nothing this
+                    // frame (streaming catches up within sub-second, and
+                    // proactive pre-connect means this only happens at very
+                    // distant approach where invisibility is acceptable).
+                    EntityKind::Ship => continue,
                     EntityKind::EvaPlayer => ([1.0, 0.25, 0.85, 1.0], 1.0),
                     EntityKind::GroundedPlayer => ([0.25, 0.65, 1.0, 1.0], 1.0),
                     EntityKind::Seated => ([0.25, 1.0, 0.75, 1.0], 1.0),
                 };
+                let _ = ships_with_meshes; // kept for API stability; no longer consulted
                 if *object_count >= MAX_OBJECTS {
                     break;
                 }
@@ -291,6 +366,7 @@ fn build_uniforms(
         draw_entities(
             uniform_data,
             &mut object_count,
+            &mut drawn_ids,
             &ws.entities,
             ws.origin,
             &ship_ids_with_meshes,
@@ -300,55 +376,32 @@ fn build_uniforms(
         draw_entities(
             uniform_data,
             &mut object_count,
+            &mut drawn_ids,
             &sec_ws.entities,
             sec_ws.origin,
             &ship_ids_with_meshes,
         );
     }
+    // Grace-window fallback: during a seamless primary-secondary promotion,
+    // the old primary's WS is stashed briefly so its LOD-proxy entities (e.g.,
+    // the ship the user just touched, which the new primary marks `is_own`
+    // and therefore skips) keep drawing for `LAST_PRIMARY_GRACE_SECS`. Dedupe
+    // against entities already drawn from `ws`/`sec_ws` by entity_id.
+    if let Some(grace_ws) = grace_fallback_ws {
+        draw_entities(
+            uniform_data,
+            &mut object_count,
+            &mut drawn_ids,
+            &grace_ws.entities,
+            grace_ws.origin,
+            &ship_ids_with_meshes,
+        );
+    }
 
-    // Collect ship transforms for block-based rendering.
-    // All ships (interior and exterior) are rendered from block chunks.
+    // Block chunk uniforms begin right after the sphere/avatar draws. The
+    // shadow + color passes fill `uniform_data[block_uniform_start..]` with
+    // one entry per (block_ships transform × chunks-for-source).
     let block_uniform_start = object_count;
-    let mut block_ships: Vec<BlockShipTransform> = Vec::new();
-
-    // Interior ship (player is inside — shard_type 2).
-    if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
-        let ship_rot_mat = Mat4::from_quat(ship_rotation.as_quat());
-        let origin_local = -(player_position + DVec3::new(0.0, EYE_HEIGHT, 0.0));
-        let ship_origin_offset = (ship_rotation * origin_local).as_vec3();
-        let base_transform = Mat4::from_translation(ship_origin_offset) * ship_rot_mat;
-        block_ships.push(BlockShipTransform { base_transform });
-    }
-
-    // Exterior ships from primary WorldState.
-    if let Some(ws) = ws {
-        for ship in &ws.ships {
-            let offset = (ship.position - cam.cam_system_pos).as_vec3();
-            if !cam.frustum.contains_sphere(offset, 16.0) { continue; }
-            let ship_rot_mat = Mat4::from_quat(ship.rotation.as_quat());
-            let base_transform = Mat4::from_translation(offset) * ship_rot_mat;
-            block_ships.push(BlockShipTransform { base_transform });
-        }
-    }
-
-    // Exterior ships from secondary WorldState (dual-shard compositing).
-    if let Some(sec_ws) = secondary_ws {
-        for ship in &sec_ws.ships {
-            // Skip own ship: when inside a ship, the interior is already rendered
-            // by the primary shard. The secondary's copy would render as a duplicate.
-            if current_shard_type == voxeldust_core::client_message::shard_type::SHIP
-                && ship.ship_id == shard_seed
-            {
-                continue;
-            }
-            let ship_system_pos = sec_ws.origin + ship.position;
-            let offset = (ship_system_pos - cam.cam_system_pos).as_vec3();
-            if !cam.frustum.contains_sphere(offset, 16.0) { continue; }
-            let ship_rot_mat = Mat4::from_quat(ship.rotation.as_quat());
-            let base_transform = Mat4::from_translation(offset) * ship_rot_mat;
-            block_ships.push(BlockShipTransform { base_transform });
-        }
-    }
 
     RenderObjects {
         object_count,
@@ -576,6 +629,7 @@ pub fn render_frame(
     cam: &CameraParams,
     latest_world_state: Option<&WorldStateData>,
     secondary_world_state: Option<&WorldStateData>,
+    grace_fallback_world_state: Option<&WorldStateData>,
     interpolated_bodies: &[voxeldust_core::client_message::CelestialBodyData],
     current_shard_type: u8,
     shard_seed: u64,
@@ -602,15 +656,59 @@ pub fn render_frame(
     gfx_settings: &GraphicsSettings,
     sub_grid_transforms: &std::collections::HashMap<u32, voxeldust_core::client_message::SubGridTransformData>,
     sub_grid_assignments: &std::collections::HashMap<glam::IVec3, u32>,
+    primary_source: Option<ChunkSourceId>,
+    secondary_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
 ) -> hud::ConfigPanelAction {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     // Build object uniforms.
     let ro = build_uniforms(
-        uniform_data, cam, latest_world_state, secondary_world_state,
+        uniform_data, cam, latest_world_state, secondary_world_state, grace_fallback_world_state,
         interpolated_bodies, current_shard_type, shard_seed, player_position, ship_rotation,
+        primary_source, secondary_ship_sources,
     );
+
+    // Diagnostic: log ship rendering state every 40 frames (~0.7s at 60fps)
+    // so we can correlate "ship disappeared" reports with what the render
+    // pipeline saw. Emits: block_ships count, per-ship source+chunk count,
+    // number of Ship entities in each WS, and the full secondary source map.
+    if frame_count % 40 == 0 {
+        let ws_ship_entities = latest_world_state.map_or(0, |ws| {
+            ws.entities.iter().filter(|e| matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)).count()
+        });
+        let sec_ws_ship_entities = secondary_world_state.map_or(0, |ws| {
+            ws.entities.iter().filter(|e| matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)).count()
+        });
+        let grace_ws_ship_entities = grace_fallback_world_state.map_or(0, |ws| {
+            ws.entities.iter().filter(|e| matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)).count()
+        });
+        let block_ship_sources: Vec<u32> = ro.block_ships
+            .iter()
+            .map(|bs| bs.source.0)
+            .collect();
+        let block_ship_chunk_counts: Vec<(u32, usize)> = block_renderer
+            .map(|br| {
+                ro.block_ships.iter()
+                    .map(|bs| (bs.source.0, br.chunks_for_source(bs.source).count()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        tracing::info!(
+            frame = frame_count,
+            shard_type = current_shard_type,
+            shard_seed,
+            ws_ships = ws_ship_entities,
+            sec_ws_ships = sec_ws_ship_entities,
+            grace_ws_ships = grace_ws_ship_entities,
+            block_ships = ro.block_ships.len(),
+            block_ship_sources = ?block_ship_sources,
+            block_ship_chunks = ?block_ship_chunk_counts,
+            primary_source = primary_source.map(|s| s.0),
+            sec_src_map = ?secondary_ship_sources.iter().map(|(k, v)| (*k, v.0)).collect::<Vec<_>>(),
+            "ship-render diagnostic"
+        );
+    }
 
     // Write scene lighting data from server WorldState, with eclipse darkening.
     let mut scene_lighting = build_scene_lighting(latest_world_state);
@@ -670,23 +768,24 @@ pub fn render_frame(
                     gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
                 }
 
-                // Write shadow-space MVPs for block chunks (batched).
+                // Write shadow-space MVPs for block chunks. Each ship in
+                // `block_ships` pairs its transform with its own chunk source,
+                // so we iterate (transform × that source's chunks) — not the
+                // old (transform × all active sources) cross product.
                 if let Some(br) = block_renderer {
                     if br.has_chunks() && !ro.block_ships.is_empty() {
                         let block_start = ro.block_uniform_start;
                         let mut chunk_idx = 0usize;
                         for ship_transform in &ro.block_ships {
-                            for source in br.active_sources() {
-                                for (chunk_pos, _) in br.chunks_for_source(source) {
-                                    let uniform_idx = block_start + chunk_idx;
-                                    if uniform_idx >= MAX_OBJECTS { break; }
-                                    let chunk_model = crate::block_render::BlockRenderer::chunk_model_matrix(
-                                        ship_transform.base_transform, chunk_pos, CHUNK_SIZE as f64,
-                                    );
-                                    uniform_data[uniform_idx].mvp = (cascade_matrices[cascade_idx] * chunk_model).to_cols_array_2d();
-                                    uniform_data[uniform_idx].model = chunk_model.to_cols_array_2d();
-                                    chunk_idx += 1;
-                                }
+                            for (chunk_pos, _) in br.chunks_for_source(ship_transform.source) {
+                                let uniform_idx = block_start + chunk_idx;
+                                if uniform_idx >= MAX_OBJECTS { break; }
+                                let chunk_model = crate::block_render::BlockRenderer::chunk_model_matrix(
+                                    ship_transform.base_transform, chunk_pos, CHUNK_SIZE as f64,
+                                );
+                                uniform_data[uniform_idx].mvp = (cascade_matrices[cascade_idx] * chunk_model).to_cols_array_2d();
+                                uniform_data[uniform_idx].model = chunk_model.to_cols_array_2d();
+                                chunk_idx += 1;
                             }
                         }
                         if chunk_idx > 0 {
@@ -732,17 +831,15 @@ pub fn render_frame(
                             pass.set_pipeline(&br.shadow_pipeline);
                             let block_start = ro.block_uniform_start;
                             let mut chunk_idx = 0usize;
-                            for _ship_transform in &ro.block_ships {
-                                for source in br.active_sources() {
-                                    for (_, chunk_mesh) in br.chunks_for_source(source) {
-                                        let uniform_idx = block_start + chunk_idx;
-                                        if uniform_idx >= MAX_OBJECTS { break; }
-                                        pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
-                                        pass.set_vertex_buffer(0, chunk_mesh.vertex_buf.slice(..));
-                                        pass.set_index_buffer(chunk_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                                        pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
-                                        chunk_idx += 1;
-                                    }
+                            for ship_transform in &ro.block_ships {
+                                for (_, chunk_mesh) in br.chunks_for_source(ship_transform.source) {
+                                    let uniform_idx = block_start + chunk_idx;
+                                    if uniform_idx >= MAX_OBJECTS { break; }
+                                    pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
+                                    pass.set_vertex_buffer(0, chunk_mesh.vertex_buf.slice(..));
+                                    pass.set_index_buffer(chunk_mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                                    pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
+                                    chunk_idx += 1;
                                 }
                             }
                         }
@@ -754,8 +851,9 @@ pub fn render_frame(
 
         // Restore camera-space MVPs for the main pass.
         let ro = build_uniforms(
-            uniform_data, cam, latest_world_state, secondary_world_state,
+            uniform_data, cam, latest_world_state, secondary_world_state, grace_fallback_world_state,
             interpolated_bodies, current_shard_type, shard_seed, player_position, ship_rotation,
+            primary_source, secondary_ship_sources,
         );
         if ro.object_count > 0 {
             gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
@@ -852,31 +950,32 @@ pub fn render_frame(
                 chunk_uniform_map.clear();
 
                 for ship_transform in &ro.block_ships {
-                    for source in br.active_sources() {
-                        for (chunk_pos, chunk_mesh) in br.chunks_for_source(source) {
-                            let uniform_idx = block_start + chunk_idx;
-                            if uniform_idx >= MAX_OBJECTS { break; }
+                    for (chunk_pos, chunk_mesh) in br.chunks_for_source(ship_transform.source) {
+                        let uniform_idx = block_start + chunk_idx;
+                        if uniform_idx >= MAX_OBJECTS { break; }
 
-                            let model = BlockRenderer::chunk_model_matrix(
-                                ship_transform.base_transform,
-                                chunk_pos,
-                                CHUNK_SIZE as f64,
-                            );
-                            let mvp = cam.vp * model;
+                        let model = BlockRenderer::chunk_model_matrix(
+                            ship_transform.base_transform,
+                            chunk_pos,
+                            CHUNK_SIZE as f64,
+                        );
+                        let mvp = cam.vp * model;
 
-                            let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
-                            obj.mvp = mvp.to_cols_array_2d();
-                            obj.model = model.to_cols_array_2d();
-                            obj.color = [1.0, 1.0, 1.0, 0.0];
-                            obj.material = [0.1, 0.7, 0.0, 0.0];
-                            uniform_data[uniform_idx] = obj;
+                        let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                        obj.mvp = mvp.to_cols_array_2d();
+                        obj.model = model.to_cols_array_2d();
+                        obj.color = [1.0, 1.0, 1.0, 0.0];
+                        obj.material = [0.1, 0.7, 0.0, 0.0];
+                        uniform_data[uniform_idx] = obj;
 
-                            let key = voxeldust_core::block::client_chunks::ChunkKey { source, chunk: chunk_pos };
-                            chunk_uniform_map.insert(key, uniform_idx);
+                        let key = voxeldust_core::block::client_chunks::ChunkKey {
+                            source: ship_transform.source,
+                            chunk: chunk_pos,
+                        };
+                        chunk_uniform_map.insert(key, uniform_idx);
 
-                            block_draws.push((uniform_idx, chunk_mesh));
-                            chunk_idx += 1;
-                        }
+                        block_draws.push((uniform_idx, chunk_mesh));
+                        chunk_idx += 1;
                     }
                 }
 
@@ -900,10 +999,15 @@ pub fn render_frame(
                         pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                     }
 
-                    // Draw sub-block meshes (same pipeline + uniform as their parent chunk).
-                    for source in br.active_sources() {
-                        for (chunk_pos, sub_mesh) in br.sub_blocks_for_source(source) {
-                            let key = voxeldust_core::block::client_chunks::ChunkKey { source, chunk: chunk_pos };
+                    // Draw sub-block meshes (same pipeline + uniform as their
+                    // parent chunk). Iterate per-ship sources so we draw
+                    // sub-blocks only for ships we actually rendered.
+                    for ship_transform in &ro.block_ships {
+                        for (chunk_pos, sub_mesh) in br.sub_blocks_for_source(ship_transform.source) {
+                            let key = voxeldust_core::block::client_chunks::ChunkKey {
+                                source: ship_transform.source,
+                                chunk: chunk_pos,
+                            };
                             if let Some(&uniform_idx) = chunk_uniform_map.get(&key) {
                                 pass.set_bind_group(0, &gpu.bind_group, &[(uniform_idx as u32) * 256]);
                                 pass.set_vertex_buffer(0, sub_mesh.vertex_buf.slice(..));
@@ -921,43 +1025,41 @@ pub fn render_frame(
                         let mut sg_draws: Vec<(usize, &ChunkGpuMesh)> = Vec::with_capacity(32);
 
                         for ship_transform in &ro.block_ships {
-                            for source in br.active_sources() {
-                                for (sg_key, sg_mesh) in br.sub_grid_meshes_for_source(source) {
-                                    let uniform_idx = block_start + chunk_idx;
-                                    if uniform_idx >= MAX_OBJECTS { break; }
+                            for (sg_key, sg_mesh) in br.sub_grid_meshes_for_source(ship_transform.source) {
+                                let uniform_idx = block_start + chunk_idx;
+                                if uniform_idx >= MAX_OBJECTS { break; }
 
-                                    // Compute sub-grid transform from world-space body isometry.
-                                    // T(world_pos) * R(world_rot) * T(-anchor_root)
-                                    // anchor_root is the fixed root-space anchor; world_pos/rot
-                                    // include parent chain (composed on server).
-                                    let sg_local = sub_grid_transforms.get(&sg_key.sub_grid_id)
-                                        .map(|sgt| {
-                                            Mat4::from_translation(sgt.translation)
-                                                * Mat4::from_quat(sgt.rotation)
-                                                * Mat4::from_translation(-sgt.anchor)
-                                        })
-                                        .unwrap_or(Mat4::IDENTITY);
+                                // Compute sub-grid transform from world-space body isometry.
+                                // T(world_pos) * R(world_rot) * T(-anchor_root)
+                                // anchor_root is the fixed root-space anchor; world_pos/rot
+                                // include parent chain (composed on server).
+                                let sg_local = sub_grid_transforms.get(&sg_key.sub_grid_id)
+                                    .map(|sgt| {
+                                        Mat4::from_translation(sgt.translation)
+                                            * Mat4::from_quat(sgt.rotation)
+                                            * Mat4::from_translation(-sgt.anchor)
+                                    })
+                                    .unwrap_or(Mat4::IDENTITY);
 
-                                    let chunk_offset = Vec3::new(
-                                        sg_key.chunk.x as f32 * CHUNK_SIZE as f32,
-                                        sg_key.chunk.y as f32 * CHUNK_SIZE as f32,
-                                        sg_key.chunk.z as f32 * CHUNK_SIZE as f32,
-                                    );
-                                    let model = ship_transform.base_transform
-                                        * sg_local
-                                        * Mat4::from_translation(chunk_offset);
-                                    let mvp = cam.vp * model;
+                                let chunk_offset = Vec3::new(
+                                    sg_key.chunk.x as f32 * CHUNK_SIZE as f32,
+                                    sg_key.chunk.y as f32 * CHUNK_SIZE as f32,
+                                    sg_key.chunk.z as f32 * CHUNK_SIZE as f32,
+                                );
+                                let model = ship_transform.base_transform
+                                    * sg_local
+                                    * Mat4::from_translation(chunk_offset);
+                                let mvp = cam.vp * model;
 
-                                    let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
-                                    obj.mvp = mvp.to_cols_array_2d();
-                                    obj.model = model.to_cols_array_2d();
-                                    obj.color = [1.0, 1.0, 1.0, 0.0];
-                                    obj.material = [0.1, 0.7, 0.0, 0.0];
-                                    uniform_data[uniform_idx] = obj;
+                                let mut obj: ObjectUniforms = bytemuck::Zeroable::zeroed();
+                                obj.mvp = mvp.to_cols_array_2d();
+                                obj.model = model.to_cols_array_2d();
+                                obj.color = [1.0, 1.0, 1.0, 0.0];
+                                obj.material = [0.1, 0.7, 0.0, 0.0];
+                                uniform_data[uniform_idx] = obj;
 
-                                    sg_draws.push((uniform_idx, sg_mesh));
-                                    chunk_idx += 1;
-                                }
+                                sg_draws.push((uniform_idx, sg_mesh));
+                                chunk_idx += 1;
                             }
                         }
 

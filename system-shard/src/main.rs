@@ -14,9 +14,9 @@ use voxeldust_core::client_message::{
     CelestialBodyData, JoinResponseData, LightingData, ServerMsg, WorldStateData,
 };
 use voxeldust_core::ecs::{
-    self, AngularVelocity, Autopilot, AutopilotIntercept, InSoi, Landed, LandingZoneDebounce,
-    Position, Rotation, ShipId, ShipPhysics, ThermalState, ThrustInput, TorqueInput, Velocity,
-    WarpAutopilot,
+    self, AngularVelocity, Autopilot, AutopilotIntercept, HandoffPending, InSoi, Landed,
+    LandingZoneDebounce, Position, Rotation, ShipId, ShipPhysics, ThermalState, ThrustInput,
+    TorqueInput, Velocity, WarpAutopilot,
 };
 use voxeldust_core::handoff;
 use voxeldust_core::shard_message::{
@@ -170,14 +170,17 @@ struct EvaPlayerIndex(HashMap<String, (Entity, SessionToken, DVec3)>);
 // ---------------------------------------------------------------------------
 
 /// Cached ship collider shapes received from the ship shard.
-/// Stored as component data for future EVA collision (Phase 4).
+/// Stored as component data for EVA collision + boarding-detection queries.
 /// The system shard does not run Rapier physics — it stores the shapes
 /// so they can be used when EVA players need hull collision detection.
+/// `interior_mask` is the authoritative "is ship-local point X interior?"
+/// data, computed on the ship shard and shipped alongside the colliders.
 #[derive(Component)]
 struct ShipColliderCache {
     chunks: Vec<voxeldust_core::shard_message::ChunkColliderData>,
     hull_min: glam::Vec3,
     hull_max: glam::Vec3,
+    interior_mask: voxeldust_core::block::interior_mask::InteriorMask,
 }
 
 /// Session token for a directly connected TCP client (debug mode).
@@ -321,6 +324,22 @@ struct PendingHandoffs(HashMap<SessionToken, ShardId>);
 /// creates the ship entity.
 #[derive(Resource, Default)]
 struct PendingWarpArrivals(HashMap<u64, handoff::PlayerHandoff>);
+
+/// Pending ship collider sync data: ship_id → latest collider snapshot,
+/// stored until the ship entity exists on this shard. ShipColliderSync is
+/// sent once on ship-shard startup and may arrive before `discover_ships`
+/// has spawned the corresponding entity. Drained by `process_ship_collider_sync`
+/// each tick, latest snapshot wins.
+#[derive(Resource, Default)]
+struct PendingColliderSyncs(HashMap<u64, voxeldust_core::shard_message::ShipColliderSyncData>);
+
+/// EVA players mid-boarding. Maps session_token → (entity, player_name).
+/// Populated by `eva_boarding_detection` when a boarding handoff is sent and
+/// drained by `process_handoff_accepted` once the target ship shard acks —
+/// keeps the EVA entity alive and broadcasting during the handoff round-trip
+/// so the client doesn't see a frozen/missing world-state gap.
+#[derive(Resource, Default)]
+struct EvaBoardingPending(HashMap<SessionToken, (Entity, String)>);
 
 /// Orchestrator URL for provisioning requests.
 #[derive(Resource)]
@@ -573,18 +592,17 @@ fn drain_quic(
                 }
             }
             ShardMsg::ShipColliderSync(data) => {
-                // Store collider shapes on the ship entity for future EVA collision.
-                if let Some(&entity) = ship_index.0.get(&data.ship_id) {
-                    collider_sync_events.write(ShipColliderSyncMsg {
-                        ship_id: data.ship_id,
-                        data,
-                    });
-                } else {
-                    warn!(
-                        ship_id = data.ship_id,
-                        "ShipColliderSync for unknown ship — ignoring"
-                    );
-                }
+                info!(
+                    ship_id = data.ship_id,
+                    chunks = data.chunks.len(),
+                    interior_chunks = data.interior_chunks.len(),
+                    "received ShipColliderSync from ship shard — queueing for process"
+                );
+                collider_sync_events.write(ShipColliderSyncMsg {
+                    ship_id: data.ship_id,
+                    data,
+                });
+                let _ = &ship_index; // keep param alive (no longer used to gate)
             }
             ShardMsg::PlanetPlayerDigest(data) => {
                 digest_events.write(PlanetPlayerDigestMsg { data });
@@ -642,7 +660,8 @@ fn process_connects(
     planet_pos: Res<PlanetPositions>,
     celestial_time: Res<ecs::CelestialTime>,
     mut ship_index: ResMut<ecs::ShipEntityIndex>,
-    eva_index: Res<EvaPlayerIndex>,
+    mut eva_index: ResMut<EvaPlayerIndex>,
+    mut eva_sessions: Query<&mut EvaSession, With<EvaPlayer>>,
     bridge: Res<NetworkBridge>,
 ) {
     for event in events.read() {
@@ -661,33 +680,63 @@ fn process_connects(
             eva_index_keys = ?eva_index.0.keys().collect::<Vec<_>>(),
             "process_connects: checking EVA index"
         );
-        if let Some(&(_eva_entity, _old_session, eva_pos)) = eva_index.0.get(&event.player_name) {
+        if let Some(&(eva_entity, old_session, eva_pos)) = eva_index.0.get(&event.player_name) {
             info!(
                 player = %event.player_name,
                 eva_pos = format!("({:.0},{:.0},{:.0})", eva_pos.x, eva_pos.y, eva_pos.z),
+                old_session = old_session.0,
+                new_session = token.0,
                 "process_connects: MATCHED EVA player — sending JoinResponse with EVA position"
             );
+            // Critical: update the EVA entity's SessionToken and the index
+            // entry to the NEW TCP session. `client_listener` generates a
+            // fresh random token on every reconnect, so the token the EVA
+            // entity was spawned with (from the hull-exit handoff) is stale
+            // and won't match in the ClientRegistry. Without this update,
+            // later handoffs sent from this EVA (e.g., boarding detection
+            // → ShardRedirect) use the stale token and `send_tcp` silently
+            // drops them because "client session not in registry".
+            if let Ok(mut es) = eva_sessions.get_mut(eva_entity) {
+                es.0 = token;
+            }
+            eva_index.0.insert(event.player_name.clone(), (eva_entity, token, eva_pos));
 
-            // Collect all ship shards for observer connections.
-            let ship_preconnects: Vec<(u64, String, String, u64)> =
-                if let Ok(reg) = bridge.peer_registry.try_read() {
-                    reg.find_by_type(ShardType::Ship)
-                        .iter()
-                        .filter_map(|info| {
-                            let ship_id = info.ship_id?;
-                            Some((
-                                ship_id,
-                                info.endpoint.tcp_addr.to_string(),
-                                info.endpoint.udp_addr.to_string(),
-                                info.id.0,
-                            ))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+            // Build the full set of secondary shards the EVA client should
+            // observe. Every shard the player can plausibly transition to
+            // must already be streaming — no LOD substitution, no blank
+            // frames during transitions.
+            let mut preconnects: Vec<handoff::ShardPreConnect> = Vec::new();
+            if let Ok(reg) = bridge.peer_registry.try_read() {
+                // Galaxy (scene context, stars, warp visuals).
+                if let Some(info) = reg.find_by_type(ShardType::Galaxy).first() {
+                    preconnects.push(handoff::ShardPreConnect {
+                        shard_type: ShardType::Galaxy as u8,
+                        tcp_addr: info.endpoint.tcp_addr.to_string(),
+                        udp_addr: info.endpoint.udp_addr.to_string(),
+                        seed: galaxy_seed,
+                        planet_index: 0,
+                        reference_position: DVec3::ZERO,
+                        reference_rotation: DQuat::IDENTITY,
+                        shard_id: info.id.0,
+                    });
+                }
+                // All ship shards in this system — boarding any ship should
+                // be instantaneous (chunks already on the client).
+                for info in reg.find_by_type(ShardType::Ship) {
+                    let Some(ship_id) = info.ship_id else { continue };
+                    preconnects.push(handoff::ShardPreConnect {
+                        shard_type: ShardType::Ship as u8,
+                        tcp_addr: info.endpoint.tcp_addr.to_string(),
+                        udp_addr: info.endpoint.udp_addr.to_string(),
+                        seed: ship_id,
+                        planet_index: 0,
+                        reference_position: DVec3::ZERO,
+                        reference_rotation: DQuat::IDENTITY,
+                        shard_id: info.id.0,
+                    });
+                }
+            }
 
-            // Send JoinResponse + ShardPreConnect for all ships.
             tokio::spawn(async move {
                 let jr = ServerMsg::JoinResponse(JoinResponseData {
                     seed,
@@ -706,21 +755,12 @@ fn process_connects(
                 });
                 let mut writer = tcp_write.lock().await;
                 let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
-
-                // Send ShardPreConnect for each ship shard so the EVA client
-                // opens observer connections and receives ship block data.
-                for (ship_id, tcp_addr, udp_addr, shard_id) in &ship_preconnects {
-                    let pc = ServerMsg::ShardPreConnect(handoff::ShardPreConnect {
-                        shard_type: 2, // Ship
-                        tcp_addr: tcp_addr.clone(),
-                        udp_addr: udp_addr.clone(),
-                        seed: *ship_id,
-                        planet_index: 0,
-                        reference_position: DVec3::ZERO,
-                        reference_rotation: DQuat::IDENTITY,
-                        shard_id: *shard_id,
-                    });
-                    let _ = client_listener::send_tcp_msg(&mut *writer, &pc).await;
+                for pc in preconnects {
+                    let _ = client_listener::send_tcp_msg(
+                        &mut *writer,
+                        &ServerMsg::ShardPreConnect(pc),
+                    )
+                    .await;
                 }
             });
 
@@ -1181,8 +1221,10 @@ fn process_handoffs(
             } else {
                 tracing::warn!(planet_seed, "no provisioned planet shard for handoff");
             }
-        } else if let Some(target_ship_id) = h.target_ship_id {
+        } else if let Some(target_ship_id) = h.target_ship_id.filter(|_| !h.target_system_eva) {
             // Planet→Ship handoff: forward to ship shard.
+            // Filter excludes EVA hull-exit (which also sets target_ship_id to
+            // identify the source ship for spawn-position lookup — handled below).
             if let Ok(reg) = bridge.peer_registry.try_read() {
                 let ship_shard = reg
                     .find_by_type(ShardType::Ship)
@@ -1355,13 +1397,47 @@ fn process_handoffs(
             }
         } else if h.target_system_eva {
             // Ship→System EVA: player exited ship hull in space.
-            // Spawn an EVA player entity with inherited velocity.
+            //
+            // Reconstruct the player's ship-local offset from the handoff
+            // (using the OLD ship rotation at handoff-creation time), then
+            // apply the ship entity's CURRENT pose to place the EVA exactly
+            // where the player physically was when they crossed the hull.
+            //
+            // Two sources of lag are cancelled:
+            //   1. Translation — the ship has been co-moving with the planet
+            //      (~110 km/s) for the N ticks since handoff creation, so we
+            //      add the offset to ship.Position_current, not the stale
+            //      handoff.ship_system_position.
+            //   2. Rotation — if the ship was rotating during the handoff
+            //      window, |ω·Δt·r| would otherwise misplace the spawn by the
+            //      delta-rotation applied to the player's offset. Reapplying
+            //      the offset with the ship's current rotation removes this.
+            //
+            // player_local is reconstructed (not transmitted): it's whatever
+            // Rapier body position the player had at exit, which works for
+            // any hatch location or player-drilled hull hole without special
+            // casing.
+            let ship_entity = h
+                .target_ship_id
+                .and_then(|sid| ship_index.0.get(&sid).copied());
+            let current_ship_pose = ship_entity
+                .and_then(|ent| ships.get(ent).ok().map(|q| (q.2.0, q.4.0)));
+
+            let old_rot = h.ship_rotation.unwrap_or(DQuat::IDENTITY);
+            let old_pos = h.ship_system_position.unwrap_or(DVec3::ZERO);
+            let player_local = old_rot.inverse() * (h.position - old_pos);
+
+            let spawn_pos = match current_ship_pose {
+                Some((pos, rot)) => pos + rot * player_local,
+                None => h.position, // fall back only if ship entity no longer exists
+            };
+
             let eva_entity = commands
                 .spawn((
                     EvaPlayer,
                     EvaSession(session),
                     EvaPlayerName(h.player_name.clone()),
-                    EvaPosition(h.position),
+                    EvaPosition(spawn_pos),
                     EvaVelocity(h.velocity),
                     EvaRotation(h.rotation),
                     EvaPhysics::default(),
@@ -1369,14 +1445,15 @@ fn process_handoffs(
                 ))
                 .id();
 
-            eva_player_index.0.insert(h.player_name.clone(), (eva_entity, session, h.position));
+            eva_player_index.0.insert(h.player_name.clone(), (eva_entity, session, spawn_pos));
 
             info!(
                 session = session.0,
                 player = %h.player_name,
                 player_name_key = %h.player_name,
-                pos = format!("({:.0},{:.0},{:.0})", h.position.x, h.position.y, h.position.z),
-                pos = format!("({:.0},{:.0},{:.0})", h.position.x, h.position.y, h.position.z),
+                pos = format!("({:.0},{:.0},{:.0})", spawn_pos.x, spawn_pos.y, spawn_pos.z),
+                stale_pos = format!("({:.0},{:.0},{:.0})", h.position.x, h.position.y, h.position.z),
+                lag_m = format!("{:.1}", (spawn_pos - h.position).length()),
                 vel = format!("{:.1} m/s", h.velocity.length()),
                 "EVA player spawned from ship hull exit"
             );
@@ -1386,10 +1463,31 @@ fn process_handoffs(
                 session_token: session,
                 target_shard: shard_identity.0,
             });
-            if let Ok(reg) = bridge.peer_registry.try_read() {
-                if let Some(addr) = reg.quic_addr(source) {
-                    let _ = bridge.quic_send_tx.try_send((source, addr, accepted));
-                }
+            match bridge.peer_registry.try_read() {
+                Ok(reg) => match reg.quic_addr(source) {
+                    Some(addr) => match bridge.quic_send_tx.try_send((source, addr, accepted)) {
+                        Ok(()) => info!(
+                            source = source.0,
+                            %addr,
+                            "sent HandoffAccepted to source ship shard (EVA)"
+                        ),
+                        Err(e) => tracing::error!(
+                            source = source.0,
+                            %addr,
+                            %e,
+                            "failed to queue HandoffAccepted (EVA)"
+                        ),
+                    },
+                    None => tracing::warn!(
+                        source = source.0,
+                        "no quic_addr for source shard in peer_registry — HandoffAccepted (EVA) dropped"
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    source = source.0,
+                    %e,
+                    "peer_registry lock unavailable — HandoffAccepted (EVA) dropped"
+                ),
             }
 
             // ShardRedirect to client is handled by the ship shard upon receiving
@@ -1405,10 +1503,89 @@ fn process_handoffs(
 fn process_handoff_accepted(
     mut events: MessageReader<HandoffAcceptedMsg>,
     mut pending_handoffs: ResMut<PendingHandoffs>,
+    mut boarding_pending: ResMut<EvaBoardingPending>,
+    mut eva_index: ResMut<EvaPlayerIndex>,
+    mut commands: Commands,
+    shard_identity: Res<ShardIdentity>,
     bridge: Res<NetworkBridge>,
 ) {
     for event in events.read() {
         if let Some(source_shard) = pending_handoffs.0.remove(&event.session_token) {
+            if source_shard == shard_identity.0 {
+                // Locally-originated handoff (e.g. EVA → ship boarding). The
+                // target shard has acked; now send ShardRedirect to the client
+                // and despawn our kept-alive EVA entity.
+                if let Some((eva_entity, player_name)) =
+                    boarding_pending.0.remove(&event.session_token)
+                {
+                    eva_index.0.remove(&player_name);
+                    commands.entity(eva_entity).despawn();
+                }
+
+                if let Ok(reg) = bridge.peer_registry.try_read() {
+                    if let Some(peer_info) = reg.get(event.target_shard) {
+                        let tcp_addr = peer_info.endpoint.tcp_addr.to_string();
+                        let udp_addr = peer_info.endpoint.udp_addr.to_string();
+                        let shard_type = peer_info.shard_type as u8;
+                        let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
+                            session_token: event.session_token,
+                            target_tcp_addr: tcp_addr.clone(),
+                            target_udp_addr: udp_addr.clone(),
+                            shard_id: event.target_shard,
+                            target_shard_type: shard_type,
+                        });
+                        info!(
+                            session = event.session_token.0,
+                            target = event.target_shard.0,
+                            target_tcp = %tcp_addr,
+                            target_udp = %udp_addr,
+                            target_shard_type = shard_type,
+                            "EVA-boarding ShardRedirect prepared; sending to client"
+                        );
+                        let creg = bridge.client_registry.clone();
+                        let token = event.session_token;
+                        let target = event.target_shard.0;
+                        tokio::spawn(async move {
+                            let client_present = {
+                                let reg = creg.read().await;
+                                reg.has_client(&token)
+                            };
+                            if !client_present {
+                                tracing::warn!(
+                                    session = token.0,
+                                    target = target,
+                                    "client session not in registry — ShardRedirect cannot be delivered"
+                                );
+                                return;
+                            }
+                            let send_result = {
+                                let reg = creg.read().await;
+                                reg.send_tcp(token, &redirect).await
+                            };
+                            match send_result {
+                                Ok(()) => info!(
+                                    session = token.0,
+                                    target = target,
+                                    "sent ShardRedirect to EVA-boarding client"
+                                ),
+                                Err(e) => {
+                                    tracing::warn!(session = token.0, %e, "failed to send ShardRedirect")
+                                }
+                            }
+                            if let Ok(mut reg) = creg.try_write() {
+                                reg.unregister(&token);
+                            }
+                        });
+                    } else {
+                        tracing::warn!(
+                            target = event.target_shard.0,
+                            "peer_registry has no entry for target shard — ShardRedirect NOT sent"
+                        );
+                    }
+                }
+                continue;
+            }
+            // Cross-shard relay (e.g. planet→ship re-entry flow).
             if let Ok(reg) = bridge.peer_registry.try_read() {
                 if let Some(addr) = reg.quic_addr(source_shard) {
                     let msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
@@ -3411,6 +3588,8 @@ fn warp_boundary(
             warp_target_star_index: Some(warp.target_star_index),
             warp_velocity_gu: Some(vel_gu),
             target_system_eva: false,
+            schema_version: 1,
+            character_state: Vec::new(),
         };
         let _ = bridge.quic_send_tx.try_send((
             galaxy_shard_id,
@@ -3506,21 +3685,48 @@ fn warp_velocity_cap(
 /// The actual Rapier physics world is not created here — it will be added in Phase 4 (EVA).
 fn process_ship_collider_sync(
     mut events: MessageReader<ShipColliderSyncMsg>,
+    mut pending: ResMut<PendingColliderSyncs>,
     ship_index: Res<ecs::ShipEntityIndex>,
     mut commands: Commands,
 ) {
+    // Merge incoming events into the pending buffer (latest snapshot wins per
+    // ship). Then try to flush every pending entry to a matching ship entity.
+    // Entries that still have no entity stay buffered for the next tick —
+    // covers the race where ShipColliderSync arrives before `discover_ships`
+    // has spawned the ship on this shard.
     for event in events.read() {
-        if let Some(&entity) = ship_index.0.get(&event.ship_id) {
-            commands.entity(entity).insert(ShipColliderCache {
-                chunks: event.data.chunks.clone(),
-                hull_min: event.data.hull_min,
-                hull_max: event.data.hull_max,
-            });
-            info!(
-                ship_id = event.ship_id,
-                chunks = event.data.chunks.len(),
-                "cached ship collider shapes for EVA"
-            );
+        pending.0.insert(event.ship_id, event.data.clone());
+    }
+
+    let ship_ids: Vec<u64> = pending.0.keys().copied().collect();
+    for ship_id in ship_ids {
+        if let Some(&entity) = ship_index.0.get(&ship_id) {
+            if let Some(data) = pending.0.remove(&ship_id) {
+                let chunk_count = data.chunks.len();
+                let interior_chunks = data.interior_chunks.len();
+                // Rebuild the interior mask from the transmitted per-chunk bit arrays.
+                let mut interior_mask = voxeldust_core::block::interior_mask::InteriorMask::new();
+                for ic in data.interior_chunks {
+                    let bits = voxeldust_core::block::interior_mask::ChunkInteriorBits::from_words(
+                        ic.interior_bits,
+                    );
+                    interior_mask.insert_chunk(ic.chunk_key, bits);
+                }
+                let interior_voxels = interior_mask.total_voxels();
+                commands.entity(entity).insert(ShipColliderCache {
+                    chunks: data.chunks,
+                    hull_min: data.hull_min,
+                    hull_max: data.hull_max,
+                    interior_mask,
+                });
+                info!(
+                    ship_id,
+                    chunks = chunk_count,
+                    interior_chunks,
+                    interior_voxels,
+                    "cached ship collider shapes + interior mask"
+                );
+            }
         }
     }
 }
@@ -3654,6 +3860,163 @@ fn eva_physics(
         let drag_new = compute_eva_drag(pos.0, vel.0, physics, &sys_config.0, &planet_pos.0, dt);
         let accel_new = grav_new + thrust_accel + drag_new;
         vel.0 += 0.5 * (accel_old + accel_new) * dt;
+    }
+}
+
+/// Approximate EVA player body radius for ship-hull collision resolution.
+/// 0.5 m sphere — roughly a suited astronaut's torso/helmet radius.
+const EVA_COLLISION_RADIUS: f32 = 0.5;
+
+/// Restitution for EVA↔hull contact. Low (mostly inelastic) — suit bounce
+/// should feel soft, not rubbery. Tuned for Star-Citizen-style feel.
+const EVA_HULL_RESTITUTION: f64 = 0.1;
+
+/// Resolve solid-block collision between each EVA player and each ship with
+/// a cached collider set. Runs right after `eva_physics` (same Physics
+/// schedule) so position has already been integrated for the tick.
+///
+/// **Relative-velocity impulse response with ship-frame momentum inheritance**.
+/// When EVA collides with a ship block:
+/// 1. Compute the ship's velocity at the contact point (linear + ω × r).
+/// 2. Compute EVA velocity RELATIVE to the ship at contact.
+/// 3. Decompose relative velocity into normal (into surface) + tangential.
+/// 4. Normal: flip and damp by restitution (bounce). Tangential: preserve
+///    entirely (no friction in v1 — foundation for magnet boots).
+/// 5. Add the ship's contact-point velocity back in, so the EVA's world
+///    velocity includes the ship's motion. A resting EVA bumped by a moving
+///    ship ends up moving WITH the ship, not stopped dead in system space
+///    ("ship teleported away" bug).
+/// 6. Position push-out (by penetration depth + ε) is unchanged — keeps
+///    EVA out of solid blocks.
+///
+/// "Entering" (through an open hatch — i.e. into interior air where no
+/// solid block is present) is handled downstream by `eva_boarding_detection`
+/// via the flood-fill interior mask.
+fn eva_ship_collision(
+    mut eva_players: Query<(&mut EvaPosition, &mut EvaVelocity), With<EvaPlayer>>,
+    ships: Query<(&Position, &Rotation, &Velocity, &AngularVelocity, &ShipColliderCache)>,
+) {
+    let r = EVA_COLLISION_RADIUS;
+    let cs = voxeldust_core::block::CHUNK_SIZE as f32;
+    for (mut pos, mut vel) in &mut eva_players {
+        for (ship_pos, ship_rot, ship_vel, ship_ang_vel, cache) in &ships {
+            // Arm vector from ship COM (≈ ship_pos) to EVA in world space.
+            let arm_world = pos.0 - ship_pos.0;
+            // Ship velocity at the contact point (linear + tangential from ω).
+            let v_ship_at_contact = ship_vel.0 + ship_ang_vel.0.cross(arm_world);
+
+            // Transform EVA-relative-to-ship motion into ship-local frame.
+            let v_eva_rel_world = vel.0 - v_ship_at_contact;
+            let mut v_rel_local = ship_rot.0.inverse() * v_eva_rel_world;
+
+            // Ship-local EVA position.
+            let mut local = ship_rot.0.inverse() * arm_world;
+
+            // Broad-phase AABB rejection with the sphere radius margin.
+            let aabb_min = cache.hull_min - glam::Vec3::splat(r);
+            let aabb_max = cache.hull_max + glam::Vec3::ONE + glam::Vec3::splat(r);
+            let local_f32 = glam::Vec3::new(local.x as f32, local.y as f32, local.z as f32);
+            if local_f32.x < aabb_min.x
+                || local_f32.x > aabb_max.x
+                || local_f32.y < aabb_min.y
+                || local_f32.y > aabb_max.y
+                || local_f32.z < aabb_min.z
+                || local_f32.z > aabb_max.z
+            {
+                continue;
+            }
+
+            // Narrow-phase: walk per-chunk per-box colliders. The shape
+            // center is in pure ship-local block coordinates.
+            let mut resolved_local = local_f32;
+            let mut any_hit = false;
+            for chunk in &cache.chunks {
+                let chunk_min = glam::Vec3::new(
+                    chunk.chunk_key.x as f32 * cs,
+                    chunk.chunk_key.y as f32 * cs,
+                    chunk.chunk_key.z as f32 * cs,
+                ) - glam::Vec3::splat(r);
+                let chunk_max = chunk_min + glam::Vec3::splat(cs + 2.0 * r);
+                if resolved_local.x < chunk_min.x
+                    || resolved_local.x > chunk_max.x
+                    || resolved_local.y < chunk_min.y
+                    || resolved_local.y > chunk_max.y
+                    || resolved_local.z < chunk_min.z
+                    || resolved_local.z > chunk_max.z
+                {
+                    continue;
+                }
+                for &(center, half) in &chunk.shapes {
+                    let box_min = center - half - glam::Vec3::splat(r);
+                    let box_max = center + half + glam::Vec3::splat(r);
+                    if resolved_local.x < box_min.x
+                        || resolved_local.x > box_max.x
+                        || resolved_local.y < box_min.y
+                        || resolved_local.y > box_max.y
+                        || resolved_local.z < box_min.z
+                        || resolved_local.z > box_max.z
+                    {
+                        continue;
+                    }
+                    // Shallowest penetration axis.
+                    let dx_neg = resolved_local.x - box_min.x;
+                    let dx_pos = box_max.x - resolved_local.x;
+                    let dy_neg = resolved_local.y - box_min.y;
+                    let dy_pos = box_max.y - resolved_local.y;
+                    let dz_neg = resolved_local.z - box_min.z;
+                    let dz_pos = box_max.z - resolved_local.z;
+                    let (mut min_depth, mut axis, mut sign) = (dx_neg, 0u8, -1.0f32);
+                    if dx_pos < min_depth { min_depth = dx_pos; sign = 1.0; }
+                    if dy_neg < min_depth { min_depth = dy_neg; axis = 1; sign = -1.0; }
+                    if dy_pos < min_depth { min_depth = dy_pos; axis = 1; sign = 1.0; }
+                    if dz_neg < min_depth { min_depth = dz_neg; axis = 2; sign = -1.0; }
+                    if dz_pos < min_depth { min_depth = dz_pos; axis = 2; sign = 1.0; }
+
+                    // Push position out along shallowest axis.
+                    let epsilon = 1e-3f32;
+                    let n_local: DVec3 = match axis {
+                        0 => DVec3::new(sign as f64, 0.0, 0.0),
+                        1 => DVec3::new(0.0, sign as f64, 0.0),
+                        _ => DVec3::new(0.0, 0.0, sign as f64),
+                    };
+                    match axis {
+                        0 => resolved_local.x += sign * (min_depth + epsilon),
+                        1 => resolved_local.y += sign * (min_depth + epsilon),
+                        _ => resolved_local.z += sign * (min_depth + epsilon),
+                    }
+
+                    // Relative-velocity impulse along the outward normal.
+                    // Only resolve if moving INTO the surface (v_n < 0 in the
+                    // frame where n points out of the block, i.e. `sign * axis`).
+                    // The player's velocity component normal to the surface is
+                    // flipped-and-damped; the tangential component is kept
+                    // entirely so sliding along the hull is smooth (friction
+                    // is zero in v1 — magnet boots will later reinstate it).
+                    let v_n = v_rel_local.dot(n_local);
+                    if v_n < 0.0 {
+                        let new_v_n = -(1.0 + EVA_HULL_RESTITUTION) * v_n;
+                        v_rel_local += (new_v_n - v_n) * n_local;
+                    }
+                    any_hit = true;
+                }
+            }
+
+            if any_hit {
+                // Back to world-space.
+                local = DVec3::new(
+                    resolved_local.x as f64,
+                    resolved_local.y as f64,
+                    resolved_local.z as f64,
+                );
+                pos.0 = ship_pos.0 + ship_rot.0 * local;
+                // EVA world velocity = ship velocity at contact + relative
+                // velocity (in world frame). This is the key to not feeling
+                // "teleported" when a moving ship bumps you: you inherit the
+                // ship's motion rather than staying stopped in system-space.
+                let v_rel_world = ship_rot.0 * v_rel_local;
+                vel.0 = v_ship_at_contact + v_rel_world;
+            }
+        }
     }
 }
 
@@ -3892,50 +4255,67 @@ fn eva_broadcast(
     }
 }
 
-/// EVA boarding detection: when an EVA player is near a ship, allow boarding via action key.
-/// Uses distance check against ShipColliderCache hull bounds (when available)
-/// or fallback distance threshold. Triggers handoff to ship shard.
+/// EVA boarding detection: when an EVA player enters a ship's hull AABB,
+/// auto-board by handing off to the ship shard. Symmetric with `hull_exit_check`
+/// on the ship shard — just walking (or flying) into the hatch is enough;
+/// no key press required. The same geometry test (ship-local AABB) ensures
+/// exit and re-entry are the same "crossing the hull boundary" event.
 fn eva_boarding_detection(
-    eva_players: Query<(Entity, &EvaSession, &EvaPlayerName, &EvaPosition, &EvaInputState), With<EvaPlayer>>,
-    ships: Query<(&ShipId, &Position, Option<&ShipColliderCache>)>,
-    mut eva_index: ResMut<EvaPlayerIndex>,
+    eva_players: Query<
+        (Entity, &EvaSession, &EvaPlayerName, &EvaPosition, &EvaVelocity),
+        (With<EvaPlayer>, Without<HandoffPending>),
+    >,
+    ships: Query<(&ShipId, &Position, &Rotation, Option<&ShipColliderCache>)>,
+    mut pending_handoffs: ResMut<PendingHandoffs>,
+    mut boarding_pending: ResMut<EvaBoardingPending>,
     shard_identity: Res<ShardIdentity>,
     bridge: Res<NetworkBridge>,
     tick: Res<ecs::TickCounter>,
     mut commands: Commands,
 ) {
-    if tick.0 % 10 != 0 {
-        return;
-    }
+    // Run every tick — boarding must respond immediately; the check is cheap
+    // (one AABB test per (ship, EVA) pair).
 
-    for (eva_entity, session, name, eva_pos, input) in &eva_players {
-        // Check for action key press (edge detection).
-        let action_pressed = input.action == 3 && input.prev_action != 3;
-        if !action_pressed {
-            continue;
-        }
+    for (eva_entity, session, name, eva_pos, eva_vel) in &eva_players {
+        // "Entered" means the player is in INTERIOR AIR inside the ship:
+        //   - position is inside the ship's hull AABB, AND
+        //   - position is NOT inside any solid block (eva_ship_collision keeps
+        //     the player out of solid blocks, so this is effectively "inside
+        //     the hull via an open hatch / hole, not merely pressed against
+        //     the exterior").
+        // Bumping the exterior is a collision only and does not trigger board.
+        // Track chosen ship's full pose so the handoff can record the ship
+        // position/rotation AT BOARDING TIME. Otherwise the ship shard will
+        // compute the player's ship-local spawn from the ship's CURRENT
+        // (moved) pose, placing the player km off-hull.
+        let mut inside_ship: Option<(u64, f64, DVec3, DQuat)> = None;
+        for (ship_id, ship_pos, ship_rot, collider_cache) in &ships {
+            let Some(cache) = collider_cache else {
+                continue; // no hull data yet — ship shard hasn't synced colliders
+            };
+            let offset = eva_pos.0 - ship_pos.0;
+            let local = ship_rot.0.inverse() * offset;
+            let local_f32 = glam::Vec3::new(local.x as f32, local.y as f32, local.z as f32);
 
-        // Find the nearest ship.
-        let mut nearest: Option<(u64, f64)> = None;
-        for (ship_id, ship_pos, collider_cache) in &ships {
-            let dist = (eva_pos.0 - ship_pos.0).length();
-
-            // Boarding range: hull AABB diagonal / 2 + margin, or fallback 15m.
-            let boarding_range = collider_cache
-                .map(|c| {
-                    let diag = (c.hull_max - c.hull_min).length() as f64;
-                    diag / 2.0 + 5.0 // half diagonal + 5m margin
-                })
-                .unwrap_or(15.0);
-
-            if dist < boarding_range {
-                if nearest.map_or(true, |(_, d)| dist < d) {
-                    nearest = Some((ship_id.0, dist));
-                }
+            // O(1) interior-mask lookup. The mask was computed on the ship
+            // shard via flood-fill from seat seeds + geometric enclosure
+            // gate, so it's topologically exact: a player pressed against
+            // the hull or between a thruster strut and the hull is NOT
+            // interior (unreachable from a seat) — only a player who
+            // actually made it through a hatch into the enclosed cabin is.
+            // Shipped here via `ShipColliderSync.interior_chunks`.
+            if !cache.interior_mask.is_interior(local_f32) {
+                continue;
+            }
+            let dist = offset.length();
+            if inside_ship.map_or(true, |(_, d, _, _)| dist < d) {
+                inside_ship = Some((ship_id.0, dist, ship_pos.0, ship_rot.0));
             }
         }
 
-        let Some((target_ship_id, dist)) = nearest else { continue };
+        let Some((target_ship_id, dist, board_ship_pos, board_ship_rot)) = inside_ship else {
+            continue;
+        };
 
         // Find the ship shard for this ship.
         let ship_shard = if let Ok(reg) = bridge.peer_registry.try_read() {
@@ -3948,12 +4328,15 @@ fn eva_boarding_detection(
         };
         let Some((ship_shard_id, ship_quic_addr)) = ship_shard else { continue };
 
-        // Create boarding handoff.
+        // Create boarding handoff. Inherits the EVA's current momentum —
+        // boarding should preserve velocity across the handoff boundary,
+        // letting ship-side physics decide whether to clamp (e.g. via seat
+        // snap). Stopping dead on board felt unphysical / discontinuous.
         let h = handoff::PlayerHandoff {
             session_token: session.0,
             player_name: name.0.clone(),
             position: eva_pos.0,
-            velocity: DVec3::ZERO,
+            velocity: eva_vel.0,
             rotation: DQuat::IDENTITY,
             forward: DVec3::NEG_Z,
             fly_mode: false,
@@ -3969,19 +4352,43 @@ fn eva_boarding_detection(
             target_planet_index: None,
             target_ship_id: Some(target_ship_id),
             target_ship_shard_id: Some(ship_shard_id),
-            ship_system_position: None,
-            ship_rotation: None,
+            // Capture the ship's pose AT THE MOMENT the EVA was classified as
+            // interior. The ship shard needs these to correctly transform the
+            // EVA's system-space `position` into ship-local, using the
+            // SAME ship pose the system shard used. Without this the ship
+            // shard would use its CURRENT (moved) pose and the resulting
+            // ship-local spawn would be km away from the real hatch.
+            ship_system_position: Some(board_ship_pos),
+            ship_rotation: Some(board_ship_rot),
             game_time: 0.0,
             warp_target_star_index: None,
             warp_velocity_gu: None,
             target_system_eva: false,
+            schema_version: 1,
+            character_state: Vec::new(),
         };
         let msg = ShardMsg::PlayerHandoff(h);
         let _ = bridge.quic_send_tx.try_send((ship_shard_id, ship_quic_addr, msg));
 
-        // Despawn EVA entity.
-        eva_index.0.remove(&name.0);
-        commands.entity(eva_entity).despawn();
+        // Register self as the source so `process_handoff_accepted` knows this
+        // is a locally-originated handoff and dispatches ShardRedirect straight
+        // to the client (rather than relaying HandoffAccepted to another shard).
+        pending_handoffs.0.insert(session.0, shard_identity.0);
+
+        // Mark the EVA as mid-handoff and remember the entity so we can
+        // despawn it once the target ship shard acks. Keeping the entity
+        // alive means `eva_broadcast` continues emitting WorldStates during
+        // the ~50 ms handoff round-trip — the client keeps seeing its own
+        // position + the world, avoiding a frozen/blank frame window.
+        // The `Without<HandoffPending>` filter on this query stops repeated
+        // boarding triggers on subsequent ticks.
+        commands.entity(eva_entity).insert(HandoffPending {
+            target_shard: ship_shard_id,
+            initiated_tick: tick.0,
+        });
+        boarding_pending
+            .0
+            .insert(session.0, (eva_entity, name.0.clone()));
 
         info!(
             session = session.0.0,
@@ -4048,6 +4455,8 @@ fn eva_soi_detection(
                     warp_target_star_index: None,
                     warp_velocity_gu: None,
                     target_system_eva: false,
+                    schema_version: 1,
+                    character_state: Vec::new(),
                 };
 
                 if let Ok(reg) = bridge.peer_registry.try_read() {
@@ -4955,6 +5364,8 @@ fn build_app(
     app.insert_resource(ProvisioningInFlight::default());
     app.insert_resource(PendingHandoffs::default());
     app.insert_resource(PendingWarpArrivals::default());
+    app.insert_resource(PendingColliderSyncs::default());
+    app.insert_resource(EvaBoardingPending::default());
     app.insert_resource(OrchestratorUrl(orchestrator_url));
     app.insert_resource(HttpClient(http_client));
     app.insert_resource(PlanetProvisionSender(planet_prov_tx));
@@ -5046,6 +5457,7 @@ fn build_app(
             ground_contact,
             thermal_update,
             eva_physics,
+            eva_ship_collision,
         )
             .chain()
             .in_set(SystemShardSet::Physics),

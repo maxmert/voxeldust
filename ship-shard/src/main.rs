@@ -41,6 +41,13 @@ use voxeldust_shard_common::authorized_peers::AuthorizedPeers;
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 
+use voxeldust_core::character::{
+    self, build_character, kcc_move_all, move_one_character, CharacterBuildSpec, CharacterCapsule,
+    CharacterController, CharacterMoveInput, CharacterVelocity, CharacterCollisionEvent,
+    DesiredMovement, IsCharacter, LandedEvent, LocalUp, LocomotionState, MovementStats,
+    PlatformDelta, PlatformSnapSuppressed, RapierWorld,
+};
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -80,7 +87,8 @@ struct Args {
 // Constants
 // ---------------------------------------------------------------------------
 
-// WALK_SPEED, JUMP_IMPULSE, INTERACT_DIST moved to PlayerPhysics component.
+// WALK_SPEED / JUMP_IMPULSE / INTERACT_DIST moved to
+// `voxeldust_core::character::MovementStats` (shared with planet-shard).
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -100,6 +108,32 @@ struct RapierContext {
     multibody_joint_set: MultibodyJointSet,
     ccd_solver: CCDSolver,
     query_pipeline: QueryPipeline,
+    /// True after `refresh_query_pipeline` runs this tick. `kcc_move_all` and
+    /// `update_player_platform` both need fresh collider data but must not
+    /// double-update — the flag is cleared at the end of the Physics set.
+    query_pipeline_fresh: bool,
+}
+
+/// Adapter so the shared `kcc_move_all` function can drive our context.
+impl RapierWorld for RapierContext {
+    fn bodies(&self) -> &RigidBodySet {
+        &self.rigid_body_set
+    }
+    fn colliders(&self) -> &ColliderSet {
+        &self.collider_set
+    }
+    fn queries(&self) -> &QueryPipeline {
+        &self.query_pipeline
+    }
+    fn bodies_mut(&mut self) -> &mut RigidBodySet {
+        &mut self.rigid_body_set
+    }
+    fn refresh_query_pipeline(&mut self) {
+        if !self.query_pipeline_fresh {
+            self.query_pipeline.update(&self.collider_set);
+            self.query_pipeline_fresh = true;
+        }
+    }
 }
 
 /// Configurable gravity source — future: one per gravity block entity.
@@ -459,11 +493,11 @@ struct SessionId(SessionToken);
 #[derive(Component)]
 struct PlayerName(String);
 
-/// Per-player Rapier rigid body handle.
-#[derive(Component)]
-struct PlayerBody(RigidBodyHandle);
-
 /// Per-player position in ship-local coordinates.
+///
+/// Written by `sync_position_from_kcc` (reads from the character controller's
+/// kinematic body). Legacy consumers (broadcast, seat raycast, interior check)
+/// read this instead of calling into Rapier directly.
 #[derive(Component)]
 struct PlayerPosition(Vec3);
 
@@ -491,29 +525,10 @@ struct InputActions {
 #[derive(Component, Default)]
 struct SeatInputValues(Vec<f32>);
 
-/// Per-player physics parameters — no magic numbers.
-/// Default values are the standard humanoid parameters.
-/// Future: can vary by character type, equipment, gravity, etc.
-#[derive(Component, Clone)]
-struct PlayerPhysics {
-    walk_speed: f32,
-    jump_impulse: f32,
-    capsule_height: f32,
-    capsule_radius: f32,
-    interact_distance: f32,
-}
-
-impl Default for PlayerPhysics {
-    fn default() -> Self {
-        Self {
-            walk_speed: 4.0,
-            jump_impulse: 5.0,
-            capsule_height: 0.6,
-            capsule_radius: 0.3,
-            interact_distance: 1.5,
-        }
-    }
-}
+// `PlayerPhysics` (local component) was deleted in the KCC migration —
+// walk speed, jump, and capsule geometry now live in the shared
+// `voxeldust_core::character::MovementStats` + `CharacterCapsule`
+// components. See `core/src/character/` for the extension points.
 
 /// Marker for a player with a pending shard handoff.
 /// Prevents duplicate handoff attempts in hull_exit_check.
@@ -553,6 +568,13 @@ struct ShipGridResource(ShipGrid);
 /// Block registry — static block property table.
 #[derive(Resource)]
 struct BlockRegistryResource(BlockRegistry);
+
+/// Per-ship interior-volume mask. Computed from the block grid by
+/// `voxeldust_core::block::interior_mask::compute` whenever blocks change,
+/// and sent to the host shard alongside collider shapes so the host can
+/// answer "is this ship-local position interior?" in O(1).
+#[derive(Resource, Default)]
+struct ShipInteriorMask(voxeldust_core::block::interior_mask::InteriorMask);
 
 /// Index mapping world position → Entity for O(1) lookup of functional blocks.
 /// Synced automatically by the entity lifecycle system (process_entity_ops).
@@ -667,8 +689,11 @@ struct PendingMessages {
     handoffs: Vec<ShardMsg>,
 }
 
-// PlayerBodyHandle, PlayerPosition, PlayerYaw, SeatedState, InputActions
-// moved to per-entity Components above.
+// Character physics + transform components (CharacterController,
+// PlayerPosition, PlayerYaw, SeatedState, InputActions, MovementStats,
+// CharacterVelocity, LocomotionState, LocalUp, DesiredMovement,
+// PlatformDelta, PlatformSnapSuppressed) are attached per-entity in
+// `spawn_player`. See `voxeldust_core::character` for the shared layer.
 
 /// Whether gravity is enabled in the ship.
 #[derive(Resource)]
@@ -798,6 +823,8 @@ fn drain_connects(
 fn drain_input(
     mut bridge: ResMut<NetworkBridge>,
     mut events: MessageWriter<PlayerInputMsg>,
+    mut diag: ResMut<DrainInputDiag>,
+    tick: Res<ecs::TickCounter>,
 ) {
     // Snapshot current UDP→session mapping from ClientRegistry.
     let session_map: Vec<(std::net::SocketAddr, SessionToken)> =
@@ -811,20 +838,57 @@ fn drain_input(
             Vec::new()
         };
 
+    let mut received = 0usize;
+    let mut matched = 0usize;
+    let mut unmatched = 0usize;
+    let mut unmatched_src: Option<std::net::SocketAddr> = None;
     for _ in 0..64 {
         let (src, input) = match bridge.input_rx.try_recv() {
             Ok(e) => e,
             Err(_) => break,
         };
+        received += 1;
         // Resolve the UDP source address to a session token.
         let session = session_map
             .iter()
             .find(|(addr, _)| *addr == src)
             .map(|(_, token)| *token);
         if let Some(session) = session {
+            matched += 1;
             events.write(PlayerInputMsg { session, input });
+        } else {
+            unmatched += 1;
+            unmatched_src = Some(src);
         }
     }
+    if unmatched > 0 {
+        tracing::warn!(
+            received,
+            unmatched,
+            src = ?unmatched_src,
+            known_addrs = ?session_map.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
+            "drain_input: dropped inputs with unmatched UDP source — player input won't reach physics"
+        );
+    }
+    diag.total_received = diag.total_received.saturating_add(received as u64);
+    diag.total_matched = diag.total_matched.saturating_add(matched as u64);
+    // Heartbeat every ~5s so we can see input flow rate.
+    if tick.0 % 100 == 0 {
+        tracing::info!(
+            tick = tick.0,
+            known_clients = session_map.len(),
+            total_received = diag.total_received,
+            total_matched = diag.total_matched,
+            "drain_input: heartbeat"
+        );
+    }
+}
+
+/// Running totals for `drain_input` visibility.
+#[derive(Resource, Default)]
+struct DrainInputDiag {
+    total_received: u64,
+    total_matched: u64,
 }
 
 fn drain_quic(
@@ -836,7 +900,7 @@ fn drain_quic(
     mut landing: ResMut<LandingState>,
     mut rapier: ResMut<RapierContext>,
     mut player_index: ResMut<PlayerEntityIndex>,
-    players: Query<(&SessionId, &PlayerBody), With<Player>>,
+    players: Query<(&SessionId, &CharacterController), With<Player>>,
     tick: Res<ecs::TickCounter>,
     mut incoming_signals: ResMut<IncomingSignalBuffer>,
     mut peer_positions: ResMut<PeerPositionCache>,
@@ -899,6 +963,7 @@ fn drain_quic(
                             target_tcp_addr: peer_info.endpoint.tcp_addr.to_string(),
                             target_udp_addr: peer_info.endpoint.udp_addr.to_string(),
                             shard_id: target_shard,
+                            target_shard_type: peer_info.shard_type as u8,
                         });
                         let cr = bridge.client_registry.clone();
                         tokio::spawn(async move {
@@ -914,10 +979,11 @@ fn drain_quic(
                     }
                 }
 
-                // Despawn the player entity and remove Rapier body.
+                // Despawn the player entity and remove the KCC's kinematic
+                // body + collider from Rapier.
                 if let Some(&entity) = player_index.0.get(&session) {
-                    if let Ok((_, body_comp)) = players.get(entity) {
-                        remove_player_body(&mut rapier, body_comp.0);
+                    if let Ok((_, ctrl)) = players.get(entity) {
+                        remove_player_body(&mut rapier, ctrl.body);
                     }
                     despawn_player(&mut commands, &mut rapier, &mut player_index, entity, session);
                 }
@@ -1131,7 +1197,14 @@ fn drain_quic(
 // Player spawn / despawn
 // ---------------------------------------------------------------------------
 
-/// Spawn a new player entity with Rapier body, components, and index entry.
+/// Spawn a new player entity with a `KinematicCharacterController`,
+/// the character-movement components, and the ECS index entry.
+///
+/// Replaces the legacy dynamic-body + `set_linvel` pattern. The Rapier body
+/// behind `CharacterController` is `kinematic_position_based`, so it stays
+/// queryable by other systems (block raycasts, interior mask checks,
+/// hull-exit detection) but its motion is driven by the KCC — no solver
+/// fighting per-tick velocity overrides.
 fn spawn_player(
     commands: &mut Commands,
     rapier: &mut RapierContext,
@@ -1139,35 +1212,45 @@ fn spawn_player(
     token: SessionToken,
     name: String,
     spawn_pos: Vec3,
-    physics: PlayerPhysics,
+    stats: MovementStats,
 ) -> Entity {
-    let player_rb = RigidBodyBuilder::dynamic()
-        .translation(vector![spawn_pos.x, spawn_pos.y, spawn_pos.z])
-        .lock_rotations()
-        .build();
-    let handle = rapier.rigid_body_set.insert(player_rb);
-    let player_collider = ColliderBuilder::capsule_y(physics.capsule_height, physics.capsule_radius).build();
-    rapier.collider_set.insert_with_parent(
-        player_collider,
-        handle,
+    let capsule = CharacterCapsule::default();
+    let ctrl = build_character(
         &mut rapier.rigid_body_set,
+        &mut rapier.collider_set,
+        CharacterBuildSpec {
+            position: vector![spawn_pos.x, spawn_pos.y, spawn_pos.z],
+            capsule,
+            stats,
+            up_axis: rapier3d::na::Vector3::y_axis(),
+        },
     );
 
-    let entity = commands
-        .spawn((
-            Player,
-            SessionId(token),
-            PlayerName(name),
-            PlayerBody(handle),
-            PlayerPosition(spawn_pos),
-            PlayerYaw(0.0),
-            SeatedState::default(),
-            InputActions::default(),
-            SeatInputValues::default(),
-            PlayerPlatformState::default(),
-            physics,
-        ))
-        .id();
+    // Bundle tuples are capped at 15 in Bevy — split into two sub-bundles.
+    let identity_bundle = (
+        Player,
+        SessionId(token),
+        PlayerName(name),
+        PlayerPosition(spawn_pos),
+        PlayerYaw(0.0),
+        SeatedState::default(),
+        InputActions::default(),
+        SeatInputValues::default(),
+        PlayerPlatformState::default(),
+    );
+    let character_bundle = (
+        IsCharacter,
+        ctrl,
+        capsule,
+        stats,
+        CharacterVelocity::zero(),
+        LocomotionState::Airborne,
+        LocalUp::default(),
+        DesiredMovement::default(),
+        PlatformDelta::default(),
+        PlatformSnapSuppressed::default(),
+    );
+    let entity = commands.spawn((identity_bundle, character_bundle)).id();
 
     player_index.0.insert(token, entity);
     entity
@@ -1181,8 +1264,10 @@ fn despawn_player(
     entity: Entity,
     token: SessionToken,
 ) {
-    // Look up the Rapier body handle from the entity before despawning.
-    // (Caller must ensure the entity has PlayerBody component.)
+    // Caller is responsible for removing the Rapier body/collider via
+    // `remove_player_body(&mut rapier, ctrl.body)` BEFORE calling this —
+    // once the entity is despawned we lose the `CharacterController`
+    // handle.
     player_index.0.remove(&token);
     commands.entity(entity).despawn();
 }
@@ -1267,10 +1352,18 @@ fn process_connects(
 
         // Check if this player has a pending handoff (re-entering the ship).
         let spawn_pos = if let Some(handoff_info) = pending_handoffs.0.remove(&player_name) {
-            // Re-entry: use the handoff position (ship-local).
+            // Re-entry: transform the EVA's handoff system-space position
+            // into ship-local coords. Critical: use the ship's pose AT THE
+            // MOMENT OF HANDOFF (carried in `ship_system_position` and
+            // `ship_rotation`), NOT the ship's current pose. During the
+            // handoff round-trip (~50–200 ms) the ship may have translated
+            // tens to thousands of meters in the system (km/s orbital +
+            // active thrust), so using the current pose places the player
+            // that many meters off-hull. Falls back to current exterior
+            // only when the handoff didn't include a snapshot (legacy path).
             let sys_pos = handoff_info.position;
-            let ship_pos = exterior.position;
-            let ship_rot = exterior.rotation;
+            let ship_pos = handoff_info.ship_system_position.unwrap_or(exterior.position);
+            let ship_rot = handoff_info.ship_rotation.unwrap_or(exterior.rotation);
             let local = ship_rot.inverse() * (sys_pos - ship_pos);
             Vec3::new(local.x as f32, local.y as f32, local.z as f32)
         } else {
@@ -1278,7 +1371,7 @@ fn process_connects(
             default_spawn.0
         };
 
-        // Spawn player entity with Rapier body.
+        // Spawn player entity with kinematic character controller.
         spawn_player(
             &mut commands,
             &mut rapier,
@@ -1286,7 +1379,7 @@ fn process_connects(
             token,
             player_name,
             spawn_pos,
-            PlayerPhysics::default(),
+            MovementStats::default(),
         );
 
         let tcp_write = event.tcp_write.clone();
@@ -1318,11 +1411,21 @@ fn process_connects(
         // Collect sub-grid block assignments for initial sync.
         let sg_assignments: Vec<(glam::IVec3, u32)> = ship_grid.0.iter_sub_grid_assignments().collect();
 
-        // Look up the host system shard (for always-on scene secondary).
-        let system_preconnect = if let Ok(reg) = bridge.peer_registry.try_read() {
-            reg.find_by_type(ShardType::System).first().map(|info| {
-                handoff::ShardPreConnect {
-                    shard_type: 1, // System
+        // Build the full set of secondary shards the client should observe
+        // while on this ship as primary. Every shard the player could
+        // plausibly transition to must already be streaming so transitions
+        // feel instantaneous — no LOD substitution, no blank frames.
+        //   * System (parent of this ship): scene context + stars + other
+        //     ships in this system (ship positions for proximity rendering).
+        //   * Galaxy: star-field / inter-system scene (warp visuals).
+        //   * Other ships in AOI: full block meshes pre-streamed so flying
+        //     past / boarding one is seamless.
+        let mut preconnects: Vec<handoff::ShardPreConnect> = Vec::new();
+        if let Ok(reg) = bridge.peer_registry.try_read() {
+            // System (parent) — always-on scene context.
+            if let Some(info) = reg.find_by_type(ShardType::System).first() {
+                preconnects.push(handoff::ShardPreConnect {
+                    shard_type: voxeldust_core::shard_types::ShardType::System as u8,
                     tcp_addr: info.endpoint.tcp_addr.to_string(),
                     udp_addr: info.endpoint.udp_addr.to_string(),
                     seed: system_seed,
@@ -1330,11 +1433,37 @@ fn process_connects(
                     reference_position: DVec3::ZERO,
                     reference_rotation: DQuat::IDENTITY,
                     shard_id: info.id.0,
-                }
-            })
-        } else {
-            None
-        };
+                });
+            }
+            // Galaxy — scene context, stars, warp visuals.
+            if let Some(info) = reg.find_by_type(ShardType::Galaxy).first() {
+                preconnects.push(handoff::ShardPreConnect {
+                    shard_type: voxeldust_core::shard_types::ShardType::Galaxy as u8,
+                    tcp_addr: info.endpoint.tcp_addr.to_string(),
+                    udp_addr: info.endpoint.udp_addr.to_string(),
+                    seed: galaxy_seed,
+                    planet_index: 0,
+                    reference_position: DVec3::ZERO,
+                    reference_rotation: DQuat::IDENTITY,
+                    shard_id: info.id.0,
+                });
+            }
+            // Other ships in the same system. Exclude self (this ship).
+            for info in reg.find_by_type(ShardType::Ship) {
+                let Some(other_id) = info.ship_id else { continue };
+                if other_id == ship_id { continue; }
+                preconnects.push(handoff::ShardPreConnect {
+                    shard_type: voxeldust_core::shard_types::ShardType::Ship as u8,
+                    tcp_addr: info.endpoint.tcp_addr.to_string(),
+                    udp_addr: info.endpoint.udp_addr.to_string(),
+                    seed: other_id,
+                    planet_index: 0,
+                    reference_position: DVec3::ZERO,
+                    reference_rotation: DQuat::IDENTITY,
+                    shard_id: info.id.0,
+                });
+            }
+        }
 
         tokio::spawn(async move {
             let jr = ServerMsg::JoinResponse(JoinResponseData {
@@ -1355,10 +1484,10 @@ fn process_connects(
             let mut writer = tcp_write.lock().await;
             let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
 
-            // Always-on system scene secondary. Exempt from the client's
-            // secondary cap; spans the session until a different system
-            // shard takes over (e.g., after cross-system warp arrival).
-            if let Some(pc) = system_preconnect {
+            // Always-on scene secondaries (System, Galaxy) + nearby ships.
+            // Every shard the player can plausibly transition to is
+            // pre-connected so transitions don't wait for chunks to stream.
+            for pc in preconnects {
                 let _ = client_listener::send_tcp_msg(
                     &mut *writer,
                     &ServerMsg::ShardPreConnect(pc),
@@ -1389,25 +1518,33 @@ fn process_connects(
 // Input processing
 // ---------------------------------------------------------------------------
 
+/// Translate the latest `PlayerInputMsg` for each player into a
+/// `DesiredMovement` + yaw + seat values. **No Rapier writes.** The
+/// KCC system in the Physics set consumes `DesiredMovement`.
+///
+/// The LATEST input for each session wins — if network jitter delivers
+/// multiple packets in one tick we only keep the most recent, matching
+/// the intent of the client's own "send latest on change" loop.
 fn process_input(
     mut events: MessageReader<PlayerInputMsg>,
     player_index: Res<PlayerEntityIndex>,
     mut players: Query<(
-        &PlayerBody,
         &mut PlayerYaw,
         &mut InputActions,
         &SeatedState,
         &mut SeatInputValues,
-        &PlayerPhysics,
+        &mut DesiredMovement,
     ), With<Player>>,
-    mut rapier: ResMut<RapierContext>,
+    mut diag: Local<ProcessInputDiag>,
 ) {
+    use voxeldust_core::client_message::input_action_bits as bits;
+
     for event in events.read() {
         let entity = match player_index.0.get(&event.session) {
             Some(&e) => e,
             None => continue,
         };
-        let Ok((body, mut yaw, mut actions, seated, mut seat_input, physics)) =
+        let Ok((mut yaw, mut actions, seated, mut seat_input, mut desired)) =
             players.get_mut(entity)
         else {
             continue;
@@ -1419,29 +1556,68 @@ fn process_input(
         yaw.0 = input.look_yaw;
 
         if seated.seated {
-            // Copy per-binding seat values from client input.
+            // Seated: all walking-layer state clears to prevent a stale
+            // pending jump / stance action from firing on dismount.
             if !input.seat_values.is_empty() {
                 seat_input.0 = input.seat_values.clone();
             }
+            *desired = DesiredMovement::default();
         } else {
-            // Walking mode: apply velocity to Rapier body.
-            let (sin_y, cos_y) = yaw.0.sin_cos();
-            let fwd = Vec3::new(cos_y, 0.0, sin_y);
-            let right = Vec3::new(-sin_y, 0.0, cos_y);
+            // Walking: write intent into DesiredMovement. `input.movement`
+            // is `[strafe, vertical, forward]`; our `DesiredMovement`
+            // horizontal is `[strafe, forward]`.
+            desired.horizontal = glam::Vec2::new(input.movement[0], input.movement[2]);
+            // Jump is an edge — OR it in so a jump packet arriving the
+            // same tick as a later no-jump packet still fires. The KCC
+            // system clears the edge via `DesiredMovement::clear_edges`
+            // after consumption.
+            desired.jump |= input.jump;
+            desired.sprint = (input.actions_bits & bits::SPRINT) != 0;
+            desired.crouch = (input.actions_bits & bits::CROUCH) != 0;
+            // Stance action: same edge semantics — keep the first
+            // non-None until the Physics set consumes it.
+            let new_stance = if (input.actions_bits & bits::STANCE_CYCLE_UP) != 0 {
+                Some(character::StanceAction::CycleUp)
+            } else if (input.actions_bits & bits::STANCE_CYCLE_DOWN) != 0 {
+                Some(character::StanceAction::CycleDown)
+            } else {
+                None
+            };
+            if new_stance.is_some() {
+                desired.stance_action = new_stance;
+            }
 
-            let walk_speed = physics.walk_speed;
-            let move_vel =
-                fwd * input.movement[2] * walk_speed + right * input.movement[0] * walk_speed;
-
-            if let Some(rb) = rapier.rigid_body_set.get_mut(body.0) {
-                let current_vel = *rb.linvel();
-                rb.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
-
-                if input.jump && current_vel.y.abs() < 0.1 {
-                    rb.apply_impulse(vector![0.0, physics.jump_impulse, 0.0], true);
-                }
+            diag.total += 1;
+            if desired.horizontal.length_squared() > 0.0 {
+                diag.nonzero += 1;
             }
         }
+    }
+
+    let now = std::time::Instant::now();
+    if now.duration_since(diag.last_log) >= std::time::Duration::from_secs(5) {
+        if diag.total > 0 {
+            tracing::info!(
+                total = diag.total,
+                nonzero_movement = diag.nonzero,
+                "process_input: walking inputs received in last 5s"
+            );
+        }
+        diag.total = 0;
+        diag.nonzero = 0;
+        diag.last_log = now;
+    }
+}
+
+struct ProcessInputDiag {
+    total: u64,
+    nonzero: u64,
+    last_log: std::time::Instant,
+}
+
+impl Default for ProcessInputDiag {
+    fn default() -> Self {
+        Self { total: 0, nonzero: 0, last_log: std::time::Instant::now() }
     }
 }
 
@@ -1599,24 +1775,46 @@ fn hull_exit_check(
     scene: Res<SceneCache>,
     cached_sys: Res<CachedSystemParams>,
     config: Res<ShipConfig>,
+    interior_mask: Res<ShipInteriorMask>,
     tick: Res<ecs::TickCounter>,
     mut pending: ResMut<PendingMessages>,
     mut commands: Commands,
 ) {
+    let _ = hull_bounds; // retained for diagnostics / future use
+    // Guard: if the interior mask is still empty (first tick or
+    // hasn't-synced-yet), don't eject anyone. Mask computes in
+    // `sync_colliders_to_host` which runs in the same tick's BlockEdit set;
+    // a defensive empty-check prevents a race where players are in the
+    // cockpit but the mask hasn't populated yet.
+    if interior_mask.0.is_empty() {
+        return;
+    }
     for (entity, session_id, player_name, player_pos) in &players {
-        // Check if this player is outside the ship's solid block bounding box.
         let pos = player_pos.0;
-        let margin = hull_bounds.margin;
-        let inside = pos.x >= hull_bounds.min.x as f32 - margin
-            && pos.x <= hull_bounds.max.x as f32 + 1.0 + margin
-            && pos.y >= hull_bounds.min.y as f32 - margin
-            && pos.y <= hull_bounds.max.y as f32 + 1.0 + margin
-            && pos.z >= hull_bounds.min.z as f32 - margin
-            && pos.z <= hull_bounds.max.z as f32 + 1.0 + margin;
+        // Interior volume mask — symmetric with `eva_boarding_detection` on
+        // the system shard. Both sides use the exact same mask data (shipped
+        // alongside colliders), so entry and exit observe the identical
+        // hull boundary for any ship shape.
+        let inside = interior_mask.0.is_interior(pos);
 
         if inside {
             continue;
         }
+        // Diagnostic: log the exact position + voxel that failed the
+        // interior test. Helps tell "mask is wrong" from "player really
+        // walked outside" when triaging exit reports.
+        let voxel = glam::IVec3::new(
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        );
+        tracing::info!(
+            player = %player_name.0,
+            ship_local_pos = format!("({:.2},{:.2},{:.2})", pos.x, pos.y, pos.z),
+            voxel = format!("({},{},{})", voxel.x, voxel.y, voxel.z),
+            mask_voxel_count = interior_mask.0.total_voxels(),
+            "hull_exit_check: player outside interior mask — initiating EVA handoff"
+        );
 
         let player_local = DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
         let player_system_pos = exterior.position + exterior.rotation * player_local;
@@ -1661,6 +1859,8 @@ fn hull_exit_check(
                             warp_target_star_index: None,
                             warp_velocity_gu: None,
                             target_system_eva: false,
+                            schema_version: 1,
+                            character_state: Vec::new(),
                         };
                         commands.entity(entity).insert(HandoffPending);
                         pending.handoffs.push(ShardMsg::PlayerHandoff(h));
@@ -1677,6 +1877,12 @@ fn hull_exit_check(
             // In space: EVA handoff to system shard.
             // Player inherits ship velocity + local walking velocity rotated to system frame.
             let eva_velocity = exterior.velocity + exterior.rotation * player_local * 0.0; // local pos isn't velocity — use ship vel
+            // `target_ship_id` identifies the ship being exited so the system shard
+            // can place the EVA at `ship.Position_current + (handoff.position -
+            // handoff.ship_system_position)` instead of the stale handoff position.
+            // Without this, EVA spawns ~700m behind the ship because the ship has
+            // already co-moved a few ticks with the planet's orbit (~110 km/s)
+            // during handoff propagation.
             let h = handoff::PlayerHandoff {
                 session_token: session_id.0,
                 player_name: player_name.0.clone(),
@@ -1695,14 +1901,16 @@ fn hull_exit_check(
                 galaxy_context: None,
                 target_planet_seed: None,
                 target_planet_index: None,
-                target_ship_id: None,
-                target_ship_shard_id: None,
+                target_ship_id: Some(config.ship_id),
+                target_ship_shard_id: Some(config.shard_id),
                 ship_system_position: Some(exterior.position),
                 ship_rotation: Some(exterior.rotation),
                 game_time: scene.game_time,
                 warp_target_star_index: None,
                 warp_velocity_gu: None,
                 target_system_eva: true,
+                schema_version: 1,
+                character_state: Vec::new(),
             };
             commands.entity(entity).insert(HandoffPending);
             pending.handoffs.push(ShardMsg::PlayerHandoff(h));
@@ -1802,40 +2010,64 @@ fn pilot_send(
 // Physics
 // ---------------------------------------------------------------------------
 
-/// Detect which sub-grid the player is standing on and apply its motion delta.
-/// Runs BEFORE physics_step so the player moves with the platform before gravity/collision.
+/// Detect which sub-grid the player is standing on and emit the platform
+/// motion delta for the KCC to consume.
+///
+/// Runs before `kcc_move_characters` in the Physics set; the KCC folds
+/// `PlatformDelta` into its desired translation so characters riding a
+/// moving rotor/piston advance with it. Replaces the legacy pattern of
+/// mutating the rigid body directly via `set_translation`.
 fn update_player_platform(
     mut rapier: ResMut<RapierContext>,
-    mut players: Query<(&PlayerBody, &mut PlayerPlatformState), With<Player>>,
+    mut players: Query<
+        (
+            &CharacterController,
+            &mut PlayerPlatformState,
+            &mut PlatformDelta,
+            &mut PlatformSnapSuppressed,
+        ),
+        With<Player>,
+    >,
     sub_grids: Res<SubGridRegistry>,
     world_isos: Res<MechanicalWorldIsometries>,
 ) {
     use voxeldust_core::ecs::components::SubGridId;
 
-    for (body_comp, mut platform) in &mut players {
-        let player_pos = match rapier.rigid_body_set.get(body_comp.0) {
+    // Large vertical delta (e.g. a rotor lifting ≥ 0.3 m in one tick)
+    // triggers snap-to-ground suppression in the KCC — otherwise the
+    // snap would undo the lift. Tuned empirically.
+    const LARGE_VERTICAL_DELTA: f32 = 0.3;
+
+    // Refresh query pipeline once per Physics set.
+    let ctx = &mut *rapier;
+    if !ctx.query_pipeline_fresh {
+        ctx.query_pipeline.update(&ctx.collider_set);
+        ctx.query_pipeline_fresh = true;
+    }
+
+    for (ctrl, mut platform, mut delta_out, mut snap_suppress) in &mut players {
+        // Reset per-tick outputs.
+        delta_out.reset();
+        snap_suppress.0 = false;
+
+        let player_pos = match ctx.rigid_body_set.get(ctrl.body) {
             Some(body) => *body.translation(),
             None => continue,
         };
 
-        // Downward raycast from player feet to detect which collider is below.
         let ray_origin = rapier3d::math::Point::new(player_pos.x, player_pos.y - 0.1, player_pos.z);
         let ray_dir = rapier3d::math::Vector::new(0.0, -1.0, 0.0);
-        let max_dist = 0.5; // half a block below feet
+        let max_dist = 0.5;
 
-        // Update query pipeline and perform raycast.
-        let ctx = &mut *rapier;
-        ctx.query_pipeline.update(&ctx.collider_set);
         let hit = ctx.query_pipeline.cast_ray(
             &ctx.rigid_body_set,
             &ctx.collider_set,
             &rapier3d::geometry::Ray::new(ray_origin, ray_dir),
             max_dist,
             true,
-            rapier3d::pipeline::QueryFilter::default().exclude_rigid_body(body_comp.0),
+            rapier3d::pipeline::QueryFilter::default().exclude_rigid_body(ctrl.body),
         );
 
-        // Determine which sub-grid (if any) the hit collider belongs to.
         let mut riding_sg: Option<SubGridId> = None;
         if let Some((collider_handle, _dist)) = hit {
             if let Some(collider) = ctx.collider_set.get(collider_handle) {
@@ -1850,16 +2082,36 @@ fn update_player_platform(
             }
         }
 
-        // Apply platform delta if riding a sub-grid.
         if let Some(sg_id) = riding_sg {
             if let Some(&current_iso) = world_isos.0.get(&sg_id) {
                 if platform.riding == Some(sg_id) {
                     if let Some(prev_iso) = platform.prev_iso {
+                        // Compute the world-space delta transform the
+                        // rider should inherit. Applied to the rider's
+                        // current position: `new = delta * old`.
                         let delta = current_iso * prev_iso.inverse();
-                        if let Some(body) = ctx.rigid_body_set.get_mut(body_comp.0) {
-                            let player_t = *body.translation();
-                            let new_pos = delta * rapier3d::math::Point::new(player_t.x, player_t.y, player_t.z);
-                            body.set_translation(rapier3d::math::Vector::new(new_pos.x, new_pos.y, new_pos.z), true);
+                        // Decompose into a translation the KCC can
+                        // consume. The rotational part is applied
+                        // purely as a positional offset around the
+                        // player's current translation.
+                        let current_pt = rapier3d::math::Point::new(
+                            player_pos.x,
+                            player_pos.y,
+                            player_pos.z,
+                        );
+                        let new_pt = delta * current_pt;
+                        let translation = rapier3d::math::Vector::new(
+                            new_pt.x - player_pos.x,
+                            new_pt.y - player_pos.y,
+                            new_pt.z - player_pos.z,
+                        );
+                        delta_out.0 = rapier3d::math::Isometry::translation(
+                            translation.x,
+                            translation.y,
+                            translation.z,
+                        );
+                        if translation.y.abs() > LARGE_VERTICAL_DELTA {
+                            snap_suppress.0 = true;
                         }
                     }
                 }
@@ -1873,21 +2125,15 @@ fn update_player_platform(
     }
 }
 
-fn physics_step(
-    mut rapier: ResMut<RapierContext>,
-    gravity_sources: Res<GravitySources>,
-    gravity_enabled: Res<GravityEnabled>,
-    mut players: Query<(&PlayerBody, &mut PlayerPosition), With<Player>>,
-) {
-    // Compute gravity using the first player's position (ship-internal gravity
-    // is uniform, so any player's position gives the same result).
-    let sample_pos = players
-        .iter()
-        .next()
-        .map(|(_, p)| p.0)
-        .unwrap_or(Vec3::ZERO);
-
-    let gravity = if gravity_enabled.0 {
+/// Compute gravity for this tick from the first player's position.
+/// Ship-internal gravity is uniform, so any player's position gives
+/// the same result (and there's no player → zero vector).
+fn sample_ship_gravity(
+    gravity_sources: &GravitySources,
+    gravity_enabled: &GravityEnabled,
+    sample_pos: Vec3,
+) -> rapier3d::math::Vector<f32> {
+    if gravity_enabled.0 {
         let mut total = vector![0.0, 0.0, 0.0];
         for source in &gravity_sources.0 {
             total += source.gravity_at(sample_pos);
@@ -1895,10 +2141,138 @@ fn physics_step(
         total
     } else {
         vector![0.0, 0.0, 0.0]
-    };
+    }
+}
 
-    // Destructure to satisfy the borrow checker — physics_pipeline.step() needs
-    // mutable references to multiple fields simultaneously.
+/// Drive the character controllers: fold `DesiredMovement` + gravity +
+/// `PlatformDelta` through the KCC, write `set_next_kinematic_translation`
+/// so the following `physics_pipeline_step` propagates the move into
+/// Rapier's world state.
+fn kcc_move_characters_system(
+    mut rapier: ResMut<RapierContext>,
+    gravity_sources: Res<GravitySources>,
+    gravity_enabled: Res<GravityEnabled>,
+    integration: Res<ShipIntegrationDt>,
+    mut characters: Query<
+        (
+            Entity,
+            &CharacterController,
+            &mut DesiredMovement,
+            &PlatformDelta,
+            &MovementStats,
+            &mut CharacterVelocity,
+            &mut LocomotionState,
+            &LocalUp,
+            &PlatformSnapSuppressed,
+            &PlayerYaw,
+        ),
+        With<IsCharacter>,
+    >,
+    sample_positions: Query<&PlayerPosition, With<Player>>,
+    mut landed_writer: MessageWriter<LandedEvent>,
+    mut collision_writer: MessageWriter<CharacterCollisionEvent>,
+) {
+    // Gravity is per-tick state independent of any character, so we
+    // sample once. (All ship-interior gravity sources are uniform.)
+    let sample_pos = sample_positions
+        .iter()
+        .next()
+        .map(|p| p.0)
+        .unwrap_or(Vec3::ZERO);
+    let gravity_vec = sample_ship_gravity(&gravity_sources, &gravity_enabled, sample_pos);
+    let gravity = Vec3::new(gravity_vec.x, gravity_vec.y, gravity_vec.z);
+
+    let dt = integration.0;
+
+    // Refresh the query pipeline once per Physics set. Platform update
+    // may have already done it; `RapierContext::refresh_query_pipeline`
+    // is idempotent per tick.
+    rapier.refresh_query_pipeline();
+
+    for (entity, ctrl, mut desired, platform, stats, mut vel, mut state, local_up, snap, yaw) in
+        characters.iter_mut()
+    {
+        if state.skips_kcc() {
+            // Seated/ragdoll characters don't move under KCC; seat system
+            // handles their transform. Still clear edge-triggered inputs
+            // so we don't jump on dismount.
+            desired.clear_edges();
+            continue;
+        }
+
+        // KCC expects gravity as a Vec3 — we use its Y component for
+        // integration. `LocalUp` is informational (for serialization /
+        // future rotating-frame gravity), not consumed here because
+        // ship interior is Y-up in the locally-flat frame.
+        let _ = local_up;
+
+        let input = CharacterMoveInput {
+            dt,
+            prev_state: *state,
+            velocity: vel.0,
+            desired: *desired,
+            platform_delta: *platform,
+            gravity,
+            // Ship-shard yaw=0 faces +X, same as KCC convention → no offset.
+            yaw: yaw.0,
+            stats,
+            crouching: desired.crouch,
+            jump_grace_remaining: 0.0,
+            snap_suppressed: snap.0,
+        };
+
+        let result = move_one_character(
+            &rapier.rigid_body_set,
+            &rapier.collider_set,
+            &rapier.query_pipeline,
+            ctrl,
+            input,
+            |hit| {
+                collision_writer.write(CharacterCollisionEvent { entity, hit });
+            },
+        );
+
+        // Apply the move to the kinematic body — physics_pipeline.step()
+        // converts `next_position - position` into an implicit velocity
+        // that pushes dynamics correctly.
+        if let Some(body) = rapier.rigid_body_set.get_mut(ctrl.body) {
+            let cur = body.position().translation.vector;
+            body.set_next_kinematic_translation(cur + result.translation);
+        }
+
+        vel.0 = result.new_velocity;
+        *state = result.new_state;
+        if let Some(impact) = result.landed_with_impact_speed {
+            landed_writer.write(LandedEvent {
+                entity,
+                impact_speed: impact,
+            });
+        }
+
+        // Consume edge-triggered inputs now that the KCC has acted on
+        // them — prevents the next Physics tick from re-firing a jump
+        // that already applied.
+        desired.clear_edges();
+    }
+}
+
+/// Step Rapier's physics pipeline. After this call, all kinematic
+/// bodies that had a `set_next_kinematic_translation` earlier in the
+/// tick have their `position` updated; dynamic bodies integrate
+/// velocity + forces as usual.
+fn physics_pipeline_step(
+    mut rapier: ResMut<RapierContext>,
+    gravity_sources: Res<GravitySources>,
+    gravity_enabled: Res<GravityEnabled>,
+    sample_positions: Query<&PlayerPosition, With<Player>>,
+) {
+    let sample_pos = sample_positions
+        .iter()
+        .next()
+        .map(|p| p.0)
+        .unwrap_or(Vec3::ZERO);
+    let gravity = sample_ship_gravity(&gravity_sources, &gravity_enabled, sample_pos);
+
     let ctx = &mut *rapier;
     ctx.physics_pipeline.step(
         &gravity,
@@ -1915,15 +2289,31 @@ fn physics_step(
         &(),
         &(),
     );
+    // Step invalidates the query pipeline's snapshot; next set needs a
+    // fresh `refresh_query_pipeline` call.
+    ctx.query_pipeline_fresh = false;
+}
 
-    // Sync positions from Rapier for all players.
-    for (body_comp, mut pos) in &mut players {
-        if let Some(body) = ctx.rigid_body_set.get(body_comp.0) {
+/// Sync the character body's post-step translation back to
+/// `PlayerPosition` so the broadcast + interaction systems see the
+/// authoritative position.
+fn sync_position_from_kcc(
+    rapier: Res<RapierContext>,
+    mut players: Query<(&CharacterController, &mut PlayerPosition), With<Player>>,
+) {
+    for (ctrl, mut pos) in &mut players {
+        if let Some(body) = rapier.rigid_body_set.get(ctrl.body) {
             let t = body.translation();
             pos.0 = Vec3::new(t.x, t.y, t.z);
         }
     }
 }
+
+/// Simulation dt for the Physics set. Populated from
+/// `IntegrationParameters.dt` at startup so the KCC and the Rapier step
+/// share the same clock.
+#[derive(Resource, Clone, Copy)]
+struct ShipIntegrationDt(pub f32);
 
 fn tick_counter(mut tick: ResMut<ecs::TickCounter>) {
     tick.0 += 1;
@@ -3047,7 +3437,11 @@ fn produce_player_edits(
     registry: Res<BlockRegistryResource>,
     player_index: Res<PlayerEntityIndex>,
     mut players: Query<(
-        &PlayerPosition, &PlayerBody, &mut SeatedState, &PlayerPhysics,
+        &PlayerPosition,
+        &CharacterController,
+        &mut SeatedState,
+        &mut CharacterVelocity,
+        &mut LocomotionState,
     ), (With<Player>, Without<HandoffPending>)>,
     block_index: Res<FunctionalBlockIndex>,
     mut rapier: ResMut<RapierContext>,
@@ -3065,14 +3459,22 @@ fn produce_player_edits(
             Some(&e) => e,
             None => continue,
         };
-        let Ok((player_pos, _body, mut seated_state, _physics)) = players.get_mut(entity) else {
+        let Ok((player_pos, _ctrl, mut seated_state, mut vel, mut loco)) =
+            players.get_mut(entity)
+        else {
             continue;
         };
 
         // Action EXIT_SEAT: no raycast or position validation needed.
+        // Dismount restores walking state; horizontal velocity is preserved
+        // (a ship moving at 30 m/s leaves the character at that speed when
+        // exiting the cockpit — physical continuity).
         if edit.action == voxeldust_core::client_message::action::EXIT_SEAT && seated_state.seated {
             seated_state.seated = false;
             seated_state.seat_entity = None;
+            *loco = LocomotionState::Airborne;
+            // Leave CharacterVelocity intact — carries over seat momentum.
+            let _ = &mut vel;
             info!(session = event.session.0, "exited seat via F key");
             continue;
         }
@@ -3245,9 +3647,12 @@ fn produce_player_edits(
                                     seated_state.seated = !seated_state.seated;
                                     if seated_state.seated {
                                         seated_state.seat_entity = Some(entity);
-                                        if let Some(body) = rapier.rigid_body_set.get_mut(_body.0) {
-                                            body.set_linvel(vector![0.0, 0.0, 0.0], true);
-                                        }
+                                        // Zero persisted character velocity
+                                        // and mark as seated so the KCC
+                                        // system skips this character next
+                                        // tick.
+                                        vel.0 = Vec3::ZERO;
+                                        *loco = LocomotionState::Seated;
                                         // Send SeatBindingsNotify to client so it knows what inputs to evaluate.
                                         if let Ok(mapping) = signal_ctx.seat_query.get(entity) {
                                             let bindings = mapping.bindings.iter().map(|b| {
@@ -3279,6 +3684,7 @@ fn produce_player_edits(
                                         info!(session = event.session.0, "entered seat at {:?}", hit.world_pos);
                                     } else {
                                         seated_state.seat_entity = None;
+                                        *loco = LocomotionState::Airborne;
                                         info!(session = event.session.0, "exited seat");
                                     }
                                 }
@@ -4297,11 +4703,11 @@ fn sync_colliders_to_host(
     config: Res<ShipConfig>,
     bridge: Res<NetworkBridge>,
     mut seqs: ResMut<ColliderSyncSeqs>,
+    mut interior_mask: ResMut<ShipInteriorMask>,
 ) {
     if !dirty.0 {
         return;
     }
-    dirty.0 = false;
 
     // Build collider shapes for all non-empty chunks.
     let origin = glam::Vec3::ZERO; // ship-local, no offset
@@ -4314,7 +4720,7 @@ fn sync_colliders_to_host(
         }
         // Check if this chunk changed since last sync.
         let current_seq = chunk.edit_seq();
-        let prev_seq = seqs.0.get(&chunk_key).copied().unwrap_or(0);
+        let _prev_seq = seqs.0.get(&chunk_key).copied().unwrap_or(0);
         // Always include all chunks in the sync message (host needs the full set).
         // The seq tracking is for future delta-only optimization.
         seqs.0.insert(chunk_key, current_seq);
@@ -4331,8 +4737,31 @@ fn sync_colliders_to_host(
     }
 
     if chunk_data.is_empty() {
+        // No solid blocks to sync — retry next tick in case grid is still
+        // initializing. Do NOT clear dirty; keep trying.
         return;
     }
+
+    // Recompute the interior-volume mask. This is the authoritative source
+    // of truth for boarding (system-shard) and exit (ship-shard); both
+    // sides MUST agree, so we recompute on the same trigger as colliders
+    // and ship the mask alongside them. Local mask is stored unconditionally
+    // so `hull_exit_check` has it even if the cross-shard send later fails.
+    interior_mask.0 = voxeldust_core::block::interior_mask::compute(&grid.0, &registry.0);
+    let mut interior_chunks: Vec<voxeldust_core::shard_message::InteriorChunkData> = Vec::new();
+    for (chunk_key, bits) in interior_mask.0.chunks() {
+        interior_chunks.push(voxeldust_core::shard_message::InteriorChunkData {
+            chunk_key,
+            interior_bits: bits.as_words().to_vec(),
+        });
+    }
+    let interior_voxels = interior_mask.0.total_voxels();
+    info!(
+        ship_id = config.ship_id,
+        interior_voxels,
+        interior_chunks = interior_chunks.len(),
+        "computed interior mask from grid"
+    );
 
     let hull_min = glam::Vec3::new(
         hull_bounds.min.x as f32,
@@ -4348,23 +4777,41 @@ fn sync_colliders_to_host(
     let msg = ShardMsg::ShipColliderSync(voxeldust_core::shard_message::ShipColliderSyncData {
         ship_id: config.ship_id,
         chunks: chunk_data,
+        interior_chunks,
         hull_min,
         hull_max,
     });
 
-    // Send to host shard (system or planet shard that manages this ship's exterior).
+    // Try to send to host. If peer_registry isn't ready yet (early startup),
+    // leave `dirty` set so we retry next tick; otherwise the first-tick
+    // race leaves system-shard without any collider data until the next
+    // block edit, which is why EVA could "pass through" ships on a fresh
+    // cluster spin-up.
+    let mut sent = false;
     if let Some(host_id) = config.host_shard_id {
         if let Ok(reg) = bridge.peer_registry.try_read() {
             if let Some(addr) = reg.quic_addr(host_id) {
-                let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
-                info!(
-                    ship_id = config.ship_id,
-                    chunks = seqs.0.len(),
-                    shapes = total_shapes,
-                    "synced collider shapes to host shard"
-                );
+                if bridge.quic_send_tx.try_send((host_id, addr, msg)).is_ok() {
+                    sent = true;
+                    info!(
+                        ship_id = config.ship_id,
+                        chunks = seqs.0.len(),
+                        shapes = total_shapes,
+                        interior_voxels,
+                        "synced collider shapes + interior mask to host shard"
+                    );
+                }
             }
         }
+    }
+    if sent {
+        dirty.0 = false;
+    } else {
+        // Peer registry or QUIC channel not ready — retry next tick.
+        tracing::debug!(
+            ship_id = config.ship_id,
+            "collider sync deferred: peer not ready; will retry"
+        );
     }
 }
 
@@ -5954,12 +6401,14 @@ fn build_ship_interior(
     let mut app = App::new();
 
     // Resources.
+    const SHIP_TICK_DT: f32 = 0.05;
+    app.insert_resource(ShipIntegrationDt(SHIP_TICK_DT));
     app.insert_resource(RapierContext {
         rigid_body_set,
         collider_set,
         integration_params: {
             let mut p = IntegrationParameters::default();
-            p.dt = 0.05;
+            p.dt = SHIP_TICK_DT;
             p
         },
         physics_pipeline: PhysicsPipeline::new(),
@@ -5970,6 +6419,7 @@ fn build_ship_interior(
         multibody_joint_set: MultibodyJointSet::new(),
         ccd_solver: CCDSolver::new(),
         query_pipeline: QueryPipeline::new(),
+        query_pipeline_fresh: false,
     });
     app.insert_resource(GravitySources(vec![GravitySource::default_floor_plates()]));
     app.insert_resource(RootBodyHandle(root_body_handle));
@@ -6023,6 +6473,7 @@ fn build_ship_interior(
     app.insert_resource(ShipGridResource(grid));
     app.insert_resource(BlockRegistryResource(registry));
     app.insert_resource(hull_bounds);
+    app.insert_resource(ShipInteriorMask::default());
     app.insert_resource(ChunkColliderHandles(chunk_collider_handles));
     app.insert_resource(PendingEntityOps::default());
     app.insert_resource(FunctionalBlockIndex::default());
@@ -6040,14 +6491,16 @@ fn build_ship_interior(
     app.insert_resource(LandingState::default());
     app.insert_resource(PendingMessages::default());
     app.insert_resource(DefaultSpawnPosition(spawn_pos));
-    // PlayerBodyHandle, PlayerPosition, PlayerYaw, SeatedState, InputActions
-    // are now per-entity Components — spawned on-demand in process_connects.
+    // Per-player components (CharacterController + character-layer
+    // bundle) are attached on-demand in process_connects; see
+    // `spawn_player` for the exact bundle.
     app.insert_resource(GravityEnabled(true));
     app.insert_resource(ecs::TickCounter::default());
     app.insert_resource(BlockEditQueue::default());
     app.insert_resource(AggregationDirty(false));
     app.insert_resource(ColliderSyncDirty(true)); // true = initial sync on first tick
     app.insert_resource(ColliderSyncSeqs::default());
+    app.insert_resource(DrainInputDiag::default());
     app.insert_resource(SignalChannelTable::new());
     app.insert_resource(IncomingSignalBuffer::default());
     app.insert_resource(PeerPositionCache::default());
@@ -6062,6 +6515,11 @@ fn build_ship_interior(
     app.add_message::<InboundHandoffMsg>();
     app.add_message::<HandoffAcceptedMsg>();
     app.add_message::<HostSwitchMsg>();
+    // Character-layer events (consumed by future gameplay systems; logged
+    // for now). Registered even before handlers exist so downstream code
+    // can subscribe without schedule-order hazards.
+    app.add_message::<LandedEvent>();
+    app.add_message::<CharacterCollisionEvent>();
 
     // System ordering.
     app.configure_sets(
@@ -6129,7 +6587,15 @@ fn build_ship_interior(
     // Physics.
     app.add_systems(
         Update,
-        (tick_counter, update_player_platform, physics_step).chain().in_set(ShipSet::Physics),
+        (
+            tick_counter,
+            update_player_platform,
+            kcc_move_characters_system,
+            physics_pipeline_step,
+            sync_position_from_kcc,
+        )
+            .chain()
+            .in_set(ShipSet::Physics),
     );
 
     // Interaction: hull exit detection (seat interaction moved to BlockEdit via raycast).

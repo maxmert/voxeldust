@@ -200,6 +200,32 @@ pub fn send_input_with_dt(
         }
         let jump = keys_held.contains(&KeyCode::Space);
 
+        // Once a second, log whether WASD are registering as held. Proves whether
+        // `keys_held` is the source of movement=[0,0,0] in the sender heartbeat.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_LOG: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_LOG.load(Ordering::Relaxed);
+            if now_ms >= last + 1000 {
+                LAST_LOG.store(now_ms, Ordering::Relaxed);
+                tracing::info!(
+                    is_piloting,
+                    w = keys_held.contains(&KeyCode::KeyW),
+                    a = keys_held.contains(&KeyCode::KeyA),
+                    s = keys_held.contains(&KeyCode::KeyS),
+                    d = keys_held.contains(&KeyCode::KeyD),
+                    space = keys_held.contains(&KeyCode::Space),
+                    movement = ?movement,
+                    total_held = keys_held.len(),
+                    "input build diag"
+                );
+            }
+        }
+
         let _ = tx.send(PlayerInputData {
             movement,
             look_yaw,
@@ -216,6 +242,9 @@ pub fn send_input_with_dt(
             cruise: false,
             atmo_comp: false,
             seat_values,
+            // Reserved for future stance / sprint wiring — zero preserves
+            // legacy server behaviour.
+            actions_bits: 0,
         });
     }
 }

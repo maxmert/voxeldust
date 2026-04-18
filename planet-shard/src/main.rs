@@ -22,6 +22,13 @@ use voxeldust_core::system::{compute_lighting, compute_planet_position, SystemPa
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 
+use voxeldust_core::character::{
+    self, build_character, move_one_character, CharacterBuildSpec, CharacterCapsule,
+    CharacterCollisionEvent, CharacterController, CharacterMoveInput, CharacterVelocity,
+    DesiredMovement, IsCharacter, LandedEvent, LocalUp, LocomotionState, MovementStats,
+    PlatformDelta, PlatformSnapSuppressed, RapierWorld,
+};
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -58,8 +65,12 @@ struct Args {
 // ---------------------------------------------------------------------------
 
 const G: f64 = 6.674e-11;
-const WALK_SPEED: f32 = 4.0;
-const JUMP_IMPULSE: f32 = 5.0;
+
+// Planet walking constants moved into the shared
+// `voxeldust_core::character::MovementStats` defaults. Legacy
+// `WALK_SPEED`/`JUMP_IMPULSE` values (4.0 / 5.0) were preserved as the
+// new tunable defaults — speeds are unchanged; the physics is now
+// kinematic-character-controller driven.
 
 // ---------------------------------------------------------------------------
 // Components (planet-shard-specific, on player entities)
@@ -69,9 +80,9 @@ const JUMP_IMPULSE: f32 = 5.0;
 #[derive(Component)]
 struct PlanetPlayer;
 
-/// Rapier rigid body handle for this player.
-#[derive(Component)]
-struct PlayerBody(RigidBodyHandle);
+// `PlayerBody` (RigidBodyHandle newtype) was removed in the KCC
+// migration. The body handle now lives inside `CharacterController`
+// from `voxeldust_core::character`.
 
 /// Planet-local position (vector from planet center).
 #[derive(Component)]
@@ -178,7 +189,28 @@ struct RapierContext {
     multibody_joint_set: MultibodyJointSet,
     ccd_solver: CCDSolver,
     query_pipeline: QueryPipeline,
+    /// Set true after `refresh_query_pipeline`; cleared after
+    /// `physics_pipeline.step()` invalidates the BVH snapshot.
+    query_pipeline_fresh: bool,
 }
+
+impl RapierWorld for RapierContext {
+    fn bodies(&self) -> &RigidBodySet { &self.rigid_body_set }
+    fn colliders(&self) -> &ColliderSet { &self.collider_set }
+    fn queries(&self) -> &QueryPipeline { &self.query_pipeline }
+    fn bodies_mut(&mut self) -> &mut RigidBodySet { &mut self.rigid_body_set }
+    fn refresh_query_pipeline(&mut self) {
+        if !self.query_pipeline_fresh {
+            self.query_pipeline.update(&self.collider_set);
+            self.query_pipeline_fresh = true;
+        }
+    }
+}
+
+/// Planet physics dt. Shared between KCC + Rapier step so they integrate
+/// against the same clock.
+#[derive(Resource, Clone, Copy)]
+struct PlanetIntegrationDt(pub f32);
 
 /// Planet configuration (immutable after init).
 #[derive(Resource)]
@@ -551,39 +583,58 @@ fn spawn_player(
     let height = (planet_local_pos.length() - planet_radius).max(0.5);
     let frame = TangentFrame::from_up(radial);
 
-    let player_rb = RigidBodyBuilder::dynamic()
-        .translation(vector![0.0, height as f32, 0.0])
-        .lock_rotations()
-        .build();
-    let handle = rapier.rigid_body_set.insert(player_rb);
-    let player_collider = ColliderBuilder::capsule_y(0.6, 0.3)
-        .collision_groups(InteractionGroups::new(
+    // Build the KCC-backed kinematic body at the re-centered origin.
+    // The planet keeps the same "character lives at (0, height, 0) in
+    // flat Rapier space + re-center each tick" invariant — no change
+    // to that pattern, only the body type.
+    let stats = MovementStats::default();
+    let capsule = CharacterCapsule::default();
+    let ctrl = build_character(
+        &mut rapier.rigid_body_set,
+        &mut rapier.collider_set,
+        CharacterBuildSpec {
+            position: vector![0.0, height as f32, 0.0],
+            capsule,
+            stats,
+            up_axis: rapier3d::na::Vector3::y_axis(),
+        },
+    );
+    // Apply planet-specific collision groups so players don't get
+    // filtered out by the existing planet-shard raycast filters.
+    if let Some(col) = rapier.collider_set.get_mut(ctrl.collider) {
+        col.set_collision_groups(InteractionGroups::new(
             Group::GROUP_1,
             Group::GROUP_1 | Group::GROUP_2,
-        ))
-        .build();
-    rapier.collider_set.insert_with_parent(
-        player_collider,
-        handle,
-        &mut rapier.rigid_body_set,
+        ));
+    }
+
+    let identity_bundle = (
+        PlanetPlayer,
+        PlanetPosition(planet_local_pos),
+        frame,
+        RapierOrigin(DVec3::new(0.0, height, 0.0)),
+        PlayerYaw(0.0),
+        SessionId(session_token),
+        Name(name),
+        ActionState {
+            current: 0,
+            previous: 0,
+        },
+    );
+    let character_bundle = (
+        IsCharacter,
+        ctrl,
+        capsule,
+        stats,
+        CharacterVelocity::zero(),
+        LocomotionState::Airborne,
+        LocalUp(radial),
+        DesiredMovement::default(),
+        PlatformDelta::default(),
+        PlatformSnapSuppressed::default(),
     );
 
-    commands
-        .spawn((
-            PlanetPlayer,
-            PlayerBody(handle),
-            PlanetPosition(planet_local_pos),
-            frame,
-            RapierOrigin(DVec3::new(0.0, height, 0.0)),
-            PlayerYaw(0.0),
-            SessionId(session_token),
-            Name(name),
-            ActionState {
-                current: 0,
-                previous: 0,
-            },
-        ))
-        .id()
+    commands.spawn((identity_bundle, character_bundle)).id()
 }
 
 fn process_handoffs(
@@ -848,7 +899,7 @@ fn process_handoff_accepted(
     mut rapier: ResMut<RapierContext>,
     bridge: Res<NetworkBridge>,
     player_index: Res<PlayerEntityIndex>,
-    players: Query<&PlayerBody, With<PlanetPlayer>>,
+    players: Query<&CharacterController, With<PlanetPlayer>>,
 ) {
     for event in events.read() {
         let session = event.session;
@@ -867,6 +918,7 @@ fn process_handoff_accepted(
                     target_tcp_addr: peer_info.endpoint.tcp_addr.to_string(),
                     target_udp_addr: peer_info.endpoint.udp_addr.to_string(),
                     shard_id: target_shard,
+                    target_shard_type: peer_info.shard_type as u8,
                 });
                 let cr = bridge.client_registry.clone();
                 tokio::spawn(async move {
@@ -882,12 +934,12 @@ fn process_handoff_accepted(
             }
         }
 
-        // Remove player entity and Rapier body.
+        // Remove player entity and KCC body.
         if let Some(&entity) = player_index.0.get(&session) {
-            if let Ok(body) = players.get(entity) {
+            if let Ok(ctrl) = players.get(entity) {
                 let ctx = &mut *rapier;
                 ctx.rigid_body_set.remove(
-                    body.0,
+                    ctrl.body,
                     &mut ctx.island_manager,
                     &mut ctx.collider_set,
                     &mut ctx.impulse_joint_set,
@@ -905,18 +957,23 @@ fn process_handoff_accepted(
 // Input
 // ---------------------------------------------------------------------------
 
+/// Translate client input into `DesiredMovement`; KCC system in Physics
+/// set consumes it. Same pattern as ship-shard.
 fn process_input(
     mut events: MessageReader<PlayerInputMsg>,
     player_index: Res<PlayerEntityIndex>,
-    mut players: Query<(&PlayerBody, &mut PlayerYaw, &mut ActionState), With<PlanetPlayer>>,
-    mut rapier: ResMut<RapierContext>,
+    mut players: Query<
+        (&mut PlayerYaw, &mut ActionState, &mut DesiredMovement),
+        With<PlanetPlayer>,
+    >,
 ) {
+    use voxeldust_core::client_message::input_action_bits as bits;
     for event in events.read() {
         let entity = match player_index.0.get(&event.session) {
             Some(&e) => e,
             None => continue,
         };
-        let Ok((body, mut yaw, mut actions)) = players.get_mut(entity) else {
+        let Ok((mut yaw, mut actions, mut desired)) = players.get_mut(entity) else {
             continue;
         };
 
@@ -924,26 +981,109 @@ fn process_input(
         actions.current = event.input.action;
         yaw.0 = event.input.look_yaw;
 
-        let has_movement = event.input.movement[0].abs() > 0.001
-            || event.input.movement[2].abs() > 0.001;
-
-        if let Some(rb) = rapier.rigid_body_set.get_mut(body.0) {
-            if has_movement || event.input.jump {
-                let (sin_y, cos_y) = yaw.0.sin_cos();
-                let fwd = Vec3::new(sin_y, 0.0, cos_y);
-                let right = Vec3::new(cos_y, 0.0, -sin_y);
-
-                let move_vel = fwd * event.input.movement[2] * WALK_SPEED
-                    + right * event.input.movement[0] * WALK_SPEED;
-
-                let current_vel = *rb.linvel();
-                rb.set_linvel(vector![move_vel.x, current_vel.y, move_vel.z], true);
-
-                if event.input.jump && current_vel.y.abs() < 0.5 {
-                    rb.apply_impulse(vector![0.0, JUMP_IMPULSE, 0.0], true);
-                }
-            }
+        // Planet-local horizontal input: [strafe, forward] — same
+        // semantics as ship-shard.
+        desired.horizontal = glam::Vec2::new(event.input.movement[0], event.input.movement[2]);
+        // Jump is edge-triggered; OR so packets arriving same-tick don't lose it.
+        desired.jump |= event.input.jump;
+        desired.sprint = (event.input.actions_bits & bits::SPRINT) != 0;
+        desired.crouch = (event.input.actions_bits & bits::CROUCH) != 0;
+        let new_stance = if (event.input.actions_bits & bits::STANCE_CYCLE_UP) != 0 {
+            Some(character::StanceAction::CycleUp)
+        } else if (event.input.actions_bits & bits::STANCE_CYCLE_DOWN) != 0 {
+            Some(character::StanceAction::CycleDown)
+        } else {
+            None
+        };
+        if new_stance.is_some() {
+            desired.stance_action = new_stance;
         }
+    }
+}
+
+/// Drive the kinematic character controllers for planet-surface walkers.
+///
+/// The planet-shard uses the `TangentFrame` + `RapierOrigin` re-center
+/// trick: the character body lives near (0, height, 0) in flat Rapier
+/// space and its horizontal displacement is remapped to sphere-surface
+/// rotation in `tangent_frame_sync`. The KCC operates IN that flat
+/// frame — no special-case math here — because:
+/// 1. Gravity is `-surface_g * flat_Y` (the tangent frame's local Y).
+/// 2. Displacement is tangential; curvature is applied post-KCC.
+fn kcc_move_characters_system(
+    mut rapier: ResMut<RapierContext>,
+    config: Res<PlanetConfig>,
+    integration: Res<PlanetIntegrationDt>,
+    mut characters: Query<
+        (
+            Entity,
+            &CharacterController,
+            &mut DesiredMovement,
+            &PlatformDelta,
+            &MovementStats,
+            &mut CharacterVelocity,
+            &mut LocomotionState,
+            &PlayerYaw,
+            &PlatformSnapSuppressed,
+        ),
+        With<IsCharacter>,
+    >,
+    mut landed_writer: MessageWriter<LandedEvent>,
+    mut collision_writer: MessageWriter<CharacterCollisionEvent>,
+) {
+    let dt = integration.0;
+    let gravity = Vec3::new(0.0, -(config.surface_gravity as f32), 0.0);
+
+    rapier.refresh_query_pipeline();
+
+    // Planet yaw convention: yaw=0 → facing +Z. Shared KCC convention:
+    // yaw=0 → facing +X. Offset by +π/2 so pressing W at planet-yaw=0
+    // walks toward +Z as before.
+    const PLANET_YAW_OFFSET: f32 = std::f32::consts::FRAC_PI_2;
+
+    for (entity, ctrl, mut desired, platform, stats, mut vel, mut state, yaw, snap) in
+        characters.iter_mut()
+    {
+        if state.skips_kcc() {
+            desired.clear_edges();
+            continue;
+        }
+        let input = CharacterMoveInput {
+            dt,
+            prev_state: *state,
+            velocity: vel.0,
+            desired: *desired,
+            platform_delta: *platform,
+            gravity,
+            yaw: yaw.0 + PLANET_YAW_OFFSET,
+            stats,
+            crouching: desired.crouch,
+            jump_grace_remaining: 0.0,
+            snap_suppressed: snap.0,
+        };
+        let result = move_one_character(
+            &rapier.rigid_body_set,
+            &rapier.collider_set,
+            &rapier.query_pipeline,
+            ctrl,
+            input,
+            |hit| {
+                collision_writer.write(CharacterCollisionEvent { entity, hit });
+            },
+        );
+        if let Some(body) = rapier.rigid_body_set.get_mut(ctrl.body) {
+            let cur = body.position().translation.vector;
+            body.set_next_kinematic_translation(cur + result.translation);
+        }
+        vel.0 = result.new_velocity;
+        *state = result.new_state;
+        if let Some(impact) = result.landed_with_impact_speed {
+            landed_writer.write(LandedEvent {
+                entity,
+                impact_speed: impact,
+            });
+        }
+        desired.clear_edges();
     }
 }
 
@@ -994,27 +1134,40 @@ fn physics_step(
         &(),
         &(),
     );
+    // Step invalidates the BVH snapshot; next Physics set must refresh.
+    ctx.query_pipeline_fresh = false;
 }
 
 /// Tangent frame sync: maps Rapier flat-space deltas to sphere surface movement.
 /// Re-centers bodies to prevent f32 drift, recomputes tangent frames.
+/// Tangent-frame sync: map the character's flat-space horizontal
+/// displacement to a rotation of the sphere-tangent basis, re-center the
+/// kinematic body to the origin, and transform the character's
+/// persisted velocity from the old frame to the new one.
+///
+/// Runs AFTER `physics_step` so the body's post-step translation
+/// reflects the KCC move + any external dynamic interactions.
 fn tangent_frame_sync(
     mut rapier: ResMut<RapierContext>,
     config: Res<PlanetConfig>,
     mut players: Query<
         (
-            &PlayerBody,
+            &CharacterController,
             &mut PlanetPosition,
             &mut TangentFrame,
             &mut RapierOrigin,
+            &mut CharacterVelocity,
+            &mut LocalUp,
         ),
         With<PlanetPlayer>,
     >,
 ) {
     let planet_radius = config.planet_radius;
 
-    for (body_comp, mut position, mut frame, mut rapier_origin) in &mut players {
-        let body = match rapier.rigid_body_set.get_mut(body_comp.0) {
+    for (ctrl, mut position, mut frame, mut rapier_origin, mut char_vel, mut local_up) in
+        &mut players
+    {
+        let body = match rapier.rigid_body_set.get_mut(ctrl.body) {
             Some(b) => b,
             None => continue,
         };
@@ -1040,21 +1193,27 @@ fn tangent_frame_sync(
 
         let height = rapier_pos.y as f64;
 
-        // Transform velocity from old frame to world, then into new frame.
-        let vel = body.linvel();
-        let vel_world = frame.east * vel.x as f64
-            + frame.up * vel.y as f64
-            + frame.north * vel.z as f64;
+        // Transform the *persisted* character velocity from the old
+        // frame to world space, then back into the new frame. This is
+        // the piece that used to read the Rapier body's linvel — now
+        // we own it via `CharacterVelocity`.
+        let vel_local = char_vel.0;
+        let vel_world = frame.east * vel_local.x as f64
+            + frame.up * vel_local.y as f64
+            + frame.north * vel_local.z as f64;
 
         // Update to new frame.
         position.0 = new_up * (planet_radius + height);
         *frame = TangentFrame::from_up(new_up);
+        local_up.0 = new_up;
 
         let new_vx = vel_world.dot(frame.east) as f32;
         let new_vy = vel_world.dot(frame.up) as f32;
         let new_vz = vel_world.dot(frame.north) as f32;
+        char_vel.0 = Vec3::new(new_vx, new_vy, new_vz);
+
+        // Re-center the body to (0, height, 0) in flat space.
         body.set_translation(vector![0.0, t.y, 0.0], true);
-        body.set_linvel(vector![new_vx, new_vy, new_vz], true);
 
         rapier_origin.0 = DVec3::new(0.0, height, 0.0);
     }
@@ -1124,6 +1283,8 @@ fn ship_proximity(
                 warp_target_star_index: None,
                 warp_velocity_gu: None,
                 target_system_eva: false,
+                schema_version: 1,
+                character_state: Vec::new(),
             };
 
             // Mark player as pending handoff.
@@ -1157,7 +1318,7 @@ fn disconnect_cleanup(
     bridge: Res<NetworkBridge>,
     mut rapier: ResMut<RapierContext>,
     mut player_index: ResMut<PlayerEntityIndex>,
-    players: Query<(Entity, &SessionId, &PlayerBody, &Name, Has<HandoffPending>), With<PlanetPlayer>>,
+    players: Query<(Entity, &SessionId, &CharacterController, &Name, Has<HandoffPending>), With<PlanetPlayer>>,
 ) {
     if tick.0 % 40 != 0 {
         return;
@@ -1179,7 +1340,7 @@ fn disconnect_cleanup(
         .filter(|(_, sid, _, _, has_handoff)| {
             !connected_tokens.contains(&sid.0) && !has_handoff
         })
-        .map(|(entity, sid, body, name, _)| (entity, sid.0, body.0, name.0.clone()))
+        .map(|(entity, sid, ctrl, name, _)| (entity, sid.0, ctrl.body, name.0.clone()))
         .collect();
 
     for (entity, token, body_handle, player_name) in orphaned {
@@ -1436,12 +1597,14 @@ fn build_app(
 
     let mut app = App::new();
 
+    const PLANET_TICK_DT: f32 = 0.05;
+    app.insert_resource(PlanetIntegrationDt(PLANET_TICK_DT));
     app.insert_resource(RapierContext {
         rigid_body_set,
         collider_set,
         integration_params: {
             let mut p = IntegrationParameters::default();
-            p.dt = 0.05;
+            p.dt = PLANET_TICK_DT;
             p
         },
         physics_pipeline: PhysicsPipeline::new(),
@@ -1452,6 +1615,7 @@ fn build_app(
         multibody_joint_set: MultibodyJointSet::new(),
         ccd_solver: CCDSolver::new(),
         query_pipeline: QueryPipeline::new(),
+        query_pipeline_fresh: false,
     });
     app.insert_resource(PlanetConfig {
         shard_id,
@@ -1481,6 +1645,9 @@ fn build_app(
     app.add_message::<ShipNearbyMsg>();
     app.add_message::<HandoffAcceptedMsg>();
     app.add_message::<ShipColliderSyncMsg>();
+    // Character-layer events (reserved — consumed by future gameplay).
+    app.add_message::<LandedEvent>();
+    app.add_message::<CharacterCollisionEvent>();
 
     // System ordering.
     app.configure_sets(
@@ -1529,9 +1696,22 @@ fn build_app(
     app.add_systems(Update, process_input.in_set(PlanetSet::Input));
 
     // Physics.
+    //
+    // Order: `kcc_move_characters_system` drives character translation
+    // from `DesiredMovement` → `set_next_kinematic_translation`. Then
+    // `physics_step` runs Rapier's full step (kinematic bodies pick up
+    // their new positions; any dynamic bodies integrate normally).
+    // `tangent_frame_sync` re-centers the character in the flat Rapier
+    // frame and updates the sphere-surface tangent basis.
     app.add_systems(
         Update,
-        (physics_step, refresh_planet_position_cache, tangent_frame_sync, update_ship_collider_positions)
+        (
+            kcc_move_characters_system,
+            physics_step,
+            refresh_planet_position_cache,
+            tangent_frame_sync,
+            update_ship_collider_positions,
+        )
             .chain()
             .in_set(PlanetSet::Physics),
     );

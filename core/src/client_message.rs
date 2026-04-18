@@ -520,6 +520,25 @@ pub struct PlayerInputData {
     /// Per-binding float values for the generic seat system.
     /// Length matches the seat's binding count. Empty when walking or using legacy path.
     pub seat_values: Vec<f32>,
+    /// Bit-packed action modifiers.
+    /// See [`actions`] for flag bit layout. Zero preserves legacy behaviour;
+    /// old clients transmit no value for this field and servers see `0`.
+    pub actions_bits: u32,
+}
+
+/// Action-bit layout for [`PlayerInputData::actions_bits`].
+///
+/// Bits are stable once assigned — add new flags at the next unused bit,
+/// never repurpose. FlatBuffers field default is `0`, so older wire
+/// formats deserialize cleanly (no sprint/crouch).
+pub mod input_action_bits {
+    pub const SPRINT: u32 = 1 << 0;
+    pub const CROUCH: u32 = 1 << 1;
+    pub const PRONE: u32 = 1 << 2;
+    pub const STANCE_CYCLE_UP: u32 = 1 << 3;
+    pub const STANCE_CYCLE_DOWN: u32 = 1 << 4;
+    pub const INTERACT_ALT: u32 = 1 << 5;
+    // bits 6..31 reserved
 }
 
 /// Block edit action codes (client → server).
@@ -966,6 +985,7 @@ impl ClientMsg {
                         cruise: data.cruise,
                         atmo_comp: data.atmo_comp,
                         seat_values: sv,
+                        actions_bits: data.actions_bits,
                     },
                 );
                 let msg = fb::ClientMessage::create(
@@ -1127,6 +1147,7 @@ impl ClientMsg {
                     cruise: p.cruise(),
                     atmo_comp: p.atmo_comp(),
                     seat_values: p.seat_values().map(|v| v.iter().collect()).unwrap_or_default(),
+                    actions_bits: p.actions_bits(),
                 }))
             }
             fb::ClientPayload::BlockEditRequest => {
@@ -1254,6 +1275,7 @@ impl ServerMsg {
                         target_tcp_addr: Some(tcp),
                         target_udp_addr: Some(udp),
                         shard_id: data.shard_id.0,
+                        target_shard_type: data.target_shard_type,
                     },
                 );
                 let msg = fb::ServerMessage::create(
@@ -1702,6 +1724,7 @@ impl ServerMsg {
                         .ok_or(MessageError::MissingField("target_udp_addr"))?
                         .to_string(),
                     shard_id: ShardId(sr.shard_id()),
+                    target_shard_type: sr.target_shard_type(),
                 }))
             }
             fb::ServerPayload::WorldState => {
@@ -2105,6 +2128,7 @@ mod tests {
             target_tcp_addr: "127.0.0.1:7777".to_string(),
             target_udp_addr: "127.0.0.1:7778".to_string(),
             shard_id: ShardId(10),
+            target_shard_type: 2,
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();
@@ -2114,6 +2138,7 @@ mod tests {
             assert_eq!(sr.target_tcp_addr, "127.0.0.1:7777");
             assert_eq!(sr.target_udp_addr, "127.0.0.1:7778");
             assert_eq!(sr.shard_id, ShardId(10));
+            assert_eq!(sr.target_shard_type, 2);
         } else {
             panic!("expected ShardRedirect");
         }
@@ -2137,6 +2162,7 @@ mod tests {
             cruise: false,
             atmo_comp: false,
             seat_values: vec![0.5, 1.0, 0.0],
+            actions_bits: input_action_bits::SPRINT,
         });
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
@@ -2148,6 +2174,7 @@ mod tests {
             assert_eq!(p.tick, 1000);
             assert_eq!(p.seat_values.len(), 3);
             assert!((p.seat_values[0] - 0.5).abs() < 1e-5);
+            assert_eq!(p.actions_bits, input_action_bits::SPRINT);
         } else {
             panic!("expected PlayerInput");
         }

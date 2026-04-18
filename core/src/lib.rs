@@ -1,4 +1,5 @@
 pub mod block;
+pub mod character;
 pub mod ecs;
 pub mod signal;
 pub mod builder_pool;

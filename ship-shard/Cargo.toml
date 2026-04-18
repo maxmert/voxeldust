@@ -8,7 +8,7 @@ name = "ship-shard"
 path = "src/main.rs"
 
 [dependencies]
-voxeldust-core = { workspace = true }
+voxeldust-core = { workspace = true, features = ["rapier"] }
 voxeldust-shard-common = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -118,12 +118,17 @@ impl ClientRegistry {
     /// First client without a UDP addr gets it. If no clients yet,
     /// store as pending for later matching on register().
     pub fn discover_udp(&mut self, udp_addr: SocketAddr) {
-        // If a stale entry already has this address (reconnect from same endpoint),
-        // clear it so the new client can claim it.
-        for entry in self.clients.values_mut() {
-            if entry.udp_addr == Some(udp_addr) {
-                entry.udp_addr = None;
-            }
+        // Idempotent fast-path: if this UDP address is already known (either
+        // assigned to a client or registered as an observer), bail out.
+        // Without this, every incoming UDP packet (20 Hz) re-ran the
+        // clear-and-reassign dance below — spamming logs and, in edge cases
+        // with multiple unassigned clients, swapping which client gets
+        // which UDP address between packets.
+        if self.clients.values().any(|e| e.udp_addr == Some(udp_addr)) {
+            return;
+        }
+        if self.observers.iter().any(|o| o.addr == udp_addr) {
+            return;
         }
 
         // Assign to the first client without a UDP address.
@@ -232,6 +237,7 @@ pub async fn run_tcp_listener(
     addr: SocketAddr,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     msg_channels: TcpMessageChannels,
+    client_registry: Arc<RwLock<ClientRegistry>>,
     cancel: CancellationToken,
 ) {
     let listener = match TcpListener::bind(addr).await {
@@ -254,8 +260,9 @@ pub async fn run_tcp_listener(
                     Ok((stream, peer_addr)) => {
                         let tx = connect_tx.clone();
                         let channels = msg_channels.clone();
+                        let registry = client_registry.clone();
                         tokio::spawn(async move {
-                            handle_client_connection(stream, peer_addr, tx, channels).await;
+                            handle_client_connection(stream, peer_addr, tx, channels, registry).await;
                         });
                     }
                     Err(e) => {
@@ -277,6 +284,7 @@ async fn handle_client_connection(
     peer_addr: SocketAddr,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     channels: TcpMessageChannels,
+    client_registry: Arc<RwLock<ClientRegistry>>,
 ) {
     let _ = stream.set_nodelay(true);
 
@@ -332,6 +340,13 @@ async fn handle_client_connection(
             // Persistent read loop — blocks until client disconnects.
             run_tcp_read_loop(read_half, peer_addr, &player_name, token, channels).await;
             info!(%peer_addr, %player_name, "client TCP read loop ended");
+
+            // Release registry resources tied to this session: the ClientEntry
+            // keeps the write half alive via its Arc, and its UDP addr stays in
+            // udp_addrs() forever otherwise — broadcasting WorldState to a dead
+            // socket and spamming ICMP unreachables at us.
+            let mut reg = client_registry.write().await;
+            reg.unregister(&token);
             return;
         }
         ClientMsg::ObserverConnect { observer_name } => {
@@ -340,7 +355,7 @@ async fn handle_client_connection(
             // Observer connections: split stream, store write half for chunk sync,
             // but do NOT send a ClientConnectEvent (no player entity).
             // The shard will detect the observer via the ObserverConnect channel.
-            let (_read_half, write_half) = stream.into_split();
+            let (read_half, write_half) = stream.into_split();
             let write = Arc::new(Mutex::new(write_half));
 
             // Store observer TCP write half in the connect channel with a special
@@ -354,10 +369,19 @@ async fn handle_client_connection(
                 udp_addr: None,
             };
             let _ = connect_tx.send(ClientConnectEvent { connection });
-
-            // Observer TCP connections don't have a persistent read loop.
-            // They only receive data (ChunkSnapshots, ChunkDeltas), never send.
             info!(%peer_addr, %observer_name, "observer TCP setup complete");
+
+            // Observers send nothing meaningful, but we must still drive the
+            // read half to detect EOF. Without this, the ClientEntry lingers
+            // forever after the secondary shard disconnects, and its stale UDP
+            // address stays in udp_addrs() — broadcasting WorldState to a
+            // dead socket and spamming ICMP port-unreachables at our UDP
+            // socket, which can disrupt input flow for live clients.
+            run_observer_read_loop(read_half, peer_addr, observer_name.as_str()).await;
+            info!(%peer_addr, %observer_name, "observer TCP read loop ended");
+
+            let mut reg = client_registry.write().await;
+            reg.unregister(&observer_token);
             return;
         }
         _ => {
@@ -366,6 +390,31 @@ async fn handle_client_connection(
         }
     };
     // All match arms return — this is unreachable.
+}
+
+/// Observer TCP read loop. Observers don't send application messages, but we
+/// must drive the read half to detect EOF so we can clean up the ClientEntry.
+async fn run_observer_read_loop(
+    mut reader: tokio::net::tcp::OwnedReadHalf,
+    peer_addr: SocketAddr,
+    observer_name: &str,
+) {
+    let mut buf = [0u8; 256];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => {
+                info!(%peer_addr, %observer_name, "observer disconnected (TCP EOF)");
+                return;
+            }
+            Ok(_) => {
+                // Observers aren't expected to send anything; silently discard.
+            }
+            Err(e) => {
+                warn!(%peer_addr, %observer_name, %e, "observer TCP read error, disconnecting");
+                return;
+            }
+        }
+    }
 }
 
 /// Persistent per-client TCP read loop. Reads length-prefixed messages from the
@@ -616,10 +665,15 @@ mod tests {
 
     #[test]
     fn pending_udp_no_duplicates() {
+        // With no clients registered, the first unmatched UDP address is
+        // stored as an observer (dual-shard compositing path). The
+        // idempotent fast-path in `discover_udp` must prevent duplicate
+        // observer entries when the same hello arrives twice.
         let mut reg = ClientRegistry::new();
         let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
         reg.discover_udp(addr);
         reg.discover_udp(addr);
-        assert_eq!(reg.pending_udp.len(), 1);
+        assert_eq!(reg.pending_udp.len(), 0);
+        assert_eq!(reg.observers.len(), 1);
     }
 }

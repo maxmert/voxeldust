@@ -34,6 +34,9 @@ fn make_handoff() -> PlayerHandoff {
         game_time: 0.0,
         warp_target_star_index: None,
         warp_velocity_gu: None,
+        target_system_eva: false,
+        schema_version: 1,
+        character_state: Vec::new(),
     }
 }
 

@@ -111,6 +111,8 @@ async fn handle_client(
                 target_tcp_addr: session.target_tcp_addr,
                 target_udp_addr: session.target_udp_addr,
                 shard_id: session.last_shard_id,
+                // Gateway always routes to a ship shard on session resume.
+                target_shard_type: voxeldust_core::shard_types::ShardType::Ship as u8,
             });
 
             send_server_msg(&mut stream, &redirect).await?;
@@ -142,6 +144,8 @@ async fn handle_client(
         target_tcp_addr: shard_info.endpoint.tcp_addr.to_string(),
         target_udp_addr: shard_info.endpoint.udp_addr.to_string(),
         shard_id: shard_info.id,
+        // Gateway routes fresh players to a ship shard (their ship).
+        target_shard_type: voxeldust_core::shard_types::ShardType::Ship as u8,
     });
 
     send_server_msg(&mut stream, &redirect).await?;

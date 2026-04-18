@@ -217,8 +217,9 @@ impl ShardHarness {
             config_update_tx: self.config_update_tx.clone(),
             sub_block_edit_tx: self.sub_block_edit_tx.clone(),
         };
+        let tcp_registry = self.client_registry.clone();
         tokio::spawn(async move {
-            client_listener::run_tcp_listener(tcp_addr, connect_tx, tcp_channels, tcp_cancel).await;
+            client_listener::run_tcp_listener(tcp_addr, connect_tx, tcp_channels, tcp_registry, tcp_cancel).await;
         });
 
         // Heartbeat sender.

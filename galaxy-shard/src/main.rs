@@ -655,12 +655,19 @@ fn soi_detection(
         // Build handoff. The galaxy shard doesn't know the destination system's
         // real size. Send the ship's forward direction as a hint — the destination
         // system shard computes the actual arrival position from its own SystemParams.
+        //
+        // Arrival velocity: seeded at a modest sub-orbital speed along the
+        // forward direction rather than zero. Emerging from warp stationary
+        // feels unphysical and loses momentum continuity. 200 m/s is below
+        // escape velocity around a typical star — destination system physics
+        // will shape the actual trajectory via gravity.
         let ship_forward = rot.0 * DVec3::NEG_Z;
+        const ARRIVAL_SPEED_MPS: f64 = 200.0;
         let handoff_data = handoff::PlayerHandoff {
             session_token: player_id.0,
             player_name: player_name.0.clone(),
             position: ship_forward, // unit vector hint, not a position
-            velocity: DVec3::ZERO,  // system shard computes speed
+            velocity: ship_forward * ARRIVAL_SPEED_MPS,
             rotation: rot.0,
             forward: ship_forward,
             fly_mode: false,
@@ -686,6 +693,8 @@ fn soi_detection(
             warp_target_star_index: None,
             warp_velocity_gu: None,
             target_system_eva: false,
+            schema_version: 1,
+            character_state: Vec::new(),
         };
 
         // Send PlayerHandoff to destination system shard.

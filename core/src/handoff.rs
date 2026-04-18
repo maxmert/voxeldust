@@ -78,6 +78,19 @@ pub struct PlayerHandoff {
     /// When true, the system shard spawns an EVA player entity
     /// with the inherited ship velocity.
     pub target_system_eva: bool,
+
+    // -- Character-system evolution --
+    /// Schema version of [`Self::character_state`].
+    /// `0` = pre-KCC (legacy), `1` = KCC migration (Phase A — blob reserved).
+    /// Always-`Default` so deserializers from older wire format see `0`
+    /// and reconstruct character defaults.
+    #[serde(default)]
+    pub schema_version: u16,
+    /// Reserved zstd-compressed, tag-keyed blob for future character
+    /// components ([`crate::character::hooks::CharacterComponentTag`]).
+    /// Empty in the current version — the hooks aren't wired yet.
+    #[serde(default)]
+    pub character_state: Vec<u8>,
 }
 
 /// Context for handoffs between galaxy and system shards.
@@ -118,6 +131,9 @@ pub struct ShardRedirect {
     pub target_tcp_addr: String,
     pub target_udp_addr: String,
     pub shard_id: ShardId,
+    /// Shard type of the destination (0=Planet, 1=System, 2=Ship, 3=Galaxy).
+    /// `255` = unknown/legacy (falls back to last-connected secondary's type).
+    pub target_shard_type: u8,
 }
 
 /// Seamless handoff: client promotes an existing secondary connection to primary.

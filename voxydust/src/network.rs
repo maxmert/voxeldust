@@ -65,7 +65,12 @@ pub enum NetEvent {
         data: voxeldust_core::client_message::SubGridAssignmentData,
     },
     /// Primary shard is changing (ShardRedirect received).
-    Transitioning,
+    /// `target_shard_type` disambiguates which open secondary to promote when
+    /// more than one is live (e.g., Ship + Galaxy secondaries). `255` = legacy
+    /// redirect with no type hint (falls back to last-connected secondary).
+    Transitioning {
+        target_shard_type: u8,
+    },
     Disconnected(String),
 }
 
@@ -110,12 +115,28 @@ pub async fn run_network(
         }
     };
 
+    // Session-level cancel: fires only on genuine session end (Disconnected),
+    // NOT on `ShardRedirect`. Scene-context secondaries (System/Galaxy) bind
+    // their lifetime to this so they survive every primary reconnect — without
+    // it, stars/bodies/AOI blip off on every shard transition.
+    let (session_cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
+    // Session-level secondary registry. Keyed by (shard_type, shard_id).
+    // Scene-context entries (type 1/3) persist across primary reconnects;
+    // per-primary entries (type 0/2) are drained when a `ShardRedirect` is
+    // processed inside the TCP listener. Shared across the outer reconnect
+    // loop via Arc<Mutex<…>>.
+    let active_secondaries: Arc<std::sync::Mutex<
+        std::collections::HashMap<(u8, u64), tokio::sync::broadcast::Sender<()>>
+    >> = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
     // Main shard connection loop — reconnects on ShardRedirect.
     loop {
-        info!(%shard_tcp_addr, "connecting to shard");
+        info!(%shard_tcp_addr, %shard_udp_addr, "connecting to shard");
         let (tcp_stream, jr) = match connect_to_shard_full(shard_tcp_addr, &player_name).await {
             Ok(r) => r,
             Err(e) => {
+                tracing::warn!(%shard_tcp_addr, %e, "connect_to_shard_full FAILED — session will disconnect");
                 let _ = event_tx.send(NetEvent::Disconnected(format!("shard connect: {e}")));
                 return;
             }
@@ -165,9 +186,12 @@ pub async fn run_network(
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
             let mut last_sent = empty_input();
             let mut ticks_since_send: u32 = 0;
+            let mut ticks_total: u32 = 0;
+            info!(%shard_udp_addr, "input sender task started");
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
+                        ticks_total += 1;
                         let input = {
                             let mut rx = input_rx_clone.lock().await;
                             let mut latest = empty_input();
@@ -175,19 +199,35 @@ pub async fn run_network(
                             latest
                         };
                         // Suppress unchanged input; send keepalive every 1s (20 ticks).
-                        if input != last_sent || ticks_since_send >= 20 {
+                        let movement_snapshot = input.movement;
+                        let changed = input != last_sent;
+                        if changed || ticks_since_send >= 20 {
                             let pkt = build_input(&input);
-                            let _ = udp_send.send_to(&pkt, shard_udp_addr).await;
+                            let send_result = udp_send.send_to(&pkt, shard_udp_addr).await;
+                            if changed {
+                                if let Err(e) = send_result {
+                                    tracing::warn!(%shard_udp_addr, %e, "UDP input send failed");
+                                }
+                            }
                             last_sent = input;
                             ticks_since_send = 0;
                         } else {
                             ticks_since_send += 1;
                         }
-
-                        // Block edits now go through tcp_out_tx from the ECS world.
-                        // No need to drain block_edit_rx here.
+                        // Heartbeat every ~5s so we can verify the task is alive.
+                        if ticks_total % 100 == 0 {
+                            tracing::info!(
+                                %shard_udp_addr,
+                                ticks_total,
+                                movement = ?movement_snapshot,
+                                "input sender heartbeat"
+                            );
+                        }
                     }
-                    _ = cancel_input.recv() => { return; }
+                    _ = cancel_input.recv() => {
+                        info!("input sender task cancelled");
+                        return;
+                    }
                 }
             }
         });
@@ -195,6 +235,7 @@ pub async fn run_network(
         // UDP WorldState receiver task.
         let event_tx_udp = event_tx.clone();
         let udp_recv = udp.clone();
+        let primary_udp_addr = shard_udp_addr;
         let mut cancel_udp = cancel_tx.subscribe();
         let mut recv_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
@@ -214,10 +255,22 @@ pub async fn run_network(
                                     let _ = event_tx_udp.send(NetEvent::WorldState(ws));
                                 }
                             }
-                            Err(e) => { warn!(%e, "UDP recv error"); return; }
+                            Err(e) => {
+                                // On Linux, an ICMP port-unreachable received in response
+                                // to a prior UDP send causes the NEXT recv_from to fail
+                                // with ECONNREFUSED on an UNCONNECTED socket — this is
+                                // how we'd silently lose the primary UDP path if the
+                                // server's peer tracking got confused.
+                                let kind = e.kind();
+                                warn!(%e, ?kind, %primary_udp_addr, "primary UDP recv error — giving up on this socket");
+                                return;
+                            }
                         }
                     }
-                    _ = cancel_udp.recv() => { return; }
+                    _ = cancel_udp.recv() => {
+                        info!(%primary_udp_addr, "primary UDP recv task cancelled");
+                        return;
+                    }
                 }
             }
         });
@@ -225,7 +278,12 @@ pub async fn run_network(
         // TCP listener — monitors for ShardRedirect or ShardPreConnect.
         let event_tx_tcp = event_tx.clone();
         let player_name_tcp = player_name.clone();
-        let cancel_tx_for_tcp = cancel_tx.clone();
+        // `primary_cancel_tx` kills only per-primary subordinate tasks (send/recv/tcp
+        // and ship/planet secondaries). Scene-context secondaries bind to
+        // `session_cancel_tx_for_tcp` which does NOT fire on `ShardRedirect`.
+        let primary_cancel_tx = cancel_tx.clone();
+        let session_cancel_tx_for_tcp = session_cancel_tx.clone();
+        let secondaries_for_tcp = active_secondaries.clone();
         let (redirect_tx, mut redirect_rx) = mpsc::channel::<ShardRedirect>(1);
         let mut cancel_tcp = cancel_tx.subscribe();
         let tcp_handle = tokio::spawn(async move {
@@ -234,22 +292,21 @@ pub async fn run_network(
             let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(60));
             keepalive_interval.tick().await; // skip first immediate tick
 
-            // Active secondary connections keyed by (shard_type, shard_id).
-            // Multiple secondaries of the SAME type can coexist (e.g., 3 nearby ships).
-            // For planet shards, shard_id is 0 (only one planet secondary at a time).
+            // Active secondary connections keyed by (shard_type, shard_id) are
+            // stored in `secondaries_for_tcp` (Arc<Mutex<HashMap<…>>>) shared
+            // with the outer session. Multiple secondaries of the SAME type
+            // coexist (e.g., 3 nearby ships); for planet shards shard_id is 0.
             //
             // Shard type discriminants (matching core/src/client_message.rs::shard_type):
             //   PLANET=0, SYSTEM=1, SHIP=2, GALAXY=3.
             //
-            // System (1) and Galaxy (3) secondaries are "scene context" — they carry
-            // celestial bodies, long-range AOI entities, and warp parallax. They are
-            // always-on for the session duration and exempt from the MAX_SECONDARIES
-            // cap. Only Ship (2) and Planet (0) secondaries count toward the cap.
+            // System (1) and Galaxy (3) secondaries are "scene context" — they
+            // carry celestial bodies, long-range AOI entities, and warp parallax.
+            // They are always-on for the session duration, exempt from
+            // MAX_SECONDARIES, and bind their cancel to `session_cancel_tx`
+            // so they survive primary reconnects.
             const MAX_SECONDARIES: usize = 4;
             let is_scene_context = |shard_type: u8| shard_type == 1 || shard_type == 3;
-            let mut active_secondaries: std::collections::HashMap<
-                (u8, u64), tokio::sync::broadcast::Sender<()>
-            > = std::collections::HashMap::new();
 
             loop {
                 tokio::select! {
@@ -271,17 +328,24 @@ pub async fn run_network(
                         match result {
                             Ok(ServerMsg::ShardRedirect(r)) => {
                                 info!(target_tcp = %r.target_tcp_addr, "received ShardRedirect");
-                                // Scene-context secondaries (System/Galaxy) must survive
-                                // primary transitions so the sky/starfield/AOI doesn't
-                                // pop during land/launch/board/warp. Only tear down
-                                // ship/planet secondaries here.
-                                let doomed: Vec<(u8, u64)> = active_secondaries
-                                    .keys()
-                                    .filter(|(st, _)| !is_scene_context(*st))
-                                    .copied()
-                                    .collect();
+                                // Scene-context secondaries (System/Galaxy) survive the
+                                // primary transition: they're bound to `session_cancel_tx`
+                                // (NOT `primary_cancel_tx`), and we leave their entries
+                                // in the shared map. Only ship/planet entries are torn
+                                // down here.
+                                let doomed: Vec<(u8, u64)> = {
+                                    let map = secondaries_for_tcp.lock().unwrap();
+                                    map.keys()
+                                        .filter(|(st, _)| !is_scene_context(*st))
+                                        .copied()
+                                        .collect()
+                                };
                                 for key in doomed {
-                                    if let Some(cancel) = active_secondaries.remove(&key) {
+                                    let cancel = {
+                                        let mut map = secondaries_for_tcp.lock().unwrap();
+                                        map.remove(&key)
+                                    };
+                                    if let Some(cancel) = cancel {
                                         let _ = cancel.send(());
                                         info!(
                                             shard_type = key.0,
@@ -301,8 +365,12 @@ pub async fn run_network(
                                 // Key: (shard_type, shard_id). For planets, shard_id = 0.
                                 let sec_key = (pc.shard_type, pc.shard_id);
 
-                                // Cancel existing secondary with the SAME key.
-                                if let Some(old_cancel) = active_secondaries.remove(&sec_key) {
+                                // Cancel existing secondary with the SAME key (shared map).
+                                let prev_cancel = {
+                                    let mut map = secondaries_for_tcp.lock().unwrap();
+                                    map.remove(&sec_key)
+                                };
+                                if let Some(old_cancel) = prev_cancel {
                                     let _ = old_cancel.send(());
                                     info!(shard_type = pc.shard_type, shard_id = pc.shard_id,
                                         "cancelled old secondary for replacement");
@@ -310,31 +378,40 @@ pub async fn run_network(
 
                                 // Enforce maximum simultaneous secondaries, counting
                                 // only Ship/Planet secondaries (System+Galaxy are exempt).
-                                let countable = |ss: &std::collections::HashMap<(u8, u64), _>| {
-                                    ss.keys().filter(|(st, _)| !is_scene_context(*st)).count()
-                                };
-                                while countable(&active_secondaries) >= MAX_SECONDARIES
-                                    && !is_scene_context(pc.shard_type)
-                                {
-                                    // Drop the first countable entry (future: drop farthest).
-                                    let evict_key = active_secondaries
-                                        .keys()
-                                        .find(|(st, _)| !is_scene_context(*st))
-                                        .copied();
-                                    if let Some(key) = evict_key {
-                                        if let Some(cancel) = active_secondaries.remove(&key) {
+                                if !is_scene_context(pc.shard_type) {
+                                    loop {
+                                        let evict_key = {
+                                            let map = secondaries_for_tcp.lock().unwrap();
+                                            let count = map
+                                                .keys()
+                                                .filter(|(st, _)| !is_scene_context(*st))
+                                                .count();
+                                            if count < MAX_SECONDARIES {
+                                                break;
+                                            }
+                                            map.keys()
+                                                .find(|(st, _)| !is_scene_context(*st))
+                                                .copied()
+                                        };
+                                        let Some(key) = evict_key else { break };
+                                        let cancel = {
+                                            let mut map = secondaries_for_tcp.lock().unwrap();
+                                            map.remove(&key)
+                                        };
+                                        if let Some(cancel) = cancel {
                                             let _ = cancel.send(());
                                             info!(shard_type = key.0, shard_id = key.1,
                                                 "evicted secondary — max reached");
                                         }
-                                    } else {
-                                        break;
                                     }
                                 }
 
                                 // Dedicated cancel token for this secondary.
                                 let (sec_cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
-                                active_secondaries.insert(sec_key, sec_cancel_tx.clone());
+                                {
+                                    let mut map = secondaries_for_tcp.lock().unwrap();
+                                    map.insert(sec_key, sec_cancel_tx.clone());
+                                }
 
                                 // Open observer TCP connection for chunk data.
                                 if let Ok(tcp_addr) = pc.tcp_addr.parse::<SocketAddr>() {
@@ -348,7 +425,16 @@ pub async fn run_network(
 
                                 let sec_event_tx = event_tx_tcp.clone();
                                 let mut sec_cancel_own = sec_cancel_tx.subscribe();
-                                let mut sec_cancel_primary = cancel_tx_for_tcp.subscribe();
+                                // Scene-context secondaries (System/Galaxy) bind their
+                                // second cancel source to `session_cancel_tx` so they
+                                // survive primary transitions. Per-primary secondaries
+                                // (Ship/Planet) bind to `primary_cancel_tx` and die
+                                // with the current primary — matching the old behavior.
+                                let mut sec_cancel_parent = if is_scene_context(pc.shard_type) {
+                                    session_cancel_tx_for_tcp.subscribe()
+                                } else {
+                                    primary_cancel_tx.subscribe()
+                                };
                                 let sec_pc = pc;
                                 tokio::spawn(async move {
                                     let sec_udp: SocketAddr = match sec_pc.udp_addr.parse() {
@@ -410,7 +496,7 @@ pub async fn run_network(
                                                 info!("secondary connection cancelled (replaced)");
                                                 return;
                                             }
-                                            _ = sec_cancel_primary.recv() => { return; }
+                                            _ = sec_cancel_parent.recv() => { return; }
                                         }
                                     }
                                 });
@@ -432,7 +518,11 @@ pub async fn run_network(
                             }
                             Ok(ServerMsg::ShardDisconnectNotify(dn)) => {
                                 let key = (dn.shard_type, dn.seed);
-                                if let Some(cancel) = active_secondaries.remove(&key) {
+                                let cancel = {
+                                    let mut map = secondaries_for_tcp.lock().unwrap();
+                                    map.remove(&key)
+                                };
+                                if let Some(cancel) = cancel {
                                     let _ = cancel.send(());
                                     info!(shard_type = dn.shard_type, seed = dn.seed,
                                         "secondary disconnected via ShardDisconnectNotify");
@@ -441,12 +531,15 @@ pub async fn run_network(
                             }
                             Ok(_) => { /* ignore other TCP messages */ }
                             Err(e) => {
-                                warn!(%e, "TCP read error");
+                                warn!(%e, "primary TCP read error — exiting TCP task");
                                 return;
                             }
                         }
                     }
-                    _ = cancel_tcp.recv() => { return; }
+                    _ = cancel_tcp.recv() => {
+                        info!("primary TCP task cancelled");
+                        return;
+                    }
                 }
             }
         });
@@ -455,7 +548,15 @@ pub async fn run_network(
         tokio::select! {
             redirect = redirect_rx.recv() => {
                 if let Some(r) = redirect {
-                    let _ = event_tx.send(NetEvent::Transitioning);
+                    info!(
+                        target_tcp = %r.target_tcp_addr,
+                        target_udp = %r.target_udp_addr,
+                        target_shard_type = r.target_shard_type,
+                        "processing redirect: tearing down primary tasks"
+                    );
+                    let _ = event_tx.send(NetEvent::Transitioning {
+                        target_shard_type: r.target_shard_type,
+                    });
                     // Cancel all tasks for current shard.
                     let _ = cancel_tx.send(());
                     send_handle.abort();
@@ -467,25 +568,33 @@ pub async fn run_network(
                         (Ok(tcp), Ok(udp)) => {
                             shard_tcp_addr = tcp;
                             shard_udp_addr = udp;
-                            info!(%shard_tcp_addr, "transitioning to new shard");
+                            info!(%shard_tcp_addr, %shard_udp_addr, "transitioning to new shard");
                             continue;
                         }
                         _ => {
+                            // Genuine disconnect — session_cancel_tx fires so
+                            // scene-context secondaries are cleaned up.
+                            let _ = session_cancel_tx.send(());
                             let _ = event_tx.send(NetEvent::Disconnected("bad redirect addrs".into()));
                             return;
                         }
                     }
                 }
                 // redirect_rx closed without value — fall through to disconnect.
+                // This happens when the TCP read loop exited (TCP error or EOF).
+                warn!(%shard_tcp_addr, "TCP read task exited without sending redirect — treating as disconnect");
                 let _ = cancel_tx.send(());
+                let _ = session_cancel_tx.send(());
                 send_handle.abort();
                 tcp_handle.abort();
                 let _ = event_tx.send(NetEvent::Disconnected("redirect channel closed".into()));
                 return;
             }
             _ = &mut recv_handle => {
-                // UDP died — disconnect.
+                // UDP died — genuine disconnect.
+                warn!(%shard_udp_addr, "primary UDP recv task exited — treating as disconnect");
                 let _ = cancel_tx.send(());
+                let _ = session_cancel_tx.send(());
                 send_handle.abort();
                 tcp_handle.abort();
                 let _ = event_tx.send(NetEvent::Disconnected("connection lost".into()));
@@ -636,5 +745,6 @@ fn empty_input() -> PlayerInputData {
         cruise: false,
         atmo_comp: false,
         seat_values: Vec::new(),
+        actions_bits: 0,
     }
 }

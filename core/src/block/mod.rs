@@ -8,6 +8,7 @@ pub mod chunk_mesher;
 pub mod chunk_storage;
 pub mod client_chunks;
 pub mod edit_pipeline;
+pub mod interior_mask;
 pub mod meshing_adapter;
 pub mod palette;
 pub mod raycast;

@@ -80,6 +80,17 @@ table PlayerHandoff {
     /// Ship→system EVA exit: player leaves ship hull in space.
     /// When true, the system shard spawns an EVA player entity.
     target_system_eva: bool = false;
+    /// Schema version for character_state blob.
+    /// 0 = legacy/absent (pre-Phase-A handoffs); 1 = Phase-A (KCC migration,
+    /// blob always empty but reserved). Bump when blob layout changes
+    /// incompatibly. Old shards reading new wire see default 0 → reconstruct
+    /// character defaults; new shards reading old wire see 0 → same path.
+    schema_version: uint16 = 0;
+    /// Zstd-compressed, tag-keyed serialization of future character components
+    /// (Stamina, EquipmentLoad, ActiveItem, DamageResistance). Layout is
+    /// append-only, gated by CharacterComponentTag. Empty today; reserved
+    /// so gameplay landings don't re-touch wire format.
+    character_state: [ubyte];
 }
 
 table HandoffAccepted {
@@ -426,9 +437,24 @@ table ChunkColliderDataMsg {
     shapes: [ColliderShape];       // (center, half_extents) pairs
 }
 
-/// Ship shard → host shard: full set of collider shapes for the ship hull.
+/// Per-chunk interior-volume bitmask. `interior_bits` is a packed bit array
+/// of length `CHUNK_INTERIOR_WORDS` (3724 u64s = 238328 bits, one per voxel)
+/// matching `palette::block_index(x,y,z)`. A set bit means the voxel is
+/// interior — i.e. inside the ship's hull, reachable from a seat, and
+/// geometrically enclosed. Used by the host shard for O(1) boarding checks
+/// and by the ship shard for exit checks.
+table InteriorChunkBitsMsg {
+    cx: int32;                     // chunk key x
+    cy: int32;                     // chunk key y
+    cz: int32;                     // chunk key z
+    interior_bits: [uint64];       // packed bit array, one bit per voxel
+}
+
+/// Ship shard → host shard: full set of collider shapes for the ship hull,
+/// plus the per-chunk interior-volume mask.
 /// Sent on startup and when blocks change. The host shard builds Rapier
-/// compound colliders from these shapes for physical collision.
+/// compound colliders from these shapes for physical collision AND keeps
+/// the interior mask for boarding-detection queries.
 table ShipColliderSync {
     ship_id: uint64;
     chunks: [ChunkColliderDataMsg];
@@ -438,6 +464,7 @@ table ShipColliderSync {
     hull_max_x: float;             // AABB max corner
     hull_max_y: float;
     hull_max_z: float;
+    interior_chunks: [InteriorChunkBitsMsg];
 }
 
 union ShardPayload {
@@ -530,6 +557,19 @@ table PlayerInput {
     cruise: bool;                 // C key: supercruise active (legacy)
     atmo_comp: bool;              // H key: atmosphere compensation active (legacy)
     seat_values: [float];         // Per-binding float values when seated (generic seat)
+    /// Bit-packed action modifiers. Reserved bits (MSB→LSB order, stable):
+    ///   bit 0 = SPRINT
+    ///   bit 1 = CROUCH
+    ///   bit 2 = PRONE
+    ///   bit 3 = STANCE_CYCLE_UP
+    ///   bit 4 = STANCE_CYCLE_DOWN
+    ///   bit 5 = INTERACT_ALT (future — alt-fire, throw)
+    ///   bits 6..31 reserved — add new bits at the end of the used range,
+    ///   never repurpose an assigned bit.
+    ///
+    /// Default 0 preserves legacy behaviour; old clients transmit nothing
+    /// for this field and servers read 0 (no sprint/crouch).
+    actions_bits: uint32 = 0;
 }
 
 table PlayerSnapshot {
@@ -677,6 +717,11 @@ table ShardRedirectMsg {
     target_tcp_addr: string;
     target_udp_addr: string;
     shard_id: uint64;
+    /// Shard type of the destination (0=Planet, 1=System, 2=Ship, 3=Galaxy).
+    /// Lets the client pick the correct pending secondary for seamless
+    /// promotion when multiple secondaries of different types are connected
+    /// (e.g., Ship + Galaxy), instead of relying on last-writer-wins state.
+    target_shard_type: uint8 = 255;
 }
 
 /// Seamless handoff: client promotes an existing secondary connection to primary.

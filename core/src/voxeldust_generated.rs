@@ -1819,6 +1819,8 @@ impl<'a> PlayerHandoff<'a> {
   pub const VT_WARP_TARGET_STAR_INDEX: ::flatbuffers::VOffsetT = 48;
   pub const VT_WARP_VELOCITY: ::flatbuffers::VOffsetT = 50;
   pub const VT_TARGET_SYSTEM_EVA: ::flatbuffers::VOffsetT = 52;
+  pub const VT_SCHEMA_VERSION: ::flatbuffers::VOffsetT = 54;
+  pub const VT_CHARACTER_STATE: ::flatbuffers::VOffsetT = 56;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1837,6 +1839,7 @@ impl<'a> PlayerHandoff<'a> {
     builder.add_source_tick(args.source_tick);
     builder.add_source_shard_id(args.source_shard_id);
     builder.add_session_token(args.session_token);
+    if let Some(x) = args.character_state { builder.add_character_state(x); }
     if let Some(x) = args.warp_velocity { builder.add_warp_velocity(x); }
     builder.add_warp_target_star_index(args.warp_target_star_index);
     if let Some(x) = args.ship_rotation { builder.add_ship_rotation(x); }
@@ -1851,6 +1854,7 @@ impl<'a> PlayerHandoff<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.position { builder.add_position(x); }
     if let Some(x) = args.player_name { builder.add_player_name(x); }
+    builder.add_schema_version(args.schema_version);
     builder.add_target_system_eva(args.target_system_eva);
     builder.add_grounded(args.grounded);
     builder.add_speed_tier(args.speed_tier);
@@ -2047,6 +2051,29 @@ impl<'a> PlayerHandoff<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(PlayerHandoff::VT_TARGET_SYSTEM_EVA, Some(false)).unwrap()}
   }
+  /// Schema version for character_state blob.
+  /// 0 = legacy/absent (pre-Phase-A handoffs); 1 = Phase-A (KCC migration,
+  /// blob always empty but reserved). Bump when blob layout changes
+  /// incompatibly. Old shards reading new wire see default 0 → reconstruct
+  /// character defaults; new shards reading old wire see 0 → same path.
+  #[inline]
+  pub fn schema_version(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(PlayerHandoff::VT_SCHEMA_VERSION, Some(0)).unwrap()}
+  }
+  /// Zstd-compressed, tag-keyed serialization of future character components
+  /// (Stamina, EquipmentLoad, ActiveItem, DamageResistance). Layout is
+  /// append-only, gated by CharacterComponentTag. Empty today; reserved
+  /// so gameplay landings don't re-touch wire format.
+  #[inline]
+  pub fn character_state(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(PlayerHandoff::VT_CHARACTER_STATE, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
@@ -2080,6 +2107,8 @@ impl ::flatbuffers::Verifiable for PlayerHandoff<'_> {
      .visit_field::<u32>("warp_target_star_index", Self::VT_WARP_TARGET_STAR_INDEX, false)?
      .visit_field::<Vec3d>("warp_velocity", Self::VT_WARP_VELOCITY, false)?
      .visit_field::<bool>("target_system_eva", Self::VT_TARGET_SYSTEM_EVA, false)?
+     .visit_field::<u16>("schema_version", Self::VT_SCHEMA_VERSION, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("character_state", Self::VT_CHARACTER_STATE, false)?
      .finish();
     Ok(())
   }
@@ -2110,6 +2139,8 @@ pub struct PlayerHandoffArgs<'a> {
     pub warp_target_star_index: u32,
     pub warp_velocity: Option<&'a Vec3d>,
     pub target_system_eva: bool,
+    pub schema_version: u16,
+    pub character_state: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
 }
 impl<'a> Default for PlayerHandoffArgs<'a> {
   #[inline]
@@ -2140,6 +2171,8 @@ impl<'a> Default for PlayerHandoffArgs<'a> {
       warp_target_star_index: 4294967295,
       warp_velocity: None,
       target_system_eva: false,
+      schema_version: 0,
+      character_state: None,
     }
   }
 }
@@ -2250,6 +2283,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerHandoffBuilder<'a, 'b, 
     self.fbb_.push_slot::<bool>(PlayerHandoff::VT_TARGET_SYSTEM_EVA, target_system_eva, false);
   }
   #[inline]
+  pub fn add_schema_version(&mut self, schema_version: u16) {
+    self.fbb_.push_slot::<u16>(PlayerHandoff::VT_SCHEMA_VERSION, schema_version, 0);
+  }
+  #[inline]
+  pub fn add_character_state(&mut self, character_state: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PlayerHandoff::VT_CHARACTER_STATE, character_state);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerHandoffBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerHandoffBuilder {
@@ -2292,6 +2333,8 @@ impl ::core::fmt::Debug for PlayerHandoff<'_> {
       ds.field("warp_target_star_index", &self.warp_target_star_index());
       ds.field("warp_velocity", &self.warp_velocity());
       ds.field("target_system_eva", &self.target_system_eva());
+      ds.field("schema_version", &self.schema_version());
+      ds.field("character_state", &self.character_state());
       ds.finish()
   }
 }
@@ -7127,12 +7170,167 @@ impl ::core::fmt::Debug for ChunkColliderDataMsg<'_> {
       ds.finish()
   }
 }
+pub enum InteriorChunkBitsMsgOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Per-chunk interior-volume bitmask. `interior_bits` is a packed bit array
+/// of length `CHUNK_INTERIOR_WORDS` (3724 u64s = 238328 bits, one per voxel)
+/// matching `palette::block_index(x,y,z)`. A set bit means the voxel is
+/// interior — i.e. inside the ship's hull, reachable from a seat, and
+/// geometrically enclosed. Used by the host shard for O(1) boarding checks
+/// and by the ship shard for exit checks.
+pub struct InteriorChunkBitsMsg<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for InteriorChunkBitsMsg<'a> {
+  type Inner = InteriorChunkBitsMsg<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> InteriorChunkBitsMsg<'a> {
+  pub const VT_CX: ::flatbuffers::VOffsetT = 4;
+  pub const VT_CY: ::flatbuffers::VOffsetT = 6;
+  pub const VT_CZ: ::flatbuffers::VOffsetT = 8;
+  pub const VT_INTERIOR_BITS: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    InteriorChunkBitsMsg { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args InteriorChunkBitsMsgArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<InteriorChunkBitsMsg<'bldr>> {
+    let mut builder = InteriorChunkBitsMsgBuilder::new(_fbb);
+    if let Some(x) = args.interior_bits { builder.add_interior_bits(x); }
+    builder.add_cz(args.cz);
+    builder.add_cy(args.cy);
+    builder.add_cx(args.cx);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn cx(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(InteriorChunkBitsMsg::VT_CX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn cy(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(InteriorChunkBitsMsg::VT_CY, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn cz(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(InteriorChunkBitsMsg::VT_CZ, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn interior_bits(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(InteriorChunkBitsMsg::VT_INTERIOR_BITS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for InteriorChunkBitsMsg<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("cx", Self::VT_CX, false)?
+     .visit_field::<i32>("cy", Self::VT_CY, false)?
+     .visit_field::<i32>("cz", Self::VT_CZ, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("interior_bits", Self::VT_INTERIOR_BITS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct InteriorChunkBitsMsgArgs<'a> {
+    pub cx: i32,
+    pub cy: i32,
+    pub cz: i32,
+    pub interior_bits: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+}
+impl<'a> Default for InteriorChunkBitsMsgArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    InteriorChunkBitsMsgArgs {
+      cx: 0,
+      cy: 0,
+      cz: 0,
+      interior_bits: None,
+    }
+  }
+}
+
+pub struct InteriorChunkBitsMsgBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> InteriorChunkBitsMsgBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_cx(&mut self, cx: i32) {
+    self.fbb_.push_slot::<i32>(InteriorChunkBitsMsg::VT_CX, cx, 0);
+  }
+  #[inline]
+  pub fn add_cy(&mut self, cy: i32) {
+    self.fbb_.push_slot::<i32>(InteriorChunkBitsMsg::VT_CY, cy, 0);
+  }
+  #[inline]
+  pub fn add_cz(&mut self, cz: i32) {
+    self.fbb_.push_slot::<i32>(InteriorChunkBitsMsg::VT_CZ, cz, 0);
+  }
+  #[inline]
+  pub fn add_interior_bits(&mut self, interior_bits: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u64>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(InteriorChunkBitsMsg::VT_INTERIOR_BITS, interior_bits);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> InteriorChunkBitsMsgBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    InteriorChunkBitsMsgBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<InteriorChunkBitsMsg<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for InteriorChunkBitsMsg<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("InteriorChunkBitsMsg");
+      ds.field("cx", &self.cx());
+      ds.field("cy", &self.cy());
+      ds.field("cz", &self.cz());
+      ds.field("interior_bits", &self.interior_bits());
+      ds.finish()
+  }
+}
 pub enum ShipColliderSyncOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// Ship shard → host shard: full set of collider shapes for the ship hull.
+/// Ship shard → host shard: full set of collider shapes for the ship hull,
+/// plus the per-chunk interior-volume mask.
 /// Sent on startup and when blocks change. The host shard builds Rapier
-/// compound colliders from these shapes for physical collision.
+/// compound colliders from these shapes for physical collision AND keeps
+/// the interior mask for boarding-detection queries.
 pub struct ShipColliderSync<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -7154,6 +7352,7 @@ impl<'a> ShipColliderSync<'a> {
   pub const VT_HULL_MAX_X: ::flatbuffers::VOffsetT = 14;
   pub const VT_HULL_MAX_Y: ::flatbuffers::VOffsetT = 16;
   pub const VT_HULL_MAX_Z: ::flatbuffers::VOffsetT = 18;
+  pub const VT_INTERIOR_CHUNKS: ::flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -7166,6 +7365,7 @@ impl<'a> ShipColliderSync<'a> {
   ) -> ::flatbuffers::WIPOffset<ShipColliderSync<'bldr>> {
     let mut builder = ShipColliderSyncBuilder::new(_fbb);
     builder.add_ship_id(args.ship_id);
+    if let Some(x) = args.interior_chunks { builder.add_interior_chunks(x); }
     builder.add_hull_max_z(args.hull_max_z);
     builder.add_hull_max_y(args.hull_max_y);
     builder.add_hull_max_x(args.hull_max_x);
@@ -7233,6 +7433,13 @@ impl<'a> ShipColliderSync<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(ShipColliderSync::VT_HULL_MAX_Z, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn interior_chunks(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<InteriorChunkBitsMsg<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<InteriorChunkBitsMsg>>>>(ShipColliderSync::VT_INTERIOR_CHUNKS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ShipColliderSync<'_> {
@@ -7249,6 +7456,7 @@ impl ::flatbuffers::Verifiable for ShipColliderSync<'_> {
      .visit_field::<f32>("hull_max_x", Self::VT_HULL_MAX_X, false)?
      .visit_field::<f32>("hull_max_y", Self::VT_HULL_MAX_Y, false)?
      .visit_field::<f32>("hull_max_z", Self::VT_HULL_MAX_Z, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<InteriorChunkBitsMsg>>>>("interior_chunks", Self::VT_INTERIOR_CHUNKS, false)?
      .finish();
     Ok(())
   }
@@ -7262,6 +7470,7 @@ pub struct ShipColliderSyncArgs<'a> {
     pub hull_max_x: f32,
     pub hull_max_y: f32,
     pub hull_max_z: f32,
+    pub interior_chunks: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<InteriorChunkBitsMsg<'a>>>>>,
 }
 impl<'a> Default for ShipColliderSyncArgs<'a> {
   #[inline]
@@ -7275,6 +7484,7 @@ impl<'a> Default for ShipColliderSyncArgs<'a> {
       hull_max_x: 0.0,
       hull_max_y: 0.0,
       hull_max_z: 0.0,
+      interior_chunks: None,
     }
   }
 }
@@ -7317,6 +7527,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipColliderSyncBuilder<'a, '
     self.fbb_.push_slot::<f32>(ShipColliderSync::VT_HULL_MAX_Z, hull_max_z, 0.0);
   }
   #[inline]
+  pub fn add_interior_chunks(&mut self, interior_chunks: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<InteriorChunkBitsMsg<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ShipColliderSync::VT_INTERIOR_CHUNKS, interior_chunks);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipColliderSyncBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ShipColliderSyncBuilder {
@@ -7342,6 +7556,7 @@ impl ::core::fmt::Debug for ShipColliderSync<'_> {
       ds.field("hull_max_x", &self.hull_max_x());
       ds.field("hull_max_y", &self.hull_max_y());
       ds.field("hull_max_z", &self.hull_max_z());
+      ds.field("interior_chunks", &self.interior_chunks());
       ds.finish()
   }
 }
@@ -8660,6 +8875,7 @@ impl<'a> PlayerInput<'a> {
   pub const VT_CRUISE: ::flatbuffers::VOffsetT = 32;
   pub const VT_ATMO_COMP: ::flatbuffers::VOffsetT = 34;
   pub const VT_SEAT_VALUES: ::flatbuffers::VOffsetT = 36;
+  pub const VT_ACTIONS_BITS: ::flatbuffers::VOffsetT = 38;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -8672,6 +8888,7 @@ impl<'a> PlayerInput<'a> {
   ) -> ::flatbuffers::WIPOffset<PlayerInput<'bldr>> {
     let mut builder = PlayerInputBuilder::new(_fbb);
     builder.add_tick(args.tick);
+    builder.add_actions_bits(args.actions_bits);
     if let Some(x) = args.seat_values { builder.add_seat_values(x); }
     builder.add_roll(args.roll);
     builder.add_thrust_limiter(args.thrust_limiter);
@@ -8811,6 +9028,25 @@ impl<'a> PlayerInput<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, f32>>>(PlayerInput::VT_SEAT_VALUES, None)}
   }
+  /// Bit-packed action modifiers. Reserved bits (MSB→LSB order, stable):
+  ///   bit 0 = SPRINT
+  ///   bit 1 = CROUCH
+  ///   bit 2 = PRONE
+  ///   bit 3 = STANCE_CYCLE_UP
+  ///   bit 4 = STANCE_CYCLE_DOWN
+  ///   bit 5 = INTERACT_ALT (future — alt-fire, throw)
+  ///   bits 6..31 reserved — add new bits at the end of the used range,
+  ///   never repurpose an assigned bit.
+  ///
+  /// Default 0 preserves legacy behaviour; old clients transmit nothing
+  /// for this field and servers read 0 (no sprint/crouch).
+  #[inline]
+  pub fn actions_bits(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(PlayerInput::VT_ACTIONS_BITS, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerInput<'_> {
@@ -8836,6 +9072,7 @@ impl ::flatbuffers::Verifiable for PlayerInput<'_> {
      .visit_field::<bool>("cruise", Self::VT_CRUISE, false)?
      .visit_field::<bool>("atmo_comp", Self::VT_ATMO_COMP, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, f32>>>("seat_values", Self::VT_SEAT_VALUES, false)?
+     .visit_field::<u32>("actions_bits", Self::VT_ACTIONS_BITS, false)?
      .finish();
     Ok(())
   }
@@ -8858,6 +9095,7 @@ pub struct PlayerInputArgs<'a> {
     pub cruise: bool,
     pub atmo_comp: bool,
     pub seat_values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, f32>>>,
+    pub actions_bits: u32,
 }
 impl<'a> Default for PlayerInputArgs<'a> {
   #[inline]
@@ -8880,6 +9118,7 @@ impl<'a> Default for PlayerInputArgs<'a> {
       cruise: false,
       atmo_comp: false,
       seat_values: None,
+      actions_bits: 0,
     }
   }
 }
@@ -8958,6 +9197,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerInputBuilder<'a, 'b, A>
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PlayerInput::VT_SEAT_VALUES, seat_values);
   }
   #[inline]
+  pub fn add_actions_bits(&mut self, actions_bits: u32) {
+    self.fbb_.push_slot::<u32>(PlayerInput::VT_ACTIONS_BITS, actions_bits, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerInputBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerInputBuilder {
@@ -8992,6 +9235,7 @@ impl ::core::fmt::Debug for PlayerInput<'_> {
       ds.field("cruise", &self.cruise());
       ds.field("atmo_comp", &self.atmo_comp());
       ds.field("seat_values", &self.seat_values());
+      ds.field("actions_bits", &self.actions_bits());
       ds.finish()
   }
 }
@@ -11258,6 +11502,7 @@ impl<'a> ShardRedirectMsg<'a> {
   pub const VT_TARGET_TCP_ADDR: ::flatbuffers::VOffsetT = 6;
   pub const VT_TARGET_UDP_ADDR: ::flatbuffers::VOffsetT = 8;
   pub const VT_SHARD_ID: ::flatbuffers::VOffsetT = 10;
+  pub const VT_TARGET_SHARD_TYPE: ::flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -11273,6 +11518,7 @@ impl<'a> ShardRedirectMsg<'a> {
     builder.add_session_token(args.session_token);
     if let Some(x) = args.target_udp_addr { builder.add_target_udp_addr(x); }
     if let Some(x) = args.target_tcp_addr { builder.add_target_tcp_addr(x); }
+    builder.add_target_shard_type(args.target_shard_type);
     builder.finish()
   }
 
@@ -11305,6 +11551,17 @@ impl<'a> ShardRedirectMsg<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(ShardRedirectMsg::VT_SHARD_ID, Some(0)).unwrap()}
   }
+  /// Shard type of the destination (0=Planet, 1=System, 2=Ship, 3=Galaxy).
+  /// Lets the client pick the correct pending secondary for seamless
+  /// promotion when multiple secondaries of different types are connected
+  /// (e.g., Ship + Galaxy), instead of relying on last-writer-wins state.
+  #[inline]
+  pub fn target_shard_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ShardRedirectMsg::VT_TARGET_SHARD_TYPE, Some(255)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ShardRedirectMsg<'_> {
@@ -11317,6 +11574,7 @@ impl ::flatbuffers::Verifiable for ShardRedirectMsg<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_tcp_addr", Self::VT_TARGET_TCP_ADDR, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_udp_addr", Self::VT_TARGET_UDP_ADDR, false)?
      .visit_field::<u64>("shard_id", Self::VT_SHARD_ID, false)?
+     .visit_field::<u8>("target_shard_type", Self::VT_TARGET_SHARD_TYPE, false)?
      .finish();
     Ok(())
   }
@@ -11326,6 +11584,7 @@ pub struct ShardRedirectMsgArgs<'a> {
     pub target_tcp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub target_udp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub shard_id: u64,
+    pub target_shard_type: u8,
 }
 impl<'a> Default for ShardRedirectMsgArgs<'a> {
   #[inline]
@@ -11335,6 +11594,7 @@ impl<'a> Default for ShardRedirectMsgArgs<'a> {
       target_tcp_addr: None,
       target_udp_addr: None,
       shard_id: 0,
+      target_shard_type: 255,
     }
   }
 }
@@ -11361,6 +11621,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShardRedirectMsgBuilder<'a, '
     self.fbb_.push_slot::<u64>(ShardRedirectMsg::VT_SHARD_ID, shard_id, 0);
   }
   #[inline]
+  pub fn add_target_shard_type(&mut self, target_shard_type: u8) {
+    self.fbb_.push_slot::<u8>(ShardRedirectMsg::VT_TARGET_SHARD_TYPE, target_shard_type, 255);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShardRedirectMsgBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ShardRedirectMsgBuilder {
@@ -11382,6 +11646,7 @@ impl ::core::fmt::Debug for ShardRedirectMsg<'_> {
       ds.field("target_tcp_addr", &self.target_tcp_addr());
       ds.field("target_udp_addr", &self.target_udp_addr());
       ds.field("shard_id", &self.shard_id());
+      ds.field("target_shard_type", &self.target_shard_type());
       ds.finish()
   }
 }

@@ -260,12 +260,30 @@ pub struct ChunkColliderData {
     pub shapes: Vec<(glam::Vec3, glam::Vec3)>,
 }
 
-/// Ship hull collider shapes for physical collision on host shards.
+/// Interior-volume bitmask for one chunk of a ship grid. `interior_bits` is
+/// `CHUNK_INTERIOR_WORDS` `u64`s packed in the same layout as
+/// `voxeldust_core::block::palette::block_index` — bit `i` set means the
+/// voxel at `index_to_xyz(i)` (within this chunk) is interior.
+///
+/// Decoupled from `ChunkColliderData` because an all-interior-air chunk has
+/// no collider shapes but may still have tens of thousands of interior
+/// voxels (a big ship's central cabin).
+#[derive(Debug, Clone)]
+pub struct InteriorChunkData {
+    pub chunk_key: glam::IVec3,
+    pub interior_bits: Vec<u64>,
+}
+
+/// Ship hull collider shapes + interior volume mask for physical collision
+/// and boarding/exit classification on host shards.
 /// Sent from ship shard to planet/system shard when blocks change.
 #[derive(Debug, Clone)]
 pub struct ShipColliderSyncData {
     pub ship_id: u64,
     pub chunks: Vec<ChunkColliderData>,
+    /// Per-chunk interior-voxel bitmask. Empty when the ship has no
+    /// semantically-interior volume (no seats/cockpits).
+    pub interior_chunks: Vec<InteriorChunkData>,
     /// Tight AABB of all solid blocks (block coords).
     pub hull_min: glam::Vec3,
     pub hull_max: glam::Vec3,
@@ -380,6 +398,11 @@ impl ShardMsg {
                 let ship_sys_pos = h.ship_system_position.as_ref().map(|p| to_fb_vec3d(p));
                 let ship_rot = h.ship_rotation.as_ref().map(|r| to_fb_quatd(r));
                 let warp_vel = h.warp_velocity_gu.as_ref().map(|v| to_fb_vec3d(v));
+                let char_state = if h.character_state.is_empty() {
+                    None
+                } else {
+                    Some(builder.create_vector(&h.character_state))
+                };
 
                 let handoff = fb::PlayerHandoff::create(
                     &mut builder,
@@ -409,6 +432,8 @@ impl ShardMsg {
                         warp_target_star_index: h.warp_target_star_index.unwrap_or(0xFFFFFFFF),
                         warp_velocity: warp_vel.as_ref(),
                         target_system_eva: h.target_system_eva,
+                        schema_version: h.schema_version,
+                        character_state: char_state,
                     },
                 );
 
@@ -947,6 +972,19 @@ impl ShardMsg {
                     )
                 }).collect();
                 let chunks_vec = builder.create_vector(&chunks);
+                let interior_chunks: Vec<_> = data.interior_chunks.iter().map(|ic| {
+                    let bits_vec = builder.create_vector(&ic.interior_bits);
+                    fb::InteriorChunkBitsMsg::create(
+                        &mut builder,
+                        &fb::InteriorChunkBitsMsgArgs {
+                            cx: ic.chunk_key.x,
+                            cy: ic.chunk_key.y,
+                            cz: ic.chunk_key.z,
+                            interior_bits: Some(bits_vec),
+                        },
+                    )
+                }).collect();
+                let interior_chunks_vec = builder.create_vector(&interior_chunks);
                 let sync = fb::ShipColliderSync::create(
                     &mut builder,
                     &fb::ShipColliderSyncArgs {
@@ -958,6 +996,7 @@ impl ShardMsg {
                         hull_max_x: data.hull_max.x,
                         hull_max_y: data.hull_max.y,
                         hull_max_z: data.hull_max.z,
+                        interior_chunks: Some(interior_chunks_vec),
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -1052,6 +1091,11 @@ impl ShardMsg {
                     },
                     warp_velocity_gu: h.warp_velocity().map(|v| from_fb_vec3d(v)),
                     target_system_eva: h.target_system_eva(),
+                    schema_version: h.schema_version(),
+                    character_state: h
+                        .character_state()
+                        .map(|v| v.bytes().to_vec())
+                        .unwrap_or_default(),
                 }))
             }
 
@@ -1409,9 +1453,27 @@ impl ShardMsg {
                             .collect()
                     })
                     .unwrap_or_default();
+                let interior_chunks: Vec<InteriorChunkData> = sync
+                    .interior_chunks()
+                    .map(|v| {
+                        v.iter()
+                            .map(|ic| {
+                                let bits: Vec<u64> = ic
+                                    .interior_bits()
+                                    .map(|b| b.iter().collect())
+                                    .unwrap_or_default();
+                                InteriorChunkData {
+                                    chunk_key: glam::IVec3::new(ic.cx(), ic.cy(), ic.cz()),
+                                    interior_bits: bits,
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 Ok(ShardMsg::ShipColliderSync(ShipColliderSyncData {
                     ship_id: sync.ship_id(),
                     chunks,
+                    interior_chunks,
                     hull_min: glam::Vec3::new(sync.hull_min_x(), sync.hull_min_y(), sync.hull_min_z()),
                     hull_max: glam::Vec3::new(sync.hull_max_x(), sync.hull_max_y(), sync.hull_max_z()),
                 }))
@@ -1521,6 +1583,8 @@ mod tests {
             warp_target_star_index: None,
             warp_velocity_gu: None,
             target_system_eva: false,
+            schema_version: 1,
+            character_state: Vec::new(),
         }
     }
 
@@ -1748,5 +1812,64 @@ mod tests {
     fn deserialize_garbage_fails() {
         let result = ShardMsg::deserialize(&[0xFF, 0x00, 0x01, 0x02]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn roundtrip_ship_collider_sync_with_interior() {
+        // Two chunks of colliders + two chunks of interior bits. Verifies
+        // the new `interior_chunks` field round-trips correctly — without
+        // this, the ship-shard → system-shard path was silently dropping
+        // ShipColliderSync messages because the payload schema diverged.
+        let mut bits0 = vec![0u64; 3724];
+        bits0[0] = 0xdead_beef_f00d_babe;
+        bits0[37] = 1u64 << 17;
+        let mut bits1 = vec![0u64; 3724];
+        bits1[3723] = 0xffff_0000_ffff_0000;
+
+        let msg = ShardMsg::ShipColliderSync(ShipColliderSyncData {
+            ship_id: 777,
+            chunks: vec![
+                ChunkColliderData {
+                    chunk_key: glam::IVec3::new(0, 0, 0),
+                    shapes: vec![
+                        (glam::Vec3::new(0.5, 0.5, 0.5), glam::Vec3::new(0.5, 0.5, 0.5)),
+                        (glam::Vec3::new(1.5, 0.5, 0.5), glam::Vec3::new(0.5, 0.5, 0.5)),
+                    ],
+                },
+                ChunkColliderData {
+                    chunk_key: glam::IVec3::new(0, 0, -1),
+                    shapes: vec![(glam::Vec3::new(0.5, 0.5, -0.5), glam::Vec3::new(0.5, 0.5, 0.5))],
+                },
+            ],
+            interior_chunks: vec![
+                InteriorChunkData {
+                    chunk_key: glam::IVec3::new(0, 0, 0),
+                    interior_bits: bits0.clone(),
+                },
+                InteriorChunkData {
+                    chunk_key: glam::IVec3::new(0, 0, -1),
+                    interior_bits: bits1.clone(),
+                },
+            ],
+            hull_min: glam::Vec3::new(-5.0, 0.0, -8.0),
+            hull_max: glam::Vec3::new(5.0, 6.0, 8.0),
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+
+        let ShardMsg::ShipColliderSync(d) = decoded else {
+            panic!("expected ShipColliderSync");
+        };
+        assert_eq!(d.ship_id, 777);
+        assert_eq!(d.chunks.len(), 2);
+        assert_eq!(d.chunks[0].shapes.len(), 2);
+        assert_eq!(d.chunks[1].chunk_key, glam::IVec3::new(0, 0, -1));
+        assert_eq!(d.interior_chunks.len(), 2);
+        assert_eq!(d.interior_chunks[0].chunk_key, glam::IVec3::new(0, 0, 0));
+        assert_eq!(d.interior_chunks[0].interior_bits, bits0);
+        assert_eq!(d.interior_chunks[1].chunk_key, glam::IVec3::new(0, 0, -1));
+        assert_eq!(d.interior_chunks[1].interior_bits, bits1);
+        assert!((d.hull_min.x + 5.0).abs() < 1e-6);
+        assert!((d.hull_max.x - 5.0).abs() < 1e-6);
     }
 }

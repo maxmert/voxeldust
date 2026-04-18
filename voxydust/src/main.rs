@@ -247,6 +247,13 @@ struct ConnectionInfo {
     reference_position: DVec3,
     reference_rotation: DQuat,
     secondary_shard_type: Option<u8>,
+    /// Target shard type during a seamless promotion. The render/logic code
+    /// keeps using `current_shard_type` (still the OLD primary's type) until
+    /// the new primary's first WorldState that contains our player arrives —
+    /// at which point we flip `current_shard_type = pending_shard_type.take()`.
+    /// This prevents the interior-ship render branch from activating with a
+    /// stale player_position during the ~100-300 ms reconnect window.
+    pending_shard_type: Option<u8>,
     system_seed: u64,
     galaxy_seed: u64,
 }
@@ -255,6 +262,51 @@ struct ConnectionInfo {
 struct ServerWorldState {
     latest: Option<WorldStateData>,
     secondary: Option<WorldStateData>,
+    /// Last-known primary WorldState, stashed on a hard transition so the
+    /// renderer can keep drawing ships/players/entities from it for a short
+    /// grace period instead of showing a blank world until the new primary's
+    /// first WorldState arrives (previously a 200-500 ms blackout).
+    /// Cleared as soon as `latest` is populated or after the grace expires.
+    last_primary: Option<WorldStateData>,
+    last_primary_until: Option<Instant>,
+}
+
+/// Grace period during which `last_primary` is rendered after a hard transition.
+const LAST_PRIMARY_GRACE_SECS: f64 = 1.5;
+
+impl ServerWorldState {
+    /// Returns the WorldState to show in the 3D/HUD scene this frame. Prefers
+    /// the live primary (`latest`); if the primary was just torn down on a
+    /// hard transition, falls back to the stashed `last_primary` until the
+    /// grace window expires. Used for ship/entity rendering so the world
+    /// doesn't go blank during a reconnect. Camera logic intentionally keeps
+    /// using `latest` directly (to avoid animating the own avatar from stale
+    /// data) — only the scene-render path is allowed to fall back here.
+    fn effective(&self) -> Option<&WorldStateData> {
+        if self.latest.is_some() {
+            return self.latest.as_ref();
+        }
+        if let Some(deadline) = self.last_primary_until {
+            if Instant::now() <= deadline {
+                return self.last_primary.as_ref();
+            }
+        }
+        None
+    }
+
+    /// Returns `last_primary` iff still within the grace window, regardless of
+    /// whether `latest` is populated. Used by the renderer to keep drawing
+    /// cross-shard entities (e.g., the ship's LOD proxy from the old system WS)
+    /// for a brief overlap during a seamless promotion so the visual doesn't
+    /// pop when `latest` is swapped to the promoted secondary.
+    fn grace_fallback(&self) -> Option<&WorldStateData> {
+        if let Some(deadline) = self.last_primary_until {
+            if Instant::now() <= deadline {
+                return self.last_primary.as_ref();
+            }
+        }
+        None
+    }
 }
 
 /// Client-side chunk cache for block data received from the server.
@@ -691,9 +743,15 @@ fn poll_network(
                     info!(bodies = world_state.bodies.len(), tick = world_state.tick, "first WorldState");
                 }
                 ws.latest = Some(world_state);
+                // New primary data — the stash is no longer needed.
+                ws.last_primary = None;
+                ws.last_primary_until = None;
             }
             NetEvent::Connected { shard_type, seed, reference_position, reference_rotation, system_seed, galaxy_seed, .. } => {
                 conn.current_shard_type = shard_type;
+                // New primary is live — pending flip is satisfied. Clear so
+                // the WorldState-level fallback flip doesn't fire redundantly.
+                conn.pending_shard_type = None;
                 conn.shard_seed = seed;
                 conn.reference_position = reference_position;
                 conn.reference_rotation = reference_rotation;
@@ -929,8 +987,22 @@ fn poll_network(
                 // Sub-grid assignments for secondary ships — store for rendering.
                 let _ = (seed, data); // TODO: apply to secondary source sub-grid state
             }
-            NetEvent::Transitioning => {
-                info!("transitioning to new shard...");
+            NetEvent::Transitioning { target_shard_type } => {
+                info!(target_shard_type, "transitioning to new shard...");
+                // Defer the `current_shard_type` flip. Interior-ship render,
+                // block raycast, and other gates keep seeing the OLD shard
+                // type until the new primary's first WorldState with our
+                // player arrives — at which point we flip to the destination
+                // type. Prevents a ~100-300 ms window where `current_shard_type`
+                // is SHIP but `ws.latest` / `smooth.*` still hold stale EVA
+                // coordinates, which would paint the interior mesh off-frame.
+                if target_shard_type != 255 {
+                    conn.pending_shard_type = Some(target_shard_type);
+                } else {
+                    // Legacy `ShardRedirect` with no type hint: fall back to
+                    // whichever secondary shard type most recently connected.
+                    conn.pending_shard_type = conn.secondary_shard_type;
+                }
 
                 // Transition to new shard: the OLD source's chunks remain in the
                 // cache (e.g., ship chunks stay visible as exterior after exiting).
@@ -951,19 +1023,59 @@ fn poll_network(
                     // Seamless: promote secondary to primary.
                     info!("seamless transition — secondary data available");
 
-                    // Convert camera yaw/pitch from ship frame to planet tangent
-                    // frame so the view direction is preserved across the transition.
-                    if conn.current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
-                        // Step 1: world-space forward from ship-local yaw/pitch.
-                        let sp = (cam.pitch as f32).sin() as f64;
-                        let cp = (cam.pitch as f32).cos() as f64;
-                        let sy = (cam.yaw as f32).sin() as f64;
-                        let cy = (cam.yaw as f32).cos() as f64;
-                        let local_fwd = DVec3::new(cy * cp, sp, sy * cp);
-                        let cam_fwd_world = (player.ship_rotation * local_fwd).normalize();
+                    // Convert camera yaw/pitch so the view direction is
+                    // preserved across the transition. The frame of
+                    // interpretation depends on where we're going:
+                    //   * Ship (walking inside): yaw/pitch are ship-local —
+                    //     rotated by ship_rotation on display.
+                    //   * System (EVA): yaw/pitch are world Y-up.
+                    //   * Planet (on surface): yaw/pitch are local tangent.
+                    // When transitioning AWAY FROM a ship we first compute
+                    // the world-space forward vector, then convert it into
+                    // the target shard's coordinate conventions so the
+                    // camera points in the exact same world direction
+                    // before and after the transition.
+                    // Compute world-space forward for the CURRENT camera so
+                    // we can re-express it in the new shard's frame.
+                    let sp = (cam.pitch as f32).sin() as f64;
+                    let cp = (cam.pitch as f32).cos() as f64;
+                    let sy = (cam.yaw as f32).sin() as f64;
+                    let cy = (cam.yaw as f32).cos() as f64;
+                    let basis_fwd = DVec3::new(cy * cp, sp, sy * cp);
+                    let cam_fwd_world = match conn.current_shard_type {
+                        // Ship frame: ship_rotation * local fwd.
+                        t if t == voxeldust_core::client_message::shard_type::SHIP => {
+                            (player.ship_rotation * basis_fwd).normalize()
+                        }
+                        // Otherwise world Y-up (system / fallback).
+                        _ => basis_fwd.normalize(),
+                    };
 
-                        // Step 2: planet tangent frame at player's position.
-                        // Use promoted WorldState's first player position (planet-local).
+                    // Re-express cam_fwd_world in the new shard's frame.
+                    if target_shard_type == voxeldust_core::client_message::shard_type::SHIP {
+                        // System/Planet → Ship (boarding): convert world
+                        // forward into ship-local frame using the
+                        // promoted ship's rotation. After boarding the
+                        // camera reads yaw/pitch as ship-local and
+                        // `camera.rs` multiplies by `ship_rotation` to
+                        // display — we need `ship_rotation * local_fwd ==
+                        // cam_fwd_world`.
+                        let ship_rot = ws.secondary.as_ref()
+                            .and_then(|secondary| secondary.entities.iter()
+                                .find(|e| e.is_own
+                                    && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)))
+                            .map(|e| e.rotation)
+                            .unwrap_or(player.ship_rotation);
+                        let local_fwd = ship_rot.inverse() * cam_fwd_world;
+                        cam.pitch = local_fwd.y.asin();
+                        cam.yaw = local_fwd.z.atan2(local_fwd.x);
+                        // Also update the cached ship_rotation used by the
+                        // camera so the first render frame uses the correct
+                        // orientation.
+                        player.ship_rotation = ship_rot;
+                    } else if target_shard_type == voxeldust_core::client_message::shard_type::PLANET {
+                        // Ship/System → Planet: project world forward onto the
+                        // player's planet tangent frame.
                         let planet_pos = ws.secondary.as_ref()
                             .and_then(|secondary| secondary.players.first())
                             .map(|p| p.position)
@@ -977,19 +1089,34 @@ fn poll_network(
                             DVec3::Z.cross(up).normalize()
                         };
                         let north = up.cross(east).normalize();
-
-                        // Step 3: project world forward onto tangent frame.
                         let fwd_north = cam_fwd_world.dot(north);
                         let fwd_up = cam_fwd_world.dot(up);
                         let fwd_east = cam_fwd_world.dot(east);
-
-                        // Step 4: extract planet-frame yaw/pitch.
                         cam.pitch = fwd_up.asin();
                         cam.yaw = fwd_east.atan2(fwd_north);
-                        cam.pitch = cam.pitch.clamp(
-                            -std::f64::consts::FRAC_PI_2 + 0.01,
-                            std::f64::consts::FRAC_PI_2 - 0.01,
-                        );
+                    } else {
+                        // → System (EVA, or unknown target=255 which we
+                        // treat as System-like world-Y-up). Use world-Y-up
+                        // yaw/pitch directly from the world forward.
+                        cam.pitch = cam_fwd_world.y.asin();
+                        cam.yaw = cam_fwd_world.z.atan2(cam_fwd_world.x);
+                    }
+                    cam.pitch = cam.pitch.clamp(
+                        -std::f64::consts::FRAC_PI_2 + 0.01,
+                        std::f64::consts::FRAC_PI_2 - 0.01,
+                    );
+
+                    // Flip `current_shard_type` immediately for seamless
+                    // transitions: the camera + rendering code branches on
+                    // it, and having it stale during the promotion window
+                    // causes visual chaos (e.g. SHIP-frame data rendered
+                    // through the SYSTEM-frame camera path, where cam_pos
+                    // is interpreted without adding the ship's origin).
+                    // The `pending_shard_type` safety valve kept for the
+                    // hard-transition path below.
+                    if target_shard_type != 255 {
+                        conn.current_shard_type = target_shard_type;
+                        conn.pending_shard_type = None;
                     }
 
                     // Save ship-local state before overwriting — needed as
@@ -1004,10 +1131,22 @@ fn poll_network(
                     smooth.handoff_start_world = Some(prev_ship_origin + prev_render_pos);
                     smooth.handoff_started_at = Instant::now();
 
-                    ws.latest = ws.secondary.take();
-                    if let Some(st) = conn.secondary_shard_type.take() {
-                        conn.current_shard_type = st;
+                    // Stash the old primary WS for a grace window so the renderer
+                    // can keep drawing its LOD-proxy ship entity during the
+                    // promotion overlap. Without this, the moment we swap
+                    // `ws.latest` to the promoted secondary (whose own ship is
+                    // marked `is_own=true` and skipped by draw_entities), the
+                    // orange LOD sphere for the ship vanishes from screen.
+                    if let Some(prev) = ws.latest.take() {
+                        ws.last_primary = Some(prev);
+                        ws.last_primary_until =
+                            Some(Instant::now() + std::time::Duration::from_secs_f64(LAST_PRIMARY_GRACE_SECS));
                     }
+                    ws.latest = ws.secondary.take();
+                    // Clear `secondary_shard_type` to avoid stale last-writer
+                    // values leaking into later decisions. The authoritative
+                    // destination type is `pending_shard_type`, set above.
+                    conn.secondary_shard_type = None;
                     player.is_piloting = false;
 
                     // Snap interpolation state from promoted WorldState so
@@ -1043,14 +1182,26 @@ fn poll_network(
                     if !snapped {
                         // Secondary WS has no player yet (handoff entity not
                         // created when the last secondary broadcast went out).
-                        // Compute planet-local from ship's last known state.
+                        // Compute ship-local from ship's last known state.
+                        // Carry the ship's rotation forward from the promoted
+                        // secondary's own ship entity if present — otherwise
+                        // keep whatever the camera was already using, so the
+                        // hull mesh doesn't snap to IDENTITY orientation for
+                        // the first render frame after boarding.
                         if let Some(ref promoted) = ws.latest {
                             let system_pos = prev_ship_origin + prev_render_pos;
                             let planet_local = system_pos - promoted.origin;
+                            let carried_rot = promoted
+                                .entities
+                                .iter()
+                                .find(|e| e.is_own
+                                    && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship))
+                                .map(|e| e.rotation)
+                                .unwrap_or(smooth.render_rotation);
                             let snap = TimedSnapshot {
                                 tick: promoted.tick,
                                 player_position: planet_local,
-                                ship_rotation: DQuat::IDENTITY,
+                                ship_rotation: carried_rot,
                                 ship_origin: promoted.origin,
                                 velocity: DVec3::ZERO,
                                 bodies: promoted.bodies.clone(),
@@ -1062,7 +1213,7 @@ fn poll_network(
                             snapshots.estimated_server_tick = promoted.tick as f64;
                             snapshots.synced = true;
                             smooth.render_position = planet_local;
-                            smooth.render_rotation = DQuat::IDENTITY;
+                            smooth.render_rotation = carried_rot;
                             smooth.ship_origin = promoted.origin;
                             smooth.bodies = promoted.bodies.clone();
                         } else {
@@ -1072,10 +1223,19 @@ fn poll_network(
                     }
                 } else {
                     // Hard transition: clear and reconnect.
+                    // Stash the last-known primary WorldState so the renderer
+                    // keeps showing entities (ships, players, bodies) for up to
+                    // LAST_PRIMARY_GRACE_SECS instead of going blank for the
+                    // full reconnect latency. Cleared when the new primary's
+                    // first WorldState arrives (see NetEvent::WorldState handler).
                     info!("hard transition — no secondary data");
                     snapshots.snapshots.clear();
                     snapshots.synced = false;
-                    ws.latest = None;
+                    if let Some(prev) = ws.latest.take() {
+                        ws.last_primary = Some(prev);
+                        ws.last_primary_until =
+                            Some(Instant::now() + std::time::Duration::from_secs_f64(LAST_PRIMARY_GRACE_SECS));
+                    }
                 }
                 ws.secondary = None;
                 conn.secondary_shard_type = None;
@@ -1445,6 +1605,7 @@ impl ClientApp {
         ecs_app.insert_resource(ConnectionInfo {
             connected: false,
             current_shard_type: 255,
+            pending_shard_type: None,
             shard_seed: 0,
             reference_position: DVec3::ZERO,
             reference_rotation: DQuat::IDENTITY,
@@ -1455,6 +1616,8 @@ impl ClientApp {
         ecs_app.insert_resource(ServerWorldState {
             latest: None,
             secondary: None,
+            last_primary: None,
+            last_primary_until: None,
         });
         ecs_app.insert_resource(LocalPlayer {
             position: DVec3::new(0.0, 1.0, 0.0),
@@ -2264,52 +2427,6 @@ impl ClientApp {
                         }
                     }
 
-                    // Debug: log cloud detection status periodically.
-                    static LOG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let count = LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count % 300 == 0 { // every ~5 seconds at 60fps
-                        let n_planets = sys.planets.len();
-                        let n_with_clouds = sys.planets.iter().filter(|p| p.clouds.has_clouds).count();
-                        // Find closest cloudy planet distance for debugging.
-                        let mut closest_dist = f64::MAX;
-                        let mut closest_radius = 0.0_f64;
-                        for body in &ws.bodies {
-                            if body.body_id == 0 { continue; }
-                            let pi = (body.body_id - 1) as usize;
-                            if pi >= sys.planets.len() { continue; }
-                            let planet = &sys.planets[pi];
-                            if !planet.clouds.has_clouds { continue; }
-                            let d = (cam_sys_pos - body.position).length();
-                            if d < closest_dist {
-                                closest_dist = d;
-                                closest_radius = planet.radius_m;
-                            }
-                        }
-                        // Also find the nearest planet of ANY type.
-                        let mut nearest_any_dist = f64::MAX;
-                        let mut nearest_any_id = 0u32;
-                        let mut nearest_any_has_clouds = false;
-                        for body in &ws.bodies {
-                            if body.body_id == 0 { continue; }
-                            let d = (cam_sys_pos - body.position).length();
-                            if d < nearest_any_dist {
-                                nearest_any_dist = d;
-                                nearest_any_id = body.body_id;
-                                let pi = (body.body_id - 1) as usize;
-                                nearest_any_has_clouds = pi < sys.planets.len() && sys.planets[pi].clouds.has_clouds;
-                            }
-                        }
-                        tracing::info!(
-                            planets = n_planets,
-                            cloudy = n_with_clouds,
-                            nearest_planet = nearest_any_id,
-                            nearest_km = (nearest_any_dist / 1000.0) as u64,
-                            nearest_has_clouds = nearest_any_has_clouds,
-                            closest_cloudy_km = (closest_dist / 1000.0) as u64,
-                            noise_ready = cloud_sys.has_noise(),
-                            "cloud system status"
-                        );
-                    }
                 }
             }
         }
@@ -2330,8 +2447,19 @@ impl ClientApp {
             &mut self.uniform_data,
             &mut self.chunk_uniform_map,
             &cam,
-            ws.latest.as_ref(),
+            // Use `effective()` so the scene (ships, entities, bodies) keeps
+            // drawing from the stashed `last_primary` during the brief window
+            // of a hard primary transition — prevents the 200-500 ms blackout
+            // users would otherwise see while the new primary's first
+            // WorldState is in flight.
+            ws.effective(),
             ws.secondary.as_ref(),
+            // Grace-window fallback: during a seamless promotion, the old
+            // primary WS is stashed in `last_primary` for
+            // `LAST_PRIMARY_GRACE_SECS` so the renderer can keep drawing its
+            // LOD-proxy ship entity (the new primary marks its own ship
+            // `is_own`, which draw_entities would otherwise skip).
+            ws.grace_fallback(),
             &interpolated_bodies,
             current_shard_type,
             shard_seed,
@@ -2358,6 +2486,11 @@ impl ClientApp {
             &gfx_settings,
             &smooth.sub_grid_transforms,
             &sg_state.assignments,
+            // A4b: route block-mesh rendering through ship_id → source lookup.
+            // Primary source = own ship's chunks on SHIP shard. Secondary ship
+            // sources map nearby-ship entity_id → their observer chunk source.
+            world.resource::<ClientChunkCacheRes>().primary_source,
+            &world.resource::<ClientChunkCacheRes>().secondary_sources,
         );
 
         // Handle config panel actions.
