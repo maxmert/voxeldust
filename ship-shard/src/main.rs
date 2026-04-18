@@ -2221,6 +2221,12 @@ fn kcc_move_characters_system(
             snap_suppressed: snap.0,
         };
 
+        let prev_pos = rapier
+            .rigid_body_set
+            .get(ctrl.body)
+            .map(|b| b.position().translation.vector)
+            .unwrap_or_default();
+
         let result = move_one_character(
             &rapier.rigid_body_set,
             &rapier.collider_set,
@@ -2231,6 +2237,35 @@ fn kcc_move_characters_system(
                 collision_writer.write(CharacterCollisionEvent { entity, hit });
             },
         );
+
+        // Diagnostic: log once a second so we can see per-tick KCC
+        // output (desired vs actual translation) when something looks
+        // wrong from the client side.
+        {
+            static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_ms >= last + 1000 {
+                LAST_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                let desired_mag = (desired.horizontal.x.powi(2) + desired.horizontal.y.powi(2)).sqrt();
+                let applied_mag = (result.translation.x.powi(2) + result.translation.z.powi(2)).sqrt();
+                let vel_mag = (result.new_velocity.x.powi(2) + result.new_velocity.z.powi(2)).sqrt();
+                tracing::info!(
+                    desired_mag,
+                    applied_mag,
+                    vel_mag,
+                    grounded = result.grounded,
+                    state = ?*state,
+                    sliding = result.is_sliding_down_slope,
+                    prev_y = prev_pos.y,
+                    dy = result.translation.y,
+                    "kcc diag (1Hz)"
+                );
+            }
+        }
 
         // Apply the move to the kinematic body — physics_pipeline.step()
         // converts `next_position - position` into an implicit velocity

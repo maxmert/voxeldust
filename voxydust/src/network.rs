@@ -35,6 +35,15 @@ pub enum NetEvent {
         reference_position: DVec3,
         reference_rotation: DQuat,
     },
+    /// A secondary shard's connection has ended (for any reason: server-sent
+    /// `ShardDisconnectNotify`, replacement by a new pre-connect for the
+    /// same key, primary-transition cancel, session end, or UDP error).
+    /// The main thread must release the chunk source associated with `seed`
+    /// so its GPU buffers are freed — otherwise chunks accumulate across
+    /// every ship transition.
+    SecondaryDisconnected {
+        seed: u64,
+    },
     /// WorldState from a secondary shard (for composite rendering).
     SecondaryWorldState(WorldStateData),
     /// Galaxy world state from secondary UDP (warp travel position for star parallax).
@@ -450,17 +459,32 @@ pub async fn run_network(
                                     });
 
                                     // Open secondary UDP.
+                                    // If bind fails after `SecondaryConnected` was sent,
+                                    // main has already allocated a chunk source for this
+                                    // seed — emit `SecondaryDisconnected` to clean it up.
                                     let udp = match UdpSocket::bind("0.0.0.0:0").await {
                                         Ok(s) => s,
-                                        Err(e) => { warn!(%e, "secondary UDP bind failed"); return; }
+                                        Err(e) => {
+                                            warn!(%e, "secondary UDP bind failed");
+                                            let _ = sec_event_tx.send(
+                                                NetEvent::SecondaryDisconnected { seed: sec_pc.seed });
+                                            return;
+                                        }
                                     };
                                     let hello = build_input(&empty_input());
                                     let _ = udp.send_to(&hello, sec_udp).await;
                                     info!(%sec_udp, "secondary UDP hole-punch sent");
 
                                     // Receive loop.
+                                    //
+                                    // Every exit from this loop emits `SecondaryDisconnected`
+                                    // so the main thread frees the chunk source's GPU
+                                    // buffers. The UDP task is always spawned for every
+                                    // secondary (the observer TCP task is optional), so
+                                    // this is the one reliable disconnect signal per seed.
+                                    let sec_seed = sec_pc.seed;
                                     let mut buf = vec![0u8; 65536];
-                                    loop {
+                                    let exit_reason: &str = loop {
                                         tokio::select! {
                                             result = udp.recv_from(&mut buf) => {
                                                 match result {
@@ -488,17 +512,22 @@ pub async fn run_network(
                                                     }
                                                     Err(e) => {
                                                         warn!(%e, "secondary UDP recv error");
-                                                        return;
+                                                        break "udp error";
                                                     }
                                                 }
                                             }
                                             _ = sec_cancel_own.recv() => {
                                                 info!("secondary connection cancelled (replaced)");
-                                                return;
+                                                break "cancel_own";
                                             }
-                                            _ = sec_cancel_parent.recv() => { return; }
+                                            _ = sec_cancel_parent.recv() => { break "cancel_parent"; }
                                         }
-                                    }
+                                    };
+                                    info!(seed = sec_seed, reason = exit_reason,
+                                        "secondary UDP task exiting — emitting SecondaryDisconnected");
+                                    let _ = sec_event_tx.send(NetEvent::SecondaryDisconnected {
+                                        seed: sec_seed,
+                                    });
                                 });
                             }
                             Ok(ServerMsg::BlockConfigState(config)) => {

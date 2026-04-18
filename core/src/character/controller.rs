@@ -125,10 +125,20 @@ fn configure_kcc(
     kcc.offset = CharacterLength::Absolute(stats.skin_offset);
     kcc.slide = true;
     kcc.max_slope_climb_angle = stats.max_slope_deg.to_radians();
-    // min_slope_slide_angle: above this the character slides down even
-    // when standing still. Default (π/4) = 45°. Match max_slope for a
-    // predictable "walkable or slide" threshold.
-    kcc.min_slope_slide_angle = stats.max_slope_deg.to_radians();
+    // `min_slope_slide_angle` must be STRICTLY GREATER than
+    // `max_slope_climb_angle`. If they're equal every floor hit falls
+    // into an ambiguous "wall OR slope" branch inside Rapier's
+    // `handle_slopes` — on voxel terrain with adjacent box colliders
+    // that seam hits every ~0.5 m and the character loses 30-60 % of
+    // the tick's tangential motion to the "let it slide" fallback.
+    // Measured effect: walking at 4 m/s produced 0.125 m/tick instead
+    // of 0.200 m/tick on ~40 % of ticks. Separating the two angles by
+    // 10° gives a clear walkable band and eliminates the stutter.
+    //
+    // With max_slope_deg=45, slide fires only past 55° — steep enough
+    // that a stationary character on the actual 45° boundary still
+    // doesn't slide.                                                    // TUNABLE
+    kcc.min_slope_slide_angle = (stats.max_slope_deg + 10.0).to_radians();
     kcc.snap_to_ground = if stats.snap_distance > 0.0 {
         Some(CharacterLength::Absolute(stats.snap_distance))
     } else {

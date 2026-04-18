@@ -317,9 +317,15 @@ struct ClientChunkCacheRes {
     /// Source ID for the current primary shard connection.
     /// Set when a new shard connection provides chunk data.
     primary_source: Option<voxeldust_core::block::client_chunks::ChunkSourceId>,
+    /// Shard seed that `primary_source` holds chunks for. Stored so that
+    /// on a new primary `Connected` event we can promote a matching
+    /// pre-observed secondary source (zero re-upload, zero visual gap)
+    /// and — critically — tell when the old primary's chunks are
+    /// redundant with a new secondary covering the same seed.
+    primary_seed: Option<u64>,
     /// Source IDs for secondary (observer) connections, keyed by seed (ship_id).
     /// Created on SecondaryConnected, populated by SecondaryChunkSnapshot,
-    /// removed on ShardDisconnectNotify.
+    /// removed on SecondaryDisconnected (or when promoted to primary).
     secondary_sources: std::collections::HashMap<u64, voxeldust_core::block::client_chunks::ChunkSourceId>,
 }
 
@@ -423,6 +429,17 @@ struct SnapshotBuffer {
     estimated_server_tick: f64,
     /// Whether we've received the first snapshot and synced the clock.
     synced: bool,
+    /// Wall-clock anchor: the `Instant` that corresponds to
+    /// `anchor_server_tick`. Updated when a WorldState arrives so
+    /// `estimated_server_tick = anchor_server_tick + (Instant::now() -
+    /// anchor_time) / TICK_DURATION_SECS`. This makes the tick estimate
+    /// advance at a **constant real-time rate** instead of accumulating
+    /// per-frame `ft.dt`, which amplifies frame-rate jitter into visible
+    /// per-frame position steps (the "patchy walking" feel). Frame
+    /// stutters up to `~1 tick` now produce a larger step once and then
+    /// self-correct, rather than shrinking/growing every step with fps.
+    anchor_time: Option<std::time::Instant>,
+    anchor_server_tick: f64,
 }
 
 #[derive(Resource)]
@@ -651,15 +668,60 @@ fn poll_network(
                             .map(|sg| (sg.sub_grid_id, sg.clone())).collect(),
                     };
 
-                    // Teleport detection: clear buffer on large jumps.
-                    // unwrap_or(true): when snapshot buffer is empty (first WS after
-                    // shard transition), always snap to position immediately.
-                    let is_teleport = snapshots.snapshots.back()
-                        .map(|last| (new_pos - last.player_position).length() > 10.0)
-                        .unwrap_or(true);
+                    // Teleport detection: clear buffer on large, discontinuous
+                    // jumps. The threshold is velocity-aware — the previous
+                    // snapshot's velocity × dt predicts the expected per-tick
+                    // delta. Anything substantially larger than that is a real
+                    // teleport (warp arrival, respawn, handoff). A fixed 10 m
+                    // threshold (the old version) was broken for system-shard
+                    // EVA, where the player legitimately moves at ship velocity
+                    // (km/s) — every tick was (incorrectly) classified as a
+                    // teleport and the interpolation buffer never filled.
+                    //
+                    // `unwrap_or(true)`: on an empty buffer (first WS after a
+                    // shard transition) we always snap immediately.
+                    // Threshold strategy: use the PREVIOUS per-tick
+                    // position delta as the reference, with a margin. This
+                    // is independent of the server's reported `velocity`
+                    // field — which on EVA reports velocity relative to
+                    // a local frame (e.g. ship- or planet-relative) and
+                    // does not capture the large orbital motion that
+                    // manifests as ~5000 m per-tick deltas in system-
+                    // space coordinates. Position deltas always reflect
+                    // the true per-tick displacement.
+                    //
+                    // Requires at least 2 prior snapshots to establish
+                    // a delta; for a 1-element buffer we fall back to a
+                    // generous 100 km floor (catches warp arrivals,
+                    // not normal motion at any velocity < 2000 km/s).
+                    const TELEPORT_DELTA_MARGIN: f64 = 5.0;
+                    const TELEPORT_MIN_FLOOR_M: f64 = 100.0;
+                    const TELEPORT_HARD_FLOOR_M: f64 = 100_000.0;
+                    let is_teleport = {
+                        let snaps = &snapshots.snapshots;
+                        let n = snaps.len();
+                        if n == 0 {
+                            true
+                        } else if n == 1 {
+                            let last = &snaps[0];
+                            let delta = (new_pos - last.player_position).length();
+                            delta > TELEPORT_HARD_FLOOR_M
+                        } else {
+                            let last = &snaps[n - 1];
+                            let prev = &snaps[n - 2];
+                            let prev_delta =
+                                (last.player_position - prev.player_position).length();
+                            let delta = (new_pos - last.player_position).length();
+                            let threshold = (prev_delta * TELEPORT_DELTA_MARGIN)
+                                .max(TELEPORT_MIN_FLOOR_M);
+                            delta > threshold
+                        }
+                    };
                     if is_teleport {
                         snapshots.snapshots.clear();
                         snapshots.estimated_server_tick = tick as f64;
+                        snapshots.anchor_time = Some(std::time::Instant::now());
+                        snapshots.anchor_server_tick = tick as f64;
                         smooth.render_position = new_pos;
                         smooth.render_rotation = p.rotation;
                         smooth.ship_origin = world_state.origin;
@@ -691,6 +753,8 @@ fn poll_network(
                     // Initialize clock on first snapshot.
                     if !snapshots.synced {
                         snapshots.estimated_server_tick = tick as f64;
+                        snapshots.anchor_time = Some(std::time::Instant::now());
+                        snapshots.anchor_server_tick = tick as f64;
                         snapshots.synced = true;
                         info!(
                             tick,
@@ -700,9 +764,25 @@ fn poll_network(
                         );
                     }
 
-                    // Gentle clock drift correction: blend toward server tick.
+                    // Gentle clock drift correction: blend anchor toward
+                    // a new anchor pinned to the just-arrived server
+                    // tick. We rebuild `anchor_time` + `anchor_server_tick`
+                    // so that the wall-clock interpolation sees a smooth
+                    // catch-up (10 % per packet = 0.5 s half-life) without
+                    // any per-frame-dt accumulation.
+                    let now = std::time::Instant::now();
+                    let prev_anchor_time =
+                        snapshots.anchor_time.unwrap_or(now);
+                    let prev_anchor_tick = snapshots.anchor_server_tick;
+                    // What the current anchor would predict for "right now":
+                    let predicted_now =
+                        prev_anchor_tick + (now - prev_anchor_time).as_secs_f64() / TICK_DURATION_SECS;
                     let server_now = tick as f64;
-                    snapshots.estimated_server_tick += (server_now - snapshots.estimated_server_tick) * 0.1;
+                    // Blend the predicted tick toward the server tick.
+                    let blended = predicted_now + (server_now - predicted_now) * 0.1;
+                    snapshots.anchor_time = Some(now);
+                    snapshots.anchor_server_tick = blended;
+                    snapshots.estimated_server_tick = blended;
 
                     // Game logic (non-rendering).
                     player.position = new_pos;
@@ -755,6 +835,28 @@ fn poll_network(
                 conn.shard_seed = seed;
                 conn.reference_position = reference_position;
                 conn.reference_rotation = reference_rotation;
+
+                // If we were already observing this shard as a secondary
+                // (typical on system → ship boarding: the ship was a
+                // secondary for nearby rendering), promote its chunk source
+                // to primary instead of allocating a fresh one. This both
+                // avoids re-downloading + re-uploading ~8 MB of chunk data
+                // AND prevents a triple-allocation leak where the old
+                // primary, the now-redundant secondary, and the freshly
+                // allocated primary all sit in GPU memory together.
+                if let Some(old_primary) = chunk_cache.primary_source.take() {
+                    // New `Connected` supersedes any previous primary
+                    // whose `Transitioning` cleanup did not fire (e.g. the
+                    // legacy code path that nulled the pointer without
+                    // calling `remove_source`). Free it now.
+                    chunk_cache.cache.remove_source(old_primary);
+                    info!(source = old_primary.0, "freed stale primary source on new Connected");
+                }
+                if let Some(sec_src) = chunk_cache.secondary_sources.remove(&seed) {
+                    chunk_cache.primary_source = Some(sec_src);
+                    info!(seed, source = sec_src.0, "promoted pre-observed secondary to primary");
+                }
+                chunk_cache.primary_seed = Some(seed);
                 if shard_type == voxeldust_core::client_message::shard_type::SHIP {
                     player.ship_rotation = reference_rotation;
                 }
@@ -812,6 +914,9 @@ fn poll_network(
 
                 // Create a chunk source for this secondary connection's block data.
                 // Ship secondaries provide their own chunk data via observer TCP.
+                // If a secondary with the same seed is already tracked (reconnect
+                // after network hiccup, or pre-connect echo), reuse its source —
+                // chunks are already cached, no re-upload needed.
                 if shard_type == voxeldust_core::client_message::shard_type::SHIP {
                     if !chunk_cache.secondary_sources.contains_key(&seed) {
                         let source = chunk_cache.cache.add_source();
@@ -837,6 +942,18 @@ fn poll_network(
                             sf.set_current_system_seed(seed);
                         }
                     }
+                }
+            }
+            NetEvent::SecondaryDisconnected { seed } => {
+                // Secondary connection ended — release its chunk source so GPU
+                // buffers are freed on the next render tick (via
+                // `drain_removed_sources`). Called for every death path
+                // (ShardDisconnectNotify, primary-transition cancel, replacement,
+                // UDP error). Idempotent: `remove` + `remove_source` are no-ops
+                // if the seed isn't tracked, so duplicate events are harmless.
+                if let Some(src) = chunk_cache.secondary_sources.remove(&seed) {
+                    chunk_cache.cache.remove_source(src);
+                    info!(seed, source = src.0, "released secondary chunk source on disconnect");
                 }
             }
             NetEvent::SecondaryWorldState(secondary_ws) => {
@@ -1004,15 +1121,22 @@ fn poll_network(
                     conn.pending_shard_type = conn.secondary_shard_type;
                 }
 
-                // Transition to new shard: the OLD source's chunks remain in the
-                // cache (e.g., ship chunks stay visible as exterior after exiting).
-                // A new source will be created when the new shard starts sending data.
-                // The old source is removed later when its chunks are no longer needed
-                // (out of render range, or explicitly cleaned up).
-                //
-                // For now, we keep the old source and create a fresh one for the new shard.
-                // TODO: implement distance-based cleanup of old sources.
-                chunk_cache.primary_source = None;
+                // Transition to new shard: release the OLD primary source so
+                // its chunks + GPU buffers are freed. If the player needs to
+                // see the shard we just left (e.g. the ship they exited,
+                // rendered as exterior from system shard), the NEW primary
+                // will pre-connect it back as a secondary and re-stream its
+                // chunks into a fresh secondary source. The previous code
+                // only nulled the pointer, which orphaned the source and
+                // accumulated ~8 chunks × ~100 KB per transition — the root
+                // cause of the post-transition frame-rate drop (120 → 70 →
+                // 50 fps across two round trips).
+                if let Some(old_primary) = chunk_cache.primary_source.take() {
+                    chunk_cache.cache.remove_source(old_primary);
+                    info!(source = old_primary.0, seed = ?chunk_cache.primary_seed,
+                        "released old primary chunk source on transition");
+                }
+                chunk_cache.primary_seed = None;
 
                 // Clear warp state — warp travel is over.
                 warp.galaxy_position = None;
@@ -1171,6 +1295,8 @@ fn poll_network(
                             snapshots.snapshots.push_back(snap);
                             snapshots.highest_tick = promoted.tick;
                             snapshots.estimated_server_tick = promoted.tick as f64;
+                            snapshots.anchor_time = Some(std::time::Instant::now());
+                            snapshots.anchor_server_tick = promoted.tick as f64;
                             snapshots.synced = true;
                             smooth.render_position = p.position;
                             smooth.render_rotation = p.rotation;
@@ -1211,6 +1337,8 @@ fn poll_network(
                             snapshots.snapshots.push_back(snap);
                             snapshots.highest_tick = promoted.tick;
                             snapshots.estimated_server_tick = promoted.tick as f64;
+                            snapshots.anchor_time = Some(std::time::Instant::now());
+                            snapshots.anchor_server_tick = promoted.tick as f64;
                             snapshots.synced = true;
                             smooth.render_position = planet_local;
                             smooth.render_rotation = carried_rot;
@@ -1219,6 +1347,7 @@ fn poll_network(
                         } else {
                             snapshots.snapshots.clear();
                             snapshots.synced = false;
+                            snapshots.anchor_time = None;
                         }
                     }
                 } else {
@@ -1231,6 +1360,7 @@ fn poll_network(
                     info!("hard transition — no secondary data");
                     snapshots.snapshots.clear();
                     snapshots.synced = false;
+                    snapshots.anchor_time = None;
                     if let Some(prev) = ws.latest.take() {
                         ws.last_primary = Some(prev);
                         ws.last_primary_until =
@@ -1278,8 +1408,25 @@ fn smooth_render_position(
         return;
     }
 
-    // Advance estimated server tick by frame delta.
-    snapshots.estimated_server_tick += ft.dt / TICK_DURATION_SECS;
+    // Tick estimate is anchored to wall-clock, not accumulated frame
+    // dt. This makes per-frame position step a constant function of
+    // real elapsed time → per-frame step at 120 fps is exactly half
+    // of the step at 60 fps, and a frame-rate oscillation no longer
+    // produces visible per-frame jumps. Previously
+    // `estimated_server_tick += ft.dt / TICK_DURATION_SECS` pushed
+    // every frame's dt jitter straight into the interpolation — a
+    // 25 ms frame followed by a 8 ms frame looked like a teleport
+    // even when the server data was perfectly smooth.
+    //
+    // The clock-drift correction in the WorldState handler still
+    // pulls the anchor toward the server tick gently (0.1× blend).
+    let _ = ft; // kept in the signature for compat; no longer consumed.
+    if let (Some(anchor_time), anchor_tick) =
+        (snapshots.anchor_time, snapshots.anchor_server_tick)
+    {
+        let elapsed = anchor_time.elapsed().as_secs_f64();
+        snapshots.estimated_server_tick = anchor_tick + elapsed / TICK_DURATION_SECS;
+    }
 
     // Render at a fixed delay behind the estimated server tick.
     let render_tick = snapshots.estimated_server_tick - INTERP_DELAY_TICKS;
@@ -1305,8 +1452,25 @@ fn smooth_render_position(
         ((render_tick - snap_a.tick as f64) / (snap_b.tick - snap_a.tick) as f64).clamp(0.0, 1.0)
     };
 
-    if conn.current_shard_type == voxeldust_core::client_message::shard_type::PLANET {
-        // Planet shard: snap to latest snapshot (no interpolation).
+    // Shards where the client is positioned in a FAST-MOVING reference
+    // frame (system-space positions change by ~5000 m/tick at orbital
+    // velocity; planet-shard origin rotates / orbits) snap directly to
+    // the latest snapshot instead of interpolating. Reason: ship
+    // entities in the WorldState are rendered from `ws.entities[].position`
+    // at the *latest* server tick — if the camera is interp-delayed by
+    // 3 ticks (150 ms), the other ship appears thousands of meters
+    // ahead of the camera even though on the server they're co-located.
+    // Snapping keeps the camera aligned with peer-ship positions. The
+    // ship-interior shard (stable local frame, sub-meter motion) is
+    // the only place standard snapshot interpolation is worthwhile,
+    // and it benefits from the extra smoothness.
+    let snap_to_latest = matches!(
+        conn.current_shard_type,
+        voxeldust_core::client_message::shard_type::PLANET
+            | voxeldust_core::client_message::shard_type::SYSTEM
+            | voxeldust_core::client_message::shard_type::GALAXY
+    );
+    if snap_to_latest {
         if let Some(latest) = snapshots.snapshots.back() {
             smooth.render_position = latest.player_position;
             smooth.render_rotation = latest.ship_rotation;
@@ -1317,9 +1481,40 @@ fn smooth_render_position(
     } else {
         // Ship/system shard: interpolate between bracketing snapshots.
         smooth.interpolation_t = t;
+        let prev_render = smooth.render_position;
         smooth.render_position = snap_a.player_position.lerp(snap_b.player_position, t);
         smooth.render_rotation = snap_a.ship_rotation.slerp(snap_b.ship_rotation, t);
         smooth.ship_origin = snap_a.ship_origin.lerp(snap_b.ship_origin, t);
+
+        // 1 Hz diagnostic: verify interpolation is actually producing
+        // smooth per-frame deltas. `snap_delta_mag` (distance between
+        // the two bracketing server snapshots) and `frame_delta_mag`
+        // (distance render_position moved this frame) tell us whether
+        // the interpolation is advancing smoothly.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_LOG: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_LOG.load(Ordering::Relaxed);
+            if now_ms >= last + 1000 {
+                LAST_LOG.store(now_ms, Ordering::Relaxed);
+                let snap_delta_mag = (snap_b.player_position - snap_a.player_position).length();
+                let frame_delta_mag = (smooth.render_position - prev_render).length();
+                tracing::info!(
+                    snap_a_tick = snap_a.tick,
+                    snap_b_tick = snap_b.tick,
+                    t,
+                    snap_delta_mag = snap_delta_mag as f32,
+                    frame_delta_mag = frame_delta_mag as f32,
+                    buffer_len = snapshots.snapshots.len(),
+                    est_server_tick = snapshots.estimated_server_tick as f32,
+                    "interp diag (1Hz)"
+                );
+            }
+        }
 
         // Interpolate celestial body positions at same t.
         smooth.bodies.clear();
@@ -1647,6 +1842,8 @@ impl ClientApp {
             highest_tick: 0,
             estimated_server_tick: 0.0,
             synced: false,
+            anchor_time: None,
+            anchor_server_tick: 0.0,
         });
         ecs_app.insert_resource(CameraControl {
             yaw: 0.0,
@@ -1688,6 +1885,7 @@ impl ClientApp {
         ecs_app.insert_resource(ClientChunkCacheRes {
             cache: voxeldust_core::block::client_chunks::ClientChunkCache::new(),
             primary_source: None,
+            primary_seed: None,
             secondary_sources: std::collections::HashMap::new(),
         });
         ecs_app.insert_resource(FrameTime {
