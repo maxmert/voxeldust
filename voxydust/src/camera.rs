@@ -26,6 +26,12 @@ pub fn compute_camera(
     is_piloting: bool,
     current_shard_type: u8,
     ship_rotation: glam::DQuat,
+    // EVA body orientation in world frame. Used only on SYSTEM shard —
+    // the player's persistent orientation in vacuum. `camera_yaw/pitch`
+    // are head rotation RELATIVE to this body, so ship→EVA transitions
+    // are continuous (no Y-up snap) by setting this to the ship's
+    // rotation at the moment of exit.
+    body_rotation: glam::DQuat,
     keys_held: &std::collections::HashSet<winit::keyboard::KeyCode>,
     gpu_width: u32,
     gpu_height: u32,
@@ -82,10 +88,16 @@ pub fn compute_camera(
         let local_fwd = north * (cy * cp) as f64 + up * sp as f64 + east * (sy * cp) as f64;
         local_fwd.as_vec3().normalize()
     } else {
-        // System/fallback: camera_yaw/pitch are world-space Y-up.
+        // System/fallback (EVA in vacuum): camera_yaw/pitch are
+        // BODY-LOCAL. Rotate the local forward by `body_rotation` to
+        // get the world-space look direction. When the player exits a
+        // ship, body_rotation is set to the ship's world rotation at
+        // exit time so yaw/pitch kept unchanged produce the same
+        // world view they had inside the ship — no snap.
         let (sy, cy) = (camera_yaw as f32).sin_cos();
         let (sp, cp) = (camera_pitch as f32).sin_cos();
-        Vec3::new(cy * cp, sp, sy * cp).normalize()
+        let local_fwd = DVec3::new((cy * cp) as f64, sp as f64, (sy * cp) as f64);
+        (body_rotation * local_fwd).as_vec3().normalize()
     };
 
     let aspect = gpu_width as f32 / gpu_height as f32;
@@ -98,7 +110,8 @@ pub fn compute_camera(
         // Planet: up = radial direction from planet center.
         player_position.normalize().as_vec3()
     } else {
-        Vec3::Y
+        // System/EVA: up rotates with the body (no gravity in vacuum).
+        (body_rotation * DVec3::Y).as_vec3().normalize()
     };
 
     let view_mat = Mat4::look_to_rh(Vec3::ZERO, cam_fwd, cam_up);

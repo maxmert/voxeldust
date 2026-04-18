@@ -269,10 +269,35 @@ struct ServerWorldState {
     /// Cleared as soon as `latest` is populated or after the grace expires.
     last_primary: Option<WorldStateData>,
     last_primary_until: Option<Instant>,
+    /// Ship the client just left. Populated on SHIP→!SHIP Transitioning,
+    /// cleared when expiry passes. Co-located with `last_primary` because
+    /// they share the same grace window and lifecycle.
+    departed_ship: Option<DepartedShipData>,
 }
 
 /// Grace period during which `last_primary` is rendered after a hard transition.
 const LAST_PRIMARY_GRACE_SECS: f64 = 1.5;
+
+/// Ship the client just left (SHIP → !SHIP transition), captured so the
+/// renderer can draw it as an exterior mesh in system-space during the
+/// grace window. See `ServerWorldState::departed_ship`.
+struct DepartedShipData {
+    /// Chunk source on GPU; holds the ship's block meshes. Sourced from the
+    /// client's old primary or secondary source. Freed when the entry in
+    /// `ClientChunkCacheRes::grace_sources` expires, NOT here.
+    source: voxeldust_core::block::client_chunks::ChunkSourceId,
+    /// Ship center in absolute system-space at the moment of exit.
+    world_position: glam::DVec3,
+    /// Ship orientation in world-space at the moment of exit.
+    rotation: glam::DQuat,
+    /// Conservative bounding sphere radius (m) of the ship's block mesh,
+    /// used for frustum culling. Taken from the own-ship entity's
+    /// `bounding_radius` (derived from hull AABB on ship-shard), so
+    /// complex / fractional hulls are sized correctly — not a guess.
+    bounding_radius: f32,
+    /// When to stop rendering this ship. Matches `LAST_PRIMARY_GRACE_SECS`.
+    expiry: Instant,
+}
 
 impl ServerWorldState {
     /// Returns the WorldState to show in the 3D/HUD scene this frame. Prefers
@@ -327,6 +352,16 @@ struct ClientChunkCacheRes {
     /// Created on SecondaryConnected, populated by SecondaryChunkSnapshot,
     /// removed on SecondaryDisconnected (or when promoted to primary).
     secondary_sources: std::collections::HashMap<u64, voxeldust_core::block::client_chunks::ChunkSourceId>,
+    /// Sources kept alive across the shard-switch seam so the renderer can
+    /// still draw a ship whose source just changed role (old primary freed,
+    /// or secondary promoted to primary). Keyed by the source's original
+    /// seed. Split from `grace_expiries` so the renderer can look up by
+    /// seed without allocating. Both maps stay in sync: every entry in
+    /// `grace_sources` has a matching entry in `grace_expiries`.
+    /// `LAST_PRIMARY_GRACE_SECS` — mirrors the `last_primary` WorldState
+    /// grace. Drained by `drain_expired_grace_sources`.
+    grace_sources: std::collections::HashMap<u64, voxeldust_core::block::client_chunks::ChunkSourceId>,
+    grace_expiries: std::collections::HashMap<u64, Instant>,
 }
 
 impl std::ops::Deref for ClientChunkCacheRes {
@@ -353,6 +388,14 @@ struct LocalPlayer {
     velocity: DVec3,
     is_piloting: bool,
     ship_rotation: DQuat,
+    /// Body orientation in world (system) frame when on SYSTEM shard
+    /// as an EVA player. Persists across ticks — EVA in vacuum has no
+    /// gravity "up", so the player keeps whatever orientation they
+    /// inherited from the ship they left (or from thruster input).
+    /// `cam.yaw/pitch` are head rotation RELATIVE to this body frame,
+    /// so inside or outside the ship, the same scalar yaw/pitch
+    /// produce a continuous world-space view (no snap at handoff).
+    body_rotation: DQuat,
 }
 
 /// Interpolated render state — output of snapshot interpolation, consumed by camera + renderer.
@@ -797,6 +840,17 @@ fn poll_network(
                     if conn.current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
                         player.ship_rotation = p.rotation;
                     }
+                    // On SYSTEM shard (EVA), the player's WS rotation
+                    // field IS their body orientation in world/system
+                    // space — server persists it across ticks as there
+                    // is no gravity "up" to re-normalize to. Sync to the
+                    // client so camera.rs can render head rotation as
+                    // body-relative, matching the pre-exit view 1:1.
+                    if conn.current_shard_type
+                        == voxeldust_core::client_message::shard_type::SYSTEM
+                    {
+                        player.body_rotation = p.rotation;
+                    }
 
                     if player.is_piloting && !was_piloting {
                         let fwd = p.rotation * DVec3::NEG_Z;
@@ -844,19 +898,42 @@ fn poll_network(
                 // AND prevents a triple-allocation leak where the old
                 // primary, the now-redundant secondary, and the freshly
                 // allocated primary all sit in GPU memory together.
-                if let Some(old_primary) = chunk_cache.primary_source.take() {
-                    // New `Connected` supersedes any previous primary
-                    // whose `Transitioning` cleanup did not fire (e.g. the
-                    // legacy code path that nulled the pointer without
-                    // calling `remove_source`). Free it now.
-                    chunk_cache.cache.remove_source(old_primary);
-                    info!(source = old_primary.0, "freed stale primary source on new Connected");
+                // If Transitioning's eager-promotion already set
+                // `primary_source` + `primary_seed` for THIS shard
+                // (common boarding path), the work is already done.
+                // Do NOT `take()` + free — the "old primary" IS the
+                // very source we just promoted; freeing it removes
+                // the GPU buffers we need.
+                let already_promoted = chunk_cache.primary_seed == Some(seed)
+                    && chunk_cache.primary_source.is_some();
+                if !already_promoted {
+                    if let Some(old_primary) = chunk_cache.primary_source.take() {
+                        // New `Connected` supersedes any previous primary
+                        // (unrelated shard seed). Free it.
+                        chunk_cache.cache.remove_source(old_primary);
+                        info!(source = old_primary.0, "freed stale primary source on new Connected");
+                    }
+                    let grace_expiry = Instant::now()
+                        + std::time::Duration::from_secs_f64(LAST_PRIMARY_GRACE_SECS);
+                    // Prefer secondary_sources (normal promote), then
+                    // grace_sources (either from a prior eager-promote at
+                    // Transitioning, or from SecondaryDisconnected rescuing
+                    // the source before this Connected was dispatched). In
+                    // all cases the source already has chunks uploaded — we
+                    // just rebind it without re-downloading.
+                    let sec_src = chunk_cache.secondary_sources.remove(&seed)
+                        .or_else(|| chunk_cache.grace_sources.get(&seed).copied());
+                    if let Some(sec_src) = sec_src {
+                        chunk_cache.primary_source = Some(sec_src);
+                        chunk_cache.grace_sources.insert(seed, sec_src);
+                        chunk_cache.grace_expiries.insert(seed, grace_expiry);
+                        info!(seed, source = sec_src.0, "promoted pre-observed secondary to primary (grace-pinned)");
+                    }
+                    chunk_cache.primary_seed = Some(seed);
+                } else {
+                    info!(seed, source = ?chunk_cache.primary_source.map(|s| s.0),
+                        "Connected: primary already eagerly promoted at Transitioning, keeping");
                 }
-                if let Some(sec_src) = chunk_cache.secondary_sources.remove(&seed) {
-                    chunk_cache.primary_source = Some(sec_src);
-                    info!(seed, source = sec_src.0, "promoted pre-observed secondary to primary");
-                }
-                chunk_cache.primary_seed = Some(seed);
                 if shard_type == voxeldust_core::client_message::shard_type::SHIP {
                     player.ship_rotation = reference_rotation;
                 }
@@ -945,15 +1022,27 @@ fn poll_network(
                 }
             }
             NetEvent::SecondaryDisconnected { seed } => {
-                // Secondary connection ended — release its chunk source so GPU
-                // buffers are freed on the next render tick (via
-                // `drain_removed_sources`). Called for every death path
-                // (ShardDisconnectNotify, primary-transition cancel, replacement,
-                // UDP error). Idempotent: `remove` + `remove_source` are no-ops
-                // if the seed isn't tracked, so duplicate events are harmless.
+                // Secondary connection ended. DO NOT free the chunk source
+                // immediately — the common trigger is `ShardRedirect`
+                // cancelling the current-shard observer a moment BEFORE
+                // the Transitioning event that would promote this same
+                // source to primary (observed ordering: network emits
+                // SecondaryDisconnected then Transitioning, main loop
+                // processes them in that order, so a free here destroys
+                // the exact source the next Transitioning will try to
+                // promote — boarding blink).
+                //
+                // Instead move the source into `grace_sources` for the
+                // standard grace window. If Transitioning + Connected
+                // promote it the entry will be overwritten there;
+                // otherwise the periodic cleanup releases it after the
+                // window expires, same as any other grace entry.
                 if let Some(src) = chunk_cache.secondary_sources.remove(&seed) {
-                    chunk_cache.cache.remove_source(src);
-                    info!(seed, source = src.0, "released secondary chunk source on disconnect");
+                    let expiry = Instant::now()
+                        + std::time::Duration::from_secs_f64(LAST_PRIMARY_GRACE_SECS);
+                    chunk_cache.grace_sources.insert(seed, src);
+                    chunk_cache.grace_expiries.insert(seed, expiry);
+                    info!(seed, source = src.0, "grace-pinned secondary source on disconnect");
                 }
             }
             NetEvent::SecondaryWorldState(secondary_ws) => {
@@ -1131,10 +1220,85 @@ fn poll_network(
                 // accumulated ~8 chunks × ~100 KB per transition — the root
                 // cause of the post-transition frame-rate drop (120 → 70 →
                 // 50 fps across two round trips).
+                // Move the old primary source into `grace_sources` under its
+                // original seed so the renderer's grace-fallback pass (which
+                // iterates the stashed last-primary WorldState for the next
+                // `LAST_PRIMARY_GRACE_SECS`) can still resolve the ship's
+                // chunks by entity_id. Free happens lazily in
+                // `drain_expired_grace_sources`, not here. Without this, an
+                // exit ship→planet transition would blink the ship off the
+                // moment the old primary WS is stashed — chunks gone,
+                // grace WS entity orphaned.
+                let grace_expiry = Instant::now()
+                    + std::time::Duration::from_secs_f64(LAST_PRIMARY_GRACE_SECS);
                 if let Some(old_primary) = chunk_cache.primary_source.take() {
-                    chunk_cache.cache.remove_source(old_primary);
-                    info!(source = old_primary.0, seed = ?chunk_cache.primary_seed,
-                        "released old primary chunk source on transition");
+                    if let Some(seed) = chunk_cache.primary_seed {
+                        chunk_cache.grace_sources.insert(seed, old_primary);
+                        chunk_cache.grace_expiries.insert(seed, grace_expiry);
+                        info!(source = old_primary.0, seed,
+                            "grace-pinned old primary chunk source on transition");
+                    } else {
+                        // No seed recorded (legacy / first connect). Free
+                        // immediately — nothing in `grace_sources` can key
+                        // to a None seed, so it would never render anyway.
+                        chunk_cache.cache.remove_source(old_primary);
+                        info!(source = old_primary.0,
+                            "released old primary chunk source on transition (no seed)");
+                    }
+                    // Leaving a SHIP primary: capture the ship's system-space
+                    // pose + source for the grace-window exterior render.
+                    // The render path uses absolute system-space coords so
+                    // the ship draws correctly regardless of what frame the
+                    // new primary's camera is in (system, planet-local,
+                    // etc). Only populate when the source is actually
+                    // available — if primary_source was already None we
+                    // have nothing to render anyway.
+                    if conn.current_shard_type
+                        == voxeldust_core::client_message::shard_type::SHIP
+                    {
+                        // Ship's system-space pose: ws.latest.origin is the
+                        // ship's exterior.position (per ship-shard broadcast
+                        // convention). Rotation comes from the own-ship
+                        // entity we inject on ship shard, or falls back to
+                        // the cached player.ship_rotation.
+                        let (ship_sys_pos, ship_rot, ship_br) = {
+                            let origin = ws
+                                .latest
+                                .as_ref()
+                                .map(|w| w.origin)
+                                .unwrap_or(smooth.ship_origin);
+                            let own_entity = ws
+                                .latest
+                                .as_ref()
+                                .and_then(|w| w.entities.iter().find(|e| e.is_own
+                                    && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)));
+                            let rot = own_entity.map(|e| e.rotation)
+                                .unwrap_or(player.ship_rotation);
+                            // Bounding radius authoritative from ship-shard
+                            // (hull AABB half-diagonal). Ships without a
+                            // populated entity fall back to a large value so
+                            // we err on the side of rendering — a frustum
+                            // miss on exit is the bug we're fixing.
+                            let br = own_entity
+                                .map(|e| e.bounding_radius as f32)
+                                .unwrap_or(2048.0);
+                            (origin, rot, br)
+                        };
+                        ws.departed_ship = Some(DepartedShipData {
+                            source: old_primary,
+                            world_position: ship_sys_pos,
+                            rotation: ship_rot,
+                            bounding_radius: ship_br,
+                            expiry: grace_expiry,
+                        });
+                        info!(
+                            source = old_primary.0,
+                            pos = ?(ship_sys_pos.x, ship_sys_pos.y, ship_sys_pos.z),
+                            rot = ?(ship_rot.x, ship_rot.y, ship_rot.z, ship_rot.w),
+                            to_shard = target_shard_type,
+                            "captured departed ship for grace-window render"
+                        );
+                    }
                 }
                 chunk_cache.primary_seed = None;
 
@@ -1166,14 +1330,48 @@ fn poll_network(
                     let sy = (cam.yaw as f32).sin() as f64;
                     let cy = (cam.yaw as f32).cos() as f64;
                     let basis_fwd = DVec3::new(cy * cp, sp, sy * cp);
-                    let cam_fwd_world = match conn.current_shard_type {
-                        // Ship frame: ship_rotation * local fwd.
+                    let (cam_fwd_world, ship_rot_used, ship_rot_source) = match conn.current_shard_type {
+                        // Ship frame: rotate ship-local forward into world
+                        // via the ship's authoritative quaternion.
                         t if t == voxeldust_core::client_message::shard_type::SHIP => {
-                            (player.ship_rotation * basis_fwd).normalize()
+                            let own_entity_rot = ws.latest.as_ref()
+                                .and_then(|latest| latest.entities.iter().find(|e| e.is_own
+                                    && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)))
+                                .map(|e| e.rotation);
+                            let (ship_rot_now, src) = match own_entity_rot {
+                                Some(r) => (r, "ws.entities.own_ship"),
+                                None => (player.ship_rotation, "player.ship_rotation (FALLBACK)"),
+                            };
+                            ((ship_rot_now * basis_fwd).normalize(), ship_rot_now, src)
                         }
-                        // Otherwise world Y-up (system / fallback).
-                        _ => basis_fwd.normalize(),
+                        // EVA (SYSTEM): camera_yaw/pitch are body-local,
+                        // world forward is `body_rotation * basis_fwd`.
+                        // Before the body-frame refactor this arm fell
+                        // through to world-Y-up, which caused the
+                        // wrong-angle boarding bug when returning to a
+                        // ship from EVA because the target shard's
+                        // projection was reading an unrotated world
+                        // vector.
+                        t if t == voxeldust_core::client_message::shard_type::SYSTEM => {
+                            let br = player.body_rotation;
+                            ((br * basis_fwd).normalize(), br, "player.body_rotation (EVA)")
+                        }
+                        // Planet / unknown: world Y-up (scalar yaw/pitch
+                        // are tangent-frame already for planet,
+                        // world-Y-up for unknown).
+                        _ => (basis_fwd.normalize(), DQuat::IDENTITY, "world Y-up"),
                     };
+                    info!(
+                        source = ship_rot_source,
+                        ship_rot = ?(ship_rot_used.x, ship_rot_used.y, ship_rot_used.z, ship_rot_used.w),
+                        cam_yaw = cam.yaw,
+                        cam_pitch = cam.pitch,
+                        basis_fwd = ?(basis_fwd.x, basis_fwd.y, basis_fwd.z),
+                        cam_fwd_world = ?(cam_fwd_world.x, cam_fwd_world.y, cam_fwd_world.z),
+                        from_shard = conn.current_shard_type,
+                        to_shard = target_shard_type,
+                        "transition rotation math"
+                    );
 
                     // Re-express cam_fwd_world in the new shard's frame.
                     if target_shard_type == voxeldust_core::client_message::shard_type::SHIP {
@@ -1200,11 +1398,50 @@ fn poll_network(
                     } else if target_shard_type == voxeldust_core::client_message::shard_type::PLANET {
                         // Ship/System → Planet: project world forward onto the
                         // player's planet tangent frame.
-                        let planet_pos = ws.secondary.as_ref()
-                            .and_then(|secondary| secondary.players.first())
-                            .map(|p| p.position)
-                            .unwrap_or(DVec3::Y);
-                        let up = planet_pos.normalize();
+                        //
+                        // The tangent frame is defined by the player's
+                        // planet-local position (the radial up). Previously
+                        // this was read from `ws.secondary.players.first()`
+                        // which is wrong: during the handoff the exiting
+                        // player isn't in the planet's player list yet, so
+                        // `.first()` returned *another* player's position
+                        // (or the `DVec3::Y` fallback), giving a tangent
+                        // frame unrelated to where the player actually lands
+                        // → camera yaw/pitch that drift 10s-to-180° off.
+                        //
+                        // Derive the actual landing position from state the
+                        // client already has: the player's current world
+                        // position (ship-local rotated into system-space,
+                        // plus ship origin) minus the planet's system-space
+                        // position (`ws.secondary.origin`, which the planet
+                        // shard publishes as its WorldState origin).
+                        let player_system_pos = if conn.current_shard_type
+                            == voxeldust_core::client_message::shard_type::SHIP
+                        {
+                            let ship_rot = ws.latest.as_ref()
+                                .and_then(|latest| latest.entities.iter().find(|e| e.is_own
+                                    && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)))
+                                .map(|e| e.rotation)
+                                .unwrap_or(player.ship_rotation);
+                            smooth.ship_origin + ship_rot * smooth.render_position
+                        } else {
+                            // EVA → Planet: smooth.render_position is already
+                            // system-space.
+                            smooth.render_position
+                        };
+                        let planet_origin = ws.secondary.as_ref()
+                            .map(|secondary| secondary.origin)
+                            .unwrap_or(DVec3::ZERO);
+                        let planet_pos = player_system_pos - planet_origin;
+                        let up = if planet_pos.length_squared() > 1e-10 {
+                            planet_pos.normalize()
+                        } else {
+                            // Degenerate (player at planet center). Fall back
+                            // to world-Y so the math is defined; this case
+                            // shouldn't happen in practice (handoff only
+                            // fires in atmosphere or surface).
+                            DVec3::Y
+                        };
                         let pole = DVec3::Y;
                         let east_raw = pole.cross(up);
                         let east = if east_raw.length_squared() > 1e-10 {
@@ -1218,12 +1455,38 @@ fn poll_network(
                         let fwd_east = cam_fwd_world.dot(east);
                         cam.pitch = fwd_up.asin();
                         cam.yaw = fwd_east.atan2(fwd_north);
+                        info!(
+                            player_sys_pos = ?(player_system_pos.x, player_system_pos.y, player_system_pos.z),
+                            planet_origin = ?(planet_origin.x, planet_origin.y, planet_origin.z),
+                            planet_local_pos = ?(planet_pos.x, planet_pos.y, planet_pos.z),
+                            up = ?(up.x, up.y, up.z),
+                            east = ?(east.x, east.y, east.z),
+                            north = ?(north.x, north.y, north.z),
+                            fwd_north, fwd_up, fwd_east,
+                            new_yaw = cam.yaw,
+                            new_pitch = cam.pitch,
+                            "ship→planet tangent projection"
+                        );
                     } else {
-                        // → System (EVA, or unknown target=255 which we
-                        // treat as System-like world-Y-up). Use world-Y-up
-                        // yaw/pitch directly from the world forward.
-                        cam.pitch = cam_fwd_world.y.asin();
-                        cam.yaw = cam_fwd_world.z.atan2(cam_fwd_world.x);
+                        // → System (EVA in vacuum) or fallback. No
+                        // gravity "up" to align to — inherit the ship's
+                        // body orientation so the view doesn't snap at
+                        // the hatch. `cam.yaw/pitch` stay BODY-LOCAL
+                        // (same values as inside the ship), and
+                        // `player.body_rotation` now carries the ship's
+                        // world orientation. camera.rs's SYSTEM branch
+                        // renders `body_rotation * head_fwd`, which
+                        // equals the pre-exit `ship_rotation * head_fwd`
+                        // by construction.
+                        if target_shard_type == voxeldust_core::client_message::shard_type::SYSTEM {
+                            player.body_rotation = ship_rot_used;
+                        } else {
+                            // Unknown/default — project to world-Y-up as
+                            // before; no body-frame to inherit.
+                            cam.pitch = cam_fwd_world.y.asin();
+                            cam.yaw = cam_fwd_world.z.atan2(cam_fwd_world.x);
+                            player.body_rotation = DQuat::IDENTITY;
+                        }
                     }
                     cam.pitch = cam.pitch.clamp(
                         -std::f64::consts::FRAC_PI_2 + 0.01,
@@ -1272,6 +1535,66 @@ fn poll_network(
                     // destination type is `pending_shard_type`, set above.
                     conn.secondary_shard_type = None;
                     player.is_piloting = false;
+
+                    // Eagerly promote the ship secondary's chunk source to
+                    // primary when boarding (target=SHIP). Without this the
+                    // interior render branch looks up the source via
+                    // `shard_seed`/own-ship-entity during the 18-40 ms
+                    // window between `Transitioning` and `Connected`, but:
+                    //   * `shard_seed` still holds the PREVIOUS primary's
+                    //     seed (updated only in `Connected`), so the
+                    //     HashMap lookup misses.
+                    //   * `ws.latest` may not yet contain the own-ship
+                    //     Ship entity (depends on arrival timing of the
+                    //     first ship WS with the injection), so the
+                    //     fallback via entities doesn't resolve either.
+                    // Consequence: the interior mesh renders nothing for
+                    // that window = boarding blink. Promote here and also
+                    // update `shard_seed` so every lookup during the gap
+                    // succeeds. `Connected`'s promotion code is idempotent
+                    // (it removes from `secondary_sources` if present) so
+                    // re-running it does no harm.
+                    if target_shard_type
+                        == voxeldust_core::client_message::shard_type::SHIP
+                    {
+                        let ship_seed = ws.latest.as_ref()
+                            .and_then(|w| w.entities.iter().find(|e| e.is_own
+                                && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship))
+                                .map(|e| e.entity_id));
+                        if let Some(seed) = ship_seed {
+                            // Check secondary_sources first (normal
+                            // observer case) then grace_sources (case
+                            // where SecondaryDisconnected just
+                            // grace-pinned the source a moment before
+                            // this Transitioning was processed — common
+                            // for ShardRedirect replacing the current
+                            // observer with the new primary).
+                            let sec_src = chunk_cache.secondary_sources.remove(&seed)
+                                .or_else(|| chunk_cache.grace_sources.get(&seed).copied());
+                            if let Some(sec_src) = sec_src {
+                                // Free any previous primary first (we
+                                // already grace-pinned the old primary
+                                // source above, so this only fires for
+                                // rare paths where primary_source was
+                                // non-None here).
+                                if let Some(old) = chunk_cache.primary_source.take() {
+                                    chunk_cache.cache.remove_source(old);
+                                }
+                                chunk_cache.primary_source = Some(sec_src);
+                                // Also grace-pin under the same key so
+                                // the external-ship entity path can find
+                                // this source while `is_own` filtering
+                                // skips the interior duplicate. Extends
+                                // the expiry (overwrite ok).
+                                chunk_cache.grace_sources.insert(seed, sec_src);
+                                chunk_cache.grace_expiries.insert(seed, grace_expiry);
+                                chunk_cache.primary_seed = Some(seed);
+                                conn.shard_seed = seed;
+                                info!(seed, source = sec_src.0,
+                                    "eagerly promoted ship secondary to primary at Transitioning");
+                            }
+                        }
+                    }
 
                     // Snap interpolation state from promoted WorldState so
                     // smooth_render_position has data on the very next frame.
@@ -1813,12 +2136,14 @@ impl ClientApp {
             secondary: None,
             last_primary: None,
             last_primary_until: None,
+            departed_ship: None,
         });
         ecs_app.insert_resource(LocalPlayer {
             position: DVec3::new(0.0, 1.0, 0.0),
             velocity: DVec3::ZERO,
             is_piloting: false,
             ship_rotation: DQuat::IDENTITY,
+            body_rotation: DQuat::IDENTITY,
         });
         ecs_app.insert_resource(RenderSmoothing {
             render_position: DVec3::new(0.0, 1.0, 0.0),
@@ -1887,6 +2212,8 @@ impl ClientApp {
             primary_source: None,
             primary_seed: None,
             secondary_sources: std::collections::HashMap::new(),
+            grace_sources: std::collections::HashMap::new(),
+            grace_expiries: std::collections::HashMap::new(),
         });
         ecs_app.insert_resource(FrameTime {
             count: 0,
@@ -2071,6 +2398,7 @@ impl ClientApp {
                 player.is_piloting,
                 conn.current_shard_type,
                 smooth.render_rotation,
+                player.body_rotation,
                 &kb.keys_held,
                 gpu.config.width,
                 gpu.config.height,
@@ -2211,6 +2539,38 @@ impl ClientApp {
                 sg_state.assignments.clone()
             };
             let mut chunk_cache = world_mut.resource_mut::<ClientChunkCacheRes>();
+
+            // Expire grace-pinned sources whose window has elapsed. Freed
+            // sources flow into `removed_sources` via `remove_source` and
+            // are picked up by the `drain_removed_sources` call below so
+            // GPU buffers are released in the same frame.
+            let now = Instant::now();
+            let expired_seeds: Vec<u64> = chunk_cache
+                .grace_expiries
+                .iter()
+                .filter_map(|(seed, deadline)| (now >= *deadline).then_some(*seed))
+                .collect();
+            for seed in expired_seeds {
+                chunk_cache.grace_expiries.remove(&seed);
+                if let Some(src) = chunk_cache.grace_sources.remove(&seed) {
+                    // Only free if the source isn't still being used as the
+                    // current primary (the promotion path keeps it in both
+                    // `primary_source` and `grace_sources`; only the grace
+                    // alias expires, the primary keeps ownership).
+                    let still_primary = chunk_cache.primary_source == Some(src);
+                    let still_secondary = chunk_cache
+                        .secondary_sources
+                        .values()
+                        .any(|&s| s == src);
+                    if !still_primary && !still_secondary {
+                        chunk_cache.cache.remove_source(src);
+                        info!(seed, source = src.0, "released grace-pinned source");
+                    } else {
+                        info!(seed, source = src.0, still_primary, still_secondary,
+                            "grace window expired, source retained by active role");
+                    }
+                }
+            }
 
             // Clean up GPU buffers for removed sources.
             for source in chunk_cache.drain_removed_sources() {
@@ -2689,6 +3049,22 @@ impl ClientApp {
             // sources map nearby-ship entity_id → their observer chunk source.
             world.resource::<ClientChunkCacheRes>().primary_source,
             &world.resource::<ClientChunkCacheRes>().secondary_sources,
+            // Grace-pinned sources keep ships renderable across the
+            // handoff seam (see ClientChunkCacheRes::grace_sources).
+            &world.resource::<ClientChunkCacheRes>().grace_sources,
+            // Departed ship: disabled — rendering the old ship as a
+            // system-space frozen mesh produced a "ghost ship" that
+            // drifted off at orbital velocity (~110 km/s) because the
+            // stashed world_position doesn't advance with the ship's
+            // physical motion. The entity-based path (push_ship_entity
+            // reading grace_ship_sources first) correctly renders the
+            // ship at its CURRENT authoritative position every frame,
+            // which is what we want. DepartedShip captured data is
+            // still kept in ServerWorldState in case we later want it
+            // for a specific edge case (e.g. the target shard doesn't
+            // yet carry the ship as an entity), but the render path is
+            // off.
+            None,
         );
 
         // Handle config panel actions.

@@ -931,6 +931,19 @@ fn drain_quic(
                 if data.ship_id != config.ship_id {
                     continue;
                 }
+                // Log rotation changes so we can verify the ship's
+                // authoritative orientation is actually reaching this
+                // shard when the player yaws (if exterior.rotation stays
+                // at identity, the system shard physics isn't producing
+                // torque from the pilot command).
+                if (exterior.rotation.dot(data.rotation) - 1.0).abs() > 1e-4 {
+                    info!(
+                        old = ?(exterior.rotation.x, exterior.rotation.y, exterior.rotation.z, exterior.rotation.w),
+                        new = ?(data.rotation.x, data.rotation.y, data.rotation.z, data.rotation.w),
+                        ang_vel = ?(data.angular_velocity.x, data.angular_velocity.y, data.angular_velocity.z),
+                        "ShipPositionUpdate rotation changed"
+                    );
+                }
                 exterior.position = data.position;
                 exterior.velocity = data.velocity;
                 exterior.rotation = data.rotation;
@@ -1818,6 +1831,14 @@ fn hull_exit_check(
 
         let player_local = DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
         let player_system_pos = exterior.position + exterior.rotation * player_local;
+        info!(
+            player = %player_name.0,
+            ship_pos = ?(exterior.position.x, exterior.position.y, exterior.position.z),
+            ship_rot = ?(exterior.rotation.x, exterior.rotation.y, exterior.rotation.z, exterior.rotation.w),
+            player_local = ?(player_local.x, player_local.y, player_local.z),
+            player_system_pos = ?(player_system_pos.x, player_system_pos.y, player_system_pos.z),
+            "hull_exit: computing exit pose"
+        );
 
         // Determine handoff target based on atmosphere state.
         if exterior.in_atmosphere {
@@ -2371,6 +2392,7 @@ fn broadcast_world_state(
     mechanicals: Query<&MechanicalState>,
     config: Res<ShipConfig>,
     external: Res<ExternalEntities>,
+    hull_bounds: Res<ShipHullBounds>,
 ) {
     let scene_stale = tick.0 > scene.last_update_tick + 20;
     let bodies: Vec<CelestialBodyData> = if scene_stale {
@@ -2427,14 +2449,46 @@ fn broadcast_world_state(
     // client can reconstruct world-space via `entity.position + origin`.
     use voxeldust_core::client_message::{EntityKind, LodTier, ObservableEntityData};
     let mut entities: Vec<ObservableEntityData> = Vec::with_capacity(
-        external.entities.len() + players.iter().count(),
+        external.entities.len() + players.iter().count() + 1,
     );
+    // Inject the own ship as an `is_own=true` Ship entity. The host system
+    // shard's AOI computation skips the observer itself (see
+    // `compute_aoi` self_entity_id filter), so the ship would otherwise be
+    // absent from this broadcast and the client would have no entity to
+    // render as exterior geometry during a shard-switch grace window
+    // (ship→planet exit) or to read the authoritative rotation from at
+    // transition time (camera orientation preservation). Position is zero
+    // in ship-local space; rotation / velocity are authoritative. Bounding
+    // radius is derived from the solid-block AABB — ships can span many
+    // chunks, so a stale default of 16 m would cull most of them out of
+    // the frustum test during the grace window.
+    let hull_min = hull_bounds.min.as_vec3();
+    let hull_max = hull_bounds.max.as_vec3();
+    let hull_half = (hull_max - hull_min) * 0.5;
+    let ship_bounding_radius = hull_half.length().max(16.0);
+    entities.push(ObservableEntityData {
+        entity_id: config.ship_id,
+        kind: EntityKind::Ship,
+        position: DVec3::ZERO,
+        rotation: exterior.rotation,
+        velocity: exterior.velocity,
+        bounding_radius: ship_bounding_radius,
+        lod_tier: LodTier::Full,
+        shard_id: config.shard_id.0,
+        shard_type: voxeldust_core::shard_types::ShardType::Ship as u8,
+        is_own: true,
+        name: String::new(),
+        health: 100.0,
+        shield: 100.0,
+    });
     for e in &external.entities {
         let mut entity = e.clone();
         entity.position = e.position - exterior.position;
-        // If this entry is our own ship, mark it — client uses this to bind camera.
+        // Belt-and-suspenders: if the system shard ever does send the own
+        // ship in AOI (e.g. during a handoff window), dedupe so we don't
+        // emit two Ship entries with the same entity_id.
         if matches!(entity.kind, EntityKind::Ship) && entity.entity_id == config.ship_id {
-            entity.is_own = true;
+            continue;
         }
         entities.push(entity);
     }

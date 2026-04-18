@@ -3828,12 +3828,29 @@ fn eva_physics(
 
         let grav = compute_grav(pos.0);
 
-        // Jetpack thrust: convert movement input to world-space thrust.
-        // Movement is relative to player orientation.
+        // Jetpack thrust: body-relative FPS convention. The player's
+        // current view heading (look_yaw) rotates a horizontal
+        // forward/right pair inside the body frame; body-up is
+        // constant relative to body. Then the whole basis is rotated
+        // to world by the EVA body quaternion.
+        //
+        // Convention matches the client camera body-frame:
+        //   local_fwd  = (cos(yaw), 0, sin(yaw))          at pitch=0
+        //   local_right = (-sin(yaw), 0, cos(yaw))
+        //   local_up   = Y
+        // World = body_rot * local.
+        //
+        // Pitch is intentionally ignored for horizontal WASD — looking
+        // up with the mouse shouldn't shoot you into space when you
+        // press W; Space/Ctrl are the explicit vertical axis. This
+        // matches the pre-fix behavior users learned.
         let (sin_y, cos_y) = (input.look_yaw as f64).sin_cos();
-        let fwd = DVec3::new(cos_y, 0.0, sin_y);
-        let right = DVec3::new(-sin_y, 0.0, cos_y);
-        let up = DVec3::Y;
+        let local_fwd = DVec3::new(cos_y, 0.0, sin_y);
+        let local_right = DVec3::new(-sin_y, 0.0, cos_y);
+        let local_up = DVec3::Y;
+        let fwd = rot.0 * local_fwd;
+        let right = rot.0 * local_right;
+        let up = rot.0 * local_up;
 
         let thrust_dir = fwd * input.movement[2] as f64
             + right * input.movement[0] as f64

@@ -82,6 +82,25 @@ struct BlockShipTransform {
     source: ChunkSourceId,
 }
 
+/// View of a ship the client just left (SHIP → !SHIP transition) that
+/// should be rendered in absolute system-space during the grace window,
+/// independent of the current primary's coordinate frame. This is what
+/// makes the exit seamless: the ship's system-space position doesn't
+/// change when the client's "primary shard" does, so rendering against
+/// it is blink-free.
+#[derive(Clone, Copy)]
+pub struct DepartedShipView {
+    pub source: ChunkSourceId,
+    pub world_position: DVec3,
+    pub rotation: DQuat,
+    pub bounding_radius: f32,
+    /// Absolute system-space camera position, used to compute the offset
+    /// for rendering. The caller must compute this consistently with
+    /// whatever frame the current shard's `cam_system_pos` is in —
+    /// typically: SHIP → already system-space; PLANET → add `ws.origin`.
+    pub cam_world: DVec3,
+}
+
 /// Intermediate state for the render pass: object counts and special indices.
 struct RenderObjects {
     object_count: usize,
@@ -106,6 +125,8 @@ fn build_uniforms(
     ship_rotation: DQuat,
     primary_source: Option<ChunkSourceId>,
     secondary_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
+    grace_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
+    departed_ship: Option<DepartedShipView>,
 ) -> RenderObjects {
     let mut object_count = 0usize;
     let mut inside_sphere_indices: Vec<usize> = Vec::new();
@@ -239,26 +260,47 @@ fn build_uniforms(
         std::collections::HashSet::new();
     let mut block_ships: Vec<BlockShipTransform> = Vec::new();
 
+    use voxeldust_core::client_message::EntityKind;
     // Interior ship (player is inside — shard_type 2).
-    // Prefer `primary_source` (fresh ship-shard chunks). When primary is still
-    // empty (typical during the ~100 ms between a ShardRedirect-driven TCP
-    // reconnect and the first new ChunkSnapshot), fall back to the chunks
-    // we streamed as a secondary observer before boarding — they're already
-    // on GPU, keyed by the ship's own_id in `secondary_ship_sources`.
+    // Resolve the ship's chunk source across the boarding seam: the client
+    // may be in any of three states simultaneously:
+    //   * primary_source is set (steady state after Connected) — use it.
+    //   * primary_source is None but the ship is still reachable via its
+    //     secondary observer source (post-Transitioning, pre-Connected gap).
+    //   * same but the source was moved into grace after role change.
+    // `shard_seed` flips one tick after `current_shard_type` (Connected vs
+    // Transitioning), so during the boarding gap it still holds the PREV
+    // primary's seed. Prefer the authoritative id carried on the own-ship
+    // entity in `ws` / `secondary_ws` — that matches exactly what boarding
+    // promoted. Fall back to `shard_seed` for the steady state.
     if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
+        let own_ship_id: Option<u64> = ws
+            .and_then(|w| w.entities.iter().find(|e| e.is_own
+                && matches!(e.kind, EntityKind::Ship))
+                .map(|e| e.entity_id))
+            .or_else(|| secondary_ws
+                .and_then(|w| w.entities.iter().find(|e| e.is_own
+                    && matches!(e.kind, EntityKind::Ship))
+                    .map(|e| e.entity_id)));
+        let resolve_id = own_ship_id.unwrap_or(shard_seed);
+        // Same preference as the external-ship path: grace-pinned before
+        // secondary, because a freshly-created secondary source may be
+        // waiting on chunk snapshots (renders empty ship = blink). The
+        // grace source is the ship's previous primary/secondary that
+        // was just role-switched — its chunks are already on the GPU.
         let source = primary_source
-            .or_else(|| secondary_ship_sources.get(&shard_seed).copied());
+            .or_else(|| grace_ship_sources.get(&resolve_id).copied())
+            .or_else(|| secondary_ship_sources.get(&resolve_id).copied());
         if let Some(source) = source {
             let ship_rot_mat = Mat4::from_quat(ship_rotation.as_quat());
             let origin_local = -(player_position + DVec3::new(0.0, EYE_HEIGHT, 0.0));
             let ship_origin_offset = (ship_rotation * origin_local).as_vec3();
             let base_transform = Mat4::from_translation(ship_origin_offset) * ship_rot_mat;
             block_ships.push(BlockShipTransform { base_transform, source });
-            ship_ids_with_meshes.insert(shard_seed);
+            ship_ids_with_meshes.insert(resolve_id);
         }
     }
 
-    use voxeldust_core::client_message::EntityKind;
     // Render every ship as its actual block mesh — no LOD / proxy / sphere
     // substitution at any distance. If a ship's observer source isn't
     // connected yet or its chunks haven't arrived, we render nothing for
@@ -277,11 +319,48 @@ fn build_uniforms(
         {
             return;
         }
-        let Some(&source) = secondary_ship_sources.get(&e.entity_id) else {
-            return; // observer not connected yet — chunks arriving soon
+        // Source resolution: prefer grace-pinned (old primary / old
+        // secondary whose chunks are already fully uploaded) over a
+        // freshly-allocated secondary that may have zero chunks
+        // populated yet. Observed bug: on SHIP→SYSTEM exit, the system
+        // shard pre-connects the ship as a NEW secondary — a source
+        // entry is created immediately but the chunk snapshots take
+        // ~30-90 ms to arrive. During that window, falling back to
+        // `secondary_ship_sources` picks a source with zero chunks and
+        // the ship renders invisibly — the "blink." Checking grace
+        // FIRST keeps the fully-populated old source active until the
+        // grace window expires, by which time the new secondary has
+        // finished downloading and both paths agree.
+        let Some(source) = grace_ship_sources
+            .get(&e.entity_id)
+            .copied()
+            .or_else(|| secondary_ship_sources.get(&e.entity_id).copied())
+        else {
+            return;
         };
+        // System-space offset. `origin + e.position` is always the
+        // entity's absolute system-space position (ship-shard shifts
+        // entities by `-exterior.position`, planet-shard by
+        // `-planet_pos`, so the sum undoes the shift). `cam.cam_system_pos`
+        // is system-space on SHIP (camera.rs adds origin) but
+        // shard-local on PLANET/SYSTEM — so we promote to system-space
+        // here by adding origin when the current shard is not SHIP. On
+        // SYSTEM the origin is 0 (no-op), on PLANET it's the planet's
+        // system-space position (the missing piece that caused the
+        // exit-to-planet blink: the ship rendered at `system_space -
+        // planet_local` which was on the other side of the solar system
+        // and always frustum-culled).
         let ship_system_pos = origin + e.position;
-        let offset = (ship_system_pos - cam.cam_system_pos).as_vec3();
+        let cam_system = if current_shard_type == voxeldust_core::client_message::shard_type::SHIP {
+            cam.cam_system_pos
+        } else {
+            // Use the PRIMARY WS's origin for cam frame. When ws is
+            // None (first frame after transition before any WS arrived)
+            // fall back to the passed `origin` which at least matches
+            // the entity we're computing for.
+            ws.map(|w| w.origin).unwrap_or(origin) + cam.cam_system_pos
+        };
+        let offset = (ship_system_pos - cam_system).as_vec3();
         if !cam.frustum.contains_sphere(offset, e.bounding_radius.max(16.0) as f32) { return; }
         let ship_rot_mat = Mat4::from_quat(e.rotation.as_quat());
         let base_transform = Mat4::from_translation(offset) * ship_rot_mat;
@@ -306,6 +385,39 @@ fn build_uniforms(
         for e in &grace_ws.entities {
             push_ship_entity(&mut block_ships, &mut ship_ids_with_meshes, e, grace_ws.origin);
         }
+    }
+
+    // Departed ship: rendered in ABSOLUTE SYSTEM-SPACE so the ship stays
+    // on screen during the exit grace window regardless of what shard
+    // frame the new primary's camera is in. The entity-based paths above
+    // all use `origin + e.position` which resolves to system-space only
+    // when origin is in system-space AND cam_system_pos is in system-space
+    // — that invariant breaks on planet-shard-primary where
+    // `cam_system_pos` is planet-local. This path sidesteps the frame
+    // mismatch by receiving the ship's already-system-space pose and
+    // the caller-resolved system-space camera position.
+    if let Some(ref dep) = departed_ship {
+        let offset = (dep.world_position - dep.cam_world).as_vec3();
+        let dist = offset.length();
+        let in_frustum = cam.frustum.contains_sphere(offset, dep.bounding_radius.max(16.0));
+        if in_frustum {
+            let ship_rot_mat = Mat4::from_quat(dep.rotation.as_quat());
+            let base_transform = Mat4::from_translation(offset) * ship_rot_mat;
+            block_ships.push(BlockShipTransform {
+                base_transform,
+                source: dep.source,
+            });
+        }
+        // Diagnostic: one line per frame during the grace window
+        // (~90 lines for the 1.5 s window — acceptable until verified).
+        tracing::info!(
+            source = dep.source.0,
+            offset = ?(offset.x, offset.y, offset.z),
+            dist,
+            bounding_radius = dep.bounding_radius,
+            in_frustum,
+            "departed-ship render"
+        );
     }
 
     // Phase 2: LOD-sphere / avatar entity rendering. Runs AFTER block_ships
@@ -658,6 +770,8 @@ pub fn render_frame(
     sub_grid_assignments: &std::collections::HashMap<glam::IVec3, u32>,
     primary_source: Option<ChunkSourceId>,
     secondary_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
+    grace_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
+    departed_ship: Option<DepartedShipView>,
 ) -> hud::ConfigPanelAction {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -666,7 +780,7 @@ pub fn render_frame(
     let ro = build_uniforms(
         uniform_data, cam, latest_world_state, secondary_world_state, grace_fallback_world_state,
         interpolated_bodies, current_shard_type, shard_seed, player_position, ship_rotation,
-        primary_source, secondary_ship_sources,
+        primary_source, secondary_ship_sources, grace_ship_sources, departed_ship,
     );
 
     // Diagnostic: log ship rendering state every 40 frames (~0.7s at 60fps)
@@ -853,7 +967,7 @@ pub fn render_frame(
         let ro = build_uniforms(
             uniform_data, cam, latest_world_state, secondary_world_state, grace_fallback_world_state,
             interpolated_bodies, current_shard_type, shard_seed, player_position, ship_rotation,
-            primary_source, secondary_ship_sources,
+            primary_source, secondary_ship_sources, grace_ship_sources, departed_ship,
         );
         if ro.object_count > 0 {
             gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::cast_slice(&uniform_data[..ro.object_count]));
