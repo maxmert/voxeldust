@@ -104,10 +104,21 @@ pub struct GalaxyHandoffContext {
 }
 
 /// Confirmation sent back from target shard to source shard.
+///
+/// `spawn_pose` carries the target shard's **actual** spawn pose. This
+/// may differ from the source's `PlayerHandoff.position` because the
+/// target uses its CURRENT ship pose (not the pose at handoff-creation
+/// time, which is ~40-100 ms stale due to inter-shard network latency)
+/// when computing `spawn = ship.pos_current + ship.rot_current * player_local`.
+///
+/// When the source shard forwards this to the client via `ShardRedirect`,
+/// the client renders its first post-transition frame exactly where the
+/// target broadcasts the player — zero drift, zero client prediction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffAccepted {
     pub session_token: SessionToken,
     pub target_shard: ShardId,
+    pub spawn_pose: Option<SpawnPose>,
 }
 
 /// Position update sent from source shard to target shard for 15 frames
@@ -123,8 +134,10 @@ pub struct GhostUpdate {
 }
 
 /// Redirect message sent to client, telling it to reconnect to a new shard.
-/// Used by the gateway for initial routing (pre-game join). Also kept as the
-/// fallback path if the destination shard has no pre-opened secondary.
+/// Used by the gateway for initial routing (pre-game join). Also used by
+/// shards for in-game transitions (exit/board/launch/land) where the
+/// `spawn_pose` fields carry the authoritative first-frame camera pose the
+/// client should render at.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardRedirect {
     pub session_token: SessionToken,
@@ -134,6 +147,35 @@ pub struct ShardRedirect {
     /// Shard type of the destination (0=Planet, 1=System, 2=Ship, 3=Galaxy).
     /// `255` = unknown/legacy (falls back to last-connected secondary's type).
     pub target_shard_type: u8,
+    /// Authoritative post-transition pose, in destination-shard-local
+    /// coordinates (system-space for SYSTEM/GALAXY, planet-local for
+    /// PLANET, ship-local for SHIP). `None` for gateway routing where
+    /// no natural spawn pose exists (client uses the JoinResponse
+    /// position from the destination shard instead).
+    pub spawn_pose: Option<SpawnPose>,
+}
+
+/// Authoritative spawn pose carried in a `ShardRedirect` for in-game
+/// transitions. The source shard computes these using the exact same
+/// formula the target will use to spawn the player, so the client's
+/// first rendered frame post-transition matches the server's authoritative
+/// spawn position with zero client-side prediction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnPose {
+    /// System-space position on the destination shard. For destination
+    /// types that render in system-space (SYSTEM, GALAXY) this is used
+    /// directly as `smooth.render_position + destination.ws.origin`.
+    /// For local-frame destinations (PLANET, SHIP) it is converted to
+    /// local coordinates by subtracting the destination `ws.origin`.
+    pub position: DVec3,
+    /// Initial body/look rotation. For EVA exit this is the ship's
+    /// rotation at exit (so body-frame yaw/pitch remain visually
+    /// continuous). For boarding, identity (ship-local frame).
+    pub rotation: DQuat,
+    /// Inherited velocity (ship's velocity on exit; zero on board).
+    /// Used to prime the client's smoothing so the handoff blend does
+    /// not visibly decelerate the camera during the first ~150 ms.
+    pub velocity: DVec3,
 }
 
 /// Seamless handoff: client promotes an existing secondary connection to primary.

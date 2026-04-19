@@ -26,6 +26,11 @@ pub enum NetEvent {
         game_time: f64,
         system_seed: u64,
         galaxy_seed: u64,
+        /// Our player's id on this shard. Client must filter
+        /// `WorldState.players[]` by this to avoid picking up someone
+        /// else's position (system-shard EVA broadcasts include all
+        /// players, not just the recipient).
+        player_id: u64,
     },
     WorldState(WorldStateData),
     /// A secondary shard has been pre-connected for rendering.
@@ -45,7 +50,16 @@ pub enum NetEvent {
         seed: u64,
     },
     /// WorldState from a secondary shard (for composite rendering).
-    SecondaryWorldState(WorldStateData),
+    /// `shard_type` identifies which secondary the WS came from —
+    /// necessary because multiple secondaries (SYSTEM, PLANET) can be
+    /// connected simultaneously and their WorldStates interleave. The
+    /// client uses this to route the WS to the correct per-type slot
+    /// so Transitioning's `ws.secondary.take()` picks the secondary
+    /// matching the redirect target, not whichever sent last.
+    SecondaryWorldState {
+        shard_type: u8,
+        ws: WorldStateData,
+    },
     /// Galaxy world state from secondary UDP (warp travel position for star parallax).
     GalaxyWorldState(voxeldust_core::client_message::GalaxyWorldStateData),
     /// Block signal config state from server (config UI).
@@ -77,8 +91,15 @@ pub enum NetEvent {
     /// `target_shard_type` disambiguates which open secondary to promote when
     /// more than one is live (e.g., Ship + Galaxy secondaries). `255` = legacy
     /// redirect with no type hint (falls back to last-connected secondary).
+    ///
+    /// `spawn_pose` (when present) carries the authoritative
+    /// post-transition camera pose, computed server-side. The client uses
+    /// this directly for its first rendered frame after the primary switch,
+    /// so there is zero client-side prediction of position/rotation across
+    /// the handoff.
     Transitioning {
         target_shard_type: u8,
+        spawn_pose: Option<voxeldust_core::handoff::SpawnPose>,
     },
     Disconnected(String),
 }
@@ -160,6 +181,7 @@ pub async fn run_network(
             game_time: jr.game_time,
             system_seed: jr.system_seed,
             galaxy_seed: jr.galaxy_seed,
+            player_id: jr.player_id,
         });
 
         // Set up UDP for this shard.
@@ -433,6 +455,7 @@ pub async fn run_network(
                                 }
 
                                 let sec_event_tx = event_tx_tcp.clone();
+                                let sec_shard_type = pc.shard_type;
                                 let mut sec_cancel_own = sec_cancel_tx.subscribe();
                                 // Scene-context secondaries (System/Galaxy) bind their
                                 // second cancel source to `session_cancel_tx` so they
@@ -501,7 +524,10 @@ pub async fn run_network(
                                                         match ServerMsg::deserialize(&decoded) {
                                                             Ok(ServerMsg::WorldState(ws)) => {
                                                                 let _ = sec_event_tx.send(
-                                                                    NetEvent::SecondaryWorldState(ws));
+                                                                    NetEvent::SecondaryWorldState {
+                                                                        shard_type: sec_shard_type,
+                                                                        ws,
+                                                                    });
                                                             }
                                                             Ok(ServerMsg::GalaxyWorldState(gws)) => {
                                                                 let _ = sec_event_tx.send(
@@ -585,6 +611,7 @@ pub async fn run_network(
                     );
                     let _ = event_tx.send(NetEvent::Transitioning {
                         target_shard_type: r.target_shard_type,
+                        spawn_pose: r.spawn_pose.clone(),
                     });
                     // Cancel all tasks for current shard.
                     let _ = cancel_tx.send(());

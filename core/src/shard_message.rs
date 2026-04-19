@@ -448,11 +448,29 @@ impl ShardMsg {
             }
 
             ShardMsg::HandoffAccepted(a) => {
+                let (has_pose, pose_pos, pose_rot, pose_vel) = match &a.spawn_pose {
+                    Some(sp) => (
+                        true,
+                        to_fb_vec3d(&sp.position),
+                        to_fb_quatd(&sp.rotation),
+                        to_fb_vec3d(&sp.velocity),
+                    ),
+                    None => (
+                        false,
+                        to_fb_vec3d(&glam::DVec3::ZERO),
+                        to_fb_quatd(&glam::DQuat::IDENTITY),
+                        to_fb_vec3d(&glam::DVec3::ZERO),
+                    ),
+                };
                 let accepted = fb::HandoffAccepted::create(
                     &mut builder,
                     &fb::HandoffAcceptedArgs {
                         session_token: a.session_token.0,
                         target_shard_id: a.target_shard.0,
+                        has_spawn_pose: has_pose,
+                        spawn_position: Some(&pose_pos),
+                        spawn_rotation: Some(&pose_rot),
+                        spawn_velocity: Some(&pose_vel),
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -1104,9 +1122,23 @@ impl ShardMsg {
                     .payload_as_handoff_accepted()
                     .ok_or(MessageError::MissingField("HandoffAccepted payload"))?;
 
+                let spawn_pose = if a.has_spawn_pose() {
+                    match (a.spawn_position(), a.spawn_rotation(), a.spawn_velocity()) {
+                        (Some(p), Some(r), Some(v)) => Some(handoff::SpawnPose {
+                            position: from_fb_vec3d(p),
+                            rotation: from_fb_quatd(r),
+                            velocity: from_fb_vec3d(v),
+                        }),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
                 Ok(ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
                     session_token: SessionToken(a.session_token()),
                     target_shard: ShardId(a.target_shard_id()),
+                    spawn_pose,
                 }))
             }
 
@@ -1616,6 +1648,7 @@ mod tests {
         let msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
             session_token: SessionToken(111),
             target_shard: ShardId(222),
+            spawn_pose: None,
         });
         let bytes = msg.serialize();
         let decoded = ShardMsg::deserialize(&bytes).unwrap();

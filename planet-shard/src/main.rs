@@ -674,9 +674,13 @@ fn process_handoffs(
         });
 
         // Send HandoffAccepted back to the relay system shard.
+        // TODO(phase-A-surface): populate spawn_pose with the planet-local
+        // authoritative landing position. For now left None — client uses
+        // the JoinResponse position when arriving at a planet shard.
         let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
             session_token: h.session_token,
             target_shard: config.shard_id,
+            spawn_pose: None,
         });
         let relay_shard = event.relay_shard;
         if let Ok(reg) = bridge.peer_registry.try_read() {
@@ -913,12 +917,17 @@ fn process_handoff_accepted(
         // Send ShardRedirect to client.
         if let Ok(reg) = bridge.peer_registry.try_read() {
             if let Some(peer_info) = reg.get(target_shard) {
+                // TODO(phase-A-reentry): populate spawn_pose with the
+                // ship-local spawn position for planet→ship re-entry.
+                // Left None for now — client uses the ship shard's
+                // JoinResponse position.
                 let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
                     session_token: session,
                     target_tcp_addr: peer_info.endpoint.tcp_addr.to_string(),
                     target_udp_addr: peer_info.endpoint.udp_addr.to_string(),
                     shard_id: target_shard,
                     target_shard_type: peer_info.shard_type as u8,
+                    spawn_pose: None,
                 });
                 let cr = bridge.client_registry.clone();
                 tokio::spawn(async move {

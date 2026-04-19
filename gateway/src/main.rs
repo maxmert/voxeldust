@@ -113,6 +113,9 @@ async fn handle_client(
                 shard_id: session.last_shard_id,
                 // Gateway always routes to a ship shard on session resume.
                 target_shard_type: voxeldust_core::shard_types::ShardType::Ship as u8,
+                // Gateway routing has no natural spawn pose — client uses
+                // the JoinResponse position from the destination shard.
+                spawn_pose: None,
             });
 
             send_server_msg(&mut stream, &redirect).await?;
@@ -146,6 +149,9 @@ async fn handle_client(
         shard_id: shard_info.id,
         // Gateway routes fresh players to a ship shard (their ship).
         target_shard_type: voxeldust_core::shard_types::ShardType::Ship as u8,
+        // Gateway routing has no natural spawn pose — client uses
+        // the JoinResponse position from the destination shard.
+        spawn_pose: None,
     });
 
     send_server_msg(&mut stream, &redirect).await?;

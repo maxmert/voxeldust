@@ -256,12 +256,31 @@ struct ConnectionInfo {
     pending_shard_type: Option<u8>,
     system_seed: u64,
     galaxy_seed: u64,
+    /// Our player's id (session token) on the current primary shard.
+    /// Set from `JoinResponse.player_id` on every `Connected`. The
+    /// WorldState handler MUST filter `players[]` by this — system-
+    /// shard EVA broadcasts include every EVA player in the shard,
+    /// not just the recipient, so `players.first()` would pick an
+    /// arbitrary other player's position and snap the camera there.
+    own_player_id: u64,
 }
 
 #[derive(Resource)]
 struct ServerWorldState {
     latest: Option<WorldStateData>,
+    /// Last-received secondary WorldState, ANY shard type. Kept for
+    /// backward-compat with code paths that expect a single slot.
+    /// For Transitioning promotion, prefer `secondary_by_type`.
     secondary: Option<WorldStateData>,
+    /// WorldState per secondary shard type. Multiple secondaries can
+    /// be connected at once (SYSTEM + PLANET while flying in
+    /// atmosphere), each broadcasting at ~20 Hz; without per-type
+    /// storage, `secondary` gets overwritten non-deterministically and
+    /// Transitioning promotes the wrong shard — e.g. on Ship→System
+    /// exit, `ws.secondary` might be the PLANET WS (origin ≈ 3.58 Gm)
+    /// instead of SYSTEM (origin = 0), and `planet_local = live_ship_origin
+    /// - planet_pos = 0` → camera rendered at the star.
+    secondary_by_type: std::collections::HashMap<u8, WorldStateData>,
     /// Last-known primary WorldState, stashed on a hard transition so the
     /// renderer can keep drawing ships/players/entities from it for a short
     /// grace period instead of showing a blank world until the new primary's
@@ -273,6 +292,10 @@ struct ServerWorldState {
     /// cleared when expiry passes. Co-located with `last_primary` because
     /// they share the same grace window and lifecycle.
     departed_ship: Option<DepartedShipData>,
+    /// If set, force per-frame diagnostic logging until this instant.
+    /// Set by `Transitioning` for a short window so we capture exactly
+    /// what the renderer saw during the blink.
+    trace_render_until: Option<Instant>,
 }
 
 /// Grace period during which `last_primary` is rendered after a hard transition.
@@ -423,6 +446,23 @@ struct RenderSmoothing {
     handoff_start_world: Option<DVec3>,
     /// Instant at which the handoff blend started.
     handoff_started_at: Instant,
+    /// Ship/player velocity (m/s, system-space) at the moment of the primary
+    /// switch. `handoff_start_world` is extrapolated by this velocity over
+    /// the blend duration so the reference point moves WITH the ship's
+    /// orbital motion (110 km/s at planet orbital velocity). Without this
+    /// the camera would appear to lag behind the ship by `velocity *
+    /// blend_time` (~16.5 km over 150 ms) as the authoritative target
+    /// position in the new shard advances each tick. Purely dead-reckoning
+    /// of an authoritative server-provided velocity — no client prediction
+    /// of position is involved.
+    handoff_velocity: DVec3,
+
+    /// Post-transition anchor (legacy). Not used for re-anchoring
+    /// anymore — server-authoritative spawn positions in the
+    /// ShardRedirect/handoff make client-side prediction unnecessary.
+    /// Kept only to track whether a Transitioning snap is still the
+    /// sole snapshot in the buffer.
+    exit_ship_anchor: Option<DVec3>,
 
     // --- Galaxy warp (separate interpolation, kept for warp travel) ---
     galaxy_render_position: DVec3,
@@ -695,8 +735,20 @@ fn poll_network(
                     warp.target_star_index = None;
                 }
 
-                // Insert snapshot into ring buffer for tick-based interpolation.
-                if let Some(p) = world_state.players.first() {
+                // Insert snapshot into ring buffer for tick-based
+                // interpolation. MUST filter by `own_player_id`, not
+                // `first()`: system-shard EVA broadcasts include every
+                // EVA player in the shard, so `first()` can return a
+                // totally different player and snap our camera to them.
+                // When our player hasn't been spawned server-side yet
+                // (the handoff is still in flight), `find()` returns
+                // None and we intentionally insert no snapshot,
+                // leaving the Transitioning fallback snap intact so
+                // the post-transition anchor code can keep the camera
+                // on the ship.
+                if let Some(p) = world_state.players.iter()
+                    .find(|p| p.player_id == conn.own_player_id)
+                {
                     let tick = world_state.tick;
                     let new_pos = p.position;
 
@@ -881,7 +933,8 @@ fn poll_network(
                 ws.last_primary = None;
                 ws.last_primary_until = None;
             }
-            NetEvent::Connected { shard_type, seed, reference_position, reference_rotation, system_seed, galaxy_seed, .. } => {
+            NetEvent::Connected { shard_type, seed, reference_position, reference_rotation, system_seed, galaxy_seed, player_id, .. } => {
+                conn.own_player_id = player_id;
                 conn.current_shard_type = shard_type;
                 // New primary is live — pending flip is satisfied. Clear so
                 // the WorldState-level fallback flip doesn't fire redundantly.
@@ -1045,8 +1098,13 @@ fn poll_network(
                     info!(seed, source = src.0, "grace-pinned secondary source on disconnect");
                 }
             }
-            NetEvent::SecondaryWorldState(secondary_ws) => {
-                ws.secondary = Some(secondary_ws);
+            NetEvent::SecondaryWorldState { shard_type, ws: secondary_ws } => {
+                // Store by shard_type so Transitioning can promote the
+                // correct secondary for the redirect target. Also keep
+                // the single-slot `ws.secondary` updated for rendering
+                // code that uses whichever is most recent.
+                ws.secondary = Some(secondary_ws.clone());
+                ws.secondary_by_type.insert(shard_type, secondary_ws);
             }
             NetEvent::GalaxyWorldState(gws) => {
                 // Only process while a galaxy secondary is the active type.
@@ -1193,8 +1251,24 @@ fn poll_network(
                 // Sub-grid assignments for secondary ships — store for rendering.
                 let _ = (seed, data); // TODO: apply to secondary source sub-grid state
             }
-            NetEvent::Transitioning { target_shard_type } => {
-                info!(target_shard_type, "transitioning to new shard...");
+            NetEvent::Transitioning { target_shard_type, spawn_pose } => {
+                info!(
+                    target_shard_type,
+                    has_spawn_pose = spawn_pose.is_some(),
+                    spawn_pos = ?spawn_pose.as_ref().map(|sp| (sp.position.x as i64, sp.position.y as i64, sp.position.z as i64)),
+                    "transitioning to new shard..."
+                );
+                // Force per-frame render diagnostics for 500 ms so we
+                // capture the transition window (the 40-frame sampled
+                // diagnostic misses the first ~200 ms).
+                {
+                    use std::sync::atomic::Ordering;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    render::TRACE_RENDER_UNTIL_MS.store(now_ms + 500, Ordering::Relaxed);
+                }
                 // Defer the `current_shard_type` flip. Interior-ship render,
                 // block raycast, and other gates keep seeing the OLD shard
                 // type until the new primary's first WorldState with our
@@ -1307,7 +1381,21 @@ fn poll_network(
                 warp.galaxy_rotation = None;
                 warp.target_star_index = None;
 
-                if ws.secondary.is_some() {
+                // Pick the secondary WS that matches the redirect target.
+                // Fall back to any available `ws.secondary` if no per-type
+                // match (shouldn't happen in practice but keeps the code
+                // robust for legacy/unknown target types).
+                let target_secondary = if target_shard_type != 255 {
+                    ws.secondary_by_type.remove(&target_shard_type)
+                        .or_else(|| ws.secondary.clone())
+                } else {
+                    ws.secondary.clone()
+                };
+                if let Some(matched_sec) = target_secondary.as_ref() {
+                    info!(target_shard_type, ws_origin = ?(matched_sec.origin.x as i64, matched_sec.origin.y as i64, matched_sec.origin.z as i64),
+                        "Transitioning: picked matching secondary");
+                }
+                if target_secondary.is_some() {
                     // Seamless: promote secondary to primary.
                     info!("seamless transition — secondary data available");
 
@@ -1493,6 +1581,13 @@ fn poll_network(
                         std::f64::consts::FRAC_PI_2 - 0.01,
                     );
 
+                    // Capture the SOURCE shard type before the flip at line
+                    // below overwrites `conn.current_shard_type`. Used to
+                    // decide whether `smooth.render_position` is in
+                    // ship-local (needs rotation) or system-space (already
+                    // world-aligned) coordinates.
+                    let source_shard_type = conn.current_shard_type;
+
                     // Flip `current_shard_type` immediately for seamless
                     // transitions: the camera + rendering code branches on
                     // it, and having it stale during the promotion window
@@ -1508,15 +1603,80 @@ fn poll_network(
 
                     // Save ship-local state before overwriting — needed as
                     // fallback if the secondary WS doesn't include the player.
+                    // With `smooth.ship_origin` now tracking `ws.latest.origin`
+                    // directly (no interp lag on SHIP shard — see
+                    // `smooth_render_position`), this is the authoritative
+                    // anchor camera.rs was using to render `cam_system_pos`
+                    // on the last frame, so `start_world` matches the pixel
+                    // position the user last saw.
                     let prev_ship_origin = smooth.ship_origin;
                     let prev_render_pos = smooth.render_position;
+                    // On SHIP source shard, `prev_render_pos` is the player's
+                    // SHIP-LOCAL position (un-rotated). The actual rendered
+                    // camera applies the ship's rotation: `cam_sys = ws.origin
+                    // + ship_rot * player_local`. If we compute `start_world`
+                    // without that rotation, we're 10+ km off from the camera
+                    // that was actually on screen last frame.
+                    //
+                    // For SYSTEM/PLANET source shards `prev_render_pos` is
+                    // already the player's system-space (or planet-local)
+                    // world position, so no rotation is applied — multiplying
+                    // a gigameter-scale vector by a non-identity quaternion
+                    // would teleport the camera across the star system.
+                    let prev_render_pos_world = if source_shard_type
+                        == voxeldust_core::client_message::shard_type::SHIP
+                    {
+                        smooth.render_rotation * prev_render_pos
+                    } else {
+                        prev_render_pos
+                    };
                     // Capture pre-switch camera world position for the 150 ms
                     // handoff blend. smooth_render_position will lerp the
                     // rendered camera from this world-space anchor toward the
                     // new primary's authoritative position so the view doesn't
                     // snap on primary switch.
-                    smooth.handoff_start_world = Some(prev_ship_origin + prev_render_pos);
-                    smooth.handoff_started_at = Instant::now();
+                    //
+                    // When the redirect carries a server-authoritative
+                    // `spawn_pose`, the blend's TARGET is the authoritative
+                    // spawn position. Starting from the last-rendered camera
+                    // position (`prev_ship_origin + prev_render_pos_world`)
+                    // and lerping toward the server's spawn over 150 ms
+                    // masks the ~1-tick ship-pose drift between client and
+                    // server without any client-side prediction.
+                    // When the redirect carries a server-authoritative
+                    // `spawn_pose` (computed by the target shard using its
+                    // CURRENT pose), blending from the source's stale
+                    // position to the target's authoritative position
+                    // introduces a visible ~5 km "catch-up" sweep over
+                    // 150 ms — the gap is the inter-shard latency drift
+                    // (source shard sees itself 50-100 ms stale because it
+                    // receives position updates from the target at 20 Hz).
+                    // The gap is inherent at the protocol level; blending
+                    // over it just makes the lag into visible motion.
+                    //
+                    // Snap the camera directly to the authoritative target
+                    // instead. The snapped path already wrote the target's
+                    // position into `smooth.render_position`, so not
+                    // activating the blend means the first post-transition
+                    // frame renders exactly there. The one-frame position
+                    // discontinuity (~5 km) is smaller and less obvious
+                    // than a 150 ms lerp that visibly traverses 18+ km.
+                    if spawn_pose.is_some() {
+                        smooth.handoff_start_world = None;
+                        smooth.handoff_velocity = DVec3::ZERO;
+                    } else {
+                        smooth.handoff_start_world = Some(prev_ship_origin + prev_render_pos_world);
+                        smooth.handoff_started_at = Instant::now();
+                        // Capture the ship's orbital velocity for the legacy
+                        // (non-authoritative) blend path. The target moves at
+                        // ship velocity each tick; advancing start_world by
+                        // the same rate keeps the lerp delta bounded.
+                        smooth.handoff_velocity = ws.latest.as_ref()
+                            .and_then(|w| w.entities.iter().find(|e| e.is_own
+                                && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)))
+                            .map(|e| e.velocity)
+                            .unwrap_or(DVec3::ZERO);
+                    }
 
                     // Stash the old primary WS for a grace window so the renderer
                     // can keep drawing its LOD-proxy ship entity during the
@@ -1529,7 +1689,14 @@ fn poll_network(
                         ws.last_primary_until =
                             Some(Instant::now() + std::time::Duration::from_secs_f64(LAST_PRIMARY_GRACE_SECS));
                     }
-                    ws.latest = ws.secondary.take();
+                    // Use the target-matched secondary (SYSTEM for
+                    // Ship→System exit, not PLANET even if the PLANET
+                    // secondary was the most recently received).
+                    ws.latest = target_secondary;
+                    // Clear the single-slot alias too so stale data
+                    // from other shards doesn't linger.
+                    ws.secondary = None;
+                    ws.secondary_by_type.clear();
                     // Clear `secondary_shard_type` to avoid stale last-writer
                     // values leaking into later decisions. The authoritative
                     // destination type is `pending_shard_type`, set above.
@@ -1603,7 +1770,20 @@ fn poll_network(
                     // planet-local (camera inside the planet core).
                     let mut snapped = false;
                     if let Some(ref promoted) = ws.latest {
-                        if let Some(p) = promoted.players.first() {
+                        // Filter by own_player_id, NOT `first()`. System
+                        // shard EVA broadcasts include every EVA player
+                        // in the shard, so `first()` often returns the
+                        // wrong one and snaps the camera to someone
+                        // else's position — the "star fly-through"
+                        // symptom seen in video captures. If our own
+                        // player isn't present yet (handoff still in
+                        // flight on the server), we fall through to the
+                        // `snapped=false` path below, which sets up the
+                        // re-anchor to ship that `smooth_render_position`
+                        // uses during the blink window.
+                        if let Some(p) = promoted.players.iter()
+                            .find(|p| p.player_id == conn.own_player_id)
+                        {
                             let snap = TimedSnapshot {
                                 tick: promoted.tick,
                                 player_position: p.position,
@@ -1638,24 +1818,115 @@ fn poll_network(
                         // hull mesh doesn't snap to IDENTITY orientation for
                         // the first render frame after boarding.
                         if let Some(ref promoted) = ws.latest {
-                            let system_pos = prev_ship_origin + prev_render_pos;
+                            // Use the ship's LIVE system-space origin (ws.origin
+                            // from the just-stashed ship WS) instead of the
+                            // interpolated `smooth.ship_origin`, which lags
+                            // ~3 ticks behind at 20 Hz (~15 km at 110 km/s
+                            // orbital velocity). That lag is invisible on
+                            // SHIP shard because interior rendering is
+                            // camera-relative, but at Transitioning it
+                            // baked 15 km of staleness into `render_position`
+                            // — putting the new primary's ship AOI entity
+                            // (at the live position) 15 km outside the
+                            // camera frustum. The live origin is what the
+                            // new primary sees the ship at right now, so
+                            // starting the fallback from there keeps the
+                            // camera near the ship even before velocity
+                            // extrapolation kicks in.
+                            let live_ship_origin = ws.last_primary.as_ref()
+                                .map(|last| last.origin)
+                                .unwrap_or(prev_ship_origin);
+                            // Server-authoritative spawn position (preferred):
+                            // the source shard computed this using the exact
+                            // same formula the target shard will use to spawn
+                            // the player. Using it directly eliminates all
+                            // client-side fallback math — no interp-lag
+                            // compensation, no rotation reconstruction, no
+                            // guessing. When absent (gateway routing, legacy
+                            // paths), we fall back to the client-side
+                            // reconstruction using the last ship pose.
+                            let (system_pos, authoritative_rot) = match spawn_pose.as_ref() {
+                                Some(sp) => (sp.position, Some(sp.rotation)),
+                                None => (live_ship_origin + prev_render_pos_world, None),
+                            };
                             let planet_local = system_pos - promoted.origin;
-                            let carried_rot = promoted
-                                .entities
-                                .iter()
-                                .find(|e| e.is_own
-                                    && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship))
-                                .map(|e| e.rotation)
-                                .unwrap_or(smooth.render_rotation);
+                            info!(
+                                has_spawn_pose = spawn_pose.is_some(),
+                                spawn_pos = ?spawn_pose.as_ref().map(|sp| (sp.position.x as i64, sp.position.y as i64, sp.position.z as i64)),
+                                spawn_vel = ?spawn_pose.as_ref().map(|sp| (sp.velocity.x as i64, sp.velocity.y as i64, sp.velocity.z as i64)),
+                                live_ship_origin = ?(live_ship_origin.x as i64, live_ship_origin.y as i64, live_ship_origin.z as i64),
+                                fallback_system_pos = ?((live_ship_origin + prev_render_pos_world).x as i64,
+                                    (live_ship_origin + prev_render_pos_world).y as i64,
+                                    (live_ship_origin + prev_render_pos_world).z as i64),
+                                actual_system_pos = ?(system_pos.x as i64, system_pos.y as i64, system_pos.z as i64),
+                                promoted_origin = ?(promoted.origin.x as i64, promoted.origin.y as i64, promoted.origin.z as i64),
+                                "Transitioning fallback: choosing spawn position"
+                            );
+                            // Prefer the server-authoritative rotation from
+                            // the redirect's spawn_pose. Fall back to the
+                            // target shard's own-ship entity rotation, and
+                            // finally to the source's last rendered rotation.
+                            let carried_rot = authoritative_rot.unwrap_or_else(|| {
+                                promoted
+                                    .entities
+                                    .iter()
+                                    .find(|e| e.is_own
+                                        && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship))
+                                    .map(|e| e.rotation)
+                                    .unwrap_or(smooth.render_rotation)
+                            });
+                            // Capture the ship's system-space velocity at
+                            // transition time so the extrapolation below
+                            // advances `render_position` with the ship's
+                            // orbit until the new primary's first WS with
+                            // our player arrives (~50-200 ms). Without
+                            // this, `render_position` stays frozen while
+                            // the ship entity in the new primary's AOI
+                            // moves ~10 km in orbital velocity, putting
+                            // the ship outside the frustum — the blink.
+                            // Prefer server-authoritative velocity from the
+                            // redirect's spawn_pose (inherited ship velocity
+                            // for EVA exit); fall back to last-seen ship
+                            // velocity from the source WS.
+                            let carried_velocity = spawn_pose.as_ref()
+                                .map(|sp| sp.velocity)
+                                .unwrap_or_else(|| {
+                                    ws.last_primary.as_ref()
+                                        .and_then(|last| last.entities.iter().find(|e| e.is_own
+                                            && matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)))
+                                        .map(|e| e.velocity)
+                                        .unwrap_or(DVec3::ZERO)
+                                });
                             let snap = TimedSnapshot {
                                 tick: promoted.tick,
                                 player_position: planet_local,
                                 ship_rotation: carried_rot,
                                 ship_origin: promoted.origin,
-                                velocity: DVec3::ZERO,
+                                velocity: carried_velocity,
                                 bodies: promoted.bodies.clone(),
                                 sub_grids: std::collections::HashMap::new(),
                             };
+                            // Record the live ship anchor separately so
+                            // `smooth_render_position` can re-target the
+                            // camera to the ship's CURRENT AOI position
+                            // each frame. Keeping this out of the
+                            // TimedSnapshot (and off `smooth.ship_origin`)
+                            // preserves the `handoff_blend` invariant
+                            // `smooth.ship_origin + render_position ==
+                            // world_pos`, which broke catastrophically
+                            // when ship_origin was set to a non-zero
+                            // value (the camera was briefly rendered at
+                            // the star then lerped out to the ship).
+                            smooth.exit_ship_anchor = Some(live_ship_origin);
+                            info!(
+                                live_ship_origin = ?(live_ship_origin.x as i64, live_ship_origin.y as i64, live_ship_origin.z as i64),
+                                planet_local = ?(planet_local.x as i64, planet_local.y as i64, planet_local.z as i64),
+                                prev_render_pos = ?(prev_render_pos.x as i64, prev_render_pos.y as i64, prev_render_pos.z as i64),
+                                prev_ship_origin = ?(prev_ship_origin.x as i64, prev_ship_origin.y as i64, prev_ship_origin.z as i64),
+                                promoted_origin = ?(promoted.origin.x as i64, promoted.origin.y as i64, promoted.origin.z as i64),
+                                ws_last_primary_origin = ?ws.last_primary.as_ref().map(|l| (l.origin.x as i64, l.origin.y as i64, l.origin.z as i64)),
+                                "Transitioning fallback: exit_ship_anchor set"
+                            );
                             snapshots.snapshots.clear();
                             snapshots.snapshots.push_back(snap);
                             snapshots.highest_tick = promoted.tick;
@@ -1713,6 +1984,7 @@ fn smooth_render_position(
     warp: Res<ClientWarp>,
     conn: Res<ConnectionInfo>,
     ft: Res<FrameTime>,
+    ws: Res<ServerWorldState>,
 ) {
     // Galaxy warp: separate smoothing path (GalaxyWorldState, not WorldState snapshots).
     if warp.galaxy_position.is_some() {
@@ -1795,6 +2067,33 @@ fn smooth_render_position(
     );
     if snap_to_latest {
         if let Some(latest) = snapshots.snapshots.back() {
+            // Post-transition anchor: during the 50-200 ms window
+            // between Transitioning and the first new-primary WS that
+            // contains our (spawned) player, the snapshot buffer holds
+            // only the synthetic snap inserted at Transitioning.
+            // Velocity extrapolation was tried and rejected — it
+            // unboundedly advances past the ship's AOI entity, which
+            // is frozen in the WS between server ticks. The correct
+            // behavior is to re-anchor `render_position` each frame
+            // to the ship entity's CURRENT position in the new
+            // primary's WS, offset by the player's ship-local
+            // position at exit time. That keeps the client camera
+            // within frustum range of the ship regardless of how
+            // many WS ticks have advanced on the server.
+            //
+            // `latest.player_position - latest.ship_origin_at_exit`
+            // encodes the world-space player offset captured at the
+            // Transitioning snap fallback. Here `latest.ship_origin`
+            // stores that anchor (live ship origin at stash time, per
+            // the Transitioning handler). Subtracting gives the
+            // offset from ship, which we apply to whatever position
+            // the new primary's ship entity is at RIGHT NOW.
+            // Real player WS arrived — snapshot buffer has >1 entries
+            // now, clear the post-transition anchor so normal
+            // snap_to_latest takes over.
+            if snapshots.snapshots.len() > 1 {
+                smooth.exit_ship_anchor = None;
+            }
             smooth.render_position = latest.player_position;
             smooth.render_rotation = latest.ship_rotation;
             smooth.ship_origin = latest.ship_origin;
@@ -1807,7 +2106,22 @@ fn smooth_render_position(
         let prev_render = smooth.render_position;
         smooth.render_position = snap_a.player_position.lerp(snap_b.player_position, t);
         smooth.render_rotation = snap_a.ship_rotation.slerp(snap_b.ship_rotation, t);
-        smooth.ship_origin = snap_a.ship_origin.lerp(snap_b.ship_origin, t);
+        // DO NOT interpolate `ship_origin`: at orbital velocity (~110 km/s)
+        // interp lag of ~3 ticks puts `smooth.ship_origin` 15+ km behind the
+        // authoritative `ws.latest.origin`. On SHIP shard the interior scene
+        // is camera-relative so that lag is invisible — but it becomes a
+        // 15 km CAMERA JUMP at the moment of Ship→System transition, because
+        // the new shard's ship entity is at the authoritative position while
+        // `handoff_start_world` and the last-rendered `cam_system_pos` were
+        // anchored at the lagged interp origin. Pin `ship_origin` to the
+        // live WS origin so interior rendering and system-space anchoring
+        // agree. The 20 Hz step change is sub-arc-second for celestial
+        // bodies and cancels out in nearby-entity delta math (all ship
+        // shard entities are ship-local so `entity_world - cam_system_pos`
+        // is independent of `ship_origin`).
+        smooth.ship_origin = ws.latest.as_ref()
+            .map(|w| w.origin)
+            .unwrap_or_else(|| snap_b.ship_origin);
 
         // 1 Hz diagnostic: verify interpolation is actually producing
         // smooth per-frame deltas. `snap_delta_mag` (distance between
@@ -1882,14 +2196,32 @@ fn smooth_render_position(
         let elapsed = smooth.handoff_started_at.elapsed().as_secs_f64();
         if elapsed >= HANDOFF_BLEND_SECS {
             smooth.handoff_start_world = None;
+            smooth.handoff_velocity = DVec3::ZERO;
+            tracing::info!("handoff_blend completed");
         } else {
             let t = (elapsed / HANDOFF_BLEND_SECS).clamp(0.0, 1.0);
-            // Smoothstep so easing feels natural (no velocity discontinuity at
-            // the endpoints).
             let s = t * t * (3.0 - 2.0 * t);
+            // Advance start_world by the inherited ship velocity so the
+            // reference point moves WITH the ship. Target (authoritative
+            // EVA position in the new shard) also advances by the same
+            // velocity each tick. With both moving at the same rate,
+            // `target - start` stays at the constant inter-shard latency
+            // drift (~5 km) instead of growing to ~22 km over 150 ms.
+            let start_extrapolated = start_world + smooth.handoff_velocity * elapsed;
             let target_world = smooth.ship_origin + smooth.render_position;
-            let blended_world = start_world.lerp(target_world, s);
+            let pre_rp = smooth.render_position;
+            let blended_world = start_extrapolated.lerp(target_world, s);
             smooth.render_position = blended_world - smooth.ship_origin;
+            tracing::info!(
+                t, s,
+                start_world = ?(start_world.x as i64, start_world.y as i64, start_world.z as i64),
+                target_world = ?(target_world.x as i64, target_world.y as i64, target_world.z as i64),
+                ship_origin = ?(smooth.ship_origin.x as i64, smooth.ship_origin.y as i64, smooth.ship_origin.z as i64),
+                pre_render_pos = ?(pre_rp.x as i64, pre_rp.y as i64, pre_rp.z as i64),
+                blended = ?(blended_world.x as i64, blended_world.y as i64, blended_world.z as i64),
+                post_render_pos = ?(smooth.render_position.x as i64, smooth.render_position.y as i64, smooth.render_position.z as i64),
+                "handoff_blend step"
+            );
         }
     }
 }
@@ -2130,13 +2462,16 @@ impl ClientApp {
             secondary_shard_type: None,
             system_seed: 0,
             galaxy_seed: 0,
+            own_player_id: 0,
         });
         ecs_app.insert_resource(ServerWorldState {
             latest: None,
             secondary: None,
+            secondary_by_type: std::collections::HashMap::new(),
             last_primary: None,
             last_primary_until: None,
             departed_ship: None,
+            trace_render_until: None,
         });
         ecs_app.insert_resource(LocalPlayer {
             position: DVec3::new(0.0, 1.0, 0.0),
@@ -2154,6 +2489,8 @@ impl ClientApp {
             sub_grid_transforms: std::collections::HashMap::new(),
             handoff_start_world: None,
             handoff_started_at: Instant::now(),
+            handoff_velocity: DVec3::ZERO,
+            exit_ship_anchor: None,
             galaxy_render_position: DVec3::ZERO,
             galaxy_render_rotation: DQuat::IDENTITY,
             galaxy_velocity: DVec3::ZERO,

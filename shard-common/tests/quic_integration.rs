@@ -123,6 +123,7 @@ async fn send_multiple_messages_on_same_connection() {
         ShardMsg::HandoffAccepted(HandoffAccepted {
             session_token: SessionToken(42),
             target_shard: ShardId(3),
+            spawn_pose: None,
         }),
         ShardMsg::GhostUpdate(GhostUpdate {
             session_token: SessionToken(42),

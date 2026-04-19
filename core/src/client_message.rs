@@ -1268,6 +1268,20 @@ impl ServerMsg {
             ServerMsg::ShardRedirect(data) => {
                 let tcp = builder.create_string(&data.target_tcp_addr);
                 let udp = builder.create_string(&data.target_udp_addr);
+                let (has_pose, pose_pos, pose_rot, pose_vel) = match &data.spawn_pose {
+                    Some(sp) => (
+                        true,
+                        to_fb_vec3d(&sp.position),
+                        to_fb_quatd(&sp.rotation),
+                        to_fb_vec3d(&sp.velocity),
+                    ),
+                    None => (
+                        false,
+                        to_fb_vec3d(&DVec3::ZERO),
+                        to_fb_quatd(&DQuat::IDENTITY),
+                        to_fb_vec3d(&DVec3::ZERO),
+                    ),
+                };
                 let sr = fb::ShardRedirectMsg::create(
                     &mut builder,
                     &fb::ShardRedirectMsgArgs {
@@ -1276,6 +1290,10 @@ impl ServerMsg {
                         target_udp_addr: Some(udp),
                         shard_id: data.shard_id.0,
                         target_shard_type: data.target_shard_type,
+                        has_spawn_pose: has_pose,
+                        spawn_system_position: Some(&pose_pos),
+                        spawn_rotation: Some(&pose_rot),
+                        spawn_velocity: Some(&pose_vel),
                     },
                 );
                 let msg = fb::ServerMessage::create(
@@ -1713,6 +1731,18 @@ impl ServerMsg {
                 let sr = msg
                     .payload_as_shard_redirect_msg()
                     .ok_or(MessageError::MissingField("ShardRedirectMsg payload"))?;
+                let spawn_pose = if sr.has_spawn_pose() {
+                    match (sr.spawn_system_position(), sr.spawn_rotation(), sr.spawn_velocity()) {
+                        (Some(pos), Some(rot), Some(vel)) => Some(crate::handoff::SpawnPose {
+                            position: from_fb_vec3d(pos),
+                            rotation: from_fb_quatd(rot),
+                            velocity: from_fb_vec3d(vel),
+                        }),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 Ok(ServerMsg::ShardRedirect(ShardRedirect {
                     session_token: SessionToken(sr.session_token()),
                     target_tcp_addr: sr
@@ -1725,6 +1755,7 @@ impl ServerMsg {
                         .to_string(),
                     shard_id: ShardId(sr.shard_id()),
                     target_shard_type: sr.target_shard_type(),
+                    spawn_pose,
                 }))
             }
             fb::ServerPayload::WorldState => {
@@ -2129,6 +2160,7 @@ mod tests {
             target_udp_addr: "127.0.0.1:7778".to_string(),
             shard_id: ShardId(10),
             target_shard_type: 2,
+            spawn_pose: None,
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();

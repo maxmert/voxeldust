@@ -1458,10 +1458,23 @@ fn process_handoffs(
                 "EVA player spawned from ship hull exit"
             );
 
-            // Send HandoffAccepted back to the source ship shard.
+            // Send HandoffAccepted back to the source ship shard, carrying
+            // the target's AUTHORITATIVE spawn pose (`spawn_pos` computed
+            // with CURRENT ship pose, not the ~40-100 ms-stale
+            // `h.position` from handoff creation). The source shard
+            // forwards these in its `ShardRedirectMsg` to the client so
+            // the client's first post-transition frame matches where
+            // this shard broadcasts the player — eliminating the 5-15 km
+            // "camera far from ship" sweep caused by source-vs-target
+            // pose drift during inter-shard handoff latency.
             let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
                 session_token: session,
                 target_shard: shard_identity.0,
+                spawn_pose: Some(handoff::SpawnPose {
+                    position: spawn_pos,
+                    rotation: h.rotation,
+                    velocity: h.velocity,
+                }),
             });
             match bridge.peer_registry.try_read() {
                 Ok(reg) => match reg.quic_addr(source) {
@@ -1527,12 +1540,19 @@ fn process_handoff_accepted(
                         let tcp_addr = peer_info.endpoint.tcp_addr.to_string();
                         let udp_addr = peer_info.endpoint.udp_addr.to_string();
                         let shard_type = peer_info.shard_type as u8;
+                        // TODO(phase-A-boarding): populate spawn_pose with
+                        // the ship-local spawn position. Requires looking up
+                        // the target ship's current pose (via ShipIndex) and
+                        // converting the system-space EVA position to ship-
+                        // local coordinates. Left None for now — client uses
+                        // the ship shard's JoinResponse position.
                         let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
                             session_token: event.session_token,
                             target_tcp_addr: tcp_addr.clone(),
                             target_udp_addr: udp_addr.clone(),
                             shard_id: event.target_shard,
                             target_shard_type: shard_type,
+                            spawn_pose: None,
                         });
                         info!(
                             session = event.session_token.0,
@@ -1588,9 +1608,13 @@ fn process_handoff_accepted(
             // Cross-shard relay (e.g. planet→ship re-entry flow).
             if let Ok(reg) = bridge.peer_registry.try_read() {
                 if let Some(addr) = reg.quic_addr(source_shard) {
+                    // TODO(phase-A-boarding): populate spawn_pose with the
+                    // authoritative ship-local spawn for EVA-boarding. For
+                    // now leave None — client falls back to JoinResponse.
                     let msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
                         session_token: event.session_token,
                         target_shard: event.target_shard,
+                        spawn_pose: None,
                     });
                     match bridge.quic_send_tx.try_send((source_shard, addr, msg)) {
                         Ok(()) => info!(

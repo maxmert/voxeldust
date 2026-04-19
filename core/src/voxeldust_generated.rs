@@ -2356,6 +2356,10 @@ impl<'a> ::flatbuffers::Follow<'a> for HandoffAccepted<'a> {
 impl<'a> HandoffAccepted<'a> {
   pub const VT_SESSION_TOKEN: ::flatbuffers::VOffsetT = 4;
   pub const VT_TARGET_SHARD_ID: ::flatbuffers::VOffsetT = 6;
+  pub const VT_HAS_SPAWN_POSE: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SPAWN_POSITION: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SPAWN_ROTATION: ::flatbuffers::VOffsetT = 12;
+  pub const VT_SPAWN_VELOCITY: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2364,11 +2368,15 @@ impl<'a> HandoffAccepted<'a> {
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args HandoffAcceptedArgs
+    args: &'args HandoffAcceptedArgs<'args>
   ) -> ::flatbuffers::WIPOffset<HandoffAccepted<'bldr>> {
     let mut builder = HandoffAcceptedBuilder::new(_fbb);
     builder.add_target_shard_id(args.target_shard_id);
     builder.add_session_token(args.session_token);
+    if let Some(x) = args.spawn_velocity { builder.add_spawn_velocity(x); }
+    if let Some(x) = args.spawn_rotation { builder.add_spawn_rotation(x); }
+    if let Some(x) = args.spawn_position { builder.add_spawn_position(x); }
+    builder.add_has_spawn_pose(args.has_spawn_pose);
     builder.finish()
   }
 
@@ -2387,6 +2395,39 @@ impl<'a> HandoffAccepted<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(HandoffAccepted::VT_TARGET_SHARD_ID, Some(0)).unwrap()}
   }
+  /// Target shard's authoritative spawn pose — the position/rotation/velocity
+  /// where the target ACTUALLY placed the player entity (using its current
+  /// ship pose, not the stale pose from `PlayerHandoff`). The source shard
+  /// forwards these in its `ShardRedirectMsg` to the client so the client's
+  /// first post-transition frame matches the target's broadcast exactly.
+  #[inline]
+  pub fn has_spawn_pose(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(HandoffAccepted::VT_HAS_SPAWN_POSE, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn spawn_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(HandoffAccepted::VT_SPAWN_POSITION, None)}
+  }
+  #[inline]
+  pub fn spawn_rotation(&self) -> Option<&'a Quatd> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Quatd>(HandoffAccepted::VT_SPAWN_ROTATION, None)}
+  }
+  #[inline]
+  pub fn spawn_velocity(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(HandoffAccepted::VT_SPAWN_VELOCITY, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for HandoffAccepted<'_> {
@@ -2397,20 +2438,32 @@ impl ::flatbuffers::Verifiable for HandoffAccepted<'_> {
     v.visit_table(pos)?
      .visit_field::<u64>("session_token", Self::VT_SESSION_TOKEN, false)?
      .visit_field::<u64>("target_shard_id", Self::VT_TARGET_SHARD_ID, false)?
+     .visit_field::<bool>("has_spawn_pose", Self::VT_HAS_SPAWN_POSE, false)?
+     .visit_field::<Vec3d>("spawn_position", Self::VT_SPAWN_POSITION, false)?
+     .visit_field::<Quatd>("spawn_rotation", Self::VT_SPAWN_ROTATION, false)?
+     .visit_field::<Vec3d>("spawn_velocity", Self::VT_SPAWN_VELOCITY, false)?
      .finish();
     Ok(())
   }
 }
-pub struct HandoffAcceptedArgs {
+pub struct HandoffAcceptedArgs<'a> {
     pub session_token: u64,
     pub target_shard_id: u64,
+    pub has_spawn_pose: bool,
+    pub spawn_position: Option<&'a Vec3d>,
+    pub spawn_rotation: Option<&'a Quatd>,
+    pub spawn_velocity: Option<&'a Vec3d>,
 }
-impl<'a> Default for HandoffAcceptedArgs {
+impl<'a> Default for HandoffAcceptedArgs<'a> {
   #[inline]
   fn default() -> Self {
     HandoffAcceptedArgs {
       session_token: 0,
       target_shard_id: 0,
+      has_spawn_pose: false,
+      spawn_position: None,
+      spawn_rotation: None,
+      spawn_velocity: None,
     }
   }
 }
@@ -2427,6 +2480,22 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HandoffAcceptedBuilder<'a, 'b
   #[inline]
   pub fn add_target_shard_id(&mut self, target_shard_id: u64) {
     self.fbb_.push_slot::<u64>(HandoffAccepted::VT_TARGET_SHARD_ID, target_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_has_spawn_pose(&mut self, has_spawn_pose: bool) {
+    self.fbb_.push_slot::<bool>(HandoffAccepted::VT_HAS_SPAWN_POSE, has_spawn_pose, false);
+  }
+  #[inline]
+  pub fn add_spawn_position(&mut self, spawn_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(HandoffAccepted::VT_SPAWN_POSITION, spawn_position);
+  }
+  #[inline]
+  pub fn add_spawn_rotation(&mut self, spawn_rotation: &Quatd) {
+    self.fbb_.push_slot_always::<&Quatd>(HandoffAccepted::VT_SPAWN_ROTATION, spawn_rotation);
+  }
+  #[inline]
+  pub fn add_spawn_velocity(&mut self, spawn_velocity: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(HandoffAccepted::VT_SPAWN_VELOCITY, spawn_velocity);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HandoffAcceptedBuilder<'a, 'b, A> {
@@ -2448,6 +2517,10 @@ impl ::core::fmt::Debug for HandoffAccepted<'_> {
     let mut ds = f.debug_struct("HandoffAccepted");
       ds.field("session_token", &self.session_token());
       ds.field("target_shard_id", &self.target_shard_id());
+      ds.field("has_spawn_pose", &self.has_spawn_pose());
+      ds.field("spawn_position", &self.spawn_position());
+      ds.field("spawn_rotation", &self.spawn_rotation());
+      ds.field("spawn_velocity", &self.spawn_velocity());
       ds.finish()
   }
 }
@@ -11503,6 +11576,10 @@ impl<'a> ShardRedirectMsg<'a> {
   pub const VT_TARGET_UDP_ADDR: ::flatbuffers::VOffsetT = 8;
   pub const VT_SHARD_ID: ::flatbuffers::VOffsetT = 10;
   pub const VT_TARGET_SHARD_TYPE: ::flatbuffers::VOffsetT = 12;
+  pub const VT_HAS_SPAWN_POSE: ::flatbuffers::VOffsetT = 14;
+  pub const VT_SPAWN_SYSTEM_POSITION: ::flatbuffers::VOffsetT = 16;
+  pub const VT_SPAWN_ROTATION: ::flatbuffers::VOffsetT = 18;
+  pub const VT_SPAWN_VELOCITY: ::flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -11516,8 +11593,12 @@ impl<'a> ShardRedirectMsg<'a> {
     let mut builder = ShardRedirectMsgBuilder::new(_fbb);
     builder.add_shard_id(args.shard_id);
     builder.add_session_token(args.session_token);
+    if let Some(x) = args.spawn_velocity { builder.add_spawn_velocity(x); }
+    if let Some(x) = args.spawn_rotation { builder.add_spawn_rotation(x); }
+    if let Some(x) = args.spawn_system_position { builder.add_spawn_system_position(x); }
     if let Some(x) = args.target_udp_addr { builder.add_target_udp_addr(x); }
     if let Some(x) = args.target_tcp_addr { builder.add_target_tcp_addr(x); }
+    builder.add_has_spawn_pose(args.has_spawn_pose);
     builder.add_target_shard_type(args.target_shard_type);
     builder.finish()
   }
@@ -11562,6 +11643,45 @@ impl<'a> ShardRedirectMsg<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u8>(ShardRedirectMsg::VT_TARGET_SHARD_TYPE, Some(255)).unwrap()}
   }
+  /// Authoritative spawn pose on the destination shard. The source shard
+  /// computes these using the same formula the target will use to spawn
+  /// the player (e.g., ship-exit: `exterior.position + exterior.rotation
+  /// * player_local`). Client uses these directly for its first rendered
+  /// frame after the transition, eliminating the need for client-side
+  /// fallback prediction that was visibly off by orbital drift (~15 km)
+  /// and by hull interior/exterior confusion.
+  ///
+  /// `has_spawn_pose = false` means legacy sender / initial gateway
+  /// routing that has no natural spawn pose (client falls back to its
+  /// existing post-connect JoinResponse position).
+  #[inline]
+  pub fn has_spawn_pose(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ShardRedirectMsg::VT_HAS_SPAWN_POSE, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn spawn_system_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ShardRedirectMsg::VT_SPAWN_SYSTEM_POSITION, None)}
+  }
+  #[inline]
+  pub fn spawn_rotation(&self) -> Option<&'a Quatd> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Quatd>(ShardRedirectMsg::VT_SPAWN_ROTATION, None)}
+  }
+  #[inline]
+  pub fn spawn_velocity(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ShardRedirectMsg::VT_SPAWN_VELOCITY, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ShardRedirectMsg<'_> {
@@ -11575,6 +11695,10 @@ impl ::flatbuffers::Verifiable for ShardRedirectMsg<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_udp_addr", Self::VT_TARGET_UDP_ADDR, false)?
      .visit_field::<u64>("shard_id", Self::VT_SHARD_ID, false)?
      .visit_field::<u8>("target_shard_type", Self::VT_TARGET_SHARD_TYPE, false)?
+     .visit_field::<bool>("has_spawn_pose", Self::VT_HAS_SPAWN_POSE, false)?
+     .visit_field::<Vec3d>("spawn_system_position", Self::VT_SPAWN_SYSTEM_POSITION, false)?
+     .visit_field::<Quatd>("spawn_rotation", Self::VT_SPAWN_ROTATION, false)?
+     .visit_field::<Vec3d>("spawn_velocity", Self::VT_SPAWN_VELOCITY, false)?
      .finish();
     Ok(())
   }
@@ -11585,6 +11709,10 @@ pub struct ShardRedirectMsgArgs<'a> {
     pub target_udp_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub shard_id: u64,
     pub target_shard_type: u8,
+    pub has_spawn_pose: bool,
+    pub spawn_system_position: Option<&'a Vec3d>,
+    pub spawn_rotation: Option<&'a Quatd>,
+    pub spawn_velocity: Option<&'a Vec3d>,
 }
 impl<'a> Default for ShardRedirectMsgArgs<'a> {
   #[inline]
@@ -11595,6 +11723,10 @@ impl<'a> Default for ShardRedirectMsgArgs<'a> {
       target_udp_addr: None,
       shard_id: 0,
       target_shard_type: 255,
+      has_spawn_pose: false,
+      spawn_system_position: None,
+      spawn_rotation: None,
+      spawn_velocity: None,
     }
   }
 }
@@ -11625,6 +11757,22 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShardRedirectMsgBuilder<'a, '
     self.fbb_.push_slot::<u8>(ShardRedirectMsg::VT_TARGET_SHARD_TYPE, target_shard_type, 255);
   }
   #[inline]
+  pub fn add_has_spawn_pose(&mut self, has_spawn_pose: bool) {
+    self.fbb_.push_slot::<bool>(ShardRedirectMsg::VT_HAS_SPAWN_POSE, has_spawn_pose, false);
+  }
+  #[inline]
+  pub fn add_spawn_system_position(&mut self, spawn_system_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ShardRedirectMsg::VT_SPAWN_SYSTEM_POSITION, spawn_system_position);
+  }
+  #[inline]
+  pub fn add_spawn_rotation(&mut self, spawn_rotation: &Quatd) {
+    self.fbb_.push_slot_always::<&Quatd>(ShardRedirectMsg::VT_SPAWN_ROTATION, spawn_rotation);
+  }
+  #[inline]
+  pub fn add_spawn_velocity(&mut self, spawn_velocity: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ShardRedirectMsg::VT_SPAWN_VELOCITY, spawn_velocity);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShardRedirectMsgBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ShardRedirectMsgBuilder {
@@ -11647,6 +11795,10 @@ impl ::core::fmt::Debug for ShardRedirectMsg<'_> {
       ds.field("target_udp_addr", &self.target_udp_addr());
       ds.field("shard_id", &self.shard_id());
       ds.field("target_shard_type", &self.target_shard_type());
+      ds.field("has_spawn_pose", &self.has_spawn_pose());
+      ds.field("spawn_system_position", &self.spawn_system_position());
+      ds.field("spawn_rotation", &self.spawn_rotation());
+      ds.field("spawn_velocity", &self.spawn_velocity());
       ds.finish()
   }
 }

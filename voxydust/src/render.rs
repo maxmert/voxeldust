@@ -1,6 +1,12 @@
 //! Render pass: uniform building, draw calls, scene lighting, egui integration.
 
 use glam::{DVec3, DQuat, Mat4, Quat, Vec3};
+use std::sync::atomic::AtomicU64;
+
+/// Unix-ms wall-clock deadline until which render-frame diagnostics are
+/// logged every frame instead of every 40. Set by main.rs's Transitioning
+/// handler to `now + 500 ms` so the full shard-switch window is captured.
+pub static TRACE_RENDER_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 
 use crate::block_render::{BlockRenderer, ChunkGpuMesh};
 use crate::camera::CameraParams;
@@ -787,7 +793,16 @@ pub fn render_frame(
     // so we can correlate "ship disappeared" reports with what the render
     // pipeline saw. Emits: block_ships count, per-ship source+chunk count,
     // number of Ship entities in each WS, and the full secondary source map.
-    if frame_count % 40 == 0 {
+    let trace_active = {
+        use std::sync::atomic::Ordering;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let until = TRACE_RENDER_UNTIL_MS.load(Ordering::Relaxed);
+        now_ms < until
+    };
+    if trace_active || frame_count % 40 == 0 {
         let ws_ship_entities = latest_world_state.map_or(0, |ws| {
             ws.entities.iter().filter(|e| matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship)).count()
         });
@@ -808,6 +823,16 @@ pub fn render_frame(
                     .collect()
             })
             .unwrap_or_default();
+        let grace_src_map: Vec<(u64, u32)> = grace_ship_sources.iter().map(|(k, v)| (*k, v.0)).collect();
+        let ws_origin = latest_world_state.map(|ws| (ws.origin.x as i64, ws.origin.y as i64, ws.origin.z as i64));
+        let grace_origin = grace_fallback_world_state.map(|gws| (gws.origin.x as i64, gws.origin.y as i64, gws.origin.z as i64));
+        let cam_sys = (cam.cam_system_pos.x as i64, cam.cam_system_pos.y as i64, cam.cam_system_pos.z as i64);
+        let primary_ship_entities: Vec<(u64, f64, bool)> = latest_world_state
+            .map(|ws| ws.entities.iter()
+                .filter(|e| matches!(e.kind, voxeldust_core::client_message::EntityKind::Ship))
+                .map(|e| (e.entity_id, e.bounding_radius as f64, e.is_own))
+                .collect())
+            .unwrap_or_default();
         tracing::info!(
             frame = frame_count,
             shard_type = current_shard_type,
@@ -820,6 +845,11 @@ pub fn render_frame(
             block_ship_chunks = ?block_ship_chunk_counts,
             primary_source = primary_source.map(|s| s.0),
             sec_src_map = ?secondary_ship_sources.iter().map(|(k, v)| (*k, v.0)).collect::<Vec<_>>(),
+            grace_src_map = ?grace_src_map,
+            ws_origin = ?ws_origin,
+            grace_origin = ?grace_origin,
+            cam_sys = ?cam_sys,
+            ws_ships_info = ?primary_ship_entities,
             "ship-render diagnostic"
         );
     }

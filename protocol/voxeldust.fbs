@@ -96,6 +96,15 @@ table PlayerHandoff {
 table HandoffAccepted {
     session_token: uint64;
     target_shard_id: uint64;
+    /// Target shard's authoritative spawn pose — the position/rotation/velocity
+    /// where the target ACTUALLY placed the player entity (using its current
+    /// ship pose, not the stale pose from `PlayerHandoff`). The source shard
+    /// forwards these in its `ShardRedirectMsg` to the client so the client's
+    /// first post-transition frame matches the target's broadcast exactly.
+    has_spawn_pose: bool = false;
+    spawn_position: Vec3d;
+    spawn_rotation: Quatd;
+    spawn_velocity: Vec3d;
 }
 
 table GhostUpdate {
@@ -722,6 +731,21 @@ table ShardRedirectMsg {
     /// promotion when multiple secondaries of different types are connected
     /// (e.g., Ship + Galaxy), instead of relying on last-writer-wins state.
     target_shard_type: uint8 = 255;
+    /// Authoritative spawn pose on the destination shard. The source shard
+    /// computes these using the same formula the target will use to spawn
+    /// the player (e.g., ship-exit: `exterior.position + exterior.rotation
+    /// * player_local`). Client uses these directly for its first rendered
+    /// frame after the transition, eliminating the need for client-side
+    /// fallback prediction that was visibly off by orbital drift (~15 km)
+    /// and by hull interior/exterior confusion.
+    ///
+    /// `has_spawn_pose = false` means legacy sender / initial gateway
+    /// routing that has no natural spawn pose (client falls back to its
+    /// existing post-connect JoinResponse position).
+    has_spawn_pose: bool = false;
+    spawn_system_position: Vec3d;
+    spawn_rotation: Quatd;
+    spawn_velocity: Vec3d;
 }
 
 /// Seamless handoff: client promotes an existing secondary connection to primary.

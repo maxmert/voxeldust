@@ -555,11 +555,23 @@ struct SeatOccupant(Option<Entity>);
 #[derive(Resource, Default)]
 struct PlayerEntityIndex(std::collections::HashMap<SessionToken, Entity>);
 
-/// Stores handoff data for players that are about to connect via TCP.
-/// When a PlayerHandoff arrives via QUIC (re-entry), we store the spawn info here.
-/// When the player's TCP Connect arrives, process_connects consumes it.
+/// Stores handoff data for players moving across shards on BOTH directions.
+///
+/// * `incoming` (name → handoff): players about to connect via TCP. When a
+///   `PlayerHandoff` arrives via QUIC (re-entry), we store the spawn info
+///   here; when the player's TCP Connect arrives, `process_connects`
+///   consumes it.
+/// * `outgoing` (session → handoff): players the ship shard sent a
+///   `PlayerHandoff` for (hull exit). Consumed when `HandoffAccepted`
+///   arrives from the target shard, at which point the stored pose is
+///   forwarded to the client in the `ShardRedirect.spawn_pose` so the
+///   client's first post-transition frame renders at the server-
+///   authoritative spawn position with zero client-side prediction.
 #[derive(Resource, Default)]
-struct PendingPlayerHandoffs(std::collections::HashMap<String, handoff::PlayerHandoff>);
+struct PendingPlayerHandoffs {
+    incoming: std::collections::HashMap<String, handoff::PlayerHandoff>,
+    outgoing: std::collections::HashMap<voxeldust_core::shard_types::SessionToken, handoff::PlayerHandoff>,
+}
 
 /// Ship voxel grid — the block-based ship structure.
 #[derive(Resource)]
@@ -963,6 +975,11 @@ fn drain_quic(
                 // Target shard accepted the player. Send ShardRedirect, then despawn.
                 let session = accepted.session_token;
                 let target_shard = accepted.target_shard;
+                // Target-authoritative spawn pose — the position the target
+                // actually placed the player at, using its CURRENT ship pose.
+                // This differs from our outgoing PlayerHandoff.position by
+                // ~40-100 ms of orbital drift (~5-15 km at 110 km/s).
+                let authoritative_pose = accepted.spawn_pose.clone();
                 info!(
                     session = session.0,
                     target = target_shard.0,
@@ -971,12 +988,27 @@ fn drain_quic(
 
                 if let Ok(reg) = bridge.peer_registry.try_read() {
                     if let Some(peer_info) = reg.get(target_shard) {
+                        // Look up the pending handoff for this session to
+                        // carry the authoritative spawn pose through the
+                        // redirect. The pose is the `position/rotation/
+                        // velocity` computed at hull_exit_check time using
+                        // the ship's exterior pose at that moment — same
+                        // formula the target shard will apply when spawning
+                        // the EVA, so the client's first rendered frame
+                        // post-transition lines up with the target's
+                        // authoritative position to within one physics tick.
+                        // Prefer the target's authoritative spawn pose
+                        // (from HandoffAccepted) over our own stale pose
+                        // stored at handoff-creation time.
+                        let _ = pending_handoffs.outgoing.remove(&session);
+                        let spawn_pose = authoritative_pose.clone();
                         let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
                             session_token: session,
                             target_tcp_addr: peer_info.endpoint.tcp_addr.to_string(),
                             target_udp_addr: peer_info.endpoint.udp_addr.to_string(),
                             shard_id: target_shard,
                             target_shard_type: peer_info.shard_type as u8,
+                            spawn_pose,
                         });
                         let cr = bridge.client_registry.clone();
                         tokio::spawn(async move {
@@ -1010,12 +1042,18 @@ fn drain_quic(
                 );
 
                 // Store handoff for when the player's TCP connection arrives.
-                pending_handoffs.0.insert(h.player_name.clone(), h.clone());
+                pending_handoffs.incoming.insert(h.player_name.clone(), h.clone());
 
                 // Send HandoffAccepted back to host shard.
+                // TODO(phase-A-boarding): populate spawn_pose with the ship-
+                // local authoritative spawn position. Ship shard knows the
+                // exact spawn (it will compute it from handoff data at next
+                // process_connects). For now left None — client uses
+                // JoinResponse position for ship entries.
                 let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
                     session_token: h.session_token,
                     target_shard: config.shard_id,
+                    spawn_pose: None,
                 });
                 if let Some(host_id) = config.host_shard_id {
                     if let Ok(reg) = bridge.peer_registry.try_read() {
@@ -1364,7 +1402,7 @@ fn process_connects(
         }
 
         // Check if this player has a pending handoff (re-entering the ship).
-        let spawn_pos = if let Some(handoff_info) = pending_handoffs.0.remove(&player_name) {
+        let spawn_pos = if let Some(handoff_info) = pending_handoffs.incoming.remove(&player_name) {
             // Re-entry: transform the EVA's handoff system-space position
             // into ship-local coords. Critical: use the ship's pose AT THE
             // MOMENT OF HANDOFF (carried in `ship_system_position` and
@@ -1791,6 +1829,7 @@ fn hull_exit_check(
     interior_mask: Res<ShipInteriorMask>,
     tick: Res<ecs::TickCounter>,
     mut pending: ResMut<PendingMessages>,
+    mut pending_handoffs: ResMut<PendingPlayerHandoffs>,
     mut commands: Commands,
 ) {
     let _ = hull_bounds; // retained for diagnostics / future use
@@ -1883,6 +1922,7 @@ fn hull_exit_check(
                             schema_version: 1,
                             character_state: Vec::new(),
                         };
+                        pending_handoffs.outgoing.insert(session_id.0, h.clone());
                         commands.entity(entity).insert(HandoffPending);
                         pending.handoffs.push(ShardMsg::PlayerHandoff(h));
                         info!(
@@ -1933,6 +1973,10 @@ fn hull_exit_check(
                 schema_version: 1,
                 character_state: Vec::new(),
             };
+            // Stash the outgoing handoff keyed by session so the
+            // `HandoffAccepted` handler can populate the client-bound
+            // `ShardRedirect` with the authoritative spawn pose.
+            pending_handoffs.outgoing.insert(session_id.0, h.clone());
             commands.entity(entity).insert(HandoffPending);
             pending.handoffs.push(ShardMsg::PlayerHandoff(h));
             info!(
