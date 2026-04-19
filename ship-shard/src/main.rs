@@ -1044,16 +1044,34 @@ fn drain_quic(
                 // Store handoff for when the player's TCP connection arrives.
                 pending_handoffs.incoming.insert(h.player_name.clone(), h.clone());
 
-                // Send HandoffAccepted back to host shard.
-                // TODO(phase-A-boarding): populate spawn_pose with the ship-
-                // local authoritative spawn position. Ship shard knows the
-                // exact spawn (it will compute it from handoff data at next
-                // process_connects). For now left None — client uses
-                // JoinResponse position for ship entries.
+                // Compute the authoritative spawn pose in SYSTEM-space using
+                // the ship's CURRENT exterior pose. The source (system/planet
+                // shard) sent `h.position` using the ship's pose at handoff-
+                // creation time, which may be 50-100 ms stale by the time we
+                // receive it here. Reconstructing player_local from the
+                // (old_pos, old_rot) pair in the handoff and re-applying with
+                // our fresh exterior pose gives the exact SYSTEM-space
+                // position the player will be rendered at when
+                // `process_connects` finalizes the spawn. This matches the
+                // formula `process_connects` itself uses (see
+                // `ship-shard/src/main.rs:1367-1372` / re-entry spawn code),
+                // so the client's first post-transition frame lines up with
+                // our first outgoing WorldState to within one physics tick.
+                let spawn_pose = {
+                    let old_rot = h.ship_rotation.unwrap_or(DQuat::IDENTITY);
+                    let old_pos = h.ship_system_position.unwrap_or(exterior.position);
+                    let player_local = old_rot.inverse() * (h.position - old_pos);
+                    let spawn_system_pos = exterior.position + exterior.rotation * player_local;
+                    Some(handoff::SpawnPose {
+                        position: spawn_system_pos,
+                        rotation: exterior.rotation,
+                        velocity: exterior.velocity,
+                    })
+                };
                 let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
                     session_token: h.session_token,
                     target_shard: config.shard_id,
-                    spawn_pose: None,
+                    spawn_pose,
                 });
                 if let Some(host_id) = config.host_shard_id {
                     if let Ok(reg) = bridge.peer_registry.try_read() {

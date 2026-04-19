@@ -338,8 +338,15 @@ struct PendingColliderSyncs(HashMap<u64, voxeldust_core::shard_message::ShipColl
 /// drained by `process_handoff_accepted` once the target ship shard acks —
 /// keeps the EVA entity alive and broadcasting during the handoff round-trip
 /// so the client doesn't see a frozen/missing world-state gap.
+///
+/// Value tuple: `(eva_entity, player_name, target_ship_id)`. `target_ship_id`
+/// is used when `process_handoff_accepted` dispatches the client's
+/// `ShardRedirect` — it looks up the ship's CURRENT authoritative pose via
+/// `ship_index` to compute the spawn position in the ship's current frame,
+/// rather than relying on ship-shard's stale `exterior.position` (which lags
+/// SYSTEM's authoritative physics by ~50-100 ms).
 #[derive(Resource, Default)]
-struct EvaBoardingPending(HashMap<SessionToken, (Entity, String)>);
+struct EvaBoardingPending(HashMap<SessionToken, (Entity, String, u64)>);
 
 /// Orchestrator URL for provisioning requests.
 #[derive(Resource)]
@@ -420,6 +427,11 @@ struct ShipPropsUpdateMsg {
 struct HandoffAcceptedMsg {
     session_token: SessionToken,
     target_shard: ShardId,
+    /// Target shard's authoritative spawn pose (forwarded into the
+    /// outgoing `ShardRedirect.spawn_pose` so the client snaps its
+    /// camera directly to where the target shard will render the
+    /// player, eliminating inter-shard latency drift).
+    spawn_pose: Option<handoff::SpawnPose>,
 }
 
 /// Planet provisioning completed.
@@ -537,6 +549,7 @@ fn drain_quic(
                 accepted_events.write(HandoffAcceptedMsg {
                     session_token: a.session_token,
                     target_shard: a.target_shard,
+                    spawn_pose: a.spawn_pose,
                 });
             }
             ShardMsg::ShipPropertiesUpdate(data) => {
@@ -1521,6 +1534,9 @@ fn process_handoff_accepted(
     mut commands: Commands,
     shard_identity: Res<ShardIdentity>,
     bridge: Res<NetworkBridge>,
+    evas: Query<(&EvaPosition, &EvaRotation, &EvaVelocity), With<EvaPlayer>>,
+    ship_index: Res<ecs::ShipEntityIndex>,
+    ships: Query<(&Position, &Rotation, &Velocity), With<ShipId>>,
 ) {
     for event in events.read() {
         if let Some(source_shard) = pending_handoffs.0.remove(&event.session_token) {
@@ -1528,9 +1544,40 @@ fn process_handoff_accepted(
                 // Locally-originated handoff (e.g. EVA → ship boarding). The
                 // target shard has acked; now send ShardRedirect to the client
                 // and despawn our kept-alive EVA entity.
-                if let Some((eva_entity, player_name)) =
-                    boarding_pending.0.remove(&event.session_token)
-                {
+                // Capture the EVA's pose BEFORE despawning, and resolve
+                // the target ship's CURRENT authoritative pose from
+                // `ship_index`. The spawn pose we send to the client is
+                // computed in THIS shard's physics frame — the same
+                // coordinate space the ship-shard's secondary WS carries
+                // as `ws.origin`. That way client math
+                // `planet_local = spawn_pose.position - promoted.origin`
+                // gives the player's ship-local offset (a few meters),
+                // not a ~5 km drift from using ship-shard's stale view
+                // of its own exterior.position.
+                let boarding_entry = boarding_pending.0.remove(&event.session_token);
+                let authoritative_spawn = boarding_entry.as_ref().and_then(|(eva_entity, _, ship_id)| {
+                    let eva_data = evas.get(*eva_entity).ok();
+                    let ship_entity = ship_index.0.get(ship_id).copied();
+                    let ship_data = ship_entity.and_then(|ent| ships.get(ent).ok());
+                    match (eva_data, ship_data) {
+                        (Some((eva_pos, _eva_rot, _eva_vel)), Some((ship_pos, ship_rot, ship_vel))) => {
+                            // Reconstruct player's ship-local position from
+                            // the authoritative EVA system position and
+                            // ship's current pose. Re-apply with the same
+                            // ship pose to produce a spawn_pos in the ship
+                            // shard's system-space frame.
+                            let player_local = ship_rot.0.inverse() * (eva_pos.0 - ship_pos.0);
+                            let spawn_sys_pos = ship_pos.0 + ship_rot.0 * player_local;
+                            Some(handoff::SpawnPose {
+                                position: spawn_sys_pos,
+                                rotation: ship_rot.0,
+                                velocity: ship_vel.0,
+                            })
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some((eva_entity, player_name, _)) = boarding_entry {
                     eva_index.0.remove(&player_name);
                     commands.entity(eva_entity).despawn();
                 }
@@ -1540,19 +1587,19 @@ fn process_handoff_accepted(
                         let tcp_addr = peer_info.endpoint.tcp_addr.to_string();
                         let udp_addr = peer_info.endpoint.udp_addr.to_string();
                         let shard_type = peer_info.shard_type as u8;
-                        // TODO(phase-A-boarding): populate spawn_pose with
-                        // the ship-local spawn position. Requires looking up
-                        // the target ship's current pose (via ShipIndex) and
-                        // converting the system-space EVA position to ship-
-                        // local coordinates. Left None for now — client uses
-                        // the ship shard's JoinResponse position.
+                        // Prefer SYSTEM-computed spawn pose (built from
+                        // authoritative ship_index pose) over ship-shard's
+                        // HandoffAccepted.spawn_pose (built from stale
+                        // exterior.position). Falls back to ship-shard's
+                        // value if SYSTEM can't resolve the ship entity.
+                        let spawn_pose = authoritative_spawn.or_else(|| event.spawn_pose.clone());
                         let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
                             session_token: event.session_token,
                             target_tcp_addr: tcp_addr.clone(),
                             target_udp_addr: udp_addr.clone(),
                             shard_id: event.target_shard,
                             target_shard_type: shard_type,
-                            spawn_pose: None,
+                            spawn_pose,
                         });
                         info!(
                             session = event.session_token.0,
@@ -4429,7 +4476,7 @@ fn eva_boarding_detection(
         });
         boarding_pending
             .0
-            .insert(session.0, (eva_entity, name.0.clone()));
+            .insert(session.0, (eva_entity, name.0.clone(), target_ship_id));
 
         info!(
             session = session.0.0,
