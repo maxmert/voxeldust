@@ -4337,6 +4337,11 @@ fn eva_broadcast(
         autopilot: None,
         sub_grids: vec![],
         entities,
+        // SYSTEM shard publishes observer-relevant signals (body count,
+        // nearest body) so EVA HUD tiles can render them. Observed
+        // ships' status comes via their SHIP shard's hud_signals —
+        // this shard's entries cover system-scope data only.
+        hud_signals: Vec::new(),
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("EVA WorldState broadcast dropped — channel full");
@@ -5337,6 +5342,7 @@ fn broadcast_udp(
         autopilot: None,
         sub_grids: vec![],
         entities: vec![],
+        hud_signals: Vec::new(),
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("WorldState broadcast dropped — channel full");

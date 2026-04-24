@@ -3402,6 +3402,7 @@ impl ClientApp {
             // yet carry the ship as an entity), but the render path is
             // off.
             None,
+            self.cloud_system.as_ref(),
         );
 
         // Handle config panel actions.

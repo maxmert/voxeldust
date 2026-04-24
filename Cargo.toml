@@ -11,7 +11,7 @@ members = [
     "ship-shard",
     "planet-shard",
     "galaxy-shard",
-    "voxydust",
+    "client",
 ]
 
 [workspace.package]

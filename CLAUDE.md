@@ -9,7 +9,7 @@ universe with spherical voxel planets, player-built ships, and Newtonian space p
 ### Three-Crate Structure
 - **Core** (`core/`): Rust library — terrain gen, meshing, coordinate math. Shared by server and client as a direct Rust dependency.
 - **Server** (`server/`): Rust — Tokio async networking, Rapier3D physics, game loop at 20Hz.
-- **Client** (`voxydust/`): Rust — wgpu renderer, winit windowing, egui UI. Generates terrain/meshes locally, connects to server for multiplayer.
+- **Client** (`client/`): Rust + Bevy 0.18 — DefaultPlugins rendering pipeline (bevy_pbr + Bloom + AgX tonemap), bevy_egui UI. Shard-type plugins register via `ShardTypePlugin` trait so adding a new shard-type (DEBRIS, STATION, …) is one new file under `client/src/shard_types/`. `voxydust/` is the retired legacy client kept only as an implementation reference; `voxydust-next/` is the archived second attempt (removed from the workspace members).
 
 ### Key Principles
 - **No magic numbers**: All world parameters derived deterministically from seeds (planet size, gravity, terrain, biomes).
@@ -57,8 +57,8 @@ System Shard (1 per star system)
 ## Build & Run
 ```bash
 cargo test -p voxeldust-core          # Core tests (124 tests)
-cargo run -p voxydust                 # Run client (connects to localhost:7777 by default)
-cargo run -p voxydust -- --gateway 127.0.0.1:7777 --name Player  # Explicit options
+cargo run -p client                   # Run client (connects to localhost:7777 by default)
+cargo run -p client -- --gateway 127.0.0.1:7777 --name Player  # Explicit options
 ./dev-cluster.sh up                   # Build images & deploy to k3d
 ./dev-cluster.sh rebuild              # Rebuild images & redeploy
 ./dev-cluster.sh down                 # Tear down cluster

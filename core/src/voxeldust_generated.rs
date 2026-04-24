@@ -425,10 +425,10 @@ pub struct ServerPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 6;
+pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 7;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 7] = [
+pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 8] = [
   ClientPayload::NONE,
   ClientPayload::Connect,
   ClientPayload::PlayerInput,
@@ -436,6 +436,7 @@ pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 7] = [
   ClientPayload::BlockConfigUpdate,
   ClientPayload::SubBlockEditRequest,
   ClientPayload::ObserverConnect,
+  ClientPayload::ClientSignalPublish,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -450,9 +451,10 @@ impl ClientPayload {
   pub const BlockConfigUpdate: Self = Self(4);
   pub const SubBlockEditRequest: Self = Self(5);
   pub const ObserverConnect: Self = Self(6);
+  pub const ClientSignalPublish: Self = Self(7);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 6;
+  pub const ENUM_MAX: u8 = 7;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::Connect,
@@ -461,6 +463,7 @@ impl ClientPayload {
     Self::BlockConfigUpdate,
     Self::SubBlockEditRequest,
     Self::ObserverConnect,
+    Self::ClientSignalPublish,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -472,6 +475,7 @@ impl ClientPayload {
       Self::BlockConfigUpdate => Some("BlockConfigUpdate"),
       Self::SubBlockEditRequest => Some("SubBlockEditRequest"),
       Self::ObserverConnect => Some("ObserverConnect"),
+      Self::ClientSignalPublish => Some("ClientSignalPublish"),
       _ => None,
     }
   }
@@ -9794,6 +9798,184 @@ impl ::core::fmt::Debug for SubGridTransform<'_> {
       ds.finish()
   }
 }
+pub enum HudSignalEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Server-authored HUD signal snapshot entry. A superset of the
+/// numeric-only core `SignalValue` — HUD widgets read strings too
+/// (body names, warp targets, ship callsigns) and the server is
+/// authoritative for all of them. Clients NEVER look up these strings
+/// locally.
+///
+/// Value encoding:
+///   value_type == 0 → Bool  (value_num: 0.0 or 1.0)
+///   value_type == 1 → Float (value_num: as-is)
+///   value_type == 2 → State (value_num: u8 cast to float)
+///   value_type == 3 → Text  (value_text populated; value_num ignored)
+pub struct HudSignalEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for HudSignalEntry<'a> {
+  type Inner = HudSignalEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> HudSignalEntry<'a> {
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VALUE_TYPE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_VALUE_NUM: ::flatbuffers::VOffsetT = 8;
+  pub const VT_VALUE_TEXT: ::flatbuffers::VOffsetT = 10;
+  pub const VT_PROPERTY: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    HudSignalEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args HudSignalEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<HudSignalEntry<'bldr>> {
+    let mut builder = HudSignalEntryBuilder::new(_fbb);
+    if let Some(x) = args.value_text { builder.add_value_text(x); }
+    builder.add_value_num(args.value_num);
+    if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    builder.add_property(args.property);
+    builder.add_value_type(args.value_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HudSignalEntry::VT_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn value_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(HudSignalEntry::VT_VALUE_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn value_num(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(HudSignalEntry::VT_VALUE_NUM, Some(0.0)).unwrap()}
+  }
+  /// Only populated when value_type == 3.
+  #[inline]
+  pub fn value_text(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HudSignalEntry::VT_VALUE_TEXT, None)}
+  }
+  /// `SignalProperty` ordinal (0=Active, 1=Throttle, 2=Angle, …,
+  /// 10=Text). Widget code uses this to pick a display format.
+  #[inline]
+  pub fn property(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(HudSignalEntry::VT_PROPERTY, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for HudSignalEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
+     .visit_field::<u8>("value_type", Self::VT_VALUE_TYPE, false)?
+     .visit_field::<f32>("value_num", Self::VT_VALUE_NUM, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("value_text", Self::VT_VALUE_TEXT, false)?
+     .visit_field::<u8>("property", Self::VT_PROPERTY, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct HudSignalEntryArgs<'a> {
+    pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub value_type: u8,
+    pub value_num: f32,
+    pub value_text: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub property: u8,
+}
+impl<'a> Default for HudSignalEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    HudSignalEntryArgs {
+      channel_name: None,
+      value_type: 0,
+      value_num: 0.0,
+      value_text: None,
+      property: 0,
+    }
+  }
+}
+
+pub struct HudSignalEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HudSignalEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HudSignalEntry::VT_CHANNEL_NAME, channel_name);
+  }
+  #[inline]
+  pub fn add_value_type(&mut self, value_type: u8) {
+    self.fbb_.push_slot::<u8>(HudSignalEntry::VT_VALUE_TYPE, value_type, 0);
+  }
+  #[inline]
+  pub fn add_value_num(&mut self, value_num: f32) {
+    self.fbb_.push_slot::<f32>(HudSignalEntry::VT_VALUE_NUM, value_num, 0.0);
+  }
+  #[inline]
+  pub fn add_value_text(&mut self, value_text: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HudSignalEntry::VT_VALUE_TEXT, value_text);
+  }
+  #[inline]
+  pub fn add_property(&mut self, property: u8) {
+    self.fbb_.push_slot::<u8>(HudSignalEntry::VT_PROPERTY, property, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HudSignalEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    HudSignalEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<HudSignalEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for HudSignalEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("HudSignalEntry");
+      ds.field("channel_name", &self.channel_name());
+      ds.field("value_type", &self.value_type());
+      ds.field("value_num", &self.value_num());
+      ds.field("value_text", &self.value_text());
+      ds.field("property", &self.property());
+      ds.finish()
+  }
+}
 pub enum WorldStateOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -9821,6 +10003,7 @@ impl<'a> WorldState<'a> {
   pub const VT_AUTOPILOT: ::flatbuffers::VOffsetT = 20;
   pub const VT_SUB_GRIDS: ::flatbuffers::VOffsetT = 22;
   pub const VT_ENTITIES: ::flatbuffers::VOffsetT = 24;
+  pub const VT_HUD_SIGNALS: ::flatbuffers::VOffsetT = 26;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -9834,6 +10017,7 @@ impl<'a> WorldState<'a> {
     let mut builder = WorldStateBuilder::new(_fbb);
     builder.add_game_time(args.game_time);
     builder.add_tick(args.tick);
+    if let Some(x) = args.hud_signals { builder.add_hud_signals(x); }
     if let Some(x) = args.entities { builder.add_entities(x); }
     if let Some(x) = args.sub_grids { builder.add_sub_grids(x); }
     if let Some(x) = args.autopilot { builder.add_autopilot(x); }
@@ -9931,6 +10115,18 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>(WorldState::VT_ENTITIES, None)}
   }
+  /// Per-tick HUD signal snapshot. Full replacement each tick —
+  /// widgets that displayed a channel last tick but not this tick
+  /// render their "no signal" state. Server includes every channel
+  /// the player has permission to read + any server-authored text
+  /// labels (body names, warp target names, ship callsigns, …).
+  #[inline]
+  pub fn hud_signals(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HudSignalEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HudSignalEntry>>>>(WorldState::VT_HUD_SIGNALS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for WorldState<'_> {
@@ -9950,6 +10146,7 @@ impl ::flatbuffers::Verifiable for WorldState<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>("autopilot", Self::VT_AUTOPILOT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SubGridTransform>>>>("sub_grids", Self::VT_SUB_GRIDS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>("entities", Self::VT_ENTITIES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<HudSignalEntry>>>>("hud_signals", Self::VT_HUD_SIGNALS, false)?
      .finish();
     Ok(())
   }
@@ -9966,6 +10163,7 @@ pub struct WorldStateArgs<'a> {
     pub autopilot: Option<::flatbuffers::WIPOffset<AutopilotSnapshot<'a>>>,
     pub sub_grids: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridTransform<'a>>>>>,
     pub entities: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity<'a>>>>>,
+    pub hud_signals: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HudSignalEntry<'a>>>>>,
 }
 impl<'a> Default for WorldStateArgs<'a> {
   #[inline]
@@ -9982,6 +10180,7 @@ impl<'a> Default for WorldStateArgs<'a> {
       autopilot: None,
       sub_grids: None,
       entities: None,
+      hud_signals: None,
     }
   }
 }
@@ -10036,6 +10235,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WorldStateBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WorldState::VT_ENTITIES, entities);
   }
   #[inline]
+  pub fn add_hud_signals(&mut self, hud_signals: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<HudSignalEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WorldState::VT_HUD_SIGNALS, hud_signals);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WorldStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     WorldStateBuilder {
@@ -10064,6 +10267,7 @@ impl ::core::fmt::Debug for WorldState<'_> {
       ds.field("autopilot", &self.autopilot());
       ds.field("sub_grids", &self.sub_grids());
       ds.field("entities", &self.entities());
+      ds.field("hud_signals", &self.hud_signals());
       ds.finish()
   }
 }
@@ -16611,6 +16815,144 @@ impl ::core::fmt::Debug for ObserverConnect<'_> {
       ds.finish()
   }
 }
+pub enum ClientSignalPublishOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Client → server: publish a signal value to a channel. The server
+/// validates `publish_policy` against the sender's player_id before
+/// accepting. Used by publisher HUD widgets (buttons, sliders,
+/// toggles) painted on in-world HUD panels. No `Text` publish —
+/// string signals are server-authored only.
+///
+/// Value encoding matches `HudSignalEntry` for types 0-2 (Bool, Float,
+/// State).
+pub struct ClientSignalPublish<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ClientSignalPublish<'a> {
+  type Inner = ClientSignalPublish<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ClientSignalPublish<'a> {
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VALUE_TYPE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_VALUE_DATA: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ClientSignalPublish { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ClientSignalPublishArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ClientSignalPublish<'bldr>> {
+    let mut builder = ClientSignalPublishBuilder::new(_fbb);
+    builder.add_value_data(args.value_data);
+    if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    builder.add_value_type(args.value_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ClientSignalPublish::VT_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn value_type(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ClientSignalPublish::VT_VALUE_TYPE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn value_data(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ClientSignalPublish::VT_VALUE_DATA, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ClientSignalPublish<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
+     .visit_field::<u8>("value_type", Self::VT_VALUE_TYPE, false)?
+     .visit_field::<f32>("value_data", Self::VT_VALUE_DATA, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ClientSignalPublishArgs<'a> {
+    pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub value_type: u8,
+    pub value_data: f32,
+}
+impl<'a> Default for ClientSignalPublishArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ClientSignalPublishArgs {
+      channel_name: None,
+      value_type: 0,
+      value_data: 0.0,
+    }
+  }
+}
+
+pub struct ClientSignalPublishBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ClientSignalPublishBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ClientSignalPublish::VT_CHANNEL_NAME, channel_name);
+  }
+  #[inline]
+  pub fn add_value_type(&mut self, value_type: u8) {
+    self.fbb_.push_slot::<u8>(ClientSignalPublish::VT_VALUE_TYPE, value_type, 0);
+  }
+  #[inline]
+  pub fn add_value_data(&mut self, value_data: f32) {
+    self.fbb_.push_slot::<f32>(ClientSignalPublish::VT_VALUE_DATA, value_data, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ClientSignalPublishBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ClientSignalPublishBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ClientSignalPublish<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ClientSignalPublish<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ClientSignalPublish");
+      ds.field("channel_name", &self.channel_name());
+      ds.field("value_type", &self.value_type());
+      ds.field("value_data", &self.value_data());
+      ds.finish()
+  }
+}
 pub enum ClientMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -16751,6 +17093,21 @@ impl<'a> ClientMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_client_signal_publish(&self) -> Option<ClientSignalPublish<'a>> {
+    if self.payload_type() == ClientPayload::ClientSignalPublish {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ClientSignalPublish::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ClientMessage<'_> {
@@ -16767,6 +17124,7 @@ impl ::flatbuffers::Verifiable for ClientMessage<'_> {
           ClientPayload::BlockConfigUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockConfigUpdate>>("ClientPayload::BlockConfigUpdate", pos),
           ClientPayload::SubBlockEditRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SubBlockEditRequest>>("ClientPayload::SubBlockEditRequest", pos),
           ClientPayload::ObserverConnect => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ObserverConnect>>("ClientPayload::ObserverConnect", pos),
+          ClientPayload::ClientSignalPublish => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ClientSignalPublish>>("ClientPayload::ClientSignalPublish", pos),
           _ => Ok(()),
         }
      })?
@@ -16858,6 +17216,13 @@ impl ::core::fmt::Debug for ClientMessage<'_> {
         },
         ClientPayload::ObserverConnect => {
           if let Some(x) = self.payload_as_observer_connect() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::ClientSignalPublish => {
+          if let Some(x) = self.payload_as_client_signal_publish() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

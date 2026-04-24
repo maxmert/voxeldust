@@ -197,6 +197,10 @@ fn generate_element_mesh(
             emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &guide_color,
                 0.5, 0.5, 0.08, 0.08, 0.14, elem.rotation, vertices, indices);
         }
+        SubBlockType::HudPanel => {
+            // Emit nothing — client spawns a separate textured quad
+            // entity per HudPanel with its own widget-painted Image.
+        }
         _ => {
             // Generic small box for any unhandled type.
             emit_face_strip(block_origin, face, &normal, &tan_u, &tan_v, &color,

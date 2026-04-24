@@ -515,10 +515,12 @@ mod tests {
         // rays must still pass through them to the hull walls.
         //
         // Walking at y=1.9 means voxel y=1. Solid blocks on that row at
-        // x=0 are COCKPIT (z=-7), OWNERSHIP_CORE (z=0), REACTOR_SMALL (z=1),
-        // BATTERY (z=2), CRUISE_DRIVE_SMALL (z=3). All other z values in
-        // [-8, 7] are air and must be marked interior.
-        let solid_z_at_y1_x0: [i32; 5] = [-7, 0, 1, 2, 3];
+        // x=0 are COCKPIT (z=-5, moved 2 blocks back from the front
+        // glass to give the pilot reading distance to the HUD canopy),
+        // OWNERSHIP_CORE (z=0), REACTOR_SMALL (z=1), BATTERY (z=2),
+        // CRUISE_DRIVE_SMALL (z=3). All other z values in [-8, 7] are
+        // air and must be marked interior.
+        let solid_z_at_y1_x0: [i32; 5] = [-5, 0, 1, 2, 3];
         for z in -6..=6 {
             if solid_z_at_y1_x0.contains(&z) { continue; }
             let v = glam::Vec3::new(0.5, 1.9, z as f32 + 0.5);

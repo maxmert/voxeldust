@@ -8,6 +8,16 @@ use bevy_ecs::prelude::*;
 
 use super::types::*;
 
+/// Failure modes of `SignalChannelTable::try_push_pending`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishDenied {
+    /// Channel name not registered on this shard. Clients must not
+    /// auto-create channels by publishing to them.
+    UnknownChannel,
+    /// Sender's `player_id` not permitted by `publish_policy`.
+    Forbidden,
+}
+
 // ---------------------------------------------------------------------------
 // ChannelId
 // ---------------------------------------------------------------------------
@@ -241,6 +251,15 @@ impl SignalChannelTable {
         self.get_by_id_mut(id)
     }
 
+    /// Iterate every registered channel as `(name, id, current_value)`.
+    /// Used by `WorldState.hud_signals` population — a snapshot-per-tick
+    /// of all channels on the shard for client HUD widgets.
+    pub fn iter_all(&self) -> impl Iterator<Item = (&str, ChannelId, SignalValue)> {
+        self.name_to_id.iter().filter_map(|(name, &id)| {
+            self.get_by_id(id).map(|ch| (name.as_str(), id, ch.value))
+        })
+    }
+
     /// Push a value by channel name (resolves or auto-creates with defaults).
     pub fn push_pending(&mut self, name: &str, value: SignalValue) {
         let id = self.resolve_or_create(
@@ -250,6 +269,38 @@ impl SignalChannelTable {
             0,
         );
         self.push_pending_id(id, value);
+    }
+
+    /// Permission-checked publish used by the client→server
+    /// `SignalPublish` path. Returns:
+    /// - `Ok(())` if the channel exists AND `publish_policy.allows`
+    ///   the sender (value pushed into the pending aggregation).
+    /// - `Err(PublishDenied::UnknownChannel)` if the channel isn't
+    ///   registered — publishing to a nonexistent channel is always
+    ///   denied (channels must be created by block config first).
+    /// - `Err(PublishDenied::Forbidden)` if the policy rejects the
+    ///   sender.
+    ///
+    /// Never auto-creates channels (prevents griefing: a malicious
+    /// client spamming `SignalPublish { channel: "<random>" }` would
+    /// otherwise exhaust channel slots).
+    pub fn try_push_pending(
+        &mut self,
+        name: &str,
+        value: SignalValue,
+        sender_id: u64,
+    ) -> Result<(), PublishDenied> {
+        let Some(&id) = self.name_to_id.get(name) else {
+            return Err(PublishDenied::UnknownChannel);
+        };
+        let Some(ch) = self.channels.get(id.0 as usize).and_then(|s| s.as_ref()) else {
+            return Err(PublishDenied::UnknownChannel);
+        };
+        if !ch.publish_policy.allows(sender_id, ch.owner_id) {
+            return Err(PublishDenied::Forbidden);
+        }
+        self.push_pending_id(id, value);
+        Ok(())
     }
 
     /// Directly publish a value by channel name (bypasses merge).

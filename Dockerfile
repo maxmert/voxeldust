@@ -19,10 +19,10 @@ COPY ship-shard/ ship-shard/
 COPY planet-shard/ planet-shard/
 COPY e2e-tests/ e2e-tests/
 COPY protocol/ protocol/
-# voxydust: copy Cargo.toml + stub main so workspace resolves, but don't build it
 COPY galaxy-shard/ galaxy-shard/
-COPY voxydust/Cargo.toml voxydust/Cargo.toml
-RUN mkdir -p voxydust/src && echo "fn main() {}" > voxydust/src/main.rs
+# client: stub so workspace resolves (client-only crate, not built in server image)
+COPY client/Cargo.toml client/Cargo.toml
+RUN mkdir -p client/src && echo "fn main() {}" > client/src/main.rs
 
 # Build all server binaries in release mode
 RUN cargo build --release \

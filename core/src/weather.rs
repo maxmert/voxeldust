@@ -244,6 +244,49 @@ impl WeatherMap {
 
         Self { width, height, data }
     }
+
+    /// Sample the weather map at a direction vector (relative to planet center).
+    /// Returns (coverage, cloud_type, precipitation, wind_modifier), each in [0, 1]
+    /// except wind_modifier which is in [0.5, 1.5] (pre-remap to [0, 1] here →
+    /// multiply by 2.0 to recover physical range). Uses bilinear interpolation
+    /// in equirectangular UV.
+    pub fn sample(&self, dir: glam::DVec3) -> [f32; 4] {
+        let d = dir.normalize();
+        let lon = d.z.atan2(d.x); // [-PI, PI]
+        let lat = d.y.clamp(-1.0, 1.0).asin(); // [-PI/2, PI/2]
+        let u = (lon / std::f64::consts::TAU + 0.5) * self.width as f64;
+        let v = (lat / std::f64::consts::PI + 0.5) * self.height as f64;
+        // Wrap longitude, clamp latitude.
+        let iu = |u: f64| -> u32 { (u.rem_euclid(self.width as f64)) as u32 };
+        let iv = |v: f64| -> u32 { v.clamp(0.0, self.height as f64 - 1.0) as u32 };
+        let u0 = iu(u.floor());
+        let u1 = iu(u.floor() + 1.0);
+        let v0 = iv(v.floor());
+        let v1 = iv((v.floor() + 1.0).min(self.height as f64 - 1.0));
+        let fu = (u - u.floor()) as f32;
+        let fv = (v - v.floor()) as f32;
+
+        let fetch = |x: u32, y: u32| -> [f32; 4] {
+            let idx = ((y * self.width + x) * 4) as usize;
+            [
+                self.data[idx] as f32 / 255.0,
+                self.data[idx + 1] as f32 / 255.0,
+                self.data[idx + 2] as f32 / 255.0,
+                self.data[idx + 3] as f32 / 255.0,
+            ]
+        };
+        let p00 = fetch(u0, v0);
+        let p10 = fetch(u1, v0);
+        let p01 = fetch(u0, v1);
+        let p11 = fetch(u1, v1);
+        let mut out = [0.0f32; 4];
+        for c in 0..4 {
+            let top = p00[c] * (1.0 - fu) + p10[c] * fu;
+            let bot = p01[c] * (1.0 - fu) + p11[c] * fu;
+            out[c] = top * (1.0 - fv) + bot * fv;
+        }
+        out
+    }
 }
 
 fn smooth_step(edge0: f64, edge1: f64, x: f64) -> f64 {

@@ -1,6 +1,6 @@
 //! Render pass: uniform building, draw calls, scene lighting, egui integration.
 
-use glam::{DVec3, DQuat, Mat4, Quat, Vec3};
+use glam::{DVec3, DQuat, Mat4, Quat, Vec3, Vec4};
 use std::sync::atomic::AtomicU64;
 
 /// Unix-ms wall-clock deadline until which render-frame diagnostics are
@@ -622,27 +622,74 @@ fn build_atmosphere_uniforms(
     // Inverse VP for depth reconstruction.
     let inv_vp = (cam.vp).inverse();
 
-    // Quality settings.
-    let min_spp = match gfx.atmosphere_samples {
-        0..=8 => 2.0_f32,
-        9..=16 => 4.0,
-        _ => 6.0,
+    // Atmosphere-space basis: local up = planet radial. We need a world-fixed
+    // azimuth reference that stays stable under tiny per-frame changes in
+    // `observer_km` — otherwise the sky-view LUT reparameterizes slightly
+    // each frame and the sky visibly shakes.
+    //
+    // The sun direction is a natural world-fixed reference: it barely changes
+    // frame-to-frame (server-driven sun) and is always meaningful. Project it
+    // onto the tangent plane at the observer to get a stable azimuth axis.
+    // Only degenerate case: sun is exactly along `up`; pick an arbitrary
+    // world-fixed fallback and ensure no discontinuity as we transition.
+    let observer_len = observer_km.length();
+    let up = if observer_len > 1e-6 {
+        (observer_km / observer_len).as_vec3()
+    } else {
+        Vec3::Y
     };
-    let max_spp = gfx.atmosphere_samples as f32;
+    let sun_world = Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]);
+    // Project sun onto tangent plane: tangent_sun = sun - (sun·up)·up.
+    let tangent_sun_raw = sun_world - up * sun_world.dot(up);
+    let tangent_sun_len = tangent_sun_raw.length();
+    let right = if tangent_sun_len > 1e-4 {
+        // Right axis perpendicular to both up and tangent_sun (cross product).
+        // Stable because tangent_sun is world-fixed (or nearly so).
+        up.cross(tangent_sun_raw).normalize_or(Vec3::X)
+    } else {
+        // Sun is colinear with up (zenith/nadir). Fall back to a world-fixed
+        // axis that's perpendicular to up, choosing deterministically.
+        let fallback = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
+        up.cross(fallback).normalize_or(Vec3::X)
+    };
+    let fwd = right.cross(up).normalize_or(Vec3::NEG_Z);
+    let world_from_atmo_rot = Mat4::from_cols(
+        right.extend(0.0),
+        up.extend(0.0),
+        (-fwd).extend(0.0),
+        Vec4::new(0.0, 0.0, 0.0, 1.0),
+    );
+    let atmo_from_world_rot = world_from_atmo_rot.transpose();
+
+    // Aerial-perspective LUT spans the visible distance range inside the
+    // atmosphere. Use atmosphere height × 1.5 as a sensible cap — covers the
+    // full horizon sweep without wasting LUT slices on far-past-atmosphere.
+    let ap_max_km = ((atmo.atmosphere_height / 1000.0) as f32) * 1.5;
+
+    // Sun angular radius (half-angle). If not set by the server, pick a
+    // sensible default matching a Sol-like 0.25° disc.
+    let sun_angular_radius = 0.00465_f32;
 
     AtmosphereUniforms {
         observer_pos: [observer_km.x as f32, observer_km.y as f32, observer_km.z as f32, 0.0],
-        radii: [planet_r_km, atmo_r_km, 1.0, 0.0],
+        radii: [planet_r_km, atmo_r_km, 1.0, sun_angular_radius],
         rayleigh: [rayleigh_scatter_km[0], rayleigh_scatter_km[1], rayleigh_scatter_km[2],
-                   -1.0 / rayleigh_h_km], // density exp scale
+                   -1.0 / rayleigh_h_km],
         mie: [mie_scatter_km, mie_absorb_km, -1.0 / mie_h_km, atmo.mie_anisotropy as f32],
         ozone: [ozone_km[0], ozone_km[1], ozone_km[2], ozone_center_km],
         ozone_extra: [ozone_width_km, 0.3, 1.0, 0.0], // ground_albedo, multi_scatter_factor
-        sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.01], // w = sun disk diameter (radians)
+        sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
         sun_color: [sun_color[0], sun_color[1], sun_color[2], 0.0],
         inv_vp: inv_vp.to_cols_array_2d(),
-        screen: [cam.aspect * 100.0, 100.0, 0.0, 0.0], // placeholder, real dims set in composite params
-        quality: [min_spp, max_spp, atmo.weather_mie_multiplier as f32, atmo.weather_sun_occlusion as f32],
+        screen: [cam.aspect * 100.0, 100.0, 0.0, 0.0],
+        quality: [
+            atmo.weather_mie_multiplier as f32,
+            atmo.weather_sun_occlusion as f32,
+            ap_max_km,
+            gfx.atmosphere_samples as f32,
+        ],
+        atmo_from_world: atmo_from_world_rot.to_cols_array_2d(),
+        world_from_atmo: world_from_atmo_rot.to_cols_array_2d(),
     }
 }
 
@@ -705,6 +752,59 @@ fn compute_eclipse(
     }
 
     best_factor
+}
+
+/// Lightning flash envelope. Deterministic from (game_time, planet_seed) so
+/// every player on the planet sees the identical flash pattern. Returns the
+/// flash intensity in [0, 1], typically > 0 only for a few frames at a time.
+///
+/// Model: 0.5-second time buckets; each bucket independently rolls a trigger
+/// event with probability scaled by `storm_strength` (coverage×type×precip at
+/// the player's location) and `altitude_factor` (how far into the storm the
+/// player is). When triggered, a 160-ms double-pulse envelope replays —
+/// mimicking the characteristic "bright, momentary darkness, brighter" pattern
+/// of real cloud-to-cloud lightning seen from below the storm.
+fn lightning_flash_envelope(
+    game_time: f64,
+    planet_seed: u64,
+    storm_strength: f32,
+    altitude_factor: f32,
+) -> f32 {
+    if storm_strength <= 0.0 || altitude_factor <= 0.0 { return 0.0; }
+    const BUCKET_SECS: f64 = 0.5;
+    const FLASH_LEN: f64 = 0.16;
+    let current_bucket = (game_time / BUCKET_SECS).floor() as i64;
+    let trigger_prob = (storm_strength * altitude_factor * 0.35).clamp(0.0, 0.45);
+
+    // Check up to 2 recent buckets in case an active flash started before the
+    // current bucket (edges of 160 ms envelope can cross bucket boundaries).
+    let mut max_flash = 0.0_f32;
+    for back in 0..2 {
+        let bucket = current_bucket.saturating_sub(back);
+        let bucket_start_time = bucket as f64 * BUCKET_SECS;
+        // 64-bit splitmix hash: bucket_index XOR planet_seed.
+        let mixed = (bucket as u64).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(planet_seed);
+        let roll = (mixed.wrapping_mul(0xBF58476D1CE4E5B9)) ^ (mixed >> 27);
+        let r01 = (roll as f64) / (u64::MAX as f64);
+        if r01 < trigger_prob as f64 {
+            let t_since = game_time - bucket_start_time;
+            if t_since >= 0.0 && t_since < FLASH_LEN {
+                let x = (t_since / FLASH_LEN) as f32;
+                // Double-pulse: quick bright peak, short dimming, smaller rebound.
+                let env = if x < 0.15 {
+                    1.0 - x / 0.15
+                } else if x < 0.4 {
+                    0.0
+                } else if x < 0.7 {
+                    (0.5 * (1.0 - (x - 0.4) / 0.3)).max(0.0)
+                } else {
+                    0.0
+                };
+                if env > max_flash { max_flash = env; }
+            }
+        }
+    }
+    max_flash
 }
 
 /// Build SceneLighting from the current WorldState.
@@ -778,6 +878,7 @@ pub fn render_frame(
     secondary_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
     grace_ship_sources: &std::collections::HashMap<u64, ChunkSourceId>,
     departed_ship: Option<DepartedShipView>,
+    cloud_system: Option<&crate::cloud_system::CloudSystem>,
 ) -> hud::ConfigPanelAction {
     let frame = match gpu.surface.get_current_texture() { Ok(f) => f, Err(_) => return hud::ConfigPanelAction::None };
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -864,6 +965,76 @@ pub fn render_frame(
             }
         }
     }
+    // Cloud shadow attenuation + lightning flashes + wetness. All only apply
+    // when the player is actually outside — piloting a cockpit means the camera
+    // is sealed inside an interior and storm modulation shouldn't leak into
+    // the shared SceneLighting buffer (otherwise interior walls become "wet"
+    // and flash with lightning, which looks awful).
+    if !is_piloting {
+        scene_lighting.ambient[1] = 0.0;
+    }
+    if !is_piloting {
+    if let (Some(cs), Some(sys)) = (cloud_system, system_params) {
+        if let Some(weather) = &cs.current_weather_cpu {
+            if let Some((planet_idx, planet_pos)) = find_atmosphere_planet(cam.cam_system_pos, sys, interpolated_bodies) {
+                let planet = &sys.planets[planet_idx];
+                let observer_m = cam.cam_system_pos - planet_pos;
+                let altitude_m = observer_m.length() - planet.radius_m;
+                let cloud_top_m = planet.clouds.cloud_base_altitude + planet.clouds.cloud_layer_thickness;
+                if altitude_m < cloud_top_m && planet.clouds.has_clouds {
+                    let sample = weather.sample(observer_m);
+                    let coverage = sample[0];
+                    let cloud_type = sample[1];
+                    let precip = sample[2];
+                    let alt_factor = if altitude_m < planet.clouds.cloud_base_altitude {
+                        1.0
+                    } else {
+                        let t = (altitude_m - planet.clouds.cloud_base_altitude) / planet.clouds.cloud_layer_thickness;
+                        (1.0 - t).clamp(0.0, 1.0) as f32
+                    };
+                    let max_darken = 0.75 * cloud_type.max(0.4);
+                    let factor = 1.0 - coverage * alt_factor * max_darken;
+                    scene_lighting.sun_color[3] *= factor;
+
+                    // Lightning: cumulonimbus + precipitation + coverage produces
+                    // electrically active storm cells. Deterministic hashing of
+                    // 0.5-second time buckets fires a short double-pulse flash
+                    // with ~15% probability in any given bucket. Effect is
+                    // additive to ambient so shadow side still glows.
+                    // Wet-surface factor: surfaces stay wet during rain and
+                    // for a short decay after. For initial implementation we
+                    // use the instantaneous precipitation at the player's
+                    // location; a proper puddle-decay buffer would remember
+                    // "where did it recently rain" across chunks, a future
+                    // addition. Clamp to the same altitude fade so the player
+                    // only gets wet when they're actually below/in the cloud
+                    // layer.
+                    let wetness = (precip * alt_factor).clamp(0.0, 1.0);
+                    scene_lighting.ambient[1] = wetness;
+
+                    let storm_strength = coverage * cloud_type.max(0.0) * precip.max(0.0);
+                    if storm_strength > 0.08 {
+                        if let Some(ws) = latest_world_state {
+                            let game_time = ws.game_time;
+                            let flash = lightning_flash_envelope(game_time, planet.planet_seed, storm_strength, alt_factor);
+                            if flash > 0.0 {
+                                // Cool-white flash color, added to ambient term
+                                // (the existing ambient channel lives in
+                                // scene_lighting.ambient[0] as a scalar; bump
+                                // it directly). Also brighten sun slightly to
+                                // simulate the secondary illumination from
+                                // deep-cloud scattering.
+                                let f = flash.min(1.0);
+                                scene_lighting.ambient[0] += f * 0.3;
+                                scene_lighting.sun_color[3] *= 1.0 + f * 0.25;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    } // end if !is_piloting
     gpu.queue.write_buffer(&gpu.scene_lighting_buf, 0, bytemuck::bytes_of(&scene_lighting));
 
     // Write render configuration from graphics settings.
@@ -1406,10 +1577,74 @@ pub fn render_frame(
         }
     }
 
+    // -- Atmosphere LUT compute passes (Hillaire 2020 four-LUT pipeline, minus
+    // the multi-scatter LUT which is deferred to a later phase).
+    //
+    // Only dispatched when the atmosphere is actually enabled — when the
+    // disabled-atmosphere uniform is uploaded, the LUTs still get rebuilt but
+    // the composite shader early-outs via the `radii.z > 0.5` check.
+    //
+    // Transmittance LUT: depends only on planet parameters. Rebuilding it
+    // every frame is a tiny (256×64 = 16384 invocations × ~40 samples) job —
+    // far simpler than tracking "planet changed" state.
+    // Sky-view + aerial-view: depend on observer position + sun + view, so
+    // must be rebuilt every frame.
+    if gpu.hdr_enabled {
+        if let (
+            Some(t_pipe), Some(t_bg),
+            Some(m_pipe), Some(m_bg),
+            Some(s_pipe), Some(s_bg),
+            Some(a_pipe), Some(a_bg),
+        ) = (
+            &gpu.atmo_transmittance_pipeline, &gpu.atmo_transmittance_bind_group,
+            &gpu.atmo_multiscatter_pipeline, &gpu.atmo_multiscatter_bind_group,
+            &gpu.atmo_skyview_pipeline, &gpu.atmo_skyview_bind_group,
+            &gpu.atmo_aerial_pipeline, &gpu.atmo_aerial_bind_group,
+        ) {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("atmo_lut_dispatch"),
+                timestamp_writes: None,
+            });
+            // Transmittance LUT (8×8 workgroups).
+            cpass.set_pipeline(t_pipe);
+            cpass.set_bind_group(0, t_bg, &[]);
+            cpass.dispatch_workgroups(
+                crate::gpu::TRANSMITTANCE_LUT_W.div_ceil(8),
+                crate::gpu::TRANSMITTANCE_LUT_H.div_ceil(8),
+                1,
+            );
+            // Multi-scatter LUT: workgroup_size (1, 1, 64) — one workgroup per
+            // (r, mu) output texel, 64 sample rays reduced in shared memory.
+            cpass.set_pipeline(m_pipe);
+            cpass.set_bind_group(0, m_bg, &[]);
+            cpass.dispatch_workgroups(
+                crate::gpu::MULTISCATTER_LUT_W,
+                crate::gpu::MULTISCATTER_LUT_H,
+                1,
+            );
+            // Sky-view LUT (depends on transmittance + multi-scatter).
+            cpass.set_pipeline(s_pipe);
+            cpass.set_bind_group(0, s_bg, &[]);
+            cpass.dispatch_workgroups(
+                crate::gpu::SKY_VIEW_LUT_W.div_ceil(8),
+                crate::gpu::SKY_VIEW_LUT_H.div_ceil(8),
+                1,
+            );
+            // Aerial-view LUT (3D; outer loop over slices happens inside the shader).
+            cpass.set_pipeline(a_pipe);
+            cpass.set_bind_group(0, a_bg, &[]);
+            cpass.dispatch_workgroups(
+                crate::gpu::AERIAL_LUT_W.div_ceil(8),
+                crate::gpu::AERIAL_LUT_H.div_ceil(8),
+                1,
+            );
+        }
+    }
+
     // -- HDR composite pass: tonemap HDR → swapchain --
     if gpu.hdr_enabled {
-        if let (Some(pipeline), Some(bind_group), Some(params_buf)) =
-            (&gpu.composite_pipeline, &gpu.composite_bind_group, &gpu.composite_params_buf)
+        if let (Some(pipeline), Some(bind_group), Some(params_buf), Some(lut_bg)) =
+            (&gpu.composite_pipeline, &gpu.composite_bind_group, &gpu.composite_params_buf, &gpu.atmo_lut_bind_group)
         {
             // Upload composite params (screen dimensions).
             let w = gpu.config.width as f32;
@@ -1434,6 +1669,7 @@ pub fn render_frame(
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
+            pass.set_bind_group(1, lut_bg, &[]);
             pass.draw(0..3, 0..1); // vertexless fullscreen triangle
         }
     }

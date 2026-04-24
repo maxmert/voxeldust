@@ -1,0 +1,31 @@
+[package]
+name = "voxydust-next"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Bevy 0.18 — full engine. Pins wgpu 27 + winit 0.30 + naga 27 transitively.
+# DefaultPlugins gets us: bevy_render, bevy_pbr, bevy_core_pipeline (bloom,
+# tonemapping, auto_exposure, fxaa, taa), bevy_winit, bevy_asset, bevy_input,
+# bevy_time, bevy_transform, bevy_scene, bevy_text, bevy_log, etc.
+bevy = { version = "0.18", default-features = true }
+# UI: bevy_egui matches Bevy's egui version automatically.
+bevy_egui = "0.39"
+
+# Voxeldust core + networking stay shared. Protocol and game state are
+# renderer-agnostic.
+voxeldust-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+flatbuffers.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+clap.workspace = true
+# Pinned version matches voxeldust-core's noise version so procedural terrain
+# is bit-identical between server-generated chunks (future) and this demo.
+noise = "=0.9.0"
+
+# NOTE: NO direct wgpu or winit dependency. Bevy re-exports what's needed
+# (e.g., `bevy::render::renderer::RenderDevice` wraps `wgpu::Device`). If
+# we ever need raw wgpu for a custom render node, use `bevy::render::wgpu`
+# re-export to guarantee version alignment.

@@ -76,6 +76,10 @@ pub struct CloudSystem {
     last_weather_time: f64,
     /// Whether the weather map has been uploaded to GPU at least once.
     pub weather_map_ready: bool,
+    /// Most recently produced CPU-side weather map. Kept so CPU systems can
+    /// sample cloud coverage at the player's position without a GPU readback.
+    /// Updated when `poll_weather_map` consumes a generation result.
+    pub current_weather_cpu: Option<voxeldust_core::weather::WeatherMap>,
     /// Fallback 1×1 dummy 2D texture view for when weather map isn't ready.
     pub dummy_2d_view: wgpu::TextureView,
 }
@@ -183,6 +187,7 @@ impl CloudSystem {
             weather_gen_handle: None,
             last_weather_time: -1000.0, // force immediate generation
             weather_map_ready: false,
+            current_weather_cpu: None,
             dummy_2d_view: {
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("dummy_weather_2d"),
@@ -206,22 +211,23 @@ impl CloudSystem {
     /// Non-blocking: spawns a background thread. Call `poll_weather_map()` each
     /// frame to check for completion and upload to GPU.
     ///
-    /// Weather map is generated ONCE per planet (static large-scale pattern).
-    /// Cloud animation comes from wind scrolling the 3D noise in the shader.
-    /// Only regenerates when switching to a different planet.
+    /// Weather is static per planet load for now. An earlier revision
+    /// regenerated the map every 30 game-seconds, but swapping the GPU texture
+    /// wholesale produced a visible "teleport" where cloud patterns jumped to
+    /// new positions. Smooth evolution needs a dual-buffer lerp (or a proper
+    /// server-authoritative broadcast with per-frame interpolation) — until
+    /// that's in, static is better than teleporting.
     pub fn request_weather_update(
         &mut self,
         planet: &PlanetParams,
         _game_time: f64,
     ) {
-        // Don't start if already generating.
         if self.weather_gen_handle.is_some() { return; }
-
-        // Only generate once per planet — skip if already generated for this seed.
         if self.weather_map_ready && self.current_planet_seed == Some(planet.planet_seed) { return; }
 
+        self.current_planet_seed = Some(planet.planet_seed);
+
         let planet_clone = planet.clone();
-        // Use time=0 for static weather pattern. Cloud motion comes from wind scrolling.
         self.weather_gen_handle = Some(std::thread::spawn(move || {
             voxeldust_core::weather::WeatherMap::generate(&planet_clone, 0.0)
         }));
@@ -296,6 +302,9 @@ impl CloudSystem {
             height = weather_map.height,
             "uploaded weather map to GPU"
         );
+        // Retain the CPU copy so per-frame cloud-cover queries can attenuate
+        // the scene sun without a GPU readback.
+        self.current_weather_cpu = Some(weather_map);
         needs_create // true if bind group needs rebuild (new texture)
     }
 

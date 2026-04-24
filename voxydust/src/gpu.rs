@@ -116,6 +116,27 @@ pub struct GpuState {
     pub atmosphere_buf: Option<wgpu::Buffer>,
     /// Cloud uniform buffer (binding 8 in composite bind group).
     pub cloud_uniform_buf: Option<wgpu::Buffer>,
+
+    // Atmosphere LUT rig — Hillaire 2020 four-LUT pipeline (multi-scatter LUT deferred).
+    pub transmittance_lut_tex: Option<wgpu::Texture>,
+    pub transmittance_lut_view: Option<wgpu::TextureView>,
+    pub multiscatter_lut_tex: Option<wgpu::Texture>,
+    pub multiscatter_lut_view: Option<wgpu::TextureView>,
+    pub sky_view_lut_tex: Option<wgpu::Texture>,
+    pub sky_view_lut_view: Option<wgpu::TextureView>,
+    pub aerial_view_lut_tex: Option<wgpu::Texture>,
+    pub aerial_view_lut_view: Option<wgpu::TextureView>,
+    pub atmo_lut_sampler: Option<wgpu::Sampler>,
+    pub atmo_transmittance_pipeline: Option<wgpu::ComputePipeline>,
+    pub atmo_transmittance_bind_group: Option<wgpu::BindGroup>,
+    pub atmo_multiscatter_pipeline: Option<wgpu::ComputePipeline>,
+    pub atmo_multiscatter_bind_group: Option<wgpu::BindGroup>,
+    pub atmo_skyview_pipeline: Option<wgpu::ComputePipeline>,
+    pub atmo_skyview_bind_group: Option<wgpu::BindGroup>,
+    pub atmo_aerial_pipeline: Option<wgpu::ComputePipeline>,
+    pub atmo_aerial_bind_group: Option<wgpu::BindGroup>,
+    /// Bind group 1 for the composite pass: exposes the four LUTs + sampler.
+    pub atmo_lut_bind_group: Option<wgpu::BindGroup>,
     pub pipeline: wgpu::RenderPipeline,
     pub sphere_inside_pipeline: wgpu::RenderPipeline,
     pub sphere_vertex_buf: wgpu::Buffer,
@@ -173,38 +194,56 @@ pub const NUM_CASCADES: u32 = 4;
 
 /// Atmosphere rendering uniforms. All scattering parameters are per-planet,
 /// derived deterministically from the planet seed. Units: kilometers for radii
-/// and scale heights, 1/km for scattering coefficients (matching Hillaire 2020
-/// and webgpu-sky-atmosphere conventions).
+/// and scale heights, 1/km for scattering coefficients (Hillaire 2020 convention).
+///
+/// Used by BOTH the LUT compute shaders (transmittance / sky-view / aerial-view)
+/// and the composite fragment shader. Layout must match atmo_common.wgsl.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct AtmosphereUniforms {
     /// Observer position relative to planet center (km). w = unused.
     pub observer_pos: [f32; 4],
     /// x = planet surface radius (km), y = atmosphere top radius (km),
-    /// z = 1.0 if atmosphere enabled, w = unused.
+    /// z = enabled flag (>0.5), w = sun disk angular radius (radians).
     pub radii: [f32; 4],
-    /// Rayleigh scattering coefficients at sea level (1/km). w = density exp scale (-1/scale_height_km).
+    /// Rayleigh scattering coefficients at sea level (1/km). w = density exp scale (-1/H_rayleigh_km).
     pub rayleigh: [f32; 4],
     /// x = Mie scattering (1/km), y = Mie absorption (1/km),
-    /// z = Mie density exp scale (-1/scale_height_km), w = Mie asymmetry (g).
+    /// z = Mie density exp scale (-1/H_mie_km), w = Mie asymmetry g.
     pub mie: [f32; 4],
-    /// Ozone absorption coefficients (1/km). w = layer center altitude (km).
+    /// xyz = ozone absorption (1/km). w = layer center altitude (km).
     pub ozone: [f32; 4],
-    /// x = ozone layer width (km), y = ground albedo, z = multi_scattering_factor, w = unused.
+    /// x = ozone width (km), y = ground albedo, z = multi-scatter factor (placeholder), w = unused.
     pub ozone_extra: [f32; 4],
-    /// Sun direction (toward sun, normalized). w = sun disk angular diameter (radians).
+    /// Sun direction (toward sun, normalized). w = unused.
     pub sun_dir: [f32; 4],
-    /// Sun illuminance (linear RGB). w = unused.
+    /// Sun illuminance (linear RGB, exposed). w = unused.
     pub sun_color: [f32; 4],
     /// Inverse view-projection for depth → world-pos reconstruction.
     pub inv_vp: [[f32; 4]; 4],
-    /// x = screen width, y = screen height, z = 1/width, w = 1/height.
+    /// x = screen width, y = screen height, z = 1/width, w = 1/height (legacy; composite reads CompositeParams instead).
     pub screen: [f32; 4],
-    /// x = min ray march samples, y = max ray march samples, z = weather_mie_mult, w = weather_sun_occlusion.
+    /// x = weather Mie multiplier, y = weather sun occlusion (illuminance scale),
+    /// z = aerial-view LUT max distance (km), w = unused.
     pub quality: [f32; 4],
+    /// Rotation from world space → atmosphere space (local up = +Y, azimuth 0 = world +X).
+    pub atmo_from_world: [[f32; 4]; 4],
+    /// Inverse of the above.
+    pub world_from_atmo: [[f32; 4]; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<AtmosphereUniforms>() == 224);
+const _: () = assert!(std::mem::size_of::<AtmosphereUniforms>() == 352);
+
+/// Sizes for atmosphere LUT textures. Match the constants in atmo_common.wgsl.
+pub const TRANSMITTANCE_LUT_W: u32 = 256;
+pub const TRANSMITTANCE_LUT_H: u32 = 64;
+pub const SKY_VIEW_LUT_W: u32 = 192;
+pub const SKY_VIEW_LUT_H: u32 = 108;
+pub const AERIAL_LUT_W: u32 = 32;
+pub const AERIAL_LUT_H: u32 = 32;
+pub const AERIAL_LUT_D: u32 = 32;
+pub const MULTISCATTER_LUT_W: u32 = 32;
+pub const MULTISCATTER_LUT_H: u32 = 32;
 
 /// Shadow cascade data passed to the fragment shader for CSM shadow sampling.
 #[repr(C)]
@@ -853,11 +892,336 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
         cache: None,
     });
 
-    // -- Composite pipeline (HDR tonemapping fullscreen pass) --
-    let (composite_pipeline, composite_bind_group_layout, composite_bind_group, composite_params_buf, atmosphere_buf, cloud_uniform_buf) = if hdr_enabled {
-        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("composite_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
+    // -- Composite pipeline (HDR tonemapping fullscreen pass) + atmosphere LUT rig --
+    //
+    // Shared atmosphere WGSL prefix concatenated into every atmosphere shader so
+    // types and helper functions are available without an import system.
+    let atmo_common_src = include_str!("atmo_common.wgsl");
+    let make_atmo_shader = |label: &'static str, body: &'static str| -> wgpu::ShaderModule {
+        let full = format!("{}\n{}", atmo_common_src, body);
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(full.into()),
+        })
+    };
+
+    let (
+        composite_pipeline,
+        composite_bind_group_layout,
+        composite_bind_group,
+        composite_params_buf,
+        atmosphere_buf,
+        cloud_uniform_buf,
+        transmittance_lut_tex,
+        transmittance_lut_view,
+        multiscatter_lut_tex,
+        multiscatter_lut_view,
+        sky_view_lut_tex,
+        sky_view_lut_view,
+        aerial_view_lut_tex,
+        aerial_view_lut_view,
+        atmo_lut_sampler,
+        atmo_transmittance_pipeline,
+        atmo_transmittance_bind_group,
+        atmo_multiscatter_pipeline,
+        atmo_multiscatter_bind_group,
+        atmo_skyview_pipeline,
+        atmo_skyview_bind_group,
+        atmo_aerial_pipeline,
+        atmo_aerial_bind_group,
+        atmo_lut_bind_group,
+    ) = if hdr_enabled {
+        let composite_shader = make_atmo_shader("composite_shader", include_str!("composite.wgsl"));
+        let transmittance_shader = make_atmo_shader("atmo_transmittance_shader", include_str!("atmo_transmittance.wgsl"));
+        let multiscatter_shader = make_atmo_shader("atmo_multiscatter_shader", include_str!("atmo_multiscatter.wgsl"));
+        let skyview_shader = make_atmo_shader("atmo_skyview_shader", include_str!("atmo_skyview.wgsl"));
+        let aerial_shader = make_atmo_shader("atmo_aerial_shader", include_str!("atmo_aerial.wgsl"));
+
+        // Atmosphere uniform buffer — shared by all atmosphere shaders.
+        let atmo_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atmosphere_uniforms"),
+            size: std::mem::size_of::<AtmosphereUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // LUT textures. rgba16float storage texture is standard; all three use
+        // the same format so a single sampler works for all of them.
+        let make_lut_2d = |label: &'static str, w: u32, h: u32| -> (wgpu::Texture, wgpu::TextureView) {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            (tex, view)
+        };
+        let (transmittance_tex, transmittance_view) = make_lut_2d("transmittance_lut", TRANSMITTANCE_LUT_W, TRANSMITTANCE_LUT_H);
+        let (multiscatter_tex, multiscatter_view) = make_lut_2d("multiscatter_lut", MULTISCATTER_LUT_W, MULTISCATTER_LUT_H);
+        let (skyview_tex, skyview_view) = make_lut_2d("sky_view_lut", SKY_VIEW_LUT_W, SKY_VIEW_LUT_H);
+        let aerial_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aerial_view_lut"),
+            size: wgpu::Extent3d { width: AERIAL_LUT_W, height: AERIAL_LUT_H, depth_or_array_layers: AERIAL_LUT_D },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let aerial_view = aerial_tex.create_view(&Default::default());
+
+        let atmo_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("atmo_lut_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Compute BGL for the transmittance LUT pass (no dependency on other LUTs).
+        let transmittance_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("atmo_transmittance_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<AtmosphereUniforms>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Shared builder for "depends on transmittance LUT" compute passes.
+        // `extra_inputs` controls whether the multi-scatter LUT is also bound
+        // (sky-view and aerial-view need it; multiscatter itself does not).
+        let make_dependent_bgl = |label: &'static str, output_dim: wgpu::TextureViewDimension, extra_input: bool| -> wgpu::BindGroupLayout {
+            let mut entries: Vec<wgpu::BindGroupLayoutEntry> = vec![
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<AtmosphereUniforms>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ];
+            let output_binding = if extra_input {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                });
+                4
+            } else {
+                3
+            };
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: output_binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    view_dimension: output_dim,
+                },
+                count: None,
+            });
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries: &entries,
+            })
+        };
+        let multiscatter_bgl = make_dependent_bgl("atmo_multiscatter_bgl", wgpu::TextureViewDimension::D2, false);
+        let skyview_bgl = make_dependent_bgl("atmo_skyview_bgl", wgpu::TextureViewDimension::D2, true);
+        let aerial_bgl = make_dependent_bgl("atmo_aerial_bgl", wgpu::TextureViewDimension::D3, true);
+
+        let transmittance_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("atmo_transmittance_pl"),
+            bind_group_layouts: &[&transmittance_bgl],
+            push_constant_ranges: &[],
+        });
+        let multiscatter_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("atmo_multiscatter_pl"),
+            bind_group_layouts: &[&multiscatter_bgl],
+            push_constant_ranges: &[],
+        });
+        let skyview_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("atmo_skyview_pl"),
+            bind_group_layouts: &[&skyview_bgl],
+            push_constant_ranges: &[],
+        });
+        let aerial_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("atmo_aerial_pl"),
+            bind_group_layouts: &[&aerial_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let transmittance_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("atmo_transmittance_pipeline"),
+            layout: Some(&transmittance_pipeline_layout),
+            module: &transmittance_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let multiscatter_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("atmo_multiscatter_pipeline"),
+            layout: Some(&multiscatter_pipeline_layout),
+            module: &multiscatter_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let skyview_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("atmo_skyview_pipeline"),
+            layout: Some(&skyview_pipeline_layout),
+            module: &skyview_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let aerial_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("atmo_aerial_pipeline"),
+            layout: Some(&aerial_pipeline_layout),
+            module: &aerial_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let transmittance_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atmo_transmittance_bg"),
+            layout: &transmittance_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: atmo_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&transmittance_view) },
+            ],
+        });
+        let multiscatter_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atmo_multiscatter_bg"),
+            layout: &multiscatter_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: atmo_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&transmittance_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&atmo_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&multiscatter_view) },
+            ],
+        });
+        let skyview_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atmo_skyview_bg"),
+            layout: &skyview_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: atmo_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&transmittance_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&atmo_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&multiscatter_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&skyview_view) },
+            ],
+        });
+        let aerial_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atmo_aerial_bg"),
+            layout: &aerial_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: atmo_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&transmittance_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&atmo_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&multiscatter_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&aerial_view) },
+            ],
+        });
+
+        // LUT bind group layout + bind group for the composite pass (group 1).
+        let lut_composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("atmo_lut_composite_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let lut_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atmo_lut_composite_bg"),
+            layout: &lut_composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&transmittance_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&skyview_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&aerial_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&atmo_lut_sampler) },
+            ],
         });
 
         let composite_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -976,7 +1340,7 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
 
         let composite_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("composite_pipeline_layout"),
-            bind_group_layouts: &[&composite_bind_group_layout],
+            bind_group_layouts: &[&composite_bind_group_layout, &lut_composite_bgl],
             push_constant_ranges: &[],
         });
 
@@ -1019,13 +1383,6 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("composite_params"),
             size: std::mem::size_of::<CompositeParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let atmo_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("atmosphere_uniforms"),
-            size: std::mem::size_of::<AtmosphereUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1086,9 +1443,39 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
             ],
         });
 
-        (Some(composite_pipeline), Some(composite_bind_group_layout), Some(bind_group), Some(params_buf), Some(atmo_buf), Some(cloud_buf))
+        (
+            Some(composite_pipeline),
+            Some(composite_bind_group_layout),
+            Some(bind_group),
+            Some(params_buf),
+            Some(atmo_buf),
+            Some(cloud_buf),
+            Some(transmittance_tex),
+            Some(transmittance_view),
+            Some(multiscatter_tex),
+            Some(multiscatter_view),
+            Some(skyview_tex),
+            Some(skyview_view),
+            Some(aerial_tex),
+            Some(aerial_view),
+            Some(atmo_lut_sampler),
+            Some(transmittance_pipeline),
+            Some(transmittance_bg),
+            Some(multiscatter_pipeline),
+            Some(multiscatter_bg),
+            Some(skyview_pipeline),
+            Some(skyview_bg),
+            Some(aerial_pipeline),
+            Some(aerial_bg),
+            Some(lut_composite_bg),
+        )
     } else {
-        (None, None, None, None, None, None)
+        (
+            None, None, None, None, None, None,
+            None, None, None, None, None, None,
+            None, None, None, None, None, None,
+            None, None, None, None, None, None,
+        )
     };
 
     // egui.
@@ -1104,6 +1491,24 @@ pub fn init_gpu(window: Arc<Window>, hdr_enabled: bool) -> GpuState {
         depth_texture: Some(depth_texture_obj),
         atmosphere_buf,
         cloud_uniform_buf,
+        transmittance_lut_tex,
+        transmittance_lut_view,
+        multiscatter_lut_tex,
+        multiscatter_lut_view,
+        sky_view_lut_tex,
+        sky_view_lut_view,
+        aerial_view_lut_tex,
+        aerial_view_lut_view,
+        atmo_lut_sampler,
+        atmo_transmittance_pipeline,
+        atmo_transmittance_bind_group,
+        atmo_multiscatter_pipeline,
+        atmo_multiscatter_bind_group,
+        atmo_skyview_pipeline,
+        atmo_skyview_bind_group,
+        atmo_aerial_pipeline,
+        atmo_aerial_bind_group,
+        atmo_lut_bind_group,
         pipeline, sphere_inside_pipeline,
         sphere_vertex_buf, sphere_index_buf, sphere_index_count: sphere.indices.len() as u32,
         box_vertex_buf, box_index_buf, box_index_count: box_idxs.len() as u32,

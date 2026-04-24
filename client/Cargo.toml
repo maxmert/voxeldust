@@ -1,0 +1,30 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
+[dependencies]
+# Bevy — DefaultPlugins brings bevy_render, bevy_pbr, bevy_core_pipeline,
+# bevy_winit, bevy_asset, bevy_input, bevy_time, bevy_transform, bevy_text,
+# bevy_log.
+bevy = { version = "0.18", default-features = true }
+bevy_egui = "0.39"
+
+# Shared game code.
+voxeldust-core = { workspace = true, features = ["bytemuck"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+flatbuffers.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+clap.workspace = true
+lz4_flex.workspace = true
+
+# NOTE: No direct wgpu/winit/rapier. Bevy re-exports anything we need; physics
+# is server-side. No direct bevy_ecs/bevy_app either — the full `bevy` crate
+# supersedes them.

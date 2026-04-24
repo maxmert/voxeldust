@@ -2455,6 +2455,7 @@ fn broadcast_world_state(
     config: Res<ShipConfig>,
     external: Res<ExternalEntities>,
     hull_bounds: Res<ShipHullBounds>,
+    channels: Res<SignalChannelTable>,
 ) {
     let scene_stale = tick.0 > scene.last_update_tick + 20;
     let bodies: Vec<CelestialBodyData> = if scene_stale {
@@ -2555,10 +2556,13 @@ fn broadcast_world_state(
         entities.push(entity);
     }
     for (sid, name, pos, seated) in players.iter() {
+        // Kind reflects the player's actual posture. Copy-paste bug here
+        // previously emitted `Seated` in both branches, which permanently
+        // stuck every client's pilot-mode detection on.
         let kind = if seated.seated {
             EntityKind::Seated
         } else {
-            EntityKind::Seated
+            EntityKind::GroundedPlayer
         };
         entities.push(ObservableEntityData {
             entity_id: sid.0.0,
@@ -2577,6 +2581,84 @@ fn broadcast_world_state(
         });
     }
 
+    // HUD signal snapshot for every subscribed client. Two sources
+    // combine:
+    //
+    //   1. **Ship-status auto-publish** — derived ship state the
+    //      player always wants on their cockpit HUD (speed, thrust
+    //      tier, warp phase, callsign). These use well-known channel
+    //      names prefixed `ship.*` so widget configs can subscribe
+    //      without needing a matching `ShipStatusBlock` placed.
+    //
+    //   2. **User-configured channels** — every channel registered in
+    //      the shard's `SignalChannelTable` (created by
+    //      `BlockConfigUpdate` binding). Snapshotted here so HUD
+    //      widgets configured against any channel see the live value
+    //      in-tick.
+    //
+    // Text channels are server-authored string labels — clients never
+    // look them up locally. Numeric channels pass through verbatim.
+    let mut hud_signals: Vec<voxeldust_core::client_message::HudSignalEntryData> = Vec::new();
+    {
+        use voxeldust_core::client_message::{HudSignalEntryData, HudSignalValue};
+        use voxeldust_core::signal::types::{SignalProperty, SignalValue as CoreSignalValue};
+
+        // (1) Ship-status auto-publish.
+        let speed = exterior.velocity.length() as f32;
+        hud_signals.push(HudSignalEntryData {
+            channel_name: "ship.speed".into(),
+            value: HudSignalValue::Float(speed),
+            property: SignalProperty::Speed.as_ordinal(),
+        });
+        hud_signals.push(HudSignalEntryData {
+            channel_name: "ship.callsign".into(),
+            value: HudSignalValue::Text(format!("SHIP-{:X}", config.shard_id.0)),
+            property: SignalProperty::Text.as_ordinal(),
+        });
+        if let Some(ref ap) = autopilot_cache.snapshot {
+            hud_signals.push(HudSignalEntryData {
+                channel_name: "ship.thrust_tier".into(),
+                value: HudSignalValue::Float(ap.thrust_tier as f32 / 5.0),
+                property: SignalProperty::Throttle.as_ordinal(),
+            });
+            hud_signals.push(HudSignalEntryData {
+                channel_name: "ship.autopilot.phase".into(),
+                value: HudSignalValue::State(ap.phase),
+                property: SignalProperty::SwitchState.as_ordinal(),
+            });
+            hud_signals.push(HudSignalEntryData {
+                channel_name: "ship.autopilot.eta".into(),
+                value: HudSignalValue::Float(ap.eta_real_seconds as f32),
+                property: SignalProperty::Speed.as_ordinal(),
+            });
+        }
+
+        // (2) User-configured channels — snapshot every registered
+        // channel's current value. Duplicate names (e.g. if a user
+        // ever configures `ship.speed`) let the user's binding
+        // override the auto-publish on the client side — intentional
+        // precedence: the later-inserted entry wins when the client's
+        // drainer runs `insert` in order.
+        for (name, _id, value) in channels.iter_all() {
+            let (hud_value, property) = match value {
+                CoreSignalValue::Bool(b) => {
+                    (HudSignalValue::Bool(b), SignalProperty::Active)
+                }
+                CoreSignalValue::Float(f) => {
+                    (HudSignalValue::Float(f), SignalProperty::Throttle)
+                }
+                CoreSignalValue::State(s) => {
+                    (HudSignalValue::State(s), SignalProperty::SwitchState)
+                }
+            };
+            hud_signals.push(HudSignalEntryData {
+                channel_name: name.to_string(),
+                value: hud_value,
+                property: property.as_ordinal(),
+            });
+        }
+    }
+
     let mut ws = ServerMsg::WorldState(WorldStateData {
         tick: tick.0,
         origin: exterior.position,
@@ -2589,6 +2671,7 @@ fn broadcast_world_state(
         autopilot: autopilot_cache.snapshot.clone(),
         sub_grids: Vec::new(), // Populated below after WorldStateData construction.
         entities,
+        hud_signals,
     });
     // Build sub-grid transforms from MechanicalState (clean joint angle + axis)
     // instead of raw Rapier body quaternions (which have solver noise on off-axes).
@@ -3240,6 +3323,51 @@ fn drain_config_updates(
             Err(_) => break,
         };
         events.write(ConfigUpdateMsg { session, update });
+    }
+}
+
+/// Drain client publisher-widget signal publishes, validate
+/// `publish_policy` against the sender's session, and push into the
+/// pending aggregation for this tick. Authority chain:
+///   1. Client's `ConfigPanelWidget` / publisher button emits
+///      `ClientMsg::SignalPublish { channel, value }`.
+///   2. TCP listener forwards through `signal_publish_rx`.
+///   3. `try_push_pending` checks the channel's `publish_policy` —
+///      `OwnerOnly` (ship owner), `AllowList`, or `Public`.
+///   4. On allow, value enters the channel's pending accumulator.
+///   5. `merge_pending` finalises each tick; the merged value
+///      propagates through converter rules + subscribers exactly as
+///      any other publisher.
+/// `SignalPublish` into an unknown channel is rejected (prevents
+/// malicious channel enumeration).
+fn drain_client_signal_publishes(
+    mut bridge: ResMut<NetworkBridge>,
+    mut channels: ResMut<SignalChannelTable>,
+) {
+    use voxeldust_core::signal::channel::PublishDenied;
+    for _ in 0..64 {
+        let (session, publish) = match bridge.signal_publish_rx.try_recv() {
+            Ok(u) => u,
+            Err(_) => break,
+        };
+        let player_id = session.0;
+        match channels.try_push_pending(&publish.channel_name, publish.value, player_id) {
+            Ok(()) => {}
+            Err(PublishDenied::UnknownChannel) => {
+                tracing::warn!(
+                    player_id,
+                    channel = %publish.channel_name,
+                    "SignalPublish rejected: unknown channel",
+                );
+            }
+            Err(PublishDenied::Forbidden) => {
+                tracing::warn!(
+                    player_id,
+                    channel = %publish.channel_name,
+                    "SignalPublish rejected: publish_policy forbids sender",
+                );
+            }
+        }
     }
 }
 
@@ -6692,7 +6820,7 @@ fn build_ship_interior(
     // Bridge: drain async channels.
     app.add_systems(
         Update,
-        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_sub_block_edits, drain_quic).in_set(ShipSet::Bridge),
+        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_sub_block_edits, drain_client_signal_publishes, drain_quic).in_set(ShipSet::Bridge),
     );
 
     // Input: process connects, player input, preconnect, config updates.

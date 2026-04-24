@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use voxeldust_core::client_message::{BlockEditData, ClientMsg, PlayerInputData, ServerMsg};
+use voxeldust_core::client_message::{
+    BlockEditData, ClientMsg, PlayerInputData, ServerMsg, SignalPublishData,
+};
 use voxeldust_core::shard_types::SessionToken;
 
 /// A persistent client connection. The TCP write half is stored for server→client sends.
@@ -32,6 +34,11 @@ pub struct TcpMessageChannels {
     pub block_edit_tx: mpsc::UnboundedSender<(SessionToken, BlockEditData)>,
     pub config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
     pub sub_block_edit_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
+    /// Publisher-widget signal publishes (button presses, slider drags,
+    /// toggle clicks). Routed to the shard's signal evaluator which
+    /// validates `publish_policy` against the sender's player_id before
+    /// accepting.
+    pub signal_publish_tx: mpsc::UnboundedSender<(SessionToken, SignalPublishData)>,
 }
 
 /// Event emitted when a client connects via TCP.
@@ -488,6 +495,9 @@ async fn run_tcp_read_loop(
             Ok(ClientMsg::ObserverConnect { .. }) => {
                 // ObserverConnect on an already-established connection — ignore.
                 warn!(%peer_addr, "ObserverConnect on established connection");
+            }
+            Ok(ClientMsg::SignalPublish(data)) => {
+                let _ = channels.signal_publish_tx.send((session_token, data));
             }
             Err(e) => {
                 debug!(%peer_addr, %e, "failed to deserialize TCP client message");

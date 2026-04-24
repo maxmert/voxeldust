@@ -1498,6 +1498,10 @@ fn broadcast_world_state(
         autopilot: None,
         sub_grids: vec![],
         entities,
+        // Planet shards don't auto-publish HUD signals yet — planet
+        // turrets / seats publish via the normal signal graph. Left
+        // empty so client SignalRegistry retains last-known values.
+        hud_signals: Vec::new(),
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("WorldState broadcast dropped — channel full");

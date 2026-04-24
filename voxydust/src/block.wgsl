@@ -197,8 +197,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let metallic = u.material.x;
-    let roughness = max(u.material.y, 0.04);
+    var roughness = max(u.material.y, 0.04);
     let glass = u.material.z;
+
+    // Wet-surface BRDF modulation. `scene.ambient[1]` carries a [0, 1] wetness
+    // factor — populated CPU-side from the weather map's precipitation channel
+    // at the player's location. Rain visibly smooths the surface (roughness
+    // collapses toward 0.15) and boosts the dielectric F0 (Fresnel response),
+    // producing wet specular highlights and the gleaming-ground look that
+    // pairs with the screen-space rain in composite.
+    let wetness = clamp(scene.ambient[1], 0.0, 1.0);
+    roughness = mix(roughness, 0.15, wetness * 0.8);
 
     // Glass material: screen-door transparency.
     if glass > 0.5 {
@@ -218,8 +227,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n_dot_h = max(dot(N, H), 0.0);
     let v_dot_h = max(dot(V, H), 0.0);
 
-    // Fresnel: dielectric F0 = 0.04, metallic F0 = base_color.
-    let f0 = mix(vec3(0.04), base_color, metallic);
+    // Fresnel: dielectric F0 = 0.04, metallic F0 = base_color. Rain boosts
+    // dielectric F0 toward water-film level (~0.10) for stronger highlights.
+    let wet_dielectric_f0 = mix(0.04, 0.10, wetness);
+    let f0 = mix(vec3(wet_dielectric_f0), base_color, metallic);
     let F = fresnel_schlick(v_dot_h, f0);
 
     // Distribution and geometry.

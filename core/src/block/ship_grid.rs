@@ -741,8 +741,11 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
         }
     }
 
-    // Place cockpit at the front interior, center
-    let cockpit_z = z_min + 1;
+    // Place cockpit at interior, center. Seated 2 blocks back from the
+    // front glass so the pilot isn't pressed against the canopy — there
+    // is clear reading distance to the HUD panels placed on the glass
+    // (see HUD panel loop below).
+    let cockpit_z = z_min + 3;
     grid.set_block(0, 1, cockpit_z, BlockId::COCKPIT);
 
     // Place ownership core at center of ship
@@ -922,6 +925,34 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
 
     // --- Sub-block elements: decorative only (power is wireless now) ---
     use sub_block::{SubBlockElement, SubBlockType};
+
+    // Cockpit HUD canopy: attach a `HudPanel` sub-block to the pilot-
+    // facing (+Z, face 4) side of every window block in the front wall.
+    // Widget kind stays `None` by default — client-side config
+    // (HudPanelConfigs) lets the pilot pick Gauge/Numeric/Toggle/Text/
+    // Button + channel later via F on each panel. Placing them now
+    // guarantees the glass is pre-canopied with interactive surfaces
+    // the player can customise immediately on connect.
+    //
+    // Window block layout (lines above): x ∈ [-3, 3], y ∈ [1, 4],
+    // z = z_min. Skipping the outer edges of the frame (`!on_x_min`,
+    // `!on_x_max`, `!on_y_min`, `!on_y_max`) yields a 7×4 grid of 28
+    // HUD panels.
+    for y in 1..=(y_max - 1) {
+        for x in (x_min + 1)..=(x_max - 1) {
+            grid.add_sub_block(
+                x,
+                y,
+                z_min,
+                SubBlockElement {
+                    face: 4, // +Z, inward toward pilot
+                    element_type: SubBlockType::HudPanel,
+                    rotation: 0,
+                    flags: 0,
+                },
+            );
+        }
+    }
 
     // Decorative cable along the interior ceiling center (visual only).
     for z in (z_min + 2)..=(z_max - 2) {
@@ -1143,8 +1174,9 @@ mod tests {
         // Front wall should be windows (interior face of front wall)
         assert_eq!(grid.get_block(0, 2, z_min), BlockId::WINDOW);
 
-        // Cockpit should be placed
-        assert_eq!(grid.get_block(0, 1, z_min + 1), BlockId::COCKPIT);
+        // Cockpit should be placed 2 blocks back from the front glass
+        // so the pilot has clear reading distance to the HUD canopy.
+        assert_eq!(grid.get_block(0, 1, z_min + 3), BlockId::COCKPIT);
 
         // Ownership core at center
         assert_eq!(grid.get_block(0, 1, 0), BlockId::OWNERSHIP_CORE);

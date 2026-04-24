@@ -413,6 +413,18 @@ pub enum ClientMsg {
     SubBlockEdit(SubBlockEditData),
     /// Observer-only connection (no player entity, receives chunk data + WorldState).
     ObserverConnect { observer_name: String },
+    /// Publish a signal value to a channel. Server validates
+    /// `publish_policy` + sender's player_id, then calls
+    /// `push_pending` on the shard's `SignalChannelTable`.
+    SignalPublish(SignalPublishData),
+}
+
+/// Payload for `ClientMsg::SignalPublish`. No text variant — string
+/// signals are server-authored only (see `HudSignalValue::Text`).
+#[derive(Debug, Clone)]
+pub struct SignalPublishData {
+    pub channel_name: String,
+    pub value: crate::signal::types::SignalValue,
 }
 
 /// Server → client messages.
@@ -599,6 +611,68 @@ pub struct WorldStateData {
     /// Source-of-truth going forward; the legacy `ships`/`players` fields
     /// mirror a subset for backward compatibility and will be removed.
     pub entities: Vec<ObservableEntityData>,
+    /// HUD signal snapshot. Server-authored per-tick replacement for the
+    /// client's `SignalRegistry`: every channel the player has
+    /// permission to read, plus server-authored string labels (body
+    /// names, warp targets, ship callsigns). Empty on minor ticks if
+    /// the server chooses to skip — client retains previous values.
+    pub hud_signals: Vec<HudSignalEntryData>,
+}
+
+/// Single HUD signal entry in a `WorldStateData.hud_signals` batch.
+/// See `HudSignalValue` for the value encoding.
+#[derive(Debug, Clone)]
+pub struct HudSignalEntryData {
+    pub channel_name: String,
+    pub value: HudSignalValue,
+    /// `SignalProperty` ordinal (Active=0, Throttle=1, …, Text=10).
+    pub property: u8,
+}
+
+/// Superset of the numeric-only core `SignalValue`, adding a `Text`
+/// variant for display-only strings the server is authoritative for
+/// (body names, warp targets, ship callsigns). Kept separate from
+/// core `SignalValue` so the simulation retains a `Copy` / numeric
+/// type.
+#[derive(Debug, Clone)]
+pub enum HudSignalValue {
+    Bool(bool),
+    Float(f32),
+    State(u8),
+    Text(String),
+}
+
+impl HudSignalValue {
+    pub fn type_code(&self) -> u8 {
+        match self {
+            Self::Bool(_) => 0,
+            Self::Float(_) => 1,
+            Self::State(_) => 2,
+            Self::Text(_) => 3,
+        }
+    }
+
+    pub fn numeric_repr(&self) -> f32 {
+        match self {
+            Self::Bool(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Float(f) => *f,
+            Self::State(s) => *s as f32,
+            Self::Text(_) => 0.0,
+        }
+    }
+
+    pub fn text_repr(&self) -> &str {
+        match self {
+            Self::Text(s) => s.as_str(),
+            _ => "",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -811,7 +885,10 @@ pub struct SubBlockModData {
     pub face: u8,
     pub element_type: u8,
     pub rotation: u8,
-    pub action: u8, // 0=remove, 1=place
+    /// Server passes through the original `SubBlockEditRequest.action`
+    /// — i.e. `action::PLACE_SUB` (10) or `action::REMOVE_SUB` (11)
+    /// from the `action` constants module. Do NOT assume 0/1.
+    pub action: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -933,6 +1010,70 @@ pub(crate) fn decode_observable_entities(
                 health: e.health(),
                 shield: e.shield(),
             }
+        })
+        .collect()
+}
+
+/// Encode HUD signal snapshot for `WorldState.hud_signals`.
+pub(crate) fn encode_hud_signals<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    entries: &[HudSignalEntryData],
+) -> Option<
+    flatbuffers::WIPOffset<
+        flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::HudSignalEntry<'a>>>,
+    >,
+> {
+    if entries.is_empty() {
+        return None;
+    }
+    let offsets: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            let name = builder.create_string(&e.channel_name);
+            let text = if matches!(e.value, HudSignalValue::Text(_)) {
+                Some(builder.create_string(e.value.text_repr()))
+            } else {
+                None
+            };
+            fb::HudSignalEntry::create(
+                builder,
+                &fb::HudSignalEntryArgs {
+                    channel_name: Some(name),
+                    value_type: e.value.type_code(),
+                    value_num: e.value.numeric_repr(),
+                    value_text: text,
+                    property: e.property,
+                },
+            )
+        })
+        .collect();
+    Some(builder.create_vector(&offsets))
+}
+
+/// Decode HUD signal entries from a WorldState frame.
+pub(crate) fn decode_hud_signals(
+    entries: Option<
+        flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::HudSignalEntry<'_>>>,
+    >,
+) -> Vec<HudSignalEntryData> {
+    let Some(v) = entries else { return Vec::new() };
+    v.iter()
+        .filter_map(|e| {
+            let name = e.channel_name()?;
+            let value = match e.value_type() {
+                0 => HudSignalValue::Bool(e.value_num() > 0.5),
+                1 => HudSignalValue::Float(e.value_num()),
+                2 => HudSignalValue::State(e.value_num() as u8),
+                3 => HudSignalValue::Text(
+                    e.value_text().map(|s| s.to_string()).unwrap_or_default(),
+                ),
+                _ => return None,
+            };
+            Some(HudSignalEntryData {
+                channel_name: name.to_string(),
+                value,
+                property: e.property(),
+            })
         })
         .collect()
 }
@@ -1104,6 +1245,32 @@ impl ClientMsg {
                 });
                 builder.finish(msg, None);
             }
+            ClientMsg::SignalPublish(data) => {
+                let name = builder.create_string(&data.channel_name);
+                let (value_type, value_data) = match data.value {
+                    crate::signal::types::SignalValue::Bool(b) => {
+                        (0u8, if b { 1.0 } else { 0.0 })
+                    }
+                    crate::signal::types::SignalValue::Float(f) => (1u8, f),
+                    crate::signal::types::SignalValue::State(s) => (2u8, s as f32),
+                };
+                let sp = fb::ClientSignalPublish::create(
+                    &mut builder,
+                    &fb::ClientSignalPublishArgs {
+                        channel_name: Some(name),
+                        value_type,
+                        value_data,
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::ClientSignalPublish,
+                        payload: Some(sp.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -1222,6 +1389,30 @@ impl ClientMsg {
                 Ok(ClientMsg::ObserverConnect {
                     observer_name: oc.observer_name().unwrap_or("").to_string(),
                 })
+            }
+            fb::ClientPayload::ClientSignalPublish => {
+                let sp = msg
+                    .payload_as_client_signal_publish()
+                    .ok_or(MessageError::MissingField("ClientSignalPublish payload"))?;
+                let name = sp
+                    .channel_name()
+                    .ok_or(MessageError::MissingField("channel_name"))?
+                    .to_string();
+                let value = match sp.value_type() {
+                    0 => crate::signal::types::SignalValue::Bool(sp.value_data() > 0.5),
+                    1 => crate::signal::types::SignalValue::Float(sp.value_data()),
+                    2 => crate::signal::types::SignalValue::State(sp.value_data() as u8),
+                    _ => {
+                        return Err(MessageError::InvalidBuffer(format!(
+                            "SignalPublish: unsupported value_type {}",
+                            sp.value_type()
+                        )))
+                    }
+                };
+                Ok(ClientMsg::SignalPublish(SignalPublishData {
+                    channel_name: name,
+                    value,
+                }))
             }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),
             other => Err(MessageError::UnknownPayload(other.0)),
@@ -1391,6 +1582,7 @@ impl ServerMsg {
                 let sub_grids_vec = if sg_fbs.is_empty() { None } else { Some(builder.create_vector(&sg_fbs)) };
 
                 let entities_vec = encode_observable_entities(&mut builder, &data.entities);
+                let hud_signals_vec = encode_hud_signals(&mut builder, &data.hud_signals);
 
                 let ws = fb::WorldState::create(&mut builder, &fb::WorldStateArgs {
                     tick: data.tick,
@@ -1404,6 +1596,7 @@ impl ServerMsg {
                     autopilot: ap_offset,
                     sub_grids: sub_grids_vec,
                     entities: entities_vec,
+                    hud_signals: hud_signals_vec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::WorldState,
@@ -1839,6 +2032,7 @@ impl ServerMsg {
                 }).collect()).unwrap_or_default();
 
                 let entities = decode_observable_entities(ws.entities());
+                let hud_signals = decode_hud_signals(ws.hud_signals());
 
                 Ok(ServerMsg::WorldState(WorldStateData {
                     tick: ws.tick(),
@@ -1852,6 +2046,7 @@ impl ServerMsg {
                     autopilot,
                     sub_grids,
                     entities,
+                    hud_signals,
                 }))
             }
             fb::ServerPayload::ChunkBlockMods => {
@@ -2266,6 +2461,18 @@ mod tests {
                 health: 0.0,
                 shield: 0.0,
             }],
+            hud_signals: vec![
+                HudSignalEntryData {
+                    channel_name: "ship.speed".into(),
+                    value: HudSignalValue::Float(42.5),
+                    property: crate::signal::types::SignalProperty::Speed.as_ordinal(),
+                },
+                HudSignalEntryData {
+                    channel_name: "ship.callsign".into(),
+                    value: HudSignalValue::Text("TestPilot-1".into()),
+                    property: crate::signal::types::SignalProperty::Text.as_ordinal(),
+                },
+            ],
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();

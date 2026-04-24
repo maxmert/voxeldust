@@ -48,6 +48,8 @@ pub struct NetworkBridge {
     pub config_update_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
     /// Incoming sub-block edit requests with sender session (TCP or UDP).
     pub sub_block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
+    /// Incoming signal publishes from publisher HUD widgets.
+    pub signal_publish_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
@@ -134,6 +136,8 @@ pub struct ShardHarness {
     config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
     sub_block_edit_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
     sub_block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
+    signal_publish_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
+    signal_publish_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
     quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
@@ -145,6 +149,7 @@ impl ShardHarness {
         let (block_edit_tx, block_edit_rx) = mpsc::unbounded_channel();
         let (config_update_tx, config_update_rx) = mpsc::unbounded_channel();
         let (sub_block_edit_tx, sub_block_edit_rx) = mpsc::unbounded_channel();
+        let (signal_publish_tx, signal_publish_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
         let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
@@ -176,6 +181,8 @@ impl ShardHarness {
             config_update_tx,
             sub_block_edit_tx,
             sub_block_edit_rx,
+            signal_publish_tx,
+            signal_publish_rx,
             quic_msg_tx,
             cancel: CancellationToken::new(),
         }
@@ -216,6 +223,7 @@ impl ShardHarness {
             block_edit_tx: self.block_edit_tx.clone(),
             config_update_tx: self.config_update_tx.clone(),
             sub_block_edit_tx: self.sub_block_edit_tx.clone(),
+            signal_publish_tx: self.signal_publish_tx.clone(),
         };
         let tcp_registry = self.client_registry.clone();
         tokio::spawn(async move {
@@ -517,6 +525,7 @@ impl ShardHarness {
             block_edit_rx: self.block_edit_rx,
             config_update_rx: self.config_update_rx,
             sub_block_edit_rx: self.sub_block_edit_rx,
+            signal_publish_rx: self.signal_publish_rx,
             quic_msg_rx: self.quic_msg_rx,
             broadcast_tx: self.broadcast_tx.clone(),
             quic_send_tx: self.quic_send_tx.clone(),

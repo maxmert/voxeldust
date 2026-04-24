@@ -52,6 +52,13 @@ pub enum SubBlockType {
     // Structural (50-59)
     Bracket         = 50,
     Seal            = 51,
+
+    // HUD / UI (60-69)
+    /// Transparent signal-driven HUD tile on a block face.
+    /// Per-sub-block config (widget kind + channel/property) lives in
+    /// the server-authored `BlockSignalConfig` payload keyed on
+    /// `(block_pos, face)`.
+    HudPanel        = 60,
 }
 
 impl SubBlockType {
@@ -77,6 +84,7 @@ impl SubBlockType {
             44 => Some(Self::Vent),
             50 => Some(Self::Bracket),
             51 => Some(Self::Seal),
+            60 => Some(Self::HudPanel),
             _  => None,
         }
     }
@@ -104,6 +112,7 @@ impl SubBlockType {
             Self::Vent          => "Vent",
             Self::Bracket       => "Bracket",
             Self::Seal          => "Seal",
+            Self::HudPanel      => "HUD Panel",
         }
     }
 
@@ -140,6 +149,7 @@ impl SubBlockType {
             Self::Vent          => [120, 130, 140],  // steel
             Self::Bracket       => [100, 100, 110],
             Self::Seal          => [200, 200, 220],  // light steel
+            Self::HudPanel      => [20, 30, 50],     // dark glass; real content drawn by widget
         }
     }
 }

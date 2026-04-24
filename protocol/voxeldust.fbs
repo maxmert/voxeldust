@@ -607,6 +607,28 @@ table SubGridTransform {
     current_value: float; // current angle (deg) or extension (m)
 }
 
+/// Server-authored HUD signal snapshot entry. A superset of the
+/// numeric-only core `SignalValue` — HUD widgets read strings too
+/// (body names, warp targets, ship callsigns) and the server is
+/// authoritative for all of them. Clients NEVER look up these strings
+/// locally.
+///
+/// Value encoding:
+///   value_type == 0 → Bool  (value_num: 0.0 or 1.0)
+///   value_type == 1 → Float (value_num: as-is)
+///   value_type == 2 → State (value_num: u8 cast to float)
+///   value_type == 3 → Text  (value_text populated; value_num ignored)
+table HudSignalEntry {
+    channel_name: string;
+    value_type: uint8;
+    value_num: float;
+    /// Only populated when value_type == 3.
+    value_text: string;
+    /// `SignalProperty` ordinal (0=Active, 1=Throttle, 2=Angle, …,
+    /// 10=Text). Widget code uses this to pick a display format.
+    property: uint8;
+}
+
 table WorldState {
     tick: uint64;
     origin: Vec3d;
@@ -626,6 +648,12 @@ table WorldState {
     /// Source-of-truth going forward. The legacy `ships`/`players` fields
     /// will be removed once all shards and clients migrate.
     entities: [ObservableEntity];
+    /// Per-tick HUD signal snapshot. Full replacement each tick —
+    /// widgets that displayed a channel last tick but not this tick
+    /// render their "no signal" state. Server includes every channel
+    /// the player has permission to read + any server-authored text
+    /// labels (body names, warp target names, ship callsigns, …).
+    hud_signals: [HudSignalEntry];
 }
 
 /// Block-to-sub-grid assignment for mechanical mount membership.
@@ -1024,6 +1052,20 @@ table ObserverConnect {
     observer_name: string;     // optional, for debugging/logging
 }
 
+/// Client → server: publish a signal value to a channel. The server
+/// validates `publish_policy` against the sender's player_id before
+/// accepting. Used by publisher HUD widgets (buttons, sliders,
+/// toggles) painted on in-world HUD panels. No `Text` publish —
+/// string signals are server-authored only.
+///
+/// Value encoding matches `HudSignalEntry` for types 0-2 (Bool, Float,
+/// State).
+table ClientSignalPublish {
+    channel_name: string;
+    value_type: uint8;
+    value_data: float;
+}
+
 union ClientPayload {
     Connect,
     PlayerInput,
@@ -1031,6 +1073,7 @@ union ClientPayload {
     BlockConfigUpdate,
     SubBlockEditRequest,
     ObserverConnect,
+    ClientSignalPublish,
 }
 
 /// Root type for client → server messages.
