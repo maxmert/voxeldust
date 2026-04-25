@@ -107,9 +107,29 @@ impl Plugin for ShardRegistryPlugin {
             .init_resource::<Secondaries>()
             .init_resource::<SourceIndex>()
             .configure_sets(Update, ShardRegistrySet.after(NetworkBridgeSet))
+            // Chain order:
+            // 1. `handle_disconnects` first — frees ShardKey slots for
+            //    secondaries that just got cancelled (old SHIP / SYSTEM
+            //    connections being torn down by ShardRedirect cleanup).
+            //    Without this, when the same shard reconnects in the
+            //    same frame (a new ShardPreConnect arriving from the
+            //    new primary), `handle_secondary_connected` would see
+            //    the key as "already-known" and skip the spawn — then
+            //    `handle_disconnects` despawns the old entity, leaving
+            //    NO entity for that ShardKey until the next manual
+            //    re-connect. The user's log shows this exact pattern:
+            //      WARN SecondaryConnected for already-known shard
+            //      shard despawned key=...
+            //    — and the ship visibly disappears for several seconds
+            //    while waiting for re-stream.
+            // 2. `handle_connected` — promote secondary → primary.
+            // 3. `handle_secondary_connected` — open new secondaries
+            //    (keys are now free if their predecessors were just
+            //    disconnected).
             .add_systems(
                 Update,
-                (handle_connected, handle_secondary_connected, handle_disconnects)
+                (handle_disconnects, handle_connected, handle_secondary_connected)
+                    .chain()
                     .in_set(ShardRegistrySet),
             );
     }
@@ -117,9 +137,11 @@ impl Plugin for ShardRegistryPlugin {
 
 // Separate systems per event kind (CLAUDE.md: split systems by access
 // pattern). They share `ShardTypeRegistry` (read-only) + the two shard
-// maps (write). The write overlap is fine because the three systems
-// never process the same ShardKey in the same frame — Connected,
-// SecondaryConnected, and Disconnect paths are disjoint.
+// maps (write). Chain order matters when the same ShardKey appears in
+// both a Disconnect and a Connect event in the same frame (common
+// during ShardRedirect — the network layer cancels every non-scene
+// secondary, then the new primary's ShardPreConnects re-open the
+// same seeds).
 
 fn handle_connected(
     mut events: MessageReader<GameEvent>,
@@ -178,6 +200,7 @@ fn handle_secondary_connected(
     registry: Res<ShardTypeRegistry>,
     mut secondaries: ResMut<Secondaries>,
     mut source_index: ResMut<SourceIndex>,
+    mut grace: ResMut<crate::shard::transition::GraceWindow>,
     mut commands: Commands,
 ) {
     for GameEvent(ev) in events.read() {
@@ -191,6 +214,32 @@ fn handle_secondary_connected(
             let key = ShardKey::new(*shard_type, *seed);
             if secondaries.runtimes.contains_key(&key) {
                 tracing::warn!(%key, "SecondaryConnected for already-known shard");
+                continue;
+            }
+            // Reuse the graced ChunkSource if the same shard is
+            // re-opening as a secondary. This happens after every
+            // PRIMARY→PRIMARY transition where the old primary
+            // becomes a secondary on the new host (e.g., SHIP→EVA
+            // turns the old SHIP into a SHIP secondary). Without
+            // reuse, the old `ChunkSource` (with all chunk children)
+            // sits in grace and despawns 1.5 s later, while the new
+            // empty `ChunkSource` waits for chunks to re-stream over
+            // the new TCP connection — net effect: the ship visibly
+            // disappears for the seconds between grace expiry and
+            // the chunk re-stream finishing.
+            if let Some(graced) = grace.retained.remove(&key) {
+                source_index.by_shard.insert(key, graced.entity);
+                let runtime = ShardRuntime {
+                    key,
+                    entity: graced.entity,
+                    origin: graced.origin_at_start,
+                    rotation: graced.rotation_at_start,
+                    reference_position: *reference_position,
+                    reference_rotation: *reference_rotation,
+                    connected_at: Instant::now(),
+                };
+                secondaries.runtimes.insert(key, runtime);
+                tracing::info!(%key, "secondary reused graced ChunkSource — chunks preserved");
                 continue;
             }
             let runtime = spawn_new_shard_runtime(

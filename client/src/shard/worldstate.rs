@@ -41,17 +41,70 @@ impl Plugin for WorldStateIngestPlugin {
             .configure_sets(Update, WorldStateIngestSet.after(ShardRegistrySet))
             .add_systems(
                 Update,
-                (ingest_primary, ingest_secondary).in_set(WorldStateIngestSet),
+                (
+                    // Clear buffered ticks on shard swaps BEFORE ingesting
+                    // this frame's WS — otherwise the new primary's tick
+                    // (which may be lower than the old primary's) gets
+                    // rejected by the monotonic-tick guard in `ingest_*`.
+                    reset_on_shard_change,
+                    (ingest_primary, ingest_secondary),
+                )
+                    .chain()
+                    .in_set(WorldStateIngestSet),
             );
     }
 }
 
+/// On `Connected` (new primary) and `SecondaryDisconnected` (closed
+/// secondary), drop the buffered WS for the affected shard so the
+/// next WS we receive isn't rejected as "older than the previous
+/// shard's last tick" by the monotonic guard.
+fn reset_on_shard_change(
+    mut events: MessageReader<GameEvent>,
+    mut primary: ResMut<PrimaryWorldState>,
+    mut secondary: ResMut<SecondaryWorldStates>,
+) {
+    for GameEvent(ev) in events.read() {
+        match ev {
+            NetEvent::Connected { .. } => {
+                primary.latest = None;
+            }
+            NetEvent::SecondaryDisconnected { .. } => {
+                // We don't get the shard_type on SecondaryDisconnected;
+                // clear all secondaries so the next WS from any
+                // remaining secondary is accepted. Cheap — ingest will
+                // repopulate from the next packet.
+                secondary.by_shard_type.clear();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// WS arrives over UDP — packets can be reordered or arrive late. A
+/// stale tick that overtakes a fresh one would overwrite `latest` with
+/// older data; the next frame's `apply_worldstate_pose` would then place
+/// the camera at the stale player position, producing a one-frame
+/// position blink that snaps back when the next fresh WS lands. Drop
+/// any WS whose tick is not newer than the one already buffered.
+///
+/// A wrap-aware comparison would matter at u64 saturation; for now we
+/// reject equal-or-older ticks and let monotonic tick growth handle the
+/// rest.
 fn ingest_primary(
     mut events: MessageReader<GameEvent>,
     mut primary: ResMut<PrimaryWorldState>,
 ) {
     for GameEvent(ev) in events.read() {
         if let NetEvent::WorldState(ws) = ev {
+            let stale = primary
+                .latest
+                .as_ref()
+                .map(|prev| ws.tick <= prev.tick)
+                .unwrap_or(false);
+            if stale {
+                continue;
+            }
             primary.latest = Some(ws.clone());
         }
     }
@@ -63,6 +116,19 @@ fn ingest_secondary(
 ) {
     for GameEvent(ev) in events.read() {
         if let NetEvent::SecondaryWorldState { shard_type, ws } = ev {
+            // Same monotonic-tick guard as `ingest_primary`. Stale UDP
+            // packets on a secondary's stream would otherwise rotate /
+            // translate that secondary's chunks (or its observable
+            // entities used for cross-shard pose lookup) backward by
+            // one frame, then snap forward on the next fresh tick.
+            let stale = secondary
+                .by_shard_type
+                .get(shard_type)
+                .map(|prev| ws.tick <= prev.tick)
+                .unwrap_or(false);
+            if stale {
+                continue;
+            }
             secondary.by_shard_type.insert(*shard_type, ws.clone());
         }
     }

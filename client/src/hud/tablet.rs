@@ -192,6 +192,9 @@ fn spawn_tablet(
                 // `SecondaryWorldStates`). Wall-mounted tiles get a
                 // config-panel toggle for this; the tablet defaults on.
                 ar_enabled: true,
+                // Tablet is always single-widget (a `ConfigPanel`).
+                layout: crate::hud::tile::HudPanelLayout::Single,
+                extra_slots: None,
                 ar_filter: crate::hud::ar::ArFilter {
                     celestial_bodies: true,
                     remote_ships: true,

@@ -17,6 +17,7 @@
 pub mod galaxy;
 pub mod planet;
 pub mod ship;
+pub mod starfield;
 pub mod system;
 
 /// Register every built-in shard-type plugin into the app. Future
@@ -27,5 +28,6 @@ pub fn register_all(app: &mut bevy::prelude::App) {
         system::SystemShardPlugin,
         planet::PlanetShardPlugin,
         galaxy::GalaxyShardPlugin,
+        starfield::StarfieldPlugin,
     ));
 }

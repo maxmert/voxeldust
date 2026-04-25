@@ -143,14 +143,23 @@ fn spawn_tile(
             },
         },
         HudConfig {
-            kind: settings.kind,
-            channel: settings.channel.clone(),
-            property: settings.property,
-            caption: settings.caption.clone(),
+            kind: settings.slots[0].kind,
+            channel: settings.slots[0].channel.clone(),
+            property: settings.slots[0].property,
+            caption: settings.slots[0].caption.clone(),
             opacity: settings.opacity,
             ar_enabled: settings.ar_enabled,
             ar_filter: settings.ar_filter,
             payload: HudPayload::None,
+            layout: settings.layout,
+            extra_slots: match settings.layout {
+                crate::hud::tile::HudPanelLayout::Single => None,
+                crate::hud::tile::HudPanelLayout::Quad => Some(Box::new([
+                    settings.slots[1].clone(),
+                    settings.slots[2].clone(),
+                    settings.slots[3].clone(),
+                ])),
+            },
         },
         HudTexture {
             handle: image,

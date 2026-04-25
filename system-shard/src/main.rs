@@ -1445,6 +1445,19 @@ fn process_handoffs(
                 None => h.position, // fall back only if ship entity no longer exists
             };
 
+            // EvaRotation is the BODY frame the player inherits from
+            // the ship at exit. The client's camera composes
+            // `body × rotation_from_look(LocalLook)` so the pre-exit
+            // view (including roll) is preserved without lossy
+            // decomposition. eva_physics computes thrust as
+            // `body × (cos(input.look_yaw), 0, sin(input.look_yaw))` —
+            // which equals the camera's horizontal forward direction
+            // when input.look_yaw is the head yaw in body frame
+            // (which IS what the client's LocalLook holds).
+            //
+            // `h.rotation` arrives from ship-shard as the body
+            // (exterior.rotation), NOT the composed camera (per the
+            // matching change in ship-shard hull_exit_check).
             let eva_entity = commands
                 .spawn((
                     EvaPlayer,
@@ -3807,25 +3820,49 @@ fn process_ship_collider_sync(
 // ---------------------------------------------------------------------------
 
 /// Process player input from clients connected directly to the system shard.
-/// Routes input to the correct EVA player entity via EvaPlayerIndex.
+/// Routes input to the correct EVA player entity by:
+///   UDP src addr → SessionToken (via ClientRegistry::session_for_udp)
+///   SessionToken → Entity (via EvaPlayerIndex search by token)
+///
+/// The previous "pick the first EVA player" stub broke as soon as more than
+/// one EVA was alive: every client's input got applied to whichever EVA the
+/// query happened to yield first (often a stale session left over from a
+/// previous connect cycle), so the actual sender's player wouldn't move.
 fn eva_input(
     mut bridge: ResMut<NetworkBridge>,
     eva_index: Res<EvaPlayerIndex>,
     mut eva_players: Query<&mut EvaInputState, With<EvaPlayer>>,
 ) {
-    // EVA players connect directly to the system shard via TCP/UDP.
-    // Input arrives via the same bridge.input_rx channel as ship inputs.
-    // We look up session from UDP address, then map to EVA entity.
+    let session_map: Vec<(std::net::SocketAddr, SessionToken)> =
+        if let Ok(reg) = bridge.client_registry.try_read() {
+            reg.udp_addrs()
+                .iter()
+                .filter_map(|addr| reg.session_for_udp(*addr).map(|s| (*addr, s)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     for _ in 0..64 {
         let (src, input) = match bridge.input_rx.try_recv() {
             Ok(e) => e,
             Err(_) => break,
         };
-        // For EVA input routing: since there are few EVA players, iterate
-        // all entities rather than index lookup (session tokens change on reconnect
-        // and would require a secondary index to map new→old tokens).
-        // Find the first EVA player — for multi-EVA, would need UDP→name mapping.
-        let Some(mut input_state) = eva_players.iter_mut().next() else {
+        let Some(session) = session_map
+            .iter()
+            .find(|(addr, _)| *addr == src)
+            .map(|(_, t)| *t)
+        else {
+            tracing::trace!(?src, "eva_input: unknown UDP source — dropped");
+            continue;
+        };
+        let Some((entity, _, _)) =
+            eva_index.0.values().find(|(_, t, _)| *t == session)
+        else {
+            tracing::trace!(?session, "eva_input: session has no EVA entity — dropped");
+            continue;
+        };
+        let Ok(mut input_state) = eva_players.get_mut(*entity) else {
             continue;
         };
 
@@ -4158,6 +4195,7 @@ fn eva_broadcast(
         &EvaPosition,
         &EvaVelocity,
         &EvaRotation,
+        &EvaInputState,
     ), With<EvaPlayer>>,
     ships: Query<(&ShipId, &Position, &Velocity, &Rotation, Option<&ShipPhysics>)>,
     surface: Res<SurfacePlayerRegistry>,
@@ -4175,7 +4213,7 @@ fn eva_broadcast(
     }
     if tick.0 % 20 == 0 {
         let count = eva_players.iter().count();
-        let first_pos = eva_players.iter().next().map(|(_, _, p, _, _)| p.0);
+        let first_pos = eva_players.iter().next().map(|(_, _, p, _, _, _)| p.0);
         info!(
             eva_count = count,
             first_pos = ?first_pos,
@@ -4203,17 +4241,29 @@ fn eva_broadcast(
     };
 
     // Build player snapshots for all EVA players.
+    // Rotation is the BODY frame (EvaRotation), NOT the composed
+    // camera. The client composes
+    // `body × rotation_from_look(LocalLook)` to recover the camera —
+    // this preserves arbitrary body roll across transitions, which
+    // composing-then-decomposing on the client cannot do (Euler /
+    // atan2/asin both lose roll). For other clients viewing this
+    // EVA player as a remote entity, body-orientation is enough
+    // for current-era avatar rendering; head detail (which way the
+    // player is looking) lands in a separate field when avatar
+    // animation is wired up.
     let player_snapshots: Vec<voxeldust_core::client_message::PlayerSnapshotData> = eva_players
         .iter()
-        .map(|(session, _name, pos, vel, rot)| voxeldust_core::client_message::PlayerSnapshotData {
-            player_id: session.0.0,
-            position: pos.0,
-            rotation: rot.0,
-            velocity: vel.0,
-            grounded: false,
-            health: 100.0,
-            shield: 100.0,
-            seated: false,
+        .map(|(session, _name, pos, vel, rot, _input)| {
+            voxeldust_core::client_message::PlayerSnapshotData {
+                player_id: session.0.0,
+                position: pos.0,
+                rotation: rot.0,
+                velocity: vel.0,
+                grounded: false,
+                health: 100.0,
+                shield: 100.0,
+                seated: false,
+            }
         })
         .collect();
 
@@ -4221,7 +4271,7 @@ fn eva_broadcast(
     let observer_pos = eva_players
         .iter()
         .next()
-        .map(|(_, _, p, _, _)| p.0)
+        .map(|(_, _, p, _, _, _)| p.0)
         .unwrap_or(DVec3::new(1e11, 0.0, 0.0));
     let lighting = compute_lighting(observer_pos, &sys_config.0.star);
 
@@ -4286,7 +4336,7 @@ fn eva_broadcast(
             &planet_shards_by_index,
         );
         let mut merged: HashMap<u64, ObservableEntityData> = HashMap::new();
-        for (session, _, pos, _, _) in eva_players.iter() {
+        for (session, _, pos, _, _, _) in eva_players.iter() {
             let per = compute_aoi(pos.0, &candidates, Some(session.0.0), &vis_cfg);
             for e in per {
                 merged
@@ -4839,6 +4889,10 @@ fn compute_aoi(
 
 /// Collect every observable entity authoritative to this system shard:
 /// ships (Position/Velocity/Rotation), EVA players, and surface-player aggregates.
+///
+/// EVA `rotation` is composed server-side from the player's body frame
+/// (EvaRotation) × head look (quat_from_yaw_pitch). This is the full
+/// camera orientation; the client applies it verbatim (no re-composition).
 fn collect_aoi_candidates<EvaFilter: bevy_ecs::query::QueryFilter>(
     ships: &Query<(&ShipId, &Position, &Velocity, &Rotation, Option<&ShipPhysics>)>,
     eva: &Query<
@@ -4848,6 +4902,7 @@ fn collect_aoi_candidates<EvaFilter: bevy_ecs::query::QueryFilter>(
             &EvaPosition,
             &EvaVelocity,
             &EvaRotation,
+            &EvaInputState,
         ),
         EvaFilter,
     >,
@@ -4877,7 +4932,10 @@ fn collect_aoi_candidates<EvaFilter: bevy_ecs::query::QueryFilter>(
         });
     }
 
-    for (session, name, pos, vel, rot) in eva.iter() {
+    for (session, name, pos, vel, rot, _input) in eva.iter() {
+        // Body frame only (NOT composed with input head look) —
+        // see the matching player_snapshots comment above. Client
+        // composes camera = body × LocalLook.
         out.push(AoiCandidate {
             entity_id: session.0.0,
             kind: EntityKind::EvaPlayer,
@@ -4968,6 +5026,7 @@ fn broadcast_system_entities(
         &EvaPosition,
         &EvaVelocity,
         &EvaRotation,
+        &EvaInputState,
     )>,
     surface: Res<SurfacePlayerRegistry>,
     vis_cfg: Res<VisibilityConfig>,

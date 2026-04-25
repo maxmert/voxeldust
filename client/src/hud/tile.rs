@@ -54,6 +54,17 @@ pub enum WidgetKind {
 
 /// Per-tile config. Server-authored via `SubBlockConfigState` for block
 /// tiles; set programmatically for held tablets.
+///
+/// **Layout**: a single tile can host either one widget spanning its
+/// whole face (`HudPanelLayout::Single`, the default) OR a 2×2 grid of
+/// four widgets each occupying a quadrant (`HudPanelLayout::Quad`).
+/// The redraw system iterates the active slots and composites each
+/// into its quadrant of the pixel buffer.
+///
+/// The `kind / channel / property / caption` fields on `HudConfig`
+/// itself describe **slot 0** (top-left in Quad, the full face in
+/// Single). `extra_slots` provides slots 1, 2, 3 when `layout ==
+/// Quad`.
 #[derive(Component, Debug, Clone)]
 pub struct HudConfig {
     pub kind: WidgetKind,
@@ -69,6 +80,48 @@ pub struct HudConfig {
     /// Optional tile-specific payload — e.g., a `ConfigPanel` widget
     /// stashes the target block's `BlockSignalConfig` here.
     pub payload: HudPayload,
+    /// Panel composition layout.
+    pub layout: HudPanelLayout,
+    /// Additional widget slots for `Quad` layout (positions TR, BL,
+    /// BR; slot 0 TL is the outer `HudConfig` fields). `None` = only
+    /// slot 0 is used.
+    pub extra_slots: Option<Box<[HudWidgetSlot; 3]>>,
+}
+
+/// Layout for a `HudPanel` sub-block's widget composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HudPanelLayout {
+    /// One widget spans the whole face.
+    Single,
+    /// Four widgets, one per 2×2 quadrant (TL, TR, BL, BR).
+    Quad,
+}
+
+impl Default for HudPanelLayout {
+    fn default() -> Self {
+        Self::Single
+    }
+}
+
+/// One widget's display settings — used for both slot 0 (stored on
+/// `HudConfig` directly) and slots 1-3 (via `extra_slots`).
+#[derive(Debug, Clone)]
+pub struct HudWidgetSlot {
+    pub kind: WidgetKind,
+    pub channel: String,
+    pub property: SignalProperty,
+    pub caption: String,
+}
+
+impl Default for HudWidgetSlot {
+    fn default() -> Self {
+        Self {
+            kind: WidgetKind::None,
+            channel: String::new(),
+            property: SignalProperty::Throttle,
+            caption: String::new(),
+        }
+    }
 }
 
 impl Default for HudConfig {
@@ -82,6 +135,8 @@ impl Default for HudConfig {
             ar_enabled: false,
             ar_filter: ArFilter::default(),
             payload: HudPayload::None,
+            layout: HudPanelLayout::Single,
+            extra_slots: None,
         }
     }
 }

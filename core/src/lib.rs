@@ -1,4 +1,5 @@
 pub mod block;
+pub mod camera_math;
 pub mod character;
 pub mod ecs;
 pub mod signal;

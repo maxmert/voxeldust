@@ -19,7 +19,7 @@ use bevy::prelude::*;
 
 use voxeldust_core::signal::types::SignalProperty;
 
-use crate::hud::tile::WidgetKind;
+use crate::hud::tile::{HudPanelLayout, HudWidgetSlot, WidgetKind};
 use crate::shard::ShardKey;
 
 /// Composite key for a block-face HUD panel.
@@ -31,12 +31,17 @@ pub struct HudPanelKey {
 }
 
 /// Per-panel user-editable display settings.
+///
+/// A panel hosts one OR four widgets (see `layout`):
+///   - `Single`: slot 0 covers the whole panel face.
+///   - `Quad`: slots 0-3 occupy TL, TR, BL, BR quadrants respectively.
+///
+/// AR overlay flags + opacity are **panel-wide** (one set of markers
+/// projected through the whole face, regardless of slot layout).
 #[derive(Debug, Clone)]
 pub struct HudPanelSettings {
-    pub kind: WidgetKind,
-    pub channel: String,
-    pub property: SignalProperty,
-    pub caption: String,
+    pub layout: HudPanelLayout,
+    pub slots: [HudWidgetSlot; 4],
     pub opacity: f32,
     /// Master AR overlay toggle. When `true`, the tile additionally
     /// paints AR markers for whichever entity kinds `ar_filter`
@@ -53,10 +58,13 @@ impl Default for HudPanelSettings {
     /// a widget.
     fn default() -> Self {
         Self {
-            kind: WidgetKind::None,
-            channel: String::new(),
-            property: SignalProperty::Throttle,
-            caption: String::new(),
+            layout: HudPanelLayout::Single,
+            slots: [
+                HudWidgetSlot::default(),
+                HudWidgetSlot::default(),
+                HudWidgetSlot::default(),
+                HudWidgetSlot::default(),
+            ],
             opacity: 0.95,
             ar_enabled: true,
             ar_filter: crate::hud::ar::ArFilter {
@@ -135,12 +143,23 @@ fn apply_panel_config_to_tiles(
         let Some(settings) = configs.by_key.get(&key) else {
             continue;
         };
-        hud_config.kind = settings.kind;
-        hud_config.channel = settings.channel.clone();
-        hud_config.property = settings.property;
-        hud_config.caption = settings.caption.clone();
+        // Slot 0 lives on the outer HudConfig fields; slots 1-3 go
+        // into `extra_slots` only when layout == Quad.
+        hud_config.kind = settings.slots[0].kind;
+        hud_config.channel = settings.slots[0].channel.clone();
+        hud_config.property = settings.slots[0].property;
+        hud_config.caption = settings.slots[0].caption.clone();
         hud_config.opacity = settings.opacity;
         hud_config.ar_enabled = settings.ar_enabled;
         hud_config.ar_filter = settings.ar_filter;
+        hud_config.layout = settings.layout;
+        hud_config.extra_slots = match settings.layout {
+            HudPanelLayout::Single => None,
+            HudPanelLayout::Quad => Some(Box::new([
+                settings.slots[1].clone(),
+                settings.slots[2].clone(),
+                settings.slots[3].clone(),
+            ])),
+        };
     }
 }

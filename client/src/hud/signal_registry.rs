@@ -113,27 +113,31 @@ impl Plugin for SignalRegistryPlugin {
     }
 }
 
-/// Drain every `NetEvent::WorldState` + `NetEvent::SecondaryWorldState`
-/// into the `SignalRegistry`. Snapshot-merge semantics: any channel
-/// present in this tick's batch overwrites the registry's value; any
-/// channel missing keeps its previous value.
+/// Drain `NetEvent::WorldState` (primary only) into the
+/// `SignalRegistry`. Snapshot-merge semantics: any channel present
+/// in this tick's batch overwrites the registry's value; any channel
+/// missing keeps its previous value.
 ///
-/// Cross-shard: primary + secondary shards BOTH contribute. A channel
-/// published by the SHIP shard (own-ship data) and another channel
-/// published by the SYSTEM shard (nearest body, warp target) coexist
-/// in the registry by name. Channel namespaces are the server's
-/// responsibility — prefix conventions like `ship.speed`, `system.*`,
-/// `planet.*` prevent collisions.
+/// **Primary-only**: every SHIP shard the client observes (own ship
+/// as primary, every other ship as a SHIP secondary) publishes its
+/// own `ship.speed` / `ship.thrust_tier` / etc. into `hud_signals`.
+/// If we ingested secondaries too, the registry's `ship.speed` slot
+/// would be overwritten by whichever shard's WS arrived last —
+/// producing the "speed jumps between values every few seconds"
+/// symptom when multiple ships are within AOI. The HUD shows the
+/// player's own status, so primary-only is the correct scope.
+/// (System-wide signals like nearest body / warp target are
+/// published by the primary too: SHIP-primary inherits them via
+/// SystemSceneUpdate caching, SYSTEM-primary publishes them
+/// directly.)
 fn drain_signal_broadcasts(
     mut events: MessageReader<GameEvent>,
     mut registry: ResMut<SignalRegistry>,
 ) {
     let now = std::time::Instant::now();
     for GameEvent(ev) in events.read() {
-        match ev {
-            NetEvent::WorldState(ws) => ingest_ws(&mut registry, ws, now),
-            NetEvent::SecondaryWorldState { ws, .. } => ingest_ws(&mut registry, ws, now),
-            _ => {}
+        if let NetEvent::WorldState(ws) = ev {
+            ingest_ws(&mut registry, ws, now);
         }
     }
 }

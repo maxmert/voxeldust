@@ -68,14 +68,42 @@ pub struct GracedSource {
 
 pub struct ShardTransitionPlugin;
 
+/// `latch_transitions` MUST run BEFORE `handle_connected_events` /
+/// `handle_secondary_connected` (in `ShardRegistrySet`). When both a
+/// `Transitioning` event and a `Connected` event arrive in the same
+/// frame (the typical SHIP→EVA flow: ShardRedirect arrives, network
+/// task tears down old primary + opens new, JoinResponse arrives a
+/// few ms later — all before the next ECS tick), if the registry runs
+/// first it promotes the new primary in place and replaces
+/// `primary.current` BEFORE we can grab the OLD primary for grace.
+/// Then `latch_transitions.primary.current.take()` returns the WRONG
+/// shard (the just-promoted one) and graces it instead of the SHIP
+/// that was actually departed. The SHIP entity is then orphaned in
+/// `source_index.by_shard` until something stomps it; the new
+/// SHIP-secondary spawn collides with the orphan, producing the
+/// "ship disappears after EVA exit" symptom because the new
+/// `ChunkSource` is empty until chunks re-stream and the orphan's
+/// transform never updates again.
+#[derive(SystemSet, Clone, Debug, Hash, Eq, PartialEq)]
+pub struct ShardTransitionLatchSet;
+
 impl Plugin for ShardTransitionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SpawnPoseLatch>()
             .init_resource::<GraceWindow>()
-            .configure_sets(Update, ShardTransitionSet.after(ShardRegistrySet))
+            .configure_sets(
+                Update,
+                (
+                    ShardTransitionLatchSet
+                        .after(crate::net::NetworkBridgeSet)
+                        .before(ShardRegistrySet),
+                    ShardTransitionSet.after(ShardRegistrySet),
+                ),
+            )
+            .add_systems(Update, latch_transitions.in_set(ShardTransitionLatchSet))
             .add_systems(
                 Update,
-                (latch_transitions, drive_grace_transforms, expire_grace)
+                (drive_grace_transforms, expire_grace)
                     .chain()
                     .in_set(ShardTransitionSet),
             );

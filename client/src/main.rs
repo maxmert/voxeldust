@@ -7,8 +7,10 @@
 //! shard the server streams — expected behavior, proves the plumbing.
 
 use bevy::{
+    core_pipeline::tonemapping::Tonemapping,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
+    render::view::Hdr,
     window::WindowResolution,
 };
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
@@ -23,6 +25,7 @@ mod hud;
 mod input;
 mod interaction;
 mod kernel;
+mod lighting;
 mod net;
 mod remote;
 mod seat;
@@ -75,6 +78,20 @@ fn main() {
             // tracing-subscriber above owns stdout.
             .disable::<bevy::log::LogPlugin>(),
     )
+    // Disable ambient entirely. Space has no atmosphere → no sky
+    // bounce → no ambient term. The ONLY illumination should come
+    // from the directional sun (and, future: in-ship interior
+    // lights / emissive blocks). We MUST insert this with
+    // `brightness: 0.0` because Bevy's default is `brightness: 80.0`
+    // — without our explicit override, that default kicks in and
+    // would wash the scene with 80 cd/m² of fake ambient fill,
+    // exactly the "uniformly highlighted" look you reported.
+    .insert_resource(bevy::light::GlobalAmbientLight {
+        color: Color::WHITE,
+        brightness: 0.0,
+        affects_lightmapped_meshes: true,
+    })
+    .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
     .add_plugins(EguiPlugin::default())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     // GameConfig registers first — every later plugin reads from it.
@@ -99,6 +116,7 @@ fn main() {
     .add_plugins(config_panel::ConfigPanelPlugin)
     .add_plugins(focus::FocusInteractionPlugin)
     .add_plugins(hud::HudPlugin)
+    .add_plugins(lighting::SolarLightPlugin)
     .init_resource::<config_panel::PendingConfigShard>();
 
     // Concrete shard-type plugins — each registers into ShardTypeRegistry
@@ -154,7 +172,36 @@ fn setup_camera(mut commands: Commands) {
     // Camera stays at identity. Phase 4's ShardOriginPlugin rebases every
     // shard's ChunkSource relative to the camera each frame; the camera
     // itself never moves in Bevy coordinates.
-    commands.spawn((Camera3d::default(), Transform::IDENTITY, MainCamera));
+    // Far-plane at 2 × 10⁶ m lets stars + celestial bodies at their
+    // far-field clamp radius (1 × 10⁶ m) render without being culled
+    // by the default `far = 1000` plane. Near plane stays tight
+    // (0.05 m) so the held tablet at 0.52 m doesn't have z-fighting.
+    let projection = Projection::Perspective(PerspectiveProjection {
+        near: 0.05,
+        far: 2.0e6,
+        ..default()
+    });
+    commands.spawn((
+        Camera3d::default(),
+        projection,
+        // Diagnostic baseline: HDR + AgX disabled so we can verify
+        // the directional light is actually being applied. With LDR
+        // rendering, default exposure, default ambient (80 cd/m²),
+        // and ~10 000 lux directional sun, lit faces should roll up
+        // toward ~1.0 (clipped to white) and shaded faces stay near
+        // mid-gray (~0.5). If THIS shows visible lit/shaded
+        // contrast on the ship, the issue is that AgX + the
+        // 100 000 lux sun was producing rolloff that compressed all
+        // faces into a similar bright value. If it does NOT show
+        // contrast, the directional light is failing to reach the
+        // chunks (material setup, normals, or a missing render
+        // component).
+        //
+        // Re-add Hdr + Tonemapping::AgX after we confirm the light
+        // is working.
+        Transform::IDENTITY,
+        MainCamera,
+    ));
 }
 
 /// Phase-1 boot HUD with a connection-status line from Phase 2.

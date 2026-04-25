@@ -101,6 +101,9 @@ pub enum NetEvent {
         target_shard_type: u8,
         spawn_pose: Option<voxeldust_core::handoff::SpawnPose>,
     },
+    /// Full star catalogue for the galaxy — sent by the galaxy
+    /// shard once per connect. Authoritative; no per-tick update.
+    StarCatalog(voxeldust_core::client_message::StarCatalogData),
     Disconnected(String),
 }
 
@@ -571,6 +574,9 @@ pub async fn run_network(
                             Ok(ServerMsg::SubGridAssignmentUpdate(data)) => {
                                 let _ = event_tx_tcp.send(NetEvent::SubGridAssignmentUpdate(data));
                             }
+                            Ok(ServerMsg::StarCatalog(data)) => {
+                                let _ = event_tx_tcp.send(NetEvent::StarCatalog(data));
+                            }
                             Ok(ServerMsg::ShardDisconnectNotify(dn)) => {
                                 let key = (dn.shard_type, dn.seed);
                                 let cancel = {
@@ -748,6 +754,16 @@ async fn connect_observer_tcp(
                     }
                     Ok(ServerMsg::SubGridAssignmentUpdate(sg)) => {
                         let _ = event_tx.send(NetEvent::SecondarySubGridAssignment { seed, data: sg });
+                    }
+                    Ok(ServerMsg::StarCatalog(data)) => {
+                        // Galaxy shard is opened as a secondary for
+                        // scene-context rendering — its StarCatalog
+                        // arrives on the observer TCP, not the
+                        // primary. Forward it as the shared
+                        // `NetEvent::StarCatalog` so client-side
+                        // systems see one path regardless of which
+                        // connection delivered the bytes.
+                        let _ = event_tx.send(NetEvent::StarCatalog(data));
                     }
                     Ok(_) => {} // ignore other messages
                     Err(e) => {

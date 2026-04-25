@@ -266,6 +266,7 @@ fn drain_provisions(
 fn process_connect_events(
     mut events: MessageReader<ClientConnectedEvent>,
     galaxy_seed: Res<GalaxySeed>,
+    galaxy_map: Res<GalaxyMapResource>,
     tick: Res<ecs::TickCounter>,
 ) {
     for event in events.read() {
@@ -275,6 +276,12 @@ fn process_connect_events(
         // Compute game time from tick (approximation — the actual celestial_time
         // would come from epoch, but for JoinResponse it only needs to be close).
         let game_time = tick.0 as f64 * 0.05;
+
+        // Snapshot the full star catalogue once per connect so the
+        // client can spawn the starfield immediately. The galaxy map
+        // is deterministic-from-seed, so a single TCP send at connect
+        // time is authoritative — no per-tick re-send needed.
+        let catalog = galaxy_catalog_message(gs, &galaxy_map);
 
         tokio::spawn(async move {
             let jr = ServerMsg::JoinResponse(JoinResponseData {
@@ -294,8 +301,36 @@ fn process_connect_events(
             });
             let mut writer = tcp_write.lock().await;
             let _ = client_listener::send_tcp_msg(&mut *writer, &jr).await;
+            let _ = client_listener::send_tcp_msg(&mut *writer, &catalog).await;
         });
     }
+}
+
+/// Build a `ServerMsg::StarCatalog` from the galaxy map. Called once
+/// per client connect; the catalog is deterministic-from-seed and
+/// immutable, so no per-tick updates are needed.
+fn galaxy_catalog_message(
+    galaxy_seed: u64,
+    galaxy_map: &Res<GalaxyMapResource>,
+) -> ServerMsg {
+    use voxeldust_core::client_message::{StarCatalogData, StarCatalogEntryData};
+    let stars = galaxy_map
+        .0
+        .stars
+        .iter()
+        .enumerate()
+        .map(|(i, s)| StarCatalogEntryData {
+            index: i as u32,
+            position: s.position,
+            system_seed: s.system_seed,
+            star_class: s.star_class as u8,
+            luminosity: s.luminosity as f32,
+        })
+        .collect();
+    ServerMsg::StarCatalog(StarCatalogData {
+        galaxy_seed,
+        stars,
+    })
 }
 
 fn spawn_warp_ships(

@@ -32,8 +32,8 @@ use voxeldust_core::block::block_id::BlockId;
 use voxeldust_core::client_message::ClientMsg;
 use voxeldust_core::signal::components::{AxisDirection, KeyMode, SeatInputSource};
 use voxeldust_core::signal::config::{
-    BlockConfigUpdateData, BlockSignalConfig, PublishBindingConfig, SeatInputBindingConfig,
-    SignalRuleConfig, SubscribeBindingConfig,
+    BlockConfigUpdateData, BlockSignalConfig, PowerAccessConfig, PowerCircuitConfig,
+    PublishBindingConfig, SeatInputBindingConfig, SignalRuleConfig, SubscribeBindingConfig,
 };
 use voxeldust_core::signal::converter::{SignalCondition, SignalExpression};
 use voxeldust_core::signal::types::SignalProperty;
@@ -57,6 +57,15 @@ pub struct TabletPaintPass;
 /// entity for pointer routing.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TabletEguiContextMarker;
+
+/// Wire `u8` values for `FunctionalBlockKind` — the server casts the
+/// enum via `kind as u8` so these constants MUST track declaration
+/// order in `core::block::registry::FunctionalBlockKind`. They decide
+/// which editor sections to surface for this block.
+mod kind {
+    pub const SEAT: u8 = 5;
+    pub const SIGNAL_CONVERTER: u8 = 16;
+}
 
 /// Size of the render target. Matches `TABLET_RES` in `tablet.rs`.
 /// Kept here as a re-used constant so the pointer-driver can convert
@@ -267,13 +276,60 @@ fn paint_tablet_ui(
                     // content area.
                     ui.set_min_width(ui.available_width());
 
+                    // Universal sections — any block may publish or
+                    // subscribe signals, so these are always shown.
                     render_publisher_section(ui, &mut state.config);
                     ui.add_space(4.0);
                     render_subscriber_section(ui, &mut state.config);
-                    ui.add_space(4.0);
-                    render_converter_section(ui, &mut state.config);
-                    ui.add_space(4.0);
-                    render_seat_section(ui, &mut state.config);
+
+                    // Kind-specific sections — only surface when the
+                    // block's FunctionalBlockKind actually consumes
+                    // that config OR when the server shipped the
+                    // optional struct in the snapshot (source of
+                    // truth: the snapshot populates each Option only
+                    // when the corresponding ECS component exists on
+                    // the block entity — see ship-shard's
+                    // `build_config_state`).
+                    if state.config.kind == kind::SIGNAL_CONVERTER {
+                        ui.add_space(4.0);
+                        render_converter_section(ui, &mut state.config);
+                    }
+                    if state.config.kind == kind::SEAT {
+                        ui.add_space(4.0);
+                        render_seat_section(ui, &mut state.config);
+                    }
+                    if state.config.power_source.is_some() {
+                        ui.add_space(4.0);
+                        render_power_source_section(ui, &mut state.config);
+                    }
+                    if state.config.power_consumer.is_some() {
+                        ui.add_space(4.0);
+                        render_power_consumer_section(ui, &mut state.config);
+                    }
+                    if state.config.flight_computer.is_some() {
+                        ui.add_space(4.0);
+                        render_flight_computer_section(ui, &mut state.config);
+                    }
+                    if state.config.hover_module.is_some() {
+                        ui.add_space(4.0);
+                        render_hover_module_section(ui, &mut state.config);
+                    }
+                    if state.config.autopilot.is_some() {
+                        ui.add_space(4.0);
+                        render_autopilot_section(ui, &mut state.config);
+                    }
+                    if state.config.warp_computer.is_some() {
+                        ui.add_space(4.0);
+                        render_warp_computer_section(ui, &mut state.config);
+                    }
+                    if state.config.engine_controller.is_some() {
+                        ui.add_space(4.0);
+                        render_engine_controller_section(ui, &mut state.config);
+                    }
+                    if state.config.mechanical.is_some() {
+                        ui.add_space(4.0);
+                        render_mechanical_section(ui, &mut state.config);
+                    }
 
                     ui.add_space(8.0);
                     ui.separator();
@@ -380,85 +436,64 @@ fn paint_hud_panel_editor(
             ui.add_space(4.0);
             ui.separator();
 
-            ui.label(
-                egui::RichText::new("WIDGET").color(egui::Color32::from_rgb(180, 220, 240)),
-            );
-            ui.horizontal_wrapped(|ui| {
-                for (kind, label) in [
-                    (WidgetKind::None, "NONE"),
-                    (WidgetKind::Gauge, "GAUGE"),
-                    (WidgetKind::Numeric, "NUMERIC"),
-                    (WidgetKind::Toggle, "TOGGLE"),
-                    (WidgetKind::Text, "TEXT"),
-                    (WidgetKind::Button, "BUTTON"),
-                ] {
-                    let selected = state.settings.kind == kind;
-                    let btn = egui::Button::new(
-                        egui::RichText::new(label).color(if selected {
-                            egui::Color32::from_rgb(10, 16, 26)
-                        } else {
-                            egui::Color32::from_rgb(210, 230, 245)
-                        }),
-                    )
-                    .fill(if selected {
-                        egui::Color32::from_rgb(120, 220, 255)
-                    } else {
-                        egui::Color32::from_rgb(22, 34, 50)
-                    });
-                    if ui.add(btn).clicked() {
-                        state.settings.kind = kind;
-                    }
-                }
-            });
+            // Everything below the header is scrollable — under the
+            // Quad layout four slot editors + AR section exceeds the
+            // tablet's texture height. Mouse wheel + click-drag on
+            // the scroll bar both work (`drive_tablet_pointer` emits
+            // egui `MouseWheel` events from `FrameMouseDelta`).
+            let scroll_h = ui.available_height();
+            egui::ScrollArea::vertical()
+                .max_height(scroll_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
 
-            ui.add_space(8.0);
+            // Layout toggle — 1 widget (whole face) or 4 widgets
+            // (2×2 grid). The toggle rebuilds the slot editor list
+            // below; flipping from Quad → Single keeps slot 0 (the
+            // previous TL) and discards slots 1-3.
             ui.label(
-                egui::RichText::new("CHANNEL")
+                egui::RichText::new("LAYOUT")
                     .color(egui::Color32::from_rgb(180, 220, 240)),
             );
-            ui.label(
-                egui::RichText::new("Any signal path — e.g. ship.speed, custom.my_channel").size(9.0).color(
-                    egui::Color32::from_rgb(120, 140, 160),
-                ),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut state.settings.channel)
-                    .hint_text("channel name")
-                    .desired_width(300.0),
-            );
-            // Known-channel shortcut chips — click to fill the field
-            // without typing. Users can still type anything.
-            ui.horizontal_wrapped(|ui| {
-                for preset in [
-                    "ship.speed",
-                    "ship.thrust_tier",
-                    "ship.autopilot.phase",
-                    "ship.autopilot.eta",
-                    "ship.callsign",
-                    "ship.altitude",
-                    "ship.heading_deg",
-                ] {
-                    if ui.small_button(preset).clicked() {
-                        state.settings.channel = preset.to_string();
-                    }
+            ui.horizontal(|ui| {
+                let single_selected = state.settings.layout == crate::hud::tile::HudPanelLayout::Single;
+                let quad_selected = state.settings.layout == crate::hud::tile::HudPanelLayout::Quad;
+                if ui
+                    .add(layout_toggle_button("1", single_selected))
+                    .on_hover_text("One widget covers the full panel")
+                    .clicked()
+                {
+                    state.settings.layout = crate::hud::tile::HudPanelLayout::Single;
+                }
+                if ui
+                    .add(layout_toggle_button("4", quad_selected))
+                    .on_hover_text("Four widgets, one per quadrant (TL / TR / BL / BR)")
+                    .clicked()
+                {
+                    state.settings.layout = crate::hud::tile::HudPanelLayout::Quad;
                 }
             });
 
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("PROPERTY").color(egui::Color32::from_rgb(180, 220, 240)),
-            );
-            property_dropdown(ui, "hud-prop", &mut state.settings.property);
-
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("CAPTION").color(egui::Color32::from_rgb(180, 220, 240)),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut state.settings.caption)
-                    .hint_text("caption (any text)")
-                    .desired_width(240.0),
-            );
+            match state.settings.layout {
+                crate::hud::tile::HudPanelLayout::Single => {
+                    render_slot_editor(ui, "panel-s0", "WIDGET", &mut state.settings.slots[0]);
+                }
+                crate::hud::tile::HudPanelLayout::Quad => {
+                    // Arrange TL / TR on one row, BL / BR on another
+                    // so the editor mirrors the on-panel layout.
+                    ui.columns(2, |cols| {
+                        render_slot_editor(&mut cols[0], "panel-tl", "TOP LEFT",     &mut state.settings.slots[0]);
+                        render_slot_editor(&mut cols[1], "panel-tr", "TOP RIGHT",    &mut state.settings.slots[1]);
+                    });
+                    ui.add_space(4.0);
+                    ui.columns(2, |cols| {
+                        render_slot_editor(&mut cols[0], "panel-bl", "BOTTOM LEFT",  &mut state.settings.slots[2]);
+                        render_slot_editor(&mut cols[1], "panel-br", "BOTTOM RIGHT", &mut state.settings.slots[3]);
+                    });
+                }
+            }
 
             ui.add_space(10.0);
             ui.separator();
@@ -511,8 +546,11 @@ fn paint_hud_panel_editor(
                     .color(egui::Color32::from_rgb(100, 120, 140))
                     .size(9.0),
             );
+                }); // end ScrollArea
 
-            // Draw cursor last.
+            // Draw cursor last, OUTSIDE the scroll area so the
+            // reticle always sits at the true focus.cursor_uv on the
+            // tablet face regardless of scroll offset.
             if focus.active {
                 let px = focus.cursor_uv.x * (TABLET_UI_RES as f32 - 1.0);
                 let py = focus.cursor_uv.y * (TABLET_UI_RES as f32 - 1.0);
@@ -524,9 +562,9 @@ fn paint_hud_panel_editor(
                 tracing::info!(
                     block = ?(state.key.block_pos.x, state.key.block_pos.y, state.key.block_pos.z),
                     face = state.key.face,
-                    kind = ?state.settings.kind,
-                    channel = %state.settings.channel,
-                    property = ?state.settings.property,
+                    layout = ?state.settings.layout,
+                    slot0_kind = ?state.settings.slots[0].kind,
+                    slot0_channel = %state.settings.slots[0].channel,
                     "HudPanel config saved",
                 );
             }
@@ -535,6 +573,106 @@ fn paint_hud_panel_editor(
                 despawn_tablet.write(DespawnHeldTablet);
             }
         });
+}
+
+/// Styled pill button for the 1/4 layout toggle at the top of the
+/// HUD panel editor.
+fn layout_toggle_button(label: &str, selected: bool) -> egui::Button<'static> {
+    egui::Button::new(
+        egui::RichText::new(label)
+            .color(if selected {
+                egui::Color32::from_rgb(10, 16, 26)
+            } else {
+                egui::Color32::from_rgb(210, 230, 245)
+            })
+            .size(18.0),
+    )
+    .min_size(egui::vec2(56.0, 32.0))
+    .fill(if selected {
+        egui::Color32::from_rgb(120, 220, 255)
+    } else {
+        egui::Color32::from_rgb(22, 34, 50)
+    })
+}
+
+/// One slot's editor (widget kind + channel + property + caption).
+/// Used for the Single layout (one call) and Quad layout (four calls
+/// arranged in a 2×2 grid). `id_base` is a unique prefix for egui
+/// widget IDs so the same editor invoked multiple times on one frame
+/// doesn't collide.
+fn render_slot_editor(
+    ui: &mut egui::Ui,
+    id_base: &str,
+    header: &str,
+    slot: &mut crate::hud::tile::HudWidgetSlot,
+) {
+    ui.label(
+        egui::RichText::new(header).color(egui::Color32::from_rgb(180, 220, 240)).size(11.0),
+    );
+    ui.horizontal_wrapped(|ui| {
+        for (kind, label) in [
+            (WidgetKind::None, "NONE"),
+            (WidgetKind::Gauge, "GAUGE"),
+            (WidgetKind::Numeric, "NUMERIC"),
+            (WidgetKind::Toggle, "TOGGLE"),
+            (WidgetKind::Text, "TEXT"),
+            (WidgetKind::Button, "BUTTON"),
+        ] {
+            let selected = slot.kind == kind;
+            let btn = egui::Button::new(
+                egui::RichText::new(label).color(if selected {
+                    egui::Color32::from_rgb(10, 16, 26)
+                } else {
+                    egui::Color32::from_rgb(210, 230, 245)
+                }),
+            )
+            .fill(if selected {
+                egui::Color32::from_rgb(120, 220, 255)
+            } else {
+                egui::Color32::from_rgb(22, 34, 50)
+            });
+            if ui
+                .add(btn)
+                .on_hover_text(format!("{} widget", label))
+                .clicked()
+            {
+                slot.kind = kind;
+            }
+        }
+    });
+    ui.add(
+        egui::TextEdit::singleline(&mut slot.channel)
+            .id_salt(format!("{}-chan", id_base))
+            .hint_text("channel name")
+            .desired_width(f32::INFINITY),
+    );
+    // Preset chips below the channel field — single-click fills
+    // without typing.
+    ui.horizontal_wrapped(|ui| {
+        for preset in [
+            "ship.speed",
+            "ship.thrust_tier",
+            "ship.autopilot.phase",
+            "ship.autopilot.eta",
+            "ship.callsign",
+            "ship.altitude",
+            "ship.heading_deg",
+        ] {
+            if ui.small_button(preset).clicked() {
+                slot.channel = preset.to_string();
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("PROP");
+        property_dropdown(ui, &format!("{}-prop", id_base), &mut slot.property);
+    });
+    ui.add(
+        egui::TextEdit::singleline(&mut slot.caption)
+            .id_salt(format!("{}-cap", id_base))
+            .hint_text("caption")
+            .desired_width(f32::INFINITY),
+    );
 }
 
 fn render_publisher_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
@@ -739,6 +877,352 @@ fn render_seat_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
             property: SignalProperty::Throttle,
         });
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Power source (reactor circuits)
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_power_source_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let Some(ps) = cfg.power_source.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("POWER CIRCUITS")
+            .color(egui::Color32::from_rgb(255, 180, 60))
+            .size(12.0),
+    );
+    ui.label(
+        egui::RichText::new(
+            "Reactor circuit allocation. Fractions below 1.0 split total power across named circuits.",
+        )
+        .size(9.0)
+        .color(egui::Color32::from_rgb(120, 140, 160)),
+    );
+    let mut remove: Option<usize> = None;
+    for (i, c) in ps.circuits.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("{}.", i + 1));
+            ui.add(
+                egui::TextEdit::singleline(&mut c.name)
+                    .id_salt(format!("pwrs-n-{}", i))
+                    .hint_text("circuit name (e.g. main, rcs)")
+                    .desired_width(180.0),
+            );
+            ui.add(
+                egui::DragValue::new(&mut c.fraction)
+                    .speed(0.01)
+                    .range(0.0..=1.0)
+                    .suffix(" x"),
+            );
+            if ui.add(button_icon("×")).clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        ps.circuits.remove(i);
+    }
+    if ui
+        .add(egui::Button::new(
+            egui::RichText::new("＋ ADD CIRCUIT")
+                .color(egui::Color32::from_rgb(255, 210, 160)),
+        ))
+        .clicked()
+    {
+        ps.circuits.push(PowerCircuitConfig {
+            name: String::new(),
+            fraction: 1.0,
+        });
+    }
+
+    // Access policy: OwnerOnly / AllowList / Open.
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("ACCESS");
+        let mut variant_idx = match ps.access {
+            PowerAccessConfig::OwnerOnly => 0u8,
+            PowerAccessConfig::AllowList(_) => 1,
+            PowerAccessConfig::Open => 2,
+        };
+        egui::ComboBox::from_id_salt("pwrs-access")
+            .selected_text(match variant_idx {
+                0 => "Owner only",
+                1 => "Allow list",
+                _ => "Open",
+            })
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut variant_idx, 0, "Owner only");
+                ui.selectable_value(&mut variant_idx, 1, "Allow list");
+                ui.selectable_value(&mut variant_idx, 2, "Open");
+            });
+        let new_access = match variant_idx {
+            0 => PowerAccessConfig::OwnerOnly,
+            1 => {
+                // Preserve existing list when switching back, else
+                // start empty.
+                match &ps.access {
+                    PowerAccessConfig::AllowList(list) => {
+                        PowerAccessConfig::AllowList(list.clone())
+                    }
+                    _ => PowerAccessConfig::AllowList(Vec::new()),
+                }
+            }
+            _ => PowerAccessConfig::Open,
+        };
+        ps.access = new_access;
+    });
+    if let PowerAccessConfig::AllowList(ref mut list) = ps.access {
+        let mut remove_idx: Option<usize> = None;
+        for (i, entry) in list.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("  {}.", i + 1));
+                ui.add(
+                    egui::TextEdit::singleline(entry)
+                        .id_salt(format!("pwrs-al-{}", i))
+                        .hint_text("player id")
+                        .desired_width(200.0),
+                );
+                if ui.add(button_icon("×")).clicked() {
+                    remove_idx = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove_idx {
+            list.remove(i);
+        }
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("＋ ADD PLAYER")
+                    .color(egui::Color32::from_rgb(255, 210, 160)),
+            ))
+            .clicked()
+        {
+            list.push(String::new());
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Power consumer (reactor + circuit picker)
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_power_consumer_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let nearby = cfg.nearby_reactors.clone();
+    let Some(pc) = cfg.power_consumer.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("POWER CONSUMER")
+            .color(egui::Color32::from_rgb(180, 140, 80))
+            .size(12.0),
+    );
+    ui.horizontal(|ui| {
+        ui.label("REACTOR");
+        let label = match pc.reactor_pos {
+            Some(p) => format!("({}, {}, {})", p.x, p.y, p.z),
+            None => "(none)".to_string(),
+        };
+        egui::ComboBox::from_id_salt("pwrc-reactor")
+            .selected_text(label)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut pc.reactor_pos, None, "(none)");
+                for r in &nearby {
+                    let label = format!(
+                        "{}  ({}, {}, {})  [{:.1} m]",
+                        r.label, r.pos.x, r.pos.y, r.pos.z, r.distance,
+                    );
+                    ui.selectable_value(&mut pc.reactor_pos, Some(r.pos), label);
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("CIRCUIT");
+        ui.add(
+            egui::TextEdit::singleline(&mut pc.circuit)
+                .id_salt("pwrc-circuit")
+                .hint_text("circuit name")
+                .desired_width(180.0),
+        );
+        // Circuit dropdown if we know which reactor + its circuits.
+        let circuits: Vec<String> = pc
+            .reactor_pos
+            .and_then(|p| nearby.iter().find(|r| r.pos == p))
+            .map(|r| r.circuits.clone())
+            .unwrap_or_default();
+        if !circuits.is_empty() {
+            egui::ComboBox::from_id_salt("pwrc-circuit-pick")
+                .selected_text("▼")
+                .width(24.0)
+                .show_ui(ui, |ui| {
+                    for name in &circuits {
+                        if ui.selectable_label(pc.circuit == *name, name).clicked() {
+                            pc.circuit = name.clone();
+                        }
+                    }
+                });
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Flight computer — yaw/pitch/roll + toggle, stabilizer gains
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_flight_computer_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let available = cfg.available_channels.clone();
+    let Some(fc) = cfg.flight_computer.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("FLIGHT COMPUTER")
+            .color(egui::Color32::from_rgb(120, 220, 255))
+            .size(12.0),
+    );
+    channel_row(ui, "fc-yaw-cw", "YAW CW", &mut fc.yaw_cw_channel, &available);
+    channel_row(ui, "fc-yaw-ccw", "YAW CCW", &mut fc.yaw_ccw_channel, &available);
+    channel_row(ui, "fc-pitch-up", "PITCH UP", &mut fc.pitch_up_channel, &available);
+    channel_row(ui, "fc-pitch-dn", "PITCH DN", &mut fc.pitch_down_channel, &available);
+    channel_row(ui, "fc-roll-cw", "ROLL CW", &mut fc.roll_cw_channel, &available);
+    channel_row(ui, "fc-roll-ccw", "ROLL CCW", &mut fc.roll_ccw_channel, &available);
+    channel_row(ui, "fc-toggle", "TOGGLE", &mut fc.toggle_channel, &available);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("DAMPING");
+        ui.add(egui::DragValue::new(&mut fc.damping_gain).speed(0.01).range(0.0..=10.0));
+        ui.label("DEAD ZONE");
+        ui.add(egui::DragValue::new(&mut fc.dead_zone).speed(0.01).range(0.0..=1.0));
+        ui.label("MAX CORR");
+        ui.add(egui::DragValue::new(&mut fc.max_correction).speed(0.01).range(0.0..=10.0));
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Hover module — 6 thrust + 6 rotation + activate + cutoff
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_hover_module_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let available = cfg.available_channels.clone();
+    let Some(hm) = cfg.hover_module.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("HOVER MODULE")
+            .color(egui::Color32::from_rgb(140, 200, 240))
+            .size(12.0),
+    );
+    channel_row(ui, "hm-tf", "THRUST FWD", &mut hm.thrust_forward_channel, &available);
+    channel_row(ui, "hm-tr", "THRUST REV", &mut hm.thrust_reverse_channel, &available);
+    channel_row(ui, "hm-tright", "THRUST R", &mut hm.thrust_right_channel, &available);
+    channel_row(ui, "hm-tleft", "THRUST L", &mut hm.thrust_left_channel, &available);
+    channel_row(ui, "hm-tup", "THRUST UP", &mut hm.thrust_up_channel, &available);
+    channel_row(ui, "hm-tdn", "THRUST DN", &mut hm.thrust_down_channel, &available);
+    channel_row(ui, "hm-ycw", "YAW CW", &mut hm.yaw_cw_channel, &available);
+    channel_row(ui, "hm-yccw", "YAW CCW", &mut hm.yaw_ccw_channel, &available);
+    channel_row(ui, "hm-pup", "PITCH UP", &mut hm.pitch_up_channel, &available);
+    channel_row(ui, "hm-pdn", "PITCH DN", &mut hm.pitch_down_channel, &available);
+    channel_row(ui, "hm-rcw", "ROLL CW", &mut hm.roll_cw_channel, &available);
+    channel_row(ui, "hm-rccw", "ROLL CCW", &mut hm.roll_ccw_channel, &available);
+    channel_row(ui, "hm-act", "ACTIVATE", &mut hm.activate_channel, &available);
+    channel_row(ui, "hm-cut", "CUTOFF", &mut hm.cutoff_channel, &available);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Autopilot block — yaw/pitch/roll + engage
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_autopilot_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let available = cfg.available_channels.clone();
+    let Some(ap) = cfg.autopilot.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("AUTOPILOT")
+            .color(egui::Color32::from_rgb(180, 160, 255))
+            .size(12.0),
+    );
+    channel_row(ui, "ap-ycw", "YAW CW", &mut ap.yaw_cw_channel, &available);
+    channel_row(ui, "ap-yccw", "YAW CCW", &mut ap.yaw_ccw_channel, &available);
+    channel_row(ui, "ap-pup", "PITCH UP", &mut ap.pitch_up_channel, &available);
+    channel_row(ui, "ap-pdn", "PITCH DN", &mut ap.pitch_down_channel, &available);
+    channel_row(ui, "ap-rcw", "ROLL CW", &mut ap.roll_cw_channel, &available);
+    channel_row(ui, "ap-rccw", "ROLL CCW", &mut ap.roll_ccw_channel, &available);
+    channel_row(ui, "ap-eng", "ENGAGE", &mut ap.engage_channel, &available);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Warp computer — cycle / accept / cancel
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_warp_computer_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let available = cfg.available_channels.clone();
+    let Some(wc) = cfg.warp_computer.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("WARP COMPUTER")
+            .color(egui::Color32::from_rgb(140, 220, 220))
+            .size(12.0),
+    );
+    channel_row(ui, "wc-cycle", "CYCLE TARGET", &mut wc.cycle_channel, &available);
+    channel_row(ui, "wc-accept", "ACCEPT", &mut wc.accept_channel, &available);
+    channel_row(ui, "wc-cancel", "CANCEL", &mut wc.cancel_channel, &available);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Engine controller — 6 thrust + 6 rotation + toggle
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_engine_controller_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let available = cfg.available_channels.clone();
+    let Some(ec) = cfg.engine_controller.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("ENGINE CONTROLLER")
+            .color(egui::Color32::from_rgb(200, 180, 120))
+            .size(12.0),
+    );
+    channel_row(ui, "ec-tf", "THRUST FWD", &mut ec.thrust_forward_channel, &available);
+    channel_row(ui, "ec-tr", "THRUST REV", &mut ec.thrust_reverse_channel, &available);
+    channel_row(ui, "ec-tright", "THRUST R", &mut ec.thrust_right_channel, &available);
+    channel_row(ui, "ec-tleft", "THRUST L", &mut ec.thrust_left_channel, &available);
+    channel_row(ui, "ec-tup", "THRUST UP", &mut ec.thrust_up_channel, &available);
+    channel_row(ui, "ec-tdn", "THRUST DN", &mut ec.thrust_down_channel, &available);
+    channel_row(ui, "ec-ycw", "YAW CW", &mut ec.yaw_cw_channel, &available);
+    channel_row(ui, "ec-yccw", "YAW CCW", &mut ec.yaw_ccw_channel, &available);
+    channel_row(ui, "ec-pup", "PITCH UP", &mut ec.pitch_up_channel, &available);
+    channel_row(ui, "ec-pdn", "PITCH DN", &mut ec.pitch_down_channel, &available);
+    channel_row(ui, "ec-rcw", "ROLL CW", &mut ec.roll_cw_channel, &available);
+    channel_row(ui, "ec-rccw", "ROLL CCW", &mut ec.roll_ccw_channel, &available);
+    channel_row(ui, "ec-tog", "TOGGLE", &mut ec.toggle_channel, &available);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Mechanical (rotor / piston) — speed override
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_mechanical_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    let Some(mc) = cfg.mechanical.as_mut() else { return };
+    ui.heading(
+        egui::RichText::new("MECHANICAL")
+            .color(egui::Color32::from_rgb(200, 200, 210))
+            .size(12.0),
+    );
+    let mut enabled = mc.speed_override.is_some();
+    let mut value = mc.speed_override.unwrap_or(0.0);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut enabled, "Override default speed");
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.add(egui::DragValue::new(&mut value).speed(1.0));
+            ui.label("(deg/s for rotor, m/s for piston — clamped by registry max)");
+        });
+    });
+    mc.speed_override = if enabled { Some(value) } else { None };
+}
+
+/// One labelled channel text-edit + preset dropdown row. Shared by
+/// every per-kind config editor that just binds N named signal
+/// channels to fixed roles.
+fn channel_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    current: &mut String,
+    available: &[String],
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        channel_text_edit(ui, id, current, available);
+    });
 }
 
 fn source_dropdown(ui: &mut egui::Ui, id: &str, current: &mut SeatInputSource) {
@@ -1106,15 +1590,18 @@ fn drive_tablet_pointer(
     }
 
     // Forward mouse-wheel deltas so the ScrollArea inside the tablet
-    // scrolls naturally. `scroll_y` in pixels/tick; egui's
-    // `MouseWheel` takes a `Vec2` delta in line-or-pixel units
-    // depending on the `unit` field.
+    // scrolls naturally. Bevy's `MouseWheel` reports raw ticks; egui
+    // interprets `MouseWheelUnit::Line` as ~one-row-per-unit which is
+    // too fast on high-resolution scroll wheels / trackpads — the
+    // whole editor whips past in a single flick. `SCROLL_SENSITIVITY`
+    // damps it to a comfortable reading cadence.
+    const SCROLL_SENSITIVITY: f32 = 0.35;
     if mouse_delta.scroll_y != 0.0 {
         writer.write(EguiInputEvent {
             context: ctx_entity,
             event: egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Line,
-                delta: egui::vec2(0.0, mouse_delta.scroll_y),
+                delta: egui::vec2(0.0, mouse_delta.scroll_y * SCROLL_SENSITIVITY),
                 modifiers: egui::Modifiers::NONE,
             },
         });

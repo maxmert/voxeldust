@@ -165,27 +165,38 @@ fn dispatch_interactions(
         return;
     }
 
-    // While the tablet cursor is active, the player is interacting
-    // with the in-world UI — typing into text fields, clicking
-    // buttons. Suppress F's "toggle tablet" action so keys typed in
-    // a text field don't close the tablet out from under the user.
-    // Free-move mode (Tab off) keeps F working.
-    if hud_focus.active && keys.just_pressed(KeyCode::KeyF) {
-        // No-op: consumed by the tablet's egui context.
+    // F key priority order (top wins):
+    //
+    // 1. **Seated** → always EXIT_SEAT, even if tablet cursor is
+    //    active. A pilot must be able to exit their seat in any UI
+    //    state; losing seat-exit because a config tablet happens to
+    //    be open is a soft-lock.
+    //
+    // 2. **Tablet cursor active + not seated** → suppress F. The
+    //    player is typing into an egui text field; eating F prevents
+    //    closing the tablet while typing.
+    //
+    // 3. **Free-move + tablet visible** → dismiss tablet.
+    //
+    // 4. **Free-move + no tablet** → summon tablet (+ OPEN_CONFIG if
+    //    crosshair is on a functional block, else HudPanel editor if
+    //    on a HUD sub-block face).
+    if keys.just_pressed(KeyCode::KeyF) && seated.is_seated {
+        send_edit(
+            &tcp,
+            BlockEditData {
+                action: edit_action::EXIT_SEAT,
+                eye: glam::DVec3::ZERO,
+                look: glam::DVec3::ZERO,
+                block_type: 0,
+            },
+            None,
+            &primary,
+        );
+    } else if hud_focus.active && keys.just_pressed(KeyCode::KeyF) {
+        // Consumed by the tablet's egui context.
     } else if keys.just_pressed(KeyCode::KeyF) {
-        if seated.is_seated {
-            send_edit(
-                &tcp,
-                BlockEditData {
-                    action: edit_action::EXIT_SEAT,
-                    eye: glam::DVec3::ZERO,
-                    look: glam::DVec3::ZERO,
-                    block_type: 0,
-                },
-                None,
-                &primary,
-            );
-        } else if existing_tablet.iter().next().is_some() {
+        if existing_tablet.iter().next().is_some() {
             // Tablet currently visible → dismiss.
             despawn_tablet.write(DespawnHeldTablet);
         } else {

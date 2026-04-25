@@ -14,7 +14,7 @@ use crate::hud::ar::{draw_ar_markers, ArDrawCtx};
 use crate::hud::focus::HudFocusState;
 use crate::hud::signal_registry::SignalRegistry;
 use crate::hud::tablet::HeldTablet;
-use crate::hud::tile::{HudConfig, HudTexture, HudTile};
+use crate::hud::tile::{HudConfig, HudPanelLayout, HudTexture, HudTile, HudWidgetSlot, WidgetKind};
 use crate::hud::widget::{DrawCtx, HudWidgetRegistry};
 use crate::remote::{RemoteDebris, RemotePlayers, RemoteShips};
 use crate::shard::{CameraWorldPos, PrimaryWorldState, SecondaryWorldStates};
@@ -80,16 +80,45 @@ fn redraw_hud_textures(
         // mutation fails to propagate to GPU.
         let mut buf = vec![0u8; byte_count];
 
-        // Widget paint.
-        let value = signals.get(&config.channel).map(|r| r.value.clone());
-        if let Some(widget) = registry.get(config.kind) {
-            let ctx = DrawCtx {
-                pixels: buf.as_mut_slice(),
-                size,
-                caption: &config.caption,
-                opacity: config.opacity,
-            };
-            widget.draw(ctx, value, config);
+        // Widget paint — Single = one widget over the whole face;
+        // Quad = four widgets, each filling a 2×2 quadrant. For Quad
+        // we paint each slot into a temp sub-buffer at `size/2` and
+        // blit the resulting pixels into the corresponding quadrant
+        // of the main buffer. `AR overlay` and `cursor` are applied
+        // on top of the composited result using the full face.
+        match config.layout {
+            HudPanelLayout::Single => {
+                paint_slot(
+                    buf.as_mut_slice(),
+                    size,
+                    0,
+                    0,
+                    size,
+                    &registry,
+                    &signals,
+                    config.kind,
+                    &config.channel,
+                    &config.caption,
+                    config.opacity,
+                    config,
+                );
+            }
+            HudPanelLayout::Quad => {
+                let half = size / 2;
+                // Slot 0 = outer HudConfig (TL).
+                paint_slot(
+                    buf.as_mut_slice(), size, 0,     0,     half,
+                    &registry, &signals,
+                    config.kind, &config.channel, &config.caption,
+                    config.opacity, config,
+                );
+                if let Some(extras) = &config.extra_slots {
+                    let [tr, bl, br] = extras.as_ref();
+                    paint_slot_from(&mut buf, size, half, 0,    half, &registry, &signals, tr, config.opacity, config);
+                    paint_slot_from(&mut buf, size, 0,    half, half, &registry, &signals, bl, config.opacity, config);
+                    paint_slot_from(&mut buf, size, half, half, half, &registry, &signals, br, config.opacity, config);
+                }
+            }
         }
 
         // AR overlay.
@@ -133,6 +162,76 @@ fn redraw_hud_textures(
             // layer to re-extract this material into the render world.
             mat.base_color_texture = Some(tex.handle.clone());
         }
+    }
+}
+
+/// Paint one widget slot into a sub-rectangle of the full tile
+/// pixel buffer. Used by both Single layouts (sub-rect = the whole
+/// face) and Quad layouts (sub-rect = one quadrant). Widgets write
+/// into a temp buffer sized `sub_size × sub_size`; result is blitted
+/// row-by-row into the main buffer starting at `(x, y)`.
+#[allow(clippy::too_many_arguments)]
+fn paint_slot(
+    full_buf: &mut [u8],
+    full_size: u32,
+    x: u32,
+    y: u32,
+    sub_size: u32,
+    registry: &HudWidgetRegistry,
+    signals: &SignalRegistry,
+    kind: WidgetKind,
+    channel: &str,
+    caption: &str,
+    opacity: f32,
+    config: &HudConfig,
+) {
+    if kind == WidgetKind::None {
+        return;
+    }
+    let Some(widget) = registry.get(kind) else { return };
+    let value = signals.get(channel).map(|r| r.value.clone());
+    let mut sub = vec![0u8; (sub_size * sub_size * 4) as usize];
+    let ctx = DrawCtx {
+        pixels: sub.as_mut_slice(),
+        size: sub_size,
+        caption,
+        opacity,
+    };
+    widget.draw(ctx, value, config);
+    blit(full_buf, full_size, &sub, x, y, sub_size);
+}
+
+/// Variant for Quad slots 1-3 (read from `extra_slots`).
+#[allow(clippy::too_many_arguments)]
+fn paint_slot_from(
+    full_buf: &mut [u8],
+    full_size: u32,
+    x: u32,
+    y: u32,
+    sub_size: u32,
+    registry: &HudWidgetRegistry,
+    signals: &SignalRegistry,
+    slot: &HudWidgetSlot,
+    opacity: f32,
+    config: &HudConfig,
+) {
+    paint_slot(
+        full_buf, full_size, x, y, sub_size, registry, signals,
+        slot.kind, &slot.channel, &slot.caption, opacity, config,
+    );
+}
+
+/// Copy `sub_size × sub_size` RGBA pixels from `src` into the full
+/// buffer at origin `(x, y)`. Overwrites; assumes `src` is tightly
+/// packed row-major at `sub_size` stride.
+fn blit(dst: &mut [u8], dst_size: u32, src: &[u8], x: u32, y: u32, sub_size: u32) {
+    let dst_stride = dst_size as usize * 4;
+    let src_stride = sub_size as usize * 4;
+    for row in 0..sub_size as usize {
+        let src_off = row * src_stride;
+        let dst_off = (y as usize + row) * dst_stride + x as usize * 4;
+        dst[dst_off..dst_off + src_stride]
+            .copy_from_slice(&src[src_off..src_off + src_stride]);
     }
 }
 

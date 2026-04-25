@@ -505,6 +505,14 @@ struct PlayerPosition(Vec3);
 #[derive(Component)]
 struct PlayerYaw(f32);
 
+/// Per-player pitch angle (radians, -π/2 .. π/2). Tracked server-side
+/// so the ship-shard can compose and broadcast the full camera
+/// world rotation `exterior_rot × quat_from_yaw_pitch(yaw, pitch)` as
+/// authoritative — removing any need for the client to compose
+/// rotation from its local `LocalLook` state.
+#[derive(Component, Default)]
+struct PlayerPitch(f32);
+
 /// Per-player seated state. `seat_entity` points to the seat block entity.
 /// Seat role (pilot/gunner/passenger) is determined by the seat's SeatChannelMapping.
 #[derive(Component, Default)]
@@ -1302,6 +1310,7 @@ fn spawn_player(
         PlayerName(name),
         PlayerPosition(spawn_pos),
         PlayerYaw(0.0),
+        PlayerPitch(0.0),
         SeatedState::default(),
         InputActions::default(),
         SeatInputValues::default(),
@@ -1599,6 +1608,7 @@ fn process_input(
     player_index: Res<PlayerEntityIndex>,
     mut players: Query<(
         &mut PlayerYaw,
+        &mut PlayerPitch,
         &mut InputActions,
         &SeatedState,
         &mut SeatInputValues,
@@ -1613,7 +1623,7 @@ fn process_input(
             Some(&e) => e,
             None => continue,
         };
-        let Ok((mut yaw, mut actions, seated, mut seat_input, mut desired)) =
+        let Ok((mut yaw, mut pitch, mut actions, seated, mut seat_input, mut desired)) =
             players.get_mut(entity)
         else {
             continue;
@@ -1623,6 +1633,12 @@ fn process_input(
         actions.previous = actions.current;
         actions.current = input.action;
         yaw.0 = input.look_yaw;
+        // Pitch is ship-local — clamped to [-π/2, π/2] so looking
+        // straight up or down doesn't flip the camera frame.
+        pitch.0 = input.look_pitch.clamp(
+            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
+        );
 
         if seated.seated {
             // Seated: all walking-layer state clears to prevent a stale
@@ -1836,7 +1852,14 @@ fn preconnect_check(
 /// - In space: hand off to system shard as EVA (future Phase 4).
 fn hull_exit_check(
     players: Query<
-        (Entity, &SessionId, &PlayerName, &PlayerPosition),
+        (
+            Entity,
+            &SessionId,
+            &PlayerName,
+            &PlayerPosition,
+            &PlayerYaw,
+            &PlayerPitch,
+        ),
         (With<Player>, Without<HandoffPending>),
     >,
     hull_bounds: Res<ShipHullBounds>,
@@ -1859,7 +1882,7 @@ fn hull_exit_check(
     if interior_mask.0.is_empty() {
         return;
     }
-    for (entity, session_id, player_name, player_pos) in &players {
+    for (entity, session_id, player_name, player_pos, yaw, pitch) in &players {
         let pos = player_pos.0;
         // Interior volume mask — symmetric with `eva_boarding_detection` on
         // the system shard. Both sides use the exact same mask data (shipped
@@ -1962,13 +1985,38 @@ fn hull_exit_check(
             // Without this, EVA spawns ~700m behind the ship because the ship has
             // already co-moved a few ticks with the planet's orbit (~110 km/s)
             // during handoff propagation.
+            // Full camera world rotation at exit moment —
+            //   ship_rot × quat_from_yaw_pitch(look_yaw, look_pitch).
+            // Shipping the composed rotation (not bare `exterior.rotation`)
+            // means the EVA camera lands facing exactly where the pilot
+            // was looking at the moment they walked out. The server owns
+            // both halves of the composition so the client doesn't have
+            // to compose anything.
+            // Send the BODY frame in the handoff, NOT the composed
+            // camera rotation. The composed-rotation approach forces the
+            // client to decompose into yaw/pitch via Euler — which loses
+            // roll on any rolled ship. By sending body separately and
+            // letting the client preserve its `LocalLook` (head yaw/pitch
+            // in body frame) across the transition, the new shard
+            // recomposes camera = body × rotation_from_look(LocalLook)
+            // and the FULL pre-exit rotation (including roll) is
+            // preserved. The destination shard will store this body as
+            // EvaRotation; eva_physics computes thrust = body × horizontal,
+            // matching what the client's camera shows.
+            let body_rotation = exterior.rotation;
+            let camera_forward = (body_rotation
+                * voxeldust_core::camera_math::quat_from_yaw_pitch(
+                    yaw.0 as f64,
+                    pitch.0 as f64,
+                ))
+                * DVec3::NEG_Z;
             let h = handoff::PlayerHandoff {
                 session_token: session_id.0,
                 player_name: player_name.0.clone(),
                 position: player_system_pos,
                 velocity: exterior.velocity, // inherit ship velocity for momentum continuity
-                rotation: exterior.rotation,
-                forward: exterior.rotation * DVec3::NEG_Z,
+                rotation: body_rotation,
+                forward: camera_forward,
                 fly_mode: true, // EVA players start in fly mode
                 speed_tier: 0,
                 grounded: false,
@@ -2442,7 +2490,17 @@ fn tick_counter(mut tick: ResMut<ecs::TickCounter>) {
 // ---------------------------------------------------------------------------
 
 fn broadcast_world_state(
-    players: Query<(&SessionId, &PlayerName, &PlayerPosition, &SeatedState), With<Player>>,
+    players: Query<
+        (
+            &SessionId,
+            &PlayerName,
+            &PlayerPosition,
+            &SeatedState,
+            &PlayerYaw,
+            &PlayerPitch,
+        ),
+        With<Player>,
+    >,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
     warp_query: Query<&WarpComputerState>,
@@ -2489,18 +2547,31 @@ fn broadcast_world_state(
         .find_map(|wc| wc.target_star_index)
         .unwrap_or(0xFFFFFFFF);
 
-    // Build player snapshots for ALL players.
+    // Build player snapshots for ALL players. Rotation composes the
+    // ship frame with the player's camera look — same as the
+    // ObservableEntity rotation below — so the legacy PlayerSnapshot
+    // path sees the same authoritative camera rotation.
+    //
+    // Body frame only — exterior.rotation. The client composes
+    // `body × rotation_from_look(LocalLook)` for the camera so head
+    // yaw/pitch (and any roll) are preserved client-side without
+    // a lossy server-then-client decomposition. Other clients
+    // viewing this player render their avatar at the body
+    // orientation; head detail lands in a separate field when
+    // avatar animation is wired up.
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, seated)| PlayerSnapshotData {
-            player_id: sid.0.0,
-            position: DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64),
-            rotation: exterior.rotation,
-            velocity: exterior.velocity,
-            grounded: !seated.seated,
-            health: 100.0,
-            shield: 100.0,
-            seated: seated.seated,
+        .map(|(sid, _, pos, seated, _yaw, _pitch)| {
+            PlayerSnapshotData {
+                player_id: sid.0.0,
+                position: DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64),
+                rotation: exterior.rotation,
+                velocity: exterior.velocity,
+                grounded: !seated.seated,
+                health: 100.0,
+                shield: 100.0,
+                seated: seated.seated,
+            }
         })
         .collect();
 
@@ -2555,7 +2626,7 @@ fn broadcast_world_state(
         }
         entities.push(entity);
     }
-    for (sid, name, pos, seated) in players.iter() {
+    for (sid, name, pos, seated, yaw, pitch) in players.iter() {
         // Kind reflects the player's actual posture. Copy-paste bug here
         // previously emitted `Seated` in both branches, which permanently
         // stuck every client's pilot-mode detection on.
@@ -2564,6 +2635,10 @@ fn broadcast_world_state(
         } else {
             EntityKind::GroundedPlayer
         };
+        // BODY frame only — exterior.rotation. Same rationale as the
+        // player_snapshots above: client composes camera =
+        // body × rotation_from_look(LocalLook) so head yaw/pitch and
+        // ship roll are preserved without lossy decomposition.
         entities.push(ObservableEntityData {
             entity_id: sid.0.0,
             kind,
