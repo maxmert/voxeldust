@@ -4229,6 +4229,8 @@ fn eva_broadcast(
             radius: sys_config.0.star.radius_m,
             color: sys_config.0.star.color,
             stellar: Some(sys_config.0.star.stellar),
+            planetary: None,
+            rotation_params: None,
         });
         for (i, planet) in sys_config.0.planets.iter().enumerate() {
             b.push(CelestialBodyData {
@@ -4236,7 +4238,9 @@ fn eva_broadcast(
                 position: planet_pos.0[i],
                 radius: planet.radius_m,
                 color: planet.color,
-                stellar: None,  // planets carry `planetary` in Phase 3
+                stellar: None,
+                planetary: Some(planet.geophysics(&sys_config.0.star.stellar)),
+                rotation_params: Some(planet.rotation_params()),
             });
         }
         b
@@ -5186,6 +5190,8 @@ fn broadcast_scene(
             radius: sys_config.0.star.radius_m,
             color: sys_config.0.star.color,
             stellar: Some(sys_config.0.star.stellar),
+            planetary: None,
+            rotation_params: None,
         });
         for (i, planet) in sys_config.0.planets.iter().enumerate() {
             bodies.push(CelestialBodySnapshotData {
@@ -5193,7 +5199,9 @@ fn broadcast_scene(
                 position: planet_pos.0[i],
                 radius: planet.radius_m,
                 color: planet.color,
-                stellar: None,  // planets carry `planetary` in Phase 3
+                stellar: None,
+                planetary: Some(planet.geophysics(&sys_config.0.star.stellar)),
+                rotation_params: Some(planet.rotation_params()),
             });
         }
 
@@ -5370,6 +5378,8 @@ fn broadcast_udp(
             radius: sys_config.0.star.radius_m,
             color: sys_config.0.star.color,
             stellar: Some(sys_config.0.star.stellar),
+            planetary: None,
+            rotation_params: None,
         });
         for (i, planet) in sys_config.0.planets.iter().enumerate() {
             b.push(CelestialBodyData {
@@ -5377,7 +5387,9 @@ fn broadcast_udp(
                 position: planet_pos.0[i],
                 radius: planet.radius_m,
                 color: planet.color,
-                stellar: None,  // planets carry `planetary` in Phase 3
+                stellar: None,
+                planetary: Some(planet.geophysics(&sys_config.0.star.stellar)),
+                rotation_params: Some(planet.rotation_params()),
             });
         }
         b

@@ -2528,9 +2528,12 @@ fn broadcast_world_state(
                 radius: b.radius,
                 color: b.color,
                 // Pass-through propagation: the system-shard's authoritative
-                // physics-derived stellar state arrives in scene.bodies via
-                // SystemSceneUpdate; we forward it byte-for-byte to clients.
+                // physics-derived stellar + planetary + rotation state
+                // arrives in scene.bodies via SystemSceneUpdate; we forward
+                // all three byte-for-byte to clients.
                 stellar: b.stellar,
+                planetary: b.planetary,
+                rotation_params: b.rotation_params,
             })
             .collect()
     };
@@ -6728,8 +6731,48 @@ fn build_ship_interior(
 
     if system_seed > 0 {
         let sys = SystemParams::from_seed(system_seed);
-        let planet_pos = system::compute_planet_position(&sys.planets[0], 0.0);
-        ship_position = planet_pos + DVec3::new(sys.scale.spawn_offset, 0.0, 0.0);
+        // Spawn near the planet with the thickest broadcast atmosphere so
+        // the player lands somewhere Phase 3 atmospheric scattering is
+        // immediately visible. Picks the planet with the highest
+        // surface_pressure_pa from the physics-derived geophysics; falls
+        // back to planet 0 if none have an atmosphere.
+        //
+        // Spawn altitude is `SHIP_SPAWN_ALTITUDE_RATIO × planet_radius`
+        // above the centre — far enough to clear the atmosphere shell
+        // (scale_height × 6 ≈ 50 km on Earth-class worlds) yet close
+        // enough that the atmospheric ring fills a meaningful fraction of
+        // the FOV. 1.5× radius gives 0.5R altitude — for an Earth-sized
+        // planet that's ~3 200 km, the textbook low-orbit-photo distance.
+        let star_stellar = &sys.star.stellar;
+        let chosen_idx = sys
+            .planets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                let g = p.geophysics(star_stellar);
+                if g.has_atmosphere && g.surface_pressure_pa > 0.0 {
+                    Some((i, g.surface_pressure_pa as f64))
+                } else {
+                    None
+                }
+            })
+            .max_by(|a, b| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let chosen_planet = &sys.planets[chosen_idx];
+        let planet_pos = system::compute_planet_position(chosen_planet, 0.0);
+        const SHIP_SPAWN_ALTITUDE_RATIO: f64 = 1.5;
+        let spawn_distance = chosen_planet.radius_m * SHIP_SPAWN_ALTITUDE_RATIO;
+        ship_position = planet_pos + DVec3::new(spawn_distance, 0.0, 0.0);
+        info!(
+            chosen_planet_idx = chosen_idx,
+            chosen_planet_radius_m = chosen_planet.radius_m,
+            spawn_distance_m = spawn_distance,
+            altitude_above_surface_m = spawn_distance - chosen_planet.radius_m,
+            "ship-shard: spawning near planet with thickest atmosphere"
+        );
 
         scene_bodies.push(CelestialBodySnapshotData {
             body_id: 0,
@@ -6739,6 +6782,8 @@ fn build_ship_interior(
             // SystemParams::from_seed is the deterministic single source of
             // stellar physics; same seed → same StellarState on every shard.
             stellar: Some(sys.star.stellar),
+            planetary: None,
+            rotation_params: None,
         });
         for (i, planet) in sys.planets.iter().enumerate() {
             let pos = system::compute_planet_position(planet, 0.0);
@@ -6747,7 +6792,9 @@ fn build_ship_interior(
                 position: pos,
                 radius: planet.radius_m,
                 color: planet.color,
-                stellar: None,  // planets carry `planetary` in Phase 3
+                stellar: None,
+                planetary: Some(planet.geophysics(&sys.star.stellar)),
+                rotation_params: Some(planet.rotation_params()),
             });
         }
         let l = system::compute_lighting(ship_position, &sys.star);

@@ -38,9 +38,10 @@ const SCANNED_PATHS: &[&str] = &[
     "client/src/lighting/quality.rs",
     "client/src/lighting/solar.rs",
     "client/src/lighting/camera.rs",
-    // Phase 2 adds: client/src/lighting/ibl.rs,
-    //               client/src/lighting/starfield_bake.rs.
-    // Phase 3 adds: client/src/lighting/atmosphere.rs.
+    "client/src/lighting/ibl.rs",
+    "client/src/lighting/atmosphere.rs",
+    "client/src/lighting/rotation.rs",
+    // Phase 2 may also add: client/src/lighting/starfield_bake.rs.
     // Phase 4 adds: client/src/lighting/rotation.rs.
     // Phase 5 adds: client/src/lighting/volumetric.rs.
     // Phase 6 adds: client/src/lighting/eclipse.rs.
@@ -48,9 +49,11 @@ const SCANNED_PATHS: &[&str] = &[
 ];
 
 /// Per-literal whitelist of small natural numbers permitted everywhere.
+/// `0.5` is included as a universal math constant (midpoint / averaging).
 const ALLOWED_LITERALS: &[&str] = &[
     "0", "1", "2", "3", "4",
     "0.0", "1.0", "2.0", "3.0", "4.0",
+    "0.5",
 ];
 
 #[test]

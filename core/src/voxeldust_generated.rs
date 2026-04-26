@@ -5863,6 +5863,930 @@ impl ::core::fmt::Debug for StellarStateData<'_> {
       ds.finish()
   }
 }
+pub enum PlanetaryStateDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Per-planet physics-derived geophysical state — broadcast for planets
+/// (CelestialBodySnapshot where body_id != 0). Server-side derivation in
+/// `core::geophysics::PlanetGeophysicalState::from_seed_and_star`.
+///
+/// All values are physics-derived from the planet seed plus the parent
+/// star's `StellarState`. The client builds a Bevy 0.18 `ScatteringMedium`
+/// and `Atmosphere` directly from these without re-deriving anything.
+///
+/// Composition fractions are mole-fractions and sum to ≈ 1 for atmosphered
+/// planets; all zero for airless bodies (where `has_atmosphere == 0`).
+pub struct PlanetaryStateData<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for PlanetaryStateData<'a> {
+  type Inner = PlanetaryStateData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> PlanetaryStateData<'a> {
+  pub const VT_HAS_ATMOSPHERE: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SURFACE_GRAVITY_MS2: ::flatbuffers::VOffsetT = 6;
+  pub const VT_EQUILIBRIUM_TEMP_K: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SURFACE_PRESSURE_PA: ::flatbuffers::VOffsetT = 10;
+  pub const VT_GROUND_ALBEDO_R: ::flatbuffers::VOffsetT = 12;
+  pub const VT_GROUND_ALBEDO_G: ::flatbuffers::VOffsetT = 14;
+  pub const VT_GROUND_ALBEDO_B: ::flatbuffers::VOffsetT = 16;
+  pub const VT_COMPOSITION_N2: ::flatbuffers::VOffsetT = 18;
+  pub const VT_COMPOSITION_O2: ::flatbuffers::VOffsetT = 20;
+  pub const VT_COMPOSITION_CO2: ::flatbuffers::VOffsetT = 22;
+  pub const VT_COMPOSITION_CH4: ::flatbuffers::VOffsetT = 24;
+  pub const VT_COMPOSITION_H2O: ::flatbuffers::VOffsetT = 26;
+  pub const VT_COMPOSITION_H2: ::flatbuffers::VOffsetT = 28;
+  pub const VT_COMPOSITION_HE: ::flatbuffers::VOffsetT = 30;
+  pub const VT_COMPOSITION_DUST: ::flatbuffers::VOffsetT = 32;
+  pub const VT_SCALE_HEIGHT_M: ::flatbuffers::VOffsetT = 34;
+  pub const VT_ATMOSPHERE_TOP_ALTITUDE_M: ::flatbuffers::VOffsetT = 36;
+  pub const VT_MEAN_MOLECULAR_MASS_KG: ::flatbuffers::VOffsetT = 38;
+  pub const VT_ATMOSPHERIC_MASS_KG: ::flatbuffers::VOffsetT = 40;
+  pub const VT_RAYLEIGH_SCATTERING_R: ::flatbuffers::VOffsetT = 42;
+  pub const VT_RAYLEIGH_SCATTERING_G: ::flatbuffers::VOffsetT = 44;
+  pub const VT_RAYLEIGH_SCATTERING_B: ::flatbuffers::VOffsetT = 46;
+  pub const VT_RAYLEIGH_SCALE_HEIGHT_M: ::flatbuffers::VOffsetT = 48;
+  pub const VT_MIE_SCATTERING_R: ::flatbuffers::VOffsetT = 50;
+  pub const VT_MIE_SCATTERING_G: ::flatbuffers::VOffsetT = 52;
+  pub const VT_MIE_SCATTERING_B: ::flatbuffers::VOffsetT = 54;
+  pub const VT_MIE_ABSORPTION_R: ::flatbuffers::VOffsetT = 56;
+  pub const VT_MIE_ABSORPTION_G: ::flatbuffers::VOffsetT = 58;
+  pub const VT_MIE_ABSORPTION_B: ::flatbuffers::VOffsetT = 60;
+  pub const VT_MIE_SCALE_HEIGHT_M: ::flatbuffers::VOffsetT = 62;
+  pub const VT_MIE_PHASE_G: ::flatbuffers::VOffsetT = 64;
+  pub const VT_OZONE_ABSORPTION_R: ::flatbuffers::VOffsetT = 66;
+  pub const VT_OZONE_ABSORPTION_G: ::flatbuffers::VOffsetT = 68;
+  pub const VT_OZONE_ABSORPTION_B: ::flatbuffers::VOffsetT = 70;
+  pub const VT_OZONE_LAYER_CENTRE_M: ::flatbuffers::VOffsetT = 72;
+  pub const VT_OZONE_LAYER_WIDTH_M: ::flatbuffers::VOffsetT = 74;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    PlanetaryStateData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args PlanetaryStateDataArgs
+  ) -> ::flatbuffers::WIPOffset<PlanetaryStateData<'bldr>> {
+    let mut builder = PlanetaryStateDataBuilder::new(_fbb);
+    builder.add_ozone_layer_width_m(args.ozone_layer_width_m);
+    builder.add_ozone_layer_centre_m(args.ozone_layer_centre_m);
+    builder.add_ozone_absorption_b(args.ozone_absorption_b);
+    builder.add_ozone_absorption_g(args.ozone_absorption_g);
+    builder.add_ozone_absorption_r(args.ozone_absorption_r);
+    builder.add_mie_phase_g(args.mie_phase_g);
+    builder.add_mie_scale_height_m(args.mie_scale_height_m);
+    builder.add_mie_absorption_b(args.mie_absorption_b);
+    builder.add_mie_absorption_g(args.mie_absorption_g);
+    builder.add_mie_absorption_r(args.mie_absorption_r);
+    builder.add_mie_scattering_b(args.mie_scattering_b);
+    builder.add_mie_scattering_g(args.mie_scattering_g);
+    builder.add_mie_scattering_r(args.mie_scattering_r);
+    builder.add_rayleigh_scale_height_m(args.rayleigh_scale_height_m);
+    builder.add_rayleigh_scattering_b(args.rayleigh_scattering_b);
+    builder.add_rayleigh_scattering_g(args.rayleigh_scattering_g);
+    builder.add_rayleigh_scattering_r(args.rayleigh_scattering_r);
+    builder.add_atmospheric_mass_kg(args.atmospheric_mass_kg);
+    builder.add_mean_molecular_mass_kg(args.mean_molecular_mass_kg);
+    builder.add_atmosphere_top_altitude_m(args.atmosphere_top_altitude_m);
+    builder.add_scale_height_m(args.scale_height_m);
+    builder.add_composition_dust(args.composition_dust);
+    builder.add_composition_he(args.composition_he);
+    builder.add_composition_h2(args.composition_h2);
+    builder.add_composition_h2o(args.composition_h2o);
+    builder.add_composition_ch4(args.composition_ch4);
+    builder.add_composition_co2(args.composition_co2);
+    builder.add_composition_o2(args.composition_o2);
+    builder.add_composition_n2(args.composition_n2);
+    builder.add_ground_albedo_b(args.ground_albedo_b);
+    builder.add_ground_albedo_g(args.ground_albedo_g);
+    builder.add_ground_albedo_r(args.ground_albedo_r);
+    builder.add_surface_pressure_pa(args.surface_pressure_pa);
+    builder.add_equilibrium_temp_k(args.equilibrium_temp_k);
+    builder.add_surface_gravity_ms2(args.surface_gravity_ms2);
+    builder.add_has_atmosphere(args.has_atmosphere);
+    builder.finish()
+  }
+
+
+  /// 1 if this planet retains an atmosphere on geological timescales;
+  /// 0 if airless (low mass, hot, or seed-derived "lost atmosphere"
+  /// outcome). When 0 the rest of the fields are still meaningful for
+  /// future ground / weather work but the client suppresses any
+  /// `Atmosphere` rendering.
+  #[inline]
+  pub fn has_atmosphere(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(PlanetaryStateData::VT_HAS_ATMOSPHERE, Some(0)).unwrap()}
+  }
+  /// Surface gravity at the equator.
+  /// Units: m · s⁻².
+  #[inline]
+  pub fn surface_gravity_ms2(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_SURFACE_GRAVITY_MS2, Some(0.0)).unwrap()}
+  }
+  /// Equilibrium temperature from radiation balance with the parent star.
+  /// Units: K.
+  #[inline]
+  pub fn equilibrium_temp_k(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_EQUILIBRIUM_TEMP_K, Some(0.0)).unwrap()}
+  }
+  /// Surface pressure of the atmosphere.
+  /// Units: Pa.
+  #[inline]
+  pub fn surface_pressure_pa(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_SURFACE_PRESSURE_PA, Some(0.0)).unwrap()}
+  }
+  /// Bond albedo of the planet surface — used for `Atmosphere.ground_albedo`.
+  /// Range: [0, 1], dimensionless.
+  #[inline]
+  pub fn ground_albedo_r(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_GROUND_ALBEDO_R, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn ground_albedo_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_GROUND_ALBEDO_G, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn ground_albedo_b(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_GROUND_ALBEDO_B, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_n2(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_N2, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_o2(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_O2, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_co2(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_CO2, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_ch4(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_CH4, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_h2o(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_H2O, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_h2(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_H2, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_he(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_HE, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn composition_dust(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_COMPOSITION_DUST, Some(0.0)).unwrap()}
+  }
+  /// Pressure scale height H = R·T / (M̄·g).
+  /// Units: m.
+  #[inline]
+  pub fn scale_height_m(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_SCALE_HEIGHT_M, Some(0.0)).unwrap()}
+  }
+  /// Altitude above the surface where atmosphere is treated as
+  /// effectively zero density (Bevy's `Atmosphere::top_radius` minus
+  /// `bottom_radius`). ~6 scale heights for ≈ 99.7 % column mass below.
+  /// Units: m.
+  #[inline]
+  pub fn atmosphere_top_altitude_m(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_ATMOSPHERE_TOP_ALTITUDE_M, Some(0.0)).unwrap()}
+  }
+  /// Mean molecular mass of the atmospheric mixture.
+  /// Units: kg per molecule.
+  #[inline]
+  pub fn mean_molecular_mass_kg(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MEAN_MOLECULAR_MASS_KG, Some(0.0)).unwrap()}
+  }
+  /// Total atmospheric mass — used by server-side weather and atmospheric
+  /// drag calculations.
+  /// Units: kg.
+  #[inline]
+  pub fn atmospheric_mass_kg(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_ATMOSPHERIC_MASS_KG, Some(0.0)).unwrap()}
+  }
+  /// Per-band Rayleigh scattering coefficient at the surface.
+  /// Units: m⁻¹.
+  #[inline]
+  pub fn rayleigh_scattering_r(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCATTERING_R, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn rayleigh_scattering_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCATTERING_G, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn rayleigh_scattering_b(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCATTERING_B, Some(0.0)).unwrap()}
+  }
+  /// Scale height of the Rayleigh-scattering vertical profile (typically
+  /// the same as `scale_height_m`; broadcast separately so future planets
+  /// with stratified composition can decouple them).
+  /// Units: m.
+  #[inline]
+  pub fn rayleigh_scale_height_m(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCALE_HEIGHT_M, Some(0.0)).unwrap()}
+  }
+  /// Per-band Mie scattering coefficient at the surface (typically grey,
+  /// but tinted for dust / sulfate atmospheres).
+  /// Units: m⁻¹.
+  #[inline]
+  pub fn mie_scattering_r(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_SCATTERING_R, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn mie_scattering_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_SCATTERING_G, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn mie_scattering_b(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_SCATTERING_B, Some(0.0)).unwrap()}
+  }
+  /// Per-band Mie absorption coefficient at the surface.
+  /// Units: m⁻¹.
+  #[inline]
+  pub fn mie_absorption_r(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_ABSORPTION_R, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn mie_absorption_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_ABSORPTION_G, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn mie_absorption_b(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_ABSORPTION_B, Some(0.0)).unwrap()}
+  }
+  /// Mie scattering scale height — aerosols sit closer to the ground
+  /// than gas molecules; defaults to ~1.2 km but can vary.
+  /// Units: m.
+  #[inline]
+  pub fn mie_scale_height_m(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_SCALE_HEIGHT_M, Some(0.0)).unwrap()}
+  }
+  /// Henyey-Greenstein phase asymmetry for the Mie term.
+  /// Range: [-1, 1]; positive ≈ forward-scattering.
+  #[inline]
+  pub fn mie_phase_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_MIE_PHASE_G, Some(0.0)).unwrap()}
+  }
+  /// Per-band ozone absorption coefficient at the layer centre. Zero for
+  /// planets that don't form an ozone layer (insufficient O₂ or
+  /// insufficient UV from a cool star).
+  /// Units: m⁻¹.
+  #[inline]
+  pub fn ozone_absorption_r(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_OZONE_ABSORPTION_R, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn ozone_absorption_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_OZONE_ABSORPTION_G, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn ozone_absorption_b(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_OZONE_ABSORPTION_B, Some(0.0)).unwrap()}
+  }
+  /// Ozone-layer geometry: centre altitude and total width.
+  /// Units: m.
+  #[inline]
+  pub fn ozone_layer_centre_m(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_OZONE_LAYER_CENTRE_M, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn ozone_layer_width_m(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetaryStateData::VT_OZONE_LAYER_WIDTH_M, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for PlanetaryStateData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u8>("has_atmosphere", Self::VT_HAS_ATMOSPHERE, false)?
+     .visit_field::<f32>("surface_gravity_ms2", Self::VT_SURFACE_GRAVITY_MS2, false)?
+     .visit_field::<f32>("equilibrium_temp_k", Self::VT_EQUILIBRIUM_TEMP_K, false)?
+     .visit_field::<f32>("surface_pressure_pa", Self::VT_SURFACE_PRESSURE_PA, false)?
+     .visit_field::<f32>("ground_albedo_r", Self::VT_GROUND_ALBEDO_R, false)?
+     .visit_field::<f32>("ground_albedo_g", Self::VT_GROUND_ALBEDO_G, false)?
+     .visit_field::<f32>("ground_albedo_b", Self::VT_GROUND_ALBEDO_B, false)?
+     .visit_field::<f32>("composition_n2", Self::VT_COMPOSITION_N2, false)?
+     .visit_field::<f32>("composition_o2", Self::VT_COMPOSITION_O2, false)?
+     .visit_field::<f32>("composition_co2", Self::VT_COMPOSITION_CO2, false)?
+     .visit_field::<f32>("composition_ch4", Self::VT_COMPOSITION_CH4, false)?
+     .visit_field::<f32>("composition_h2o", Self::VT_COMPOSITION_H2O, false)?
+     .visit_field::<f32>("composition_h2", Self::VT_COMPOSITION_H2, false)?
+     .visit_field::<f32>("composition_he", Self::VT_COMPOSITION_HE, false)?
+     .visit_field::<f32>("composition_dust", Self::VT_COMPOSITION_DUST, false)?
+     .visit_field::<f32>("scale_height_m", Self::VT_SCALE_HEIGHT_M, false)?
+     .visit_field::<f32>("atmosphere_top_altitude_m", Self::VT_ATMOSPHERE_TOP_ALTITUDE_M, false)?
+     .visit_field::<f32>("mean_molecular_mass_kg", Self::VT_MEAN_MOLECULAR_MASS_KG, false)?
+     .visit_field::<f32>("atmospheric_mass_kg", Self::VT_ATMOSPHERIC_MASS_KG, false)?
+     .visit_field::<f32>("rayleigh_scattering_r", Self::VT_RAYLEIGH_SCATTERING_R, false)?
+     .visit_field::<f32>("rayleigh_scattering_g", Self::VT_RAYLEIGH_SCATTERING_G, false)?
+     .visit_field::<f32>("rayleigh_scattering_b", Self::VT_RAYLEIGH_SCATTERING_B, false)?
+     .visit_field::<f32>("rayleigh_scale_height_m", Self::VT_RAYLEIGH_SCALE_HEIGHT_M, false)?
+     .visit_field::<f32>("mie_scattering_r", Self::VT_MIE_SCATTERING_R, false)?
+     .visit_field::<f32>("mie_scattering_g", Self::VT_MIE_SCATTERING_G, false)?
+     .visit_field::<f32>("mie_scattering_b", Self::VT_MIE_SCATTERING_B, false)?
+     .visit_field::<f32>("mie_absorption_r", Self::VT_MIE_ABSORPTION_R, false)?
+     .visit_field::<f32>("mie_absorption_g", Self::VT_MIE_ABSORPTION_G, false)?
+     .visit_field::<f32>("mie_absorption_b", Self::VT_MIE_ABSORPTION_B, false)?
+     .visit_field::<f32>("mie_scale_height_m", Self::VT_MIE_SCALE_HEIGHT_M, false)?
+     .visit_field::<f32>("mie_phase_g", Self::VT_MIE_PHASE_G, false)?
+     .visit_field::<f32>("ozone_absorption_r", Self::VT_OZONE_ABSORPTION_R, false)?
+     .visit_field::<f32>("ozone_absorption_g", Self::VT_OZONE_ABSORPTION_G, false)?
+     .visit_field::<f32>("ozone_absorption_b", Self::VT_OZONE_ABSORPTION_B, false)?
+     .visit_field::<f32>("ozone_layer_centre_m", Self::VT_OZONE_LAYER_CENTRE_M, false)?
+     .visit_field::<f32>("ozone_layer_width_m", Self::VT_OZONE_LAYER_WIDTH_M, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct PlanetaryStateDataArgs {
+    pub has_atmosphere: u8,
+    pub surface_gravity_ms2: f32,
+    pub equilibrium_temp_k: f32,
+    pub surface_pressure_pa: f32,
+    pub ground_albedo_r: f32,
+    pub ground_albedo_g: f32,
+    pub ground_albedo_b: f32,
+    pub composition_n2: f32,
+    pub composition_o2: f32,
+    pub composition_co2: f32,
+    pub composition_ch4: f32,
+    pub composition_h2o: f32,
+    pub composition_h2: f32,
+    pub composition_he: f32,
+    pub composition_dust: f32,
+    pub scale_height_m: f32,
+    pub atmosphere_top_altitude_m: f32,
+    pub mean_molecular_mass_kg: f32,
+    pub atmospheric_mass_kg: f32,
+    pub rayleigh_scattering_r: f32,
+    pub rayleigh_scattering_g: f32,
+    pub rayleigh_scattering_b: f32,
+    pub rayleigh_scale_height_m: f32,
+    pub mie_scattering_r: f32,
+    pub mie_scattering_g: f32,
+    pub mie_scattering_b: f32,
+    pub mie_absorption_r: f32,
+    pub mie_absorption_g: f32,
+    pub mie_absorption_b: f32,
+    pub mie_scale_height_m: f32,
+    pub mie_phase_g: f32,
+    pub ozone_absorption_r: f32,
+    pub ozone_absorption_g: f32,
+    pub ozone_absorption_b: f32,
+    pub ozone_layer_centre_m: f32,
+    pub ozone_layer_width_m: f32,
+}
+impl<'a> Default for PlanetaryStateDataArgs {
+  #[inline]
+  fn default() -> Self {
+    PlanetaryStateDataArgs {
+      has_atmosphere: 0,
+      surface_gravity_ms2: 0.0,
+      equilibrium_temp_k: 0.0,
+      surface_pressure_pa: 0.0,
+      ground_albedo_r: 0.0,
+      ground_albedo_g: 0.0,
+      ground_albedo_b: 0.0,
+      composition_n2: 0.0,
+      composition_o2: 0.0,
+      composition_co2: 0.0,
+      composition_ch4: 0.0,
+      composition_h2o: 0.0,
+      composition_h2: 0.0,
+      composition_he: 0.0,
+      composition_dust: 0.0,
+      scale_height_m: 0.0,
+      atmosphere_top_altitude_m: 0.0,
+      mean_molecular_mass_kg: 0.0,
+      atmospheric_mass_kg: 0.0,
+      rayleigh_scattering_r: 0.0,
+      rayleigh_scattering_g: 0.0,
+      rayleigh_scattering_b: 0.0,
+      rayleigh_scale_height_m: 0.0,
+      mie_scattering_r: 0.0,
+      mie_scattering_g: 0.0,
+      mie_scattering_b: 0.0,
+      mie_absorption_r: 0.0,
+      mie_absorption_g: 0.0,
+      mie_absorption_b: 0.0,
+      mie_scale_height_m: 0.0,
+      mie_phase_g: 0.0,
+      ozone_absorption_r: 0.0,
+      ozone_absorption_g: 0.0,
+      ozone_absorption_b: 0.0,
+      ozone_layer_centre_m: 0.0,
+      ozone_layer_width_m: 0.0,
+    }
+  }
+}
+
+pub struct PlanetaryStateDataBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlanetaryStateDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_has_atmosphere(&mut self, has_atmosphere: u8) {
+    self.fbb_.push_slot::<u8>(PlanetaryStateData::VT_HAS_ATMOSPHERE, has_atmosphere, 0);
+  }
+  #[inline]
+  pub fn add_surface_gravity_ms2(&mut self, surface_gravity_ms2: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_SURFACE_GRAVITY_MS2, surface_gravity_ms2, 0.0);
+  }
+  #[inline]
+  pub fn add_equilibrium_temp_k(&mut self, equilibrium_temp_k: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_EQUILIBRIUM_TEMP_K, equilibrium_temp_k, 0.0);
+  }
+  #[inline]
+  pub fn add_surface_pressure_pa(&mut self, surface_pressure_pa: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_SURFACE_PRESSURE_PA, surface_pressure_pa, 0.0);
+  }
+  #[inline]
+  pub fn add_ground_albedo_r(&mut self, ground_albedo_r: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_GROUND_ALBEDO_R, ground_albedo_r, 0.0);
+  }
+  #[inline]
+  pub fn add_ground_albedo_g(&mut self, ground_albedo_g: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_GROUND_ALBEDO_G, ground_albedo_g, 0.0);
+  }
+  #[inline]
+  pub fn add_ground_albedo_b(&mut self, ground_albedo_b: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_GROUND_ALBEDO_B, ground_albedo_b, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_n2(&mut self, composition_n2: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_N2, composition_n2, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_o2(&mut self, composition_o2: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_O2, composition_o2, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_co2(&mut self, composition_co2: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_CO2, composition_co2, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_ch4(&mut self, composition_ch4: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_CH4, composition_ch4, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_h2o(&mut self, composition_h2o: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_H2O, composition_h2o, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_h2(&mut self, composition_h2: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_H2, composition_h2, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_he(&mut self, composition_he: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_HE, composition_he, 0.0);
+  }
+  #[inline]
+  pub fn add_composition_dust(&mut self, composition_dust: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_COMPOSITION_DUST, composition_dust, 0.0);
+  }
+  #[inline]
+  pub fn add_scale_height_m(&mut self, scale_height_m: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_SCALE_HEIGHT_M, scale_height_m, 0.0);
+  }
+  #[inline]
+  pub fn add_atmosphere_top_altitude_m(&mut self, atmosphere_top_altitude_m: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_ATMOSPHERE_TOP_ALTITUDE_M, atmosphere_top_altitude_m, 0.0);
+  }
+  #[inline]
+  pub fn add_mean_molecular_mass_kg(&mut self, mean_molecular_mass_kg: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MEAN_MOLECULAR_MASS_KG, mean_molecular_mass_kg, 0.0);
+  }
+  #[inline]
+  pub fn add_atmospheric_mass_kg(&mut self, atmospheric_mass_kg: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_ATMOSPHERIC_MASS_KG, atmospheric_mass_kg, 0.0);
+  }
+  #[inline]
+  pub fn add_rayleigh_scattering_r(&mut self, rayleigh_scattering_r: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCATTERING_R, rayleigh_scattering_r, 0.0);
+  }
+  #[inline]
+  pub fn add_rayleigh_scattering_g(&mut self, rayleigh_scattering_g: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCATTERING_G, rayleigh_scattering_g, 0.0);
+  }
+  #[inline]
+  pub fn add_rayleigh_scattering_b(&mut self, rayleigh_scattering_b: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCATTERING_B, rayleigh_scattering_b, 0.0);
+  }
+  #[inline]
+  pub fn add_rayleigh_scale_height_m(&mut self, rayleigh_scale_height_m: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_RAYLEIGH_SCALE_HEIGHT_M, rayleigh_scale_height_m, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_scattering_r(&mut self, mie_scattering_r: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_SCATTERING_R, mie_scattering_r, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_scattering_g(&mut self, mie_scattering_g: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_SCATTERING_G, mie_scattering_g, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_scattering_b(&mut self, mie_scattering_b: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_SCATTERING_B, mie_scattering_b, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_absorption_r(&mut self, mie_absorption_r: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_ABSORPTION_R, mie_absorption_r, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_absorption_g(&mut self, mie_absorption_g: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_ABSORPTION_G, mie_absorption_g, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_absorption_b(&mut self, mie_absorption_b: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_ABSORPTION_B, mie_absorption_b, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_scale_height_m(&mut self, mie_scale_height_m: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_SCALE_HEIGHT_M, mie_scale_height_m, 0.0);
+  }
+  #[inline]
+  pub fn add_mie_phase_g(&mut self, mie_phase_g: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_MIE_PHASE_G, mie_phase_g, 0.0);
+  }
+  #[inline]
+  pub fn add_ozone_absorption_r(&mut self, ozone_absorption_r: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_OZONE_ABSORPTION_R, ozone_absorption_r, 0.0);
+  }
+  #[inline]
+  pub fn add_ozone_absorption_g(&mut self, ozone_absorption_g: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_OZONE_ABSORPTION_G, ozone_absorption_g, 0.0);
+  }
+  #[inline]
+  pub fn add_ozone_absorption_b(&mut self, ozone_absorption_b: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_OZONE_ABSORPTION_B, ozone_absorption_b, 0.0);
+  }
+  #[inline]
+  pub fn add_ozone_layer_centre_m(&mut self, ozone_layer_centre_m: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_OZONE_LAYER_CENTRE_M, ozone_layer_centre_m, 0.0);
+  }
+  #[inline]
+  pub fn add_ozone_layer_width_m(&mut self, ozone_layer_width_m: f32) {
+    self.fbb_.push_slot::<f32>(PlanetaryStateData::VT_OZONE_LAYER_WIDTH_M, ozone_layer_width_m, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlanetaryStateDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    PlanetaryStateDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<PlanetaryStateData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for PlanetaryStateData<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("PlanetaryStateData");
+      ds.field("has_atmosphere", &self.has_atmosphere());
+      ds.field("surface_gravity_ms2", &self.surface_gravity_ms2());
+      ds.field("equilibrium_temp_k", &self.equilibrium_temp_k());
+      ds.field("surface_pressure_pa", &self.surface_pressure_pa());
+      ds.field("ground_albedo_r", &self.ground_albedo_r());
+      ds.field("ground_albedo_g", &self.ground_albedo_g());
+      ds.field("ground_albedo_b", &self.ground_albedo_b());
+      ds.field("composition_n2", &self.composition_n2());
+      ds.field("composition_o2", &self.composition_o2());
+      ds.field("composition_co2", &self.composition_co2());
+      ds.field("composition_ch4", &self.composition_ch4());
+      ds.field("composition_h2o", &self.composition_h2o());
+      ds.field("composition_h2", &self.composition_h2());
+      ds.field("composition_he", &self.composition_he());
+      ds.field("composition_dust", &self.composition_dust());
+      ds.field("scale_height_m", &self.scale_height_m());
+      ds.field("atmosphere_top_altitude_m", &self.atmosphere_top_altitude_m());
+      ds.field("mean_molecular_mass_kg", &self.mean_molecular_mass_kg());
+      ds.field("atmospheric_mass_kg", &self.atmospheric_mass_kg());
+      ds.field("rayleigh_scattering_r", &self.rayleigh_scattering_r());
+      ds.field("rayleigh_scattering_g", &self.rayleigh_scattering_g());
+      ds.field("rayleigh_scattering_b", &self.rayleigh_scattering_b());
+      ds.field("rayleigh_scale_height_m", &self.rayleigh_scale_height_m());
+      ds.field("mie_scattering_r", &self.mie_scattering_r());
+      ds.field("mie_scattering_g", &self.mie_scattering_g());
+      ds.field("mie_scattering_b", &self.mie_scattering_b());
+      ds.field("mie_absorption_r", &self.mie_absorption_r());
+      ds.field("mie_absorption_g", &self.mie_absorption_g());
+      ds.field("mie_absorption_b", &self.mie_absorption_b());
+      ds.field("mie_scale_height_m", &self.mie_scale_height_m());
+      ds.field("mie_phase_g", &self.mie_phase_g());
+      ds.field("ozone_absorption_r", &self.ozone_absorption_r());
+      ds.field("ozone_absorption_g", &self.ozone_absorption_g());
+      ds.field("ozone_absorption_b", &self.ozone_absorption_b());
+      ds.field("ozone_layer_centre_m", &self.ozone_layer_centre_m());
+      ds.field("ozone_layer_width_m", &self.ozone_layer_width_m());
+      ds.finish()
+  }
+}
+pub enum PlanetRotationParamsDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Per-planet rotation parameters — broadcast for planets
+/// (`body_id != 0`). Static for the planet's session lifetime; both
+/// server and client evaluate the same closed-form
+/// `core::planet_rotation::rotation_at(params, game_time)` per frame so
+/// every viewer sees the same rotation phase at every wall-clock moment.
+pub struct PlanetRotationParamsData<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for PlanetRotationParamsData<'a> {
+  type Inner = PlanetRotationParamsData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> PlanetRotationParamsData<'a> {
+  pub const VT_PERIOD_S: ::flatbuffers::VOffsetT = 4;
+  pub const VT_AXIS_X: ::flatbuffers::VOffsetT = 6;
+  pub const VT_AXIS_Y: ::flatbuffers::VOffsetT = 8;
+  pub const VT_AXIS_Z: ::flatbuffers::VOffsetT = 10;
+  pub const VT_EPOCH_OFFSET_S: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    PlanetRotationParamsData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args PlanetRotationParamsDataArgs
+  ) -> ::flatbuffers::WIPOffset<PlanetRotationParamsData<'bldr>> {
+    let mut builder = PlanetRotationParamsDataBuilder::new(_fbb);
+    builder.add_epoch_offset_s(args.epoch_offset_s);
+    builder.add_axis_z(args.axis_z);
+    builder.add_axis_y(args.axis_y);
+    builder.add_axis_x(args.axis_x);
+    builder.add_period_s(args.period_s);
+    builder.finish()
+  }
+
+
+  /// Sidereal rotation period (seconds). Derived in
+  /// `core::planet_rotation::PlanetRotationParams::from_seed_and_state`
+  /// from the planet's gravitational free-fall timescale plus a
+  /// log-uniform seed-driven formation-history multiplier.
+  #[inline]
+  pub fn period_s(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(PlanetRotationParamsData::VT_PERIOD_S, Some(0.0)).unwrap()}
+  }
+  /// Rotation axis in the system's inertial frame. Unit vector.
+  /// Retrograde rotation is encoded as a flipped axis (negative Z).
+  #[inline]
+  pub fn axis_x(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(PlanetRotationParamsData::VT_AXIS_X, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn axis_y(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(PlanetRotationParamsData::VT_AXIS_Y, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn axis_z(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(PlanetRotationParamsData::VT_AXIS_Z, Some(0.0)).unwrap()}
+  }
+  /// Phase offset at `game_time = 0`. Picked from the planet seed so
+  /// neighbour planets aren't synchronised at boot.
+  #[inline]
+  pub fn epoch_offset_s(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(PlanetRotationParamsData::VT_EPOCH_OFFSET_S, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for PlanetRotationParamsData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<f64>("period_s", Self::VT_PERIOD_S, false)?
+     .visit_field::<f64>("axis_x", Self::VT_AXIS_X, false)?
+     .visit_field::<f64>("axis_y", Self::VT_AXIS_Y, false)?
+     .visit_field::<f64>("axis_z", Self::VT_AXIS_Z, false)?
+     .visit_field::<f64>("epoch_offset_s", Self::VT_EPOCH_OFFSET_S, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct PlanetRotationParamsDataArgs {
+    pub period_s: f64,
+    pub axis_x: f64,
+    pub axis_y: f64,
+    pub axis_z: f64,
+    pub epoch_offset_s: f64,
+}
+impl<'a> Default for PlanetRotationParamsDataArgs {
+  #[inline]
+  fn default() -> Self {
+    PlanetRotationParamsDataArgs {
+      period_s: 0.0,
+      axis_x: 0.0,
+      axis_y: 0.0,
+      axis_z: 0.0,
+      epoch_offset_s: 0.0,
+    }
+  }
+}
+
+pub struct PlanetRotationParamsDataBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlanetRotationParamsDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_period_s(&mut self, period_s: f64) {
+    self.fbb_.push_slot::<f64>(PlanetRotationParamsData::VT_PERIOD_S, period_s, 0.0);
+  }
+  #[inline]
+  pub fn add_axis_x(&mut self, axis_x: f64) {
+    self.fbb_.push_slot::<f64>(PlanetRotationParamsData::VT_AXIS_X, axis_x, 0.0);
+  }
+  #[inline]
+  pub fn add_axis_y(&mut self, axis_y: f64) {
+    self.fbb_.push_slot::<f64>(PlanetRotationParamsData::VT_AXIS_Y, axis_y, 0.0);
+  }
+  #[inline]
+  pub fn add_axis_z(&mut self, axis_z: f64) {
+    self.fbb_.push_slot::<f64>(PlanetRotationParamsData::VT_AXIS_Z, axis_z, 0.0);
+  }
+  #[inline]
+  pub fn add_epoch_offset_s(&mut self, epoch_offset_s: f64) {
+    self.fbb_.push_slot::<f64>(PlanetRotationParamsData::VT_EPOCH_OFFSET_S, epoch_offset_s, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlanetRotationParamsDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    PlanetRotationParamsDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<PlanetRotationParamsData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for PlanetRotationParamsData<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("PlanetRotationParamsData");
+      ds.field("period_s", &self.period_s());
+      ds.field("axis_x", &self.axis_x());
+      ds.field("axis_y", &self.axis_y());
+      ds.field("axis_z", &self.axis_z());
+      ds.field("epoch_offset_s", &self.epoch_offset_s());
+      ds.finish()
+  }
+}
 pub enum CelestialBodySnapshotOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -5887,6 +6811,8 @@ impl<'a> CelestialBodySnapshot<'a> {
   pub const VT_COLOR_G: ::flatbuffers::VOffsetT = 12;
   pub const VT_COLOR_B: ::flatbuffers::VOffsetT = 14;
   pub const VT_STELLAR: ::flatbuffers::VOffsetT = 16;
+  pub const VT_PLANETARY: ::flatbuffers::VOffsetT = 18;
+  pub const VT_ROTATION_PARAMS: ::flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5899,6 +6825,8 @@ impl<'a> CelestialBodySnapshot<'a> {
   ) -> ::flatbuffers::WIPOffset<CelestialBodySnapshot<'bldr>> {
     let mut builder = CelestialBodySnapshotBuilder::new(_fbb);
     builder.add_radius(args.radius);
+    if let Some(x) = args.rotation_params { builder.add_rotation_params(x); }
+    if let Some(x) = args.planetary { builder.add_planetary(x); }
     if let Some(x) = args.stellar { builder.add_stellar(x); }
     builder.add_color_b(args.color_b);
     builder.add_color_g(args.color_g);
@@ -5952,14 +6880,36 @@ impl<'a> CelestialBodySnapshot<'a> {
     unsafe { self._tab.get::<f32>(CelestialBodySnapshot::VT_COLOR_B, Some(0.0)).unwrap()}
   }
   /// Optional physics-derived stellar state. Populated for stars
-  /// (body_id == 0) by every shard that broadcasts the body. Absent for
-  /// planets (which carry `planetary` in a future protocol revision).
+  /// (body_id == 0) by every shard that broadcasts the body.
   #[inline]
   pub fn stellar(&self) -> Option<StellarStateData<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<StellarStateData>>(CelestialBodySnapshot::VT_STELLAR, None)}
+  }
+  /// Optional physics-derived planetary state. Populated for planets
+  /// (body_id != 0) by every shard that broadcasts the body. The client
+  /// builds Bevy 0.18 `ScatteringMedium` + `Atmosphere` directly from
+  /// these fields.
+  #[inline]
+  pub fn planetary(&self) -> Option<PlanetaryStateData<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PlanetaryStateData>>(CelestialBodySnapshot::VT_PLANETARY, None)}
+  }
+  /// Optional rotation parameters for planets (`body_id != 0`). Static
+  /// for the planet's session lifetime; client evaluates
+  /// `rotation_at(params, game_time_now)` each frame to drive the
+  /// shard origin's rotation (sunrise/sunset emerges from the existing
+  /// per-camera sun-direction recomputation).
+  #[inline]
+  pub fn rotation_params(&self) -> Option<PlanetRotationParamsData<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PlanetRotationParamsData>>(CelestialBodySnapshot::VT_ROTATION_PARAMS, None)}
   }
 }
 
@@ -5976,6 +6926,8 @@ impl ::flatbuffers::Verifiable for CelestialBodySnapshot<'_> {
      .visit_field::<f32>("color_g", Self::VT_COLOR_G, false)?
      .visit_field::<f32>("color_b", Self::VT_COLOR_B, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<StellarStateData>>("stellar", Self::VT_STELLAR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<PlanetaryStateData>>("planetary", Self::VT_PLANETARY, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<PlanetRotationParamsData>>("rotation_params", Self::VT_ROTATION_PARAMS, false)?
      .finish();
     Ok(())
   }
@@ -5988,6 +6940,8 @@ pub struct CelestialBodySnapshotArgs<'a> {
     pub color_g: f32,
     pub color_b: f32,
     pub stellar: Option<::flatbuffers::WIPOffset<StellarStateData<'a>>>,
+    pub planetary: Option<::flatbuffers::WIPOffset<PlanetaryStateData<'a>>>,
+    pub rotation_params: Option<::flatbuffers::WIPOffset<PlanetRotationParamsData<'a>>>,
 }
 impl<'a> Default for CelestialBodySnapshotArgs<'a> {
   #[inline]
@@ -6000,6 +6954,8 @@ impl<'a> Default for CelestialBodySnapshotArgs<'a> {
       color_g: 0.0,
       color_b: 0.0,
       stellar: None,
+      planetary: None,
+      rotation_params: None,
     }
   }
 }
@@ -6038,6 +6994,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CelestialBodySnapshotBuilder<
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<StellarStateData>>(CelestialBodySnapshot::VT_STELLAR, stellar);
   }
   #[inline]
+  pub fn add_planetary(&mut self, planetary: ::flatbuffers::WIPOffset<PlanetaryStateData<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PlanetaryStateData>>(CelestialBodySnapshot::VT_PLANETARY, planetary);
+  }
+  #[inline]
+  pub fn add_rotation_params(&mut self, rotation_params: ::flatbuffers::WIPOffset<PlanetRotationParamsData<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PlanetRotationParamsData>>(CelestialBodySnapshot::VT_ROTATION_PARAMS, rotation_params);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CelestialBodySnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     CelestialBodySnapshotBuilder {
@@ -6062,6 +7026,8 @@ impl ::core::fmt::Debug for CelestialBodySnapshot<'_> {
       ds.field("color_g", &self.color_g());
       ds.field("color_b", &self.color_b());
       ds.field("stellar", &self.stellar());
+      ds.field("planetary", &self.planetary());
+      ds.field("rotation_params", &self.rotation_params());
       ds.finish()
   }
 }

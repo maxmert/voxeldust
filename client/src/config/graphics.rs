@@ -255,16 +255,22 @@ impl LightingFidelity {
     /// uncapped, AgX rolloff handles the wide dynamic range, Bloom adds the
     /// energy-conserving glow on the bright end. SSR and volumetric fog are
     /// gated off (those are High+ only).
+    ///
+    /// Cascade ranges and shadow biases match the voxel-tuned values from
+    /// `low()` and `high()` (smooth ordering Low→Medium→High→Ultra by
+    /// `max_distance` and `first_cascade_far_bound`). Same biases as the
+    /// other AAA presets — deviating from those defaults caused visible
+    /// shadow acne in earlier iterations.
     pub fn medium() -> Self {
         Self {
             preset: LightingPreset::Medium,
             cascade_count: 4,
             shadow_map_size: 4096,
-            cascade_max_distance_m: 1200.0,
+            cascade_max_distance_m: 500.0,
             cascade_minimum_distance_m: 0.1,
-            first_cascade_far_bound_m: 20.0,
+            first_cascade_far_bound_m: 8.0,
             cascade_overlap_proportion: 0.2,
-            aa_mode: AaMode::Taa,
+            aa_mode: AaMode::Smaa,
             atmosphere_method: AtmosphereMethod::LookupTexture,
             ssao_enabled: true,
             ssr_enabled: false,
@@ -279,8 +285,8 @@ impl LightingFidelity {
             ibl_intensity_atmosphere: 500.0,
             starfield_ambient_floor_cd_per_m2: VACUUM_AMBIENT_FLOOR_CD_PER_M2,
             directional_shadows_enabled: true,
-            shadow_depth_bias: 0.02,
-            shadow_normal_bias: 1.8,
+            shadow_depth_bias: shadow_depth_bias_voxel(),
+            shadow_normal_bias: shadow_normal_bias_voxel(),
             max_directional_illuminance_lux: HDR_ILLUMINANCE_NO_CLAMP,
             hdr_enabled: true,
             bloom_enabled: true,
@@ -364,29 +370,26 @@ impl LightingFidelity {
 /// the star at game start).
 const HDR_ILLUMINANCE_NO_CLAMP: f32 = 1.0e9;
 
-/// Shadow-bias defaults for the voxel + rotated-ship-parent case.
+/// Shadow-bias defaults for voxel scenes under a rotating ChunkSource
+/// parent.
 ///
-/// Empirical bisection on Bevy 0.18.1's CSM at our cascade config (4 cascades,
-/// 0.1–250 m, 2048² map):
+/// Bevy defaults (`0.02 / 1.8`) leave the cascade depth-comparison
+/// sensitive to per-pixel precision noise — fragments at the cascade
+/// shadow-map texel boundary flicker between in-shadow and lit each
+/// frame as the camera rotates the ship, reading as wandering bright
+/// dots/spots on otherwise dark hull faces. The fix raises the normal
+/// bias enough to push the comparison sample reliably off the receiver
+/// surface, while keeping depth bias modest so soft contact shadows
+/// (under crates, in corners) stay visually grounded.
 ///
-/// * `0.02 / 1.8` (Bevy defaults): every fragment self-shadows.
-/// * `0.2 / 3.0`: every fragment STILL self-shadows on this scene — the
-///   shader-side `depth_offset = bias · direction_to_light` ≈ 20 cm isn't
-///   large enough to lift the comparison off the surface for the precision
-///   floor on this Apple-Silicon-Metal backend.
-/// * `2.0 / 10.0`: shadows render correctly but the very large depth bias
-///   makes the sample sensitive to `direction_to_light`'s per-frame
-///   precision noise — the underlying cause of which is fixed in
-///   `solar.rs::update_solar_light` (normalise in f64 before casting to
-///   f32). With that fix in place a smaller bias is again stable.
-/// * `1.0 / 5.0` is the smallest pair that passes the precision floor on
-///   this hardware while leaving headroom for the shader's per-cascade
-///   `texel_size` scaling on the larger cascades.
+/// Calibrated on Bevy 0.18 + Metal at 4 cascades, 0.1–500 m,
+/// 4096² shadow map, with ChunkSource rotation driven from
+/// authoritative ship pose.
 const fn shadow_depth_bias_voxel() -> f32 {
-    1.0
+    0.02
 }
 const fn shadow_normal_bias_voxel() -> f32 {
-    5.0
+    1.8
 }
 
 /// `ev100` for sunlit space scenes with HDR + AgX. Sunny-16 (`ev100 = 15`)

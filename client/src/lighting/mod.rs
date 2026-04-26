@@ -24,8 +24,11 @@
 
 use bevy::prelude::*;
 
+pub mod atmosphere;
 pub mod camera;
+pub mod ibl;
 pub mod quality;
+pub mod rotation;
 pub mod solar;
 
 pub use solar::{SolarLight, SolarLightPlugin};
@@ -38,7 +41,10 @@ impl Plugin for LightingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(quality::LightingQualityPlugin)
             .add_plugins(camera::LightingCameraPlugin)
-            .add_plugins(solar::SolarLightPlugin);
-        // Phase 2+ will register: atmosphere, ibl, eclipse, volumetric, local.
+            .add_plugins(solar::SolarLightPlugin)
+            .add_plugins(ibl::IblPlugin)
+            .add_plugins(atmosphere::AtmospherePlugin)
+            .add_plugins(rotation::PlanetRotationPlugin);
+        // Phase 5+ will register: eclipse, volumetric, local.
     }
 }

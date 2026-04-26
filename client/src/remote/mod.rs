@@ -102,7 +102,7 @@ fn track_remote_entities(
             ingest(ws, key, &mut players, &mut ships, &mut debris);
         }
     }
-    for (&shard_type, ws) in &secondary_ws.by_shard_type {
+    for (&shard_type, (ws, _)) in &secondary_ws.by_shard_type {
         // We don't know the exact `seed` of the secondary from its
         // WorldState (wire format collapses to shard_type). Use
         // shard_type + 0 as a placeholder ShardKey; downstream

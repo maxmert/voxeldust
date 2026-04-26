@@ -99,7 +99,7 @@ pub fn draw_ar_markers(pixels: &mut [u8], size: u32, config: &HudConfig, ctx: &A
                 project_and_paint_body(pixels, size, body, &projector);
             }
         }
-        for (_, ws) in ctx.secondary_ws.by_shard_type.iter() {
+        for (_, (ws, _)) in ctx.secondary_ws.by_shard_type.iter() {
             for body in &ws.bodies {
                 project_and_paint_body(pixels, size, body, &projector);
             }

@@ -24,6 +24,7 @@ glam.workspace = true
 bytemuck.workspace = true
 clap.workspace = true
 lz4_flex.workspace = true
+half = { workspace = true }
 
 # NOTE: No direct wgpu/winit/rapier. Bevy re-exports anything we need; physics
 # is server-side. No direct bevy_ecs/bevy_app either — the full `bevy` crate

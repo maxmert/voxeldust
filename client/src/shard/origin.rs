@@ -107,7 +107,7 @@ impl Plugin for ShardOriginPlugin {
 ///     primary WS that lists ships/debris with their live poses for
 ///     cross-shard rendering (own-ship inside SYSTEM primary, parked
 ///     ship visible from PLANET primary, etc.).
-fn refresh_origins_from_worldstate(
+pub fn refresh_origins_from_worldstate(
     primary: Res<PrimaryShard>,
     primary_ws: Res<PrimaryWorldState>,
     secondary_ws: Res<SecondaryWorldStates>,
@@ -200,7 +200,7 @@ fn find_secondary_pose(
     }
 
     // Non-SHIP secondaries: secondary WS's own origin is authoritative.
-    if let Some(ws) = secondary_ws.by_shard_type.get(&key.shard_type) {
+    if let Some((ws, _)) = secondary_ws.by_shard_type.get(&key.shard_type) {
         let origin = DVec3::new(ws.origin.x, ws.origin.y, ws.origin.z);
         let rotation = primary_ws
             .entities
@@ -220,7 +220,7 @@ fn find_secondary_pose(
     None
 }
 
-fn rebase_shard_transforms(
+pub fn rebase_shard_transforms(
     camera_world: Res<CameraWorldPos>,
     mut query: Query<(&ShardOrigin, &mut Transform), With<ChunkSource>>,
 ) {

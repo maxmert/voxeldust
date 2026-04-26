@@ -27,10 +27,20 @@ pub fn ensure_chunk_material(
     if let Some(ref h) = cache.opaque {
         return h.clone();
     }
+    // `reflectance: 0.0` (default 0.5) — kills dielectric F0 specular
+    // entirely. Voxel hulls are matte painted surfaces; future block types
+    // (metal, glass) opt in to specular via per-block-type materials.
+    //
+    // Without this, Fresnel ramps the F0 = 0.04 specular toward 1.0 at
+    // glancing angles, and the GGX spike on rough surfaces under physical
+    // ~127 000-lux Sol produces single-pixel super-bright fragments that
+    // Bloom's mip pyramid smears into visible "fireflies" on otherwise
+    // dark hull faces.
     let handle = materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        perceptual_roughness: 0.85,
+        perceptual_roughness: 1.0,
         metallic: 0.0,
+        reflectance: 0.0,
         ..default()
     });
     cache.opaque = Some(handle.clone());

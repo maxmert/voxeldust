@@ -23,9 +23,6 @@ pub mod system;
 /// Register every built-in shard-type plugin into the app. Future
 /// shard-types are added here with one line apiece.
 pub fn register_all(app: &mut bevy::prelude::App) {
-    // **BISECT 3a**: enabling shard-type plugins one at a time to
-    // isolate which one corrupts directional lighting on the test
-    // scene. Currently testing: StarfieldPlugin only.
     app.add_plugins(ship::ShipShardPlugin);
     app.add_plugins(system::SystemShardPlugin);
     app.add_plugins(planet::PlanetShardPlugin);

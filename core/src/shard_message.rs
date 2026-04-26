@@ -121,8 +121,19 @@ pub struct CelestialBodySnapshotData {
     /// Physics-derived stellar state for stars (`body_id == 0`). Computed by
     /// system-shard at system bootstrap and propagated to subscriber shards
     /// (planet-shard, ship-shard) through this `SystemSceneUpdate` payload.
-    /// `None` for planets (Phase 3 will add `planetary` for those).
+    /// `None` for planets.
     pub stellar: Option<crate::stellar::StellarState>,
+    /// Physics-derived planetary geophysical state for planets
+    /// (`body_id != 0`). Computed by system-shard at system bootstrap via
+    /// `core::geophysics::PlanetGeophysicalState::from_seed_and_star`,
+    /// then echoed by every shard that broadcasts the body. `None` for the
+    /// star or for transient pre-Phase-3 catalogues.
+    pub planetary: Option<crate::geophysics::PlanetGeophysicalState>,
+    /// Rotation parameters for planets (`body_id != 0`). Computed by
+    /// system-shard at system bootstrap via
+    /// `core::planet_rotation::PlanetRotationParams::from_seed_and_state`;
+    /// static for the planet's session lifetime.
+    pub rotation_params: Option<crate::planet_rotation::PlanetRotationParams>,
 }
 
 #[derive(Debug, Clone)]
@@ -691,10 +702,14 @@ impl ShardMsg {
                 let bodies: Vec<_> = s.bodies.iter().map(|b| {
                     let pos = to_fb_vec3d(&b.position);
                     let stellar = crate::stellar::to_fb_stellar(&b.stellar, &mut builder);
+                    let planetary = crate::geophysics::to_fb_planetary(&b.planetary, &mut builder);
+                    let rotation_params = crate::planet_rotation::to_fb_rotation_params(&b.rotation_params, &mut builder);
                     fb::CelestialBodySnapshot::create(&mut builder, &fb::CelestialBodySnapshotArgs {
                         body_id: b.body_id, position: Some(&pos), radius: b.radius,
                         color_r: b.color[0], color_g: b.color[1], color_b: b.color[2],
                         stellar,
+                        planetary,
+                        rotation_params,
                     })
                 }).collect();
                 let bodies_vec = builder.create_vector(&bodies);
@@ -1294,6 +1309,8 @@ impl ShardMsg {
                         body_id: b.body_id(), position: from_fb_vec3d(pos),
                         radius: b.radius(), color: [b.color_r(), b.color_g(), b.color_b()],
                         stellar: crate::stellar::from_fb_stellar(b.stellar()),
+                        planetary: crate::geophysics::from_fb_planetary(b.planetary()),
+                        rotation_params: crate::planet_rotation::from_fb_rotation_params(b.rotation_params()),
                     }
                 }).collect()).unwrap_or_default();
 

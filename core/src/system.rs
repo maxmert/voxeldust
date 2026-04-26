@@ -248,6 +248,47 @@ pub struct SystemParams {
     pub scale: CelestialScaleConfig,
 }
 
+impl PlanetParams {
+    /// Derive the physics-correct geophysical state for this planet given
+    /// the parent star's stellar state.
+    ///
+    /// Pure-functional: every numeric value comes from named constants in
+    /// [`crate::physics_constants`], applied via
+    /// [`crate::geophysics::PlanetGeophysicalState::from_seed_and_star`].
+    /// Two callers with the same `(planet_seed, parent_stellar, mass, radius,
+    /// orbital_distance)` produce byte-identical results.
+    ///
+    /// The result is the broadcast-ready physics state — distinct from the
+    /// stylised `self.atmosphere: AtmosphereParams` used by the legacy
+    /// server-side weather sim. Phase 5+ may consolidate the two paths.
+    pub fn geophysics(
+        &self,
+        parent_stellar: &crate::stellar::StellarState,
+    ) -> crate::geophysics::PlanetGeophysicalState {
+        crate::geophysics::PlanetGeophysicalState::from_seed_and_star(
+            self.planet_seed,
+            parent_stellar,
+            self.mass_kg,
+            self.radius_m,
+            self.orbital_elements.sma,
+        )
+    }
+
+    /// Derive the physics-correct rotation parameters for this planet.
+    ///
+    /// Pure-functional: every numeric value flows from the planet's
+    /// `(planet_seed, mass_kg, radius_m)` via
+    /// [`crate::planet_rotation::PlanetRotationParams::from_seed_and_state`].
+    /// Two callers with byte-equal inputs produce byte-equal outputs.
+    pub fn rotation_params(&self) -> crate::planet_rotation::PlanetRotationParams {
+        crate::planet_rotation::PlanetRotationParams::from_seed_and_state(
+            self.planet_seed,
+            self.mass_kg,
+            self.radius_m,
+        )
+    }
+}
+
 /// Lighting information computed by the server, sent to the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightingInfo {

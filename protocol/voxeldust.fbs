@@ -358,6 +358,134 @@ table StellarStateData {
     surface_radiance_w_per_m2: float;
 }
 
+/// Per-planet physics-derived geophysical state — broadcast for planets
+/// (CelestialBodySnapshot where body_id != 0). Server-side derivation in
+/// `core::geophysics::PlanetGeophysicalState::from_seed_and_star`.
+///
+/// All values are physics-derived from the planet seed plus the parent
+/// star's `StellarState`. The client builds a Bevy 0.18 `ScatteringMedium`
+/// and `Atmosphere` directly from these without re-deriving anything.
+///
+/// Composition fractions are mole-fractions and sum to ≈ 1 for atmosphered
+/// planets; all zero for airless bodies (where `has_atmosphere == 0`).
+table PlanetaryStateData {
+    /// 1 if this planet retains an atmosphere on geological timescales;
+    /// 0 if airless (low mass, hot, or seed-derived "lost atmosphere"
+    /// outcome). When 0 the rest of the fields are still meaningful for
+    /// future ground / weather work but the client suppresses any
+    /// `Atmosphere` rendering.
+    has_atmosphere: ubyte;
+
+    // ─── Bulk planet physics ──────────────────────────────────────────────
+    /// Surface gravity at the equator.
+    /// Units: m · s⁻².
+    surface_gravity_ms2: float;
+    /// Equilibrium temperature from radiation balance with the parent star.
+    /// Units: K.
+    equilibrium_temp_k: float;
+    /// Surface pressure of the atmosphere.
+    /// Units: Pa.
+    surface_pressure_pa: float;
+    /// Bond albedo of the planet surface — used for `Atmosphere.ground_albedo`.
+    /// Range: [0, 1], dimensionless.
+    ground_albedo_r: float;
+    ground_albedo_g: float;
+    ground_albedo_b: float;
+
+    // ─── Composition (mole fractions) ─────────────────────────────────────
+    composition_n2: float;
+    composition_o2: float;
+    composition_co2: float;
+    composition_ch4: float;
+    composition_h2o: float;
+    composition_h2: float;
+    composition_he: float;
+    composition_dust: float;
+
+    // ─── Atmospheric vertical structure ───────────────────────────────────
+    /// Pressure scale height H = R·T / (M̄·g).
+    /// Units: m.
+    scale_height_m: float;
+    /// Altitude above the surface where atmosphere is treated as
+    /// effectively zero density (Bevy's `Atmosphere::top_radius` minus
+    /// `bottom_radius`). ~6 scale heights for ≈ 99.7 % column mass below.
+    /// Units: m.
+    atmosphere_top_altitude_m: float;
+    /// Mean molecular mass of the atmospheric mixture.
+    /// Units: kg per molecule.
+    mean_molecular_mass_kg: float;
+    /// Total atmospheric mass — used by server-side weather and atmospheric
+    /// drag calculations.
+    /// Units: kg.
+    atmospheric_mass_kg: float;
+
+    // ─── Rayleigh (molecular) scattering — per RGB ────────────────────────
+    /// Per-band Rayleigh scattering coefficient at the surface.
+    /// Units: m⁻¹.
+    rayleigh_scattering_r: float;
+    rayleigh_scattering_g: float;
+    rayleigh_scattering_b: float;
+    /// Scale height of the Rayleigh-scattering vertical profile (typically
+    /// the same as `scale_height_m`; broadcast separately so future planets
+    /// with stratified composition can decouple them).
+    /// Units: m.
+    rayleigh_scale_height_m: float;
+
+    // ─── Mie (aerosol/dust) scattering ────────────────────────────────────
+    /// Per-band Mie scattering coefficient at the surface (typically grey,
+    /// but tinted for dust / sulfate atmospheres).
+    /// Units: m⁻¹.
+    mie_scattering_r: float;
+    mie_scattering_g: float;
+    mie_scattering_b: float;
+    /// Per-band Mie absorption coefficient at the surface.
+    /// Units: m⁻¹.
+    mie_absorption_r: float;
+    mie_absorption_g: float;
+    mie_absorption_b: float;
+    /// Mie scattering scale height — aerosols sit closer to the ground
+    /// than gas molecules; defaults to ~1.2 km but can vary.
+    /// Units: m.
+    mie_scale_height_m: float;
+    /// Henyey-Greenstein phase asymmetry for the Mie term.
+    /// Range: [-1, 1]; positive ≈ forward-scattering.
+    mie_phase_g: float;
+
+    // ─── Ozone absorption — per RGB ───────────────────────────────────────
+    /// Per-band ozone absorption coefficient at the layer centre. Zero for
+    /// planets that don't form an ozone layer (insufficient O₂ or
+    /// insufficient UV from a cool star).
+    /// Units: m⁻¹.
+    ozone_absorption_r: float;
+    ozone_absorption_g: float;
+    ozone_absorption_b: float;
+    /// Ozone-layer geometry: centre altitude and total width.
+    /// Units: m.
+    ozone_layer_centre_m: float;
+    ozone_layer_width_m: float;
+}
+
+/// Per-planet rotation parameters — broadcast for planets
+/// (`body_id != 0`). Static for the planet's session lifetime; both
+/// server and client evaluate the same closed-form
+/// `core::planet_rotation::rotation_at(params, game_time)` per frame so
+/// every viewer sees the same rotation phase at every wall-clock moment.
+table PlanetRotationParamsData {
+    /// Sidereal rotation period (seconds). Derived in
+    /// `core::planet_rotation::PlanetRotationParams::from_seed_and_state`
+    /// from the planet's gravitational free-fall timescale plus a
+    /// log-uniform seed-driven formation-history multiplier.
+    period_s: double;
+    /// Rotation axis in the system's inertial frame. Unit vector.
+    /// Retrograde rotation is encoded as a flipped axis (negative Z).
+    axis_x: double;
+    axis_y: double;
+    axis_z: double;
+    /// Phase offset at `game_time = 0`. Picked from the planet seed so
+    /// neighbour planets aren't synchronised at boot.
+    epoch_offset_s: double;
+}
+
 /// Snapshot of a celestial body's state for scene rendering.
 table CelestialBodySnapshot {
     body_id: uint32;       // 0 = star, 1..N = planets
@@ -367,9 +495,19 @@ table CelestialBodySnapshot {
     color_g: float;
     color_b: float;
     /// Optional physics-derived stellar state. Populated for stars
-    /// (body_id == 0) by every shard that broadcasts the body. Absent for
-    /// planets (which carry `planetary` in a future protocol revision).
+    /// (body_id == 0) by every shard that broadcasts the body.
     stellar: StellarStateData;
+    /// Optional physics-derived planetary state. Populated for planets
+    /// (body_id != 0) by every shard that broadcasts the body. The client
+    /// builds Bevy 0.18 `ScatteringMedium` + `Atmosphere` directly from
+    /// these fields.
+    planetary: PlanetaryStateData;
+    /// Optional rotation parameters for planets (`body_id != 0`). Static
+    /// for the planet's session lifetime; client evaluates
+    /// `rotation_at(params, game_time_now)` each frame to drive the
+    /// shard origin's rotation (sunrise/sunset emerges from the existing
+    /// per-camera sun-direction recomputation).
+    rotation_params: PlanetRotationParamsData;
 }
 
 /// Snapshot of a ship's state for scene rendering.

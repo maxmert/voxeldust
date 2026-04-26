@@ -52,6 +52,7 @@ bevy_ecs = { version = "0.18", features = ["multi_threaded"] }
 bevy_app = "0.18"
 bevy_tasks = "0.18"
 binary-greedy-meshing = "0.5"
+half = "2"
 
 [profile.dev.package.noise]
 opt-level = 3

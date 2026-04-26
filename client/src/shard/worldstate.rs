@@ -5,6 +5,7 @@
 //! touching the raw event stream.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use bevy::prelude::*;
 
@@ -18,18 +19,33 @@ pub struct WorldStateIngestSet;
 
 /// Latest primary WorldState. Replaced every tick; downstream code
 /// reads the current tick's authoritative game state.
+///
+/// `last_tick_real_time` records when the most recent fresh WorldState
+/// was ingested, so per-frame systems (e.g.
+/// `client/src/lighting/rotation.rs`) can extrapolate the
+/// server-authoritative `game_time` between ticks at 1:1 real-time:
+///
+///     game_time_now = ws.game_time + (Instant::now() − last_tick_real_time)
+///
+/// This produces the same `game_time_now` on any client at any wall-clock
+/// moment, which is the basis of the cross-client temporal-correctness
+/// guarantee in `core::planet_rotation`.
 #[derive(Resource, Default)]
 pub struct PrimaryWorldState {
     pub latest: Option<WorldStateData>,
+    pub last_tick_real_time: Option<Instant>,
 }
 
-/// Latest WorldState per secondary shard-type. Keyed by shard_type
-/// (u8) because the `SecondaryWorldState` NetEvent carries shard_type
-/// but not seed — multiple secondaries of the same type are rare at
-/// tick granularity (typically system-wide AOI).
+/// Latest WorldState per secondary shard-type plus the `Instant` it
+/// arrived. Keyed by shard_type (u8) because the `SecondaryWorldState`
+/// NetEvent carries shard_type but not seed — multiple secondaries of
+/// the same type are rare at tick granularity (typically system-wide AOI).
+///
+/// The `Instant` follows the same role as `PrimaryWorldState.last_tick_real_time`:
+/// per-frame consumers extrapolate `game_time_now` from `(ws, instant)`.
 #[derive(Resource, Default)]
 pub struct SecondaryWorldStates {
-    pub by_shard_type: HashMap<u8, WorldStateData>,
+    pub by_shard_type: HashMap<u8, (WorldStateData, Instant)>,
 }
 
 pub struct WorldStateIngestPlugin;
@@ -68,6 +84,7 @@ fn reset_on_shard_change(
         match ev {
             NetEvent::Connected { .. } => {
                 primary.latest = None;
+                primary.last_tick_real_time = None;
             }
             NetEvent::SecondaryDisconnected { .. } => {
                 // We don't get the shard_type on SecondaryDisconnected;
@@ -106,6 +123,7 @@ fn ingest_primary(
                 continue;
             }
             primary.latest = Some(ws.clone());
+            primary.last_tick_real_time = Some(Instant::now());
         }
     }
 }
@@ -124,12 +142,14 @@ fn ingest_secondary(
             let stale = secondary
                 .by_shard_type
                 .get(shard_type)
-                .map(|prev| ws.tick <= prev.tick)
+                .map(|prev| ws.tick <= prev.0.tick)
                 .unwrap_or(false);
             if stale {
                 continue;
             }
-            secondary.by_shard_type.insert(*shard_type, ws.clone());
+            secondary
+                .by_shard_type
+                .insert(*shard_type, (ws.clone(), Instant::now()));
         }
     }
 }

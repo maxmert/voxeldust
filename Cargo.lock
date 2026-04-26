@@ -2416,6 +2416,7 @@ dependencies = [
  "clap 4.6.0",
  "flatbuffers",
  "glam 0.29.3",
+ "half 2.7.1",
  "lz4_flex",
  "regex",
  "tokio",

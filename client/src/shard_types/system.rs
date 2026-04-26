@@ -156,7 +156,10 @@ fn sync_celestial_bodies(
         if on_system_primary {
             primary_ws.latest.as_ref()
         } else {
-            secondary_ws.by_shard_type.get(&SYSTEM_SHARD_TYPE)
+            secondary_ws
+                .by_shard_type
+                .get(&SYSTEM_SHARD_TYPE)
+                .map(|(ws, _)| ws)
         }
     };
     let Some(ws) = source_ws else {

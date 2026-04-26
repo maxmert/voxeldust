@@ -29,7 +29,7 @@ use bevy::camera::visibility::{CascadesVisibleEntities, ViewVisibility};
 use bevy::light::cascade::Cascade;
 use bevy::light::{
     CascadeShadowConfig, CascadeShadowConfigBuilder, Cascades, DirectionalLightShadowMap,
-    SimulationLightSystems,
+    SimulationLightSystems, VolumetricLight,
 };
 use bevy::math::Vec3A;
 use bevy::prelude::*;
@@ -103,7 +103,7 @@ fn spawn_solar_light(mut commands: Commands, config: Res<GameConfig>) {
     // extract reading the light pointing along world `-Z` and producing
     // a degenerate shadow map. (Verified against Bevy v0.18.1
     // examples/3d/lighting.rs and shadow_caster_receiver.rs.)
-    commands.spawn((
+    let mut entity = commands.spawn((
         SolarLight,
         DirectionalLight {
             color: Color::WHITE,
@@ -123,6 +123,14 @@ fn spawn_solar_light(mut commands: Commands, config: Res<GameConfig>) {
         Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
         Name::new("solar_light"),
     ));
+    // Phase 5: tag the sun as a volumetric scatterer so god rays (light
+    // shafts) emerge from it when the camera also has `VolumetricFog`.
+    // Quality-gated: enabling `volumetric_fog_enabled` on the camera
+    // without also tagging the sun produces a fog with no scatterers,
+    // i.e. flat ambient — so we mirror the same boolean here.
+    if fidelity.volumetric_fog_enabled {
+        entity.insert(VolumetricLight);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -172,7 +180,7 @@ fn update_solar_light(
     let secondary_body_pos_stellar = secondary_ws
         .by_shard_type
         .get(&SYSTEM_SHARD_TYPE)
-        .and_then(|ws| ws.bodies.iter().find(|b| b.body_id == 0))
+        .and_then(|(ws, _)| ws.bodies.iter().find(|b| b.body_id == 0))
         .map(|b| (b.position, b.stellar));
 
     // Pick the candidate that has stellar populated; if neither has it,
@@ -276,7 +284,7 @@ fn update_solar_light(
                     secondary_ws
                         .by_shard_type
                         .get(&SYSTEM_SHARD_TYPE)
-                        .and_then(|ws| {
+                        .and_then(|(ws, _)| {
                             ws.bodies.iter().find(|b| b.body_id == 0).map(|b| b.color)
                         })
                 })
