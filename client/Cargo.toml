@@ -28,3 +28,9 @@ lz4_flex.workspace = true
 # NOTE: No direct wgpu/winit/rapier. Bevy re-exports anything we need; physics
 # is server-side. No direct bevy_ecs/bevy_app either — the full `bevy` crate
 # supersedes them.
+
+[dev-dependencies]
+# Used by the determinism-harness integration tests
+# (`tests/no_magic_numbers.rs`, `tests/no_client_seed_derivation.rs`) to scan
+# Rust source files for forbidden patterns. Not a runtime dep.
+regex = "1"

@@ -2527,6 +2527,10 @@ fn broadcast_world_state(
                 position: b.position,
                 radius: b.radius,
                 color: b.color,
+                // Pass-through propagation: the system-shard's authoritative
+                // physics-derived stellar state arrives in scene.bodies via
+                // SystemSceneUpdate; we forward it byte-for-byte to clients.
+                stellar: b.stellar,
             })
             .collect()
     };
@@ -6732,6 +6736,9 @@ fn build_ship_interior(
             position: DVec3::ZERO,
             radius: sys.star.radius_m,
             color: sys.star.color,
+            // SystemParams::from_seed is the deterministic single source of
+            // stellar physics; same seed → same StellarState on every shard.
+            stellar: Some(sys.star.stellar),
         });
         for (i, planet) in sys.planets.iter().enumerate() {
             let pos = system::compute_planet_position(planet, 0.0);
@@ -6740,6 +6747,7 @@ fn build_ship_interior(
                 position: pos,
                 radius: planet.radius_m,
                 color: planet.color,
+                stellar: None,  // planets carry `planetary` in Phase 3
             });
         }
         let l = system::compute_lighting(ship_position, &sys.star);

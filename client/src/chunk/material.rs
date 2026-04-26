@@ -31,7 +31,6 @@ pub fn ensure_chunk_material(
         base_color: Color::WHITE,
         perceptual_roughness: 0.85,
         metallic: 0.0,
-        cull_mode: Some(bevy::render::render_resource::Face::Back),
         ..default()
     });
     cache.opaque = Some(handle.clone());

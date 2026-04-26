@@ -15,13 +15,17 @@
 
 use bevy::prelude::*;
 
+pub mod graphics;
+
+pub use graphics::{AaMode, AtmosphereMethod, GraphicsConfig, LightingFidelity, LightingPreset};
+
 /// Root config resource. Register once via `GameConfigPlugin`; every
 /// other plugin reads its own sub-struct from here.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct GameConfig {
     pub control: ControlConfig,
+    pub graphics: GraphicsConfig,
     // Future:
-    //   pub graphics: GraphicsConfig,
     //   pub audio: AudioConfig,
     //   pub keybinds: KeybindConfig,
 }

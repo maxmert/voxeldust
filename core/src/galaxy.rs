@@ -34,7 +34,7 @@ pub const BASE_SOI_RADIUS: f64 = 100.0;
 pub const SOI_LUMINOSITY_SCALE: f64 = 200.0;
 
 /// Spectral classification of a star.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StarClass {
     O, // Blue giant (very rare, very luminous)
     B, // Blue-white (rare)
@@ -48,7 +48,7 @@ pub enum StarClass {
 impl StarClass {
     /// Derive star class from a seed, weighted by realistic distribution.
     /// M stars are most common (~76%), O stars are rarest (~0.003%).
-    fn from_seed(seed: u64) -> Self {
+    pub fn from_seed(seed: u64) -> Self {
         let v = seed_to_u32(seed, 1000);
         match v {
             0..=0 => StarClass::O,       // 0.1%
@@ -71,6 +71,39 @@ impl StarClass {
             StarClass::G => 1.0,
             StarClass::K => 0.4,
             StarClass::M => 0.08,
+        }
+    }
+
+    /// Astrophysical main-sequence mass range for the spectral class, in
+    /// solar masses (`M ☉`). The values are observation-derived limits used
+    /// in the Harvard / Morgan-Keenan classification:
+    ///
+    /// | Class | Mass range (M☉) | Notes                                 |
+    /// |-------|-----------------|---------------------------------------|
+    /// | O     | 16 – 90         | extreme blue giants                   |
+    /// | B     | 2.1 – 16        | blue-white                            |
+    /// | A     | 1.4 – 2.1       | white                                 |
+    /// | F     | 1.04 – 1.4      | yellow-white                          |
+    /// | G     | 0.8 – 1.04      | yellow (Sol = 1.0)                    |
+    /// | K     | 0.45 – 0.8      | orange                                |
+    /// | M     | 0.08 – 0.45     | red dwarfs                            |
+    ///
+    /// Source: Pecaut & Mamajek 2013 (modern revision of Habets & Heintze
+    /// 1981). These are not arbitrary thresholds — they reflect the
+    /// hydrogen-burning regimes and stellar-evolution boundaries used in
+    /// every astrophysics text.
+    ///
+    /// Used by `core::stellar` to derive a continuous mass within the
+    /// class for each individual star (variance from the system seed).
+    pub fn mass_range_solar(&self) -> (f64, f64) {
+        match self {
+            StarClass::O => (16.0, 90.0),
+            StarClass::B => (2.1, 16.0),
+            StarClass::A => (1.4, 2.1),
+            StarClass::F => (1.04, 1.4),
+            StarClass::G => (0.8, 1.04),
+            StarClass::K => (0.45, 0.8),
+            StarClass::M => (0.08, 0.45),
         }
     }
 

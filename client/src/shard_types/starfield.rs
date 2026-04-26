@@ -277,6 +277,12 @@ fn ingest_star_catalog(
                             system_seed: s.system_seed,
                             star_class: s.star_class as u8,
                             luminosity: s.luminosity as f32,
+                            // Client-side seed-derivation of stellar state
+                            // is forbidden (see no_client_seed_derivation
+                            // harness). Once the server-broadcast catalog
+                            // arrives, it overrides this fallback with
+                            // the authoritative physics-derived state.
+                            stellar: None,
                         })
                         .collect();
                     tracing::info!(

@@ -5633,6 +5633,236 @@ impl ::core::fmt::Debug for PlanetPlayerDigest<'_> {
       ds.finish()
   }
 }
+pub enum StellarStateDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Stellar physical state — broadcast for stars (CelestialBodySnapshot
+/// where body_id == 0, and every StarCatalogEntry). Server-side derivation
+/// in `core::stellar::StellarState::from_class_and_seed`.
+///
+/// All fields are SI-unit physics values; the client renders directly from
+/// these without re-deriving anything from the seed.
+pub struct StellarStateData<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for StellarStateData<'a> {
+  type Inner = StellarStateData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> StellarStateData<'a> {
+  pub const VT_MASS_SOLAR: ::flatbuffers::VOffsetT = 4;
+  pub const VT_TEMPERATURE_K: ::flatbuffers::VOffsetT = 6;
+  pub const VT_RADIUS_SOLAR: ::flatbuffers::VOffsetT = 8;
+  pub const VT_LUMINOSITY_W: ::flatbuffers::VOffsetT = 10;
+  pub const VT_COLOR_LINEAR_R: ::flatbuffers::VOffsetT = 12;
+  pub const VT_COLOR_LINEAR_G: ::flatbuffers::VOffsetT = 14;
+  pub const VT_COLOR_LINEAR_B: ::flatbuffers::VOffsetT = 16;
+  pub const VT_SURFACE_RADIANCE_W_PER_M2: ::flatbuffers::VOffsetT = 18;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    StellarStateData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args StellarStateDataArgs
+  ) -> ::flatbuffers::WIPOffset<StellarStateData<'bldr>> {
+    let mut builder = StellarStateDataBuilder::new(_fbb);
+    builder.add_surface_radiance_w_per_m2(args.surface_radiance_w_per_m2);
+    builder.add_color_linear_b(args.color_linear_b);
+    builder.add_color_linear_g(args.color_linear_g);
+    builder.add_color_linear_r(args.color_linear_r);
+    builder.add_luminosity_w(args.luminosity_w);
+    builder.add_radius_solar(args.radius_solar);
+    builder.add_temperature_k(args.temperature_k);
+    builder.add_mass_solar(args.mass_solar);
+    builder.finish()
+  }
+
+
+  /// Mass in solar masses.
+  #[inline]
+  pub fn mass_solar(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_MASS_SOLAR, Some(0.0)).unwrap()}
+  }
+  /// Effective surface temperature in Kelvin.
+  #[inline]
+  pub fn temperature_k(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_TEMPERATURE_K, Some(0.0)).unwrap()}
+  }
+  /// Radius in solar radii.
+  #[inline]
+  pub fn radius_solar(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_RADIUS_SOLAR, Some(0.0)).unwrap()}
+  }
+  /// Total radiative power in watts.
+  #[inline]
+  pub fn luminosity_w(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_LUMINOSITY_W, Some(0.0)).unwrap()}
+  }
+  /// Pre-computed linear sRGB rendering colour, channels in [0, 1].
+  /// (Server pre-computes via the Tanner-Helland blackbody approximation
+  /// in `core::blackbody`, so the client doesn't need any colour-conversion
+  /// dependency.)
+  #[inline]
+  pub fn color_linear_r(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_COLOR_LINEAR_R, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn color_linear_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_COLOR_LINEAR_G, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn color_linear_b(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_COLOR_LINEAR_B, Some(0.0)).unwrap()}
+  }
+  /// Surface radiance σ·T⁴ in W/m² for HDR emissive sun-disk rendering.
+  #[inline]
+  pub fn surface_radiance_w_per_m2(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(StellarStateData::VT_SURFACE_RADIANCE_W_PER_M2, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for StellarStateData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<f32>("mass_solar", Self::VT_MASS_SOLAR, false)?
+     .visit_field::<f32>("temperature_k", Self::VT_TEMPERATURE_K, false)?
+     .visit_field::<f32>("radius_solar", Self::VT_RADIUS_SOLAR, false)?
+     .visit_field::<f32>("luminosity_w", Self::VT_LUMINOSITY_W, false)?
+     .visit_field::<f32>("color_linear_r", Self::VT_COLOR_LINEAR_R, false)?
+     .visit_field::<f32>("color_linear_g", Self::VT_COLOR_LINEAR_G, false)?
+     .visit_field::<f32>("color_linear_b", Self::VT_COLOR_LINEAR_B, false)?
+     .visit_field::<f32>("surface_radiance_w_per_m2", Self::VT_SURFACE_RADIANCE_W_PER_M2, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct StellarStateDataArgs {
+    pub mass_solar: f32,
+    pub temperature_k: f32,
+    pub radius_solar: f32,
+    pub luminosity_w: f32,
+    pub color_linear_r: f32,
+    pub color_linear_g: f32,
+    pub color_linear_b: f32,
+    pub surface_radiance_w_per_m2: f32,
+}
+impl<'a> Default for StellarStateDataArgs {
+  #[inline]
+  fn default() -> Self {
+    StellarStateDataArgs {
+      mass_solar: 0.0,
+      temperature_k: 0.0,
+      radius_solar: 0.0,
+      luminosity_w: 0.0,
+      color_linear_r: 0.0,
+      color_linear_g: 0.0,
+      color_linear_b: 0.0,
+      surface_radiance_w_per_m2: 0.0,
+    }
+  }
+}
+
+pub struct StellarStateDataBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> StellarStateDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_mass_solar(&mut self, mass_solar: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_MASS_SOLAR, mass_solar, 0.0);
+  }
+  #[inline]
+  pub fn add_temperature_k(&mut self, temperature_k: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_TEMPERATURE_K, temperature_k, 0.0);
+  }
+  #[inline]
+  pub fn add_radius_solar(&mut self, radius_solar: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_RADIUS_SOLAR, radius_solar, 0.0);
+  }
+  #[inline]
+  pub fn add_luminosity_w(&mut self, luminosity_w: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_LUMINOSITY_W, luminosity_w, 0.0);
+  }
+  #[inline]
+  pub fn add_color_linear_r(&mut self, color_linear_r: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_COLOR_LINEAR_R, color_linear_r, 0.0);
+  }
+  #[inline]
+  pub fn add_color_linear_g(&mut self, color_linear_g: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_COLOR_LINEAR_G, color_linear_g, 0.0);
+  }
+  #[inline]
+  pub fn add_color_linear_b(&mut self, color_linear_b: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_COLOR_LINEAR_B, color_linear_b, 0.0);
+  }
+  #[inline]
+  pub fn add_surface_radiance_w_per_m2(&mut self, surface_radiance_w_per_m2: f32) {
+    self.fbb_.push_slot::<f32>(StellarStateData::VT_SURFACE_RADIANCE_W_PER_M2, surface_radiance_w_per_m2, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> StellarStateDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    StellarStateDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<StellarStateData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for StellarStateData<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("StellarStateData");
+      ds.field("mass_solar", &self.mass_solar());
+      ds.field("temperature_k", &self.temperature_k());
+      ds.field("radius_solar", &self.radius_solar());
+      ds.field("luminosity_w", &self.luminosity_w());
+      ds.field("color_linear_r", &self.color_linear_r());
+      ds.field("color_linear_g", &self.color_linear_g());
+      ds.field("color_linear_b", &self.color_linear_b());
+      ds.field("surface_radiance_w_per_m2", &self.surface_radiance_w_per_m2());
+      ds.finish()
+  }
+}
 pub enum CelestialBodySnapshotOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -5656,6 +5886,7 @@ impl<'a> CelestialBodySnapshot<'a> {
   pub const VT_COLOR_R: ::flatbuffers::VOffsetT = 10;
   pub const VT_COLOR_G: ::flatbuffers::VOffsetT = 12;
   pub const VT_COLOR_B: ::flatbuffers::VOffsetT = 14;
+  pub const VT_STELLAR: ::flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5668,6 +5899,7 @@ impl<'a> CelestialBodySnapshot<'a> {
   ) -> ::flatbuffers::WIPOffset<CelestialBodySnapshot<'bldr>> {
     let mut builder = CelestialBodySnapshotBuilder::new(_fbb);
     builder.add_radius(args.radius);
+    if let Some(x) = args.stellar { builder.add_stellar(x); }
     builder.add_color_b(args.color_b);
     builder.add_color_g(args.color_g);
     builder.add_color_r(args.color_r);
@@ -5719,6 +5951,16 @@ impl<'a> CelestialBodySnapshot<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(CelestialBodySnapshot::VT_COLOR_B, Some(0.0)).unwrap()}
   }
+  /// Optional physics-derived stellar state. Populated for stars
+  /// (body_id == 0) by every shard that broadcasts the body. Absent for
+  /// planets (which carry `planetary` in a future protocol revision).
+  #[inline]
+  pub fn stellar(&self) -> Option<StellarStateData<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<StellarStateData>>(CelestialBodySnapshot::VT_STELLAR, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for CelestialBodySnapshot<'_> {
@@ -5733,6 +5975,7 @@ impl ::flatbuffers::Verifiable for CelestialBodySnapshot<'_> {
      .visit_field::<f32>("color_r", Self::VT_COLOR_R, false)?
      .visit_field::<f32>("color_g", Self::VT_COLOR_G, false)?
      .visit_field::<f32>("color_b", Self::VT_COLOR_B, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<StellarStateData>>("stellar", Self::VT_STELLAR, false)?
      .finish();
     Ok(())
   }
@@ -5744,6 +5987,7 @@ pub struct CelestialBodySnapshotArgs<'a> {
     pub color_r: f32,
     pub color_g: f32,
     pub color_b: f32,
+    pub stellar: Option<::flatbuffers::WIPOffset<StellarStateData<'a>>>,
 }
 impl<'a> Default for CelestialBodySnapshotArgs<'a> {
   #[inline]
@@ -5755,6 +5999,7 @@ impl<'a> Default for CelestialBodySnapshotArgs<'a> {
       color_r: 0.0,
       color_g: 0.0,
       color_b: 0.0,
+      stellar: None,
     }
   }
 }
@@ -5789,6 +6034,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CelestialBodySnapshotBuilder<
     self.fbb_.push_slot::<f32>(CelestialBodySnapshot::VT_COLOR_B, color_b, 0.0);
   }
   #[inline]
+  pub fn add_stellar(&mut self, stellar: ::flatbuffers::WIPOffset<StellarStateData<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<StellarStateData>>(CelestialBodySnapshot::VT_STELLAR, stellar);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CelestialBodySnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     CelestialBodySnapshotBuilder {
@@ -5812,6 +6061,7 @@ impl ::core::fmt::Debug for CelestialBodySnapshot<'_> {
       ds.field("color_r", &self.color_r());
       ds.field("color_g", &self.color_g());
       ds.field("color_b", &self.color_b());
+      ds.field("stellar", &self.stellar());
       ds.finish()
   }
 }
@@ -8662,6 +8912,7 @@ impl<'a> StarCatalogEntry<'a> {
   pub const VT_SYSTEM_SEED: ::flatbuffers::VOffsetT = 8;
   pub const VT_STAR_CLASS: ::flatbuffers::VOffsetT = 10;
   pub const VT_LUMINOSITY: ::flatbuffers::VOffsetT = 12;
+  pub const VT_STELLAR: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -8674,6 +8925,7 @@ impl<'a> StarCatalogEntry<'a> {
   ) -> ::flatbuffers::WIPOffset<StarCatalogEntry<'bldr>> {
     let mut builder = StarCatalogEntryBuilder::new(_fbb);
     builder.add_system_seed(args.system_seed);
+    if let Some(x) = args.stellar { builder.add_stellar(x); }
     builder.add_luminosity(args.luminosity);
     if let Some(x) = args.position { builder.add_position(x); }
     builder.add_index(args.index);
@@ -8717,6 +8969,16 @@ impl<'a> StarCatalogEntry<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(StarCatalogEntry::VT_LUMINOSITY, Some(0.0)).unwrap()}
   }
+  /// Physics-derived stellar state — populated by galaxy-shard at galaxy
+  /// generation via `core::stellar::StellarState::from_class_and_seed`.
+  /// Optional for backwards compatibility with older catalog snapshots.
+  #[inline]
+  pub fn stellar(&self) -> Option<StellarStateData<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<StellarStateData>>(StarCatalogEntry::VT_STELLAR, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for StarCatalogEntry<'_> {
@@ -8730,6 +8992,7 @@ impl ::flatbuffers::Verifiable for StarCatalogEntry<'_> {
      .visit_field::<u64>("system_seed", Self::VT_SYSTEM_SEED, false)?
      .visit_field::<u8>("star_class", Self::VT_STAR_CLASS, false)?
      .visit_field::<f32>("luminosity", Self::VT_LUMINOSITY, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<StellarStateData>>("stellar", Self::VT_STELLAR, false)?
      .finish();
     Ok(())
   }
@@ -8740,6 +9003,7 @@ pub struct StarCatalogEntryArgs<'a> {
     pub system_seed: u64,
     pub star_class: u8,
     pub luminosity: f32,
+    pub stellar: Option<::flatbuffers::WIPOffset<StellarStateData<'a>>>,
 }
 impl<'a> Default for StarCatalogEntryArgs<'a> {
   #[inline]
@@ -8750,6 +9014,7 @@ impl<'a> Default for StarCatalogEntryArgs<'a> {
       system_seed: 0,
       star_class: 0,
       luminosity: 0.0,
+      stellar: None,
     }
   }
 }
@@ -8780,6 +9045,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> StarCatalogEntryBuilder<'a, '
     self.fbb_.push_slot::<f32>(StarCatalogEntry::VT_LUMINOSITY, luminosity, 0.0);
   }
   #[inline]
+  pub fn add_stellar(&mut self, stellar: ::flatbuffers::WIPOffset<StellarStateData<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<StellarStateData>>(StarCatalogEntry::VT_STELLAR, stellar);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> StarCatalogEntryBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     StarCatalogEntryBuilder {
@@ -8802,6 +9071,7 @@ impl ::core::fmt::Debug for StarCatalogEntry<'_> {
       ds.field("system_seed", &self.system_seed());
       ds.field("star_class", &self.star_class());
       ds.field("luminosity", &self.luminosity());
+      ds.field("stellar", &self.stellar());
       ds.finish()
   }
 }

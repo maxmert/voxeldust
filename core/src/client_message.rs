@@ -494,6 +494,10 @@ pub struct StarCatalogEntryData {
     pub system_seed: u64,
     pub star_class: u8,
     pub luminosity: f32,
+    /// Physics-derived stellar state computed by galaxy-shard at galaxy
+    /// generation via `core::stellar::StellarState::from_class_and_seed`.
+    /// `None` only on legacy / pre-Phase-1 catalog snapshots.
+    pub stellar: Option<crate::stellar::StellarState>,
 }
 
 /// Galaxy shard world state sent to client during warp travel.
@@ -681,6 +685,12 @@ pub struct CelestialBodyData {
     pub position: DVec3,
     pub radius: f64,
     pub color: [f32; 3],
+    /// Physics-derived stellar state for stars (`body_id == 0`). Computed
+    /// by system-shard at system bootstrap via
+    /// `core::stellar::StellarState::from_class_and_seed`, then propagated
+    /// to planet- / ship-shard subscribers through `SystemSceneUpdate.bodies`.
+    /// `None` for planets (Phase 3 will add `planetary` for those).
+    pub stellar: Option<crate::stellar::StellarState>,
 }
 
 #[derive(Debug, Clone)]
@@ -1516,9 +1526,11 @@ impl ServerMsg {
                 let players = builder.create_vector(&snapshots);
                 let body_fbs: Vec<_> = data.bodies.iter().map(|b| {
                     let pos = to_fb_vec3d(&b.position);
+                    let stellar = crate::stellar::to_fb_stellar(&b.stellar, &mut builder);
                     fb::CelestialBodySnapshot::create(&mut builder, &fb::CelestialBodySnapshotArgs {
                         body_id: b.body_id, position: Some(&pos), radius: b.radius,
                         color_r: b.color[0], color_g: b.color[1], color_b: b.color[2],
+                        stellar,
                     })
                 }).collect();
                 let bodies_vec = builder.create_vector(&body_fbs);
@@ -1648,10 +1660,12 @@ impl ServerMsg {
             ServerMsg::StarCatalog(data) => {
                 let entries: Vec<_> = data.stars.iter().map(|s| {
                     let pos = to_fb_vec3d(&DVec3::new(s.position.x, s.position.y, s.position.z));
+                    let stellar = crate::stellar::to_fb_stellar(&s.stellar, &mut builder);
                     fb::StarCatalogEntry::create(&mut builder, &fb::StarCatalogEntryArgs {
                         index: s.index, position: Some(&pos),
                         system_seed: s.system_seed, star_class: s.star_class,
                         luminosity: s.luminosity,
+                        stellar,
                     })
                 }).collect();
                 let stars = builder.create_vector(&entries);
@@ -1977,6 +1991,7 @@ impl ServerMsg {
                     CelestialBodyData {
                         body_id: b.body_id(), position: from_fb_vec3d(pos),
                         radius: b.radius(), color: [b.color_r(), b.color_g(), b.color_b()],
+                        stellar: crate::stellar::from_fb_stellar(b.stellar()),
                     }
                 }).collect()).unwrap_or_default();
 
@@ -2092,6 +2107,7 @@ impl ServerMsg {
                             system_seed: s.system_seed(),
                             star_class: s.star_class(),
                             luminosity: s.luminosity(),
+                            stellar: crate::stellar::from_fb_stellar(s.stellar()),
                         }
                     }).collect()
                 }).unwrap_or_default();
@@ -2424,6 +2440,9 @@ mod tests {
             }],
             bodies: vec![CelestialBodyData {
                 body_id: 0, position: DVec3::ZERO, radius: 6.96e8, color: [1.0, 0.95, 0.8],
+                stellar: Some(crate::stellar::StellarState::from_class_and_seed(
+                    crate::galaxy::StarClass::G, 0xC0FFEE,
+                )),
             }],
             ships: vec![],
             lighting: Some(LightingData {
@@ -2522,6 +2541,9 @@ mod tests {
                     system_seed: 12345,
                     star_class: 4, // G
                     luminosity: 1.0,
+                    stellar: Some(crate::stellar::StellarState::from_class_and_seed(
+                        crate::galaxy::StarClass::G, 12345,
+                    )),
                 },
                 StarCatalogEntryData {
                     index: 1,
@@ -2529,6 +2551,9 @@ mod tests {
                     system_seed: 67890,
                     star_class: 6, // M
                     luminosity: 0.08,
+                    stellar: Some(crate::stellar::StellarState::from_class_and_seed(
+                        crate::galaxy::StarClass::M, 67890,
+                    )),
                 },
             ],
         });

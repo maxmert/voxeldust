@@ -314,6 +314,7 @@ fn galaxy_catalog_message(
     galaxy_map: &Res<GalaxyMapResource>,
 ) -> ServerMsg {
     use voxeldust_core::client_message::{StarCatalogData, StarCatalogEntryData};
+    use voxeldust_core::stellar::StellarState;
     let stars = galaxy_map
         .0
         .stars
@@ -325,6 +326,13 @@ fn galaxy_catalog_message(
             system_seed: s.system_seed,
             star_class: s.star_class as u8,
             luminosity: s.luminosity as f32,
+            // Galaxy-shard is the authoritative computer of stellar physical
+            // state. Derive once at catalog construction; broadcast in every
+            // catalog message; downstream shards re-broadcast the same bytes.
+            stellar: Some(StellarState::from_class_and_seed(
+                s.star_class,
+                s.system_seed,
+            )),
         })
         .collect();
     ServerMsg::StarCatalog(StarCatalogData {

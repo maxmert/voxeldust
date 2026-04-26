@@ -2417,6 +2417,7 @@ dependencies = [
  "flatbuffers",
  "glam 0.29.3",
  "lz4_flex",
+ "regex",
  "tokio",
  "tracing",
  "tracing-subscriber",

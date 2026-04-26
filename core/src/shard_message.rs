@@ -118,6 +118,11 @@ pub struct CelestialBodySnapshotData {
     pub position: DVec3,
     pub radius: f64,
     pub color: [f32; 3],
+    /// Physics-derived stellar state for stars (`body_id == 0`). Computed by
+    /// system-shard at system bootstrap and propagated to subscriber shards
+    /// (planet-shard, ship-shard) through this `SystemSceneUpdate` payload.
+    /// `None` for planets (Phase 3 will add `planetary` for those).
+    pub stellar: Option<crate::stellar::StellarState>,
 }
 
 #[derive(Debug, Clone)]
@@ -685,9 +690,11 @@ impl ShardMsg {
             ShardMsg::SystemSceneUpdate(s) => {
                 let bodies: Vec<_> = s.bodies.iter().map(|b| {
                     let pos = to_fb_vec3d(&b.position);
+                    let stellar = crate::stellar::to_fb_stellar(&b.stellar, &mut builder);
                     fb::CelestialBodySnapshot::create(&mut builder, &fb::CelestialBodySnapshotArgs {
                         body_id: b.body_id, position: Some(&pos), radius: b.radius,
                         color_r: b.color[0], color_g: b.color[1], color_b: b.color[2],
+                        stellar,
                     })
                 }).collect();
                 let bodies_vec = builder.create_vector(&bodies);
@@ -1286,6 +1293,7 @@ impl ShardMsg {
                     CelestialBodySnapshotData {
                         body_id: b.body_id(), position: from_fb_vec3d(pos),
                         radius: b.radius(), color: [b.color_r(), b.color_g(), b.color_b()],
+                        stellar: crate::stellar::from_fb_stellar(b.stellar()),
                     }
                 }).collect()).unwrap_or_default();
 

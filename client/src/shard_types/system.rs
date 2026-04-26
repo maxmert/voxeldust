@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use glam::DVec3;
 
@@ -257,12 +258,22 @@ fn render_body(
             *vis = Visibility::Inherited;
         }
     } else {
-        let material = materials.add(body_material(is_star, body.color));
+        let material = materials.add(body_material(is_star, body.color, body.stellar.as_ref()));
         let mesh = if is_star {
             assets.star_mesh.clone().unwrap()
         } else {
             assets.planet_mesh.clone().unwrap()
         };
+        // Celestial bodies must not cast directional-light shadows.
+        // For the star: it IS the light source — its visible
+        // billboard sphere has a radius (~7×10⁸ m for Sol) larger than
+        // any cascade, so without `NotShadowCaster` its bounding
+        // volume gets included in the cascade's visible-entities set,
+        // its depth fills the shadow map, and every chunk fragment
+        // reads as occluded. For planets: their occlusion (eclipses)
+        // is an atmospheric / volumetric effect, not a CSM shadow —
+        // including them in CSM would similarly corrupt the cascade
+        // depth range because of their f32-clamped distances.
         let entity = commands
             .spawn((
                 Mesh3d(mesh),
@@ -270,6 +281,7 @@ fn render_body(
                 Transform::from_translation(render_pos_f32)
                     .with_scale(Vec3::splat(render_radius_f32)),
                 Visibility::default(),
+                NotShadowCaster,
                 Name::new(format!(
                     "celestial_body[{}]",
                     if is_star { "star".to_string() } else { format!("{}", body.body_id) }
@@ -281,11 +293,45 @@ fn render_body(
     }
 }
 
-fn body_material(is_star: bool, color: [f32; 3]) -> StandardMaterial {
+fn body_material(
+    is_star: bool,
+    color: [f32; 3],
+    stellar: Option<&voxeldust_core::stellar::StellarState>,
+) -> StandardMaterial {
     if is_star {
+        // Physics-derived HDR emissive radiance for the sun-disk billboard.
+        // The star's true surface luminance (in cd/m²) is
+        //   `L_v = σ · T⁴ · η_sun / π`
+        // — radiance σ·T⁴ converted to luminance via solar luminous efficacy
+        // and the Lambertian 1/π factor. For Sol that's ~1.9×10⁹ cd/m², which
+        // when fed straight into Bevy's HDR emissive channel and combined
+        // with the camera's `Exposure { ev100 }` and `Bloom::NATURAL` produces
+        // the believable corona without any tunable scale factor.
+        //
+        // If the server hasn't shipped stellar state yet (legacy path), we
+        // fall back to a zero emissive — the diagnostic warning in
+        // `solar.rs` will point at the missing data, and the star reads as
+        // a dim sphere rather than mis-tuning the bloom.
+        let (emissive_color, emissive_intensity) = match stellar {
+            Some(s) => {
+                let intensity = s.surface_radiance_w_per_m2 as f64
+                    * voxeldust_core::physics_constants::LUMINOUS_EFFICACY_SUN
+                    / voxeldust_core::physics_constants::PI;
+                (s.color_linear_rgb, intensity as f32)
+            }
+            None => (color, 0.0),
+        };
         StandardMaterial {
-            base_color: Color::srgb(color[0], color[1], color[2]),
-            emissive: LinearRgba::rgb(color[0] * 40.0, color[1] * 40.0, color[2] * 40.0),
+            base_color: Color::linear_rgb(
+                emissive_color[0],
+                emissive_color[1],
+                emissive_color[2],
+            ),
+            emissive: LinearRgba::rgb(
+                emissive_color[0] * emissive_intensity,
+                emissive_color[1] * emissive_intensity,
+                emissive_color[2] * emissive_intensity,
+            ),
             unlit: true,
             ..default()
         }

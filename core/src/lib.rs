@@ -15,3 +15,8 @@ pub mod galaxy;
 pub mod system;
 pub mod autopilot;
 pub mod weather;
+pub mod physics_constants;
+pub mod blackbody;
+pub mod stellar;
+pub mod geophysics;
+pub mod planet_rotation;

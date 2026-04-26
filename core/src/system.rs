@@ -117,6 +117,15 @@ pub struct StarParams {
     pub luminosity: f64,
     /// Gravitational parameter GM (m³/s²).
     pub gm: f64,
+    /// Spectral classification used by the physics-derived stellar state.
+    /// O / B / A / F / G / K / M.
+    pub star_class: crate::galaxy::StarClass,
+    /// Physics-derived stellar state (mass, temperature, radius, luminosity,
+    /// linear-sRGB colour, surface radiance) — the authoritative source for
+    /// lighting. Computed once via `core::stellar::StellarState::from_class_and_seed`
+    /// at `SystemParams::from_seed`. Every server-shard that ships a star body
+    /// reads from this field so client renderings agree across all observers.
+    pub stellar: crate::stellar::StellarState,
 }
 
 /// Atmosphere parameters for a planet. Includes scattering coefficients for
@@ -254,24 +263,36 @@ pub struct LightingInfo {
 
 impl SystemParams {
     /// Generate a complete star system deterministically from a seed.
+    ///
+    /// The star is now derived through the physics-correct path:
+    ///   1. `StarClass::from_seed` (Harvard / Morgan-Keenan distribution).
+    ///   2. `StellarState::from_class_and_seed` (continuous mass within the
+    ///      class's astrophysical range, then M-L / M-R / Stefan-Boltzmann
+    ///      to derive luminosity / radius / temperature, plus a Tanner-Helland
+    ///      blackbody-to-linear-sRGB conversion for the rendering colour).
+    ///   3. The stylised gameplay fields (`mass_kg`, `radius_m`, `color`,
+    ///      `luminosity`, `gm`) are populated from the physics-derived state
+    ///      so they stay in sync — no parallel "gameplay vs physics" star
+    ///      definitions any more.
     pub fn from_seed(system_seed: u64) -> Self {
-        let star_seed = derive_seed(system_seed, 0);
+        use crate::galaxy::StarClass;
+        use crate::physics_constants::{L_SUN_W, M_SUN_KG, R_SUN_M};
+        use crate::stellar::StellarState;
+
         let planet_count_seed = derive_seed(system_seed, 1);
 
-        // Star parameters (Sun-like by default, varied by seed).
-        let star_mass = seed_to_range(derive_seed(star_seed, 0), 0.5e30, 4.0e30); // 0.25-2x solar
-        let star_radius = seed_to_range(derive_seed(star_seed, 1), 3.5e8, 1.4e9); // 0.5-2x solar
-        let star_luminosity = (star_mass / 1.989e30).powf(3.5); // mass-luminosity relation
+        // Physics-derived stellar state (the single source of truth).
+        let star_class = StarClass::from_seed(system_seed);
+        let stellar = StellarState::from_class_and_seed(star_class, system_seed);
 
-        // Star color from temperature (approximation).
-        let temp_factor = (star_mass / 1.989e30).powf(0.5);
-        let star_color = if temp_factor > 1.5 {
-            [0.7, 0.8, 1.0] // blue-white
-        } else if temp_factor > 0.8 {
-            [1.0, 0.95, 0.8] // yellow-white
-        } else {
-            [1.0, 0.6, 0.3] // orange-red
-        };
+        // Project physics-derived state onto the existing gameplay fields so
+        // anything reading `star.mass_kg` / `star.radius_m` / `star.luminosity`
+        // (orbital mechanics, SOI computation, …) stays consistent with what
+        // the lighting pipeline will see.
+        let star_mass = stellar.mass_solar as f64 * M_SUN_KG;
+        let star_radius = stellar.radius_solar as f64 * R_SUN_M;
+        let star_luminosity = stellar.luminosity_w as f64 / L_SUN_W;
+        let star_color = stellar.color_linear_rgb;
 
         let star = StarParams {
             mass_kg: star_mass,
@@ -279,6 +300,8 @@ impl SystemParams {
             color: star_color,
             luminosity: star_luminosity,
             gm: G * star_mass,
+            star_class,
+            stellar,
         };
 
         // Generate 2-8 planets.

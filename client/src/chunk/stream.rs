@@ -342,6 +342,19 @@ fn remesh_chunk_from_cache(
     let Some(chunk) = storage.get(key, chunk_index) else { return };
     let neighbours = storage.neighbours(key, chunk_index);
     let quads = mesh_chunk(chunk, &neighbours, registry, false);
+    if !quads.quads.is_empty() {
+        // Diagnostic log so we can verify greedy-meshing is doing its job
+        // (one merged quad per coplanar same-block run, not per individual
+        // block face). For a 62³ chunk full of stone, this should print a
+        // number on the order of 6 — six face directions, each merged into
+        // one large quad. Per-chunk single-line log; rate it lower if it
+        // gets noisy.
+        tracing::debug!(
+            chunk = ?(chunk_index.x, chunk_index.y, chunk_index.z),
+            quads = quads.quads.len(),
+            "chunk meshed — quad count after greedy merge"
+        );
+    }
     let sub_block_mesh = mesh_sub_blocks(chunk);
     let has_hud_panels = chunk.iter_sub_blocks().any(|(_, elems)| {
         elems.iter().any(|e| {
@@ -366,11 +379,32 @@ fn remesh_chunk_from_cache(
 
     // Root chunk entity. Even if the main mesh is empty, we may still
     // need it as a parent for sub-block geometry.
+    //
+    // Do NOT manually insert `GlobalTransform::IDENTITY`. `Mesh3d` /
+    // `Visibility` / required-components in Bevy 0.18 auto-insert a fresh
+    // `GlobalTransform::default()` and `TransformPropagate` populates it
+    // from `Transform` + parent's `GlobalTransform` *before* the cascade-
+    // shadow render extract runs. Manually pinning IDENTITY alongside a
+    // non-identity `Transform::from_translation(local_offset)` was over-
+    // riding propagation for at least one frame, leaving the shadow extract
+    // reading these meshes at world origin (which then doesn't intersect
+    // any cascade frustum → fragments default to "in shadow"). Verified
+    // against Bevy v0.18.1's `examples/3d/lighting.rs` and
+    // `examples/3d/shadow_caster_receiver.rs`, which spawn neither
+    // `GlobalTransform` nor `Visibility` manually.
+    // **Visibility chain matters for shadow casting**: Bevy 0.18's
+    // `check_dir_light_mesh_visibility` (`bevy_light-0.18.1/src/lib.rs:384`)
+    // early-returns on `!inherited_visibility.get()`, and
+    // `InheritedVisibility::default() == HIDDEN`. Auto-required-components
+    // insert HIDDEN; explicit triplet ensures chunks cast shadows from
+    // frame 1, matching `voxydust-next/src/chunk_stream.rs:540-560`.
+    // **Do NOT** insert `GlobalTransform::default()` — that overrode
+    // `TransformSystems::Propagate` for at least one frame on prior
+    // tests, leaving the chunks at world origin in the cascade extract.
     let mut chunk_entity = commands.spawn((
         Transform::from_translation(local_offset),
-        GlobalTransform::IDENTITY,
-        Visibility::default(),
-        InheritedVisibility::default(),
+        Visibility::Visible,
+        InheritedVisibility::VISIBLE,
         ViewVisibility::default(),
         Name::new(format!(
             "chunk[{}/{},{},{}]",

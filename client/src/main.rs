@@ -7,10 +7,8 @@
 //! shard the server streams — expected behavior, proves the plumbing.
 
 use bevy::{
-    core_pipeline::tonemapping::Tonemapping,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
-    render::view::Hdr,
     window::WindowResolution,
 };
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
@@ -78,20 +76,22 @@ fn main() {
             // tracing-subscriber above owns stdout.
             .disable::<bevy::log::LogPlugin>(),
     )
-    // Disable ambient entirely. Space has no atmosphere → no sky
-    // bounce → no ambient term. The ONLY illumination should come
-    // from the directional sun (and, future: in-ship interior
-    // lights / emissive blocks). We MUST insert this with
-    // `brightness: 0.0` because Bevy's default is `brightness: 80.0`
-    // — without our explicit override, that default kicks in and
-    // would wash the scene with 80 cd/m² of fake ambient fill,
-    // exactly the "uniformly highlighted" look you reported.
-    .insert_resource(bevy::light::GlobalAmbientLight {
-        color: Color::WHITE,
-        brightness: 0.0,
-        affects_lightmapped_meshes: true,
-    })
+    // Ambient light is owned by `lighting::camera::LightingCameraPlugin` so
+    // it stays in lockstep with the rest of the photometric pipeline (HDR,
+    // tonemap, exposure) and is driven from a single named physics constant
+    // (`STARFIELD_AMBIENT_FLOOR_CD_PER_M2`). The plugin reads
+    // `LightingFidelity.starfield_ambient_floor_cd_per_m2` each frame and
+    // mirrors it onto `GlobalAmbientLight.brightness`.
     .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
+    // **Global** directional-light shadow-map size. Bevy 0.18's
+    // `build_directional_light_cascades` reads `DirectionalLightShadowMap.size`
+    // (`bevy_light-0.18.1/src/cascade.rs:241-247`) — NOT a per-light or
+    // per-config field. Without this insert the global resource defaults
+    // to 2048, which makes the cascade-texel-snap code use a different
+    // size than the actual shadow render target if our `LightingFidelity`
+    // says 4096. Match the working voxydust-next setup
+    // (`voxydust-next/src/main.rs:111`) — 4096² is the AAA target.
+    .insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 })
     .add_plugins(EguiPlugin::default())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     // GameConfig registers first — every later plugin reads from it.
@@ -116,7 +116,7 @@ fn main() {
     .add_plugins(config_panel::ConfigPanelPlugin)
     .add_plugins(focus::FocusInteractionPlugin)
     .add_plugins(hud::HudPlugin)
-    .add_plugins(lighting::SolarLightPlugin)
+    .add_plugins(lighting::LightingPlugin)
     .init_resource::<config_panel::PendingConfigShard>();
 
     // Concrete shard-type plugins — each registers into ShardTypeRegistry
@@ -169,9 +169,11 @@ fn toggle_cursor_grab(
 pub struct MainCamera;
 
 fn setup_camera(mut commands: Commands) {
-    // Camera stays at identity. Phase 4's ShardOriginPlugin rebases every
+    // Camera stays at identity. ShardOriginPlugin rebases every
     // shard's ChunkSource relative to the camera each frame; the camera
-    // itself never moves in Bevy coordinates.
+    // itself never moves in Bevy coordinates. PlayerSyncPlugin writes
+    // the camera's rotation from the authoritative player pose.
+    //
     // Far-plane at 2 × 10⁶ m lets stars + celestial bodies at their
     // far-field clamp radius (1 × 10⁶ m) render without being culled
     // by the default `far = 1000` plane. Near plane stays tight
@@ -184,21 +186,6 @@ fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         projection,
-        // Diagnostic baseline: HDR + AgX disabled so we can verify
-        // the directional light is actually being applied. With LDR
-        // rendering, default exposure, default ambient (80 cd/m²),
-        // and ~10 000 lux directional sun, lit faces should roll up
-        // toward ~1.0 (clipped to white) and shaded faces stay near
-        // mid-gray (~0.5). If THIS shows visible lit/shaded
-        // contrast on the ship, the issue is that AgX + the
-        // 100 000 lux sun was producing rolloff that compressed all
-        // faces into a similar bright value. If it does NOT show
-        // contrast, the directional light is failing to reach the
-        // chunks (material setup, normals, or a missing render
-        // component).
-        //
-        // Re-add Hdr + Tonemapping::AgX after we confirm the light
-        // is working.
         Transform::IDENTITY,
         MainCamera,
     ));

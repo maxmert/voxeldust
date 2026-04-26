@@ -332,6 +332,32 @@ table PlanetPlayerDigest {
     tick: uint64;
 }
 
+/// Stellar physical state — broadcast for stars (CelestialBodySnapshot
+/// where body_id == 0, and every StarCatalogEntry). Server-side derivation
+/// in `core::stellar::StellarState::from_class_and_seed`.
+///
+/// All fields are SI-unit physics values; the client renders directly from
+/// these without re-deriving anything from the seed.
+table StellarStateData {
+    /// Mass in solar masses.
+    mass_solar: float;
+    /// Effective surface temperature in Kelvin.
+    temperature_k: float;
+    /// Radius in solar radii.
+    radius_solar: float;
+    /// Total radiative power in watts.
+    luminosity_w: float;
+    /// Pre-computed linear sRGB rendering colour, channels in [0, 1].
+    /// (Server pre-computes via the Tanner-Helland blackbody approximation
+    /// in `core::blackbody`, so the client doesn't need any colour-conversion
+    /// dependency.)
+    color_linear_r: float;
+    color_linear_g: float;
+    color_linear_b: float;
+    /// Surface radiance σ·T⁴ in W/m² for HDR emissive sun-disk rendering.
+    surface_radiance_w_per_m2: float;
+}
+
 /// Snapshot of a celestial body's state for scene rendering.
 table CelestialBodySnapshot {
     body_id: uint32;       // 0 = star, 1..N = planets
@@ -340,6 +366,10 @@ table CelestialBodySnapshot {
     color_r: float;
     color_g: float;
     color_b: float;
+    /// Optional physics-derived stellar state. Populated for stars
+    /// (body_id == 0) by every shard that broadcasts the body. Absent for
+    /// planets (which carry `planetary` in a future protocol revision).
+    stellar: StellarStateData;
 }
 
 /// Snapshot of a ship's state for scene rendering.
@@ -540,6 +570,10 @@ table StarCatalogEntry {
     system_seed: uint64;
     star_class: uint8;  // 0=O, 1=B, 2=A, 3=F, 4=G, 5=K, 6=M
     luminosity: float;
+    /// Physics-derived stellar state — populated by galaxy-shard at galaxy
+    /// generation via `core::stellar::StellarState::from_class_and_seed`.
+    /// Optional for backwards compatibility with older catalog snapshots.
+    stellar: StellarStateData;
 }
 
 /// Star catalog sent from galaxy shard to client on join.

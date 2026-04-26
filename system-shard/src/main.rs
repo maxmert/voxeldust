@@ -4228,6 +4228,7 @@ fn eva_broadcast(
             position: DVec3::ZERO,
             radius: sys_config.0.star.radius_m,
             color: sys_config.0.star.color,
+            stellar: Some(sys_config.0.star.stellar),
         });
         for (i, planet) in sys_config.0.planets.iter().enumerate() {
             b.push(CelestialBodyData {
@@ -4235,6 +4236,7 @@ fn eva_broadcast(
                 position: planet_pos.0[i],
                 radius: planet.radius_m,
                 color: planet.color,
+                stellar: None,  // planets carry `planetary` in Phase 3
             });
         }
         b
@@ -5183,6 +5185,7 @@ fn broadcast_scene(
             position: DVec3::ZERO,
             radius: sys_config.0.star.radius_m,
             color: sys_config.0.star.color,
+            stellar: Some(sys_config.0.star.stellar),
         });
         for (i, planet) in sys_config.0.planets.iter().enumerate() {
             bodies.push(CelestialBodySnapshotData {
@@ -5190,6 +5193,7 @@ fn broadcast_scene(
                 position: planet_pos.0[i],
                 radius: planet.radius_m,
                 color: planet.color,
+                stellar: None,  // planets carry `planetary` in Phase 3
             });
         }
 
@@ -5365,6 +5369,7 @@ fn broadcast_udp(
             position: DVec3::ZERO,
             radius: sys_config.0.star.radius_m,
             color: sys_config.0.star.color,
+            stellar: Some(sys_config.0.star.stellar),
         });
         for (i, planet) in sys_config.0.planets.iter().enumerate() {
             b.push(CelestialBodyData {
@@ -5372,6 +5377,7 @@ fn broadcast_udp(
                 position: planet_pos.0[i],
                 radius: planet.radius_m,
                 color: planet.color,
+                stellar: None,  // planets carry `planetary` in Phase 3
             });
         }
         b

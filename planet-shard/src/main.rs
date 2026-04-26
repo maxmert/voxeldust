@@ -1407,11 +1407,14 @@ fn broadcast_world_state(
     let mut bodies = Vec::new();
     if let Some(ref sys) = sys_params.0 {
         bodies.reserve(sys.planets.len() + 1);
+        // Star — physics-derived stellar state propagated from the system-shard's
+        // authoritative `SystemParams.star` (single source for the whole system).
         bodies.push(CelestialBodyData {
             body_id: 0,
             position: -planet_pos.0,
             radius: sys.star.radius_m,
             color: sys.star.color,
+            stellar: Some(sys.star.stellar),
         });
         for (i, planet) in sys.planets.iter().enumerate() {
             let planet_sys_pos = cached_all_planets.0.get(i)
@@ -1422,6 +1425,7 @@ fn broadcast_world_state(
                 position: planet_sys_pos - planet_pos.0,
                 radius: planet.radius_m,
                 color: planet.color,
+                stellar: None,  // planets carry `planetary` in Phase 3
             });
         }
     }

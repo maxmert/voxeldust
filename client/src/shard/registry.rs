@@ -198,6 +198,7 @@ fn handle_connected(
 fn handle_secondary_connected(
     mut events: MessageReader<GameEvent>,
     registry: Res<ShardTypeRegistry>,
+    primary: Res<PrimaryShard>,
     mut secondaries: ResMut<Secondaries>,
     mut source_index: ResMut<SourceIndex>,
     mut grace: ResMut<crate::shard::transition::GraceWindow>,
@@ -212,6 +213,24 @@ fn handle_secondary_connected(
         } = ev
         {
             let key = ShardKey::new(*shard_type, *seed);
+            // Server broadcasts `ShardPreConnect` for every visible
+            // SHIP — including the player's own ship — to every
+            // connected player (`ship-shard/src/main.rs:1120-1142`).
+            // On the owning player's client that becomes a
+            // `SecondaryConnected` for a key that is **already** their
+            // primary. Without this guard, `spawn_new_shard_runtime`
+            // creates a duplicate `ChunkSource` and overwrites the
+            // primary's entry in `source_index.by_shard` — the
+            // primary's old entity (with every streamed chunk
+            // parented under it) is orphaned, its `ShardOrigin` stops
+            // updating, and `rebase_shard_transforms` keeps drawing
+            // it at its last-known pose. Visible as a "phantom ship"
+            // stuck at the player's pre-warp position while the live
+            // ship moves through galaxy space.
+            if primary.current == Some(key) {
+                tracing::debug!(%key, "SecondaryConnected for own primary — ignoring");
+                continue;
+            }
             if secondaries.runtimes.contains_key(&key) {
                 tracing::warn!(%key, "SecondaryConnected for already-known shard");
                 continue;
@@ -323,9 +342,19 @@ fn spawn_new_shard_runtime(
             // compute per-frame camera-relative f32 translation.
             ShardOrigin::new(reference_position, reference_rotation),
             Transform::IDENTITY,
-            GlobalTransform::IDENTITY,
-            Visibility::default(),
-            InheritedVisibility::default(),
+            // **Required for cascade shadow casting**: Bevy 0.18's
+            // `check_dir_light_mesh_visibility` early-returns on
+            // `!inherited_visibility.get()`, and
+            // `InheritedVisibility::default() == HIDDEN`. Insert the
+            // visibility triplet explicitly so the chain is VISIBLE
+            // from frame 1, not deferred to next-frame propagation.
+            // **Do NOT insert `GlobalTransform::default()`**: a prior
+            // refactor proved that overrides Bevy's
+            // `TransformSystems::Propagate` for at least one frame on
+            // some scheduler orderings, leaving children at stale
+            // world positions.
+            Visibility::Visible,
+            InheritedVisibility::VISIBLE,
             ViewVisibility::default(),
         ))
         .id();
