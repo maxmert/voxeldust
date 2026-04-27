@@ -880,6 +880,9 @@ pub struct ChunkSnapshotData {
     pub seq: u64,
     /// lz4-compressed chunk data (palette + indices + metadata).
     pub data: Vec<u8>,
+    /// Per-placed-lamp configs that fall inside this chunk's bounds.
+    /// Empty when no lamp has been customised.
+    pub lamp_configs: Vec<LampConfigEntryData>,
 }
 
 /// Incremental block changes to a chunk. Shard-type agnostic.
@@ -898,6 +901,64 @@ pub struct ChunkDeltaData {
     pub mods: Vec<BlockModData>,
     /// Sub-block element modifications within this chunk.
     pub sub_block_mods: Vec<SubBlockModData>,
+    /// Lamp config additions / replacements for this chunk.
+    pub lamp_configs: Vec<LampConfigEntryData>,
+}
+
+/// Per-placed-lamp configuration entry. Mirrors the FlatBuffers
+/// `LampConfigEntry` table — the server emits one per customised
+/// lamp inside a chunk, and the client stores them in a
+/// `LampConfigs` resource keyed by `(shard, block_pos, face)`.
+#[derive(Debug, Clone)]
+pub struct LampConfigEntryData {
+    /// Block-local coordinate within the chunk (0..62 each axis).
+    pub bx: u8,
+    pub by: u8,
+    pub bz: u8,
+    /// Sub-block face (0..6: ±X, ±Y, ±Z).
+    pub face: u8,
+    pub subscribe_channel: String,
+    pub publish_channel: String,
+    pub color_kelvin: f32,
+    pub tint_linear_rgb: [f32; 3],
+    pub intensity_scale: f32,
+}
+
+impl LampConfigEntryData {
+    /// Adapt a `core::block::sub_block::LampConfig` (key + value) into
+    /// the wire-format entry. Used by server chunk-snapshot serialisation.
+    pub fn from_lamp_config(
+        bx: u8,
+        by: u8,
+        bz: u8,
+        face: u8,
+        config: &crate::block::sub_block::LampConfig,
+    ) -> Self {
+        Self {
+            bx,
+            by,
+            bz,
+            face,
+            subscribe_channel: config.subscribe_channel.clone(),
+            publish_channel: config.publish_channel.clone(),
+            color_kelvin: config.color_kelvin,
+            tint_linear_rgb: config.tint_linear_rgb,
+            intensity_scale: config.intensity_scale,
+        }
+    }
+
+    /// Convert back into the storage-format `LampConfig`. The
+    /// `(bx, by, bz, face)` key drops out — callers compose the full
+    /// `(world_pos, face)` key themselves.
+    pub fn to_lamp_config(&self) -> crate::block::sub_block::LampConfig {
+        crate::block::sub_block::LampConfig {
+            subscribe_channel: self.subscribe_channel.clone(),
+            publish_channel: self.publish_channel.clone(),
+            color_kelvin: self.color_kelvin,
+            tint_linear_rgb: self.tint_linear_rgb,
+            intensity_scale: self.intensity_scale,
+        }
+    }
 }
 
 /// A single sub-block modification within a chunk delta.
@@ -1034,6 +1095,69 @@ pub(crate) fn decode_observable_entities(
                 health: e.health(),
                 shield: e.shield(),
             }
+        })
+        .collect()
+}
+
+/// Encode lamp configs for `ChunkSnapshot.lamp_configs` /
+/// `ChunkDelta.lamp_configs`. Returns `None` for the empty case so
+/// the FlatBuffers vector field is left absent (cheaper than an
+/// empty-vector tag on every chunk that doesn't carry configs).
+pub(crate) fn encode_lamp_configs<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    entries: &[LampConfigEntryData],
+) -> Option<
+    flatbuffers::WIPOffset<
+        flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::LampConfigEntry<'a>>>,
+    >,
+> {
+    if entries.is_empty() {
+        return None;
+    }
+    let offsets: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            let sub = builder.create_string(&e.subscribe_channel);
+            let pubc = builder.create_string(&e.publish_channel);
+            fb::LampConfigEntry::create(
+                builder,
+                &fb::LampConfigEntryArgs {
+                    bx: e.bx,
+                    by: e.by,
+                    bz: e.bz,
+                    face: e.face,
+                    subscribe_channel: Some(sub),
+                    publish_channel: Some(pubc),
+                    color_kelvin: e.color_kelvin,
+                    tint_r: e.tint_linear_rgb[0],
+                    tint_g: e.tint_linear_rgb[1],
+                    tint_b: e.tint_linear_rgb[2],
+                    intensity_scale: e.intensity_scale,
+                },
+            )
+        })
+        .collect();
+    Some(builder.create_vector(&offsets))
+}
+
+/// Decode lamp configs from a `ChunkSnapshot` / `ChunkDelta` frame.
+pub(crate) fn decode_lamp_configs(
+    entries: Option<
+        flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::LampConfigEntry<'_>>>,
+    >,
+) -> Vec<LampConfigEntryData> {
+    let Some(v) = entries else { return Vec::new() };
+    v.iter()
+        .map(|e| LampConfigEntryData {
+            bx: e.bx(),
+            by: e.by(),
+            bz: e.bz(),
+            face: e.face(),
+            subscribe_channel: e.subscribe_channel().unwrap_or("").to_string(),
+            publish_channel: e.publish_channel().unwrap_or("").to_string(),
+            color_kelvin: e.color_kelvin(),
+            tint_linear_rgb: [e.tint_r(), e.tint_g(), e.tint_b()],
+            intensity_scale: e.intensity_scale(),
         })
         .collect()
 }
@@ -1740,10 +1864,12 @@ impl ServerMsg {
             ServerMsg::ChunkSnapshot(data) => {
                 let addr = fb::ChunkAddr::new(data.chunk_x, data.chunk_y, data.chunk_z);
                 let payload_data = builder.create_vector(&data.data);
+                let lamp_configs_vec = encode_lamp_configs(&mut builder, &data.lamp_configs);
                 let cs = fb::ChunkSnapshot::create(&mut builder, &fb::ChunkSnapshotArgs {
                     addr: Some(&addr),
                     seq: data.seq,
                     data: Some(payload_data),
+                    lamp_configs: lamp_configs_vec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::ChunkSnapshot,
@@ -1767,11 +1893,13 @@ impl ServerMsg {
                     })
                 }).collect();
                 let sb_mods_vec = if sb_mods.is_empty() { None } else { Some(builder.create_vector(&sb_mods)) };
+                let lamp_configs_vec = encode_lamp_configs(&mut builder, &data.lamp_configs);
                 let cd = fb::ChunkDelta::create(&mut builder, &fb::ChunkDeltaArgs {
                     addr: Some(&addr),
                     seq: data.seq,
                     mods: Some(mods_vec),
                     sub_block_mods: sb_mods_vec,
+                    lamp_configs: lamp_configs_vec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::ChunkDelta,
@@ -2179,12 +2307,14 @@ impl ServerMsg {
                     .ok_or(MessageError::MissingField("ChunkSnapshot payload"))?;
                 let addr = cs.addr().ok_or(MessageError::MissingField("ChunkSnapshot addr"))?;
                 let data = cs.data().map(|v| v.iter().collect::<Vec<u8>>()).unwrap_or_default();
+                let lamp_configs = decode_lamp_configs(cs.lamp_configs());
                 Ok(ServerMsg::ChunkSnapshot(ChunkSnapshotData {
                     chunk_x: addr.x(),
                     chunk_y: addr.y(),
                     chunk_z: addr.z(),
                     seq: cs.seq(),
                     data,
+                    lamp_configs,
                 }))
             }
             fb::ServerPayload::ChunkDelta => {
@@ -2203,6 +2333,7 @@ impl ServerMsg {
                         rotation: m.rotation(), action: m.action(),
                     }).collect()
                 }).unwrap_or_default();
+                let lamp_configs = decode_lamp_configs(cd.lamp_configs());
                 Ok(ServerMsg::ChunkDelta(ChunkDeltaData {
                     chunk_x: addr.x(),
                     chunk_y: addr.y(),
@@ -2210,6 +2341,7 @@ impl ServerMsg {
                     seq: cd.seq(),
                     mods,
                     sub_block_mods,
+                    lamp_configs,
                 }))
             }
             fb::ServerPayload::BlockConfigState => {

@@ -68,6 +68,12 @@ pub struct ShipGrid {
     /// Persisted seat configuration per block (generic seat format).
     /// If present, replaces the preset defaults on load.
     saved_seat_configs: HashMap<IVec3, SavedSeatConfig>,
+    /// Per-lamp configuration for sub-block surface lights, keyed by
+    /// `(host_block_pos, face)`. Player-edited via the lamp config
+    /// panel; broadcast to clients on chunk snapshot / delta. Absent
+    /// entries default to `LampConfig::default_for(sub_block_type)`
+    /// reproducing the stock `LightSpec`.
+    lamp_configs: HashMap<(IVec3, u8), sub_block::LampConfig>,
 }
 
 impl ShipGrid {
@@ -80,7 +86,42 @@ impl ShipGrid {
             sub_grid_assignments: HashMap::new(),
             saved_signal_bindings: HashMap::new(),
             saved_seat_configs: HashMap::new(),
+            lamp_configs: HashMap::new(),
         }
+    }
+
+    /// Set the lamp config for a sub-block lamp at `(pos, face)`. Used
+    /// by ship builders to wire pre-bound interior lighting and by the
+    /// server's `BlockConfigUpdate` handler when players edit through
+    /// the F-key UI.
+    pub fn set_lamp_config(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        face: u8,
+        config: sub_block::LampConfig,
+    ) {
+        self.lamp_configs.insert((IVec3::new(x, y, z), face), config);
+    }
+
+    /// Get the lamp config for a sub-block lamp at `(pos, face)`, if
+    /// the player has customised it. Callers should fall back to
+    /// `LampConfig::default_for(sub_block_type)` when this returns
+    /// `None`.
+    pub fn lamp_config(&self, pos: IVec3, face: u8) -> Option<&sub_block::LampConfig> {
+        self.lamp_configs.get(&(pos, face))
+    }
+
+    /// Iterate every lamp config currently set on the grid. Used by
+    /// chunk-snapshot serialisation to pick out the lamps inside a
+    /// given chunk's coordinate bounds.
+    pub fn iter_lamp_configs(
+        &self,
+    ) -> impl Iterator<Item = (IVec3, u8, &sub_block::LampConfig)> {
+        self.lamp_configs
+            .iter()
+            .map(|(&(pos, face), config)| (pos, face, config))
     }
 
     /// Set a channel override for a block position (used by ship builders).

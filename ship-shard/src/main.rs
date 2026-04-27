@@ -815,6 +815,45 @@ enum ShipSet {
 }
 
 // ---------------------------------------------------------------------------
+// Lamp config helpers
+// ---------------------------------------------------------------------------
+
+/// Collect every per-placed lamp config whose world position falls
+/// inside the given chunk's bounds. Coordinates are mapped from world
+/// space to chunk-local `(bx, by, bz)` with `rem_euclid(CHUNK_SIZE)` so
+/// negative chunk keys (planet voxel grids on the wrap-around side)
+/// resolve correctly.
+fn collect_chunk_lamp_configs(
+    grid: &block::ShipGrid,
+    chunk_key: glam::IVec3,
+) -> Vec<voxeldust_core::client_message::LampConfigEntryData> {
+    let cs = block::CHUNK_SIZE as i32;
+    let chunk_origin = chunk_key * cs;
+    let chunk_max = chunk_origin + glam::IVec3::splat(cs);
+    let mut out = Vec::new();
+    for (world_pos, face, config) in grid.iter_lamp_configs() {
+        let inside = world_pos.x >= chunk_origin.x
+            && world_pos.x < chunk_max.x
+            && world_pos.y >= chunk_origin.y
+            && world_pos.y < chunk_max.y
+            && world_pos.z >= chunk_origin.z
+            && world_pos.z < chunk_max.z;
+        if !inside {
+            continue;
+        }
+        let bx = world_pos.x.rem_euclid(cs) as u8;
+        let by = world_pos.y.rem_euclid(cs) as u8;
+        let bz = world_pos.z.rem_euclid(cs) as u8;
+        out.push(
+            voxeldust_core::client_message::LampConfigEntryData::from_lamp_config(
+                bx, by, bz, face, config,
+            ),
+        );
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Bridge systems
 // ---------------------------------------------------------------------------
 
@@ -1397,6 +1436,8 @@ fn process_connects(
                     continue;
                 }
                 let compressed = block::serialize_chunk(chunk);
+                let lamp_configs =
+                    collect_chunk_lamp_configs(&ship_grid.0, chunk_key);
                 chunk_snapshots.push(ServerMsg::ChunkSnapshot(
                     voxeldust_core::client_message::ChunkSnapshotData {
                         chunk_x: chunk_key.x,
@@ -1404,6 +1445,7 @@ fn process_connects(
                         chunk_z: chunk_key.z,
                         seq: chunk.edit_seq(),
                         data: compressed,
+                        lamp_configs,
                     },
                 ));
             }
@@ -1475,6 +1517,7 @@ fn process_connects(
                 continue;
             }
             let compressed = block::serialize_chunk(chunk);
+            let lamp_configs = collect_chunk_lamp_configs(&ship_grid.0, chunk_key);
             chunk_snapshots.push(ServerMsg::ChunkSnapshot(
                 voxeldust_core::client_message::ChunkSnapshotData {
                     chunk_x: chunk_key.x,
@@ -1482,6 +1525,7 @@ fn process_connects(
                     chunk_z: chunk_key.z,
                     seq: chunk.edit_seq(),
                     data: compressed,
+                    lamp_configs,
                 },
             ));
         }
@@ -3767,6 +3811,7 @@ fn process_sub_block_edits(
                     rotation: edit.rotation,
                     action: edit.action,
                 }],
+                lamp_configs: Vec::new(),
             });
             let cr = bridge.client_registry.clone();
             tokio::spawn(async move {
@@ -4489,6 +4534,7 @@ fn apply_block_edits(
             seq,
             mods: mods.clone(),
             sub_block_mods: Vec::new(),
+            lamp_configs: Vec::new(),
         });
         let cr = bridge.client_registry.clone();
         tokio::spawn(async move {

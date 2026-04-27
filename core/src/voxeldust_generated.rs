@@ -425,10 +425,10 @@ pub struct ServerPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 7;
+pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 8;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 8] = [
+pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 9] = [
   ClientPayload::NONE,
   ClientPayload::Connect,
   ClientPayload::PlayerInput,
@@ -437,6 +437,7 @@ pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 8] = [
   ClientPayload::SubBlockEditRequest,
   ClientPayload::ObserverConnect,
   ClientPayload::ClientSignalPublish,
+  ClientPayload::LampConfigUpdate,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -452,9 +453,10 @@ impl ClientPayload {
   pub const SubBlockEditRequest: Self = Self(5);
   pub const ObserverConnect: Self = Self(6);
   pub const ClientSignalPublish: Self = Self(7);
+  pub const LampConfigUpdate: Self = Self(8);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 7;
+  pub const ENUM_MAX: u8 = 8;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::Connect,
@@ -464,6 +466,7 @@ impl ClientPayload {
     Self::SubBlockEditRequest,
     Self::ObserverConnect,
     Self::ClientSignalPublish,
+    Self::LampConfigUpdate,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -476,6 +479,7 @@ impl ClientPayload {
       Self::SubBlockEditRequest => Some("SubBlockEditRequest"),
       Self::ObserverConnect => Some("ObserverConnect"),
       Self::ClientSignalPublish => Some("ClientSignalPublish"),
+      Self::LampConfigUpdate => Some("LampConfigUpdate"),
       _ => None,
     }
   }
@@ -12712,6 +12716,292 @@ impl ::core::fmt::Debug for SubBlockEditRequest<'_> {
       ds.finish()
   }
 }
+pub enum LampConfigEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Per-placed-lamp configuration broadcast alongside chunk data.
+///
+/// One entry per `(host_block_pos, face)` lamp the player has
+/// customised on the ship. Stored server-side in
+/// `ShipGrid.lamp_configs`; the server emits the entries that fall
+/// inside the chunk's coordinate bounds when serialising the
+/// `ChunkSnapshot` / `ChunkDelta`. Clients keep a parallel
+/// `LampConfigs` resource keyed by `(shard, block_pos, face)` and the
+/// sub-block lamp spawn reads from it.
+///
+/// Empty `subscribe_channel` / `publish_channel` strings mean
+/// "unbound" — the lamp ignores any signal modulation and just emits
+/// at `intensity_scale × LightSpec.lumens`.
+pub struct LampConfigEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for LampConfigEntry<'a> {
+  type Inner = LampConfigEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> LampConfigEntry<'a> {
+  pub const VT_BX: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BY: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BZ: ::flatbuffers::VOffsetT = 8;
+  pub const VT_FACE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SUBSCRIBE_CHANNEL: ::flatbuffers::VOffsetT = 12;
+  pub const VT_PUBLISH_CHANNEL: ::flatbuffers::VOffsetT = 14;
+  pub const VT_COLOR_KELVIN: ::flatbuffers::VOffsetT = 16;
+  pub const VT_TINT_R: ::flatbuffers::VOffsetT = 18;
+  pub const VT_TINT_G: ::flatbuffers::VOffsetT = 20;
+  pub const VT_TINT_B: ::flatbuffers::VOffsetT = 22;
+  pub const VT_INTENSITY_SCALE: ::flatbuffers::VOffsetT = 24;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    LampConfigEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args LampConfigEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<LampConfigEntry<'bldr>> {
+    let mut builder = LampConfigEntryBuilder::new(_fbb);
+    builder.add_intensity_scale(args.intensity_scale);
+    builder.add_tint_b(args.tint_b);
+    builder.add_tint_g(args.tint_g);
+    builder.add_tint_r(args.tint_r);
+    builder.add_color_kelvin(args.color_kelvin);
+    if let Some(x) = args.publish_channel { builder.add_publish_channel(x); }
+    if let Some(x) = args.subscribe_channel { builder.add_subscribe_channel(x); }
+    builder.add_face(args.face);
+    builder.add_bz(args.bz);
+    builder.add_by(args.by);
+    builder.add_bx(args.bx);
+    builder.finish()
+  }
+
+
+  /// Block-local coordinate within the chunk (0..62 each axis).
+  #[inline]
+  pub fn bx(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(LampConfigEntry::VT_BX, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn by(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(LampConfigEntry::VT_BY, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn bz(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(LampConfigEntry::VT_BZ, Some(0)).unwrap()}
+  }
+  /// Sub-block face (0..6: ±X, ±Y, ±Z).
+  #[inline]
+  pub fn face(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(LampConfigEntry::VT_FACE, Some(0)).unwrap()}
+  }
+  /// Channel the lamp's intensity scales with. Empty = unmodulated.
+  #[inline]
+  pub fn subscribe_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(LampConfigEntry::VT_SUBSCRIBE_CHANNEL, None)}
+  }
+  /// Channel the lamp publishes its `Active` state to. Empty = none.
+  #[inline]
+  pub fn publish_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(LampConfigEntry::VT_PUBLISH_CHANNEL, None)}
+  }
+  /// Override blackbody temperature for the bulb colour.
+  #[inline]
+  pub fn color_kelvin(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(LampConfigEntry::VT_COLOR_KELVIN, Some(0.0)).unwrap()}
+  }
+  /// Multiplicative tint applied on top of the blackbody colour.
+  #[inline]
+  pub fn tint_r(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(LampConfigEntry::VT_TINT_R, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn tint_g(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(LampConfigEntry::VT_TINT_G, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn tint_b(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(LampConfigEntry::VT_TINT_B, Some(0.0)).unwrap()}
+  }
+  /// Multiplier on `LightSpec.lumens`. 1.0 = stock, 0.0 = off.
+  #[inline]
+  pub fn intensity_scale(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(LampConfigEntry::VT_INTENSITY_SCALE, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for LampConfigEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u8>("bx", Self::VT_BX, false)?
+     .visit_field::<u8>("by", Self::VT_BY, false)?
+     .visit_field::<u8>("bz", Self::VT_BZ, false)?
+     .visit_field::<u8>("face", Self::VT_FACE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("subscribe_channel", Self::VT_SUBSCRIBE_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("publish_channel", Self::VT_PUBLISH_CHANNEL, false)?
+     .visit_field::<f32>("color_kelvin", Self::VT_COLOR_KELVIN, false)?
+     .visit_field::<f32>("tint_r", Self::VT_TINT_R, false)?
+     .visit_field::<f32>("tint_g", Self::VT_TINT_G, false)?
+     .visit_field::<f32>("tint_b", Self::VT_TINT_B, false)?
+     .visit_field::<f32>("intensity_scale", Self::VT_INTENSITY_SCALE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct LampConfigEntryArgs<'a> {
+    pub bx: u8,
+    pub by: u8,
+    pub bz: u8,
+    pub face: u8,
+    pub subscribe_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub publish_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub color_kelvin: f32,
+    pub tint_r: f32,
+    pub tint_g: f32,
+    pub tint_b: f32,
+    pub intensity_scale: f32,
+}
+impl<'a> Default for LampConfigEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    LampConfigEntryArgs {
+      bx: 0,
+      by: 0,
+      bz: 0,
+      face: 0,
+      subscribe_channel: None,
+      publish_channel: None,
+      color_kelvin: 0.0,
+      tint_r: 0.0,
+      tint_g: 0.0,
+      tint_b: 0.0,
+      intensity_scale: 0.0,
+    }
+  }
+}
+
+pub struct LampConfigEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LampConfigEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_bx(&mut self, bx: u8) {
+    self.fbb_.push_slot::<u8>(LampConfigEntry::VT_BX, bx, 0);
+  }
+  #[inline]
+  pub fn add_by(&mut self, by: u8) {
+    self.fbb_.push_slot::<u8>(LampConfigEntry::VT_BY, by, 0);
+  }
+  #[inline]
+  pub fn add_bz(&mut self, bz: u8) {
+    self.fbb_.push_slot::<u8>(LampConfigEntry::VT_BZ, bz, 0);
+  }
+  #[inline]
+  pub fn add_face(&mut self, face: u8) {
+    self.fbb_.push_slot::<u8>(LampConfigEntry::VT_FACE, face, 0);
+  }
+  #[inline]
+  pub fn add_subscribe_channel(&mut self, subscribe_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(LampConfigEntry::VT_SUBSCRIBE_CHANNEL, subscribe_channel);
+  }
+  #[inline]
+  pub fn add_publish_channel(&mut self, publish_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(LampConfigEntry::VT_PUBLISH_CHANNEL, publish_channel);
+  }
+  #[inline]
+  pub fn add_color_kelvin(&mut self, color_kelvin: f32) {
+    self.fbb_.push_slot::<f32>(LampConfigEntry::VT_COLOR_KELVIN, color_kelvin, 0.0);
+  }
+  #[inline]
+  pub fn add_tint_r(&mut self, tint_r: f32) {
+    self.fbb_.push_slot::<f32>(LampConfigEntry::VT_TINT_R, tint_r, 0.0);
+  }
+  #[inline]
+  pub fn add_tint_g(&mut self, tint_g: f32) {
+    self.fbb_.push_slot::<f32>(LampConfigEntry::VT_TINT_G, tint_g, 0.0);
+  }
+  #[inline]
+  pub fn add_tint_b(&mut self, tint_b: f32) {
+    self.fbb_.push_slot::<f32>(LampConfigEntry::VT_TINT_B, tint_b, 0.0);
+  }
+  #[inline]
+  pub fn add_intensity_scale(&mut self, intensity_scale: f32) {
+    self.fbb_.push_slot::<f32>(LampConfigEntry::VT_INTENSITY_SCALE, intensity_scale, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> LampConfigEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    LampConfigEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<LampConfigEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for LampConfigEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("LampConfigEntry");
+      ds.field("bx", &self.bx());
+      ds.field("by", &self.by());
+      ds.field("bz", &self.bz());
+      ds.field("face", &self.face());
+      ds.field("subscribe_channel", &self.subscribe_channel());
+      ds.field("publish_channel", &self.publish_channel());
+      ds.field("color_kelvin", &self.color_kelvin());
+      ds.field("tint_r", &self.tint_r());
+      ds.field("tint_g", &self.tint_g());
+      ds.field("tint_b", &self.tint_b());
+      ds.field("intensity_scale", &self.intensity_scale());
+      ds.finish()
+  }
+}
 pub enum ChunkSnapshotOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -12733,6 +13023,7 @@ impl<'a> ChunkSnapshot<'a> {
   pub const VT_ADDR: ::flatbuffers::VOffsetT = 4;
   pub const VT_SEQ: ::flatbuffers::VOffsetT = 6;
   pub const VT_DATA: ::flatbuffers::VOffsetT = 8;
+  pub const VT_LAMP_CONFIGS: ::flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -12745,6 +13036,7 @@ impl<'a> ChunkSnapshot<'a> {
   ) -> ::flatbuffers::WIPOffset<ChunkSnapshot<'bldr>> {
     let mut builder = ChunkSnapshotBuilder::new(_fbb);
     builder.add_seq(args.seq);
+    if let Some(x) = args.lamp_configs { builder.add_lamp_configs(x); }
     if let Some(x) = args.data { builder.add_data(x); }
     if let Some(x) = args.addr { builder.add_addr(x); }
     builder.finish()
@@ -12774,6 +13066,15 @@ impl<'a> ChunkSnapshot<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(ChunkSnapshot::VT_DATA, None)}
   }
+  /// Per-placed-lamp configs that fall inside this chunk's bounds.
+  /// Empty when no lamp has been customised in the chunk.
+  #[inline]
+  pub fn lamp_configs(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LampConfigEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LampConfigEntry>>>>(ChunkSnapshot::VT_LAMP_CONFIGS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ChunkSnapshot<'_> {
@@ -12785,6 +13086,7 @@ impl ::flatbuffers::Verifiable for ChunkSnapshot<'_> {
      .visit_field::<ChunkAddr>("addr", Self::VT_ADDR, false)?
      .visit_field::<u64>("seq", Self::VT_SEQ, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("data", Self::VT_DATA, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LampConfigEntry>>>>("lamp_configs", Self::VT_LAMP_CONFIGS, false)?
      .finish();
     Ok(())
   }
@@ -12793,6 +13095,7 @@ pub struct ChunkSnapshotArgs<'a> {
     pub addr: Option<&'a ChunkAddr>,
     pub seq: u64,
     pub data: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub lamp_configs: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LampConfigEntry<'a>>>>>,
 }
 impl<'a> Default for ChunkSnapshotArgs<'a> {
   #[inline]
@@ -12801,6 +13104,7 @@ impl<'a> Default for ChunkSnapshotArgs<'a> {
       addr: None,
       seq: 0,
       data: None,
+      lamp_configs: None,
     }
   }
 }
@@ -12823,6 +13127,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ChunkSnapshotBuilder<'a, 'b, 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkSnapshot::VT_DATA, data);
   }
   #[inline]
+  pub fn add_lamp_configs(&mut self, lamp_configs: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<LampConfigEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkSnapshot::VT_LAMP_CONFIGS, lamp_configs);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ChunkSnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ChunkSnapshotBuilder {
@@ -12843,6 +13151,7 @@ impl ::core::fmt::Debug for ChunkSnapshot<'_> {
       ds.field("addr", &self.addr());
       ds.field("seq", &self.seq());
       ds.field("data", &self.data());
+      ds.field("lamp_configs", &self.lamp_configs());
       ds.finish()
   }
 }
@@ -12868,6 +13177,7 @@ impl<'a> ChunkDelta<'a> {
   pub const VT_SEQ: ::flatbuffers::VOffsetT = 6;
   pub const VT_MODS: ::flatbuffers::VOffsetT = 8;
   pub const VT_SUB_BLOCK_MODS: ::flatbuffers::VOffsetT = 10;
+  pub const VT_LAMP_CONFIGS: ::flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -12880,6 +13190,7 @@ impl<'a> ChunkDelta<'a> {
   ) -> ::flatbuffers::WIPOffset<ChunkDelta<'bldr>> {
     let mut builder = ChunkDeltaBuilder::new(_fbb);
     builder.add_seq(args.seq);
+    if let Some(x) = args.lamp_configs { builder.add_lamp_configs(x); }
     if let Some(x) = args.sub_block_mods { builder.add_sub_block_mods(x); }
     if let Some(x) = args.mods { builder.add_mods(x); }
     if let Some(x) = args.addr { builder.add_addr(x); }
@@ -12915,6 +13226,16 @@ impl<'a> ChunkDelta<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubBlockMod>>>>(ChunkDelta::VT_SUB_BLOCK_MODS, None)}
   }
+  /// Lamp config additions / replacements for this chunk. The
+  /// server sends a delta entry whenever a player edits a lamp
+  /// through the F-key panel; the client applies in-place.
+  #[inline]
+  pub fn lamp_configs(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LampConfigEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LampConfigEntry>>>>(ChunkDelta::VT_LAMP_CONFIGS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ChunkDelta<'_> {
@@ -12927,6 +13248,7 @@ impl ::flatbuffers::Verifiable for ChunkDelta<'_> {
      .visit_field::<u64>("seq", Self::VT_SEQ, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<BlockMod>>>>("mods", Self::VT_MODS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SubBlockMod>>>>("sub_block_mods", Self::VT_SUB_BLOCK_MODS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LampConfigEntry>>>>("lamp_configs", Self::VT_LAMP_CONFIGS, false)?
      .finish();
     Ok(())
   }
@@ -12936,6 +13258,7 @@ pub struct ChunkDeltaArgs<'a> {
     pub seq: u64,
     pub mods: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BlockMod<'a>>>>>,
     pub sub_block_mods: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubBlockMod<'a>>>>>,
+    pub lamp_configs: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LampConfigEntry<'a>>>>>,
 }
 impl<'a> Default for ChunkDeltaArgs<'a> {
   #[inline]
@@ -12945,6 +13268,7 @@ impl<'a> Default for ChunkDeltaArgs<'a> {
       seq: 0,
       mods: None,
       sub_block_mods: None,
+      lamp_configs: None,
     }
   }
 }
@@ -12971,6 +13295,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ChunkDeltaBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkDelta::VT_SUB_BLOCK_MODS, sub_block_mods);
   }
   #[inline]
+  pub fn add_lamp_configs(&mut self, lamp_configs: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<LampConfigEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ChunkDelta::VT_LAMP_CONFIGS, lamp_configs);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ChunkDeltaBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ChunkDeltaBuilder {
@@ -12992,6 +13320,7 @@ impl ::core::fmt::Debug for ChunkDelta<'_> {
       ds.field("seq", &self.seq());
       ds.field("mods", &self.mods());
       ds.field("sub_block_mods", &self.sub_block_mods());
+      ds.field("lamp_configs", &self.lamp_configs());
       ds.finish()
   }
 }
@@ -18189,6 +18518,176 @@ impl ::core::fmt::Debug for ClientSignalPublish<'_> {
       ds.finish()
   }
 }
+pub enum LampConfigUpdateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Client → server: updated config for a sub-block lamp at
+/// `(block_x, block_y, block_z, face)`. Sent when the player saves
+/// changes through the F-key lamp config panel. The server validates,
+/// stores in `ShipGrid.lamp_configs`, and rebroadcasts via the
+/// chunk's next snapshot / delta so every connected client sees the
+/// new colour / channel binding.
+pub struct LampConfigUpdate<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for LampConfigUpdate<'a> {
+  type Inner = LampConfigUpdate<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> LampConfigUpdate<'a> {
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_FACE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_CONFIG: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    LampConfigUpdate { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args LampConfigUpdateArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<LampConfigUpdate<'bldr>> {
+    let mut builder = LampConfigUpdateBuilder::new(_fbb);
+    if let Some(x) = args.config { builder.add_config(x); }
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.add_face(args.face);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(LampConfigUpdate::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(LampConfigUpdate::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(LampConfigUpdate::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn face(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(LampConfigUpdate::VT_FACE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn config(&self) -> Option<LampConfigEntry<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<LampConfigEntry>>(LampConfigUpdate::VT_CONFIG, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for LampConfigUpdate<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .visit_field::<u8>("face", Self::VT_FACE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<LampConfigEntry>>("config", Self::VT_CONFIG, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct LampConfigUpdateArgs<'a> {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub face: u8,
+    pub config: Option<::flatbuffers::WIPOffset<LampConfigEntry<'a>>>,
+}
+impl<'a> Default for LampConfigUpdateArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    LampConfigUpdateArgs {
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+      face: 0,
+      config: None,
+    }
+  }
+}
+
+pub struct LampConfigUpdateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LampConfigUpdateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(LampConfigUpdate::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(LampConfigUpdate::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(LampConfigUpdate::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn add_face(&mut self, face: u8) {
+    self.fbb_.push_slot::<u8>(LampConfigUpdate::VT_FACE, face, 0);
+  }
+  #[inline]
+  pub fn add_config(&mut self, config: ::flatbuffers::WIPOffset<LampConfigEntry<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<LampConfigEntry>>(LampConfigUpdate::VT_CONFIG, config);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> LampConfigUpdateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    LampConfigUpdateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<LampConfigUpdate<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for LampConfigUpdate<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("LampConfigUpdate");
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.field("face", &self.face());
+      ds.field("config", &self.config());
+      ds.finish()
+  }
+}
 pub enum ClientMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -18344,6 +18843,21 @@ impl<'a> ClientMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_lamp_config_update(&self) -> Option<LampConfigUpdate<'a>> {
+    if self.payload_type() == ClientPayload::LampConfigUpdate {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { LampConfigUpdate::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ClientMessage<'_> {
@@ -18361,6 +18875,7 @@ impl ::flatbuffers::Verifiable for ClientMessage<'_> {
           ClientPayload::SubBlockEditRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SubBlockEditRequest>>("ClientPayload::SubBlockEditRequest", pos),
           ClientPayload::ObserverConnect => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ObserverConnect>>("ClientPayload::ObserverConnect", pos),
           ClientPayload::ClientSignalPublish => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ClientSignalPublish>>("ClientPayload::ClientSignalPublish", pos),
+          ClientPayload::LampConfigUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LampConfigUpdate>>("ClientPayload::LampConfigUpdate", pos),
           _ => Ok(()),
         }
      })?
@@ -18459,6 +18974,13 @@ impl ::core::fmt::Debug for ClientMessage<'_> {
         },
         ClientPayload::ClientSignalPublish => {
           if let Some(x) = self.payload_as_client_signal_publish() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::LampConfigUpdate => {
+          if let Some(x) = self.payload_as_lamp_config_update() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

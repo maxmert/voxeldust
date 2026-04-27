@@ -65,6 +65,7 @@ pub fn ingest_primary_chunks(
     sources: Res<SourceIndex>,
     panel_configs: Res<crate::hud::panel_config::HudPanelConfigs>,
     config: Res<crate::config::GameConfig>,
+    lamp_configs: Res<crate::lighting::emitters::LampConfigs>,
 ) {
     let Some(primary_key) = primary.current else {
         // Nothing to route primary-keyed events to; log sparsely for
@@ -97,6 +98,7 @@ pub fn ingest_primary_chunks(
                     &mut storage,
                     &panel_configs,
                     &config,
+                    &lamp_configs,
                     primary_key,
                     parent,
                     chunk_index_v,
@@ -116,6 +118,7 @@ pub fn ingest_primary_chunks(
                     &mut storage,
                     &panel_configs,
                     &config,
+                    &lamp_configs,
                     primary_key,
                     parent,
                     chunk_index_v,
@@ -145,6 +148,7 @@ pub fn ingest_secondary_chunks(
     sources: Res<SourceIndex>,
     panel_configs: Res<crate::hud::panel_config::HudPanelConfigs>,
     config: Res<crate::config::GameConfig>,
+    lamp_configs: Res<crate::lighting::emitters::LampConfigs>,
 ) {
     let material = ensure_chunk_material(&mut mat_cache, &mut materials);
     for GameEvent(ev) in events.read() {
@@ -167,6 +171,7 @@ pub fn ingest_secondary_chunks(
                     &mut storage,
                     &panel_configs,
                     &config,
+                    &lamp_configs,
                     key,
                     parent,
                     idx,
@@ -190,6 +195,7 @@ pub fn ingest_secondary_chunks(
                     &mut storage,
                     &panel_configs,
                     &config,
+                    &lamp_configs,
                     key,
                     parent,
                     idx,
@@ -221,6 +227,7 @@ fn spawn_or_replace_chunk(
     storage: &mut ChunkStorageCache,
     panel_configs: &crate::hud::panel_config::HudPanelConfigs,
     config: &crate::config::GameConfig,
+    lamp_configs: &crate::lighting::emitters::LampConfigs,
     key: ShardKey,
     parent: Entity,
     chunk_index: IVec3,
@@ -241,7 +248,7 @@ fn spawn_or_replace_chunk(
 
     remesh_chunk_from_cache(
         commands, meshes, materials, images, material, registry, chunks, storage,
-        panel_configs, config, key, parent, chunk_index,
+        panel_configs, config, lamp_configs, key, parent, chunk_index,
     );
 }
 
@@ -257,6 +264,7 @@ fn apply_chunk_delta(
     storage: &mut ChunkStorageCache,
     panel_configs: &crate::hud::panel_config::HudPanelConfigs,
     config: &crate::config::GameConfig,
+    lamp_configs: &crate::lighting::emitters::LampConfigs,
     key: ShardKey,
     parent: Entity,
     chunk_index: IVec3,
@@ -328,7 +336,7 @@ fn apply_chunk_delta(
 
     remesh_chunk_from_cache(
         commands, meshes, materials, images, material, registry, chunks, storage,
-        panel_configs, config, key, parent, chunk_index,
+        panel_configs, config, lamp_configs, key, parent, chunk_index,
     );
 }
 
@@ -344,6 +352,7 @@ fn remesh_chunk_from_cache(
     storage: &ChunkStorageCache,
     panel_configs: &crate::hud::panel_config::HudPanelConfigs,
     config: &crate::config::GameConfig,
+    lamp_configs: &crate::lighting::emitters::LampConfigs,
     key: ShardKey,
     parent: Entity,
     chunk_index: IVec3,
@@ -479,6 +488,9 @@ fn remesh_chunk_from_cache(
         chunk,
         registry,
         &mut shadow_budget,
+        lamp_configs,
+        Some(key),
+        chunk_index,
     );
 }
 

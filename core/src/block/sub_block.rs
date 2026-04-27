@@ -15,6 +15,7 @@
 //! Game systems create their own network entities by querying sub-block data.
 
 use glam::IVec3;
+use serde::{Deserialize, Serialize};
 
 /// Type of sub-block element.
 /// ID ranges are reserved per category for future expansion without renumbering.
@@ -192,6 +193,98 @@ pub struct SubBlockElement {
 impl SubBlockElement {
     pub const FLAG_POWERED: u8 = 0x01;
     pub const FLAG_ACTIVE: u8 = 0x02;
+}
+
+// ---------------------------------------------------------------------------
+// Lamp configuration (per-placed sub-block lamp)
+// ---------------------------------------------------------------------------
+
+/// Per-lamp player-editable configuration for `SubBlockType::SurfaceLight`,
+/// `RedSurfaceLight`, `BlueSurfaceLight`, and `Floodlight` elements.
+///
+/// Stored on the `ShipGrid` keyed by `(IVec3, face)` and broadcast to
+/// clients on chunk snapshot / delta. The default value reproduces the
+/// stock `LightSpec` for the sub-block's type — players adjust through
+/// the F-key config panel on each lamp:
+///
+///   * `subscribe_channel` — drives the lamp's on/off / brightness.
+///     When non-empty, the client multiplies `LightSpec.lumens`
+///     (× `intensity_scale`) by the channel's broadcast value.
+///   * `publish_channel` — channel the lamp publishes its `Active`
+///     state to, so other blocks can react to the lamp turning on/off.
+///   * `color_kelvin` + `tint_linear_rgb` — overrides the spec's
+///     blackbody colour. Identity when left at the spec defaults.
+///   * `intensity_scale` — multiplier on `LightSpec.lumens` (1.0 = full
+///     stock, 0.0 = off, > 1 brightens beyond spec).
+///
+/// All fields are static-per-session (serialised over FlatBuffers) and
+/// the client's lamp spawn reads them when the chunk remeshes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LampConfig {
+    pub subscribe_channel: String,
+    pub publish_channel: String,
+    pub color_kelvin: f32,
+    pub tint_linear_rgb: [f32; 3],
+    pub intensity_scale: f32,
+}
+
+impl LampConfig {
+    /// Factory: build the default config that reproduces a given
+    /// sub-block-light variant's stock `LightSpec`. Used by the server
+    /// the first time a player F-keys a freshly-placed lamp.
+    pub fn default_for(ty: SubBlockType) -> Self {
+        match ty {
+            SubBlockType::SurfaceLight => Self {
+                subscribe_channel: String::new(),
+                publish_channel: String::new(),
+                color_kelvin: 3000.0,
+                tint_linear_rgb: [1.0, 1.0, 1.0],
+                intensity_scale: 1.0,
+            },
+            SubBlockType::RedSurfaceLight => Self {
+                subscribe_channel: String::new(),
+                publish_channel: String::new(),
+                color_kelvin: 3000.0,
+                tint_linear_rgb: [1.0, 0.15, 0.05],
+                intensity_scale: 1.0,
+            },
+            SubBlockType::BlueSurfaceLight => Self {
+                subscribe_channel: String::new(),
+                publish_channel: String::new(),
+                color_kelvin: 3000.0,
+                tint_linear_rgb: [0.15, 0.30, 1.0],
+                intensity_scale: 1.0,
+            },
+            SubBlockType::Floodlight => Self {
+                subscribe_channel: String::new(),
+                publish_channel: String::new(),
+                color_kelvin: 5500.0,
+                tint_linear_rgb: [1.0, 1.0, 1.0],
+                intensity_scale: 1.0,
+            },
+            // Non-lamp sub-blocks return a neutral-white default; the
+            // caller is expected to gate by `is_lamp(ty)` first.
+            _ => Self {
+                subscribe_channel: String::new(),
+                publish_channel: String::new(),
+                color_kelvin: 3000.0,
+                tint_linear_rgb: [1.0, 1.0, 1.0],
+                intensity_scale: 1.0,
+            },
+        }
+    }
+}
+
+/// Whether a `SubBlockType` corresponds to a lamp / light fixture
+/// that exposes a `LampConfig`.
+pub fn is_lamp_sub_block(ty: SubBlockType) -> bool {
+    matches!(
+        ty,
+        SubBlockType::SurfaceLight
+            | SubBlockType::RedSurfaceLight
+            | SubBlockType::BlueSurfaceLight
+            | SubBlockType::Floodlight
+    )
 }
 
 // ---------------------------------------------------------------------------

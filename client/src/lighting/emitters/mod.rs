@@ -60,6 +60,7 @@
 //! sustain.
 
 pub mod full_block;
+pub mod lamp_configs;
 pub mod sub_block;
 pub mod throttle;
 
@@ -77,6 +78,7 @@ use voxeldust_core::blackbody::temperature_to_linear_rgb;
 
 use crate::config::GameConfig;
 
+pub use lamp_configs::LampConfigs;
 pub use throttle::{
     ThrottleModulatedLight, ThrottleModulatedProxy, ThrottleSignals,
 };
@@ -89,14 +91,16 @@ pub struct LocalLightingPlugin;
 
 impl Plugin for LocalLightingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ThrottleSignals>().add_systems(
-            Update,
-            (
-                throttle::update_throttle_signals,
-                throttle::apply_throttle_modulation,
-            )
-                .chain(),
-        );
+        app.add_plugins(lamp_configs::LampConfigsPlugin)
+            .init_resource::<ThrottleSignals>()
+            .add_systems(
+                Update,
+                (
+                    throttle::update_throttle_signals,
+                    throttle::apply_throttle_modulation,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -111,6 +115,13 @@ impl Plugin for LocalLightingPlugin {
 /// Internally calls into [`full_block`] and [`sub_block`] in turn;
 /// each module returns `(spawned, shadow_casters)` so the diagnostic
 /// log line below carries the correct totals.
+///
+/// `shard` + `chunk_index` are forwarded to `sub_block` so it can look
+/// up player-customised lamp configs in [`LampConfigs`] keyed by
+/// `(shard, world_pos, face)`. Pass `None` for `shard` when the chunk
+/// can't be associated with one (the broadcast pre-shard-resolution
+/// path); custom configs are silently skipped in that case.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_local_lights_for_chunk(
     commands: &mut Commands,
     config: &GameConfig,
@@ -120,6 +131,9 @@ pub fn spawn_local_lights_for_chunk(
     chunk: &ChunkStorage,
     registry: &BlockRegistry,
     shadow_budget: &mut LocalShadowBudget,
+    lamp_configs: &LampConfigs,
+    shard: Option<crate::shard::ShardKey>,
+    chunk_index: bevy::math::IVec3,
 ) {
     let _ = config; // future: per-shard / per-quality scaling
     // Cache the proxy meshes so all emissive proxies share two
@@ -152,6 +166,9 @@ pub fn spawn_local_lights_for_chunk(
         shadow_budget,
         &cube_mesh,
         &face_mesh,
+        lamp_configs,
+        shard,
+        chunk_index,
     );
     let spawned = full_spawned + sub_spawned;
     let shadow_casters = full_shadows + sub_shadows;

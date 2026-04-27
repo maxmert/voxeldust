@@ -902,6 +902,40 @@ struct ChunkAddr {
     z: int32;
 }
 
+/// Per-placed-lamp configuration broadcast alongside chunk data.
+///
+/// One entry per `(host_block_pos, face)` lamp the player has
+/// customised on the ship. Stored server-side in
+/// `ShipGrid.lamp_configs`; the server emits the entries that fall
+/// inside the chunk's coordinate bounds when serialising the
+/// `ChunkSnapshot` / `ChunkDelta`. Clients keep a parallel
+/// `LampConfigs` resource keyed by `(shard, block_pos, face)` and the
+/// sub-block lamp spawn reads from it.
+///
+/// Empty `subscribe_channel` / `publish_channel` strings mean
+/// "unbound" — the lamp ignores any signal modulation and just emits
+/// at `intensity_scale × LightSpec.lumens`.
+table LampConfigEntry {
+    /// Block-local coordinate within the chunk (0..62 each axis).
+    bx: ubyte;
+    by: ubyte;
+    bz: ubyte;
+    /// Sub-block face (0..6: ±X, ±Y, ±Z).
+    face: ubyte;
+    /// Channel the lamp's intensity scales with. Empty = unmodulated.
+    subscribe_channel: string;
+    /// Channel the lamp publishes its `Active` state to. Empty = none.
+    publish_channel: string;
+    /// Override blackbody temperature for the bulb colour.
+    color_kelvin: float;
+    /// Multiplicative tint applied on top of the blackbody colour.
+    tint_r: float;
+    tint_g: float;
+    tint_b: float;
+    /// Multiplier on `LightSpec.lumens`. 1.0 = stock, 0.0 = off.
+    intensity_scale: float;
+}
+
 /// Full chunk snapshot — lz4-compressed block data + metadata.
 /// Sent on initial connection and periodic resync. Replaces the chunk entirely.
 table ChunkSnapshot {
@@ -910,6 +944,9 @@ table ChunkSnapshot {
     /// lz4-compressed chunk data (palette + indices + metadata).
     /// Decompresses to the format produced by core::block::serialization.
     data: [uint8];
+    /// Per-placed-lamp configs that fall inside this chunk's bounds.
+    /// Empty when no lamp has been customised in the chunk.
+    lamp_configs: [LampConfigEntry];
 }
 
 /// Incremental block changes to a chunk (generic, shard-type agnostic).
@@ -919,6 +956,10 @@ table ChunkDelta {
     seq: uint64;
     mods: [BlockMod];
     sub_block_mods: [SubBlockMod];
+    /// Lamp config additions / replacements for this chunk. The
+    /// server sends a delta entry whenever a player edits a lamp
+    /// through the F-key panel; the client applies in-place.
+    lamp_configs: [LampConfigEntry];
 }
 
 table ShardRedirectMsg {
@@ -1238,6 +1279,20 @@ table ClientSignalPublish {
     value_data: float;
 }
 
+/// Client → server: updated config for a sub-block lamp at
+/// `(block_x, block_y, block_z, face)`. Sent when the player saves
+/// changes through the F-key lamp config panel. The server validates,
+/// stores in `ShipGrid.lamp_configs`, and rebroadcasts via the
+/// chunk's next snapshot / delta so every connected client sees the
+/// new colour / channel binding.
+table LampConfigUpdate {
+    block_x: int32;
+    block_y: int32;
+    block_z: int32;
+    face: ubyte;
+    config: LampConfigEntry;
+}
+
 union ClientPayload {
     Connect,
     PlayerInput,
@@ -1246,6 +1301,7 @@ union ClientPayload {
     SubBlockEditRequest,
     ObserverConnect,
     ClientSignalPublish,
+    LampConfigUpdate,
 }
 
 /// Root type for client → server messages.
