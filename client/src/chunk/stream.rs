@@ -64,6 +64,7 @@ pub fn ingest_primary_chunks(
     primary: Res<PrimaryShard>,
     sources: Res<SourceIndex>,
     panel_configs: Res<crate::hud::panel_config::HudPanelConfigs>,
+    config: Res<crate::config::GameConfig>,
 ) {
     let Some(primary_key) = primary.current else {
         // Nothing to route primary-keyed events to; log sparsely for
@@ -95,6 +96,7 @@ pub fn ingest_primary_chunks(
                     &mut chunk_index,
                     &mut storage,
                     &panel_configs,
+                    &config,
                     primary_key,
                     parent,
                     chunk_index_v,
@@ -113,6 +115,7 @@ pub fn ingest_primary_chunks(
                     &mut chunk_index,
                     &mut storage,
                     &panel_configs,
+                    &config,
                     primary_key,
                     parent,
                     chunk_index_v,
@@ -141,6 +144,7 @@ pub fn ingest_secondary_chunks(
     secondaries: Res<Secondaries>,
     sources: Res<SourceIndex>,
     panel_configs: Res<crate::hud::panel_config::HudPanelConfigs>,
+    config: Res<crate::config::GameConfig>,
 ) {
     let material = ensure_chunk_material(&mut mat_cache, &mut materials);
     for GameEvent(ev) in events.read() {
@@ -162,6 +166,7 @@ pub fn ingest_secondary_chunks(
                     &mut chunk_index,
                     &mut storage,
                     &panel_configs,
+                    &config,
                     key,
                     parent,
                     idx,
@@ -184,6 +189,7 @@ pub fn ingest_secondary_chunks(
                     &mut chunk_index,
                     &mut storage,
                     &panel_configs,
+                    &config,
                     key,
                     parent,
                     idx,
@@ -214,6 +220,7 @@ fn spawn_or_replace_chunk(
     chunks: &mut ChunkIndex,
     storage: &mut ChunkStorageCache,
     panel_configs: &crate::hud::panel_config::HudPanelConfigs,
+    config: &crate::config::GameConfig,
     key: ShardKey,
     parent: Entity,
     chunk_index: IVec3,
@@ -234,7 +241,7 @@ fn spawn_or_replace_chunk(
 
     remesh_chunk_from_cache(
         commands, meshes, materials, images, material, registry, chunks, storage,
-        panel_configs, key, parent, chunk_index,
+        panel_configs, config, key, parent, chunk_index,
     );
 }
 
@@ -249,6 +256,7 @@ fn apply_chunk_delta(
     chunks: &mut ChunkIndex,
     storage: &mut ChunkStorageCache,
     panel_configs: &crate::hud::panel_config::HudPanelConfigs,
+    config: &crate::config::GameConfig,
     key: ShardKey,
     parent: Entity,
     chunk_index: IVec3,
@@ -320,7 +328,7 @@ fn apply_chunk_delta(
 
     remesh_chunk_from_cache(
         commands, meshes, materials, images, material, registry, chunks, storage,
-        panel_configs, key, parent, chunk_index,
+        panel_configs, config, key, parent, chunk_index,
     );
 }
 
@@ -335,6 +343,7 @@ fn remesh_chunk_from_cache(
     chunks: &mut ChunkIndex,
     storage: &ChunkStorageCache,
     panel_configs: &crate::hud::panel_config::HudPanelConfigs,
+    config: &crate::config::GameConfig,
     key: ShardKey,
     parent: Entity,
     chunk_index: IVec3,
@@ -452,6 +461,25 @@ fn remesh_chunk_from_cache(
             chunk_index,
         );
     }
+
+    // Phase 8: spawn per-block PointLight / SpotLight children for any
+    // block whose registry entry carries a `LightSpec` (lamps,
+    // thruster exhausts, reactor cores). Each spawn also adds an
+    // HDR-emissive cube proxy so the fixture face itself glows under
+    // Bloom + AgX. Same parenting pattern as HUD tiles — recursive
+    // despawn on the next remesh wipes both the lights and proxies
+    // before the new pass spawns fresh.
+    let mut shadow_budget = crate::lighting::emitters::LocalShadowBudget::new(config);
+    crate::lighting::emitters::spawn_local_lights_for_chunk(
+        commands,
+        config,
+        meshes,
+        materials,
+        entity,
+        chunk,
+        registry,
+        &mut shadow_budget,
+    );
 }
 
 fn sub_block_mesh_to_bevy(data: &SubBlockMeshData) -> Mesh {

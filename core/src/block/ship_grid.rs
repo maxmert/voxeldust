@@ -923,6 +923,56 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
         circuit: "main".to_string(),
     });
 
+    // --- Interior lamps (sub-block elements, not full blocks) ---
+    //
+    // Lamps are mounted as sub-block fixtures flush against the
+    // ceiling / wall faces — physically realistic recessed fixtures
+    // rather than 1 m glowing cubes. The client spawns a `PointLight`
+    // at the face position plus a flat emissive proxy for the bulb
+    // appearance; both come from the sub-block's
+    // `BlockRegistry::sub_block_light_spec` lookup.
+    //
+    // Face indices (from `core::block::sub_block`):
+    //   2 = +Y, 3 = -Y, 0 = +X, 1 = -X, 4 = +Z, 5 = -Z.
+    // (Imports below shadow the earlier `use sub_block::SubBlockType`
+    //  to also pull in `SubBlockElement` for the sub-block construction.)
+    {
+        use sub_block::{SubBlockElement, SubBlockType};
+
+    // Ceiling lamps — five warm-white fixtures spaced down the cabin
+    // spine. Mounted on the underside (-Y face) of the ceiling hull
+    // block at y = y_max so the bulb hangs just below the ceiling.
+    for &z in &[z_min + 4, z_min + 7, 0, z_max - 7, z_max - 4] {
+        grid.add_sub_block(0, y_max, z, SubBlockElement {
+            face: 3, // -Y (ceiling underside, pointing down into cabin)
+            element_type: SubBlockType::SurfaceLight,
+            rotation: 0,
+            flags: 0,
+        });
+    }
+
+    // Red emergency strobes flanking the door opening — mounted on the
+    // -X face of the +X-side hull (the cabin-facing side of the wall
+    // with the door cut-out).
+    for &z in &[-1_i32, 1] {
+        grid.add_sub_block(x_max, 2, z, SubBlockElement {
+            face: 1, // -X (cabin-side of starboard wall)
+            element_type: SubBlockType::RedSurfaceLight,
+            rotation: 0,
+            flags: 0,
+        });
+    }
+
+    // Blue instrument indicator over the cockpit dash — mounted on the
+    // ceiling underside near the front canopy.
+    grid.add_sub_block(0, y_max, z_min + 2, SubBlockElement {
+        face: 3, // -Y
+        element_type: SubBlockType::BlueSurfaceLight,
+        rotation: 0,
+        flags: 0,
+    });
+    } // end interior-lamps scope
+
     // --- Sub-block elements: decorative only (power is wireless now) ---
     use sub_block::{SubBlockElement, SubBlockType};
 
@@ -986,13 +1036,9 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
         });
     }
 
-    // Surface light near the cockpit.
-    grid.add_sub_block(0, y_max, z_min + 2, SubBlockElement {
-        face: 3, // -Y (ceiling underside)
-        element_type: SubBlockType::SurfaceLight,
-        rotation: 0,
-        flags: 0,
-    });
+    // (Cockpit-area surface light is now placed earlier as a
+    //  `BlueSurfaceLight` instrument indicator — see the interior-lamps
+    //  section above.)
 
     grid
 }

@@ -26,6 +26,7 @@ use bevy::prelude::*;
 
 pub mod atmosphere;
 pub mod camera;
+pub mod emitters;
 pub mod ibl;
 pub mod quality;
 pub mod rotation;
@@ -44,7 +45,8 @@ impl Plugin for LightingPlugin {
             .add_plugins(solar::SolarLightPlugin)
             .add_plugins(ibl::IblPlugin)
             .add_plugins(atmosphere::AtmospherePlugin)
-            .add_plugins(rotation::PlanetRotationPlugin);
-        // Phase 5+ will register: eclipse, volumetric, local.
+            .add_plugins(rotation::PlanetRotationPlugin)
+            .add_plugins(emitters::LocalLightingPlugin);
+        // Phase 6 will register: eclipse.
     }
 }

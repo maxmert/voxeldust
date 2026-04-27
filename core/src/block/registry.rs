@@ -47,6 +47,80 @@ pub struct ThrusterProps {
     pub fuel_rate: f64,
 }
 
+/// Per-light-emitter-block specification driving the client's per-block
+/// `PointLight` / `SpotLight` spawning. Server and client both read this
+/// from the same shared registry, so a placement decision (where the
+/// block sits in the chunk grid) deterministically implies a specific
+/// light contribution everywhere.
+///
+/// Photometric units are physical:
+///   * `lumens` — luminous flux Φ (lm). Bevy 0.18's `PointLight.intensity`
+///     and `SpotLight.intensity` consume this value directly.
+///   * `color_kelvin` — blackbody temperature for a thermal emitter
+///     (incandescent / sun-like). Converted to linear sRGB on the client
+///     via `core::blackbody::temperature_to_linear_rgb`.
+///   * `tint_linear_rgb` — multiplicative tint applied on top of the
+///     blackbody colour. Models real-world filter / LED chromaticity that
+///     can't be expressed as a pure blackbody (`[1.0, 0.1, 0.05]` for a
+///     red emergency lamp, `[1, 1, 1]` for a pure thermal source).
+///   * `range_m` — physical falloff cutoff in metres.
+///   * `emissive_radiance_w_per_m2` — companion value driving the
+///     emissive proxy surface's HDR brightness (the visible "bulb face"
+///     glow, independent of the spawned light's surrounding luminance).
+///
+/// `shadow_caster_class` is the priority gate the client's shadow-budget
+/// enforcer uses: `0` = never casts shadows, higher = higher priority
+/// for the configurable `LightingFidelity.max_shadow_casting_local_lights`
+/// budget.
+///
+/// `emissive_geometry` chooses the shape of the visible emissive
+/// surface:
+///   * [`EmissiveGeometry::FullCube`] — glow from every air-facing side
+///     (lamps, reactors).
+///   * [`EmissiveGeometry::DirectionalFace`] — glow from a single face
+///     aligned with the block's `BlockOrientation.facing_direction()`
+///     (thruster exhaust, beam sources).
+#[derive(Clone, Copy, Debug)]
+pub struct LightSpec {
+    pub lumens: f32,
+    pub color_kelvin: f32,
+    pub tint_linear_rgb: [f32; 3],
+    pub range_m: f32,
+    pub beam_kind: BeamKind,
+    pub shadow_caster_class: u8,
+    pub emissive_radiance_w_per_m2: f32,
+    pub emissive_geometry: EmissiveGeometry,
+}
+
+/// Beam shape for a [`LightSpec`].
+#[derive(Clone, Copy, Debug)]
+pub enum BeamKind {
+    /// Omni-directional point source. Maps to Bevy's `PointLight`.
+    PointOmni,
+    /// Bounded cone, angles in radians. Inner = full-intensity edge,
+    /// outer = zero-intensity edge (Bevy interpolates between the two).
+    /// Maps to Bevy's `SpotLight`.
+    SpotCone {
+        inner_angle_rad: f32,
+        outer_angle_rad: f32,
+    },
+}
+
+/// Visible emissive surface shape attached to a light-emitter block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmissiveGeometry {
+    /// All air-facing sides of the block glow (housekeeping fixture
+    /// look — lamps, reactor cores). The proxy is a slightly outset
+    /// cube; faces bordering adjacent solid blocks remain occluded by
+    /// the neighbour's mesh face.
+    FullCube,
+    /// Only the face aligned with the block's
+    /// `BlockOrientation.facing_direction()` glows — the canonical
+    /// "exhaust nozzle" / "spotlight emitter" look. The proxy is a
+    /// flat quad sitting just outside that single face.
+    DirectionalFace,
+}
+
 /// Per-cruise-drive-block static properties.
 #[derive(Clone, Copy, Debug)]
 pub struct CruiseDriveProps {
@@ -161,6 +235,10 @@ pub struct BlockRegistry {
     cruise_drive_props: Vec<Option<CruiseDriveProps>>,
     /// Per-mechanical-mount properties. None = not a mechanical mount.
     mechanical_props: Vec<Option<MechanicalProps>>,
+    /// Per-light-emitter properties. `None` for blocks that don't emit
+    /// dynamic light. Drives the client's per-block `PointLight` /
+    /// `SpotLight` spawning.
+    light_specs: Vec<Option<LightSpec>>,
 }
 
 impl BlockRegistry {
@@ -173,6 +251,7 @@ impl BlockRegistry {
         let mut power_props_vec: Vec<Option<PowerProps>> = vec![None; MAX_BLOCK_TYPES];
         let mut cruise_drive_props_vec: Vec<Option<CruiseDriveProps>> = vec![None; MAX_BLOCK_TYPES];
         let mut mechanical_props_vec: Vec<Option<MechanicalProps>> = vec![None; MAX_BLOCK_TYPES];
+        let mut light_specs_vec: Vec<Option<LightSpec>> = vec![None; MAX_BLOCK_TYPES];
 
         let r = &mut defs;
 
@@ -573,6 +652,13 @@ impl BlockRegistry {
             ..BlockDef::UNDEFINED
         });
 
+        // (Light fixtures used to live as full blocks at IDs 1730–1733.
+        // Phase 8 v3 moved them to sub-block elements
+        // (`SubBlockType::SurfaceLight` and friends) so they sit flush
+        // against host-block faces rather than occupying a full 1 m
+        // cube. See `core/src/block/sub_block.rs` and
+        // `BlockRegistry::sub_block_light_spec`.)
+
         // =================================================================
         // Utility (1800–1899) — basic block properties only.
         // Functional behavior defined in the functional block registry.
@@ -810,12 +896,169 @@ impl BlockRegistry {
             max_range: 10.0,        // 10 meter max extension
         });
 
+        // ─── Light specifications ────────────────────────────────────────
+        //
+        // Photometric values calibrated against Bevy 0.18's exposure
+        // scale. The engine's `PointLight::default()` is 1 000 000 lm
+        // ("very large cinema light"); the docs explicitly note that
+        // "for indoor lighting with a lower exposure this would be way
+        // too bright" — implying that against the AAA outdoor exposure
+        // we ship (`ev100 = 11`, ≈ overcast-day target) realistic ship
+        // interior fixtures need to sit in the tens-to-hundreds of
+        // thousands of lumens, not residential household scale.
+        //
+        // Reference: a real industrial LED panel emits ~5 000 lm; under
+        // an outdoor-calibrated camera that reads as roughly 5 cd/m² at
+        // 2 m distance — invisibly dim against any non-zero ambient
+        // floor. Bevy's exposure-aware scale needs ~50 000 lm to sit at
+        // a comfortable indoor luminance under outdoor exposure.
+        let ls = &mut light_specs_vec;
+
+        // (Lamp specs moved to `BlockRegistry::sub_block_light_spec`
+        // for the sub-block-mounted variants.)
+
+        // Thrusters — plasma exhaust glow. Brighter classes scale up.
+        // Photometric values calibrated against Bevy's exposure scale
+        // (see lamp section above for the rationale): tens of thousands
+        // of lumens for a small fixture-class light. Real rocket plumes
+        // emit > 10⁹ lm at the throat — our values are conservative
+        // pixel-budget approximations.
+        // Chemical: orange-red flame plume (~2200 K, fuel-rich combustion).
+        ls[BlockId::THRUSTER_SMALL_CHEMICAL.as_u16() as usize] = Some(LightSpec {
+            lumens: 80_000.0,
+            color_kelvin: 2200.0,
+            tint_linear_rgb: [1.0, 0.55, 0.20],   // orange flame
+            range_m: 8.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,                // exhaust is fill, not shadow
+            emissive_radiance_w_per_m2: 12_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        ls[BlockId::THRUSTER_MEDIUM_CHEMICAL.as_u16() as usize] = Some(LightSpec {
+            lumens: 250_000.0,
+            color_kelvin: 2200.0,
+            tint_linear_rgb: [1.0, 0.55, 0.20],
+            range_m: 12.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 24_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        ls[BlockId::THRUSTER_LARGE_CHEMICAL.as_u16() as usize] = Some(LightSpec {
+            lumens: 800_000.0,
+            color_kelvin: 2200.0,
+            tint_linear_rgb: [1.0, 0.55, 0.20],
+            range_m: 18.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 60_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        // Ion: cool blue-violet plume (~10 000 K equivalent, ionised xenon).
+        ls[BlockId::THRUSTER_SMALL_ION.as_u16() as usize] = Some(LightSpec {
+            lumens: 50_000.0,
+            color_kelvin: 10_000.0,
+            tint_linear_rgb: [0.55, 0.65, 1.0],
+            range_m: 6.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 8_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        ls[BlockId::THRUSTER_MEDIUM_ION.as_u16() as usize] = Some(LightSpec {
+            lumens: 150_000.0,
+            color_kelvin: 10_000.0,
+            tint_linear_rgb: [0.55, 0.65, 1.0],
+            range_m: 9.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 16_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        ls[BlockId::THRUSTER_LARGE_ION.as_u16() as usize] = Some(LightSpec {
+            lumens: 500_000.0,
+            color_kelvin: 10_000.0,
+            tint_linear_rgb: [0.55, 0.65, 1.0],
+            range_m: 14.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 40_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        // Fusion: brilliant near-white core (D-T fusion plasma).
+        ls[BlockId::THRUSTER_SMALL_FUSION.as_u16() as usize] = Some(LightSpec {
+            lumens: 200_000.0,
+            color_kelvin: 6500.0,
+            tint_linear_rgb: [1.0, 1.0, 1.0],
+            range_m: 8.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 30_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        ls[BlockId::THRUSTER_MEDIUM_FUSION.as_u16() as usize] = Some(LightSpec {
+            lumens: 700_000.0,
+            color_kelvin: 6500.0,
+            tint_linear_rgb: [1.0, 1.0, 1.0],
+            range_m: 12.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 80_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+        ls[BlockId::THRUSTER_LARGE_FUSION.as_u16() as usize] = Some(LightSpec {
+            lumens: 2_500_000.0,
+            color_kelvin: 6500.0,
+            tint_linear_rgb: [1.0, 1.0, 1.0],
+            range_m: 22.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 0,
+            emissive_radiance_w_per_m2: 200_000.0,
+            emissive_geometry: EmissiveGeometry::DirectionalFace,
+        });
+
+        // Reactors — soft warm glow from the core. Used as fill around
+        // the engine room; less intense than lamps because the player
+        // doesn't read by reactor light, but enough to define the engine
+        // bay's shape.
+        ls[BlockId::REACTOR_SMALL.as_u16() as usize] = Some(LightSpec {
+            lumens: 30_000.0,
+            color_kelvin: 4500.0,
+            tint_linear_rgb: [1.0, 0.95, 0.85],
+            range_m: 8.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 1,
+            emissive_radiance_w_per_m2: 1_500.0,
+            emissive_geometry: EmissiveGeometry::FullCube,
+        });
+        ls[BlockId::REACTOR_MEDIUM.as_u16() as usize] = Some(LightSpec {
+            lumens: 100_000.0,
+            color_kelvin: 4500.0,
+            tint_linear_rgb: [1.0, 0.95, 0.85],
+            range_m: 12.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 1,
+            emissive_radiance_w_per_m2: 4_000.0,
+            emissive_geometry: EmissiveGeometry::FullCube,
+        });
+        ls[BlockId::REACTOR_LARGE.as_u16() as usize] = Some(LightSpec {
+            lumens: 350_000.0,
+            color_kelvin: 4500.0,
+            tint_linear_rgb: [1.0, 0.95, 0.85],
+            range_m: 18.0,
+            beam_kind: BeamKind::PointOmni,
+            shadow_caster_class: 1,
+            emissive_radiance_w_per_m2: 8_000.0,
+            emissive_geometry: EmissiveGeometry::FullCube,
+        });
+
         Self {
             defs, functional_kinds,
             thruster_props: thruster_props_vec,
             power_props: power_props_vec,
             cruise_drive_props: cruise_drive_props_vec,
             mechanical_props: mechanical_props_vec,
+            light_specs: light_specs_vec,
         }
     }
 
@@ -865,6 +1108,72 @@ impl BlockRegistry {
 
     pub fn mechanical_props(&self, id: BlockId) -> Option<MechanicalProps> {
         self.mechanical_props[id.as_u16() as usize]
+    }
+
+    /// Get the per-block light-emitter specification. `None` for blocks
+    /// that don't emit dynamic light.
+    #[inline]
+    pub fn light_spec(&self, id: BlockId) -> Option<LightSpec> {
+        self.light_specs[id.as_u16() as usize]
+    }
+
+    /// Per-sub-block-type light spec. Sub-block lamps (`SurfaceLight` and
+    /// friends) sit flush against a host-block face — physically smaller
+    /// than a full-cube lamp — so their geometry mode is always
+    /// `DirectionalFace`. Photometric values are calibrated for ship-
+    /// cabin illumination at the active outdoor exposure (see lamp
+    /// section in `light_specs` initialisation for the rationale).
+    pub fn sub_block_light_spec(
+        &self,
+        ty: super::sub_block::SubBlockType,
+    ) -> Option<LightSpec> {
+        use super::sub_block::SubBlockType;
+        match ty {
+            SubBlockType::SurfaceLight => Some(LightSpec {
+                lumens: 60_000.0,
+                color_kelvin: 3000.0,
+                tint_linear_rgb: [1.0, 1.0, 1.0],
+                range_m: 12.0,
+                beam_kind: BeamKind::PointOmni,
+                shadow_caster_class: 1,
+                emissive_radiance_w_per_m2: 12_000.0,
+                emissive_geometry: EmissiveGeometry::DirectionalFace,
+            }),
+            SubBlockType::RedSurfaceLight => Some(LightSpec {
+                lumens: 40_000.0,
+                color_kelvin: 3000.0,
+                tint_linear_rgb: [1.0, 0.15, 0.05],
+                range_m: 8.0,
+                beam_kind: BeamKind::PointOmni,
+                shadow_caster_class: 0,
+                emissive_radiance_w_per_m2: 8_000.0,
+                emissive_geometry: EmissiveGeometry::DirectionalFace,
+            }),
+            SubBlockType::BlueSurfaceLight => Some(LightSpec {
+                lumens: 40_000.0,
+                color_kelvin: 3000.0,
+                tint_linear_rgb: [0.15, 0.30, 1.0],
+                range_m: 8.0,
+                beam_kind: BeamKind::PointOmni,
+                shadow_caster_class: 0,
+                emissive_radiance_w_per_m2: 8_000.0,
+                emissive_geometry: EmissiveGeometry::DirectionalFace,
+            }),
+            SubBlockType::Floodlight => Some(LightSpec {
+                lumens: 300_000.0,
+                color_kelvin: 5500.0,
+                tint_linear_rgb: [1.0, 1.0, 1.0],
+                range_m: 40.0,
+                beam_kind: BeamKind::SpotCone {
+                    inner_angle_rad: 30.0_f32.to_radians(),
+                    outer_angle_rad: 45.0_f32.to_radians(),
+                },
+                shadow_caster_class: 2,
+                emissive_radiance_w_per_m2: 60_000.0,
+                emissive_geometry: EmissiveGeometry::DirectionalFace,
+            }),
+            _ => None,
+        }
     }
 
     /// Get the interaction schema for a functional block kind.

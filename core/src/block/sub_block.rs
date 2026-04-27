@@ -45,9 +45,21 @@ pub enum SubBlockType {
     // Decorative & utility (40-49)
     Ladder          = 40,
     Handle          = 41,
+    /// Warm-white interior fixture mounted flush against a host
+    /// block's face. Light + emissive proxy spawn from
+    /// `BlockRegistry::sub_block_light_spec`.
     SurfaceLight    = 42,
     Cable           = 43,
     Vent            = 44,
+    /// Red emergency / alarm lamp — same fixture geometry as
+    /// `SurfaceLight`, saturated red filter on the LightSpec.
+    RedSurfaceLight = 45,
+    /// Blue instrument-panel lamp — soft blue filter, low intensity.
+    BlueSurfaceLight = 46,
+    /// Industrial daylight floodlight — directional spot beam from
+    /// the face. Same `DirectionalFace` emissive geometry, much
+    /// higher lumens than the warm-white surface light.
+    Floodlight      = 47,
 
     // Structural (50-59)
     Bracket         = 50,
@@ -82,6 +94,9 @@ impl SubBlockType {
             42 => Some(Self::SurfaceLight),
             43 => Some(Self::Cable),
             44 => Some(Self::Vent),
+            45 => Some(Self::RedSurfaceLight),
+            46 => Some(Self::BlueSurfaceLight),
+            47 => Some(Self::Floodlight),
             50 => Some(Self::Bracket),
             51 => Some(Self::Seal),
             60 => Some(Self::HudPanel),
@@ -110,6 +125,9 @@ impl SubBlockType {
             Self::SurfaceLight  => "Surface Light",
             Self::Cable         => "Cable",
             Self::Vent          => "Vent",
+            Self::RedSurfaceLight  => "Red Surface Light",
+            Self::BlueSurfaceLight => "Blue Surface Light",
+            Self::Floodlight       => "Floodlight",
             Self::Bracket       => "Bracket",
             Self::Seal          => "Seal",
             Self::HudPanel      => "HUD Panel",
@@ -147,6 +165,9 @@ impl SubBlockType {
             Self::SurfaceLight  => [255, 255, 200],  // warm white
             Self::Cable         => [40, 40, 40],     // dark gray
             Self::Vent          => [120, 130, 140],  // steel
+            Self::RedSurfaceLight  => [255, 60, 30], // red emergency
+            Self::BlueSurfaceLight => [60, 120, 255], // blue instrument
+            Self::Floodlight       => [240, 240, 245], // daylight white
             Self::Bracket       => [100, 100, 110],
             Self::Seal          => [200, 200, 220],  // light steel
             Self::HudPanel      => [20, 30, 50],     // dark glass; real content drawn by widget

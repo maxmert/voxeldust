@@ -166,6 +166,12 @@ impl BlockId {
     pub const WINDOW: Self = Self(1710);
     pub const DOOR: Self = Self(1720);
 
+    // Light-emitter sub-blocks (mounted via `SubBlockType::SurfaceLight`,
+    // `RedSurfaceLight`, `BlueSurfaceLight`, `Floodlight`) replaced the
+    // previous full-block lamp IDs in the 1730 range. The block IDs were
+    // removed when lamps moved to sub-block placement so they read as
+    // physically-correct flush fixtures rather than 1 m glowing cubes.
+
     // -----------------------------------------------------------------------
     // Utility (1800–1899)
     // -----------------------------------------------------------------------

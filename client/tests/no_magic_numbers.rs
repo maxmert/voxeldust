@@ -41,6 +41,10 @@ const SCANNED_PATHS: &[&str] = &[
     "client/src/lighting/ibl.rs",
     "client/src/lighting/atmosphere.rs",
     "client/src/lighting/rotation.rs",
+    "client/src/lighting/emitters/mod.rs",
+    "client/src/lighting/emitters/throttle.rs",
+    "client/src/lighting/emitters/full_block.rs",
+    "client/src/lighting/emitters/sub_block.rs",
     // Phase 2 may also add: client/src/lighting/starfield_bake.rs.
     // Phase 4 adds: client/src/lighting/rotation.rs.
     // Phase 5 adds: client/src/lighting/volumetric.rs.
