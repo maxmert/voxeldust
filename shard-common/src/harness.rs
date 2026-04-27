@@ -50,6 +50,8 @@ pub struct NetworkBridge {
     pub sub_block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
     /// Incoming signal publishes from publisher HUD widgets.
     pub signal_publish_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
+    /// Incoming lamp-config edits from the F-key tablet UI.
+    pub lamp_config_update_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
@@ -121,6 +123,8 @@ pub struct ShardHarness {
     pub block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, BlockEditData)>,
     /// Incoming BlockConfigUpdate with sender session (TCP or UDP).
     pub config_update_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
+    /// Incoming LampConfigUpdate with sender session (TCP or UDP).
+    pub lamp_config_update_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
     /// Incoming inter-shard messages from QUIC (with source peer address).
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Channel to send WorldState for UDP broadcast (bounded for backpressure).
@@ -138,6 +142,7 @@ pub struct ShardHarness {
     sub_block_edit_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
     signal_publish_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
     signal_publish_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
+    lamp_config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
     quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
@@ -150,6 +155,7 @@ impl ShardHarness {
         let (config_update_tx, config_update_rx) = mpsc::unbounded_channel();
         let (sub_block_edit_tx, sub_block_edit_rx) = mpsc::unbounded_channel();
         let (signal_publish_tx, signal_publish_rx) = mpsc::unbounded_channel();
+        let (lamp_config_update_tx, lamp_config_update_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
         let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
@@ -170,6 +176,7 @@ impl ShardHarness {
             input_rx,
             block_edit_rx,
             config_update_rx,
+            lamp_config_update_rx,
             quic_msg_rx,
             broadcast_tx,
             quic_send_tx,
@@ -183,6 +190,7 @@ impl ShardHarness {
             sub_block_edit_rx,
             signal_publish_tx,
             signal_publish_rx,
+            lamp_config_update_tx,
             quic_msg_tx,
             cancel: CancellationToken::new(),
         }
@@ -224,6 +232,7 @@ impl ShardHarness {
             config_update_tx: self.config_update_tx.clone(),
             sub_block_edit_tx: self.sub_block_edit_tx.clone(),
             signal_publish_tx: self.signal_publish_tx.clone(),
+            lamp_config_update_tx: self.lamp_config_update_tx.clone(),
         };
         let tcp_registry = self.client_registry.clone();
         tokio::spawn(async move {
@@ -302,8 +311,9 @@ impl ShardHarness {
         let block_edit_tx = self.block_edit_tx.clone();
         let config_update_tx = self.config_update_tx.clone();
         let sub_block_edit_tx = self.sub_block_edit_tx.clone();
+        let lamp_config_update_tx = self.lamp_config_update_tx.clone();
         tokio::spawn(async move {
-            client_listener::run_udp_receiver(udp_recv_socket, udp_registry, input_tx, block_edit_tx, config_update_tx, sub_block_edit_tx, udp_recv_cancel).await;
+            client_listener::run_udp_receiver(udp_recv_socket, udp_registry, input_tx, block_edit_tx, config_update_tx, sub_block_edit_tx, lamp_config_update_tx, udp_recv_cancel).await;
         });
 
         // QUIC accept loop for inter-shard messages.
@@ -526,6 +536,7 @@ impl ShardHarness {
             config_update_rx: self.config_update_rx,
             sub_block_edit_rx: self.sub_block_edit_rx,
             signal_publish_rx: self.signal_publish_rx,
+            lamp_config_update_rx: self.lamp_config_update_rx,
             quic_msg_rx: self.quic_msg_rx,
             broadcast_tx: self.broadcast_tx.clone(),
             quic_send_tx: self.quic_send_tx.clone(),

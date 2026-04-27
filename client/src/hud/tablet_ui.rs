@@ -44,6 +44,7 @@ use crate::hud::focus::{HudClickButton, HudClickEvent, HudFocusState};
 use crate::hud::panel_config::{HudPanelConfigs, HudPanelSettings, OpenHudPanelConfig};
 use crate::hud::tablet::{DespawnHeldTablet, HeldTablet};
 use crate::hud::tile::WidgetKind;
+use crate::lighting::emitters::lamp_configs::OpenLampConfig;
 use crate::net::TcpSender;
 
 /// Dedicated schedule that paints egui into the tablet texture. Each
@@ -152,6 +153,7 @@ fn paint_tablet_ui(
     mut panel: ResMut<OpenConfigPanel>,
     mut hud_panel_edit: ResMut<OpenHudPanelConfig>,
     mut panel_configs: ResMut<HudPanelConfigs>,
+    mut lamp_edit: ResMut<OpenLampConfig>,
     tcp: Res<TcpSender>,
     focus: Res<HudFocusState>,
     block_registry: Res<crate::chunk::stream::SharedBlockRegistry>,
@@ -162,9 +164,14 @@ fn paint_tablet_ui(
     };
     let ctx = ctx.get_mut();
 
-    // Two modes: HUD panel config (editing a placed HudPanel sub-block)
-    // vs block config (editing a functional block's signal bindings).
-    // HUD-panel mode takes precedence when active.
+    // Three editor modes: lamp config (sub-block lamp F-key), HUD panel
+    // config (placed HudPanel sub-block), or block config (full
+    // functional block's signal bindings). Lamp + HUD-panel modes take
+    // precedence over the default block-config mode when active.
+    if lamp_edit.editing.is_some() {
+        paint_lamp_editor(ctx, &mut lamp_edit, &tcp, &focus, &mut despawn_tablet);
+        return;
+    }
     if hud_panel_edit.editing.is_some() {
         paint_hud_panel_editor(ctx, &mut hud_panel_edit, &mut panel_configs, &focus, &mut despawn_tablet);
         return;
@@ -574,6 +581,214 @@ fn paint_hud_panel_editor(
             }
         });
 }
+
+/// Lamp config editor — runs when `OpenLampConfig.editing.is_some()`.
+/// Edits the per-placed-lamp configuration (subscribe / publish
+/// channels, blackbody temperature, RGB tint, intensity scale) and
+/// sends a `LampConfigUpdate` to the server on Apply. The server
+/// validates + persists + rebroadcasts via the chunk's next delta, so
+/// every connected client sees the new lamp behaviour identically.
+fn paint_lamp_editor(
+    ctx: &mut egui::Context,
+    lamp_edit: &mut OpenLampConfig,
+    tcp: &TcpSender,
+    focus: &HudFocusState,
+    despawn_tablet: &mut MessageWriter<DespawnHeldTablet>,
+) {
+    let _ = focus; // tablet is in lamp-edit mode; cursor focus
+                   // already handled by the caller.
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(10, 16, 26)))
+        .show(ctx, |ui| {
+            style_cockpit(ui);
+
+            let Some(state) = lamp_edit.editing.as_mut() else {
+                return;
+            };
+
+            let mut apply = false;
+            let mut close = false;
+            let mut reset = false;
+
+            ui.horizontal(|ui| {
+                ui.heading(
+                    egui::RichText::new(format!(
+                        "LAMP ({}, {}, {}) f{}",
+                        state.key.block_pos.x,
+                        state.key.block_pos.y,
+                        state.key.block_pos.z,
+                        state.key.face,
+                    ))
+                    .color(egui::Color32::from_rgb(120, 220, 255))
+                    .size(14.0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(button_styled("CLOSE")).clicked() {
+                        close = true;
+                    }
+                    if ui.add(button_styled("APPLY")).clicked() {
+                        apply = true;
+                    }
+                    if ui.add(button_styled("RESET")).clicked() {
+                        reset = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.separator();
+
+            let scroll_h = ui.available_height();
+            egui::ScrollArea::vertical()
+                .max_height(scroll_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+
+                    // ─── Channels ────────────────────────────────────
+                    ui.label(
+                        egui::RichText::new("SIGNALS")
+                            .color(egui::Color32::from_rgb(180, 220, 240)),
+                    );
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("subscribe")
+                                .color(egui::Color32::from_rgb(160, 190, 210))
+                                .size(11.0),
+                        );
+                        ui.text_edit_singleline(&mut state.config.subscribe_channel)
+                            .on_hover_text(
+                                "Channel that drives the lamp's brightness (0 = off, 1 = full). Empty = always on.",
+                            );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("publish")
+                                .color(egui::Color32::from_rgb(160, 190, 210))
+                                .size(11.0),
+                        );
+                        ui.text_edit_singleline(&mut state.config.publish_channel)
+                            .on_hover_text(
+                                "Channel the lamp publishes its on/off state to. Empty = no publish.",
+                            );
+                    });
+                    ui.add_space(8.0);
+
+                    // ─── Colour ──────────────────────────────────────
+                    ui.label(
+                        egui::RichText::new("COLOUR")
+                            .color(egui::Color32::from_rgb(180, 220, 240)),
+                    );
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Kelvin")
+                                .color(egui::Color32::from_rgb(160, 190, 210))
+                                .size(11.0),
+                        );
+                        ui.add(
+                            egui::Slider::new(
+                                &mut state.config.color_kelvin,
+                                LAMP_KELVIN_MIN..=LAMP_KELVIN_MAX,
+                            )
+                            .integer()
+                            .suffix(" K"),
+                        )
+                        .on_hover_text(
+                            "Blackbody temperature of the bulb. 2700 K = warm incandescent, 6500 K = daylight, 10000 K = cool blue.",
+                        );
+                    });
+                    let mut tint = state.config.tint_linear_rgb;
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("tint")
+                                .color(egui::Color32::from_rgb(160, 190, 210))
+                                .size(11.0),
+                        );
+                        let mut rgb = [
+                            tint[0].clamp(0.0, 1.0),
+                            tint[1].clamp(0.0, 1.0),
+                            tint[2].clamp(0.0, 1.0),
+                        ];
+                        if ui.color_edit_button_rgb(&mut rgb).changed() {
+                            tint = rgb;
+                        }
+                    });
+                    state.config.tint_linear_rgb = tint;
+                    ui.add_space(8.0);
+
+                    // ─── Intensity ───────────────────────────────────
+                    ui.label(
+                        egui::RichText::new("INTENSITY")
+                            .color(egui::Color32::from_rgb(180, 220, 240)),
+                    );
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("scale")
+                                .color(egui::Color32::from_rgb(160, 190, 210))
+                                .size(11.0),
+                        );
+                        ui.add(
+                            egui::Slider::new(
+                                &mut state.config.intensity_scale,
+                                LAMP_INTENSITY_MIN..=LAMP_INTENSITY_MAX,
+                            )
+                            .fixed_decimals(2)
+                            .suffix("×"),
+                        )
+                        .on_hover_text(
+                            "Multiplier on the spec's lumens. 1.0 = stock, 0.0 = off, > 1 brightens beyond spec.",
+                        );
+                    });
+                });
+
+            if reset {
+                state.config = voxeldust_core::block::sub_block::LampConfig::default_for(state.sub_type);
+            }
+            if apply {
+                let update = voxeldust_core::client_message::LampConfigUpdateClientData {
+                    block_x: state.key.block_pos.x,
+                    block_y: state.key.block_pos.y,
+                    block_z: state.key.block_pos.z,
+                    face: state.key.face,
+                    config: state.config.clone(),
+                };
+                let msg = ClientMsg::LampConfigUpdate(update);
+                let data = msg.serialize();
+                let mut pkt = Vec::new();
+                wire_codec::encode(&data, &mut pkt);
+                if tcp.tx.send(pkt).is_err() {
+                    tracing::warn!(
+                        "tablet apply: TCP closed while sending LampConfigUpdate"
+                    );
+                } else {
+                    tracing::info!(
+                        block = ?(state.key.block_pos.x, state.key.block_pos.y, state.key.block_pos.z),
+                        face = state.key.face,
+                        subscribe = %state.config.subscribe_channel,
+                        publish = %state.config.publish_channel,
+                        kelvin = state.config.color_kelvin,
+                        intensity = state.config.intensity_scale,
+                        "tablet apply: LampConfigUpdate sent",
+                    );
+                }
+            }
+            if close {
+                lamp_edit.editing = None;
+                despawn_tablet.write(DespawnHeldTablet);
+            }
+        });
+}
+
+/// Lamp-config slider bounds. Kelvin span covers warm-incandescent to
+/// cool-blue LED; intensity scale 0–4 lets the player dim a fixture
+/// completely or push it ~2× past the stock spec without exposing
+/// runaway values that would clip every adjacent surface to white.
+const LAMP_KELVIN_MIN: f32 = 1500.0;
+const LAMP_KELVIN_MAX: f32 = 12000.0;
+const LAMP_INTENSITY_MIN: f32 = 0.0;
+const LAMP_INTENSITY_MAX: f32 = 4.0;
 
 /// Styled pill button for the 1/4 layout toggle at the top of the
 /// HUD panel editor.

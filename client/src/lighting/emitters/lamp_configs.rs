@@ -24,7 +24,7 @@ use bevy::prelude::*;
 use glam::IVec3;
 
 use voxeldust_core::block::palette::CHUNK_SIZE;
-use voxeldust_core::block::sub_block::LampConfig;
+use voxeldust_core::block::sub_block::{LampConfig, SubBlockType};
 use voxeldust_core::client_message::LampConfigEntryData;
 
 use crate::net::{GameEvent, NetEvent};
@@ -58,8 +58,40 @@ pub struct LampConfigsPlugin;
 impl Plugin for LampConfigsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LampConfigs>()
+            .init_resource::<OpenLampConfig>()
             .add_systems(Update, ingest_lamp_configs);
     }
+}
+
+/// Composite key for a lamp sub-block — used by both the broadcast
+/// resource ([`LampConfigs`]) and the client-side edit state
+/// ([`OpenLampConfig`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LampConfigKey {
+    pub shard: ShardKey,
+    pub block_pos: IVec3,
+    pub face: u8,
+}
+
+/// Edit state surfaced when the player F-keys a lamp sub-block. The
+/// tablet UI paints `OpenLampConfig.editing.is_some()` into the lamp
+/// editor; an empty `editing` field means the tablet is in its default
+/// block-config / HUD-panel mode.
+#[derive(Debug, Clone)]
+pub struct LampConfigEditState {
+    pub key: LampConfigKey,
+    /// Sub-block-type of the targeted lamp; supplies the default
+    /// values when the broadcast hasn't sent a custom config yet.
+    pub sub_type: SubBlockType,
+    /// The live mutable copy the UI binds against. Saved back to the
+    /// server via the `LampConfigUpdate` message on Apply.
+    pub config: LampConfig,
+}
+
+/// Resource: `Some(state)` while the tablet is in lamp-edit mode.
+#[derive(Resource, Default, Debug)]
+pub struct OpenLampConfig {
+    pub editing: Option<LampConfigEditState>,
 }
 
 /// Drain `ChunkSnapshot` / `ChunkDelta` events into `LampConfigs`. Each

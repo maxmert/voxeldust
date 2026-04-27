@@ -417,6 +417,22 @@ pub enum ClientMsg {
     /// `publish_policy` + sender's player_id, then calls
     /// `push_pending` on the shard's `SignalChannelTable`.
     SignalPublish(SignalPublishData),
+    /// Player saved a lamp config through the F-key UI. Server
+    /// validates ownership, persists to `ShipGrid.lamp_configs`, and
+    /// rebroadcasts via the next `ChunkDelta`.
+    LampConfigUpdate(LampConfigUpdateClientData),
+}
+
+/// Payload for `ClientMsg::LampConfigUpdate`. Carries the
+/// `(block_pos, face)` of the lamp sub-block being edited and the new
+/// configuration values.
+#[derive(Debug, Clone)]
+pub struct LampConfigUpdateClientData {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub face: u8,
+    pub config: crate::block::sub_block::LampConfig,
 }
 
 /// Payload for `ClientMsg::SignalPublish`. No text variant — string
@@ -1419,6 +1435,53 @@ impl ClientMsg {
                 );
                 builder.finish(msg, None);
             }
+            ClientMsg::LampConfigUpdate(data) => {
+                let sub = builder.create_string(&data.config.subscribe_channel);
+                let pubc = builder.create_string(&data.config.publish_channel);
+                let entry = fb::LampConfigEntry::create(
+                    &mut builder,
+                    &fb::LampConfigEntryArgs {
+                        // The bx/by/bz fields on the wire mean
+                        // chunk-local; for the single-block edit message
+                        // we don't carry the chunk address separately,
+                        // so we encode the world coords through the
+                        // outer block_x/block_y/block_z and leave bx
+                        // = 0 / by = 0 / bz = 0 here as a placeholder
+                        // (server-side handler reads block_x/y/z, not
+                        // the embedded bx/by/bz, when this entry rides
+                        // inside a `LampConfigUpdate` message).
+                        bx: 0,
+                        by: 0,
+                        bz: 0,
+                        face: data.face,
+                        subscribe_channel: Some(sub),
+                        publish_channel: Some(pubc),
+                        color_kelvin: data.config.color_kelvin,
+                        tint_r: data.config.tint_linear_rgb[0],
+                        tint_g: data.config.tint_linear_rgb[1],
+                        tint_b: data.config.tint_linear_rgb[2],
+                        intensity_scale: data.config.intensity_scale,
+                    },
+                );
+                let lcu = fb::LampConfigUpdate::create(
+                    &mut builder,
+                    &fb::LampConfigUpdateArgs {
+                        block_x: data.block_x,
+                        block_y: data.block_y,
+                        block_z: data.block_z,
+                        face: data.face,
+                        config: Some(entry),
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::LampConfigUpdate,
+                        payload: Some(lcu.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -1560,6 +1623,31 @@ impl ClientMsg {
                 Ok(ClientMsg::SignalPublish(SignalPublishData {
                     channel_name: name,
                     value,
+                }))
+            }
+            fb::ClientPayload::LampConfigUpdate => {
+                let lcu = msg
+                    .payload_as_lamp_config_update()
+                    .ok_or(MessageError::MissingField("LampConfigUpdate payload"))?;
+                let entry = lcu
+                    .config()
+                    .ok_or(MessageError::MissingField("LampConfigUpdate.config"))?;
+                let config = crate::block::sub_block::LampConfig {
+                    subscribe_channel: entry
+                        .subscribe_channel()
+                        .unwrap_or("")
+                        .to_string(),
+                    publish_channel: entry.publish_channel().unwrap_or("").to_string(),
+                    color_kelvin: entry.color_kelvin(),
+                    tint_linear_rgb: [entry.tint_r(), entry.tint_g(), entry.tint_b()],
+                    intensity_scale: entry.intensity_scale(),
+                };
+                Ok(ClientMsg::LampConfigUpdate(LampConfigUpdateClientData {
+                    block_x: lcu.block_x(),
+                    block_y: lcu.block_y(),
+                    block_z: lcu.block_z(),
+                    face: lcu.face(),
+                    config,
                 }))
             }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),

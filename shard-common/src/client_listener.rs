@@ -39,6 +39,13 @@ pub struct TcpMessageChannels {
     /// validates `publish_policy` against the sender's player_id before
     /// accepting.
     pub signal_publish_tx: mpsc::UnboundedSender<(SessionToken, SignalPublishData)>,
+    /// Lamp-config edits from the F-key tablet UI. Each message
+    /// carries the lamp's `(world_pos, face)` and the new
+    /// `LampConfig`. Server validates ownership, persists to
+    /// `ShipGrid.lamp_configs`, and rebroadcasts via the host chunk's
+    /// next `ChunkDelta`.
+    pub lamp_config_update_tx:
+        mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
 }
 
 /// Event emitted when a client connects via TCP.
@@ -496,6 +503,9 @@ async fn run_tcp_read_loop(
                 // ObserverConnect on an already-established connection — ignore.
                 warn!(%peer_addr, "ObserverConnect on established connection");
             }
+            Ok(ClientMsg::LampConfigUpdate(update)) => {
+                let _ = channels.lamp_config_update_tx.send((session_token, update));
+            }
             Ok(ClientMsg::SignalPublish(data)) => {
                 let _ = channels.signal_publish_tx.send((session_token, data));
             }
@@ -572,6 +582,7 @@ pub async fn run_udp_receiver(
     block_edit_tx: mpsc::UnboundedSender<(SessionToken, BlockEditData)>,
     config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::signal::config::BlockConfigUpdateData)>,
     sub_block_edit_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SubBlockEditData)>,
+    lamp_config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
     cancel: CancellationToken,
 ) {
     let mut buf = vec![0u8; 65536];
@@ -620,6 +631,11 @@ pub async fn run_udp_receiver(
                             Ok(ClientMsg::SubBlockEdit(edit)) => {
                                 if let Some(s) = session {
                                     let _ = sub_block_edit_tx.send((s, edit));
+                                }
+                            }
+                            Ok(ClientMsg::LampConfigUpdate(update)) => {
+                                if let Some(s) = session {
+                                    let _ = lamp_config_update_tx.send((s, update));
                                 }
                             }
                             _ => {}

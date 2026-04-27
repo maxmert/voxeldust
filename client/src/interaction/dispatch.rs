@@ -128,6 +128,8 @@ struct TabletParams<'w, 's> {
     config_panel_state: ResMut<'w, OpenConfigPanel>,
     panel_configs: Res<'w, crate::hud::panel_config::HudPanelConfigs>,
     hud_panel_edit: ResMut<'w, crate::hud::panel_config::OpenHudPanelConfig>,
+    lamp_configs: Res<'w, crate::lighting::emitters::LampConfigs>,
+    lamp_edit: ResMut<'w, crate::lighting::emitters::lamp_configs::OpenLampConfig>,
     storage: Res<'w, crate::chunk::cache::ChunkStorageCache>,
     existing_tablet: Query<'w, 's, Entity, With<HeldTablet>>,
     spawn_tablet: MessageWriter<'w, SpawnHeldTablet>,
@@ -152,6 +154,8 @@ fn dispatch_interactions(
         ref mut config_panel_state,
         ref panel_configs,
         ref mut hud_panel_edit,
+        ref lamp_configs,
+        ref mut lamp_edit,
         ref storage,
         ref existing_tablet,
         ref mut spawn_tablet,
@@ -212,6 +216,69 @@ fn dispatch_interactions(
             //         wait for BlockConfigState to populate.
             config_panel_state.editable = None;
             hud_panel_edit.editing = None;
+            lamp_edit.editing = None;
+
+            // Detect a lamp sub-block on the hit face. Lamps take
+            // priority over HudPanel detection so that a face hosting
+            // both (rare today, but legal) opens the lamp editor —
+            // the lamp's brightness contribution is the more visible
+            // piece of state to configure.
+            let lamp_hit = target.hit.and_then(|hit| {
+                let local = bevy::prelude::IVec3::new(
+                    hit.block_pos.x.rem_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.y.rem_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.z.rem_euclid(CHUNK_SIZE as i32),
+                );
+                let chunk_idx = bevy::prelude::IVec3::new(
+                    hit.block_pos.x.div_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.y.div_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.z.div_euclid(CHUNK_SIZE as i32),
+                );
+                let face = face_normal_to_face_u8(hit.face_normal);
+                storage.get(hit.shard, chunk_idx).and_then(|c| {
+                    c.get_sub_blocks(local.x as u8, local.y as u8, local.z as u8)
+                        .iter()
+                        .find(|e| {
+                            e.face == face
+                                && voxeldust_core::block::sub_block::is_lamp_sub_block(
+                                    e.element_type,
+                                )
+                        })
+                        .map(|e| (hit.shard, hit.block_pos, face, e.element_type))
+                })
+            });
+
+            if let Some((shard, block_pos, face, sub_type)) = lamp_hit {
+                let world_pos = glam::IVec3::new(block_pos.x, block_pos.y, block_pos.z);
+                let key = crate::lighting::emitters::lamp_configs::LampConfigKey {
+                    shard,
+                    block_pos: world_pos,
+                    face,
+                };
+                let config = lamp_configs
+                    .get(shard, world_pos, face)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        voxeldust_core::block::sub_block::LampConfig::default_for(sub_type)
+                    });
+                lamp_edit.editing =
+                    Some(crate::lighting::emitters::lamp_configs::LampConfigEditState {
+                        key,
+                        sub_type,
+                        config,
+                    });
+                spawn_tablet.write(SpawnHeldTablet {
+                    shard,
+                    config: voxeldust_core::signal::config::BlockSignalConfig::default(),
+                });
+                tracing::info!(
+                    block = ?(block_pos.x, block_pos.y, block_pos.z),
+                    face,
+                    ?sub_type,
+                    "F on lamp sub-block — opening lamp config",
+                );
+                return;
+            }
 
             // Detect HudPanel on the hit face.
             let hud_panel_hit = target.hit.and_then(|hit| {

@@ -3452,6 +3452,120 @@ fn drain_config_updates(
     }
 }
 
+/// Bridge system: drain LampConfigUpdate messages from the F-key
+/// tablet UI, validate ownership + lamp existence, persist the new
+/// `LampConfig` into `ShipGrid.lamp_configs`, and emit a `ChunkDelta`
+/// with the updated entry so every connected client sees the change
+/// on the next remesh.
+fn drain_lamp_config_updates(
+    mut bridge: ResMut<NetworkBridge>,
+    mut grid: ResMut<ShipGridResource>,
+) {
+    for _ in 0..16 {
+        let (session, update) = match bridge.lamp_config_update_rx.try_recv() {
+            Ok(u) => u,
+            Err(_) => break,
+        };
+        let world_pos = glam::IVec3::new(update.block_x, update.block_y, update.block_z);
+
+        // Validate: block must exist and host a lamp sub-block on the
+        // requested face. Reject silently otherwise (a malicious or
+        // stale client trying to set configs for non-lamps).
+        let cs = block::CHUNK_SIZE as i32;
+        let chunk_key = glam::IVec3::new(
+            world_pos.x.div_euclid(cs),
+            world_pos.y.div_euclid(cs),
+            world_pos.z.div_euclid(cs),
+        );
+        let local = (
+            world_pos.x.rem_euclid(cs) as u8,
+            world_pos.y.rem_euclid(cs) as u8,
+            world_pos.z.rem_euclid(cs) as u8,
+        );
+        let lamp_present = grid
+            .0
+            .get_chunk(chunk_key)
+            .map(|chunk| {
+                chunk
+                    .get_sub_blocks(local.0, local.1, local.2)
+                    .iter()
+                    .any(|e| {
+                        e.face == update.face
+                            && voxeldust_core::block::sub_block::is_lamp_sub_block(
+                                e.element_type,
+                            )
+                    })
+            })
+            .unwrap_or(false);
+        if !lamp_present {
+            tracing::warn!(
+                player_id = session.0,
+                ?world_pos,
+                face = update.face,
+                "LampConfigUpdate rejected: no lamp sub-block at requested face",
+            );
+            continue;
+        }
+
+        // Persist on the authoritative grid.
+        grid.0.set_lamp_config(
+            world_pos.x,
+            world_pos.y,
+            world_pos.z,
+            update.face,
+            update.config.clone(),
+        );
+
+        // Build a ChunkDelta carrying just this one lamp config so
+        // every connected client picks up the new value on the next
+        // remesh. The chunk's edit-seq advances so the client's
+        // monotonic-seq guard accepts the delta.
+        let seq = grid
+            .0
+            .get_chunk_mut(chunk_key)
+            .map(|c| c.next_edit_seq())
+            .unwrap_or(1);
+        let entry = voxeldust_core::client_message::LampConfigEntryData::from_lamp_config(
+            local.0,
+            local.1,
+            local.2,
+            update.face,
+            &update.config,
+        );
+        let delta = ServerMsg::ChunkDelta(ChunkDeltaData {
+            chunk_x: chunk_key.x,
+            chunk_y: chunk_key.y,
+            chunk_z: chunk_key.z,
+            seq,
+            mods: Vec::new(),
+            sub_block_mods: Vec::new(),
+            lamp_configs: vec![entry],
+        });
+
+        let cr = bridge.client_registry.clone();
+        tokio::spawn(async move {
+            if let Ok(reg) = cr.try_read() {
+                for addr in reg.udp_addrs() {
+                    if let Some(session) = reg.session_for_udp(addr) {
+                        let _ = reg.send_tcp(session, &delta).await;
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            player_id = session.0,
+            ?world_pos,
+            face = update.face,
+            subscribe = %update.config.subscribe_channel,
+            publish = %update.config.publish_channel,
+            kelvin = update.config.color_kelvin,
+            intensity = update.config.intensity_scale,
+            "LampConfigUpdate applied + broadcast",
+        );
+    }
+}
+
 /// Drain client publisher-widget signal publishes, validate
 /// `publish_policy` against the sender's session, and push into the
 /// pending aggregation for this tick. Authority chain:
@@ -6996,7 +7110,7 @@ fn build_ship_interior(
     // Bridge: drain async channels.
     app.add_systems(
         Update,
-        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_sub_block_edits, drain_client_signal_publishes, drain_quic).in_set(ShipSet::Bridge),
+        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_sub_block_edits, drain_client_signal_publishes, drain_lamp_config_updates, drain_quic).in_set(ShipSet::Bridge),
     );
 
     // Input: process connects, player input, preconnect, config updates.
