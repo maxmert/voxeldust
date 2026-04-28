@@ -248,6 +248,31 @@ fn dispatch_interactions(
                 })
             });
 
+            // Detect HudPanel on the hit face.
+            let hud_panel_hit = target.hit.and_then(|hit| {
+                let local = bevy::prelude::IVec3::new(
+                    hit.block_pos.x.rem_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.y.rem_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.z.rem_euclid(CHUNK_SIZE as i32),
+                );
+                let chunk_idx = bevy::prelude::IVec3::new(
+                    hit.block_pos.x.div_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.y.div_euclid(CHUNK_SIZE as i32),
+                    hit.block_pos.z.div_euclid(CHUNK_SIZE as i32),
+                );
+                let face = face_normal_to_face_u8(hit.face_normal);
+                storage.get(hit.shard, chunk_idx).and_then(|c| {
+                    c.get_sub_blocks(local.x as u8, local.y as u8, local.z as u8)
+                        .iter()
+                        .any(|e| {
+                            e.face == face
+                                && e.element_type
+                                    == voxeldust_core::block::sub_block::SubBlockType::HudPanel
+                        })
+                        .then_some((hit.shard, hit.block_pos, face))
+                })
+            });
+
             if let Some((shard, block_pos, face, sub_type)) = lamp_hit {
                 let world_pos = glam::IVec3::new(block_pos.x, block_pos.y, block_pos.z);
                 let key = crate::lighting::emitters::lamp_configs::LampConfigKey {
@@ -277,35 +302,7 @@ fn dispatch_interactions(
                     ?sub_type,
                     "F on lamp sub-block — opening lamp config",
                 );
-                return;
-            }
-
-            // Detect HudPanel on the hit face.
-            let hud_panel_hit = target.hit.and_then(|hit| {
-                let local = bevy::prelude::IVec3::new(
-                    hit.block_pos.x.rem_euclid(CHUNK_SIZE as i32),
-                    hit.block_pos.y.rem_euclid(CHUNK_SIZE as i32),
-                    hit.block_pos.z.rem_euclid(CHUNK_SIZE as i32),
-                );
-                let chunk_idx = bevy::prelude::IVec3::new(
-                    hit.block_pos.x.div_euclid(CHUNK_SIZE as i32),
-                    hit.block_pos.y.div_euclid(CHUNK_SIZE as i32),
-                    hit.block_pos.z.div_euclid(CHUNK_SIZE as i32),
-                );
-                let face = face_normal_to_face_u8(hit.face_normal);
-                storage.get(hit.shard, chunk_idx).and_then(|c| {
-                    c.get_sub_blocks(local.x as u8, local.y as u8, local.z as u8)
-                        .iter()
-                        .any(|e| {
-                            e.face == face
-                                && e.element_type
-                                    == voxeldust_core::block::sub_block::SubBlockType::HudPanel
-                        })
-                        .then_some((hit.shard, hit.block_pos, face))
-                })
-            });
-
-            if let Some((shard, block_pos, face)) = hud_panel_hit {
+            } else if let Some((shard, block_pos, face)) = hud_panel_hit {
                 let key = crate::hud::panel_config::HudPanelKey {
                     shard,
                     block_pos: bevy::prelude::IVec3::new(block_pos.x, block_pos.y, block_pos.z),

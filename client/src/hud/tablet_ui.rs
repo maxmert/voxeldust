@@ -595,8 +595,6 @@ fn paint_lamp_editor(
     focus: &HudFocusState,
     despawn_tablet: &mut MessageWriter<DespawnHeldTablet>,
 ) {
-    let _ = focus; // tablet is in lamp-edit mode; cursor focus
-                   // already handled by the caller.
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(10, 16, 26)))
         .show(ctx, |ui| {
@@ -742,6 +740,16 @@ fn paint_lamp_editor(
                         );
                     });
                 });
+
+            // In-world cursor overlay, painted LAST so it always sits
+            // on top of the editor chrome. Without this the player
+            // sees no reticle and assumes the cursor isn't moving,
+            // even though `focus.cursor_uv` does update.
+            if focus.active {
+                let px = focus.cursor_uv.x * (TABLET_UI_RES as f32 - 1.0);
+                let py = focus.cursor_uv.y * (TABLET_UI_RES as f32 - 1.0);
+                paint_in_world_cursor(ui, egui::pos2(px, py));
+            }
 
             if reset {
                 state.config = voxeldust_core::block::sub_block::LampConfig::default_for(state.sub_type);
