@@ -26,6 +26,7 @@ use bevy::prelude::*;
 
 pub mod atmosphere;
 pub mod camera;
+pub mod eclipse;
 pub mod emitters;
 pub mod ibl;
 pub mod quality;
@@ -36,17 +37,26 @@ pub use solar::{SolarLight, SolarLightPlugin};
 
 /// Parent lighting plugin. Wires every lighting sub-plugin so callers add a
 /// single plugin in `main.rs`.
+///
+/// **Eclipse plugin must be added before any system that touches the
+/// chunk material handle**, because it registers
+/// `MaterialPlugin::<ExtendedMaterial<StandardMaterial, EclipseExt>>`
+/// (the asset type for `ChunkMaterial`). Without that registration,
+/// `ResMut<Assets<ChunkMaterial>>` queries fail and the chunk-stream
+/// systems can't allocate the shared material handle. We add it
+/// first in this plugin chain — the chunk plugin (`ChunkStreamPlugin`)
+/// is added by `main.rs` after `LightingPlugin`.
 pub struct LightingPlugin;
 
 impl Plugin for LightingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(quality::LightingQualityPlugin)
+        app.add_plugins(eclipse::EclipsePlugin)
+            .add_plugins(quality::LightingQualityPlugin)
             .add_plugins(camera::LightingCameraPlugin)
             .add_plugins(solar::SolarLightPlugin)
             .add_plugins(ibl::IblPlugin)
             .add_plugins(atmosphere::AtmospherePlugin)
             .add_plugins(rotation::PlanetRotationPlugin)
             .add_plugins(emitters::LocalLightingPlugin);
-        // Phase 6 will register: eclipse.
     }
 }

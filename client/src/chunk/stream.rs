@@ -25,7 +25,7 @@ use voxeldust_core::block::{
 };
 
 use crate::chunk::cache::{ChunkKey, ChunkStorageCache};
-use crate::chunk::material::{ensure_chunk_material, ChunkMaterialCache};
+use crate::chunk::material::{ensure_chunk_material, ChunkMaterial, ChunkMaterialCache};
 use crate::net::{GameEvent, NetEvent};
 use crate::shard::{PrimaryShard, Secondaries, ShardKey, SourceIndex};
 
@@ -55,6 +55,7 @@ pub fn ingest_primary_chunks(
     mut events: MessageReader<GameEvent>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut chunk_materials: ResMut<Assets<ChunkMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut mat_cache: ResMut<ChunkMaterialCache>,
@@ -78,7 +79,7 @@ pub fn ingest_primary_chunks(
         return;
     };
 
-    let material = ensure_chunk_material(&mut mat_cache, &mut materials);
+    let material = ensure_chunk_material(&mut mat_cache, &mut chunk_materials);
     let Some(&parent) = sources.by_shard.get(&primary_key) else {
         return;
     };
@@ -138,6 +139,7 @@ pub fn ingest_secondary_chunks(
     mut events: MessageReader<GameEvent>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut chunk_materials: ResMut<Assets<ChunkMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut mat_cache: ResMut<ChunkMaterialCache>,
@@ -150,7 +152,7 @@ pub fn ingest_secondary_chunks(
     config: Res<crate::config::GameConfig>,
     lamp_configs: Res<crate::lighting::emitters::LampConfigs>,
 ) {
-    let material = ensure_chunk_material(&mut mat_cache, &mut materials);
+    let material = ensure_chunk_material(&mut mat_cache, &mut chunk_materials);
     for GameEvent(ev) in events.read() {
         match ev {
             NetEvent::SecondaryChunkSnapshot { seed, data } => {
@@ -221,7 +223,7 @@ fn spawn_or_replace_chunk(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
-    material: &Handle<StandardMaterial>,
+    material: &Handle<ChunkMaterial>,
     registry: &BlockRegistry,
     chunks: &mut ChunkIndex,
     storage: &mut ChunkStorageCache,
@@ -258,7 +260,7 @@ fn apply_chunk_delta(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
-    material: &Handle<StandardMaterial>,
+    material: &Handle<ChunkMaterial>,
     registry: &BlockRegistry,
     chunks: &mut ChunkIndex,
     storage: &mut ChunkStorageCache,
@@ -346,7 +348,7 @@ fn remesh_chunk_from_cache(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
-    material: &Handle<StandardMaterial>,
+    material: &Handle<ChunkMaterial>,
     registry: &BlockRegistry,
     chunks: &mut ChunkIndex,
     storage: &ChunkStorageCache,
