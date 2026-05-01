@@ -34,6 +34,8 @@ use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{
     celestial_time_from_epoch, NetworkBridge, ShardHarness, ShardHarnessConfig,
 };
+use voxeldust_shard_common::wire_dict_registry::{decode_v2_batch, encode_v2_batch};
+use voxeldust_core::signal::ship_frequency_interests::ShipFrequencyInterests;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -498,6 +500,144 @@ fn drain_connects(
     }
 }
 
+/// Phase 3F.6/9.D: keep a precise per-frequency Radio subscription
+/// alive at the galaxy-shard.
+///
+/// **Mode** is chosen by [`SystemRadioSubscriptionMode`]:
+///   * `Wildcard`: send a single wildcard `RadioSubscribe` (legacy
+///     fallback / safety net for the period when ship-shards aren't
+///     yet propagating their interest reliably).
+///   * `PerFrequency`: aggregate `ShipFrequencyInterests`,
+///     send one `RadioSubscribe` listing every frequency at least
+///     one hosted ship has a Listener for. **No** wildcard. If the
+///     aggregated set is empty, no message is sent — system-shard
+///     stays silent at galaxy until a ship actually wants Radio.
+///
+/// Cadence: 600 ticks (30s @ 20Hz), lease 90s (3× headroom for
+/// transient network jitter). The lease + freshness model is
+/// orthogonal to the mode choice.
+///
+/// Galaxy's `RadioSubscribers::add` is idempotent + lease-extending,
+/// so re-sending the same set every 30s is a no-op against an
+/// up-to-date galaxy.
+const RADIO_SUBSCRIPTION_REFRESH_TICKS: u64 = 600;
+const RADIO_SUBSCRIPTION_LEASE_MS: u64 = 90_000;
+
+/// How this system-shard subscribes to Radio at the galaxy. Default
+/// is `PerFrequency` — the AAA-quality post-3F.9 behavior. Operators
+/// can fall back to `Wildcard` via `SystemHarnessConfig` extension if
+/// per-frequency propagation regresses (it's the safety net).
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemRadioSubscriptionMode {
+    /// Single wildcard subscription — every Radio batch is fanned to
+    /// us regardless of frequency.
+    #[allow(dead_code)]
+    Wildcard,
+    /// Aggregated per-frequency subscription based on hosted ships'
+    /// Listener interest set.
+    PerFrequency,
+}
+
+impl Default for SystemRadioSubscriptionMode {
+    fn default() -> Self {
+        // Per-frequency is the post-3F.9 default. Wildcard remains as
+        // a manual override for emergency rollback.
+        Self::PerFrequency
+    }
+}
+
+fn refresh_galaxy_radio_subscription(
+    bridge: Res<NetworkBridge>,
+    identity: Res<ShardIdentity>,
+    interests: Res<ShipFrequencyInterests>,
+    mode: Res<SystemRadioSubscriptionMode>,
+    tick: Res<ecs::TickCounter>,
+) {
+    use voxeldust_core::shard_message::RadioSubscribeData;
+    if tick.0 % RADIO_SUBSCRIPTION_REFRESH_TICKS != 0 {
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let lease_until_ms = now_ms.saturating_add(RADIO_SUBSCRIPTION_LEASE_MS);
+    let our_shard_id = identity.0.0;
+
+    // Build the request payload according to mode.
+    let req = match *mode {
+        SystemRadioSubscriptionMode::Wildcard => RadioSubscribeData {
+            subscriber_shard_id: our_shard_id,
+            frequencies: Vec::new(),
+            wildcard: true,
+            lease_until_ms,
+        },
+        SystemRadioSubscriptionMode::PerFrequency => {
+            // Snapshot the aggregated frequency union from hosted
+            // ships' interests. Sorted for deterministic wire output
+            // (nice for log / pcap diffing).
+            let mut freqs: Vec<u32> = interests.aggregated_frequencies(now_ms).into_iter().collect();
+            freqs.sort();
+            if freqs.is_empty() {
+                // No active listeners on Radio → no subscription
+                // needed. We don't even send a "no, really, drop me"
+                // unsubscribe — galaxy's lease cleanup handles
+                // expiry naturally and it's idempotent on a non-
+                // existent subscriber. Saves one QUIC round-trip
+                // every 30s in the common "no listeners" case.
+                return;
+            }
+            RadioSubscribeData {
+                subscriber_shard_id: our_shard_id,
+                frequencies: freqs,
+                wildcard: false,
+                lease_until_ms,
+            }
+        }
+    };
+
+    let peer_registry = bridge.peer_registry.clone();
+    let quic_send_tx = bridge.quic_send_tx.clone();
+    tokio::spawn(async move {
+        let registry = peer_registry.read().await;
+        let galaxies: Vec<_> = registry
+            .find_by_type(ShardType::Galaxy)
+            .into_iter()
+            .map(|info| (info.id, info.endpoint.quic_addr))
+            .collect();
+        drop(registry);
+        for (galaxy_id, addr) in galaxies {
+            let _ = quic_send_tx
+                .send((galaxy_id, addr, ShardMsg::RadioSubscribe(req.clone())))
+                .await;
+        }
+    });
+}
+
+/// Phase 3F.9.D: 1Hz sweep that drops `ShipFrequencyInterests` whose
+/// lease has expired. A ship that disconnects without a clean
+/// "drop" message gets its interest cleared within ~90s + 1s sweep.
+fn sweep_ship_frequency_interests(
+    mut interests: ResMut<ShipFrequencyInterests>,
+    tick: Res<ecs::TickCounter>,
+) {
+    if tick.0 % 20 != 0 {
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let dropped = interests.cleanup_expired(now_ms);
+    if dropped > 0 {
+        tracing::debug!(
+            dropped,
+            tracked = interests.total_count(),
+            "ship_frequency_interests cleanup"
+        );
+    }
+}
+
 fn drain_quic(
     mut bridge: ResMut<NetworkBridge>,
     mut control_events: MessageWriter<ShipControlMsg>,
@@ -508,7 +648,9 @@ fn drain_quic(
     mut props_events: MessageWriter<ShipPropsUpdateMsg>,
     mut collider_sync_events: MessageWriter<ShipColliderSyncMsg>,
     mut digest_events: MessageWriter<PlanetPlayerDigestMsg>,
+    mut ship_freq_interests: ResMut<ShipFrequencyInterests>,
     ship_index: Res<ecs::ShipEntityIndex>,
+    shard_identity: Res<ShardIdentity>,
     tick: Res<ecs::TickCounter>,
 ) {
     for _ in 0..32 {
@@ -575,29 +717,193 @@ fn drain_quic(
                 }
             }
             ShardMsg::SignalBroadcastBatch(batch) => {
-                // Relay LongRange (scope=2) and Radio (scope=3) entries to all peers.
-                // ShortRange entries (scope=1) should not arrive here but are filtered
-                // out defensively to avoid unnecessary relay.
-                let relay_entries: Vec<_> = batch.entries.iter()
-                    .filter(|e| e.scope >= 2)
+                // Phase 3F.6: split routing by scope.
+                //   scope=2 (LongRange): system-wide flood — fans out to
+                //     every non-source peer (as before).
+                //   scope=3 (Radio): forwards ONLY to galaxy-shard peers.
+                //     Galaxy then fans out per-frequency via its
+                //     RadioSubscribers registry.
+                //   scope=1 (ShortRange): never relayed at this layer
+                //     (filtered out defensively).
+                let long_range: Vec<_> = batch.entries.iter()
+                    .filter(|e| e.scope == 2)
                     .cloned()
                     .collect();
-                if !relay_entries.is_empty() {
-                    let relay_batch = ShardMsg::SignalBroadcastBatch(
-                        voxeldust_core::shard_message::SignalBroadcastBatchData {
-                            source_shard_id: batch.source_shard_id,
-                            source_position: batch.source_position,
-                            entries: relay_entries,
-                        },
-                    );
-                    if let Ok(reg) = bridge.peer_registry.try_read() {
+                let radio: Vec<_> = batch.entries.iter()
+                    .filter(|e| e.scope == 3)
+                    .cloned()
+                    .collect();
+                if long_range.is_empty() && radio.is_empty() {
+                    continue;
+                }
+
+                if let Ok(reg) = bridge.peer_registry.try_read() {
+                    if !long_range.is_empty() {
+                        let lr_batch = ShardMsg::SignalBroadcastBatch(
+                            voxeldust_core::shard_message::SignalBroadcastBatchData {
+                                source_shard_id: batch.source_shard_id,
+                                source_position: batch.source_position,
+                                entries: long_range,
+                            },
+                        );
                         for peer in reg.all() {
                             if peer.id.0 == batch.source_shard_id {
                                 continue;
                             }
                             if let Some(addr) = reg.quic_addr(peer.id) {
                                 let _ = bridge.quic_send_tx.try_send((
-                                    peer.id, addr, relay_batch.clone(),
+                                    peer.id, addr, lr_batch.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    if !radio.is_empty() {
+                        let radio_batch = ShardMsg::SignalBroadcastBatch(
+                            voxeldust_core::shard_message::SignalBroadcastBatchData {
+                                source_shard_id: batch.source_shard_id,
+                                source_position: batch.source_position,
+                                entries: radio,
+                            },
+                        );
+                        let our_id = shard_identity.0;
+                        let source = voxeldust_core::shard_types::ShardId(batch.source_shard_id);
+                        let dec = reg.radio_fanout_decision(source, our_id);
+                        if dec.to_galaxy {
+                            for peer in reg.find_by_type(ShardType::Galaxy) {
+                                if let Some(addr) = reg.quic_addr(peer.id) {
+                                    let _ = bridge.quic_send_tx.try_send((
+                                        peer.id, addr, radio_batch.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                        if dec.to_local_ships {
+                            for peer in reg.local_ships(our_id, source) {
+                                if let Some(addr) = reg.quic_addr(peer.id) {
+                                    let _ = bridge.quic_send_tx.try_send((
+                                        peer.id, addr, radio_batch.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ShardMsg::SignalBroadcastBatchV2(batch) => {
+                // V2 relay: decode against the SOURCE peer's InboundDict
+                // to recover V1 entries, then re-encode V2 per RECEIVING
+                // peer against that peer's OutboundDict. Wire ids are
+                // namespaced per (sender, receiver) connection — we
+                // can't simply forward the source-namespaced batch.
+                //
+                // Single write-lock acquisition for the whole
+                // decode + N×encode cycle so a busy relay isn't
+                // thrashing the wire-dict mutex.
+                let source_id = voxeldust_core::shard_types::ShardId(batch.source_shard_id);
+                let source_position = batch.source_position;
+                let source_shard_id = batch.source_shard_id;
+
+                let mut registry = match bridge.wire_dicts.try_write() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        tracing::warn!(
+                            source = source_shard_id,
+                            "system-shard relay: wire-dict lock contended; V2 batch dropped"
+                        );
+                        continue;
+                    }
+                };
+                let v1_entries = match decode_v2_batch(&mut registry, source_id, batch) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        tracing::debug!(
+                            source = source_shard_id,
+                            error = %e,
+                            "system-shard relay: V2 decode failed; batch dropped"
+                        );
+                        continue;
+                    }
+                };
+                // Split by scope, same routing rule as the V1 arm.
+                let mut long_range: Vec<_> = Vec::new();
+                let mut radio: Vec<_> = Vec::new();
+                for e in v1_entries {
+                    match e.scope {
+                        2 => long_range.push(e),
+                        3 => radio.push(e),
+                        _ => {} // ShortRange or unknown — never relayed here
+                    }
+                }
+                if long_range.is_empty() && radio.is_empty() {
+                    continue;
+                }
+
+                if let Ok(reg) = bridge.peer_registry.try_read() {
+                    if !long_range.is_empty() {
+                        for peer in reg.all() {
+                            if peer.id.0 == source_shard_id {
+                                continue;
+                            }
+                            let Some(addr) = reg.quic_addr(peer.id) else {
+                                continue;
+                            };
+                            let v2_batch = encode_v2_batch(
+                                &mut registry,
+                                peer.id,
+                                source_shard_id,
+                                source_position,
+                                long_range.clone(),
+                            );
+                            let _ = bridge.quic_send_tx.try_send((
+                                peer.id,
+                                addr,
+                                ShardMsg::SignalBroadcastBatchV2(v2_batch),
+                            ));
+                        }
+                    }
+                    if !radio.is_empty() {
+                        let our_id = shard_identity.0;
+                        let dec = reg.radio_fanout_decision(source_id, our_id);
+                        if dec.to_galaxy {
+                            for peer in reg.find_by_type(ShardType::Galaxy) {
+                                let Some(addr) = reg.quic_addr(peer.id) else {
+                                    continue;
+                                };
+                                let v2_batch = encode_v2_batch(
+                                    &mut registry,
+                                    peer.id,
+                                    source_shard_id,
+                                    source_position,
+                                    radio.clone(),
+                                );
+                                let _ = bridge.quic_send_tx.try_send((
+                                    peer.id,
+                                    addr,
+                                    ShardMsg::SignalBroadcastBatchV2(v2_batch),
+                                ));
+                            }
+                        }
+                        if dec.to_local_ships {
+                            // Snapshot peer ids first because we need
+                            // mutable wire-dict registry access while
+                            // iterating, and `local_ships` borrows
+                            // `reg` immutably.
+                            let local_ship_targets: Vec<_> = reg
+                                .local_ships(our_id, source_id)
+                                .filter_map(|info| Some((info.id, info.endpoint.quic_addr)))
+                                .collect();
+                            for (peer_id, addr) in local_ship_targets {
+                                let v2_batch = encode_v2_batch(
+                                    &mut registry,
+                                    peer_id,
+                                    source_shard_id,
+                                    source_position,
+                                    radio.clone(),
+                                );
+                                let _ = bridge.quic_send_tx.try_send((
+                                    peer_id,
+                                    addr,
+                                    ShardMsg::SignalBroadcastBatchV2(v2_batch),
                                 ));
                             }
                         }
@@ -619,6 +925,18 @@ fn drain_quic(
             }
             ShardMsg::PlanetPlayerDigest(data) => {
                 digest_events.write(PlanetPlayerDigestMsg { data });
+            }
+            ShardMsg::ShipFrequencyInterest(data) => {
+                // Phase 3F.9.D: ship-shard reports its CURRENT
+                // Listener frequency set. Empty set drops the entry;
+                // non-empty replaces. The reconciler at the same
+                // cadence aggregates and propagates upward to galaxy.
+                let ship = voxeldust_core::shard_types::ShardId(data.ship_shard_id);
+                ship_freq_interests.upsert(
+                    ship,
+                    data.frequencies,
+                    data.lease_until_ms,
+                );
             }
             other => {
                 if tick.0 % 100 == 0 {
@@ -5519,6 +5837,12 @@ fn build_app(
     app.insert_resource(ecs::PhysicsTime::default());
     app.insert_resource(ecs::TickCounter::default());
     app.insert_resource(ecs::ShipEntityIndex::default());
+    // Phase 3F.9.D: per-ship Radio frequency interest tracker.
+    // Populated by `drain_quic`'s `ShipFrequencyInterest` arm; aggregated
+    // by `reconcile_galaxy_radio_subscriptions` and shipped upward to the
+    // galaxy-shard as a precise per-frequency `RadioSubscribe`.
+    app.insert_resource(ShipFrequencyInterests::default());
+    app.insert_resource(SystemRadioSubscriptionMode::default());
     app.insert_resource(GalaxyContext {
         seed: galaxy_seed,
         star_index,
@@ -5575,6 +5899,15 @@ fn build_app(
     app.add_systems(
         Update,
         (drain_connects, drain_quic, drain_provisions, eva_input).in_set(SystemShardSet::Bridge),
+    );
+
+    // Phase 3F.6/9.D: keep this system-shard's Radio subscription
+    // alive at galaxy. Mode (`Wildcard` vs `PerFrequency`) is chosen
+    // by the `SystemRadioSubscriptionMode` resource — default is
+    // PerFrequency post-3F.9.
+    app.add_systems(
+        Update,
+        (refresh_galaxy_radio_subscription, sweep_ship_frequency_interests),
     );
 
     // Spawn/process: convert events into entities and component updates.
@@ -5694,6 +6027,10 @@ fn main() {
         )
         .init();
 
+    // Install Prometheus exporter before any subsystem emits a metric.
+    // Healthz server reads the resulting handle to mount /metrics.
+    voxeldust_shard_common::observability::install_prometheus_recorder();
+
     let shard_id = ShardId(args.shard_id);
     let bind = "0.0.0.0";
     let config = ShardHarnessConfig {
@@ -5711,6 +6048,7 @@ fn main() {
         galaxy_seed: None,
         host_shard_id: None,
         advertise_host: args.advertise_host,
+        wire_dict_v2_send: true,
     };
 
     info!(

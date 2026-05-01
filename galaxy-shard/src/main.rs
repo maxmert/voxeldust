@@ -19,9 +19,11 @@ use voxeldust_core::handoff::{self, GalaxyHandoffContext, ShardPreConnect};
 use voxeldust_core::shard_message::{
     LightingInfoData, ShardMsg, ShipPositionUpdate, SystemSceneUpdateData,
 };
+use voxeldust_core::signal::radio_subscribers::RadioSubscribers;
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
+use voxeldust_shard_common::wire_dict_registry::{decode_v2_batch, encode_v2_batch};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -192,6 +194,7 @@ fn drain_quic(
     mut bridge: ResMut<NetworkBridge>,
     mut handoff_events: MessageWriter<WarpHandoffEvent>,
     mut warp_ap_events: MessageWriter<WarpAutopilotEvent>,
+    mut radio_subs: ResMut<RadioSubscribers>,
     tick: Res<ecs::TickCounter>,
 ) {
     for _ in 0..32 {
@@ -230,6 +233,158 @@ fn drain_quic(
             ShardMsg::AutopilotCommand(_) => {
                 // Planet autopilot not supported during warp — ignore.
             }
+            ShardMsg::RadioSubscribe(req) => {
+                // Phase 3F.5: register a galaxy-Radio subscriber.
+                // Idempotent — re-subscribing extends the lease.
+                radio_subs.add(
+                    voxeldust_core::shard_types::ShardId(req.subscriber_shard_id),
+                    &req.frequencies,
+                    req.wildcard,
+                    req.lease_until_ms,
+                );
+                tracing::debug!(
+                    subscriber = req.subscriber_shard_id,
+                    wildcard = req.wildcard,
+                    freq_count = req.frequencies.len(),
+                    lease_until_ms = req.lease_until_ms,
+                    "RadioSubscribe registered"
+                );
+            }
+            ShardMsg::RadioUnsubscribe(req) => {
+                radio_subs.remove(
+                    voxeldust_core::shard_types::ShardId(req.subscriber_shard_id),
+                    &req.frequencies,
+                    req.wildcard,
+                );
+                tracing::debug!(
+                    subscriber = req.subscriber_shard_id,
+                    wildcard = req.wildcard,
+                    freq_count = req.frequencies.len(),
+                    "RadioUnsubscribe applied"
+                );
+            }
+            ShardMsg::SignalBroadcastBatch(batch) => {
+                // Phase 3F.4 V1 fan-out via the shared
+                // `RadioSubscribers::group_for_relay` helper —
+                // identical routing decision as the V2 arm so we
+                // can't accidentally diverge them.
+                if batch.entries.iter().all(|e| e.scope != 3) {
+                    continue;
+                }
+                let radio_entries: Vec<_> = batch
+                    .entries
+                    .iter()
+                    .filter(|e| e.scope == 3)
+                    .cloned()
+                    .collect();
+                let now_ms = signal_now_ms();
+                let source_shard_id = batch.source_shard_id;
+                let buckets = radio_subs.group_for_relay(
+                    voxeldust_core::shard_types::ShardId(source_shard_id),
+                    &radio_entries,
+                    now_ms,
+                    |e| e.frequency,
+                );
+                if buckets.is_empty() {
+                    continue;
+                }
+                let peer_registry = bridge.peer_registry.clone();
+                let quic_send_tx = bridge.quic_send_tx.clone();
+                let source_position = batch.source_position;
+                tokio::spawn(async move {
+                    let registry = peer_registry.read().await;
+                    for (sub, entries) in buckets {
+                        let Some(addr) = registry.quic_addr(sub) else {
+                            continue;
+                        };
+                        let relay = ShardMsg::SignalBroadcastBatch(
+                            voxeldust_core::shard_message::SignalBroadcastBatchData {
+                                source_shard_id,
+                                source_position,
+                                entries,
+                            },
+                        );
+                        let _ = quic_send_tx.send((sub, addr, relay)).await;
+                    }
+                });
+            }
+            ShardMsg::SignalBroadcastBatchV2(batch) => {
+                // Phase 3F.4 V2 fan-out. Decode against the source
+                // peer's InboundDict to recover entries with channel
+                // names, fan out per-frequency, then re-encode V2 per
+                // receiving subscriber against that subscriber's
+                // OutboundDict (wire ids are namespaced per-pair).
+                let source_id = voxeldust_core::shard_types::ShardId(batch.source_shard_id);
+                let source_position = batch.source_position;
+                let source_shard_id = batch.source_shard_id;
+
+                let mut wd = match bridge.wire_dicts.try_write() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        tracing::warn!(
+                            source = source_shard_id,
+                            "galaxy relay: wire-dict lock contended; V2 batch dropped"
+                        );
+                        continue;
+                    }
+                };
+                let v1_entries = match decode_v2_batch(&mut wd, source_id, batch) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        tracing::debug!(
+                            source = source_shard_id,
+                            error = %e,
+                            "galaxy relay: V2 decode failed; batch dropped"
+                        );
+                        continue;
+                    }
+                };
+                if v1_entries.iter().all(|e| e.scope != 3) {
+                    continue;
+                }
+                let radio_entries: Vec<_> =
+                    v1_entries.into_iter().filter(|e| e.scope == 3).collect();
+                let now_ms = signal_now_ms();
+                let buckets = radio_subs.group_for_relay(
+                    source_id,
+                    &radio_entries,
+                    now_ms,
+                    |e| e.frequency,
+                );
+                if buckets.is_empty() {
+                    continue;
+                }
+                // Re-encode V2 per receiving subscriber while we still
+                // hold the wire-dict write lock.
+                let mut to_dispatch: Vec<(
+                    voxeldust_core::shard_types::ShardId,
+                    voxeldust_core::shard_message::SignalBroadcastBatchV2Data,
+                )> = Vec::with_capacity(buckets.len());
+                for (sub, entries) in buckets {
+                    let v2 = encode_v2_batch(
+                        &mut wd,
+                        sub,
+                        source_shard_id,
+                        source_position,
+                        entries,
+                    );
+                    to_dispatch.push((sub, v2));
+                }
+                drop(wd); // release before async dispatch
+                let peer_registry = bridge.peer_registry.clone();
+                let quic_send_tx = bridge.quic_send_tx.clone();
+                tokio::spawn(async move {
+                    let registry = peer_registry.read().await;
+                    for (sub, v2) in to_dispatch {
+                        let Some(addr) = registry.quic_addr(sub) else {
+                            continue;
+                        };
+                        let _ = quic_send_tx
+                            .send((sub, addr, ShardMsg::SignalBroadcastBatchV2(v2)))
+                            .await;
+                    }
+                });
+            }
             other => {
                 if tick.0 % 100 == 0 {
                     warn!(
@@ -239,6 +394,40 @@ fn drain_quic(
                 }
             }
         }
+    }
+}
+
+/// UNIX wall-clock millis. Used as `now_ms` argument for
+/// `RadioSubscribers` lease checks. Pulled inline so this file
+/// doesn't grow a util module just for a one-liner.
+fn signal_now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 1Hz sweep that drops Radio subscriptions whose `lease_until_ms`
+/// has passed. A subscriber that disconnects without a clean
+/// `RadioUnsubscribe` will get cleaned up here within ~1s of its
+/// lease expiring — bounded freshness even when the network
+/// misbehaves.
+fn sweep_radio_subscriptions(
+    mut subs: ResMut<RadioSubscribers>,
+    tick: Res<ecs::TickCounter>,
+) {
+    if tick.0 % 20 != 0 {
+        return;
+    }
+    let now_ms = signal_now_ms();
+    let dropped = subs.cleanup_expired(now_ms);
+    if dropped > 0 {
+        tracing::debug!(
+            dropped,
+            tracked = subs.total_count(),
+            "galaxy radio_subscribers cleanup"
+        );
     }
 }
 
@@ -1070,6 +1259,11 @@ fn build_app(
     app.insert_resource(HttpClient(http_client));
     app.insert_resource(ShipShardDirectory::default());
     app.insert_resource(ecs::TickCounter::default());
+    // Phase 3F: galaxy-shard signal_relay subscriber registry.
+    // Galaxy fans Radio-scope `SignalBroadcastBatch` / V2 messages
+    // out to shards that have explicitly registered via
+    // `ShardMsg::RadioSubscribe`. Cleanup runs at low cadence.
+    app.insert_resource(RadioSubscribers::default());
 
     // Events.
     app.add_message::<ClientConnectedEvent>();
@@ -1096,6 +1290,11 @@ fn build_app(
         Update,
         (drain_connects, drain_quic, drain_provisions).in_set(GalaxySet::Bridge),
     );
+
+    // Phase 3F: 1Hz sweep for expired Radio subscriptions. Cheap;
+    // bounded by `RadioSubscribers::cleanup_expired` which walks
+    // the wildcard map + every per-frequency bucket once.
+    app.add_systems(Update, sweep_radio_subscriptions);
 
     // Spawn/process: convert events into entities and component updates.
     app.add_systems(
@@ -1173,6 +1372,10 @@ fn main() {
         )
         .init();
 
+    // Install Prometheus exporter before any subsystem emits a metric.
+    // Healthz server reads the resulting handle to mount /metrics.
+    voxeldust_shard_common::observability::install_prometheus_recorder();
+
     let shard_id = ShardId(args.shard_id);
     let galaxy_seed = args.seed;
     let bind = "0.0.0.0";
@@ -1191,6 +1394,7 @@ fn main() {
         galaxy_seed: Some(galaxy_seed),
         host_shard_id: None,
         advertise_host: args.advertise_host,
+        wire_dict_v2_send: true,
     };
 
     info!(shard_id = args.shard_id, galaxy_seed, "galaxy shard starting");

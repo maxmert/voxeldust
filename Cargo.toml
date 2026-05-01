@@ -53,6 +53,47 @@ bevy_app = "0.18"
 bevy_tasks = "0.18"
 binary-greedy-meshing = "0.5"
 half = "2"
+# OS-backed cryptographically-secure RNG — used for `block_uid` and per-channel
+# `signature` generation in the signal pipeline (Phase 1+) and HMAC keys in
+# Phase 3. `OsRng` is the right choice here: signal-level identity needs
+# unforgeability across shard restarts, not just statistical randomness.
+rand = "0.8"
+# HMAC-SHA256 for cross-shard signal auth (Phase 3). Per-channel signature
+# is the key; truncated 128-bit tag is what the wire carries. `sha2` is
+# already in the lock file via rustls/ring, so the only new direct dep is
+# the ~200-line `hmac` wrapper. `subtle` provides constant-time tag
+# comparison so verifiers don't leak timing information about partial
+# matches under attack.
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.5"
+# Tiny inline-storage Vec — used by `RemoteAccessGrant` (typically 1–4
+# channels per grant) and `SignalChannel.subscribers` (typically <8 refs).
+# Avoids a heap allocation per grant in the common case.
+smallvec = "1"
+# base64 encoding for grant key transfer over the network — clients and
+# the configurator UI work with text-friendly base64 strings; the wire
+# carries the raw [u8; 32] bytes when efficiency matters and base64 when
+# UX clarity matters (GrantsSnapshotData → tablet UI).
+base64 = "0.22"
+# Metrics facade — `counter!`/`gauge!`/`histogram!` macros become no-ops
+# when no exporter is registered, so production code can sprinkle metric
+# calls freely without runtime cost in test/dev builds. Pair with
+# `metrics-exporter-prometheus` at the binary level when /metrics
+# scraping is needed.
+metrics = "0.24"
+# Prometheus-format exporter for the `metrics` facade. We disable default
+# features (the built-in HTTP listener) because every shard already runs
+# an axum router on `healthz_addr` — adding the exporter to that router
+# is one less port to expose, one less binding to coordinate in k8s.
+# `PrometheusBuilder::install_recorder()` returns a `PrometheusHandle`
+# (cheap to clone) whose `render()` produces the exposition payload.
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+# Used in unit tests for redb persistence (`grant_persistence`,
+# future block-config tests). Not needed at runtime, but keeping it
+# in the workspace deps lets every crate's `dev-dependencies`
+# reference it without re-pinning a version.
+tempfile = "3"
 
 [profile.dev.package.noise]
 opt-level = 3

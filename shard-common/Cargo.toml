@@ -3,9 +3,6 @@ name = "voxeldust-shard-common"
 version.workspace = true
 edition.workspace = true
 
-[dev-dependencies]
-glam = { workspace = true }
-
 [dependencies]
 voxeldust-core = { workspace = true }
 quinn = { workspace = true }
@@ -24,3 +21,21 @@ lz4_flex = { workspace = true }
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
 bevy_tasks = { workspace = true }
+# Used by `signal_pipeline::apply_remote_signal_publish` to set the
+# `source_position` zero-vector on outbound `SignalBroadcastBatch`
+# messages issued from grant-bearing publishes.
+glam = { workspace = true }
+# Used by `signal_pipeline::apply_add_held_grant` to construct mirror
+# grants with empty channel coverage (filled in at Listener config time).
+smallvec = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+# redb embedded KV store. Used by `grant_persistence` for shard-local
+# `RemoteAccessGrant` durability across restarts. The shard binary
+# owns the database file; this crate provides the helpers and the
+# `Bevy` queue resource that drains into it.
+redb = { workspace = true }
+
+[dev-dependencies]
+# Tempdir for redb-backed unit tests (grant_persistence, etc).
+tempfile = { workspace = true }

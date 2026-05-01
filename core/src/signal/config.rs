@@ -133,6 +133,38 @@ pub struct MechanicalConfig {
     pub speed_override: Option<f32>,
 }
 
+/// Phase 3E: Antenna block config. Wire form for the F-key UI; resolved
+/// to `AntennaState` at `apply_config_updates` time. The grant key
+/// itself is NOT in this config — antennas reference a grant by id that
+/// must already be in the placing player's `HeldGrants` (registered via
+/// `ClientMsg::AddHeldGrant`).
+#[derive(Clone, Debug, Default)]
+pub struct AntennaConfig {
+    /// Local channel the antenna READS from each tick.
+    pub source_channel_name: String,
+    /// Remote channel name on the target shard (the publish target).
+    pub remote_channel_name: String,
+    pub frequency: u32,
+    pub grant_id: u64,
+    pub target_shard_id: u64,
+}
+
+/// Phase 3E: Listener block config. Symmetric to `AntennaConfig`.
+#[derive(Clone, Debug, Default)]
+pub struct ListenerConfig {
+    /// Local Local-scope channel where the bridged value gets mirrored.
+    /// Internal subscribers wire to this.
+    pub destination_channel_name: String,
+    /// Local Radio-scope channel that receives forwarded entries.
+    /// Created automatically by the listener's apply step at the
+    /// publisher's listed `remote_channel_name` so try_push_remote
+    /// has somewhere to push to.
+    pub bridged_channel_name: String,
+    pub frequency: u32,
+    pub grant_id: u64,
+    pub source_shard_id: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Power configuration types
 // ---------------------------------------------------------------------------
@@ -193,6 +225,13 @@ pub struct BlockSignalConfig {
     pub seat_mappings: Vec<SeatInputBindingConfig>,
     pub seated_channel_name: String,
     pub available_channels: Vec<String>,
+    /// Property options the configurator UI should offer for *publish* bindings
+    /// on this block kind. Each entry is `(SignalProperty as_ordinal, hint_text)`.
+    /// Empty if the block doesn't publish at all (e.g., Thruster).
+    pub publish_property_options: Vec<(u8, String)>,
+    /// Property options the configurator UI should offer for *subscribe* bindings.
+    /// Empty if the block doesn't subscribe at all.
+    pub subscribe_property_options: Vec<(u8, String)>,
     pub power_source: Option<PowerSourceConfig>,
     pub power_consumer: Option<PowerConsumerConfig>,
     pub nearby_reactors: Vec<NearbyReactorInfo>,
@@ -203,6 +242,212 @@ pub struct BlockSignalConfig {
     pub warp_computer: Option<WarpComputerConfig>,
     pub engine_controller: Option<EngineControllerConfig>,
     pub mechanical: Option<MechanicalConfig>,
+    pub antenna: Option<AntennaConfig>,
+    pub listener: Option<ListenerConfig>,
+}
+
+impl BlockSignalConfig {
+    /// Populate `publish_property_options` and `subscribe_property_options`
+    /// from a `FunctionalBlockKind`'s static schema. Single source of truth
+    /// shared with `apply_config_updates` validation.
+    pub fn set_property_options_from_kind(
+        &mut self,
+        kind: crate::block::registry::FunctionalBlockKind,
+    ) {
+        let schema = kind.signal_schema();
+        let hint_for = |prop: SignalProperty| -> String {
+            schema
+                .property_hints
+                .iter()
+                .find(|(p, _)| *p == prop)
+                .map(|(_, h)| (*h).to_string())
+                .unwrap_or_default()
+        };
+        self.publish_property_options = schema
+            .publish_properties
+            .iter()
+            .map(|p| (p.as_ordinal(), hint_for(*p)))
+            .collect();
+        self.subscribe_property_options = schema
+            .subscribe_properties
+            .iter()
+            .map(|p| (p.as_ordinal(), hint_for(*p)))
+            .collect();
+    }
+}
+
+/// Reasons a `BlockConfigUpdateData` can be rejected at the server boundary.
+/// Surfaces to the client as a HUD error toast so the player understands why
+/// their config didn't apply (e.g., picked a property the block doesn't support).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigInvalid {
+    /// The chosen `SignalProperty` for a publish binding isn't in the block
+    /// kind's `publish_properties` schema. Carries the offending property
+    /// and the kind's allowed set for human-readable error rendering.
+    PublishPropertyNotSupported {
+        kind: crate::block::registry::FunctionalBlockKind,
+        property: SignalProperty,
+        allowed: Vec<SignalProperty>,
+    },
+    /// Symmetric for subscribe bindings.
+    SubscribePropertyNotSupported {
+        kind: crate::block::registry::FunctionalBlockKind,
+        property: SignalProperty,
+        allowed: Vec<SignalProperty>,
+    },
+}
+
+impl ConfigInvalid {
+    /// Check every binding in `update` against the kind's schema. Returns
+    /// `Ok(())` if all bindings are valid, `Err(ConfigInvalid)` on the first
+    /// violation. Caller is responsible for surfacing the error.
+    pub fn validate_against_kind(
+        update: &BlockConfigUpdateData,
+        kind: crate::block::registry::FunctionalBlockKind,
+    ) -> Result<(), Self> {
+        let schema = kind.signal_schema();
+        for b in &update.publish_bindings {
+            if !schema.publish_properties.contains(&b.property) {
+                return Err(Self::PublishPropertyNotSupported {
+                    kind,
+                    property: b.property,
+                    allowed: schema.publish_properties.to_vec(),
+                });
+            }
+        }
+        for b in &update.subscribe_bindings {
+            if !schema.subscribe_properties.contains(&b.property) {
+                return Err(Self::SubscribePropertyNotSupported {
+                    kind,
+                    property: b.property,
+                    allowed: schema.subscribe_properties.to_vec(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Render a one-line user-facing message for the HUD toast.
+    pub fn to_user_message(&self) -> String {
+        match self {
+            Self::PublishPropertyNotSupported { kind, property, allowed } => {
+                format!(
+                    "A {:?} cannot publish '{:?}' — supported: {}",
+                    kind,
+                    property,
+                    format_property_list(allowed),
+                )
+            }
+            Self::SubscribePropertyNotSupported { kind, property, allowed } => {
+                format!(
+                    "A {:?} cannot subscribe to '{:?}' — supported: {}",
+                    kind,
+                    property,
+                    format_property_list(allowed),
+                )
+            }
+        }
+    }
+}
+
+fn format_property_list(props: &[SignalProperty]) -> String {
+    if props.is_empty() {
+        "(none)".to_string()
+    } else {
+        props
+            .iter()
+            .map(|p| format!("{:?}", p))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::registry::FunctionalBlockKind;
+
+    #[test]
+    fn validate_rejects_pressure_on_thruster() {
+        let mut update = BlockConfigUpdateData::default();
+        update.subscribe_bindings.push(SubscribeBindingConfig {
+            channel_name: "test".into(),
+            property: SignalProperty::Pressure,
+        });
+        let err = ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster)
+            .expect_err("Pressure must not be allowed on a Thruster");
+        match err {
+            ConfigInvalid::SubscribePropertyNotSupported { kind, property, .. } => {
+                assert_eq!(kind, FunctionalBlockKind::Thruster);
+                assert_eq!(property, SignalProperty::Pressure);
+            }
+            other => panic!("wrong error variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_throttle_on_thruster() {
+        let mut update = BlockConfigUpdateData::default();
+        update.subscribe_bindings.push(SubscribeBindingConfig {
+            channel_name: "test".into(),
+            property: SignalProperty::Throttle,
+        });
+        ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster)
+            .expect("Throttle is in the Thruster's subscribe schema");
+    }
+
+    #[test]
+    fn validate_rejects_publish_on_thruster() {
+        // Thrusters' publish_properties is empty — *any* publish binding is invalid.
+        let mut update = BlockConfigUpdateData::default();
+        update.publish_bindings.push(PublishBindingConfig {
+            channel_name: "test".into(),
+            property: SignalProperty::Throttle,
+        });
+        let err = ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster)
+            .expect_err("Thrusters must not publish anything");
+        assert!(matches!(
+            err,
+            ConfigInvalid::PublishPropertyNotSupported { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_user_message_lists_allowed_properties() {
+        let mut update = BlockConfigUpdateData::default();
+        update.subscribe_bindings.push(SubscribeBindingConfig {
+            channel_name: "test".into(),
+            property: SignalProperty::Speed,
+        });
+        let err =
+            ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster).unwrap_err();
+        let msg = err.to_user_message();
+        // The message should mention what's allowed so the player learns.
+        assert!(msg.contains("Throttle"), "msg: {}", msg);
+        assert!(msg.contains("Speed"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn set_property_options_from_kind_thruster() {
+        let mut cfg = BlockSignalConfig::default();
+        cfg.set_property_options_from_kind(FunctionalBlockKind::Thruster);
+        // Thrusters don't publish.
+        assert!(cfg.publish_property_options.is_empty());
+        // Subscribe options match the schema (Throttle, Boost, Active).
+        let ords: Vec<u8> = cfg
+            .subscribe_property_options
+            .iter()
+            .map(|(o, _)| *o)
+            .collect();
+        assert_eq!(ords, vec![
+            SignalProperty::Throttle.as_ordinal(),
+            SignalProperty::Boost.as_ordinal(),
+            SignalProperty::Active.as_ordinal(),
+        ]);
+        // Hints come through.
+        let throttle_hint = &cfg.subscribe_property_options[0].1;
+        assert!(throttle_hint.contains("0.0"), "hint: {}", throttle_hint);
+    }
 }
 
 /// Config update sent from client → server after the player edits bindings.
@@ -224,4 +469,6 @@ pub struct BlockConfigUpdateData {
     pub warp_computer: Option<WarpComputerConfig>,
     pub engine_controller: Option<EngineControllerConfig>,
     pub mechanical: Option<MechanicalConfig>,
+    pub antenna: Option<AntennaConfig>,
+    pub listener: Option<ListenerConfig>,
 }

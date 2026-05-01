@@ -21,6 +21,7 @@ use voxeldust_core::signal::{
     SeatChannelMapping, SeatInputBinding, PublishBinding, SubscribeBinding, SignalProperty,
     FlightComputerState, HoverModuleState, AutopilotBlockState, WarpComputerState, EngineControllerState,
     SeatInputSource, KeyMode, AxisDirection,
+    IncomingSignalBuffer,
     seat_presets,
 };
 use voxeldust_core::shard_message::AutopilotSnapshotData;
@@ -40,6 +41,8 @@ use voxeldust_core::system::{self, SystemParams};
 use voxeldust_shard_common::authorized_peers::AuthorizedPeers;
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
+use voxeldust_shard_common::signal_pipeline::{SignalPipelinePlugin, SignalSet};
+use voxeldust_shard_common::wire_dict_registry::decode_v2_batch;
 
 use voxeldust_core::character::{
     self, build_character, kcc_move_all, move_one_character, CharacterBuildSpec, CharacterCapsule,
@@ -481,9 +484,11 @@ struct AutopilotSnapshotCache {
 // Player components (per-entity, multi-player)
 // ---------------------------------------------------------------------------
 
-/// Marker component for a player entity on this ship.
-#[derive(Component)]
-struct Player;
+// `Player`, `SeatedState`, `SeatInputValues` are defined once in
+// `voxeldust_core::ecs::components` so any shard (ship, planet, station)
+// can host seated players with the same generic signal pipeline. We
+// re-import them as part of the existing `voxeldust_core::ecs` glob below.
+use voxeldust_core::ecs::components::{Player, SeatedState, SeatInputValues};
 
 /// Player session identity — ties this entity to a network session.
 #[derive(Component)]
@@ -513,13 +518,8 @@ struct PlayerYaw(f32);
 #[derive(Component, Default)]
 struct PlayerPitch(f32);
 
-/// Per-player seated state. `seat_entity` points to the seat block entity.
-/// Seat role (pilot/gunner/passenger) is determined by the seat's SeatChannelMapping.
-#[derive(Component, Default)]
-struct SeatedState {
-    seated: bool,
-    seat_entity: Option<Entity>,
-}
+// `SeatedState` and `SeatInputValues` moved to core/src/ecs/components.rs
+// (re-imported above). The fields and shape are identical.
 
 /// Per-player input action state for edge detection.
 #[derive(Component, Default)]
@@ -527,11 +527,6 @@ struct InputActions {
     current: u8,
     previous: u8,
 }
-
-/// Per-binding float values from the client's seat input evaluation.
-/// Length matches the active seat's binding count. Written by process_input.
-#[derive(Component, Default)]
-struct SeatInputValues(Vec<f32>);
 
 // `PlayerPhysics` (local component) was deleted in the KCC migration —
 // walk speed, jump, and capsule geometry now live in the shared
@@ -613,12 +608,10 @@ struct PendingEntityOps {
 #[derive(Resource)]
 struct AggregationDirty(bool);
 
-/// Buffer for incoming cross-shard signals received via QUIC.
-/// Drained by signal_publish at the start of the signal pipeline.
-#[derive(Resource, Default)]
-struct IncomingSignalBuffer {
-    signals: Vec<(String, signal::SignalValue)>,
-}
+// `IncomingSignalBuffer` and its `IncomingSignalEntry` moved to
+// `voxeldust_core::signal::ingress` so every shard shares the same
+// schema-aware ingress path. Imported via the `voxeldust_core::signal::*`
+// re-export below.
 
 /// Last-known world positions of peer shards, learned from incoming signal
 /// broadcasts.  Used for spatial filtering in `signal_broadcast_remote` so
@@ -950,6 +943,16 @@ struct DrainInputDiag {
     total_matched: u64,
 }
 
+/// Bundle the two signal-pipeline ingress buffers as one SystemParam so
+/// `drain_quic` stays under Bevy's 16-parameter limit. The two buffers
+/// are written by adjacent QUIC ingress paths and drained by sibling
+/// systems in `SignalSet::Ingest` — bundling has zero runtime cost.
+#[derive(bevy_ecs::system::SystemParam)]
+struct SignalIngressBuffers<'w> {
+    signals: ResMut<'w, IncomingSignalBuffer>,
+    subscribes: ResMut<'w, voxeldust_core::signal::IncomingSubscribeBuffer>,
+}
+
 fn drain_quic(
     mut bridge: ResMut<NetworkBridge>,
     mut scene: ResMut<SceneCache>,
@@ -961,13 +964,15 @@ fn drain_quic(
     mut player_index: ResMut<PlayerEntityIndex>,
     players: Query<(&SessionId, &CharacterController), With<Player>>,
     tick: Res<ecs::TickCounter>,
-    mut incoming_signals: ResMut<IncomingSignalBuffer>,
+    mut signal_buffers: SignalIngressBuffers,
     mut peer_positions: ResMut<PeerPositionCache>,
     mut pending_handoffs: ResMut<PendingPlayerHandoffs>,
     mut visible_ships: ResMut<VisibleShipRegistry>,
     mut external_entities: ResMut<ExternalEntities>,
     mut commands: Commands,
 ) {
+    let incoming_signals = &mut *signal_buffers.signals;
+    let incoming_subscribes = &mut *signal_buffers.subscribes;
     for _ in 0..32 {
         let queued = match bridge.quic_msg_rx.try_recv() {
             Ok(q) => q,
@@ -1202,7 +1207,18 @@ fn drain_quic(
                     2 => signal::SignalValue::State(data.value_data as u8),
                     _ => signal::SignalValue::Float(data.value_data),
                 };
-                incoming_signals.signals.push((data.channel_name.clone(), value));
+                incoming_signals.push(voxeldust_core::signal::IncomingSignalEntry {
+                    name: data.channel_name.clone(),
+                    value,
+                    scope_code: data.scope,
+                    freq: 0,
+                    range_m: data.range_m,
+                    sender_shard_id: data.source_shard_id,
+                    timestamp_ms: 0,
+                    seq: 0,
+                    grant_id: 0,
+                    auth_tag: Vec::new(),
+                });
             }
             ShardMsg::SignalBroadcastBatch(batch) => {
                 // Learn peer position from the batch header (zero-cost spatial data).
@@ -1223,7 +1239,90 @@ fn drain_quic(
                         2 => signal::SignalValue::State(entry.value_data as u8),
                         _ => signal::SignalValue::Float(entry.value_data),
                     };
-                    incoming_signals.signals.push((entry.channel_name.clone(), value));
+                    incoming_signals.push(voxeldust_core::signal::IncomingSignalEntry {
+                        name: entry.channel_name.clone(),
+                        value,
+                        scope_code: entry.scope,
+                        freq: entry.frequency,
+                        range_m: entry.range_m,
+                        sender_shard_id: batch.source_shard_id,
+                        // Phase 2 wire fields propagated from the wire entry.
+                        // Receivers' `try_push_remote` activates the replay
+                        // window automatically when both `seq` and
+                        // `timestamp_ms` are non-zero — a Phase-1A peer
+                        // shipping zeros stays compatible.
+                        timestamp_ms: entry.timestamp_ms,
+                        seq: entry.sequence,
+                        grant_id: entry.grant_id,
+                        auth_tag: entry.auth_tag.clone(),
+                    });
+                }
+            }
+            ShardMsg::SignalBroadcastBatchV2(batch) => {
+                // Phase 4.3 wire-dict-interned receive path. Resolve
+                // wire ids back to channel names against the per-peer
+                // InboundDict, then process exactly like V1. A decode
+                // error (seq drift / unresolved wire id) is fatal for
+                // the batch only — drop it, log, and trust the
+                // sender's next batch's FLAG_REGISTERs to converge
+                // the dicts again.
+                let source_id = voxeldust_core::shard_types::ShardId(batch.source_shard_id);
+                peer_positions.positions.insert(source_id, batch.source_position);
+                let source_position = batch.source_position;
+                let source_shard_id = batch.source_shard_id;
+
+                let resolved = match bridge.wire_dicts.try_write() {
+                    Ok(mut registry) => {
+                        match decode_v2_batch(&mut registry, source_id, batch) {
+                            Ok(entries) => entries,
+                            Err(e) => {
+                                tracing::debug!(
+                                    source = source_shard_id,
+                                    error = %e,
+                                    "SignalBroadcastBatchV2 decode failed; batch dropped"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Should not happen in practice (the gauge sweep
+                        // uses try_read, encode/decode are scheduled non-
+                        // overlapping). Surface as warn so we'd notice in
+                        // logs if it ever does.
+                        tracing::warn!(
+                            source = source_shard_id,
+                            "SignalBroadcastBatchV2 decode skipped: wire-dict lock contended"
+                        );
+                        continue;
+                    }
+                };
+
+                for entry in resolved {
+                    if entry.scope == 1 {
+                        let dist = (exterior.position - source_position).length();
+                        if dist > entry.range_m {
+                            continue;
+                        }
+                    }
+                    let value = match entry.value_type {
+                        0 => signal::SignalValue::Bool(entry.value_data > 0.5),
+                        1 => signal::SignalValue::Float(entry.value_data),
+                        2 => signal::SignalValue::State(entry.value_data as u8),
+                        _ => signal::SignalValue::Float(entry.value_data),
+                    };
+                    incoming_signals.push(voxeldust_core::signal::IncomingSignalEntry {
+                        name: entry.channel_name,
+                        value,
+                        scope_code: entry.scope,
+                        freq: entry.frequency,
+                        range_m: entry.range_m,
+                        sender_shard_id: source_shard_id,
+                        timestamp_ms: entry.timestamp_ms,
+                        seq: entry.sequence,
+                        grant_id: entry.grant_id,
+                        auth_tag: entry.auth_tag,
+                    });
                 }
             }
             ShardMsg::SystemEntitiesUpdate(data) => {
@@ -1302,6 +1401,16 @@ fn drain_quic(
                 }
 
                 visible_ships.ships = new_ships;
+            }
+            ShardMsg::SignalSubscribe(data) => {
+                // Phase 3D: a foreign shard wants forwarded values for one
+                // of our channels. Validation (HMAC + grant lookup +
+                // freshness) happens in the generic `apply_signal_subscribe`
+                // system; this drain step just queues the request.
+                incoming_subscribes.push_subscribe(data);
+            }
+            ShardMsg::SignalUnsubscribe(data) => {
+                incoming_subscribes.push_unsubscribe(data);
             }
             _ => {}
         }
@@ -2533,6 +2642,202 @@ fn tick_counter(mut tick: ResMut<ecs::TickCounter>) {
 // Broadcast
 // ---------------------------------------------------------------------------
 
+/// Phase 4.4: shared HUD signal snapshot builder. Returns the FULL
+/// current set of (channel_name, value, property) tuples a HUD
+/// client should be aware of. Used by:
+///   * `broadcast_world_state` — converts to V1 `HudSignalEntryData`
+///     for the legacy UDP `WorldState.hud_signals` field.
+///   * `emit_hud_signal_deltas` — feeds into per-session
+///     `HudSession::produce_delta` for delta-encoded TCP emission.
+///
+/// Two sources combine:
+///
+///   1. **Ship-status auto-publish** — derived ship state every player
+///      wants on their cockpit HUD (speed, thrust tier, warp phase,
+///      callsign). Channel names prefixed `ship.*` so widget configs
+///      can subscribe without a matching `ShipStatusBlock` placed.
+///
+///   2. **User-configured channels** — every channel registered in
+///      the shard's `SignalChannelTable` (created by
+///      `BlockConfigUpdate`). Snapshotted so HUD widgets configured
+///      against any channel see the live value in-tick.
+///
+/// Text channels are server-authored string labels (clients never
+/// look them up locally). Numeric channels pass through verbatim.
+fn build_hud_signal_snapshot(
+    exterior: &ShipExterior,
+    autopilot_cache: &AutopilotSnapshotCache,
+    config: &ShipConfig,
+    channels: &SignalChannelTable,
+) -> Vec<(String, voxeldust_core::signal::hud_session::HudSignalValueRepr, u8)> {
+    use voxeldust_core::signal::hud_session::HudSignalValueRepr;
+    use voxeldust_core::signal::types::{SignalProperty, SignalValue as CoreSignalValue};
+
+    let mut out = Vec::new();
+
+    // (1) Ship-status auto-publish.
+    let speed = exterior.velocity.length() as f32;
+    out.push((
+        "ship.speed".to_string(),
+        HudSignalValueRepr::float(speed),
+        SignalProperty::Speed.as_ordinal(),
+    ));
+    out.push((
+        "ship.callsign".to_string(),
+        HudSignalValueRepr::text(format!("SHIP-{:X}", config.shard_id.0)),
+        SignalProperty::Text.as_ordinal(),
+    ));
+    if let Some(ref ap) = autopilot_cache.snapshot {
+        out.push((
+            "ship.thrust_tier".to_string(),
+            HudSignalValueRepr::float(ap.thrust_tier as f32 / 5.0),
+            SignalProperty::Throttle.as_ordinal(),
+        ));
+        out.push((
+            "ship.autopilot.phase".to_string(),
+            HudSignalValueRepr::state(ap.phase),
+            SignalProperty::SwitchState.as_ordinal(),
+        ));
+        out.push((
+            "ship.autopilot.eta".to_string(),
+            HudSignalValueRepr::float(ap.eta_real_seconds as f32),
+            SignalProperty::Speed.as_ordinal(),
+        ));
+    }
+
+    // (2) User-configured channels — snapshot every registered
+    // channel's current value. Duplicate names override the auto-
+    // publish on the client side (later-inserted wins via the
+    // client's drainer `insert`).
+    for (name, _id, value) in channels.iter_all() {
+        let (repr, property) = match value {
+            CoreSignalValue::Bool(b) => (HudSignalValueRepr::bool(b), SignalProperty::Active),
+            CoreSignalValue::Float(f) => (HudSignalValueRepr::float(f), SignalProperty::Throttle),
+            CoreSignalValue::State(s) => {
+                (HudSignalValueRepr::state(s), SignalProperty::SwitchState)
+            }
+        };
+        out.push((name.to_string(), repr, property.as_ordinal()));
+    }
+
+    out
+}
+
+/// Phase 4.4: per-session HUD signal state, keyed by `SessionToken`.
+/// Each connected client gets its own [`HudSession`] (lazy-inserted
+/// on first emit) tracking its own `OutboundDict` + last-sent values.
+///
+/// Lifecycle:
+///   * Insert: `emit_hud_signal_deltas` lazy-inserts on first contact
+///     with a `Player` entity's session id.
+///   * Evict: per-tick prune walks the map and drops sessions no
+///     longer present in the live `Player` set. Bounded memory under
+///     player churn — no orphaned sessions accumulate.
+#[derive(Resource, Default)]
+struct HudSessionMap {
+    sessions: std::collections::HashMap<
+        voxeldust_core::shard_types::SessionToken,
+        voxeldust_core::signal::hud_session::HudSession,
+    >,
+}
+
+/// Phase 4.4: per-tick system that builds the HUD snapshot once,
+/// runs each `HudSession::produce_delta`, and ships non-empty deltas
+/// over TCP via `ServerMsg::HudSignalDelta`.
+///
+/// Bandwidth model:
+///   * First batch per session: ~50 channels × ~30B (REGISTER) ≈ 1.5 KB.
+///   * Steady state: only changed entries × ~14B (bare) ≈ ~50-200 B/tick.
+///   * Empty deltas (zero changes) are SKIPPED entirely — no TCP send.
+///
+/// The legacy UDP `WorldState.hud_signals` path stays alive in this
+/// PR — both run in parallel. Once the client-side decode lands the
+/// `WorldState` field becomes redundant and gets removed (separate
+/// slice).
+fn emit_hud_signal_deltas(
+    players: Query<&SessionId, With<Player>>,
+    exterior: Res<ShipExterior>,
+    autopilot_cache: Res<AutopilotSnapshotCache>,
+    config: Res<ShipConfig>,
+    channels: Res<SignalChannelTable>,
+    bridge: Res<NetworkBridge>,
+    mut session_map: ResMut<HudSessionMap>,
+) {
+    use voxeldust_core::client_message::{
+        HudSignalDeltaData, HudSignalEntryV2Data, ServerMsg,
+    };
+
+    // Build the snapshot once per tick — same data the legacy path
+    // would build, but as `HudSignalValueRepr` for the diff engine.
+    let snapshot = build_hud_signal_snapshot(&exterior, &autopilot_cache, &config, &channels);
+
+    // Walk the live player set. Lazy-insert HudSession for new
+    // session tokens; collect tokens we've seen this tick for the
+    // post-loop prune.
+    let mut seen: std::collections::HashSet<voxeldust_core::shard_types::SessionToken> =
+        std::collections::HashSet::new();
+    let mut to_send: Vec<(voxeldust_core::shard_types::SessionToken, ServerMsg)> = Vec::new();
+
+    for sid in &players {
+        let token = sid.0;
+        seen.insert(token);
+        let session = session_map
+            .sessions
+            .entry(token)
+            .or_insert_with(voxeldust_core::signal::hud_session::HudSession::new);
+        let entries = session.produce_delta(&snapshot);
+        if entries.is_empty() {
+            continue;
+        }
+        // Convert HudDeltaEntry → wire-shaped HudSignalEntryV2Data.
+        // The two types are isomorphic; the split is so `core` doesn't
+        // depend on `client_message` ordering details.
+        let wire_entries: Vec<HudSignalEntryV2Data> = entries
+            .into_iter()
+            .map(|e| HudSignalEntryV2Data {
+                flags: e.flags,
+                wire_id: e.wire_id,
+                channel_name: e.channel_name,
+                value_type: e.value.type_code,
+                value_num: e.value.num,
+                value_text: e.value.text,
+                property: e.property,
+                seq: e.seq,
+            })
+            .collect();
+        let msg = ServerMsg::HudSignalDelta(HudSignalDeltaData {
+            dict_seq: session.dict_seq(),
+            batch_seq: session.batch_seq(),
+            entries: wire_entries,
+        });
+        to_send.push((token, msg));
+    }
+
+    // Prune sessions that disconnected or otherwise vanished.
+    session_map.sessions.retain(|tok, _| seen.contains(tok));
+
+    if to_send.is_empty() {
+        return;
+    }
+    // TCP fan-out via `client_registry.send_tcp` — same fire-and-
+    // forget pattern used by `apply_grant_create` etc. Deferred to a
+    // tokio task so we don't block the per-tick schedule on socket
+    // writes.
+    let cr = bridge.client_registry.clone();
+    tokio::spawn(async move {
+        let reg = cr.read().await;
+        for (token, msg) in to_send {
+            if let Err(e) = reg.send_tcp(token, &msg).await {
+                tracing::debug!(
+                    session = token.0,
+                    %e,
+                    "HudSignalDelta TCP send failed (client likely disconnected)"
+                );
+            }
+        }
+    });
+}
+
 fn broadcast_world_state(
     players: Query<
         (
@@ -2707,83 +3012,30 @@ fn broadcast_world_state(
         });
     }
 
-    // HUD signal snapshot for every subscribed client. Two sources
-    // combine:
-    //
-    //   1. **Ship-status auto-publish** — derived ship state the
-    //      player always wants on their cockpit HUD (speed, thrust
-    //      tier, warp phase, callsign). These use well-known channel
-    //      names prefixed `ship.*` so widget configs can subscribe
-    //      without needing a matching `ShipStatusBlock` placed.
-    //
-    //   2. **User-configured channels** — every channel registered in
-    //      the shard's `SignalChannelTable` (created by
-    //      `BlockConfigUpdate` binding). Snapshotted here so HUD
-    //      widgets configured against any channel see the live value
-    //      in-tick.
-    //
-    // Text channels are server-authored string labels — clients never
-    // look them up locally. Numeric channels pass through verbatim.
-    let mut hud_signals: Vec<voxeldust_core::client_message::HudSignalEntryData> = Vec::new();
-    {
-        use voxeldust_core::client_message::{HudSignalEntryData, HudSignalValue};
-        use voxeldust_core::signal::types::{SignalProperty, SignalValue as CoreSignalValue};
-
-        // (1) Ship-status auto-publish.
-        let speed = exterior.velocity.length() as f32;
-        hud_signals.push(HudSignalEntryData {
-            channel_name: "ship.speed".into(),
-            value: HudSignalValue::Float(speed),
-            property: SignalProperty::Speed.as_ordinal(),
-        });
-        hud_signals.push(HudSignalEntryData {
-            channel_name: "ship.callsign".into(),
-            value: HudSignalValue::Text(format!("SHIP-{:X}", config.shard_id.0)),
-            property: SignalProperty::Text.as_ordinal(),
-        });
-        if let Some(ref ap) = autopilot_cache.snapshot {
-            hud_signals.push(HudSignalEntryData {
-                channel_name: "ship.thrust_tier".into(),
-                value: HudSignalValue::Float(ap.thrust_tier as f32 / 5.0),
-                property: SignalProperty::Throttle.as_ordinal(),
-            });
-            hud_signals.push(HudSignalEntryData {
-                channel_name: "ship.autopilot.phase".into(),
-                value: HudSignalValue::State(ap.phase),
-                property: SignalProperty::SwitchState.as_ordinal(),
-            });
-            hud_signals.push(HudSignalEntryData {
-                channel_name: "ship.autopilot.eta".into(),
-                value: HudSignalValue::Float(ap.eta_real_seconds as f32),
-                property: SignalProperty::Speed.as_ordinal(),
-            });
-        }
-
-        // (2) User-configured channels — snapshot every registered
-        // channel's current value. Duplicate names (e.g. if a user
-        // ever configures `ship.speed`) let the user's binding
-        // override the auto-publish on the client side — intentional
-        // precedence: the later-inserted entry wins when the client's
-        // drainer runs `insert` in order.
-        for (name, _id, value) in channels.iter_all() {
-            let (hud_value, property) = match value {
-                CoreSignalValue::Bool(b) => {
-                    (HudSignalValue::Bool(b), SignalProperty::Active)
-                }
-                CoreSignalValue::Float(f) => {
-                    (HudSignalValue::Float(f), SignalProperty::Throttle)
-                }
-                CoreSignalValue::State(s) => {
-                    (HudSignalValue::State(s), SignalProperty::SwitchState)
-                }
+    // HUD signal snapshot for every subscribed client. Built via the
+    // shared `build_hud_signal_snapshot` helper so the legacy UDP path
+    // (this `WorldState.hud_signals` field) and the Phase 4.4 TCP
+    // delta path (`emit_hud_signal_deltas`) draw from a single source
+    // of truth — no risk of the two diverging.
+    let snapshot = build_hud_signal_snapshot(&exterior, &autopilot_cache, &config, &channels);
+    let hud_signals: Vec<voxeldust_core::client_message::HudSignalEntryData> = snapshot
+        .iter()
+        .map(|(name, repr, property)| {
+            use voxeldust_core::client_message::{HudSignalEntryData, HudSignalValue};
+            let value = match repr.type_code {
+                0 => HudSignalValue::Bool(repr.num > 0.5),
+                1 => HudSignalValue::Float(repr.num),
+                2 => HudSignalValue::State(repr.num as u8),
+                3 => HudSignalValue::Text(repr.text.clone()),
+                _ => HudSignalValue::Float(repr.num),
             };
-            hud_signals.push(HudSignalEntryData {
-                channel_name: name.to_string(),
-                value: hud_value,
-                property: property.as_ordinal(),
-            });
-        }
-    }
+            HudSignalEntryData {
+                channel_name: name.clone(),
+                value,
+                property: *property,
+            }
+        })
+        .collect();
 
     let mut ws = ServerMsg::WorldState(WorldStateData {
         tick: tick.0,
@@ -3583,6 +3835,7 @@ fn drain_lamp_config_updates(
 fn drain_client_signal_publishes(
     mut bridge: ResMut<NetworkBridge>,
     mut channels: ResMut<SignalChannelTable>,
+    mut rate_limits: ResMut<voxeldust_core::signal::ClientRateLimits>,
 ) {
     use voxeldust_core::signal::channel::PublishDenied;
     for _ in 0..64 {
@@ -3591,6 +3844,27 @@ fn drain_client_signal_publishes(
             Err(_) => break,
         };
         let player_id = session.0;
+        // Rate limit: HUD button-press / slider publishes from this
+        // session. Cap is 100/sec (200 burst) — enough for a player
+        // dragging a slider continuously while pressing buttons, but
+        // bounded so a misbehaving client can't saturate the tick budget.
+        let now_ms = voxeldust_core::signal::current_unix_millis();
+        let allowed = rate_limits.with_session(session, now_ms, |b| {
+            if b.signal_publish.try_consume(now_ms) {
+                true
+            } else {
+                b.denied_total += 1;
+                false
+            }
+        });
+        if !allowed {
+            tracing::debug!(
+                player_id,
+                channel = %publish.channel_name,
+                "SignalPublish rate-limited"
+            );
+            continue;
+        }
         match channels.try_push_pending(&publish.channel_name, publish.value, player_id) {
             Ok(()) => {}
             Err(PublishDenied::UnknownChannel) => {
@@ -3613,6 +3887,20 @@ fn drain_client_signal_publishes(
 
 /// Apply config updates received from clients to entity signal components.
 /// Resolves string channel names → ChannelId at this boundary.
+/// Bundle of Phase 3E.3 inputs for the antenna/listener apply path. Lifts
+/// six resources that would otherwise push `apply_config_updates` over
+/// Bevy's 16-parameter limit. SystemParam derive packs them as a single
+/// system input — zero runtime cost.
+#[derive(bevy_ecs::system::SystemParam)]
+struct AntennaListenerInputs<'w, 's> {
+    bridge: ResMut<'w, NetworkBridge>,
+    held_grants: Res<'w, voxeldust_shard_common::signal_pipeline::HeldGrants>,
+    grants_registry: ResMut<'w, voxeldust_core::signal::GrantsRegistry>,
+    block_owner_query: Query<'w, 's, &'static voxeldust_core::ecs::components::BlockOwnership>,
+    tick: Res<'w, ecs::TickCounter>,
+    config: Res<'w, ShipConfig>,
+}
+
 fn apply_config_updates(
     mut events: MessageReader<ConfigUpdateMsg>,
     block_index: Res<FunctionalBlockIndex>,
@@ -3624,6 +3912,7 @@ fn apply_config_updates(
     grid: Res<ShipGridResource>,
     persistence: Option<Res<ShipPersistence>>,
     mut mech_state_query: Query<&mut MechanicalState>,
+    mut antenna_listener: AntennaListenerInputs,
 ) {
     use voxeldust_core::signal::{ChannelMergeStrategy, SignalScope};
     use voxeldust_core::signal::config::*;
@@ -3639,6 +3928,21 @@ fn apply_config_updates(
                 continue;
             }
         };
+
+        // Defense in depth: even though the configurator UI filters the
+        // property dropdown by `BlockKindSignalSchema`, validate at the
+        // server boundary. Rejects malicious / out-of-date clients trying
+        // to bind, e.g., `Pressure` on a Thruster.
+        if let Ok(block_ref) = block_ref_query.get(entity) {
+            if let Err(invalid) = ConfigInvalid::validate_against_kind(update, block_ref.kind) {
+                warn!(
+                    block = ?update.block_pos,
+                    err = %invalid.to_user_message(),
+                    "rejected block-config update: property not supported by block kind",
+                );
+                continue;
+            }
+        }
 
         // Resolve config types (string) → runtime types (ChannelId).
         if !update.publish_bindings.is_empty() {
@@ -3785,6 +4089,89 @@ fn apply_config_updates(
                         .map(|mp| mp.max_speed as f32)
                         .unwrap_or(360.0);
                     ms.max_speed = speed.clamp(0.1, max);
+                }
+            }
+        }
+
+        // Phase 3E.3: apply Antenna config (block-bound outbound bridge).
+        // Resolution + validation lives in shard-common's helper so the
+        // ship-shard's job here is just dispatch + persistence.
+        if let Some(ref ac) = update.antenna {
+            // Owner session derived from the BlockOwnership component.
+            // Attached at placement; falls back to event.session as a
+            // last resort for legacy blocks.
+            let owner_session = antenna_listener.block_owner_query.get(entity).ok()
+                .map(|bo| voxeldust_core::shard_types::SessionToken(bo.owner_id))
+                .unwrap_or(event.session);
+            match voxeldust_shard_common::signal_pipeline::apply_antenna_config(
+                &channels, &antenna_listener.held_grants, ac, owner_session,
+            ) {
+                Ok(ok) => {
+                    commands.entity(entity).insert(ok.state);
+                    info!(
+                        block = ?update.block_pos,
+                        target_shard = ac.target_shard_id,
+                        grant_id = ac.grant_id,
+                        "applied AntennaConfig"
+                    );
+                }
+                Err(reason) => {
+                    warn!(
+                        block = ?update.block_pos,
+                        ?reason,
+                        "AntennaConfig rejected"
+                    );
+                }
+            }
+        }
+
+        // Phase 3E.3: apply Listener config. The helper mutates the
+        // SignalChannelTable + GrantsRegistry (creating bridged + dest
+        // channels and registering the bridged channel under the mirror
+        // grant). The returned `outbound_subscribe` ships to the source
+        // shard via QUIC so the publisher registers us as a subscriber.
+        if let Some(ref lc) = update.listener {
+            let owner_session = antenna_listener.block_owner_query.get(entity).ok()
+                .map(|bo| voxeldust_core::shard_types::SessionToken(bo.owner_id))
+                .unwrap_or(event.session);
+            match voxeldust_shard_common::signal_pipeline::apply_listener_config(
+                &mut channels,
+                &mut antenna_listener.grants_registry,
+                &antenna_listener.held_grants,
+                lc,
+                owner_session,
+                antenna_listener.tick.0,
+            ) {
+                Ok(mut ok) => {
+                    // Fill in our shard id so the receiver knows where to
+                    // ship forwarded entries.
+                    ok.outbound_subscribe.subscriber_shard_id = antenna_listener.config.shard_id.0;
+                    commands.entity(entity).insert(ok.state);
+                    let target = ShardId(lc.source_shard_id);
+                    let msg = ShardMsg::SignalSubscribe(ok.outbound_subscribe);
+                    if let Ok(reg) = antenna_listener.bridge.peer_registry.try_read() {
+                        if let Some(addr) = reg.quic_addr(target) {
+                            let _ = antenna_listener.bridge.quic_send_tx.try_send((target, addr, msg));
+                        } else {
+                            warn!(
+                                target = ?target,
+                                "Listener subscribe: source shard not in peer registry"
+                            );
+                        }
+                    }
+                    info!(
+                        block = ?update.block_pos,
+                        source_shard = lc.source_shard_id,
+                        grant_id = lc.grant_id,
+                        "applied ListenerConfig + dispatched SignalSubscribe"
+                    );
+                }
+                Err(reason) => {
+                    warn!(
+                        block = ?update.block_pos,
+                        ?reason,
+                        "ListenerConfig rejected"
+                    );
                 }
             }
         }
@@ -4392,7 +4779,7 @@ fn build_config_snapshot(
     }
     nearby_reactors.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
 
-    BlockSignalConfig {
+    let mut config = BlockSignalConfig {
         block_pos: pos,
         block_type: block_id.as_u16(),
         kind: kind as u8,
@@ -4402,6 +4789,8 @@ fn build_config_snapshot(
         seat_mappings,
         seated_channel_name,
         available_channels,
+        publish_property_options: Vec::new(),
+        subscribe_property_options: Vec::new(),
         power_source,
         power_consumer,
         nearby_reactors,
@@ -4468,7 +4857,20 @@ fn build_config_snapshot(
                 speed_override: Some(ms.max_speed),
             }
         }),
-    }
+        // Phase 3E: antenna/listener configs are emitted by their own
+        // dedicated build paths (driven by AntennaState/ListenerState
+        // entity components — added in a follow-up iteration). Today's
+        // build_config_snapshot leaves them None, since this loop targets
+        // the existing ship-side functional blocks.
+        antenna: None,
+        listener: None,
+    };
+    // Filter the configurator dropdown to the property set this block kind
+    // actually supports — so a Thruster's dropdown lists Throttle/Boost/Active
+    // and not Speed/Pressure/etc. Single source of truth in
+    // `FunctionalBlockKind::signal_schema()`.
+    config.set_property_options_from_kind(kind);
+    config
 }
 
 /// Rebuild a single chunk's Rapier collider from the current ShipGrid state.
@@ -4674,6 +5076,77 @@ fn apply_block_edits(
         dirty_chunks = result.dirty_chunks.len(),
         "block edits applied"
     );
+}
+
+/// Startup system: load every persisted `RemoteAccessGrant` from
+/// redb back into the in-memory `GrantsRegistry`. Channel name →
+/// ChannelId resolution happens against the SignalChannelTable that
+/// `init_functional_blocks` just populated; chained accordingly in
+/// the Startup schedule.
+///
+/// Cluster startup order: redb file is opened during main(), then
+/// the Bevy app is constructed, `SignalPipelinePlugin` `init_resource`s
+/// the empty registry, `init_functional_blocks` populates the channel
+/// table, and finally THIS system reads redb and re-inserts the
+/// grants. After this returns the registry is in the same state it
+/// was when the previous instance shut down (live grants + tombstones,
+/// minus anything past the 24h grace).
+fn load_grants_from_db(
+    persistence: Res<ShipPersistence>,
+    channels: Res<voxeldust_core::signal::SignalChannelTable>,
+    mut registry: ResMut<voxeldust_core::signal::GrantsRegistry>,
+) {
+    let now_ms = voxeldust_core::signal::current_unix_millis();
+    let _loaded = voxeldust_shard_common::grant_persistence::populate_registry_from_db(
+        &persistence.db,
+        &channels,
+        &mut registry,
+        now_ms,
+    );
+}
+
+/// Periodic save system: drain the [`GrantsPersistenceQueue`] and
+/// apply each op against the redb file. Runs at 0.5s cadence so a
+/// burst of grant ops within the window collapses to one fsync per
+/// affected grant (the queue dedupes upserts).
+///
+/// Errors are logged at `warn!` and the op is dropped — the in-memory
+/// registry stays canonical, but the redb file may be a tick behind
+/// after a transient I/O hiccup. Operators can chart redb retries via
+/// existing tracing if this becomes a concern.
+fn flush_grants_to_db(
+    persistence: Res<ShipPersistence>,
+    registry: Res<voxeldust_core::signal::GrantsRegistry>,
+    channels: Res<voxeldust_core::signal::SignalChannelTable>,
+    mut queue: ResMut<voxeldust_shard_common::grant_persistence::GrantsPersistenceQueue>,
+    tick: Res<voxeldust_core::ecs::TickCounter>,
+) {
+    use voxeldust_shard_common::grant_persistence::{
+        delete_grant, save_grant, to_persisted,
+    };
+    if tick.0 % 10 != 0 {
+        return;
+    }
+    let (upserts, deletes) = queue.drain();
+    if upserts.is_empty() && deletes.is_empty() {
+        return;
+    }
+    for grant_id in upserts {
+        let Some(grant) = registry.get(grant_id) else {
+            // Grant was inserted then immediately removed (rare race
+            // — shouldn't happen via apply_grant_* paths). Skip.
+            continue;
+        };
+        let record = to_persisted(grant, &channels);
+        if let Err(e) = save_grant(&persistence.db, &record) {
+            warn!(grant_id, %e, "grant persistence: save failed");
+        }
+    }
+    for grant_id in deletes {
+        if let Err(e) = delete_grant(&persistence.db, grant_id) {
+            warn!(grant_id, %e, "grant persistence: delete failed");
+        }
+    }
 }
 
 /// Startup system: scan the ShipGrid for existing functional blocks and spawn entities.
@@ -6190,44 +6663,21 @@ fn engine_controller_system(
 
 /// Phase 1: All functional blocks with SignalPublisher write their state to channels.
 /// Values accumulate in pending_values, merged after all publishers write.
-fn signal_publish(
+/// Ship-shard's block publishers — runs in `SignalSet::Publish`, after the
+/// generic `signal_ingest_*` stage has cleared pending and drained inbound
+/// signals + per-player seat input. Each block kind contributes its own
+/// state values to its bound channels (a Reactor publishes its Level + Status,
+/// a CruiseDrive publishes its Boost, a Rotor publishes its current Angle,
+/// etc.). Generic-property defaults handle blocks without specialized state.
+///
+/// The cross-shard inbound drain and seat-input drain that used to be
+/// inlined here moved to `voxeldust_shard_common::signal_pipeline`'s generic
+/// systems — every shard now shares them, so a Seat on a planet works
+/// identically to a Cockpit on a ship.
+fn signal_block_publishers(
     mut channels: ResMut<SignalChannelTable>,
     publishers: Query<(&FunctionalBlockRef, &SignalPublisher, Option<&ReactorState>, Option<&CruiseDriveState>, Option<&MechanicalState>)>,
-    mut incoming: ResMut<IncomingSignalBuffer>,
-    seated_players: Query<(&SeatedState, &SeatInputValues), With<Player>>,
-    seat_query: Query<&SeatChannelMapping>,
 ) {
-    channels.clear_pending();
-
-    // Cross-shard signals received via QUIC.
-    for (name, value) in incoming.signals.drain(..) {
-        channels.push_pending(&name, value);
-    }
-
-    // Per-player seat publishing: each seated player publishes to their seat's channels.
-    for (seated_state, seat_input) in &seated_players {
-        if !seated_state.seated {
-            continue;
-        }
-        let Some(seat_entity) = seated_state.seat_entity else {
-            continue;
-        };
-        let Ok(mapping) = seat_query.get(seat_entity) else {
-            continue;
-        };
-
-        // Publish each binding's value from the client's seat input evaluation.
-        let values = &seat_input.0;
-        for (i, binding) in mapping.bindings.iter().enumerate() {
-            let value = values.get(i).copied().unwrap_or(0.0);
-            channels.push_pending_id(binding.channel_id, signal::SignalValue::Float(value));
-        }
-        // Publish seated occupancy signal.
-        if let Some(ch) = mapping.seated_channel_id {
-            channels.push_pending_id(ch, signal::SignalValue::Float(1.0));
-        }
-    }
-
     // Block publishers (reactors, sensors, cruise drives, mechanical mounts, etc.).
     for (_block_ref, publisher, reactor_state, cruise_state, mech_state) in &publishers {
         for binding in &publisher.bindings {
@@ -6270,35 +6720,13 @@ fn signal_publish(
             channels.push_pending_id(binding.channel_id, value);
         }
     }
-
-    channels.merge_pending();
+    // The previous `channels.merge_pending()` call moved to
+    // `signal_pipeline::signal_merge` so every shard goes through the same
+    // merge stage exactly once per tick (`SignalSet::Merge`).
 }
 
-/// Phase 2: Signal Converters with dirty inputs evaluate their condition→action rules.
-/// Lazy evaluation: only processes converters whose input channels changed this tick.
-fn signal_evaluate(
-    mut channels: ResMut<SignalChannelTable>,
-    converters: Query<&SignalConverterConfig>,
-) {
-    for config in &converters {
-        for rule in &config.rules {
-            let (input_value, is_dirty) = match channels.get_by_id(rule.input_channel_id) {
-                Some(ch) => (ch.value, ch.dirty),
-                None => continue,
-            };
-
-            // Skip if input channel not dirty (lazy evaluation for 100K scale).
-            if !is_dirty && !matches!(rule.condition, signal::SignalCondition::Always) {
-                continue;
-            }
-
-            if rule.condition.evaluate(input_value, is_dirty) {
-                let output = rule.expression.compute(input_value);
-                channels.publish_direct_id(rule.output_channel_id, output);
-            }
-        }
-    }
-}
+// `signal_evaluate` moved to `voxeldust_shard_common::signal_pipeline` —
+// runs in `SignalSet::Evaluate` on every shard.
 
 /// Threshold above which par_iter_mut outperforms sequential iteration.
 /// Below this, thread pool dispatch overhead exceeds per-entity work.
@@ -6632,60 +7060,105 @@ fn apply_mechanical_transforms(
     world_isos.0 = world_isometries;
 }
 
-/// Phase 4: Clear dirty flags after all processing.
-fn signal_clear_dirty(mut channels: ResMut<SignalChannelTable>) {
-    channels.clear_dirty();
-}
+// `signal_clear_dirty` moved to `voxeldust_shard_common::signal_pipeline` —
+// runs in `SignalSet::ClearDirty` on every shard.
 
 /// Broadcast non-Local dirty signals to other shards via QUIC.
 /// Batches all dirty signals into one message per destination per tick,
 /// reducing QUIC sends from (signals × peers) to just (peers).
 fn signal_broadcast_remote(
-    channels: Res<SignalChannelTable>,
+    mut channels: ResMut<SignalChannelTable>,
     exterior: Res<ShipExterior>,
     config: Res<ShipConfig>,
     bridge: Res<NetworkBridge>,
     peer_positions: Res<PeerPositionCache>,
+    grants: Res<voxeldust_core::signal::GrantsRegistry>,
 ) {
     use voxeldust_core::shard_message::{
         ShardMsg, SignalBroadcastBatchData, SignalBroadcastEntry,
     };
 
+    // Phase 3D: snapshot per-channel subscribers + grant keys BEFORE
+    // calling `drain_remote_dirty` (which mutates the table). For each
+    // dirty channel we'll need to know its remote subscribers so we can
+    // grant-stamp forwarded entries to each. We collect the data
+    // up-front to avoid double-borrowing `channels` mutably.
+    let dirty_subscribers: Vec<(
+        voxeldust_core::signal::ChannelId,
+        Vec<(voxeldust_core::shard_types::ShardId, u64, [u8; 32], u64)>,
+    )> = channels
+        .iter_dirty()
+        .map(|(id, ch)| {
+            let subs = ch
+                .subscribers
+                .iter()
+                .filter_map(|sub| match sub {
+                    voxeldust_core::signal::SubscriberRef::RemoteShard {
+                        shard_id,
+                        grant_id,
+                        ..
+                    } => grants
+                        .get(*grant_id)
+                        .filter(|g| !g.revoked)
+                        .map(|g| (*shard_id, *grant_id, g.key, ch.id.0 as u64)),
+                })
+                .collect();
+            (id, subs)
+        })
+        .collect();
+
+    // `drain_remote_dirty` mutates the table to bump each emitted channel's
+    // `outbound_seq` (the seq we'll stamp on the wire). The post-bump value
+    // is what the receiver's replay window expects — same channel never
+    // ships the same seq twice in a row.
     let remote_signals = channels.drain_remote_dirty();
-    if remote_signals.is_empty() {
+    if remote_signals.is_empty() && dirty_subscribers.iter().all(|(_, s)| s.is_empty()) {
         return;
     }
+
+    // Single timestamp for the entire batch — minor batching speedup, and
+    // batch-level coherence (entries within one tick share the same wall
+    // clock, simplifying receiver-side trace reconstruction).
+    let now_ms = signal::current_unix_millis();
 
     // Encode each dirty signal into a broadcast entry and partition by destination.
     let mut peer_entries = Vec::new();   // ShortRange → all peers
     let mut host_entries = Vec::new();   // LongRange + Radio → system shard
 
-    for (channel_name, value, scope) in remote_signals {
-        let (scope_code, range_m, frequency) = match scope {
+    for entry in remote_signals {
+        let (scope_code, range_m, frequency) = match entry.scope {
             signal::SignalScope::ShortRange { range_m } => (1u8, range_m, 0u32),
             signal::SignalScope::LongRange => (2u8, 0.0, 0u32),
             signal::SignalScope::Radio { frequency } => (3u8, 0.0, frequency),
             signal::SignalScope::Local => continue,
         };
 
-        let (value_type, value_data) = match value {
+        let (value_type, value_data) = match entry.value {
             signal::SignalValue::Bool(b) => (0u8, if b { 1.0f32 } else { 0.0 }),
             signal::SignalValue::Float(f) => (1u8, f),
             signal::SignalValue::State(s) => (2u8, s as f32),
         };
 
-        let entry = SignalBroadcastEntry {
-            channel_name,
+        let wire_entry = SignalBroadcastEntry {
+            channel_name: entry.name,
             value_type,
             value_data,
             scope: scope_code,
             range_m,
             frequency,
+            // Phase 2 wire fields. `sequence` came from drain_remote_dirty
+            // (post-bump). `timestamp_ms` from the per-tick clock above.
+            // `grant_id` + `auth_tag` stay zero/empty until Phase 3 hooks
+            // HMAC stamping in here using `entry.signature` as the key.
+            sequence: entry.sequence,
+            timestamp_ms: now_ms,
+            grant_id: 0,
+            auth_tag: Vec::new(),
         };
 
         match scope_code {
-            1 => peer_entries.push(entry),       // ShortRange
-            _ => host_entries.push(entry),       // LongRange (2) + Radio (3)
+            1 => peer_entries.push(wire_entry),    // ShortRange
+            _ => host_entries.push(wire_entry),    // LongRange (2) + Radio (3)
         }
     }
 
@@ -6736,6 +7209,99 @@ fn signal_broadcast_remote(
             if let Ok(reg) = bridge.peer_registry.try_read() {
                 if let Some(addr) = reg.quic_addr(host_id) {
                     let _ = bridge.quic_send_tx.try_send((host_id, addr, batch_msg));
+                }
+            }
+        }
+    }
+
+    // Phase 3D: forward dirty values to per-channel RemoteShard
+    // subscribers (the user's "Bob's tablet subscribes to Alice's
+    // local.health" use case). Distinct from the open broadcast above:
+    //   - Open broadcast: one entry per dirty channel, sent unauthenticated
+    //     to peers in spatial range or to the system relay.
+    //   - Subscriber forward: one entry per (channel, subscriber) pair,
+    //     HMAC-stamped under the subscriber's grant key, sent only to
+    //     that subscriber's shard.
+    //
+    // The same value goes out twice if a channel has both: once
+    // unauthenticated to the world, once authenticated to each grant
+    // holder. The receiver's replay window keys by (channel, sender,
+    // grant_id) so the two streams don't collide.
+    for (channel_id, subscribers) in &dirty_subscribers {
+        if subscribers.is_empty() {
+            continue;
+        }
+        // Look up the channel's current value + name + scope. The
+        // borrow of `channels` is read-only here (`drain_remote_dirty`
+        // already mutated dirty_set + outbound_seq).
+        let Some(ch) = channels.get_by_id(*channel_id) else { continue };
+        let value = ch.value;
+        let name = ch.name.clone();
+        let scope = ch.scope;
+
+        let (scope_code, range_m, frequency) = match scope {
+            signal::SignalScope::Local => (0u8, 0.0_f64, 0u32),
+            signal::SignalScope::ShortRange { range_m } => (1u8, range_m, 0u32),
+            signal::SignalScope::LongRange => (2u8, 0.0, 0u32),
+            signal::SignalScope::Radio { frequency } => (3u8, 0.0, frequency),
+        };
+        let (value_type, value_data, value_bits) = match value {
+            signal::SignalValue::Bool(b) => {
+                let v = if b { 1.0_f32 } else { 0.0 };
+                (0u8, v, v.to_bits())
+            }
+            signal::SignalValue::Float(f) => (1u8, f, f.to_bits()),
+            signal::SignalValue::State(s) => {
+                let v = s as f32;
+                (2u8, v, v.to_bits())
+            }
+        };
+
+        // Per-subscriber: bump the per-grant outbound seq, sign HMAC,
+        // dispatch. Sequences are per-(channel, grant) so each
+        // subscriber's replay window grows monotonically without
+        // colliding with another subscriber's grant.
+        for (subscriber_shard, grant_id, key, _channel_id_u64) in subscribers {
+            let seq = channels.next_subscriber_seq(*channel_id, *grant_id);
+            let tag = signal::auth::hmac_sign(
+                key,
+                &name,
+                scope_code,
+                frequency,
+                value_type,
+                value_bits,
+                now_ms,
+                source_shard_id,
+                seq,
+                *grant_id,
+            );
+            let entry = SignalBroadcastEntry {
+                channel_name: name.clone(),
+                value_type,
+                value_data,
+                scope: scope_code,
+                range_m,
+                frequency,
+                sequence: seq,
+                timestamp_ms: now_ms,
+                grant_id: *grant_id,
+                auth_tag: tag.to_vec(),
+            };
+            let batch = SignalBroadcastBatchData {
+                source_shard_id,
+                source_position,
+                entries: vec![entry],
+            };
+            let msg = ShardMsg::SignalBroadcastBatch(batch);
+            if let Ok(reg) = bridge.peer_registry.try_read() {
+                if let Some(addr) = reg.quic_addr(*subscriber_shard) {
+                    let _ = bridge.quic_send_tx.try_send((*subscriber_shard, addr, msg));
+                } else {
+                    tracing::debug!(
+                        target_shard = subscriber_shard.0,
+                        channel = %name,
+                        "subscriber forward: target shard not in peer registry"
+                    );
                 }
             }
         }
@@ -7070,9 +7636,17 @@ fn build_ship_interior(
     app.insert_resource(ColliderSyncDirty(true)); // true = initial sync on first tick
     app.insert_resource(ColliderSyncSeqs::default());
     app.insert_resource(DrainInputDiag::default());
-    app.insert_resource(SignalChannelTable::new());
-    app.insert_resource(IncomingSignalBuffer::default());
+    // Signal pipeline plumbing — `SignalPipelinePlugin` initializes
+    // `SignalChannelTable` + `IncomingSignalBuffer`, configures the
+    // `SignalSet::*` chain, and registers the generic Ingest/Merge/Evaluate/
+    // ClearDirty stages. Ship-specific systems slot into Publish/Process/
+    // Subscribe further down.
+    app.add_plugins(SignalPipelinePlugin);
     app.insert_resource(PeerPositionCache::default());
+    // Phase 4.4: per-session HUD signal delta state. Lazy-populated
+    // by `emit_hud_signal_deltas`; entries pruned when a session
+    // disappears from the live `Player` set.
+    app.insert_resource(HudSessionMap::default());
     app.insert_resource(ship_persistence);
 
     // Messages.
@@ -7119,8 +7693,20 @@ fn build_ship_interior(
         (process_connects, process_input, preconnect_check, apply_config_updates).in_set(ShipSet::Input),
     );
 
-    // Startup: scan grid for existing functional blocks.
-    app.add_systems(Startup, init_functional_blocks);
+    // Startup: scan grid for existing functional blocks, then restore
+    // persisted grants. The chain matters — `load_grants_from_db` must
+    // run AFTER `init_functional_blocks` because grant restoration
+    // re-resolves channel names against the SignalChannelTable, which
+    // is populated by the block scan.
+    app.add_systems(
+        Startup,
+        (init_functional_blocks, load_grants_from_db).chain(),
+    );
+
+    // Phase 4-Persist: drain the GrantsPersistenceQueue every 10 ticks
+    // (0.5s @ 20Hz). Sparse enough that fsync cost amortizes; frequent
+    // enough that crash-loss bound is < 1s of grant ops in flight.
+    app.add_systems(Update, flush_grants_to_db);
 
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
@@ -7130,26 +7716,60 @@ fn build_ship_interior(
             .in_set(ShipSet::BlockEdit),
     );
 
-    // Signal pipeline: seat publish → custom block systems → evaluate → subscribe → thrust.
-    // Order determines priority: later blocks override earlier ones on the same channel.
+    // Signal pipeline (split across SignalSet stages — see SignalPipelinePlugin):
+    //   * SignalSet::Ingest       — clear pending + drain remote inbound +
+    //                                seat-input publish (in plugin).
+    //   * SignalSet::Publish      — block-state publishers (this shard).
+    //   * SignalSet::Merge        — finalize aggregations (in plugin).
+    //   * SignalSet::Process      — channel transformers (this shard).
+    //   * SignalSet::Evaluate     — converter rules (in plugin).
+    //   * SignalSet::Subscribe    — block-state subscribers (this shard).
+    //   * SignalSet::ClearDirty   — reset dirty flags (in plugin).
+    //
+    // ship-specific bookends (`read_mechanical_state` reads physics state
+    // before the pipeline; `apply_mechanical_transforms`, `compute_power_
+    // budget`, `compute_ship_thrust` apply post-subscribe state to physics)
+    // run before SignalSet::Ingest and after SignalSet::Subscribe.
+    app.add_systems(
+        Update,
+        read_mechanical_state
+            .before(SignalSet::Ingest)
+            .in_set(ShipSet::Signal),
+    );
+    app.add_systems(
+        Update,
+        signal_block_publishers
+            .in_set(SignalSet::Publish)
+            .in_set(ShipSet::Signal),
+    );
+    // Channel transformers — order matters; later overrides earlier on the
+    // same channel. engine_controller's cutoff runs last so it can zero ALL
+    // channels in an emergency-stop scenario.
     app.add_systems(
         Update,
         (
-            read_mechanical_state,
-            signal_publish,             // Seat + block publishers → merge
-            flight_computer_system,     // Damping on rotation channels
-            hover_module_system,        // Attitude + gravity comp on all channels
-            autopilot_system,           // Steering overrides on rotation channels
-            warp_computer_system,       // Reads channels, manages warp state
-            engine_controller_system,   // Cutoff: zeros ALL channels (runs last)
-            signal_evaluate,            // Converter rules
-            signal_subscribe,           // Thrusters read final channel values
-            apply_mechanical_transforms,
-            compute_power_budget,
-            compute_ship_thrust,
-            signal_clear_dirty,
+            flight_computer_system,
+            hover_module_system,
+            autopilot_system,
+            warp_computer_system,
+            engine_controller_system,
         )
             .chain()
+            .in_set(SignalSet::Process)
+            .in_set(ShipSet::Signal),
+    );
+    app.add_systems(
+        Update,
+        signal_subscribe
+            .in_set(SignalSet::Subscribe)
+            .in_set(ShipSet::Signal),
+    );
+    app.add_systems(
+        Update,
+        (apply_mechanical_transforms, compute_power_budget, compute_ship_thrust)
+            .chain()
+            .after(SignalSet::Subscribe)
+            .before(SignalSet::ClearDirty)
             .in_set(ShipSet::Signal),
     );
 
@@ -7178,6 +7798,11 @@ fn build_ship_interior(
 
     // Broadcast: WorldState to client.
     app.add_systems(Update, broadcast_world_state.in_set(ShipSet::Broadcast));
+    // Phase 4.4: emit delta-encoded HUD signal updates over TCP. Runs
+    // alongside the legacy `WorldState.hud_signals` UDP broadcast
+    // during the migration window — once client-side decode lands
+    // the legacy field becomes redundant.
+    app.add_systems(Update, emit_hud_signal_deltas.in_set(ShipSet::Broadcast));
 
     // Diagnostics.
     app.add_systems(Update, (persist_chunks, log_state).in_set(ShipSet::Diagnostics));
@@ -7198,6 +7823,10 @@ fn main() {
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    // Install Prometheus exporter before any subsystem emits a metric.
+    // Healthz server reads the resulting handle to mount /metrics.
+    voxeldust_shard_common::observability::install_prometheus_recorder();
 
     let ship_id = if args.ship_id > 0 {
         args.ship_id
@@ -7226,6 +7855,9 @@ fn main() {
         galaxy_seed: None,
         host_shard_id,
         advertise_host: args.advertise_host,
+        // V2 wire-dict emission is now the default; every receiver
+        // shard in this codebase accepts both V1 and V2 (4.3.8/4.3.9).
+        wire_dict_v2_send: true,
     };
 
     info!(

@@ -46,6 +46,32 @@ pub struct TcpMessageChannels {
     /// next `ChunkDelta`.
     pub lamp_config_update_tx:
         mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
+    /// Phase 3C: client-issued `RemoteAccessGrant` create requests. The
+    /// shard's grant-management ECS system drains this, validates that
+    /// the requesting player owns the listed channels, mints a fresh
+    /// `(grant_id, key)`, inserts into `GrantsRegistry`, and replies
+    /// with a fresh `GrantsSnapshotData` containing the new key.
+    pub grant_create_tx:
+        mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::GrantCreateData)>,
+    /// Phase 3C: client-issued grant revocation requests. The grant is
+    /// tombstoned (kept for audit) rather than removed. Idempotent —
+    /// already-revoked grants reply success.
+    pub grant_revoke_tx:
+        mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::GrantRevokeData)>,
+    /// Phase 3C: recipient-side held grant registrations. Stored in the
+    /// player's session-scoped `HeldGrants` resource on the primary
+    /// shard so subsequent `RemoteSignalPublish` can look up the key.
+    pub add_held_grant_tx:
+        mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::AddHeldGrantData)>,
+    /// Phase 3C: cleanup for a held grant.
+    pub forget_held_grant_tx:
+        mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::ForgetHeldGrantData)>,
+    /// Phase 3C: client-issued remote publish — primary shard signs
+    /// HMAC and ships a SignalBroadcastBatch to the target shard.
+    pub remote_signal_publish_tx: mpsc::UnboundedSender<(
+        SessionToken,
+        voxeldust_core::client_message::RemoteSignalPublishData,
+    )>,
 }
 
 /// Event emitted when a client connects via TCP.
@@ -508,6 +534,21 @@ async fn run_tcp_read_loop(
             }
             Ok(ClientMsg::SignalPublish(data)) => {
                 let _ = channels.signal_publish_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::GrantCreate(data)) => {
+                let _ = channels.grant_create_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::GrantRevoke(data)) => {
+                let _ = channels.grant_revoke_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::AddHeldGrant(data)) => {
+                let _ = channels.add_held_grant_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::ForgetHeldGrant(data)) => {
+                let _ = channels.forget_held_grant_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::RemoteSignalPublish(data)) => {
+                let _ = channels.remote_signal_publish_tx.send((session_token, data));
             }
             Err(e) => {
                 debug!(%peer_addr, %e, "failed to deserialize TCP client message");

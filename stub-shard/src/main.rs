@@ -53,6 +53,10 @@ fn main() {
         )
         .init();
 
+    // Install Prometheus exporter before any subsystem emits a metric.
+    // Healthz server reads the resulting handle to mount /metrics.
+    voxeldust_shard_common::observability::install_prometheus_recorder();
+
     let shard_type = match args.shard_type.as_str() {
         "planet" => ShardType::Planet,
         "system" => ShardType::System,
@@ -87,6 +91,7 @@ fn main() {
         galaxy_seed,
         host_shard_id: args.host_shard.map(ShardId),
         advertise_host: args.advertise_host,
+        wire_dict_v2_send: true,
     };
 
     info!(

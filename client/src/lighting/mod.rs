@@ -27,6 +27,7 @@ use bevy::prelude::*;
 pub mod atmosphere;
 pub mod camera;
 pub mod eclipse;
+pub mod eclipse_deferred;
 pub mod emitters;
 pub mod ibl;
 pub mod quality;

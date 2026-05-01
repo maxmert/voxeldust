@@ -21,6 +21,7 @@ use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{compute_lighting, compute_planet_position, SystemParams};
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
+use voxeldust_shard_common::signal_pipeline::SignalPipelinePlugin;
 
 use voxeldust_core::character::{
     self, build_character, move_one_character, CharacterBuildSpec, CharacterCapsule,
@@ -1387,6 +1388,7 @@ fn broadcast_world_state(
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
     external: Res<ExternalEntities>,
+    channels: Res<voxeldust_core::signal::SignalChannelTable>,
 ) {
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
@@ -1506,10 +1508,34 @@ fn broadcast_world_state(
         autopilot: None,
         sub_grids: vec![],
         entities,
-        // Planet shards don't auto-publish HUD signals yet — planet
-        // turrets / seats publish via the normal signal graph. Left
-        // empty so client SignalRegistry retains last-known values.
-        hud_signals: Vec::new(),
+        // Snapshot every channel registered on this planet's
+        // `SignalChannelTable`. Future Phase 4 work narrows this to
+        // per-connection delta encoding (HudSignalDelta on TCP) — for now
+        // every primary connection gets the full snapshot, matching how
+        // ship-shard does it. Channels stay scoped to this shard, so
+        // there's zero leakage to other planets / ships.
+        hud_signals: channels
+            .iter_all()
+            .map(|(name, _id, value)| voxeldust_core::client_message::HudSignalEntryData {
+                channel_name: name.to_string(),
+                value: match value {
+                    voxeldust_core::signal::SignalValue::Bool(b) => {
+                        voxeldust_core::client_message::HudSignalValue::Bool(b)
+                    }
+                    voxeldust_core::signal::SignalValue::Float(f) => {
+                        voxeldust_core::client_message::HudSignalValue::Float(f)
+                    }
+                    voxeldust_core::signal::SignalValue::State(s) => {
+                        voxeldust_core::client_message::HudSignalValue::State(s)
+                    }
+                },
+                // Property is per-binding metadata; the channel itself
+                // doesn't carry one, so default to Active(=0) here. The
+                // configurator and widget bindings store the property
+                // separately on each subscriber/publisher binding.
+                property: 0,
+            })
+            .collect(),
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("WorldState broadcast dropped — channel full");
@@ -1659,6 +1685,16 @@ fn build_app(
     app.insert_resource(PendingHandoffs::default());
     app.insert_resource(ExternalEntities::default());
 
+    // Signal pipeline — same `SignalPipelinePlugin` as ship-shard. Enables
+    // placing functional blocks (seats, doors, lights, future thrusters)
+    // anywhere on the planet surface and wiring them via the standard
+    // signal channels. Without this plugin a Seat block on a planet would
+    // publish into a void; with it, in-shard publish/subscribe works
+    // identically to a ship's interior. Per-block-kind subscriber systems
+    // get added under `SignalSet::Subscribe` as planet-side block kinds
+    // come online (a follow-up phase).
+    app.add_plugins(SignalPipelinePlugin);
+
     // Messages.
     app.add_message::<ClientConnectedMsg>();
     app.add_message::<PlayerInputMsg>();
@@ -1777,6 +1813,10 @@ fn main() {
         )
         .init();
 
+    // Install Prometheus exporter before any subsystem emits a metric.
+    // Healthz server reads the resulting handle to mount /metrics.
+    voxeldust_shard_common::observability::install_prometheus_recorder();
+
     let (planet_radius, planet_mass) = if let Some(sys_seed) = args.system_seed {
         let sys = SystemParams::from_seed(sys_seed);
         if let Some(planet) = sys.planets.get(args.planet_index as usize) {
@@ -1804,6 +1844,7 @@ fn main() {
         galaxy_seed: None,
         host_shard_id: None,
         advertise_host: args.advertise_host,
+        wire_dict_v2_send: true,
     };
 
     info!(

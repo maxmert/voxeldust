@@ -266,6 +266,84 @@ pub struct FunctionalBlockRef {
 }
 
 // ---------------------------------------------------------------------------
+// Block identity (Phase 1 — signal pipeline capability foundation)
+// ---------------------------------------------------------------------------
+
+/// Per-functional-block identity stamped at placement time. Persisted to redb
+/// alongside the block's voxel state.
+///
+/// `owner_id` is the player who placed (or was assigned ownership of) the
+/// block. It anchors the channel namespace `<owner_id>.<path>` and is the
+/// principal consulted by the channel's `publish_policy` / `subscribe_policy`
+/// gates, plus by `RemoteAccessGrant` in Phase 3.
+///
+/// `block_uid` is a globally-unique 64-bit identifier minted by `OsRng` at
+/// placement. It survives renames, ownership transfers, and shard migrations,
+/// and is the stable handle used in default channel names like
+/// `<owner_id>.seat-<block_uid>.thrust-forward`. Re-mining and replacing the
+/// block at the same coordinates produces a fresh `block_uid` — that's
+/// intentional: it's the block, not the position, that owns the identity.
+///
+/// `created_at_ms` is the wall-clock millisecond timestamp at placement.
+/// Used by the Access Tokens panel to display "this grant created 2 days ago"
+/// and to anchor the per-grant `created_at_ms` audit trail in Phase 3.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BlockOwnership {
+    pub owner_id: u64,
+    pub block_uid: u64,
+    pub created_at_ms: u64,
+}
+
+impl BlockOwnership {
+    /// Generate a fresh ownership stamp at placement time. Mints a
+    /// cryptographically-strong `block_uid` from the OS RNG (not a
+    /// predictable hash of position + tick — predictable uids would let a
+    /// foreign shard pre-compute the channel names a fresh placement will
+    /// use, defeating the namespacing collision-freedom property).
+    pub fn new_at(owner_id: u64, now_ms: u64) -> Self {
+        use rand::RngCore;
+        let block_uid = rand::rngs::OsRng.next_u64();
+        Self { owner_id, block_uid, created_at_ms: now_ms }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Player + seating (shard-agnostic — works on ships, planets, stations)
+// ---------------------------------------------------------------------------
+
+/// Marker component for a player entity. Distinguishes player-driven entities
+/// from NPCs / drones / observers in queries that should only see real players
+/// (e.g., the seat-input loop). Shard-agnostic: a player on a ship-shard,
+/// planet-shard, or station-shard all carry this.
+#[derive(Component)]
+pub struct Player;
+
+/// Per-player seated state. `seat_entity` points to the seat block entity the
+/// player currently occupies. The seat itself owns the channel mapping
+/// (`SeatChannelMapping`) — the seated player is just the trigger that
+/// transports their input values into those channels each tick.
+///
+/// `seated_player_id` is captured on sit-down and consulted by
+/// `ActivationAllowlist` (a future opt-in component on locked seats) to
+/// gate publish; default seats with no allowlist don't read it.
+#[derive(Component, Default)]
+pub struct SeatedState {
+    pub seated: bool,
+    pub seat_entity: Option<Entity>,
+}
+
+/// Per-binding float values from the client's seat input evaluation.
+/// Length matches the active seat's binding count. Written by the
+/// shard's input drainer; read by the generic `signal_seat_publish`
+/// system in `shard-common`.
+///
+/// Stored as a Component on the player entity (not a Resource) so the
+/// generic publish system can iterate `(SeatedState, SeatInputValues)`
+/// pairs without needing a per-shard player registry.
+#[derive(Component, Default)]
+pub struct SeatInputValues(pub Vec<f32>);
+
+// ---------------------------------------------------------------------------
 // Thermal state (ships in atmosphere)
 // ---------------------------------------------------------------------------
 

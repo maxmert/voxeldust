@@ -373,6 +373,8 @@ fn paint_tablet_ui(
                     warp_computer: state.config.warp_computer.clone(),
                     engine_controller: state.config.engine_controller.clone(),
                     mechanical: state.config.mechanical.clone(),
+                    antenna: state.config.antenna.clone(),
+                    listener: state.config.listener.clone(),
                 };
                 let msg = ClientMsg::BlockConfigUpdate(update);
                 let data = msg.serialize();
@@ -888,7 +890,9 @@ fn render_slot_editor(
     });
     ui.horizontal(|ui| {
         ui.label("PROP");
-        property_dropdown(ui, &format!("{}-prop", id_base), &mut slot.property);
+        // HUD widget config: not bound to a single block kind, so keep the
+        // full property set (player chooses what their tile reads/writes).
+        property_dropdown(ui, &format!("{}-prop", id_base), &mut slot.property, &[]);
     });
     ui.add(
         egui::TextEdit::singleline(&mut slot.caption)
@@ -899,18 +903,23 @@ fn render_slot_editor(
 }
 
 fn render_publisher_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    // Hidden entirely when this block kind can't publish (e.g., Thruster).
+    if cfg.publish_property_options.is_empty() {
+        return;
+    }
     ui.heading(
         egui::RichText::new("PUBLISH")
             .color(egui::Color32::from_rgb(60, 220, 120))
             .size(12.0),
     );
     let available = cfg.available_channels.clone();
+    let pub_opts = cfg.publish_property_options.clone();
     let mut remove: Option<usize> = None;
     for (i, b) in cfg.publish_bindings.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             ui.label(format!("{}.", i + 1));
             channel_text_edit(ui, &format!("pub-{}", i), &mut b.channel_name, &available);
-            property_dropdown(ui, &format!("pub-prop-{}", i), &mut b.property);
+            property_dropdown(ui, &format!("pub-prop-{}", i), &mut b.property, &pub_opts);
             if ui.add(button_icon("×")).clicked() {
                 remove = Some(i);
             }
@@ -925,27 +934,35 @@ fn render_publisher_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
         ))
         .clicked()
     {
+        // Default to the first property the kind actually supports.
+        let default_prop = pub_opts
+            .first()
+            .and_then(|(o, _)| SignalProperty::from_ordinal(*o))
+            .unwrap_or(SignalProperty::Active);
         cfg.publish_bindings.push(PublishBindingConfig {
-            // Start empty — user types the channel name freely.
             channel_name: String::new(),
-            property: SignalProperty::Throttle,
+            property: default_prop,
         });
     }
 }
 
 fn render_subscriber_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    if cfg.subscribe_property_options.is_empty() {
+        return;
+    }
     ui.heading(
         egui::RichText::new("SUBSCRIBE")
             .color(egui::Color32::from_rgb(240, 200, 60))
             .size(12.0),
     );
     let available = cfg.available_channels.clone();
+    let sub_opts = cfg.subscribe_property_options.clone();
     let mut remove: Option<usize> = None;
     for (i, b) in cfg.subscribe_bindings.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             ui.label(format!("{}.", i + 1));
             channel_text_edit(ui, &format!("sub-{}", i), &mut b.channel_name, &available);
-            property_dropdown(ui, &format!("sub-prop-{}", i), &mut b.property);
+            property_dropdown(ui, &format!("sub-prop-{}", i), &mut b.property, &sub_opts);
             if ui.add(button_icon("×")).clicked() {
                 remove = Some(i);
             }
@@ -960,9 +977,13 @@ fn render_subscriber_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
         ))
         .clicked()
     {
+        let default_prop = sub_opts
+            .first()
+            .and_then(|(o, _)| SignalProperty::from_ordinal(*o))
+            .unwrap_or(SignalProperty::Active);
         cfg.subscribe_bindings.push(SubscribeBindingConfig {
             channel_name: String::new(),
-            property: SignalProperty::Throttle,
+            property: default_prop,
         });
     }
 }
@@ -1076,7 +1097,12 @@ fn render_seat_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
                     &mut m.channel_name,
                     &available,
                 );
-                property_dropdown(ui, &format!("seat-prop-{}", i), &mut m.property);
+                // Seat mappings publish keyboard / mouse / scroll inputs to
+                // user-chosen channels: which property the value carries
+                // depends on the input source (button → Active, axis →
+                // Throttle, etc.) — the seat itself isn't constrained by a
+                // single property like a thruster. Keep the full set here.
+                property_dropdown(ui, &format!("seat-prop-{}", i), &mut m.property, &[]);
             });
         });
     }
@@ -1616,7 +1642,45 @@ fn channel_text_edit(
     });
 }
 
-fn property_dropdown(ui: &mut egui::Ui, id: &str, current: &mut SignalProperty) {
+/// Property selector. If `options` is non-empty, the dropdown is filtered
+/// to those entries (server-populated from `BlockKindSignalSchema` — e.g.,
+/// a Thruster's subscribe options are Throttle/Boost/Active only). When the
+/// schema yields exactly one entry, render a static label instead — there's
+/// nothing to choose. When `options` is empty, fall back to the full list
+/// (used by HUD widget config and seat mappings, which aren't schema-bound
+/// to a specific block kind).
+fn property_dropdown(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: &mut SignalProperty,
+    options: &[(u8, String)],
+) {
+    if !options.is_empty() {
+        // Coerce to first allowed if persisted state doesn't match the schema.
+        if !options.iter().any(|(o, _)| *o == current.as_ordinal()) {
+            if let Some(first) = options.first().and_then(|(o, _)| SignalProperty::from_ordinal(*o)) {
+                *current = first;
+            }
+        }
+        if options.len() == 1 {
+            ui.label(format!("{:?}", current));
+            return;
+        }
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(format!("{:?}", current))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for (ord, hint) in options {
+                    let Some(prop) = SignalProperty::from_ordinal(*ord) else { continue };
+                    let resp = ui.selectable_value(current, prop, format!("{:?}", prop));
+                    if !hint.is_empty() {
+                        resp.on_hover_text(hint);
+                    }
+                }
+            });
+        return;
+    }
+    // Fallback: full property set for HUD widgets / seat mappings.
     egui::ComboBox::from_id_salt(id)
         .selected_text(format!("{:?}", current))
         .width(90.0)

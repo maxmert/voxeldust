@@ -566,6 +566,28 @@ table SignalBroadcastEntry {
     range_m: double;
     /// Radio frequency (Radio scope only; 0 for other scopes).
     frequency: uint32;
+    // -- Phase 2 wire-protocol additions (additive, optional) ----------
+    /// Per-(channel, sender) monotonic sequence — drives the receiver's
+    /// 64-entry replay window. Senders increment this per outbound
+    /// publish on the same channel. Default 0 means "legacy sender,
+    /// don't enforce replay" — receivers gate the check on `seq != 0 ||
+    /// timestamp_ms != 0` so old↔new shards interoperate cleanly.
+    sequence: uint64 = 0;
+    /// UNIX wall-clock millis at the sender. The receiver compares against
+    /// its own clock and rejects entries whose drift exceeds
+    /// `REPLAY_TIMESTAMP_WINDOW_MS` (5 s). Default 0 → "legacy".
+    timestamp_ms: uint64 = 0;
+    /// Phase 3 capability lookup. Non-zero → look up the grant by id in
+    /// the receiver's `GrantsRegistry`, verify `auth_tag` against the
+    /// grant's HMAC key, and (if scope is Local) treat the grant as the
+    /// proof of authorized cross-shard access. Default 0 → "open
+    /// broadcast, no grant" — Phase 1A's `LocalChannelImmutable` still
+    /// rejects Local-scoped channels reached this way.
+    grant_id: uint64 = 0;
+    /// Phase 3 HMAC-SHA256 truncated to 16 bytes. Empty → unauthenticated.
+    /// Receiver verifies against `channel.signature` (or grant.key if
+    /// `grant_id != 0`) over the canonicalized payload bytes.
+    auth_tag: [uint8];
 }
 
 /// Batched signal broadcast — multiple signals in one message.
@@ -576,6 +598,174 @@ table SignalBroadcastBatch {
     source_position: Vec3d;
     /// All dirty signals in this batch.
     entries: [SignalBroadcastEntry];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4.3: wire-dictionary interning. V2 entries replace the verbose
+// `channel_name: string` with a per-connection `wire_id: uint32` plus a
+// FLAG_REGISTER bit that announces the (wire_id, name) binding the first
+// time the sender mentions a channel to a given peer. The receiver builds
+// up an `InboundDict` and looks up the name on subsequent references.
+// Steady-state savings: ~30B name → 4B id ≈ 3-5× wire-size reduction.
+//
+// V2 coexists with V1 during rolling deployments. Senders use V2 only
+// when the peer's `signal_dict_v2` capability is registered (handshake
+// not yet implemented — for now, V2 is opt-in per-shard via config).
+// ---------------------------------------------------------------------------
+
+table SignalBroadcastEntryV2 {
+    /// Bit 0 = FLAG_REGISTER: the entry carries a fresh `wire_id → name`
+    /// binding. The receiver inserts/overwrites in its inbound dict
+    /// before resolving. Bits 1-7 reserved for future use.
+    flags: uint8;
+    /// Per-connection dictionary id assigned by the sender.
+    wire_id: uint32;
+    /// Channel name. Required when FLAG_REGISTER is set; ignored
+    /// otherwise (kept on the wire as empty string for FB schema
+    /// uniformity, but receivers MUST NOT trust this field unless
+    /// FLAG_REGISTER is set on the entry).
+    channel_name: string;
+    /// Same payload semantics as V1.
+    value_type: uint8;
+    value_data: float;
+    scope: uint8;
+    range_m: double;
+    frequency: uint32;
+    sequence: uint64 = 0;
+    timestamp_ms: uint64 = 0;
+    grant_id: uint64 = 0;
+    auth_tag: [uint8];
+}
+
+table SignalBroadcastBatchV2 {
+    source_shard_id: uint64;
+    source_position: Vec3d;
+    /// Sender's `OutboundDict::dict_seq()` at batch-build time. Receiver
+    /// gates the batch on `dict_seq >= last_accepted` (monotonic). A
+    /// drift triggers full resync (drop batch + clear inbound dict +
+    /// log + bump `signal_dict_resync_total`).
+    dict_seq: uint64;
+    entries: [SignalBroadcastEntryV2];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3F: galaxy-shard signal_relay subscribe protocol.
+//
+// The galaxy-shard fans out Radio-scope (`scope=3`) signal batches to
+// system-shards that have explicitly registered as subscribers. Without
+// a subscription the relay drops Radio traffic at galaxy — operators
+// can verify by chart-watching `signal_relay_skipped_no_subscribers`.
+//
+// Two ways for a system-shard to register interest:
+//   1. **Per-frequency**: list specific `frequencies`. Galaxy fans out
+//      only batches whose entries match one of those frequencies.
+//   2. **Wildcard**: set `wildcard=true`. Galaxy fans out every Radio
+//      batch to this shard. Costs more bandwidth but trivially correct
+//      and is the MVP default — ships' Listener blocks don't yet
+//      propagate per-frequency interest to their system-shard.
+//
+// A subscription carries `lease_until_ms` (UNIX millis). The galaxy
+// expires subscribers automatically — sender must re-subscribe before
+// the deadline. Unix-time keeps the lease independent of per-shard
+// tick counters which don't share epoch.
+// ---------------------------------------------------------------------------
+
+table RadioSubscribe {
+    /// The shard the galaxy should forward matching batches to. Usually
+    /// a system-shard; could be any shard that wants to receive.
+    subscriber_shard_id: uint64;
+    /// Specific frequencies to subscribe to. Empty when `wildcard` is
+    /// set (then the field is unused).
+    frequencies: [uint32];
+    /// True ⇒ subscribe to every Radio batch regardless of frequency.
+    /// Used by system-shards as a coarse default until per-frequency
+    /// listener-tracking lands (deferred).
+    wildcard: bool;
+    /// UNIX millis after which the subscription auto-expires unless
+    /// renewed. Galaxy compares against its own clock — sender + receiver
+    /// must have approximately synchronized wall-clock time (NTP).
+    lease_until_ms: uint64;
+}
+
+table RadioUnsubscribe {
+    subscriber_shard_id: uint64;
+    /// Frequencies to drop. Ignored when `wildcard` is set (then the
+    /// shard's wildcard subscription is dropped).
+    frequencies: [uint32];
+    wildcard: bool;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3F.9: ship-shard → system-shard interest propagation.
+//
+// A ship-shard tells its host system-shard which Radio frequencies it
+// has Listener blocks for. The system-shard aggregates across all ships
+// it hosts and sends a precise per-frequency `RadioSubscribe` to the
+// galaxy. Without this hop, a system-shard subscribes to galaxy as a
+// wildcard ("send me every Radio batch") which scales poorly at 100K-
+// user load.
+//
+// Full-set semantics: each `ShipFrequencyInterest` message carries the
+// COMPLETE current set of frequencies for that ship, not a delta. The
+// system-shard's tracker overwrites the ship's entry on every receive.
+// This makes the protocol self-healing: a missed message just delays
+// convergence by one renewal cycle (90s); there's no diff state to lose.
+//
+// Lease + renewal: `lease_until_ms` is UNIX millis. Ship-shard renews
+// every 30s with a 90s lease (3× headroom for jitter). System-shard
+// drops a ship's interest after the lease expires — handles
+// disconnects + crashes without explicit teardown messaging.
+// ---------------------------------------------------------------------------
+
+table ShipFrequencyInterest {
+    /// The ship-shard that holds the listeners.
+    ship_shard_id: uint64;
+    /// All frequencies this ship has at least one Listener block for.
+    frequencies: [uint32];
+    /// UNIX millis lease deadline. System-shard drops this ship's
+    /// entry on expiry.
+    lease_until_ms: uint64;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3D: cross-shard subscribe protocol. Lets a foreign shard register
+// interest in a channel hosted on this shard. The receiving shard records
+// the subscription as `SubscriberRef::RemoteShard` on the channel; future
+// dirty values get forwarded as grant-stamped `SignalBroadcastEntry`s.
+// ---------------------------------------------------------------------------
+
+/// Subscribe request — the sender wants this shard to forward dirty values
+/// for `channel_name` until `valid_until_tick`. Authorized via `grant_id`
+/// + `auth_tag` (HMAC under the grant's key, see
+/// `signal::auth::hmac_sign_subscribe_request`).
+table SignalSubscribe {
+    /// Subscriber's shard id — the destination of forwarded entries.
+    subscriber_shard_id: uint64;
+    /// Full namespaced channel name on this shard (`<owner>.<path>`).
+    channel_name: string;
+    /// Grant authorizing the subscription. Receiver looks up the grant
+    /// in `GrantsRegistry::check_subscribe`.
+    grant_id: uint64;
+    /// Fresh per-request nonce — defends against replay of subscribe
+    /// requests within the timestamp window.
+    nonce: uint64;
+    /// UNIX millis at the sender. Receiver enforces ±5s freshness.
+    timestamp_ms: uint64;
+    /// Lease deadline in receiver-local tick numbers. Receiver caps
+    /// against a max-lease ceiling so a malicious request can't request
+    /// "valid until tick 2^64".
+    valid_until_tick: uint64;
+    /// HMAC-SHA256 over the canonical request bytes, truncated to 16
+    /// bytes. Verified under `grants_registry.check_subscribe(grant_id)`'s
+    /// returned key.
+    auth_tag: [uint8];
+}
+
+/// Unsubscribe — explicit teardown. Idempotent.
+table SignalUnsubscribe {
+    subscriber_shard_id: uint64;
+    channel_name: string;
+    grant_id: uint64;
 }
 
 // Union of all inter-shard message payloads.
@@ -662,12 +852,28 @@ union ShardPayload {
     ShipPropertiesUpdate,
     SignalBroadcast,
     SignalBroadcastBatch,
+    /// Phase 4.3: wire-dict-interned batch.
+    SignalBroadcastBatchV2,
     VisibilityDirective,
     ShipColliderSync,
     /// System shard → ship/planet shard: unified AOI entity set.
     SystemEntitiesUpdate,
     /// Planet shard → system shard: aggregate surface-player positions at 1 Hz.
     PlanetPlayerDigest,
+    /// Phase 3D: foreign shard subscribes to a channel on this shard via
+    /// a held grant. Receiver registers a `SubscriberRef::RemoteShard` and
+    /// forwards future dirty values until lease expiry.
+    SignalSubscribe,
+    /// Phase 3D: explicit subscribe teardown.
+    SignalUnsubscribe,
+    /// Phase 3F: register interest in Radio traffic at the galaxy
+    /// shard. The galaxy holds the subscription until `lease_until_ms`
+    /// or until matching `RadioUnsubscribe`.
+    RadioSubscribe,
+    /// Phase 3F: drop Radio interest.
+    RadioUnsubscribe,
+    /// Phase 3F.9: ship-shard → system-shard freq interest propagation.
+    ShipFrequencyInterest,
 }
 
 /// Root type for all inter-shard QUIC messages.
@@ -799,6 +1005,76 @@ table HudSignalEntry {
     /// `SignalProperty` ordinal (0=Active, 1=Throttle, 2=Angle, …,
     /// 10=Text). Widget code uses this to pick a display format.
     property: uint8;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4.4: delta-encoded HUD signal updates over TCP.
+//
+// Today's `WorldState.hud_signals` ships a FULL snapshot every tick
+// over UDP. At 100K users × ~50 channels × ~50B × 20 Hz that's ~5 GB/s
+// of HUD bandwidth alone. The vast majority is unchanged values
+// re-serialized every tick.
+//
+// V2 path:
+//   * Per-session `OutboundDict` interns channel names → `wire_id`.
+//   * Server emits `HudSignalDelta` ONLY when something changed.
+//   * Each `HudSignalEntryV2` is one of:
+//       - **Register**: bit 0 of `flags` set; carries `wire_id` + name
+//         (first sighting in this session).
+//       - **Bare**: flags == 0; carries `wire_id` + new value (channel
+//         already known to the client).
+//       - **Remove**: bit 1 of `flags` set; carries `wire_id` only;
+//         tells the client "this channel is no longer visible — drop
+//         your cached value."
+//   * Steady-state: only entries whose value changed since the last
+//     batch ship. Empty deltas are skipped entirely.
+//
+// `dict_seq` is monotonic per session; the client gates reads on
+// `dict_seq >= last_accepted` and triggers a full resync (drop the
+// inbound dict + reset state) on backwards drift.
+//
+// `batch_seq` is monotonic across all batches the server sent on this
+// session. The client uses it for diagnostics + as the resync hint
+// it returns in the future ack message.
+//
+// **Why TCP, not UDP**: HUD deltas are stateful (each delta builds on
+// prior state via the dict). A single dropped UDP datagram requires
+// resync. TCP's reliability lets us delete the snapshot path entirely
+// without per-message recovery.
+// ---------------------------------------------------------------------------
+
+table HudSignalEntryV2 {
+    /// Bit 0 = REGISTER (carries name); bit 1 = REMOVE (drops the
+    /// wire_id from the client's cache). Bits 2-7 reserved.
+    flags: uint8;
+    /// Per-session dictionary id for this channel. Allocated by the
+    /// server's `HudSession::OutboundDict`.
+    wire_id: uint32;
+    /// Channel name. Required when flags & REGISTER. Empty otherwise
+    /// (clients MUST gate name use on the flag, not on string
+    /// non-emptiness).
+    channel_name: string;
+    /// 0=Bool, 1=Float, 2=State, 3=Text. Same encoding as V1
+    /// `HudSignalEntry`. Ignored on REMOVE.
+    value_type: uint8;
+    value_num: float;
+    /// Populated only when `value_type == 3`.
+    value_text: string;
+    /// `SignalProperty` ordinal (matches V1's `property` field).
+    property: uint8;
+    /// Per-(session, wire_id) monotonic seq. Lets the client detect
+    /// out-of-order delivery within a single session if/when we
+    /// add UDP fast-path for non-stateful HUD entries (deferred).
+    seq: uint32;
+}
+
+table HudSignalDelta {
+    /// Per-session monotonic dictionary sequence. Bumped on every
+    /// REGISTER + every REMOVE. Client verifies `>=` last accepted.
+    dict_seq: uint64;
+    /// Per-session monotonic batch sequence. Strictly increasing.
+    batch_seq: uint64;
+    entries: [HudSignalEntryV2];
 }
 
 table WorldState {
@@ -1065,6 +1341,15 @@ table SignalBindingFB {
     property: uint8;   // SignalProperty enum
 }
 
+/// Per-block-kind allowed property descriptor used by the configurator UI
+/// dropdown. Server populates from the kind's static `BlockKindSignalSchema`;
+/// client uses to filter what options to render. Keeps the wire compact:
+/// just the ordinal + a short hint text for the tooltip.
+table PropertyOptionFB {
+    ordinal: uint8;     // SignalProperty as_ordinal
+    hint: string;       // Optional human-readable tooltip; "" for none
+}
+
 /// Signal converter rule: condition → action.
 table SignalRuleFB {
     input_channel: string;
@@ -1153,6 +1438,39 @@ table EngineControllerConfigFB {
     toggle_channel: string;
 }
 
+/// Phase 3E: Antenna block config — bridges a Local channel on this shard
+/// to a Radio channel on a target shard via a held grant. The placing
+/// player's `HeldGrants[grant_id]` provides the HMAC key (looked up at
+/// apply time, then cached on `AntennaState` for the per-tick hot path).
+table AntennaConfigFB {
+    /// Local channel the antenna READS each tick.
+    source_channel_name: string;
+    /// Remote channel name on the target shard (the publish target).
+    remote_channel_name: string;
+    frequency: uint32;
+    grant_id: uint64;
+    target_shard_id: uint64;
+}
+
+/// Phase 3E: Listener block config — receives a Radio channel from a
+/// remote source shard via a held grant and mirrors its value onto a
+/// chosen Local channel on this shard. Apply step creates BOTH:
+///   * a local Radio-scope channel matching `bridged_channel_name`
+///     (so try_push_remote can find it when forwarded entries arrive)
+///   * a local Local-scope channel matching `destination_channel_name`
+///     (so internal subscribers wire to it like any native Local channel).
+/// Then attaches the bridged channel id to the mirror grant in
+/// `GrantsRegistry` so HMAC verification succeeds.
+table ListenerConfigFB {
+    /// Local Local-scope channel where the bridged value gets mirrored.
+    destination_channel_name: string;
+    /// Cross-shard channel name (matches publisher's remote_channel_name).
+    bridged_channel_name: string;
+    frequency: uint32;
+    grant_id: uint64;
+    source_shard_id: uint64;
+}
+
 /// Server → client: seat bindings when player enters a seat.
 table SeatBindingsNotify {
     bindings: [SeatBindingFB];
@@ -1212,6 +1530,15 @@ table BlockConfigState {
     autopilot_config: AutopilotConfigFB;
     warp_computer_config: WarpComputerConfigFB;
     engine_controller_config: EngineControllerConfigFB;
+    /// Properties this block kind can publish (configurator UI dropdown).
+    /// Empty if the block doesn't publish at all (e.g., Thruster).
+    publish_property_options: [PropertyOptionFB];
+    /// Properties this block kind can subscribe to.
+    subscribe_property_options: [PropertyOptionFB];
+    /// Phase 3E: Antenna block config (None on non-antenna blocks).
+    antenna_config: AntennaConfigFB;
+    /// Phase 3E: Listener block config (None on non-listener blocks).
+    listener_config: ListenerConfigFB;
 }
 
 /// Client → server: updated signal config for a functional block.
@@ -1231,6 +1558,69 @@ table BlockConfigUpdate {
     autopilot_config: AutopilotConfigFB;
     warp_computer_config: WarpComputerConfigFB;
     engine_controller_config: EngineControllerConfigFB;
+    /// Phase 3E: Antenna block config (None on non-antenna blocks).
+    antenna_config: AntennaConfigFB;
+    /// Phase 3E: Listener block config (None on non-listener blocks).
+    listener_config: ListenerConfigFB;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3C: capability-based grants on signal channels (RemoteAccessGrant)
+// ---------------------------------------------------------------------------
+
+/// Client → server: create a grant on one or more channels owned by the
+/// requesting player. Server validates ownership, allocates `grant_id` +
+/// HMAC key via OsRng, inserts into the shard's `GrantsRegistry`, and
+/// replies with a `GrantsSnapshotData` containing the new entry's key.
+table GrantCreate {
+    /// Channels this grant covers, by full namespaced display name (e.g.,
+    /// "12345.thrust-forward"). Server resolves to ChannelIds.
+    channel_names: [string];
+    /// 0=Publish, 1=Subscribe, 2=Both.
+    ops: uint8;
+    /// Human-readable label shown in the owner's Access Tokens panel
+    /// ("Bob (remote pilot)"). Up to 64 chars.
+    label: string;
+    /// UNIX millis when the grant auto-revokes. 0 = no expiration.
+    expires_at_ms: uint64 = 0;
+    /// Optional namespace pattern for auto-extension (e.g.,
+    /// "alice.north-pad.*"). Empty = no glob.
+    namespace_glob: string;
+}
+
+/// Client → server: revoke an existing grant. Idempotent — already-revoked
+/// grants reply success. The grant is tombstoned (kept for audit) rather
+/// than removed.
+table GrantRevoke {
+    grant_id: uint64;
+}
+
+/// One row of `GrantsSnapshotData`. Contains everything the owner-side
+/// tablet UI needs to render the Access Tokens panel.
+table GrantPublicView {
+    grant_id: uint64;
+    /// Base64-encoded 32-byte HMAC key. **Sent only to the grant's owner.**
+    /// Non-owner snapshot recipients (other players in the same shard)
+    /// receive an empty string here — never the raw key.
+    key_b64: string;
+    /// Resolved channel display names.
+    channel_names: [string];
+    /// 0=Publish, 1=Subscribe, 2=Both.
+    ops: uint8;
+    label: string;
+    created_at_ms: uint64;
+    /// 0 = no expiration; otherwise UNIX millis.
+    expires_at_ms: uint64 = 0;
+    created_by: uint64;
+    revoked: bool;
+    namespace_glob: string;
+}
+
+/// Server → client: full snapshot of the player's owned grants. Sent on
+/// any GrantCreate / GrantRevoke that mutated the registry. Replaces (not
+/// merges) the client's state — the snapshot is authoritative.
+table GrantsSnapshotData {
+    grants: [GrantPublicView];
 }
 
 union ServerPayload {
@@ -1251,6 +1641,10 @@ union ServerPayload {
     ShardDisconnectNotify,
     /// Seamless promotion handoff (replaces ShardRedirectMsg for in-game transitions).
     ShardHandoffMsg,
+    /// Phase 3C: full snapshot of the player's owned RemoteAccessGrants.
+    GrantsSnapshotData,
+    /// Phase 4.4: delta-encoded HUD signal updates.
+    HudSignalDelta,
 }
 
 /// Root type for server → client messages.
@@ -1293,6 +1687,42 @@ table LampConfigUpdate {
     config: LampConfigEntry;
 }
 
+/// Client → server: register a held grant locally so subsequent
+/// `RemoteSignalPublish`es can use it. The player received `(grant_id,
+/// key_b64)` out-of-band (Discord, in-game mail) and pastes them via
+/// the tablet's "Add grant" UI.
+table AddHeldGrant {
+    /// Grant id minted by the issuing shard. Must match the recipient's
+    /// expected target.
+    grant_id: uint64;
+    /// Base64 32-byte HMAC key.
+    key_b64: string;
+    /// Shard id that issued the grant (the receiver of any future
+    /// `RemoteSignalPublish` using this grant).
+    target_shard_id: uint64;
+    /// User-facing label so the tablet UI can show "from Alice (Caraval)".
+    label: string;
+}
+
+/// Client → server: forget a previously-added held grant. Idempotent.
+table ForgetHeldGrant {
+    grant_id: uint64;
+}
+
+/// Client → server: publish a value to a remote channel via a held grant.
+/// The player's primary shard signs HMAC over the canonicalized payload
+/// using the held grant's key, then ships the resulting
+/// `SignalBroadcastBatch` via QUIC to `target_shard_id`. Receiver verifies
+/// via `try_push_remote` against `GrantsRegistry::check_publish`.
+table RemoteSignalPublish {
+    target_shard_id: uint64;
+    channel_name: string;
+    grant_id: uint64;
+    /// Signal value type: 0=Bool, 1=Float, 2=State.
+    value_type: uint8;
+    value_data: float;
+}
+
 union ClientPayload {
     Connect,
     PlayerInput,
@@ -1302,6 +1732,16 @@ union ClientPayload {
     ObserverConnect,
     ClientSignalPublish,
     LampConfigUpdate,
+    /// Phase 3C: create a new RemoteAccessGrant on owned channels.
+    GrantCreate,
+    /// Phase 3C: revoke a previously-issued grant.
+    GrantRevoke,
+    /// Phase 3C: register a held grant (recipient-side).
+    AddHeldGrant,
+    /// Phase 3C: forget a held grant (recipient-side).
+    ForgetHeldGrant,
+    /// Phase 3C: publish to a remote channel via a held grant.
+    RemoteSignalPublish,
 }
 
 /// Root type for client → server messages.

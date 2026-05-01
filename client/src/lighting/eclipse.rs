@@ -1,33 +1,45 @@
-//! Phase 6 — Eclipse occlusion of the directional sun.
+//! Phase 6 / 6.1 — Eclipse occlusion of the directional sun.
 //!
-//! A single shared `EclipseUniform` (sun position + radius, plus up to
-//! `MAX_ECLIPSE_OCCLUDERS` celestial occluders) is built each frame
-//! from `WorldState.bodies` (camera-rebased), then written to the chunk
-//! material asset. Every chunk + ship-hull mesh inherits the eclipse
-//! computation through `ChunkMaterial = ExtendedMaterial<StandardMaterial,
-//! EclipseExt>` — one buffer update, all sun-lit surfaces affected.
+//! Two render paths, one source of truth:
 //!
-//! The shader (`assets/shaders/eclipse.wgsl`) computes the visible-sun
-//! fraction at each fragment via lens-area angular-disk intersection
-//! (soft penumbra), then **surgically** subtracts only the directional
-//! sun's contribution. IBL, ambient, point + spot lights, and the
-//! cascade shadow map are untouched — the sky stays lit while the
-//! solar disk loses energy, matching real eclipses where atmospheric
-//! scattering and rim-light persist through totality.
+//!   * **Forward** (Low / Medium presets): `ChunkMaterial =
+//!     ExtendedMaterial<StandardMaterial, EclipseExt>`. The extension's
+//!     fragment shader (`eclipse.wgsl`) replaces Bevy's standard PBR
+//!     fragment, runs `apply_pbr_lighting`, then SUBTRACTS the would-be
+//!     directional-sun contribution scaled by `1 - eclipse_factor`.
+//!
+//!   * **Deferred** (High / Ultra: SSR enabled → `DeferredPrepass`):
+//!     a fullscreen post-process pass (`eclipse_deferred`) runs after
+//!     Bevy's `DeferredLightingPass` and reads the same eclipse state
+//!     to apply the same surgical sun-only attenuation against the
+//!     radiance buffer.
+//!
+//! Both paths consume the same [`EclipseState`] resource (sun position
+//! + radius, plus up to [`MAX_ECLIPSE_OCCLUDERS`] occluders) — built
+//! from `WorldState.bodies` once per frame in
+//! [`update_eclipse_uniform`]. A small mirror system copies the
+//! resource onto the chunk-material asset so the forward path keeps
+//! working through Bevy's standard material pipeline; the deferred
+//! pass reads the resource directly via `ExtractResource`.
+//!
+//! The eclipse math itself (lens-area angular-disk intersection +
+//! `sun_direct_contribution` reconstruction) lives in the shared WGSL
+//! module `voxeldust::eclipse_lib`, imported by both shaders. One
+//! source of truth for the formula; one for the data.
 //!
 //! No magic numbers in lighting values: every input is either a
-//! physical constant (`R_SUN_M`) or a server-broadcast field
+//! physical constant ([`R_SUN_M`]) or a server-broadcast field
 //! (`body.position`, `body.radius`, `body.stellar.radius_solar`).
-//!
-//! Forward-pipeline support today; deferred (SSR-on, High/Ultra)
-//! follow-up is documented in the shader header.
 
 use bevy::asset::Asset;
 use bevy::math::{UVec4, Vec4};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin, StandardMaterial};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::{
+    extract_resource::{ExtractResource, ExtractResourcePlugin},
+    render_resource::{AsBindGroup, ShaderType},
+};
 use bevy::shader::ShaderRef;
 use glam::DVec3;
 use std::collections::BTreeMap;
@@ -54,9 +66,74 @@ pub const MAX_ECLIPSE_OCCLUDERS: usize = 8;
 /// `lighting::solar`'s convention (see `solar.rs:178`).
 const STAR_BODY_ID: u32 = 0;
 
-/// `EclipseExt` — shader-side bindings for the per-frame eclipse
-/// uniform. The base material's `StandardMaterial` bindings live at
-/// group 2 bindings 0..N; we bind at 100 to leave headroom for
+// ───── Shared uniform layout ──────────────────────────────────────────────
+
+/// Layout matched by `voxeldust::eclipse_lib::EclipseUniform` in WGSL.
+/// `ShaderType` derives the std140-aligned GPU layout; the std140
+/// padding lives in the unused lanes of `count` (`.y`, `.z`, `.w`).
+///
+/// **Both** the forward material extension's `#[uniform(100)]` field
+/// AND the deferred pass's per-frame uniform buffer are filled from
+/// the same source ([`EclipseState`]) and use this exact same layout
+/// to match the shared shader-side struct.
+#[derive(ShaderType, Clone, Copy, Debug)]
+pub struct EclipseUniform {
+    /// `.xyz` = sun position camera-relative (m); `.w` = sun radius (m).
+    /// `w == 0` is the sentinel for "no sun configured" — the shader
+    /// short-circuits and returns `1.0` (no occlusion).
+    pub sun: Vec4,
+    /// `.xyz` = occluder position camera-relative (m); `.w` = radius (m).
+    /// Inactive slots have `w == 0` and are skipped in the shader loop.
+    pub occluders: [Vec4; MAX_ECLIPSE_OCCLUDERS],
+    /// `.x` = active occluder count (≤ `MAX_ECLIPSE_OCCLUDERS`); the
+    /// remaining lanes are std140 padding.
+    pub count: UVec4,
+}
+
+impl EclipseUniform {
+    /// All-zero state — both shaders interpret this as "no sun
+    /// configured" and return `1.0` unconditionally.
+    pub const INACTIVE: Self = Self {
+        sun: Vec4::ZERO,
+        occluders: [Vec4::ZERO; MAX_ECLIPSE_OCCLUDERS],
+        count: UVec4::ZERO,
+    };
+}
+
+impl Default for EclipseUniform {
+    /// `Default` returns the [`INACTIVE`](Self::INACTIVE) sentinel —
+    /// safe to bind on the very first frame before
+    /// `update_eclipse_uniform` has run.
+    fn default() -> Self {
+        Self::INACTIVE
+    }
+}
+
+// ───── Authoritative resource ─────────────────────────────────────────────
+
+/// Single source of truth for the per-frame eclipse state. Built each
+/// frame in main world by [`update_eclipse_uniform`]; mirrored to the
+/// chunk material asset (forward path) and extracted to the render
+/// world (deferred post-process pass).
+#[derive(Resource, ExtractResource, Clone, Copy, Debug)]
+pub struct EclipseState {
+    pub uniform: EclipseUniform,
+}
+
+impl Default for EclipseState {
+    fn default() -> Self {
+        Self {
+            uniform: EclipseUniform::INACTIVE,
+        }
+    }
+}
+
+// ───── Forward path: material extension ───────────────────────────────────
+
+/// `EclipseExt` — shader-side bindings for the forward path's
+/// per-fragment eclipse subtraction. The base material's
+/// `StandardMaterial` bindings live in the material bind group at
+/// bindings 0..N; we bind at 100 to leave headroom for
 /// `StandardMaterial`'s growing surface (Bevy adds bindings between
 /// minor versions).
 #[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
@@ -73,42 +150,16 @@ impl Default for EclipseExt {
     }
 }
 
-/// Layout matched by `eclipse.wgsl`'s `EclipseUniform`. `ShaderType`
-/// derives the std140-aligned GPU layout; the std140 padding lives in
-/// the unused lanes of `count` (`.y`, `.z`, `.w`).
-#[derive(ShaderType, Clone, Copy, Debug)]
-pub struct EclipseUniform {
-    /// `.xyz` = sun position camera-relative (m); `.w` = sun radius (m).
-    /// `w == 0` is the sentinel for "no sun configured" — the shader
-    /// short-circuits and returns `1.0` (no occlusion).
-    pub sun: Vec4,
-    /// `.xyz` = occluder position camera-relative (m); `.w` = radius (m).
-    /// Inactive slots have `w == 0` and are skipped in the shader loop.
-    pub occluders: [Vec4; MAX_ECLIPSE_OCCLUDERS],
-    /// `.x` = active occluder count (≤ `MAX_ECLIPSE_OCCLUDERS`); the
-    /// remaining lanes are std140 padding.
-    pub count: UVec4,
-}
-
-impl EclipseUniform {
-    /// All-zero state — the shader interprets this as "no sun
-    /// configured" and returns 1.0 unconditionally.
-    pub const INACTIVE: Self = Self {
-        sun: Vec4::ZERO,
-        occluders: [Vec4::ZERO; MAX_ECLIPSE_OCCLUDERS],
-        count: UVec4::ZERO,
-    };
-}
-
 impl MaterialExtension for EclipseExt {
     fn fragment_shader() -> ShaderRef {
         "shaders/eclipse.wgsl".into()
     }
 
     fn deferred_fragment_shader() -> ShaderRef {
-        // Same shader; the WGSL `PREPASS_PIPELINE` branch writes the
-        // G-buffer unchanged (per-fragment eclipse is a deferred-pass
-        // follow-up — see shader header).
+        // In deferred mode the extension fragment runs as the prepass
+        // (G-buffer write); the WGSL `PREPASS_PIPELINE` branch handles
+        // it unchanged. Eclipse for deferred is applied by the
+        // separate `eclipse_deferred` post-process pass.
         "shaders/eclipse.wgsl".into()
     }
 
@@ -117,40 +168,95 @@ impl MaterialExtension for EclipseExt {
     }
 }
 
+// ───── Plugin wiring ──────────────────────────────────────────────────────
+
+/// Strong handle to `eclipse_lib.wgsl`. The lib defines
+/// `#define_import_path voxeldust::eclipse_lib`; both `eclipse.wgsl`
+/// (forward) and `eclipse_deferred.wgsl` (deferred) `#import` from
+/// that path. Bevy's shader cache parses the `#define_import_path`
+/// directive only after the file is loaded as a `Shader` asset, so
+/// we hold a strong handle to keep the asset alive (otherwise the
+/// dependent shaders would fail to resolve the import on first
+/// pipeline build).
+#[derive(Resource)]
+pub struct EclipseLibShader(#[allow(dead_code)] pub Handle<bevy::shader::Shader>);
+
 pub struct EclipsePlugin;
 
 impl Plugin for EclipsePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(
-            MaterialPlugin::<ExtendedMaterial<StandardMaterial, EclipseExt>>::default(),
-        )
-        // Run after the shard-origin rebasing so the camera-relative
-        // positions we write are consistent with the chunk fragments
-        // the shader will read on the same frame. Same ordering rule
-        // as `solar.rs::update_solar_light`.
-        .add_systems(Update, update_eclipse_uniform.after(ShardOriginSet));
+        // Eagerly load the shared eclipse-math library so its
+        // `#define_import_path voxeldust::eclipse_lib` directive
+        // registers before any importer compiles.
+        let lib_handle: Handle<bevy::shader::Shader> = app
+            .world()
+            .resource::<AssetServer>()
+            .load("shaders/eclipse_lib.wgsl");
+        app.insert_resource(EclipseLibShader(lib_handle));
+
+        app.init_resource::<EclipseState>()
+            .add_plugins(ExtractResourcePlugin::<EclipseState>::default())
+            .add_plugins(
+                MaterialPlugin::<ExtendedMaterial<StandardMaterial, EclipseExt>>::default(),
+            )
+            // `update_eclipse_uniform` runs after shard-origin
+            // rebasing so the camera-relative positions we write are
+            // consistent with the chunk fragments the forward shader
+            // will read on the same frame. Same ordering rule as
+            // `solar.rs::update_solar_light`.
+            //
+            // `mirror_state_to_chunk_material` runs after the update
+            // so the freshly-computed state is what gets copied to
+            // the material asset.
+            .add_systems(
+                Update,
+                (
+                    update_eclipse_uniform.after(ShardOriginSet),
+                    mirror_state_to_chunk_material.after(update_eclipse_uniform),
+                ),
+            );
+
+        // Phase 6.1's deferred post-process pass is intentionally
+        // NOT registered. Bevy 0.18's `DefaultOpaqueRendererMethod`
+        // is `Forward`, and `StandardMaterial::opaque_render_method`
+        // defaults to `Auto` which resolves to Forward — so even
+        // when `ScreenSpaceReflections` forces `DeferredPrepass` on
+        // the camera (for SSR's G-buffer ray-marching), all our
+        // opaque draws still run through the forward path. The
+        // forward `EclipseExt` extension above already attenuates the
+        // sun term per-fragment in that path, leaving nothing for a
+        // deferred post-process to do.
+        //
+        // Worse, registering it anyway introduces a subtle break: an
+        // unconditional `post_process_write` ping-pongs `ViewTarget`
+        // and runs `pbr_input_from_deferred_gbuffer` against
+        // forward-cleared (zero) G-buffer pixels — the result is
+        // pixels off the forward main pass keeping our garbage
+        // output, which on Ultra (SSR-on) presents as "no sun
+        // lighting" on the dimmer parts of the planet / hull.
+        //
+        // The shared `eclipse_lib` WGSL module + `EclipseState`
+        // resource + the `EclipseDeferredPlugin` itself stay in the
+        // tree for the day a material in this codebase opts into
+        // `OpaqueRendererMethod::Deferred` (e.g. when we add a true
+        // deferred-only effect path). Until then it stays unwired.
     }
 }
 
+// ───── Per-frame update ───────────────────────────────────────────────────
+
 /// Drains `WorldState.bodies` from the primary + every secondary,
 /// dedupes by `body_id`, camera-rebases positions in double precision,
-/// and writes the resulting `EclipseUniform` to the shared chunk
-/// material so every chunk + ship-hull fragment shares the same
-/// occlusion state for the frame.
+/// and writes the resulting [`EclipseUniform`] to the [`EclipseState`]
+/// resource. The forward path (via [`mirror_state_to_chunk_material`])
+/// and the deferred path (via `ExtractResource<EclipseState>`) both
+/// read from this single source.
 fn update_eclipse_uniform(
     primary_ws: Res<PrimaryWorldState>,
     secondary_ws: Res<SecondaryWorldStates>,
     camera_world: Res<CameraWorldPos>,
-    cache: Res<ChunkMaterialCache>,
-    mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, EclipseExt>>>,
+    mut state: ResMut<EclipseState>,
 ) {
-    let Some(handle) = cache.opaque.as_ref() else {
-        return;
-    };
-    let Some(material) = materials.get_mut(handle) else {
-        return;
-    };
-
     // Collect bodies. Primary wins on collision (it's the
     // authoritative source for the player's current shard); SYSTEM
     // secondary fills gaps during the SHIP / PLANET / SYSTEM
@@ -174,34 +280,32 @@ fn update_eclipse_uniform(
         }
     }
 
+    let mut uniform = EclipseUniform::INACTIVE;
+
     // Sun: body_id == 0. Radius preference: spectroscopically-derived
     // `stellar.radius_solar * R_SUN_M` (server-pre-derived from the
     // mass-radius relation in `core::stellar`); fall back to the
     // generic `body.radius` field if no `StellarState` was broadcast
     // (legacy server, transient pre-Phase-1 system, etc.). Both are
     // physical metres — no magic numbers.
-    let mut uniform = EclipseUniform::INACTIVE;
-    if let Some(star) = bodies.get(&STAR_BODY_ID) {
-        let star_radius_m = star
-            .stellar
-            .map(|s| (s.radius_solar as f64) * R_SUN_M)
-            .unwrap_or(star.radius);
-        let star_pos_rel = star.position - camera_world.pos;
-        uniform.sun = camera_relative_with_radius(star_pos_rel, star_radius_m as f32);
-    } else {
-        // No sun broadcast → leave uniform at INACTIVE; shader will
+    let Some(star) = bodies.get(&STAR_BODY_ID) else {
+        // No sun broadcast → leave uniform at INACTIVE; shaders will
         // return 1.0 (no occlusion). This is the legitimate steady
         // state on the GALAXY shard (no system-shard yet) and during
         // the first-tick race before SystemSceneUpdate arrives.
-        material.extension.uniform = uniform;
+        state.uniform = uniform;
         return;
-    }
+    };
+    let star_radius_m = star
+        .stellar
+        .map(|s| (s.radius_solar as f64) * R_SUN_M)
+        .unwrap_or(star.radius);
+    let star_pos_rel = star.position - camera_world.pos;
+    uniform.sun = camera_relative_with_radius(star_pos_rel, star_radius_m as f32);
 
-    // Occluders: every other body. Sort by body_id (BTreeMap iteration
-    // already does this) so the slot assignment is stable across
-    // frames; cap at `MAX_ECLIPSE_OCCLUDERS` (the loop bound is hit
-    // very rarely — 8 is well above the visible occluder count from
-    // any realistic vantage in any realistic system).
+    // Occluders: every other body, sorted by body_id (BTreeMap
+    // iteration already does this). Cap at MAX_ECLIPSE_OCCLUDERS;
+    // the bound is hit very rarely.
     let mut count: u32 = 0;
     for (body_id, body) in bodies.iter() {
         if *body_id == STAR_BODY_ID {
@@ -217,7 +321,26 @@ fn update_eclipse_uniform(
     }
     uniform.count = UVec4::new(count, 0, 0, 0);
 
-    material.extension.uniform = uniform;
+    state.uniform = uniform;
+}
+
+/// Mirror the authoritative [`EclipseState`] onto the shared chunk
+/// material asset so the forward path's material-extension fragment
+/// shader sees the latest values through Bevy's standard material
+/// pipeline. The deferred path doesn't need this step — it reads
+/// `EclipseState` directly via `ExtractResource`.
+fn mirror_state_to_chunk_material(
+    state: Res<EclipseState>,
+    cache: Res<ChunkMaterialCache>,
+    mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, EclipseExt>>>,
+) {
+    let Some(handle) = cache.opaque.as_ref() else {
+        return;
+    };
+    let Some(material) = materials.get_mut(handle) else {
+        return;
+    };
+    material.extension.uniform = state.uniform;
 }
 
 /// Pack a camera-relative position (DVec3) + radius (f32) into a

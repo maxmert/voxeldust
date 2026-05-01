@@ -387,6 +387,64 @@ fn decode_engine_controller_config(fb: &fb::EngineControllerConfigFB<'_>) -> cra
     }
 }
 
+// -- Phase 3E: Antenna / Listener config codec --------------------------------
+
+fn encode_antenna_config<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cfg: &crate::signal::config::AntennaConfig,
+) -> flatbuffers::WIPOffset<fb::AntennaConfigFB<'a>> {
+    let src = builder.create_string(&cfg.source_channel_name);
+    let rem = builder.create_string(&cfg.remote_channel_name);
+    fb::AntennaConfigFB::create(
+        builder,
+        &fb::AntennaConfigFBArgs {
+            source_channel_name: Some(src),
+            remote_channel_name: Some(rem),
+            frequency: cfg.frequency,
+            grant_id: cfg.grant_id,
+            target_shard_id: cfg.target_shard_id,
+        },
+    )
+}
+
+fn decode_antenna_config(fb: &fb::AntennaConfigFB<'_>) -> crate::signal::config::AntennaConfig {
+    crate::signal::config::AntennaConfig {
+        source_channel_name: fb.source_channel_name().unwrap_or("").into(),
+        remote_channel_name: fb.remote_channel_name().unwrap_or("").into(),
+        frequency: fb.frequency(),
+        grant_id: fb.grant_id(),
+        target_shard_id: fb.target_shard_id(),
+    }
+}
+
+fn encode_listener_config<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cfg: &crate::signal::config::ListenerConfig,
+) -> flatbuffers::WIPOffset<fb::ListenerConfigFB<'a>> {
+    let dst = builder.create_string(&cfg.destination_channel_name);
+    let bri = builder.create_string(&cfg.bridged_channel_name);
+    fb::ListenerConfigFB::create(
+        builder,
+        &fb::ListenerConfigFBArgs {
+            destination_channel_name: Some(dst),
+            bridged_channel_name: Some(bri),
+            frequency: cfg.frequency,
+            grant_id: cfg.grant_id,
+            source_shard_id: cfg.source_shard_id,
+        },
+    )
+}
+
+fn decode_listener_config(fb: &fb::ListenerConfigFB<'_>) -> crate::signal::config::ListenerConfig {
+    crate::signal::config::ListenerConfig {
+        destination_channel_name: fb.destination_channel_name().unwrap_or("").into(),
+        bridged_channel_name: fb.bridged_channel_name().unwrap_or("").into(),
+        frequency: fb.frequency(),
+        grant_id: fb.grant_id(),
+        source_shard_id: fb.source_shard_id(),
+    }
+}
+
 fn u8_to_signal_property(v: u8) -> SignalProperty {
     match v {
         0 => SignalProperty::Active,
@@ -421,6 +479,97 @@ pub enum ClientMsg {
     /// validates ownership, persists to `ShipGrid.lamp_configs`, and
     /// rebroadcasts via the next `ChunkDelta`.
     LampConfigUpdate(LampConfigUpdateClientData),
+    /// Phase 3C: create a new `RemoteAccessGrant` on one or more channels
+    /// the requesting player owns. Server allocates `grant_id` + HMAC
+    /// key, inserts into `GrantsRegistry`, replies with a fresh
+    /// `GrantsSnapshot` containing the key (visible only to the owner).
+    GrantCreate(GrantCreateData),
+    /// Phase 3C: revoke an existing grant. Idempotent.
+    GrantRevoke(GrantRevokeData),
+    /// Phase 3C: register a held grant (recipient side). The player
+    /// received `(grant_id, key_b64)` out-of-band and is enrolling it
+    /// into their primary shard's `HeldGrants` resource so subsequent
+    /// `RemoteSignalPublish`es can use it.
+    AddHeldGrant(AddHeldGrantData),
+    /// Phase 3C: forget a held grant. Idempotent.
+    ForgetHeldGrant(ForgetHeldGrantData),
+    /// Phase 3C: publish a value to a remote channel via a held grant.
+    /// Primary shard signs HMAC + ships a `SignalBroadcastBatch` to the
+    /// target shard via QUIC.
+    RemoteSignalPublish(RemoteSignalPublishData),
+}
+
+/// Payload for `ClientMsg::AddHeldGrant`.
+#[derive(Debug, Clone, Default)]
+pub struct AddHeldGrantData {
+    pub grant_id: u64,
+    pub key_b64: String,
+    pub target_shard_id: u64,
+    pub label: String,
+}
+
+/// Payload for `ClientMsg::ForgetHeldGrant`.
+#[derive(Debug, Clone, Default)]
+pub struct ForgetHeldGrantData {
+    pub grant_id: u64,
+}
+
+/// Payload for `ClientMsg::RemoteSignalPublish`.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteSignalPublishData {
+    pub target_shard_id: u64,
+    pub channel_name: String,
+    pub grant_id: u64,
+    /// 0=Bool, 1=Float, 2=State.
+    pub value_type: u8,
+    pub value_data: f32,
+}
+
+/// Payload for `ClientMsg::GrantCreate`. See `RemoteAccessGrant` for the
+/// per-field semantics; the wire form is intentionally a flat shape so the
+/// FB schema stays simple (no nested grant table required).
+#[derive(Debug, Clone, Default)]
+pub struct GrantCreateData {
+    pub channel_names: Vec<String>,
+    pub ops: u8, // 0=Publish, 1=Subscribe, 2=Both
+    pub label: String,
+    pub expires_at_ms: u64, // 0 = no expiration
+    pub namespace_glob: String, // "" = no glob
+}
+
+/// Payload for `ClientMsg::GrantRevoke`.
+#[derive(Debug, Clone, Default)]
+pub struct GrantRevokeData {
+    pub grant_id: u64,
+}
+
+/// Public view of one `RemoteAccessGrant` for the owner's tablet UI. Lives
+/// in `core::client_message` (and not in `signal::grants`) because it's
+/// the wire-format shape, not the in-memory store.
+#[derive(Debug, Clone, Default)]
+pub struct GrantPublicView {
+    pub grant_id: u64,
+    /// Base64-encoded 32-byte HMAC key. **Empty for non-owner recipients
+    /// of the snapshot.** The server populates this only when the recipient
+    /// owns the grant — defending against accidental key disclosure to
+    /// other players in the same shard.
+    pub key_b64: String,
+    pub channel_names: Vec<String>,
+    pub ops: u8,
+    pub label: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub created_by: u64,
+    pub revoked: bool,
+    pub namespace_glob: String,
+}
+
+/// Server → client snapshot of one player's owned grants. Sent in response
+/// to any `GrantCreate` / `GrantRevoke` that mutates state for them.
+/// Replaces, not merges — the snapshot is authoritative.
+#[derive(Debug, Clone, Default)]
+pub struct GrantsSnapshotData {
+    pub grants: Vec<GrantPublicView>,
 }
 
 /// Payload for `ClientMsg::LampConfigUpdate`. Carries the
@@ -471,6 +620,13 @@ pub enum ServerMsg {
     /// Used for in-game transitions (launch, land, board, warp) where
     /// `ShardRedirect`'s tear-down/rebuild would cause a visible micro-freeze.
     ShardHandoff(handoff::ShardHandoff),
+    /// Phase 3C: full snapshot of the player's owned RemoteAccessGrants.
+    /// Sent on any GrantCreate/Revoke that mutated state for them.
+    GrantsSnapshot(GrantsSnapshotData),
+    /// Phase 4.4: delta-encoded HUD signal updates. Sent over TCP
+    /// only when something changed since the last batch — no per-tick
+    /// snapshot.
+    HudSignalDelta(HudSignalDeltaData),
 }
 
 /// Seat bindings sent to client when player enters a seat.
@@ -693,6 +849,105 @@ impl HudSignalValue {
             _ => "",
         }
     }
+}
+
+/// Bit flags for [`HudSignalEntryV2Data::flags`].
+pub mod hud_delta_flags {
+    /// The entry carries a fresh `wire_id → name` binding. Receiver
+    /// inserts/overwrites in its inbound dict before resolving.
+    pub const REGISTER: u8 = 0x01;
+    /// The wire_id is being dropped from the session's dictionary.
+    /// `value_type`, `value_num`, `value_text`, `property` are all
+    /// ignored. `channel_name` is empty.
+    pub const REMOVE: u8 = 0x02;
+}
+
+/// Phase 4.4: one entry in a `HudSignalDelta`. See the FB schema
+/// header for the layout rationale.
+#[derive(Debug, Clone)]
+pub struct HudSignalEntryV2Data {
+    pub flags: u8,
+    pub wire_id: u32,
+    /// Required when `flags & REGISTER`. Empty otherwise.
+    pub channel_name: String,
+    pub value_type: u8,
+    pub value_num: f32,
+    /// Populated only when `value_type == 3` (Text).
+    pub value_text: String,
+    pub property: u8,
+    /// Per-(session, wire_id) monotonic seq for diagnostics + future
+    /// out-of-order detection.
+    pub seq: u32,
+}
+
+impl HudSignalEntryV2Data {
+    pub fn is_register(&self) -> bool {
+        (self.flags & hud_delta_flags::REGISTER) != 0
+    }
+
+    pub fn is_remove(&self) -> bool {
+        (self.flags & hud_delta_flags::REMOVE) != 0
+    }
+
+    /// Construct a REGISTER entry carrying a fresh (wire_id, name)
+    /// binding plus the current value.
+    pub fn register(
+        wire_id: u32,
+        name: String,
+        value: HudSignalValue,
+        property: u8,
+        seq: u32,
+    ) -> Self {
+        Self {
+            flags: hud_delta_flags::REGISTER,
+            wire_id,
+            channel_name: name,
+            value_type: value.type_code(),
+            value_num: value.numeric_repr(),
+            value_text: value.text_repr().to_string(),
+            property,
+            seq,
+        }
+    }
+
+    /// Construct a bare entry — value-only update for a wire_id the
+    /// receiver already knows.
+    pub fn bare(wire_id: u32, value: HudSignalValue, property: u8, seq: u32) -> Self {
+        Self {
+            flags: 0,
+            wire_id,
+            channel_name: String::new(),
+            value_type: value.type_code(),
+            value_num: value.numeric_repr(),
+            value_text: value.text_repr().to_string(),
+            property,
+            seq,
+        }
+    }
+
+    /// Construct a REMOVE entry — drops the channel from the
+    /// receiver's cache.
+    pub fn remove(wire_id: u32, seq: u32) -> Self {
+        Self {
+            flags: hud_delta_flags::REMOVE,
+            wire_id,
+            channel_name: String::new(),
+            value_type: 0,
+            value_num: 0.0,
+            value_text: String::new(),
+            property: 0,
+            seq,
+        }
+    }
+}
+
+/// Phase 4.4: delta-encoded HUD signal batch. See the FB schema
+/// header for the protocol semantics + the bandwidth rationale.
+#[derive(Debug, Clone)]
+pub struct HudSignalDeltaData {
+    pub dict_seq: u64,
+    pub batch_seq: u64,
+    pub entries: Vec<HudSignalEntryV2Data>,
 }
 
 #[derive(Debug, Clone)]
@@ -1361,6 +1616,8 @@ impl ClientMsg {
                 let ap = data.autopilot.as_ref().map(|c| encode_autopilot_config(&mut builder, c));
                 let wc = data.warp_computer.as_ref().map(|c| encode_warp_computer_config(&mut builder, c));
                 let ec = data.engine_controller.as_ref().map(|c| encode_engine_controller_config(&mut builder, c));
+                let ant = data.antenna.as_ref().map(|c| encode_antenna_config(&mut builder, c));
+                let lis = data.listener.as_ref().map(|c| encode_listener_config(&mut builder, c));
                 let bcu = fb::BlockConfigUpdate::create(&mut builder, &fb::BlockConfigUpdateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
                     publish_bindings: Some(pv), subscribe_bindings: Some(sv),
@@ -1369,6 +1626,7 @@ impl ClientMsg {
                     seated_channel_name: seated_ch,
                     flight_computer_config: fc, hover_module_config: hm,
                     autopilot_config: ap, warp_computer_config: wc, engine_controller_config: ec,
+                    antenna_config: ant, listener_config: lis,
                 });
                 let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
                     payload_type: fb::ClientPayload::BlockConfigUpdate,
@@ -1482,6 +1740,104 @@ impl ClientMsg {
                 );
                 builder.finish(msg, None);
             }
+            ClientMsg::GrantCreate(data) => {
+                let names: Vec<_> = data
+                    .channel_names
+                    .iter()
+                    .map(|n| builder.create_string(n))
+                    .collect();
+                let names_vec = builder.create_vector(&names);
+                let label = builder.create_string(&data.label);
+                let glob = builder.create_string(&data.namespace_glob);
+                let gc = fb::GrantCreate::create(
+                    &mut builder,
+                    &fb::GrantCreateArgs {
+                        channel_names: Some(names_vec),
+                        ops: data.ops,
+                        label: Some(label),
+                        expires_at_ms: data.expires_at_ms,
+                        namespace_glob: Some(glob),
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::GrantCreate,
+                        payload: Some(gc.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ClientMsg::GrantRevoke(data) => {
+                let gr = fb::GrantRevoke::create(
+                    &mut builder,
+                    &fb::GrantRevokeArgs { grant_id: data.grant_id },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::GrantRevoke,
+                        payload: Some(gr.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ClientMsg::AddHeldGrant(data) => {
+                let key = builder.create_string(&data.key_b64);
+                let label = builder.create_string(&data.label);
+                let ahg = fb::AddHeldGrant::create(
+                    &mut builder,
+                    &fb::AddHeldGrantArgs {
+                        grant_id: data.grant_id,
+                        key_b64: Some(key),
+                        target_shard_id: data.target_shard_id,
+                        label: Some(label),
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::AddHeldGrant,
+                        payload: Some(ahg.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ClientMsg::ForgetHeldGrant(data) => {
+                let fhg = fb::ForgetHeldGrant::create(
+                    &mut builder,
+                    &fb::ForgetHeldGrantArgs { grant_id: data.grant_id },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::ForgetHeldGrant,
+                        payload: Some(fhg.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ClientMsg::RemoteSignalPublish(data) => {
+                let name = builder.create_string(&data.channel_name);
+                let rsp = fb::RemoteSignalPublish::create(
+                    &mut builder,
+                    &fb::RemoteSignalPublishArgs {
+                        target_shard_id: data.target_shard_id,
+                        channel_name: Some(name),
+                        grant_id: data.grant_id,
+                        value_type: data.value_type,
+                        value_data: data.value_data,
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::RemoteSignalPublish,
+                        payload: Some(rsp.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -1580,6 +1936,12 @@ impl ClientMsg {
                     warp_computer: bcu.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
                     engine_controller: bcu.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
                     mechanical: None, // TODO: decode from FlatBuffers when schema is extended
+                    // Phase 3E.3: antenna + listener configs round-trip
+                    // through the wire. Optional FB fields decode as None
+                    // on legacy messages (forward compat) and as Some on
+                    // updates carrying the actual config.
+                    antenna: bcu.antenna_config().map(|c| decode_antenna_config(&c)),
+                    listener: bcu.listener_config().map(|c| decode_listener_config(&c)),
                 }))
             }
             fb::ClientPayload::SubBlockEditRequest => {
@@ -1648,6 +2010,61 @@ impl ClientMsg {
                     block_z: lcu.block_z(),
                     face: lcu.face(),
                     config,
+                }))
+            }
+            fb::ClientPayload::GrantCreate => {
+                let gc = msg
+                    .payload_as_grant_create()
+                    .ok_or(MessageError::MissingField("GrantCreate payload"))?;
+                let channel_names = gc
+                    .channel_names()
+                    .map(|v| v.iter().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                Ok(ClientMsg::GrantCreate(GrantCreateData {
+                    channel_names,
+                    ops: gc.ops(),
+                    label: gc.label().unwrap_or("").to_string(),
+                    expires_at_ms: gc.expires_at_ms(),
+                    namespace_glob: gc.namespace_glob().unwrap_or("").to_string(),
+                }))
+            }
+            fb::ClientPayload::GrantRevoke => {
+                let gr = msg
+                    .payload_as_grant_revoke()
+                    .ok_or(MessageError::MissingField("GrantRevoke payload"))?;
+                Ok(ClientMsg::GrantRevoke(GrantRevokeData {
+                    grant_id: gr.grant_id(),
+                }))
+            }
+            fb::ClientPayload::AddHeldGrant => {
+                let ahg = msg
+                    .payload_as_add_held_grant()
+                    .ok_or(MessageError::MissingField("AddHeldGrant payload"))?;
+                Ok(ClientMsg::AddHeldGrant(AddHeldGrantData {
+                    grant_id: ahg.grant_id(),
+                    key_b64: ahg.key_b64().unwrap_or("").to_string(),
+                    target_shard_id: ahg.target_shard_id(),
+                    label: ahg.label().unwrap_or("").to_string(),
+                }))
+            }
+            fb::ClientPayload::ForgetHeldGrant => {
+                let fhg = msg
+                    .payload_as_forget_held_grant()
+                    .ok_or(MessageError::MissingField("ForgetHeldGrant payload"))?;
+                Ok(ClientMsg::ForgetHeldGrant(ForgetHeldGrantData {
+                    grant_id: fhg.grant_id(),
+                }))
+            }
+            fb::ClientPayload::RemoteSignalPublish => {
+                let rsp = msg
+                    .payload_as_remote_signal_publish()
+                    .ok_or(MessageError::MissingField("RemoteSignalPublish payload"))?;
+                Ok(ClientMsg::RemoteSignalPublish(RemoteSignalPublishData {
+                    target_shard_id: rsp.target_shard_id(),
+                    channel_name: rsp.channel_name().unwrap_or("").to_string(),
+                    grant_id: rsp.grant_id(),
+                    value_type: rsp.value_type(),
+                    value_data: rsp.value_data(),
                 }))
             }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),
@@ -2037,6 +2454,23 @@ impl ServerMsg {
                 let wc = data.warp_computer.as_ref().map(|c| encode_warp_computer_config(&mut builder, c));
                 let ec = data.engine_controller.as_ref().map(|c| encode_engine_controller_config(&mut builder, c));
 
+                let pub_opts: Vec<_> = data.publish_property_options.iter().map(|(ord, hint)| {
+                    let h = builder.create_string(hint);
+                    fb::PropertyOptionFB::create(&mut builder, &fb::PropertyOptionFBArgs {
+                        ordinal: *ord, hint: Some(h),
+                    })
+                }).collect();
+                let sub_opts: Vec<_> = data.subscribe_property_options.iter().map(|(ord, hint)| {
+                    let h = builder.create_string(hint);
+                    fb::PropertyOptionFB::create(&mut builder, &fb::PropertyOptionFBArgs {
+                        ordinal: *ord, hint: Some(h),
+                    })
+                }).collect();
+                let pub_opts_vec = builder.create_vector(&pub_opts);
+                let sub_opts_vec = builder.create_vector(&sub_opts);
+                let ant = data.antenna.as_ref().map(|c| encode_antenna_config(&mut builder, c));
+                let lis = data.listener.as_ref().map(|c| encode_listener_config(&mut builder, c));
+
                 let bcs = fb::BlockConfigState::create(&mut builder, &fb::BlockConfigStateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
                     block_type: data.block_type, kind: data.kind,
@@ -2047,6 +2481,9 @@ impl ServerMsg {
                     seated_channel_name: seated_ch,
                     flight_computer_config: fc, hover_module_config: hm,
                     autopilot_config: ap, warp_computer_config: wc, engine_controller_config: ec,
+                    publish_property_options: Some(pub_opts_vec),
+                    subscribe_property_options: Some(sub_opts_vec),
+                    antenna_config: ant, listener_config: lis,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::BlockConfigState,
@@ -2123,6 +2560,77 @@ impl ServerMsg {
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::ShardDisconnectNotify,
                     payload: Some(dn.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
+            ServerMsg::GrantsSnapshot(data) => {
+                let grants_fb: Vec<_> = data.grants.iter().map(|g| {
+                    let names: Vec<_> = g
+                        .channel_names
+                        .iter()
+                        .map(|n| builder.create_string(n))
+                        .collect();
+                    let names_vec = builder.create_vector(&names);
+                    let key = builder.create_string(&g.key_b64);
+                    let label = builder.create_string(&g.label);
+                    let glob = builder.create_string(&g.namespace_glob);
+                    fb::GrantPublicView::create(
+                        &mut builder,
+                        &fb::GrantPublicViewArgs {
+                            grant_id: g.grant_id,
+                            key_b64: Some(key),
+                            channel_names: Some(names_vec),
+                            ops: g.ops,
+                            label: Some(label),
+                            created_at_ms: g.created_at_ms,
+                            expires_at_ms: g.expires_at_ms,
+                            created_by: g.created_by,
+                            revoked: g.revoked,
+                            namespace_glob: Some(glob),
+                        },
+                    )
+                }).collect();
+                let grants_vec = builder.create_vector(&grants_fb);
+                let snap = fb::GrantsSnapshotData::create(
+                    &mut builder,
+                    &fb::GrantsSnapshotDataArgs { grants: Some(grants_vec) },
+                );
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::GrantsSnapshotData,
+                    payload: Some(snap.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
+            ServerMsg::HudSignalDelta(data) => {
+                let entries_fb: Vec<_> = data.entries.iter().map(|e| {
+                    let name = builder.create_string(&e.channel_name);
+                    let text = builder.create_string(&e.value_text);
+                    fb::HudSignalEntryV2::create(
+                        &mut builder,
+                        &fb::HudSignalEntryV2Args {
+                            flags: e.flags,
+                            wire_id: e.wire_id,
+                            channel_name: Some(name),
+                            value_type: e.value_type,
+                            value_num: e.value_num,
+                            value_text: Some(text),
+                            property: e.property,
+                            seq: e.seq,
+                        },
+                    )
+                }).collect();
+                let entries_vec = builder.create_vector(&entries_fb);
+                let delta = fb::HudSignalDelta::create(
+                    &mut builder,
+                    &fb::HudSignalDeltaArgs {
+                        dict_seq: data.dict_seq,
+                        batch_seq: data.batch_seq,
+                        entries: Some(entries_vec),
+                    },
+                );
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::HudSignalDelta,
+                    payload: Some(delta.as_union_value()),
                 });
                 builder.finish(msg, None);
             }
@@ -2462,6 +2970,12 @@ impl ServerMsg {
                 let power_source = bcs.power_source().map(|ps| decode_power_source(&ps));
                 let power_consumer = bcs.power_consumer().map(|pc| decode_power_consumer(&pc));
                 let nearby_reactors = decode_nearby_reactors(bcs.nearby_reactors());
+                let publish_property_options = bcs.publish_property_options().map(|v| {
+                    v.iter().map(|p| (p.ordinal(), p.hint().unwrap_or("").to_string())).collect()
+                }).unwrap_or_default();
+                let subscribe_property_options = bcs.subscribe_property_options().map(|v| {
+                    v.iter().map(|p| (p.ordinal(), p.hint().unwrap_or("").to_string())).collect()
+                }).unwrap_or_default();
                 Ok(ServerMsg::BlockConfigState(crate::signal::config::BlockSignalConfig {
                     block_pos: glam::IVec3::new(bcs.block_x(), bcs.block_y(), bcs.block_z()),
                     block_type: bcs.block_type(),
@@ -2472,6 +2986,8 @@ impl ServerMsg {
                     seat_mappings: seats,
                     seated_channel_name: bcs.seated_channel_name().unwrap_or("").to_string(),
                     available_channels: channels,
+                    publish_property_options,
+                    subscribe_property_options,
                     power_source,
                     power_consumer,
                     nearby_reactors,
@@ -2481,6 +2997,9 @@ impl ServerMsg {
                     warp_computer: bcs.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
                     engine_controller: bcs.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
                     mechanical: None, // TODO: decode from FlatBuffers when schema is extended
+                    // Phase 3E.3: antenna/listener configs flow on the wire.
+                    antenna: bcs.antenna_config().map(|c| decode_antenna_config(&c)),
+                    listener: bcs.listener_config().map(|c| decode_listener_config(&c)),
                 }))
             }
             fb::ServerPayload::SeatBindingsNotify => {
@@ -2540,6 +3059,67 @@ impl ServerMsg {
                     handoff_position: pos,
                     handoff_velocity: vel,
                     handoff_rotation: rot,
+                }))
+            }
+            fb::ServerPayload::GrantsSnapshotData => {
+                let snap = msg
+                    .payload_as_grants_snapshot_data()
+                    .ok_or(MessageError::MissingField("GrantsSnapshotData payload"))?;
+                let grants = snap
+                    .grants()
+                    .map(|v| {
+                        v.iter()
+                            .map(|g| GrantPublicView {
+                                grant_id: g.grant_id(),
+                                key_b64: g.key_b64().unwrap_or("").to_string(),
+                                channel_names: g
+                                    .channel_names()
+                                    .map(|n| n.iter().map(|s| s.to_string()).collect())
+                                    .unwrap_or_default(),
+                                ops: g.ops(),
+                                label: g.label().unwrap_or("").to_string(),
+                                created_at_ms: g.created_at_ms(),
+                                expires_at_ms: g.expires_at_ms(),
+                                created_by: g.created_by(),
+                                revoked: g.revoked(),
+                                namespace_glob: g
+                                    .namespace_glob()
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(ServerMsg::GrantsSnapshot(GrantsSnapshotData { grants }))
+            }
+            fb::ServerPayload::HudSignalDelta => {
+                let delta = msg
+                    .payload_as_hud_signal_delta()
+                    .ok_or(MessageError::MissingField("HudSignalDelta payload"))?;
+                let entries = delta
+                    .entries()
+                    .map(|v| {
+                        v.iter()
+                            .map(|e| HudSignalEntryV2Data {
+                                flags: e.flags(),
+                                wire_id: e.wire_id(),
+                                channel_name: e
+                                    .channel_name()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                value_type: e.value_type(),
+                                value_num: e.value_num(),
+                                value_text: e.value_text().unwrap_or("").to_string(),
+                                property: e.property(),
+                                seq: e.seq(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(ServerMsg::HudSignalDelta(HudSignalDeltaData {
+                    dict_seq: delta.dict_seq(),
+                    batch_seq: delta.batch_seq(),
+                    entries,
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),
@@ -2809,5 +3389,311 @@ mod tests {
         } else {
             panic!("expected StarCatalog");
         }
+    }
+
+    // -- Phase 3C: grant CRUD wire round-trip ----------------------------------
+
+    #[test]
+    fn roundtrip_grant_create() {
+        let msg = ClientMsg::GrantCreate(GrantCreateData {
+            channel_names: vec![
+                "12345.thrust-forward".into(),
+                "12345.thrust-reverse".into(),
+            ],
+            ops: 2, // Both
+            label: "Bob (remote pilot)".into(),
+            expires_at_ms: 1_700_000_000_000,
+            namespace_glob: "12345.thrust-*".into(),
+        });
+        let bytes = msg.serialize();
+        let decoded = ClientMsg::deserialize(&bytes).unwrap();
+        let ClientMsg::GrantCreate(d) = decoded else { panic!("wrong variant") };
+        assert_eq!(d.channel_names.len(), 2);
+        assert_eq!(d.channel_names[0], "12345.thrust-forward");
+        assert_eq!(d.ops, 2);
+        assert_eq!(d.label, "Bob (remote pilot)");
+        assert_eq!(d.expires_at_ms, 1_700_000_000_000);
+        assert_eq!(d.namespace_glob, "12345.thrust-*");
+    }
+
+    #[test]
+    fn roundtrip_grant_revoke() {
+        let msg = ClientMsg::GrantRevoke(GrantRevokeData { grant_id: 0xCAFE_BABE_DEAD_BEEF });
+        let bytes = msg.serialize();
+        let decoded = ClientMsg::deserialize(&bytes).unwrap();
+        let ClientMsg::GrantRevoke(d) = decoded else { panic!("wrong variant") };
+        assert_eq!(d.grant_id, 0xCAFE_BABE_DEAD_BEEF);
+    }
+
+    #[test]
+    fn roundtrip_add_held_grant() {
+        let msg = ClientMsg::AddHeldGrant(AddHeldGrantData {
+            grant_id: 0xCAFE,
+            key_b64: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
+            target_shard_id: 42,
+            label: "Alice's chair".into(),
+        });
+        let bytes = msg.serialize();
+        let decoded = ClientMsg::deserialize(&bytes).unwrap();
+        let ClientMsg::AddHeldGrant(d) = decoded else { panic!("wrong variant") };
+        assert_eq!(d.grant_id, 0xCAFE);
+        assert_eq!(d.key_b64.len(), 44);
+        assert_eq!(d.target_shard_id, 42);
+        assert_eq!(d.label, "Alice's chair");
+    }
+
+    #[test]
+    fn roundtrip_forget_held_grant() {
+        let msg = ClientMsg::ForgetHeldGrant(ForgetHeldGrantData { grant_id: 0xCAFE });
+        let bytes = msg.serialize();
+        let decoded = ClientMsg::deserialize(&bytes).unwrap();
+        let ClientMsg::ForgetHeldGrant(d) = decoded else { panic!("wrong variant") };
+        assert_eq!(d.grant_id, 0xCAFE);
+    }
+
+    #[test]
+    fn roundtrip_block_config_update_with_antenna() {
+        // Phase 3E.3: AntennaConfig flows through the BlockConfigUpdate
+        // wire path. Round-trip the full message and assert every
+        // antenna field survives.
+        use crate::signal::config::{AntennaConfig, BlockConfigUpdateData};
+        let mut data = BlockConfigUpdateData::default();
+        data.block_pos = glam::IVec3::new(1, 2, 3);
+        data.antenna = Some(AntennaConfig {
+            source_channel_name: "alice.local.alarm".into(),
+            remote_channel_name: "bob.alarm-mirror".into(),
+            frequency: 0xCAFEBABE,
+            grant_id: 0xDEADBEEF_DEADBEEF,
+            target_shard_id: 99,
+        });
+        let msg = ClientMsg::BlockConfigUpdate(data);
+        let bytes = msg.serialize();
+        let decoded = ClientMsg::deserialize(&bytes).unwrap();
+        let ClientMsg::BlockConfigUpdate(d) = decoded else { panic!("wrong variant") };
+        let a = d.antenna.expect("antenna config must round-trip");
+        assert_eq!(a.source_channel_name, "alice.local.alarm");
+        assert_eq!(a.remote_channel_name, "bob.alarm-mirror");
+        assert_eq!(a.frequency, 0xCAFEBABE);
+        assert_eq!(a.grant_id, 0xDEADBEEF_DEADBEEF);
+        assert_eq!(a.target_shard_id, 99);
+        // Listener field stays None when not set.
+        assert!(d.listener.is_none());
+    }
+
+    #[test]
+    fn roundtrip_block_config_update_with_listener() {
+        use crate::signal::config::{BlockConfigUpdateData, ListenerConfig};
+        let mut data = BlockConfigUpdateData::default();
+        data.block_pos = glam::IVec3::new(7, 8, 9);
+        data.listener = Some(ListenerConfig {
+            destination_channel_name: "bob.local.health-mirror".into(),
+            bridged_channel_name: "alice.health".into(),
+            frequency: 47291,
+            grant_id: 0xBEEF,
+            source_shard_id: 1,
+        });
+        let msg = ClientMsg::BlockConfigUpdate(data);
+        let bytes = msg.serialize();
+        let decoded = ClientMsg::deserialize(&bytes).unwrap();
+        let ClientMsg::BlockConfigUpdate(d) = decoded else { panic!("wrong variant") };
+        let l = d.listener.expect("listener config must round-trip");
+        assert_eq!(l.destination_channel_name, "bob.local.health-mirror");
+        assert_eq!(l.bridged_channel_name, "alice.health");
+        assert_eq!(l.frequency, 47291);
+        assert_eq!(l.grant_id, 0xBEEF);
+        assert_eq!(l.source_shard_id, 1);
+        assert!(d.antenna.is_none());
+    }
+
+    #[test]
+    fn roundtrip_block_config_state_with_antenna_and_listener() {
+        // Server → client snapshot path (BlockConfigState). Both configs
+        // present simultaneously, both must round-trip.
+        use crate::signal::config::{
+            AntennaConfig, BlockSignalConfig, ListenerConfig,
+        };
+        let mut snap = BlockSignalConfig::default();
+        snap.block_pos = glam::IVec3::new(0, 0, 0);
+        snap.antenna = Some(AntennaConfig {
+            source_channel_name: "src".into(),
+            remote_channel_name: "rem".into(),
+            frequency: 1,
+            grant_id: 2,
+            target_shard_id: 3,
+        });
+        snap.listener = Some(ListenerConfig {
+            destination_channel_name: "dst".into(),
+            bridged_channel_name: "bri".into(),
+            frequency: 4,
+            grant_id: 5,
+            source_shard_id: 6,
+        });
+        let msg = ServerMsg::BlockConfigState(snap);
+        let bytes = msg.serialize();
+        let decoded = ServerMsg::deserialize(&bytes).unwrap();
+        let ServerMsg::BlockConfigState(s) = decoded else { panic!("wrong variant") };
+        let a = s.antenna.expect("antenna round-trip");
+        assert_eq!(a.source_channel_name, "src");
+        assert_eq!(a.target_shard_id, 3);
+        let l = s.listener.expect("listener round-trip");
+        assert_eq!(l.destination_channel_name, "dst");
+        assert_eq!(l.source_shard_id, 6);
+    }
+
+    #[test]
+    fn roundtrip_remote_signal_publish() {
+        let msg = ClientMsg::RemoteSignalPublish(RemoteSignalPublishData {
+            target_shard_id: 42,
+            channel_name: "alice.thrust-forward".into(),
+            grant_id: 0xCAFE,
+            value_type: 1, // Float
+            value_data: 0.75,
+        });
+        let bytes = msg.serialize();
+        let decoded = ClientMsg::deserialize(&bytes).unwrap();
+        let ClientMsg::RemoteSignalPublish(d) = decoded else { panic!("wrong variant") };
+        assert_eq!(d.target_shard_id, 42);
+        assert_eq!(d.channel_name, "alice.thrust-forward");
+        assert_eq!(d.grant_id, 0xCAFE);
+        assert_eq!(d.value_type, 1);
+        assert_eq!(d.value_data, 0.75);
+    }
+
+    #[test]
+    fn roundtrip_hud_signal_delta_register_then_bare_then_remove() {
+        // Realistic batch: a fresh REGISTER (introduces wire_id=0
+        // for "ship.thrust" with throttle=0.5), a bare update for
+        // the same wire_id (throttle=0.75), and a REMOVE for an
+        // older wire_id whose channel went out of scope.
+        let msg = ServerMsg::HudSignalDelta(HudSignalDeltaData {
+            dict_seq: 42,
+            batch_seq: 100,
+            entries: vec![
+                HudSignalEntryV2Data::register(
+                    0,
+                    "ship.thrust-fwd".into(),
+                    HudSignalValue::Float(0.5),
+                    1, // Throttle
+                    1,
+                ),
+                HudSignalEntryV2Data::bare(0, HudSignalValue::Float(0.75), 1, 2),
+                HudSignalEntryV2Data::remove(7, 3),
+            ],
+        });
+        let bytes = msg.serialize();
+        let decoded = ServerMsg::deserialize(&bytes).unwrap();
+        let ServerMsg::HudSignalDelta(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(d.dict_seq, 42);
+        assert_eq!(d.batch_seq, 100);
+        assert_eq!(d.entries.len(), 3);
+
+        // First: REGISTER carries name + value.
+        assert!(d.entries[0].is_register());
+        assert!(!d.entries[0].is_remove());
+        assert_eq!(d.entries[0].wire_id, 0);
+        assert_eq!(d.entries[0].channel_name, "ship.thrust-fwd");
+        assert!((d.entries[0].value_num - 0.5).abs() < f32::EPSILON);
+        assert_eq!(d.entries[0].seq, 1);
+
+        // Second: bare entry, value-only.
+        assert!(!d.entries[1].is_register());
+        assert!(!d.entries[1].is_remove());
+        assert_eq!(d.entries[1].wire_id, 0);
+        assert!(d.entries[1].channel_name.is_empty());
+        assert!((d.entries[1].value_num - 0.75).abs() < f32::EPSILON);
+
+        // Third: REMOVE drops a wire_id.
+        assert!(d.entries[2].is_remove());
+        assert_eq!(d.entries[2].wire_id, 7);
+    }
+
+    #[test]
+    fn roundtrip_hud_signal_delta_text_value() {
+        // Text values are server-authored only (e.g., warp target name).
+        // Round-trip preserves the string + the value_type==3 marker.
+        let msg = ServerMsg::HudSignalDelta(HudSignalDeltaData {
+            dict_seq: 1,
+            batch_seq: 1,
+            entries: vec![HudSignalEntryV2Data::register(
+                3,
+                "warp.target-name".into(),
+                HudSignalValue::Text("Kepler-22b".into()),
+                10, // Text property ordinal
+                1,
+            )],
+        });
+        let bytes = msg.serialize();
+        let decoded = ServerMsg::deserialize(&bytes).unwrap();
+        let ServerMsg::HudSignalDelta(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(d.entries[0].value_type, 3);
+        assert_eq!(d.entries[0].value_text, "Kepler-22b");
+        assert_eq!(d.entries[0].channel_name, "warp.target-name");
+    }
+
+    #[test]
+    fn roundtrip_hud_signal_delta_empty_entries() {
+        // A heartbeat-style delta — all bookkeeping fields, no actual
+        // entries. Must round-trip cleanly so the client can chart
+        // dict_seq + batch_seq even when nothing changed.
+        let msg = ServerMsg::HudSignalDelta(HudSignalDeltaData {
+            dict_seq: 5,
+            batch_seq: 99,
+            entries: vec![],
+        });
+        let bytes = msg.serialize();
+        let decoded = ServerMsg::deserialize(&bytes).unwrap();
+        let ServerMsg::HudSignalDelta(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(d.dict_seq, 5);
+        assert_eq!(d.batch_seq, 99);
+        assert!(d.entries.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_grants_snapshot() {
+        let msg = ServerMsg::GrantsSnapshot(GrantsSnapshotData {
+            grants: vec![
+                GrantPublicView {
+                    grant_id: 7,
+                    key_b64: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
+                    channel_names: vec!["alice.door.open".into()],
+                    ops: 0, // Publish
+                    label: "Bob's monitoring tool".into(),
+                    created_at_ms: 100,
+                    expires_at_ms: 0,
+                    created_by: 1,
+                    revoked: false,
+                    namespace_glob: String::new(),
+                },
+                GrantPublicView {
+                    grant_id: 8,
+                    key_b64: String::new(), // non-owner view: empty
+                    channel_names: vec!["alice.beacon".into()],
+                    ops: 1,
+                    label: "stale grant".into(),
+                    created_at_ms: 50,
+                    expires_at_ms: 200,
+                    created_by: 1,
+                    revoked: true,
+                    namespace_glob: "alice.*".into(),
+                },
+            ],
+        });
+        let bytes = msg.serialize();
+        let decoded = ServerMsg::deserialize(&bytes).unwrap();
+        let ServerMsg::GrantsSnapshot(s) = decoded else { panic!("wrong variant") };
+        assert_eq!(s.grants.len(), 2);
+        assert_eq!(s.grants[0].grant_id, 7);
+        assert_eq!(s.grants[0].key_b64.len(), 44, "owner sees full key (44-char b64)");
+        assert!(s.grants[0].namespace_glob.is_empty());
+        assert_eq!(s.grants[1].grant_id, 8);
+        assert!(s.grants[1].key_b64.is_empty(), "non-owner view: key omitted");
+        assert!(s.grants[1].revoked);
+        assert_eq!(s.grants[1].namespace_glob, "alice.*");
     }
 }

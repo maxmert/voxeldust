@@ -181,6 +181,13 @@ impl BlockId {
     pub const HUD_PANEL: Self = Self(1810);
     pub const GRAVITY_GENERATOR: Self = Self(1820);
     pub const ANTENNA: Self = Self(1830);
+    /// Listener block — companion to Antenna. Subscribes to a Radio
+    /// channel via a held grant and mirrors the value onto a chosen
+    /// local channel (so in-ship subscribers can wire to the local
+    /// channel as if it were natively published). The "isolating
+    /// bridge" between the cross-shard Radio scope and the ship's
+    /// internal Local-scope wiring.
+    pub const LISTENER: Self = Self(1831);
 
     // -----------------------------------------------------------------------
     // Ship system blocks (1840–1859)

@@ -45,6 +45,17 @@ use crate::shard::{
 };
 use crate::shard_types::system::SYSTEM_SHARD_TYPE;
 
+/// Bevy 0.18's GPU shadow-buffer hard cap on cascades per directional
+/// light (`bevy_pbr/src/render/light.rs:191`,
+/// `MAX_CASCADES_PER_LIGHT = 4`). `CascadeShadowConfigBuilder::build`
+/// happily constructs N frusta for any N, but the GPU buffer stores
+/// only the first 4 — fragments past cascade 3 sample uninitialised
+/// slots and read garbage shadow values (often "no shadow"), so
+/// distant lit surfaces (planets, far hulls) blow out into a glowing
+/// halo. Clamping in [`spawn_solar_light`] is a defensive guard that
+/// converts a silent miscompile into a loud `tracing::warn!`.
+const MAX_CASCADES_PER_LIGHT_U8: u8 = 4;
+
 #[derive(Component, Debug, Clone, Copy)]
 pub struct SolarLight;
 
@@ -72,8 +83,20 @@ impl Plugin for SolarLightPlugin {
 
 fn spawn_solar_light(mut commands: Commands, config: Res<GameConfig>) {
     let fidelity = &config.graphics.lighting;
+    // Defensive clamp — see `MAX_CASCADES_PER_LIGHT_U8` doc-comment.
+    // No active preset overshoots the cap; the warn fires only if a
+    // user-facing override (Phase 9 settings UI) sets a higher value.
+    let cascade_count = fidelity.cascade_count.min(MAX_CASCADES_PER_LIGHT_U8) as usize;
+    if (fidelity.cascade_count as usize) > MAX_CASCADES_PER_LIGHT_U8 as usize {
+        tracing::warn!(
+            requested = fidelity.cascade_count,
+            clamped_to = cascade_count,
+            "lighting fidelity preset requests more cascades than Bevy's \
+             MAX_CASCADES_PER_LIGHT cap — clamped to avoid garbage shadow reads"
+        );
+    }
     let shadow_config: CascadeShadowConfig = CascadeShadowConfigBuilder {
-        num_cascades: fidelity.cascade_count as usize,
+        num_cascades: cascade_count,
         minimum_distance: fidelity.cascade_minimum_distance_m,
         maximum_distance: fidelity.cascade_max_distance_m,
         first_cascade_far_bound: fidelity.first_cascade_far_bound_m,

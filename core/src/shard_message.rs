@@ -30,6 +30,11 @@ pub enum ShardMsg {
     SignalBroadcast(SignalBroadcastData),
     /// Batched signal broadcast — multiple signals in one message.
     SignalBroadcastBatch(SignalBroadcastBatchData),
+    /// Phase 4.3: wire-dict-interned batch. Sender uses an
+    /// `OutboundDict` to replace channel names with small wire ids;
+    /// the first reference of each name carries `FLAG_REGISTER` +
+    /// the name. See [`crate::signal::wire_dict`].
+    SignalBroadcastBatchV2(SignalBroadcastBatchV2Data),
     /// Visibility directive from system shard to ship shard.
     /// Tells a ship which other ships are within visual range.
     VisibilityDirective(VisibilityDirectiveData),
@@ -44,6 +49,83 @@ pub enum ShardMsg {
     /// Feeds the system shard AOI so distant observers (ships, EVA) can see
     /// players on planets without a direct secondary connection.
     PlanetPlayerDigest(PlanetPlayerDigestData),
+    /// Phase 3D: foreign shard subscribes to a channel on this shard via
+    /// a held grant. Receiver records `SubscriberRef::RemoteShard` after
+    /// validating the HMAC tag against `GrantsRegistry::check_subscribe`.
+    SignalSubscribe(SignalSubscribeData),
+    /// Phase 3D: explicit subscribe teardown. Idempotent.
+    SignalUnsubscribe(SignalUnsubscribeData),
+    /// Phase 3F: register interest in Radio traffic at the galaxy
+    /// shard. Galaxy holds the subscription until `lease_until_ms` or
+    /// until matching `RadioUnsubscribe`.
+    RadioSubscribe(RadioSubscribeData),
+    /// Phase 3F: drop Radio interest.
+    RadioUnsubscribe(RadioUnsubscribeData),
+    /// Phase 3F.9: ship-shard → system-shard. The ship asserts its
+    /// CURRENT full set of Radio listener frequencies. System-shard
+    /// aggregates across hosted ships and propagates a precise
+    /// per-frequency `RadioSubscribe` to galaxy. Self-healing —
+    /// every message is the complete ground truth for that ship,
+    /// not a delta.
+    ShipFrequencyInterest(ShipFrequencyInterestData),
+}
+
+/// Payload for `ShardMsg::SignalSubscribe`. See `protocol/voxeldust.fbs`
+/// `SignalSubscribe` for canonical wire shape and the doc on
+/// `signal::auth::hmac_sign_subscribe_request` for the HMAC input.
+#[derive(Debug, Clone, Default)]
+pub struct SignalSubscribeData {
+    pub subscriber_shard_id: u64,
+    pub channel_name: String,
+    pub grant_id: u64,
+    pub nonce: u64,
+    pub timestamp_ms: u64,
+    pub valid_until_tick: u64,
+    /// HMAC-SHA256-truncated-to-16 over the canonical request bytes.
+    pub auth_tag: Vec<u8>,
+}
+
+/// Payload for `ShardMsg::SignalUnsubscribe`.
+#[derive(Debug, Clone, Default)]
+pub struct SignalUnsubscribeData {
+    pub subscriber_shard_id: u64,
+    pub channel_name: String,
+    pub grant_id: u64,
+}
+
+/// Payload for `ShardMsg::RadioSubscribe`. See
+/// `protocol/voxeldust.fbs::RadioSubscribe` for the canonical wire
+/// shape. Sent by a system-shard to the band-matched galaxy-shard to
+/// register interest in Radio-scope traffic.
+#[derive(Debug, Clone, Default)]
+pub struct RadioSubscribeData {
+    pub subscriber_shard_id: u64,
+    /// Specific frequencies. Empty when `wildcard` is set.
+    pub frequencies: Vec<u32>,
+    /// Subscribe to every Radio frequency.
+    pub wildcard: bool,
+    /// UNIX millis lease deadline. Galaxy compares against its own
+    /// wall clock and drops the subscription on expiry.
+    pub lease_until_ms: u64,
+}
+
+/// Payload for `ShardMsg::RadioUnsubscribe`. Idempotent.
+#[derive(Debug, Clone, Default)]
+pub struct RadioUnsubscribeData {
+    pub subscriber_shard_id: u64,
+    pub frequencies: Vec<u32>,
+    pub wildcard: bool,
+}
+
+/// Payload for `ShardMsg::ShipFrequencyInterest`. The ship-shard
+/// publishes the complete current set of Radio frequencies it has
+/// Listener blocks for. System-shard tracks per-ship sets and
+/// aggregates upward to galaxy.
+#[derive(Debug, Clone, Default)]
+pub struct ShipFrequencyInterestData {
+    pub ship_shard_id: u64,
+    pub frequencies: Vec<u32>,
+    pub lease_until_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +321,21 @@ pub struct SignalBroadcastEntry {
     pub range_m: f64,
     /// Radio frequency (Radio scope only; 0 for other scopes).
     pub frequency: u32,
+    // -- Phase 2 wire-protocol additions (additive, defaults preserve compat) -
+    /// Per-(channel, sender_shard_id) monotonic sequence. Senders increment
+    /// per publish; receivers run the 64-entry sliding-window replay check.
+    /// Default 0 marks "legacy sender" — receivers skip the replay check
+    /// when both `sequence` and `timestamp_ms` are zero.
+    pub sequence: u64,
+    /// UNIX wall-clock millis at the sender. Receiver enforces a ±5 s
+    /// freshness window. Default 0 = legacy.
+    pub timestamp_ms: u64,
+    /// Phase 3 capability lookup id. 0 = no grant (open broadcast or
+    /// scope-class-only validated). Non-zero = the receiver looks up the
+    /// grant by id and checks `auth_tag` against grant.key.
+    pub grant_id: u64,
+    /// Phase 3 HMAC-SHA256 truncated to 16 bytes. Empty = unauthenticated.
+    pub auth_tag: Vec<u8>,
 }
 
 /// Batched signal broadcast — multiple dirty signals packed into one message.
@@ -248,6 +345,42 @@ pub struct SignalBroadcastBatchData {
     pub source_shard_id: u64,
     pub source_position: DVec3,
     pub entries: Vec<SignalBroadcastEntry>,
+}
+
+// -- Phase 4.3 wire-dict V2 types ---------------------------------------
+
+/// V2 entry — replaces verbose `channel_name` with a `wire_id` plus an
+/// optional FLAG_REGISTER bit that announces a fresh `(wire_id, name)`
+/// binding. See [`crate::signal::wire_dict`] for the protocol.
+#[derive(Debug, Clone)]
+pub struct SignalBroadcastEntryV2 {
+    /// Bit 0 = FLAG_REGISTER. Receiver uses this to update its
+    /// `InboundDict` before resolving.
+    pub flags: u8,
+    /// Per-connection dictionary id.
+    pub wire_id: u32,
+    /// Channel name — meaningful only when FLAG_REGISTER is set.
+    /// Empty otherwise.
+    pub channel_name: String,
+    pub value_type: u8,
+    pub value_data: f32,
+    pub scope: u8,
+    pub range_m: f64,
+    pub frequency: u32,
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub grant_id: u64,
+    pub auth_tag: Vec<u8>,
+}
+
+/// V2 batch. `dict_seq` is the sender's `OutboundDict::dict_seq()` at
+/// batch-build time; the receiver gates monotonicity per peer.
+#[derive(Debug, Clone)]
+pub struct SignalBroadcastBatchV2Data {
+    pub source_shard_id: u64,
+    pub source_position: DVec3,
+    pub dict_seq: u64,
+    pub entries: Vec<SignalBroadcastEntryV2>,
 }
 
 /// A single visible ship entry in a VisibilityDirective.
@@ -863,6 +996,11 @@ impl ShardMsg {
             ShardMsg::SignalBroadcastBatch(data) => {
                 let entries: Vec<_> = data.entries.iter().map(|e| {
                     let name = builder.create_string(&e.channel_name);
+                    let auth_tag = if e.auth_tag.is_empty() {
+                        None
+                    } else {
+                        Some(builder.create_vector(&e.auth_tag))
+                    };
                     fb::SignalBroadcastEntry::create(
                         &mut builder,
                         &fb::SignalBroadcastEntryArgs {
@@ -872,6 +1010,10 @@ impl ShardMsg {
                             scope: e.scope,
                             range_m: e.range_m,
                             frequency: e.frequency,
+                            sequence: e.sequence,
+                            timestamp_ms: e.timestamp_ms,
+                            grant_id: e.grant_id,
+                            auth_tag,
                         },
                     )
                 }).collect();
@@ -889,6 +1031,63 @@ impl ShardMsg {
                     &mut builder,
                     &fb::ShardMessageArgs {
                         payload_type: fb::ShardPayload::SignalBroadcastBatch,
+                        payload: Some(batch.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::SignalBroadcastBatchV2(data) => {
+                // V2 entries: only emit `channel_name` when FLAG_REGISTER
+                // is set. Others ship the empty string for FB schema
+                // uniformity — receivers MUST gate name use on the flag
+                // bit, never on string-non-empty-ness.
+                let entries: Vec<_> = data.entries.iter().map(|e| {
+                    let needs_register = (e.flags & crate::signal::wire_dict::FLAG_REGISTER) != 0;
+                    let name = if needs_register {
+                        Some(builder.create_string(&e.channel_name))
+                    } else {
+                        // Empty placeholder so the FB schema position is
+                        // populated; receivers ignore it without the flag.
+                        Some(builder.create_string(""))
+                    };
+                    let auth_tag = if e.auth_tag.is_empty() {
+                        None
+                    } else {
+                        Some(builder.create_vector(&e.auth_tag))
+                    };
+                    fb::SignalBroadcastEntryV2::create(
+                        &mut builder,
+                        &fb::SignalBroadcastEntryV2Args {
+                            flags: e.flags,
+                            wire_id: e.wire_id,
+                            channel_name: name,
+                            value_type: e.value_type,
+                            value_data: e.value_data,
+                            scope: e.scope,
+                            range_m: e.range_m,
+                            frequency: e.frequency,
+                            sequence: e.sequence,
+                            timestamp_ms: e.timestamp_ms,
+                            grant_id: e.grant_id,
+                            auth_tag,
+                        },
+                    )
+                }).collect();
+                let entries_vec = builder.create_vector(&entries);
+                let src_pos = to_fb_vec3d(&data.source_position);
+                let batch = fb::SignalBroadcastBatchV2::create(
+                    &mut builder,
+                    &fb::SignalBroadcastBatchV2Args {
+                        source_shard_id: data.source_shard_id,
+                        source_position: Some(&src_pos),
+                        dict_seq: data.dict_seq,
+                        entries: Some(entries_vec),
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::SignalBroadcastBatchV2,
                         payload: Some(batch.as_union_value()),
                     },
                 );
@@ -991,6 +1190,111 @@ impl ShardMsg {
                     &fb::ShardMessageArgs {
                         payload_type: fb::ShardPayload::PlanetPlayerDigest,
                         payload: Some(digest.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::SignalSubscribe(data) => {
+                let name = builder.create_string(&data.channel_name);
+                let tag = if data.auth_tag.is_empty() {
+                    None
+                } else {
+                    Some(builder.create_vector(&data.auth_tag))
+                };
+                let sub = fb::SignalSubscribe::create(
+                    &mut builder,
+                    &fb::SignalSubscribeArgs {
+                        subscriber_shard_id: data.subscriber_shard_id,
+                        channel_name: Some(name),
+                        grant_id: data.grant_id,
+                        nonce: data.nonce,
+                        timestamp_ms: data.timestamp_ms,
+                        valid_until_tick: data.valid_until_tick,
+                        auth_tag: tag,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::SignalSubscribe,
+                        payload: Some(sub.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::SignalUnsubscribe(data) => {
+                let name = builder.create_string(&data.channel_name);
+                let unsub = fb::SignalUnsubscribe::create(
+                    &mut builder,
+                    &fb::SignalUnsubscribeArgs {
+                        subscriber_shard_id: data.subscriber_shard_id,
+                        channel_name: Some(name),
+                        grant_id: data.grant_id,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::SignalUnsubscribe,
+                        payload: Some(unsub.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::RadioSubscribe(data) => {
+                let freqs = builder.create_vector(&data.frequencies);
+                let sub = fb::RadioSubscribe::create(
+                    &mut builder,
+                    &fb::RadioSubscribeArgs {
+                        subscriber_shard_id: data.subscriber_shard_id,
+                        frequencies: Some(freqs),
+                        wildcard: data.wildcard,
+                        lease_until_ms: data.lease_until_ms,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::RadioSubscribe,
+                        payload: Some(sub.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::RadioUnsubscribe(data) => {
+                let freqs = builder.create_vector(&data.frequencies);
+                let unsub = fb::RadioUnsubscribe::create(
+                    &mut builder,
+                    &fb::RadioUnsubscribeArgs {
+                        subscriber_shard_id: data.subscriber_shard_id,
+                        frequencies: Some(freqs),
+                        wildcard: data.wildcard,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::RadioUnsubscribe,
+                        payload: Some(unsub.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ShardMsg::ShipFrequencyInterest(data) => {
+                let freqs = builder.create_vector(&data.frequencies);
+                let interest = fb::ShipFrequencyInterest::create(
+                    &mut builder,
+                    &fb::ShipFrequencyInterestArgs {
+                        ship_shard_id: data.ship_shard_id,
+                        frequencies: Some(freqs),
+                        lease_until_ms: data.lease_until_ms,
+                    },
+                );
+                let msg = fb::ShardMessage::create(
+                    &mut builder,
+                    &fb::ShardMessageArgs {
+                        payload_type: fb::ShardPayload::ShipFrequencyInterest,
+                        payload: Some(interest.as_union_value()),
                     },
                 );
                 builder.finish(msg, None);
@@ -1446,12 +1750,60 @@ impl ShardMsg {
                         scope: e.scope(),
                         range_m: e.range_m(),
                         frequency: e.frequency(),
+                        // Phase 2 fields — pre-Phase-2 senders don't write
+                        // these, FB returns the schema default (0 / empty),
+                        // and the receiver's `try_push_remote` skips the
+                        // replay check when both are zero.
+                        sequence: e.sequence(),
+                        timestamp_ms: e.timestamp_ms(),
+                        grant_id: e.grant_id(),
+                        auth_tag: e
+                            .auth_tag()
+                            .map(|v| v.bytes().to_vec())
+                            .unwrap_or_default(),
                     }).collect()
                 }).unwrap_or_default();
 
                 Ok(ShardMsg::SignalBroadcastBatch(SignalBroadcastBatchData {
                     source_shard_id: batch.source_shard_id(),
                     source_position: from_fb_vec3d(src_pos),
+                    entries,
+                }))
+            }
+
+            fb::ShardPayload::SignalBroadcastBatchV2 => {
+                let batch = msg
+                    .payload_as_signal_broadcast_batch_v2()
+                    .ok_or(MessageError::MissingField("SignalBroadcastBatchV2 payload"))?;
+                let src_pos = batch.source_position()
+                    .ok_or(MessageError::MissingField("source_position"))?;
+                let entries = batch.entries().map(|v| {
+                    v.iter().map(|e| SignalBroadcastEntryV2 {
+                        flags: e.flags(),
+                        wire_id: e.wire_id(),
+                        // Receivers MUST gate use on FLAG_REGISTER, not
+                        // string-non-empty-ness. We propagate whatever
+                        // the wire carried (empty string is fine).
+                        channel_name: e.channel_name().unwrap_or("").to_string(),
+                        value_type: e.value_type(),
+                        value_data: e.value_data(),
+                        scope: e.scope(),
+                        range_m: e.range_m(),
+                        frequency: e.frequency(),
+                        sequence: e.sequence(),
+                        timestamp_ms: e.timestamp_ms(),
+                        grant_id: e.grant_id(),
+                        auth_tag: e
+                            .auth_tag()
+                            .map(|v| v.bytes().to_vec())
+                            .unwrap_or_default(),
+                    }).collect()
+                }).unwrap_or_default();
+
+                Ok(ShardMsg::SignalBroadcastBatchV2(SignalBroadcastBatchV2Data {
+                    source_shard_id: batch.source_shard_id(),
+                    source_position: from_fb_vec3d(src_pos),
+                    dict_seq: batch.dict_seq(),
                     entries,
                 }))
             }
@@ -1596,6 +1948,76 @@ impl ShardMsg {
                     planet_index: digest.planet_index(),
                     entries,
                     tick: digest.tick(),
+                }))
+            }
+            fb::ShardPayload::SignalSubscribe => {
+                let sub = msg
+                    .payload_as_signal_subscribe()
+                    .ok_or(MessageError::MissingField("SignalSubscribe payload"))?;
+                Ok(ShardMsg::SignalSubscribe(SignalSubscribeData {
+                    subscriber_shard_id: sub.subscriber_shard_id(),
+                    channel_name: sub.channel_name().unwrap_or("").to_string(),
+                    grant_id: sub.grant_id(),
+                    nonce: sub.nonce(),
+                    timestamp_ms: sub.timestamp_ms(),
+                    valid_until_tick: sub.valid_until_tick(),
+                    auth_tag: sub
+                        .auth_tag()
+                        .map(|v| v.bytes().to_vec())
+                        .unwrap_or_default(),
+                }))
+            }
+            fb::ShardPayload::SignalUnsubscribe => {
+                let unsub = msg
+                    .payload_as_signal_unsubscribe()
+                    .ok_or(MessageError::MissingField("SignalUnsubscribe payload"))?;
+                Ok(ShardMsg::SignalUnsubscribe(SignalUnsubscribeData {
+                    subscriber_shard_id: unsub.subscriber_shard_id(),
+                    channel_name: unsub.channel_name().unwrap_or("").to_string(),
+                    grant_id: unsub.grant_id(),
+                }))
+            }
+            fb::ShardPayload::RadioSubscribe => {
+                let sub = msg
+                    .payload_as_radio_subscribe()
+                    .ok_or(MessageError::MissingField("RadioSubscribe payload"))?;
+                let frequencies = sub
+                    .frequencies()
+                    .map(|v| v.iter().collect())
+                    .unwrap_or_default();
+                Ok(ShardMsg::RadioSubscribe(RadioSubscribeData {
+                    subscriber_shard_id: sub.subscriber_shard_id(),
+                    frequencies,
+                    wildcard: sub.wildcard(),
+                    lease_until_ms: sub.lease_until_ms(),
+                }))
+            }
+            fb::ShardPayload::RadioUnsubscribe => {
+                let unsub = msg
+                    .payload_as_radio_unsubscribe()
+                    .ok_or(MessageError::MissingField("RadioUnsubscribe payload"))?;
+                let frequencies = unsub
+                    .frequencies()
+                    .map(|v| v.iter().collect())
+                    .unwrap_or_default();
+                Ok(ShardMsg::RadioUnsubscribe(RadioUnsubscribeData {
+                    subscriber_shard_id: unsub.subscriber_shard_id(),
+                    frequencies,
+                    wildcard: unsub.wildcard(),
+                }))
+            }
+            fb::ShardPayload::ShipFrequencyInterest => {
+                let interest = msg
+                    .payload_as_ship_frequency_interest()
+                    .ok_or(MessageError::MissingField("ShipFrequencyInterest payload"))?;
+                let frequencies = interest
+                    .frequencies()
+                    .map(|v| v.iter().collect())
+                    .unwrap_or_default();
+                Ok(ShardMsg::ShipFrequencyInterest(ShipFrequencyInterestData {
+                    ship_shard_id: interest.ship_shard_id(),
+                    frequencies,
+                    lease_until_ms: interest.lease_until_ms(),
                 }))
             }
 
@@ -1929,5 +2351,288 @@ mod tests {
         assert_eq!(d.interior_chunks[1].interior_bits, bits1);
         assert!((d.hull_min.x + 5.0).abs() < 1e-6);
         assert!((d.hull_max.x - 5.0).abs() < 1e-6);
+    }
+
+    // -- Phase 2 wire-format extensions: SignalBroadcastEntry round-trip ----
+
+    #[test]
+    fn roundtrip_signal_broadcast_batch_with_phase2_fields() {
+        // Round-trip a fully-populated batch through serialize/deserialize
+        // and assert every Phase 2 field survives intact. Catches schema
+        // drift between the FB definition, the Rust struct, and the
+        // serialize/deserialize impls.
+        let msg = ShardMsg::SignalBroadcastBatch(SignalBroadcastBatchData {
+            source_shard_id: 4242,
+            source_position: DVec3::new(1.0, 2.0, 3.0),
+            entries: vec![
+                SignalBroadcastEntry {
+                    channel_name: "alice.beacon".to_string(),
+                    value_type: 1,
+                    value_data: 0.75,
+                    scope: 1,
+                    range_m: 5000.0,
+                    frequency: 0,
+                    sequence: 42,
+                    timestamp_ms: 1_700_000_000_000,
+                    grant_id: 0,
+                    auth_tag: Vec::new(),
+                },
+                SignalBroadcastEntry {
+                    channel_name: "alice.fleet.formation".to_string(),
+                    value_type: 0,
+                    value_data: 1.0,
+                    scope: 3, // Radio
+                    range_m: 0.0,
+                    frequency: 91100,
+                    sequence: 7,
+                    timestamp_ms: 1_700_000_000_500,
+                    grant_id: 0xdeadbeef_cafebabe,
+                    auth_tag: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                },
+            ],
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+
+        let ShardMsg::SignalBroadcastBatch(batch) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(batch.source_shard_id, 4242);
+        assert_eq!(batch.entries.len(), 2);
+
+        let e0 = &batch.entries[0];
+        assert_eq!(e0.channel_name, "alice.beacon");
+        assert_eq!(e0.sequence, 42);
+        assert_eq!(e0.timestamp_ms, 1_700_000_000_000);
+        assert_eq!(e0.grant_id, 0);
+        assert!(e0.auth_tag.is_empty());
+
+        let e1 = &batch.entries[1];
+        assert_eq!(e1.channel_name, "alice.fleet.formation");
+        assert_eq!(e1.sequence, 7);
+        assert_eq!(e1.timestamp_ms, 1_700_000_000_500);
+        assert_eq!(e1.grant_id, 0xdeadbeef_cafebabe);
+        assert_eq!(e1.auth_tag.len(), 16);
+        assert_eq!(e1.auth_tag[0], 1);
+        assert_eq!(e1.auth_tag[15], 16);
+    }
+
+    #[test]
+    fn roundtrip_signal_subscribe() {
+        let msg = ShardMsg::SignalSubscribe(SignalSubscribeData {
+            subscriber_shard_id: 0xABCD_1234_5678_9ABC,
+            channel_name: "alice.thrust-forward".into(),
+            grant_id: 0xCAFEBABE_DEADBEEF,
+            nonce: 42,
+            timestamp_ms: 1_700_000_000_000,
+            valid_until_tick: 12_000,
+            auth_tag: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::SignalSubscribe(d) = decoded else { panic!("wrong variant") };
+        assert_eq!(d.subscriber_shard_id, 0xABCD_1234_5678_9ABC);
+        assert_eq!(d.channel_name, "alice.thrust-forward");
+        assert_eq!(d.grant_id, 0xCAFEBABE_DEADBEEF);
+        assert_eq!(d.nonce, 42);
+        assert_eq!(d.timestamp_ms, 1_700_000_000_000);
+        assert_eq!(d.valid_until_tick, 12_000);
+        assert_eq!(d.auth_tag.len(), 16);
+        assert_eq!(d.auth_tag[15], 16);
+    }
+
+    #[test]
+    fn roundtrip_signal_unsubscribe() {
+        let msg = ShardMsg::SignalUnsubscribe(SignalUnsubscribeData {
+            subscriber_shard_id: 99,
+            channel_name: "alice.lights".into(),
+            grant_id: 7,
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::SignalUnsubscribe(d) = decoded else { panic!("wrong variant") };
+        assert_eq!(d.subscriber_shard_id, 99);
+        assert_eq!(d.channel_name, "alice.lights");
+        assert_eq!(d.grant_id, 7);
+    }
+
+    #[test]
+    fn roundtrip_signal_broadcast_batch_v2_register_then_bare() {
+        // Two-entry batch: first carries FLAG_REGISTER + name, second
+        // is a bare reference using the wire_id. Round-trips through
+        // the FB encoder + decoder exactly as constructed.
+        use crate::signal::wire_dict::FLAG_REGISTER;
+        let msg = ShardMsg::SignalBroadcastBatchV2(SignalBroadcastBatchV2Data {
+            source_shard_id: 7,
+            source_position: DVec3::new(1.0, 2.0, 3.0),
+            dict_seq: 42,
+            entries: vec![
+                SignalBroadcastEntryV2 {
+                    flags: FLAG_REGISTER,
+                    wire_id: 0,
+                    channel_name: "alice.thrust".into(),
+                    value_type: 1,
+                    value_data: 0.75,
+                    scope: 1,
+                    range_m: 100.0,
+                    frequency: 0,
+                    sequence: 1,
+                    timestamp_ms: 1_700_000_000_000,
+                    grant_id: 5,
+                    auth_tag: vec![0xAA; 16],
+                },
+                // Bare entry: receiver resolves via InboundDict.
+                SignalBroadcastEntryV2 {
+                    flags: 0,
+                    wire_id: 0,
+                    channel_name: String::new(),
+                    value_type: 1,
+                    value_data: 0.5,
+                    scope: 1,
+                    range_m: 100.0,
+                    frequency: 0,
+                    sequence: 2,
+                    timestamp_ms: 1_700_000_000_500,
+                    grant_id: 5,
+                    auth_tag: vec![0xBB; 16],
+                },
+            ],
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::SignalBroadcastBatchV2(batch) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(batch.source_shard_id, 7);
+        assert_eq!(batch.dict_seq, 42);
+        assert_eq!(batch.entries.len(), 2);
+        // First entry: FLAG_REGISTER preserved, name carried.
+        assert_eq!(batch.entries[0].flags & FLAG_REGISTER, FLAG_REGISTER);
+        assert_eq!(batch.entries[0].channel_name, "alice.thrust");
+        assert_eq!(batch.entries[0].wire_id, 0);
+        assert_eq!(batch.entries[0].auth_tag.len(), 16);
+        // Second entry: flag clear, name NOT trusted (we wrote empty;
+        // FB decode reads empty back).
+        assert_eq!(batch.entries[1].flags, 0);
+        assert_eq!(batch.entries[1].wire_id, 0);
+        assert!(batch.entries[1].channel_name.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_radio_subscribe_with_frequencies() {
+        let msg = ShardMsg::RadioSubscribe(RadioSubscribeData {
+            subscriber_shard_id: 42,
+            frequencies: vec![1234, 5678, 9999],
+            wildcard: false,
+            lease_until_ms: 1_700_000_060_000,
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::RadioSubscribe(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(d.subscriber_shard_id, 42);
+        assert_eq!(d.frequencies, vec![1234, 5678, 9999]);
+        assert!(!d.wildcard);
+        assert_eq!(d.lease_until_ms, 1_700_000_060_000);
+    }
+
+    #[test]
+    fn roundtrip_radio_subscribe_wildcard() {
+        let msg = ShardMsg::RadioSubscribe(RadioSubscribeData {
+            subscriber_shard_id: 7,
+            frequencies: Vec::new(),
+            wildcard: true,
+            lease_until_ms: 1_700_000_120_000,
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::RadioSubscribe(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert!(d.wildcard);
+        assert!(d.frequencies.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_ship_frequency_interest() {
+        let msg = ShardMsg::ShipFrequencyInterest(ShipFrequencyInterestData {
+            ship_shard_id: 9000,
+            frequencies: vec![100, 200, 1234, 5678],
+            lease_until_ms: 1_700_000_090_000,
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::ShipFrequencyInterest(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(d.ship_shard_id, 9000);
+        assert_eq!(d.frequencies, vec![100, 200, 1234, 5678]);
+        assert_eq!(d.lease_until_ms, 1_700_000_090_000);
+    }
+
+    #[test]
+    fn roundtrip_ship_frequency_interest_empty_set() {
+        // A ship that USED to have listeners but currently has none
+        // sends an empty-set interest to drop its entry. Round-trips
+        // cleanly so the receiver sees `frequencies.is_empty()`.
+        let msg = ShardMsg::ShipFrequencyInterest(ShipFrequencyInterestData {
+            ship_shard_id: 1,
+            frequencies: vec![],
+            lease_until_ms: 0,
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::ShipFrequencyInterest(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert!(d.frequencies.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_radio_unsubscribe() {
+        let msg = ShardMsg::RadioUnsubscribe(RadioUnsubscribeData {
+            subscriber_shard_id: 99,
+            frequencies: vec![88],
+            wildcard: false,
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::RadioUnsubscribe(d) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(d.subscriber_shard_id, 99);
+        assert_eq!(d.frequencies, vec![88]);
+    }
+
+    #[test]
+    fn roundtrip_signal_broadcast_batch_legacy_zero_fields() {
+        // Pre-Phase-2 senders ship zero/empty for the new fields. Make sure
+        // the new deserializer accepts that as legitimate (backward compat).
+        let msg = ShardMsg::SignalBroadcastBatch(SignalBroadcastBatchData {
+            source_shard_id: 42,
+            source_position: DVec3::ZERO,
+            entries: vec![SignalBroadcastEntry {
+                channel_name: "legacy".to_string(),
+                value_type: 1,
+                value_data: 0.5,
+                scope: 1,
+                range_m: 1000.0,
+                frequency: 0,
+                sequence: 0,
+                timestamp_ms: 0,
+                grant_id: 0,
+                auth_tag: Vec::new(),
+            }],
+        });
+        let bytes = msg.serialize();
+        let decoded = ShardMsg::deserialize(&bytes).unwrap();
+        let ShardMsg::SignalBroadcastBatch(batch) = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(batch.entries.len(), 1);
+        assert_eq!(batch.entries[0].sequence, 0);
+        assert_eq!(batch.entries[0].timestamp_ms, 0);
+        assert!(batch.entries[0].auth_tag.is_empty());
     }
 }

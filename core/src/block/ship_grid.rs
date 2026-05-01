@@ -964,6 +964,39 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
         circuit: "main".to_string(),
     });
 
+    // -----------------------------------------------------------------------
+    // Comms station — Antenna + Listener (Phase 3F).
+    //
+    // Mirrors the system-blocks column at -X with a comms column on +X.
+    // Both ship without a remote-channel binding by default — the player
+    // configures them via the F-key tablet UI on each block (selects
+    // frequency, source/destination channel, held grant). They consume
+    // power only when active, so an unconfigured block is inert + free.
+    //
+    // - Antenna at (2, 1, -2): bridges a local channel onto a Radio
+    //   frequency, ships HMAC-stamped values via QUIC to the held
+    //   grant's target shard. Used for outbound Radio publication
+    //   (e.g., faction comms, fleet coordination).
+    //
+    // - Listener at (2, 1, -1): subscribes to a remote Radio channel
+    //   via a held grant; mirrors received values onto a local channel
+    //   so in-ship subscribers (HUD widgets, lights, sirens) can wire
+    //   to it like any native publisher.
+    //
+    // Power is on the "main" circuit at moderate consumption (10 kW
+    // antenna, 5 kW listener — see registry's power_props entries).
+    // -----------------------------------------------------------------------
+    grid.set_block(2, 1, -2, BlockId::ANTENNA);
+    grid.set_power_config(2, 1, -2, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
+    grid.set_block(2, 1, -1, BlockId::LISTENER);
+    grid.set_power_config(2, 1, -1, PowerConfig::Consumer {
+        reactor_pos,
+        circuit: "main".to_string(),
+    });
+
     // --- Interior lamps (sub-block elements, not full blocks) ---
     //
     // Lamps are mounted as sub-block fixtures flush against the
@@ -1267,6 +1300,14 @@ mod tests {
 
         // Ownership core at center
         assert_eq!(grid.get_block(0, 1, 0), BlockId::OWNERSHIP_CORE);
+
+        // Comms station — Antenna + Listener on the +X side of the
+        // cabin. Mirror of the system blocks at -X. Both must be
+        // present so the player can configure Radio publication +
+        // subscription via the F-key tablet UI without first having
+        // to place these blocks themselves.
+        assert_eq!(grid.get_block(2, 1, -2), BlockId::ANTENNA);
+        assert_eq!(grid.get_block(2, 1, -1), BlockId::LISTENER);
 
         // Outside the ship should be air
         assert_eq!(grid.get_block(50, 50, 50), BlockId::AIR);

@@ -354,3 +354,91 @@ impl Default for EngineControllerState {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3E — Antenna and Listener block-bound state.
+//
+// Both blocks act as block-bound conveniences over the cross-shard grant
+// infrastructure (which already works at the wire level via
+// `RemoteSignalPublish` + `SignalSubscribe`). The blocks provide a stable
+// in-world placement point + UI handle so a player doesn't have to bind a
+// HUD widget to every cross-shard channel they care about — placing an
+// Antenna pins an outgoing channel; placing a Listener pins an incoming one.
+// ---------------------------------------------------------------------------
+
+/// Antenna: bridges a Local channel on this shard to a remote
+/// (Radio-scope) channel on the target shard. Each tick, the antenna
+/// reads its `source_channel_id`'s current value and forwards it to
+/// `target_shard_id` using the held grant's HMAC key — same path as
+/// `RemoteSignalPublish` but block-driven instead of tablet-driven.
+///
+/// The grant lives in `HeldGrants` keyed by the block's `owner_id` (set
+/// from `BlockOwnership` at placement); the block's grant_id+target are
+/// captured here for fast per-tick lookup.
+#[derive(Component, Clone, Debug, Default)]
+pub struct AntennaState {
+    /// Local channel feeding the antenna. Antenna reads this each tick.
+    pub source_channel_id: Option<ChannelId>,
+    /// Remote channel name on the target shard (must match the grant's
+    /// covered channels). Stored as a string because grants reference
+    /// channel ids on a DIFFERENT shard — name is the shard-spanning key.
+    pub remote_channel_name: String,
+    /// Radio frequency for the receiver-side filter (matches the
+    /// channel's `Radio { frequency }` scope on the target shard).
+    pub frequency: u32,
+    /// HMAC grant id authorising this antenna's outbound publishes.
+    /// Looked up in the placing player's `HeldGrants` to get the key.
+    pub grant_id: u64,
+    /// Target shard the forwarded entries are addressed to.
+    pub target_shard_id: u64,
+    /// Block owner — used to look up the grant's key in HeldGrants.
+    pub owner_session: u64,
+    /// False = antenna mute (skip per-tick forward). Driven by an
+    /// optional Active subscriber binding (see `BlockKindSignalSchema`).
+    pub active: bool,
+}
+
+/// Listener: receives a remote (Radio-scope) channel via a held grant
+/// and mirrors its current value onto a chosen Local channel on this
+/// shard. Subscribers in this ship that want the bridged value just bind
+/// to the local mirror channel — they don't need to know about HMAC,
+/// grants, or cross-shard plumbing.
+///
+/// The mirror runs each tick in `listener_mirror`: read the merged value
+/// of `bridged_channel_id` (which `try_push_remote` already verified +
+/// pushed), `publish_direct_id` it to `destination_channel_id`. Local
+/// subscribers see a fresh value with the listener as the apparent publisher.
+#[derive(Component, Clone, Debug, Default)]
+pub struct ListenerState {
+    /// Local channel that mirrors the bridged Radio channel's value.
+    /// Created at config time with `SignalScope::Local` so internal
+    /// subscribers can wire to it like any native channel.
+    pub destination_channel_id: Option<ChannelId>,
+    /// Local Radio-scope channel that receives forwarded entries from
+    /// the publisher's shard. `try_push_remote` verifies the HMAC tag
+    /// against this channel's signature (or grant), then push_pendings
+    /// the value here; `listener_mirror` reads that and writes to
+    /// `destination_channel_id`.
+    pub bridged_channel_id: Option<ChannelId>,
+    /// Cross-shard channel name (matches the publisher's `remote_channel_name`).
+    pub remote_channel_name: String,
+    /// Radio frequency.
+    pub frequency: u32,
+    /// HMAC grant id authorising this listener's subscribe request.
+    pub grant_id: u64,
+    /// The shard this listener is subscribing TO (the publisher's shard).
+    pub source_shard_id: u64,
+    /// Block owner — used to look up the grant's key in HeldGrants.
+    pub owner_session: u64,
+    /// False = mirror disabled.
+    pub active: bool,
+    /// Tick number when our subscription on the publisher's side expires.
+    /// Set at apply time; refreshed by the `listener_lease_renewal`
+    /// system. When `lease_until_tick - now_tick < RENEWAL_THRESHOLD`
+    /// the renewal system re-issues `SignalSubscribe` and updates this
+    /// field. Listeners whose lease has FULLY expired (now_tick >
+    /// lease_until_tick) get re-issued anyway — the publisher's
+    /// `cleanup_expired_subscribers_system` would have dropped the
+    /// subscription, but a fresh subscribe re-establishes it.
+    pub lease_until_tick: u64,
+}

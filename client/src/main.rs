@@ -95,7 +95,10 @@ fn main() {
     .add_plugins(EguiPlugin::default())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     // GameConfig registers first — every later plugin reads from it.
-    .add_plugins(config::GameConfigPlugin)
+    // The CLI's `--graphics-preset` seeds the lighting-fidelity tier
+    // before any consumer (lighting, camera, atmosphere, eclipse, …)
+    // builds against it.
+    .add_plugins(config::GameConfigPlugin::with_preset(cli.graphics_preset))
     .add_plugins(NetworkPlugin {
         gateway: cli.gateway,
         player_name: cli.name.clone(),

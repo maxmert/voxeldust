@@ -104,6 +104,12 @@ pub enum NetEvent {
     /// Full star catalogue for the galaxy — sent by the galaxy
     /// shard once per connect. Authoritative; no per-tick update.
     StarCatalog(voxeldust_core::client_message::StarCatalogData),
+    /// Phase 4.4: server-pushed HUD signal delta. Resolved against
+    /// the client's per-session `InboundDict` and applied to the
+    /// `SignalRegistry`. Coexists with the legacy
+    /// `WorldStateData.hud_signals` UDP path until that field is
+    /// removed.
+    HudSignalDelta(voxeldust_core::client_message::HudSignalDeltaData),
     Disconnected(String),
 }
 
@@ -576,6 +582,15 @@ pub async fn run_network(
                             }
                             Ok(ServerMsg::StarCatalog(data)) => {
                                 let _ = event_tx_tcp.send(NetEvent::StarCatalog(data));
+                            }
+                            Ok(ServerMsg::HudSignalDelta(delta)) => {
+                                // Phase 4.4: forward delta-encoded HUD
+                                // updates straight into the client's
+                                // GameEvent stream. The signal-registry
+                                // drainer resolves wire ids against the
+                                // session's InboundDict and applies the
+                                // entries to the registry.
+                                let _ = event_tx_tcp.send(NetEvent::HudSignalDelta(delta));
                             }
                             Ok(ServerMsg::ShardDisconnectNotify(dn)) => {
                                 let key = (dn.shard_type, dn.seed);

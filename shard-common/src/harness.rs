@@ -29,6 +29,7 @@ use crate::client_listener::{self, ClientConnectEvent, ClientRegistry};
 use crate::heartbeat_sender;
 use crate::healthz;
 use crate::peer_registry::PeerShardRegistry;
+use crate::wire_dict_registry::WireDictRegistry;
 use crate::quic_transport::QuicTransport;
 use crate::shutdown;
 
@@ -52,6 +53,23 @@ pub struct NetworkBridge {
     pub signal_publish_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
     /// Incoming lamp-config edits from the F-key tablet UI.
     pub lamp_config_update_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
+    /// Phase 3C: incoming `RemoteAccessGrant` create requests. Drained by
+    /// the shard's grant-management ECS system into `apply_grant_create`.
+    pub grant_create_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::GrantCreateData)>,
+    /// Phase 3C: incoming grant revocation requests.
+    pub grant_revoke_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::GrantRevokeData)>,
+    /// Phase 3C: recipient-side held grant registrations. Drained by
+    /// `apply_held_grant_messages` into the per-session `HeldGrants` resource.
+    pub add_held_grant_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::AddHeldGrantData)>,
+    /// Phase 3C: held grant cleanup.
+    pub forget_held_grant_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::ForgetHeldGrantData)>,
+    /// Phase 3C: client-issued remote publishes. The shard's
+    /// `apply_remote_signal_publish` system signs HMAC against the
+    /// player's held grant and ships a SignalBroadcastBatch via QUIC.
+    pub remote_signal_publish_rx: mpsc::UnboundedReceiver<(
+        SessionToken,
+        voxeldust_core::client_message::RemoteSignalPublishData,
+    )>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
@@ -62,8 +80,56 @@ pub struct NetworkBridge {
     pub client_registry: Arc<RwLock<ClientRegistry>>,
     /// Peer shard registry (discovery).
     pub peer_registry: Arc<RwLock<PeerShardRegistry>>,
+    /// Phase 4.3: per-peer wire-dict state (OutboundDict + InboundDict
+    /// keyed by peer ShardId). Sender uses outbound to intern channel
+    /// names; receiver uses inbound to resolve wire ids back to names.
+    /// Shared between the QUIC drain task and Bevy systems via
+    /// `Arc<RwLock<...>>`, matching the `peer_registry` pattern.
+    pub wire_dicts: Arc<RwLock<WireDictRegistry>>,
     /// Universe epoch in Unix milliseconds (for deterministic celestial_time).
     pub universe_epoch_ms: Arc<AtomicU64>,
+}
+
+/// Identity of the running shard, exposed to ECS systems as a Resource.
+/// Shard-common-owned generic systems (e.g.,
+/// `signal_pipeline::apply_remote_signal_publish`) read this to stamp
+/// outbound `source_shard_id` on `SignalBroadcastBatch` messages — so
+/// the receiver's replay-window keying-by-sender works correctly.
+///
+/// Inserted by `ShardHarness::run_ecs` before any ECS system runs, so
+/// every shard gets the same access pattern.
+#[derive(Resource, Clone, Debug)]
+pub struct ShardIdentity {
+    pub shard_id: ShardId,
+    pub shard_type: ShardType,
+    /// The shard hosting this one (Phase 3F.9). For ship-shards this
+    /// is the system-shard or planet-shard managing their exterior
+    /// physics; the listener-frequency propagation system uses it as
+    /// the destination for `ShipFrequencyInterest` messages.
+    /// `None` for shards that don't have a host (system-shards,
+    /// galaxy-shards).
+    pub host_shard_id: Option<ShardId>,
+}
+
+/// Phase 4.3: shard-wide policy for V2 wire-dict-interned signal
+/// emission. Bevy systems consult this to choose between V1
+/// (`SignalBroadcastBatch`) and V2 (`SignalBroadcastBatchV2`) wire
+/// formats per outbound batch.
+///
+/// Default `true` reflects the post-cutover state of this codebase —
+/// every shard's drain loop accepts V2 (Phase 4.3.8/4.3.9), so V2
+/// emission is the cheap path. The `false` value remains available
+/// as a per-shard kill switch if a deployment regression forces a
+/// rollback to V1.
+#[derive(Resource, Clone, Debug)]
+pub struct WireDictSendPolicy {
+    pub v2_enabled: bool,
+}
+
+impl Default for WireDictSendPolicy {
+    fn default() -> Self {
+        Self { v2_enabled: true }
+    }
 }
 
 /// Compute deterministic celestial time from the universal epoch.
@@ -105,12 +171,24 @@ pub struct ShardHarnessConfig {
     /// instead of the bind address. Needed in K8s (advertise 127.0.0.1
     /// for hostNetwork so clients can reach the shard via k3d port mapping).
     pub advertise_host: Option<String>,
+    /// Phase 4.3: V2 wire-dict-interned signal broadcast emission.
+    /// Receivers in this codebase handle both V1 and V2; this flag
+    /// controls whether THIS shard's *senders* prefer V2.
+    ///
+    /// Default is now `true` — every shard binary in this workspace
+    /// receives V2, so emitting V2 saves bandwidth (~3-5× wire-size
+    /// reduction once names get cached). Set to `false` only if a
+    /// regression forces a temporary rollback to V1.
+    pub wire_dict_v2_send: bool,
 }
 
 /// The reusable shard skeleton. Every shard type embeds this.
 pub struct ShardHarness {
     pub config: ShardHarnessConfig,
     pub peer_registry: Arc<RwLock<PeerShardRegistry>>,
+    /// Phase 4.3: per-peer wire-dict state, shared with the QUIC drain
+    /// task and Bevy systems via `NetworkBridge`.
+    pub wire_dicts: Arc<RwLock<WireDictRegistry>>,
     /// Universe epoch in Unix milliseconds (from orchestrator). Shared with tick
     /// closures via Arc so they can compute deterministic celestial_time.
     pub universe_epoch_ms: Arc<AtomicU64>,
@@ -143,6 +221,25 @@ pub struct ShardHarness {
     signal_publish_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
     signal_publish_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::SignalPublishData)>,
     lamp_config_update_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::LampConfigUpdateClientData)>,
+    /// Phase 3C: client GrantCreate ingress. Shard-side grant management
+    /// ECS system drains this and updates `GrantsRegistry`.
+    grant_create_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::GrantCreateData)>,
+    /// Public Receiver for shards to drain into ECS events.
+    pub grant_create_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::GrantCreateData)>,
+    grant_revoke_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::GrantRevokeData)>,
+    pub grant_revoke_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::GrantRevokeData)>,
+    add_held_grant_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::AddHeldGrantData)>,
+    pub add_held_grant_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::AddHeldGrantData)>,
+    forget_held_grant_tx: mpsc::UnboundedSender<(SessionToken, voxeldust_core::client_message::ForgetHeldGrantData)>,
+    pub forget_held_grant_rx: mpsc::UnboundedReceiver<(SessionToken, voxeldust_core::client_message::ForgetHeldGrantData)>,
+    remote_signal_publish_tx: mpsc::UnboundedSender<(
+        SessionToken,
+        voxeldust_core::client_message::RemoteSignalPublishData,
+    )>,
+    pub remote_signal_publish_rx: mpsc::UnboundedReceiver<(
+        SessionToken,
+        voxeldust_core::client_message::RemoteSignalPublishData,
+    )>,
     quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
@@ -156,6 +253,11 @@ impl ShardHarness {
         let (sub_block_edit_tx, sub_block_edit_rx) = mpsc::unbounded_channel();
         let (signal_publish_tx, signal_publish_rx) = mpsc::unbounded_channel();
         let (lamp_config_update_tx, lamp_config_update_rx) = mpsc::unbounded_channel();
+        let (grant_create_tx, grant_create_rx) = mpsc::unbounded_channel();
+        let (grant_revoke_tx, grant_revoke_rx) = mpsc::unbounded_channel();
+        let (add_held_grant_tx, add_held_grant_rx) = mpsc::unbounded_channel();
+        let (forget_held_grant_tx, forget_held_grant_rx) = mpsc::unbounded_channel();
+        let (remote_signal_publish_tx, remote_signal_publish_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
         let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
@@ -170,6 +272,7 @@ impl ShardHarness {
         Self {
             config,
             peer_registry: Arc::new(RwLock::new(PeerShardRegistry::new())),
+            wire_dicts: Arc::new(RwLock::new(WireDictRegistry::new())),
             universe_epoch_ms: Arc::new(AtomicU64::new(now_unix_ms)),
             connect_rx,
             client_registry: Arc::new(RwLock::new(ClientRegistry::new())),
@@ -191,6 +294,16 @@ impl ShardHarness {
             signal_publish_tx,
             signal_publish_rx,
             lamp_config_update_tx,
+            grant_create_tx,
+            grant_create_rx,
+            grant_revoke_tx,
+            grant_revoke_rx,
+            add_held_grant_tx,
+            add_held_grant_rx,
+            forget_held_grant_tx,
+            forget_held_grant_rx,
+            remote_signal_publish_tx,
+            remote_signal_publish_rx,
             quic_msg_tx,
             cancel: CancellationToken::new(),
         }
@@ -233,6 +346,11 @@ impl ShardHarness {
             sub_block_edit_tx: self.sub_block_edit_tx.clone(),
             signal_publish_tx: self.signal_publish_tx.clone(),
             lamp_config_update_tx: self.lamp_config_update_tx.clone(),
+            grant_create_tx: self.grant_create_tx.clone(),
+            grant_revoke_tx: self.grant_revoke_tx.clone(),
+            add_held_grant_tx: self.add_held_grant_tx.clone(),
+            forget_held_grant_tx: self.forget_held_grant_tx.clone(),
+            remote_signal_publish_tx: self.remote_signal_publish_tx.clone(),
         };
         let tcp_registry = self.client_registry.clone();
         tokio::spawn(async move {
@@ -537,14 +655,31 @@ impl ShardHarness {
             sub_block_edit_rx: self.sub_block_edit_rx,
             signal_publish_rx: self.signal_publish_rx,
             lamp_config_update_rx: self.lamp_config_update_rx,
+            grant_create_rx: self.grant_create_rx,
+            grant_revoke_rx: self.grant_revoke_rx,
+            add_held_grant_rx: self.add_held_grant_rx,
+            forget_held_grant_rx: self.forget_held_grant_rx,
+            remote_signal_publish_rx: self.remote_signal_publish_rx,
             quic_msg_rx: self.quic_msg_rx,
             broadcast_tx: self.broadcast_tx.clone(),
             quic_send_tx: self.quic_send_tx.clone(),
             client_registry: self.client_registry.clone(),
             peer_registry: self.peer_registry.clone(),
+            wire_dicts: self.wire_dicts.clone(),
             universe_epoch_ms: self.universe_epoch_ms.clone(),
         };
         app.insert_resource(bridge);
+        // Phase 3C: shard-common's generic systems (in particular
+        // `signal_pipeline::apply_remote_signal_publish`) read the
+        // running shard's identity to stamp outbound `source_shard_id`.
+        app.insert_resource(ShardIdentity {
+            shard_id: self.config.shard_id,
+            shard_type: self.config.shard_type,
+            host_shard_id: self.config.host_shard_id,
+        });
+        app.insert_resource(WireDictSendPolicy {
+            v2_enabled: self.config.wire_dict_v2_send,
+        });
 
         // Initialize the compute task pool for par_iter_mut() within systems.
         // This is a global singleton — safe to call multiple times (idempotent).

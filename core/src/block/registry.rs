@@ -1,5 +1,6 @@
 use super::block_def::{BlockDef, LiquidProperties, MaterialType, ToolType};
 use super::block_id::BlockId;
+use crate::signal::types::SignalProperty;
 
 /// Maximum number of block types supported by the u16 address space.
 const MAX_BLOCK_TYPES: usize = 65536;
@@ -22,6 +23,12 @@ pub enum FunctionalBlockKind {
     ShieldGenerator,
     AirCompressor,
     Antenna,
+    /// Phase 3E: companion to Antenna. Subscribes to a remote Radio
+    /// channel via a held grant; mirrors the value onto a local Local-
+    /// scoped channel. Acts as the *isolating bridge* between cross-
+    /// shard auth (HMAC-verified Radio entries) and intra-ship wiring
+    /// (subscribers reading a Local channel).
+    Listener,
     Rotor,
     Piston,
     Rail,
@@ -36,6 +43,249 @@ pub enum FunctionalBlockKind {
     Autopilot,
     WarpComputer,
     EngineController,
+}
+
+/// The publish/subscribe `SignalProperty` set this block kind supports.
+///
+/// A thruster doesn't know what `Pressure` means, so it shouldn't appear in
+/// the configurator's property dropdown — neither for publish (the thruster
+/// can't generate pressure data) nor for subscribe (the thruster can't
+/// consume it). The block kind authoritatively declares the supported set
+/// here; the configurator UI filters by it; `apply_config_updates` rejects
+/// any binding whose property is outside the set.
+///
+/// Antenna and Listener blocks are *transparent relays* — their property
+/// list reflects only their own state (`Active`, `Status`); the *bridged*
+/// channel's property is decided by the source/destination channel, not by
+/// the antenna itself, and is configured through a separate dedicated UI
+/// (the Antenna/Listener config tab).
+#[derive(Clone, Copy, Debug)]
+pub struct BlockKindSignalSchema {
+    /// Properties this block can write to a channel, in display order.
+    pub publish_properties: &'static [SignalProperty],
+    /// Properties this block can read from a channel, in display order.
+    pub subscribe_properties: &'static [SignalProperty],
+    /// Per-property tooltip strings for the configurator UI.
+    pub property_hints: &'static [(SignalProperty, &'static str)],
+}
+
+impl FunctionalBlockKind {
+    /// Static signal-property schema describing what this block kind can
+    /// publish or subscribe to. Single source of truth for both the
+    /// configurator UI (drop-down filtering) and `apply_config_updates`
+    /// (server-side validation of incoming bindings).
+    pub fn signal_schema(self) -> BlockKindSignalSchema {
+        use SignalProperty::*;
+        match self {
+            Self::Thruster => BlockKindSignalSchema {
+                publish_properties: &[],
+                subscribe_properties: &[Throttle, Boost, Active],
+                property_hints: &[
+                    (Throttle, "0.0–1.0 thrust fraction"),
+                    (Boost, "Multiplier on top of throttle (cruise drives)"),
+                    (Active, "False to disable this thruster"),
+                ],
+            },
+            Self::Reactor => BlockKindSignalSchema {
+                publish_properties: &[Level, Status, Active],
+                subscribe_properties: &[Throttle, Active],
+                property_hints: &[
+                    (Level, "Output as a 0.0–1.0 fraction of rated power"),
+                    (Status, "Operational state (running/throttled/fault)"),
+                    (Active, "False to shut down the reactor"),
+                    (Throttle, "Dial output up/down (0.0–1.0)"),
+                ],
+            },
+            Self::Battery => BlockKindSignalSchema {
+                publish_properties: &[Level, Status],
+                subscribe_properties: &[],
+                property_hints: &[
+                    (Level, "0.0–1.0 charge fraction"),
+                    (Status, "Charging/idle/depleted"),
+                ],
+            },
+            Self::SolarPanel => BlockKindSignalSchema {
+                publish_properties: &[Level, Active],
+                subscribe_properties: &[],
+                property_hints: &[
+                    (Level, "0.0–1.0 instantaneous output fraction"),
+                    (Active, "False if panel is occluded or stowed"),
+                ],
+            },
+            Self::PowerConduit => BlockKindSignalSchema {
+                publish_properties: &[],
+                subscribe_properties: &[],
+                property_hints: &[],
+            },
+            Self::Seat => BlockKindSignalSchema {
+                // Per-key seat input bindings (W/A/S/D etc.) live in the
+                // dedicated SeatChannelMapping UI tab. The Active property
+                // here is for the "seat occupied" boolean only.
+                publish_properties: &[Active],
+                subscribe_properties: &[],
+                property_hints: &[
+                    (Active, "True while a player is seated"),
+                ],
+            },
+            Self::GravityGenerator => BlockKindSignalSchema {
+                publish_properties: &[Active, Status],
+                subscribe_properties: &[Active, Throttle],
+                property_hints: &[
+                    (Throttle, "0.0–1.0 gravity strength"),
+                    (Active, "Master enable"),
+                ],
+            },
+            Self::ShieldEmitter => BlockKindSignalSchema {
+                publish_properties: &[Level, Active, Status],
+                subscribe_properties: &[Active, Throttle],
+                property_hints: &[
+                    (Level, "Shield charge 0.0–1.0"),
+                    (Throttle, "Power draw fraction"),
+                ],
+            },
+            Self::ShieldGenerator => BlockKindSignalSchema {
+                publish_properties: &[Level, Active, Status],
+                subscribe_properties: &[Active, Throttle],
+                property_hints: &[
+                    (Level, "Shield charge 0.0–1.0"),
+                    (Active, "Master enable"),
+                ],
+            },
+            Self::AirCompressor => BlockKindSignalSchema {
+                publish_properties: &[Pressure, Active, Status],
+                subscribe_properties: &[Active, Throttle],
+                property_hints: &[
+                    (Pressure, "Compressed gas pressure (kPa)"),
+                ],
+            },
+            Self::Antenna => BlockKindSignalSchema {
+                // Antenna's own state. The bridged Radio-channel property is
+                // chosen via the dedicated Antenna config UI, not here.
+                publish_properties: &[Active, Status],
+                subscribe_properties: &[Active],
+                property_hints: &[
+                    (Active, "False to silence the antenna"),
+                ],
+            },
+            Self::Listener => BlockKindSignalSchema {
+                // Symmetric to Antenna. Listener publishes its own state
+                // (Active=true while connected, Status=link health). The
+                // bridged Radio-channel value flows through a SEPARATE
+                // dedicated `ListenerConfig` (chosen channel + held grant),
+                // not via this binding dropdown.
+                publish_properties: &[Active, Status],
+                subscribe_properties: &[Active],
+                property_hints: &[
+                    (Active, "False to mute the listener (drops the subscription)"),
+                ],
+            },
+            Self::Rotor => BlockKindSignalSchema {
+                publish_properties: &[Angle, Speed, Status, Active],
+                subscribe_properties: &[Angle, Throttle, Speed, Active],
+                property_hints: &[
+                    (Angle, "Position in degrees"),
+                    (Throttle, "-1.0..1.0 velocity fraction (signed)"),
+                    (Speed, "Max angular speed override (deg/s)"),
+                    (Active, "False to lock the rotor"),
+                ],
+            },
+            Self::Piston => BlockKindSignalSchema {
+                publish_properties: &[Extension, Speed, Status, Active],
+                subscribe_properties: &[Extension, Throttle, Speed, Active],
+                property_hints: &[
+                    (Extension, "0.0–1.0 extension fraction"),
+                    (Throttle, "-1.0..1.0 velocity fraction (signed)"),
+                    (Speed, "Max linear speed override (m/s)"),
+                    (Active, "False to lock the piston"),
+                ],
+            },
+            Self::Rail => BlockKindSignalSchema {
+                publish_properties: &[],
+                subscribe_properties: &[],
+                property_hints: &[],
+            },
+            Self::RailJunction => BlockKindSignalSchema {
+                publish_properties: &[SwitchState],
+                subscribe_properties: &[SwitchState],
+                property_hints: &[
+                    (SwitchState, "Junction branch index (0..N-1)"),
+                ],
+            },
+            Self::RailSignal => BlockKindSignalSchema {
+                publish_properties: &[Active, Status],
+                subscribe_properties: &[Active],
+                property_hints: &[
+                    (Active, "True = clear, false = stop"),
+                ],
+            },
+            Self::SignalConverter => BlockKindSignalSchema {
+                // Converter rules pick their input/output properties at
+                // rule-creation time; the per-binding dropdown isn't used.
+                publish_properties: &[],
+                subscribe_properties: &[],
+                property_hints: &[],
+            },
+            Self::Sensor => BlockKindSignalSchema {
+                // Generic sensor — concrete sensor block kinds (PressureSensor,
+                // VelocitySensor, LevelSensor) will replace this with single-
+                // property schemas as they're added.
+                publish_properties: &[Active, Pressure, Speed, Level, Status],
+                subscribe_properties: &[Active],
+                property_hints: &[],
+            },
+            Self::Computer => BlockKindSignalSchema {
+                publish_properties: &[Active, Status, Text],
+                subscribe_properties: &[Active, Throttle, SwitchState, Text],
+                property_hints: &[
+                    (Text, "Programmable display / message channel"),
+                ],
+            },
+            Self::CruiseDrive => BlockKindSignalSchema {
+                publish_properties: &[Boost, Status, Active],
+                subscribe_properties: &[Throttle, Active],
+                property_hints: &[
+                    (Boost, "Output thrust multiplier when engaged"),
+                    (Throttle, "Engagement throttle (>0.5 = engaged)"),
+                ],
+            },
+            Self::FlightComputer => BlockKindSignalSchema {
+                publish_properties: &[Active, Status],
+                subscribe_properties: &[Active, Throttle],
+                property_hints: &[
+                    (Active, "Master enable for rotation damping"),
+                ],
+            },
+            Self::HoverModule => BlockKindSignalSchema {
+                publish_properties: &[Status, Active],
+                subscribe_properties: &[Throttle, Active],
+                property_hints: &[
+                    (Throttle, "Vertical hover input"),
+                ],
+            },
+            Self::Autopilot => BlockKindSignalSchema {
+                publish_properties: &[Status, Active],
+                subscribe_properties: &[Throttle, Active],
+                property_hints: &[
+                    (Active, "Engage / disengage autopilot"),
+                ],
+            },
+            Self::WarpComputer => BlockKindSignalSchema {
+                publish_properties: &[Status, Active, Text],
+                subscribe_properties: &[Active, SwitchState],
+                property_hints: &[
+                    (Text, "Current target body name (server-authoritative)"),
+                    (SwitchState, "Cycle (0) / Accept (1) / Cancel (2)"),
+                ],
+            },
+            Self::EngineController => BlockKindSignalSchema {
+                publish_properties: &[Active, Status],
+                subscribe_properties: &[Active],
+                property_hints: &[
+                    (Active, "Master engine enable"),
+                ],
+            },
+        }
+    }
 }
 
 /// Per-thruster-block static properties (thrust output, fuel consumption).
@@ -686,6 +936,10 @@ impl BlockRegistry {
         });
         set(r, BlockId::GRAVITY_GENERATOR, functional_block("gravity_generator", 6000, 100, [80, 60, 140]));
         set(r, BlockId::ANTENNA, functional_block("antenna", 1500, 30, [200, 200, 210]));
+        // Listener: companion to Antenna. Slightly cheaper / lighter
+        // because it's a passive receiver — no transmit power required.
+        // Visually distinguished by a cooler (cyan-tinted) dish.
+        set(r, BlockId::LISTENER, functional_block("listener", 1200, 25, [180, 200, 220]));
 
         // =================================================================
         // Propulsion (1000–1099)
@@ -795,6 +1049,7 @@ impl BlockRegistry {
         // Utility
         fk[BlockId::GRAVITY_GENERATOR.as_u16() as usize] = Some(GravityGenerator);
         fk[BlockId::ANTENNA.as_u16() as usize] = Some(Antenna);
+        fk[BlockId::LISTENER.as_u16() as usize] = Some(Listener);
         // Shields
         fk[BlockId::SHIELD_EMITTER.as_u16() as usize] = Some(ShieldEmitter);
         fk[BlockId::SHIELD_GENERATOR.as_u16() as usize] = Some(ShieldGenerator);
@@ -859,6 +1114,10 @@ impl BlockRegistry {
         pp[BlockId::ROTOR.as_u16() as usize]             = Some(PowerProps { generation_w: 0.0, consumption_w: 100_000.0,   storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         pp[BlockId::PISTON.as_u16() as usize]            = Some(PowerProps { generation_w: 0.0, consumption_w: 80_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         pp[BlockId::ANTENNA.as_u16() as usize]           = Some(PowerProps { generation_w: 0.0, consumption_w: 10_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
+        // Listener consumes ~half of an antenna — passive receive only,
+        // no transmit power. Modelled as a fixed draw because the LNA
+        // is always on while the link is established.
+        pp[BlockId::LISTENER.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 5_000.0,     storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         pp[BlockId::COMPUTER.as_u16() as usize]          = Some(PowerProps { generation_w: 0.0, consumption_w: 20_000.0,    storage_j: 0.0, charge_rate_w: 0.0, broadcast_range: 0.0 });
         // Cruise drives: consume power when active. The real power cost comes from boosted thrusters'
         // increased consumption, but the drive itself also draws a base amount to stay operational.
@@ -1187,6 +1446,12 @@ impl BlockRegistry {
             FunctionalBlockKind::AirCompressor => &SCHEMA_TOGGLE,
             FunctionalBlockKind::SignalConverter => &SCHEMA_PROGRAM,
             FunctionalBlockKind::Computer => &SCHEMA_PROGRAM,
+            // Antenna and Listener open the F-key config UI to set the
+            // bridged Radio channel name + frequency + held grant. The
+            // SCHEMA_PROGRAM interaction matches what SignalConverter
+            // and Computer use for "open config".
+            FunctionalBlockKind::Antenna => &SCHEMA_PROGRAM,
+            FunctionalBlockKind::Listener => &SCHEMA_PROGRAM,
             FunctionalBlockKind::RailJunction => &SCHEMA_JUNCTION,
             // Blocks with no direct player interaction (config via F key panel).
             FunctionalBlockKind::CruiseDrive => &SCHEMA_NONE,
@@ -1374,7 +1639,7 @@ mod tests {
             BlockId::BATTERY, BlockId::ROTOR, BlockId::PISTON,
             BlockId::RAIL_STRAIGHT, BlockId::SIGNAL_CONVERTER,
             BlockId::COMPUTER, BlockId::OWNERSHIP_CORE, BlockId::HUD_PANEL,
-            BlockId::ANTENNA, BlockId::SHIELD_EMITTER,
+            BlockId::ANTENNA, BlockId::LISTENER, BlockId::SHIELD_EMITTER,
         ];
         for id in named {
             let def = reg.get(id);
@@ -1483,5 +1748,163 @@ mod tests {
         let junction_schema = reg.interaction_schema(FunctionalBlockKind::RailJunction);
         assert_eq!(junction_schema.actions.len(), 1);
         assert_eq!(junction_schema.actions[0].interaction_type, InteractionType::CycleState);
+    }
+
+    #[test]
+    fn listener_block_registered_with_correct_kind_and_schema() {
+        // Phase 3E: LISTENER must round-trip through the registry as a
+        // proper functional block.
+        let reg = BlockRegistry::new();
+        assert_eq!(
+            reg.functional_kind(BlockId::LISTENER),
+            Some(FunctionalBlockKind::Listener)
+        );
+        assert_eq!(reg.get(BlockId::LISTENER).name, "listener");
+        // Power consumption distinct from antenna (modeled as cheaper).
+        let listener_pp = reg.power_props(BlockId::LISTENER).expect("LISTENER power");
+        let antenna_pp = reg.power_props(BlockId::ANTENNA).expect("ANTENNA power");
+        assert!(
+            listener_pp.consumption_w < antenna_pp.consumption_w,
+            "LISTENER must draw less than ANTENNA (passive receive vs transmit)"
+        );
+        // Schema: own state only; bridged channel chosen via dedicated
+        // ListenerConfig, not the property dropdown.
+        let schema = FunctionalBlockKind::Listener.signal_schema();
+        assert!(schema.publish_properties.contains(&SignalProperty::Active));
+        assert!(schema.publish_properties.contains(&SignalProperty::Status));
+        assert!(schema.subscribe_properties.contains(&SignalProperty::Active));
+        // Listener doesn't expose Pressure or Throttle in its dropdown
+        // — those live on the bridged Radio channel, not on the listener
+        // block itself.
+        assert!(!schema.publish_properties.contains(&SignalProperty::Pressure));
+        assert!(!schema.publish_properties.contains(&SignalProperty::Throttle));
+    }
+
+    #[test]
+    fn antenna_and_listener_open_config_panel() {
+        // Both block kinds open the F-key config UI on interact (mapped
+        // to SCHEMA_PROGRAM, same as SignalConverter / Computer).
+        let reg = BlockRegistry::new();
+        let antenna_schema = reg.interaction_schema(FunctionalBlockKind::Antenna);
+        let listener_schema = reg.interaction_schema(FunctionalBlockKind::Listener);
+        // Both should be SCHEMA_PROGRAM — represented by having a single
+        // "Configure" / "Edit" action.
+        assert!(!antenna_schema.actions.is_empty(), "Antenna must have a config action");
+        assert!(!listener_schema.actions.is_empty(), "Listener must have a config action");
+        // And they should match each other (same schema constant).
+        assert_eq!(
+            antenna_schema.actions[0].label,
+            listener_schema.actions[0].label
+        );
+    }
+
+    #[test]
+    fn signal_schema_filters_thruster_to_consumer_only() {
+        // Thrusters are consumers — they don't generate signals.
+        let s = FunctionalBlockKind::Thruster.signal_schema();
+        assert!(s.publish_properties.is_empty(), "thrusters must not advertise publish properties");
+        assert!(s.subscribe_properties.contains(&SignalProperty::Throttle));
+        assert!(s.subscribe_properties.contains(&SignalProperty::Boost));
+        assert!(s.subscribe_properties.contains(&SignalProperty::Active));
+        // The smoke test the user asked for: a thruster's dropdown should
+        // never list Speed as a property it can publish or subscribe to.
+        assert!(!s.publish_properties.contains(&SignalProperty::Speed));
+        assert!(!s.subscribe_properties.contains(&SignalProperty::Speed));
+        assert!(!s.publish_properties.contains(&SignalProperty::Pressure));
+        assert!(!s.subscribe_properties.contains(&SignalProperty::Pressure));
+    }
+
+    #[test]
+    fn signal_schema_reactor_publishes_level_and_status() {
+        let s = FunctionalBlockKind::Reactor.signal_schema();
+        assert!(s.publish_properties.contains(&SignalProperty::Level));
+        assert!(s.publish_properties.contains(&SignalProperty::Status));
+        assert!(s.subscribe_properties.contains(&SignalProperty::Throttle));
+        assert!(!s.publish_properties.contains(&SignalProperty::Pressure));
+    }
+
+    #[test]
+    fn signal_schema_pressure_only_on_air_compressor() {
+        // Pressure should only appear in blocks that actually deal with pressure.
+        for kind in [
+            FunctionalBlockKind::Thruster,
+            FunctionalBlockKind::Reactor,
+            FunctionalBlockKind::Battery,
+            FunctionalBlockKind::Seat,
+            FunctionalBlockKind::Rotor,
+            FunctionalBlockKind::Piston,
+            FunctionalBlockKind::CruiseDrive,
+            FunctionalBlockKind::FlightComputer,
+            FunctionalBlockKind::WarpComputer,
+            FunctionalBlockKind::EngineController,
+        ] {
+            let s = kind.signal_schema();
+            assert!(
+                !s.publish_properties.contains(&SignalProperty::Pressure),
+                "{:?} must not publish Pressure", kind
+            );
+            assert!(
+                !s.subscribe_properties.contains(&SignalProperty::Pressure),
+                "{:?} must not subscribe to Pressure", kind
+            );
+        }
+        let air = FunctionalBlockKind::AirCompressor.signal_schema();
+        assert!(air.publish_properties.contains(&SignalProperty::Pressure));
+    }
+
+    #[test]
+    fn signal_schema_mechanical_mounts_have_position_feedback() {
+        let rotor = FunctionalBlockKind::Rotor.signal_schema();
+        assert!(rotor.publish_properties.contains(&SignalProperty::Angle));
+        assert!(rotor.subscribe_properties.contains(&SignalProperty::Angle));
+        assert!(!rotor.publish_properties.contains(&SignalProperty::Extension));
+
+        let piston = FunctionalBlockKind::Piston.signal_schema();
+        assert!(piston.publish_properties.contains(&SignalProperty::Extension));
+        assert!(piston.subscribe_properties.contains(&SignalProperty::Extension));
+        assert!(!piston.publish_properties.contains(&SignalProperty::Angle));
+    }
+
+    #[test]
+    fn signal_schema_property_hints_reference_declared_properties() {
+        // Every hint's property must be in either the publish or subscribe
+        // set — otherwise the hint is dead weight.
+        for kind in [
+            FunctionalBlockKind::Thruster,
+            FunctionalBlockKind::Reactor,
+            FunctionalBlockKind::Battery,
+            FunctionalBlockKind::SolarPanel,
+            FunctionalBlockKind::PowerConduit,
+            FunctionalBlockKind::Seat,
+            FunctionalBlockKind::GravityGenerator,
+            FunctionalBlockKind::ShieldEmitter,
+            FunctionalBlockKind::ShieldGenerator,
+            FunctionalBlockKind::AirCompressor,
+            FunctionalBlockKind::Antenna,
+            FunctionalBlockKind::Rotor,
+            FunctionalBlockKind::Piston,
+            FunctionalBlockKind::Rail,
+            FunctionalBlockKind::RailJunction,
+            FunctionalBlockKind::RailSignal,
+            FunctionalBlockKind::SignalConverter,
+            FunctionalBlockKind::Sensor,
+            FunctionalBlockKind::Computer,
+            FunctionalBlockKind::CruiseDrive,
+            FunctionalBlockKind::FlightComputer,
+            FunctionalBlockKind::HoverModule,
+            FunctionalBlockKind::Autopilot,
+            FunctionalBlockKind::WarpComputer,
+            FunctionalBlockKind::EngineController,
+        ] {
+            let s = kind.signal_schema();
+            for (prop, _) in s.property_hints {
+                let listed =
+                    s.publish_properties.contains(prop) || s.subscribe_properties.contains(prop);
+                assert!(
+                    listed,
+                    "{:?}: hint for {:?} not in publish/subscribe set", kind, prop
+                );
+            }
+        }
     }
 }

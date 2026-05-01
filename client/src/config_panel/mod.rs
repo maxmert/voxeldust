@@ -214,63 +214,79 @@ fn render_config_panel(
             ));
             ui.separator();
 
-            // Publish bindings editor.
-            ui.heading("Publisher bindings");
-            let mut remove_publish: Option<usize> = None;
-            for (i, b) in state.config.publish_bindings.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}.", i));
-                    channel_combo(
-                        ui,
-                        &format!("pub-{}", i),
-                        &mut b.channel_name,
-                        &state.config.available_channels,
-                    );
-                    property_combo(ui, &format!("pub-prop-{}", i), &mut b.property);
-                    if ui.button("✕").clicked() {
-                        remove_publish = Some(i);
-                    }
-                });
+            // Publish bindings editor — hidden entirely if this block kind
+            // can't publish (e.g., Thrusters). Default property for new
+            // bindings is the first entry in the kind's schema.
+            let pub_opts = &state.config.publish_property_options;
+            if !pub_opts.is_empty() {
+                ui.heading("Publisher bindings");
+                let mut remove_publish: Option<usize> = None;
+                for (i, b) in state.config.publish_bindings.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}.", i));
+                        channel_combo(
+                            ui,
+                            &format!("pub-{}", i),
+                            &mut b.channel_name,
+                            &state.config.available_channels,
+                        );
+                        property_combo(ui, &format!("pub-prop-{}", i), &mut b.property, pub_opts);
+                        if ui.button("✕").clicked() {
+                            remove_publish = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove_publish {
+                    state.config.publish_bindings.remove(i);
+                }
+                if ui.button("+ add publisher").clicked() {
+                    let default_prop = pub_opts
+                        .first()
+                        .and_then(|(o, _)| SignalProperty::from_ordinal(*o))
+                        .unwrap_or(SignalProperty::Active);
+                    state.config.publish_bindings.push(PublishBindingConfig {
+                        channel_name: String::new(),
+                        property: default_prop,
+                    });
+                }
+                ui.separator();
             }
-            if let Some(i) = remove_publish {
-                state.config.publish_bindings.remove(i);
-            }
-            if ui.button("+ add publisher").clicked() {
-                state.config.publish_bindings.push(PublishBindingConfig {
-                    channel_name: String::new(),
-                    property: SignalProperty::Throttle,
-                });
-            }
-            ui.separator();
 
-            // Subscribe bindings editor.
-            ui.heading("Subscriber bindings");
-            let mut remove_subscribe: Option<usize> = None;
-            for (i, b) in state.config.subscribe_bindings.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}.", i));
-                    channel_combo(
-                        ui,
-                        &format!("sub-{}", i),
-                        &mut b.channel_name,
-                        &state.config.available_channels,
-                    );
-                    property_combo(ui, &format!("sub-prop-{}", i), &mut b.property);
-                    if ui.button("✕").clicked() {
-                        remove_subscribe = Some(i);
-                    }
-                });
+            // Subscribe bindings editor — hidden if this kind can't subscribe.
+            let sub_opts = &state.config.subscribe_property_options;
+            if !sub_opts.is_empty() {
+                ui.heading("Subscriber bindings");
+                let mut remove_subscribe: Option<usize> = None;
+                for (i, b) in state.config.subscribe_bindings.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}.", i));
+                        channel_combo(
+                            ui,
+                            &format!("sub-{}", i),
+                            &mut b.channel_name,
+                            &state.config.available_channels,
+                        );
+                        property_combo(ui, &format!("sub-prop-{}", i), &mut b.property, sub_opts);
+                        if ui.button("✕").clicked() {
+                            remove_subscribe = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove_subscribe {
+                    state.config.subscribe_bindings.remove(i);
+                }
+                if ui.button("+ add subscriber").clicked() {
+                    let default_prop = sub_opts
+                        .first()
+                        .and_then(|(o, _)| SignalProperty::from_ordinal(*o))
+                        .unwrap_or(SignalProperty::Active);
+                    state.config.subscribe_bindings.push(SubscribeBindingConfig {
+                        channel_name: String::new(),
+                        property: default_prop,
+                    });
+                }
+                ui.separator();
             }
-            if let Some(i) = remove_subscribe {
-                state.config.subscribe_bindings.remove(i);
-            }
-            if ui.button("+ add subscriber").clicked() {
-                state.config.subscribe_bindings.push(SubscribeBindingConfig {
-                    channel_name: String::new(),
-                    property: SignalProperty::Throttle,
-                });
-            }
-            ui.separator();
 
             // Converter rules (only meaningful for SignalConverter kind —
             // we display them for any kind that has any; server ignores
@@ -348,6 +364,8 @@ fn render_config_panel(
             warp_computer: state.config.warp_computer.clone(),
             engine_controller: state.config.engine_controller.clone(),
             mechanical: state.config.mechanical.clone(),
+            antenna: state.config.antenna.clone(),
+            listener: state.config.listener.clone(),
         };
         let msg = ClientMsg::BlockConfigUpdate(update);
         let data = msg.serialize();
@@ -393,23 +411,55 @@ fn channel_combo(
         });
 }
 
-fn property_combo(ui: &mut egui::Ui, id: &str, current: &mut SignalProperty) {
+/// Renders the property selector for a binding row. Filtered to the set the
+/// block kind actually supports (`options` is `BlockSignalConfig::publish_property_options`
+/// or `subscribe_property_options` — server-populated from
+/// `FunctionalBlockKind::signal_schema()`). UX:
+/// - 0 entries: should never reach this fn (the parent hides the whole section).
+/// - 1 entry: render as a static label, not a dropdown — there's nothing to choose.
+/// - 2+ entries: dropdown with the hint string rendered as a tooltip per option.
+fn property_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: &mut SignalProperty,
+    options: &[(u8, String)],
+) {
+    if options.is_empty() {
+        // Defensive: parent should hide the section before reaching here.
+        ui.label(format!("{:?}", current));
+        return;
+    }
+
+    // Coerce `current` to the first allowed option if it's somehow out of set
+    // (e.g., legacy persisted config that no longer matches the schema).
+    if !options.iter().any(|(o, _)| *o == current.as_ordinal()) {
+        if let Some(first) = options.first().and_then(|(o, _)| SignalProperty::from_ordinal(*o)) {
+            *current = first;
+        }
+    }
+
+    if options.len() == 1 {
+        ui.label(format!("{:?}", current));
+        if let Some(hint) = options.first().map(|(_, h)| h).filter(|h| !h.is_empty()) {
+            ui.label(egui::RichText::new(format!("({})", hint)).weak());
+        }
+        return;
+    }
+
     egui::ComboBox::from_id_salt(id)
         .selected_text(format!("{:?}", current))
         .show_ui(ui, |ui| {
-            for prop in [
-                SignalProperty::Active,
-                SignalProperty::Throttle,
-                SignalProperty::Angle,
-                SignalProperty::Extension,
-                SignalProperty::Pressure,
-                SignalProperty::Speed,
-                SignalProperty::Level,
-                SignalProperty::SwitchState,
-                SignalProperty::Boost,
-                SignalProperty::Status,
-            ] {
-                ui.selectable_value(current, prop, format!("{:?}", prop));
+            for (ord, hint) in options {
+                let Some(prop) = SignalProperty::from_ordinal(*ord) else { continue };
+                let label = if hint.is_empty() {
+                    format!("{:?}", prop)
+                } else {
+                    format!("{:?}", prop)
+                };
+                let resp = ui.selectable_value(current, prop, label);
+                if !hint.is_empty() {
+                    resp.on_hover_text(hint);
+                }
             }
         });
 }

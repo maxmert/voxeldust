@@ -75,10 +75,31 @@ impl Default for ControlConfig {
     }
 }
 
-pub struct GameConfigPlugin;
+/// Plugin that registers [`GameConfig`] as a Resource. Optionally
+/// seeds the graphics-fidelity preset from a startup-time choice
+/// (e.g. the `--graphics-preset` CLI flag); when `None`, the default
+/// (`Medium`, per `LightingFidelity::default`) is used. Per-field
+/// overrides land later via the in-game settings UI (Phase 9), which
+/// will mutate the Resource directly without going through this plugin.
+#[derive(Default)]
+pub struct GameConfigPlugin {
+    pub graphics_preset: Option<LightingPreset>,
+}
+
+impl GameConfigPlugin {
+    pub fn with_preset(preset: LightingPreset) -> Self {
+        Self {
+            graphics_preset: Some(preset),
+        }
+    }
+}
 
 impl Plugin for GameConfigPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GameConfig>();
+        let mut config = GameConfig::default();
+        if let Some(preset) = self.graphics_preset {
+            config.graphics.lighting = LightingFidelity::from_preset(preset);
+        }
+        app.insert_resource(config);
     }
 }

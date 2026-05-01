@@ -38,7 +38,7 @@ const INTERIOR_AMBIENT_FLOOR_CD_PER_M2: f32 = 800.0;
 const VACUUM_AMBIENT_FLOOR_CD_PER_M2: f32 =
     voxeldust_core::physics_constants::STARFIELD_AMBIENT_FLOOR_CD_PER_M2 as f32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum LightingPreset {
     Low,
     Medium,
@@ -295,6 +295,14 @@ impl LightingFidelity {
     }
 
     /// Recommended for modern GPUs (RTX 30xx-class and above).
+    ///
+    /// **Lighting values match `medium()`**. The architectural rule is
+    /// that quality presets configure rendering *fidelity* — cascade
+    /// resolution, AA mode, atmosphere LUT vs raymarch, post-FX
+    /// gates — and never lighting *values*. Every photometric /
+    /// IBL / bloom / exposure value below is identical to
+    /// [`Self::medium`] so the same physical scene resolves more
+    /// accurately on High, not differently.
     pub fn high() -> Self {
         Self {
             preset: LightingPreset::High,
@@ -307,16 +315,35 @@ impl LightingFidelity {
             aa_mode: AaMode::Taa,
             atmosphere_method: AtmosphereMethod::Raymarched,
             ssao_enabled: true,
-            ssr_enabled: true,
+            // SSR off until at least one material in this codebase
+            // opts into `OpaqueRendererMethod::Deferred`. SSR's
+            // shader unconditionally reads `deferred_prepass_texture`
+            // and dispatches on the unpacked roughness — with every
+            // material on the default `Auto → Forward` path the
+            // G-buffer is cleared zeros, the roughness reads as 0,
+            // SSR enters its ray-march branch with garbage PBR
+            // inputs, and the resulting writes to the active main
+            // texture knock out direct lighting on the forward pass
+            // that follows (verified empirically: toggling this
+            // flag is the difference between "lit" and "no sun" on
+            // the same scene). Re-enable when a material path
+            // explicitly populates the G-buffer.
+            ssr_enabled: false,
             volumetric_fog_enabled: true,
-            bloom_intensity: 0.30,
+            // Bloom / IBL / exposure / ambient-floor MUST equal medium().
+            bloom_intensity: 0.25,
             exposure_ev100_space: hdr_ev100_space(),
             exposure_ev100_surface: 14.0,
-            exposure_transition_time_s: 1.0,
-            auto_exposure_enabled: true,
+            exposure_transition_time_s: 1.5,
+            // AutoExposure off until Phase 9's settings UI lets us
+            // calibrate the histogram interactively against ground
+            // truth — see the `attach_camera_lighting_stack` comment
+            // in `lighting/camera.rs` for the runaway-metering
+            // failure mode that motivated this default.
+            auto_exposure_enabled: false,
             max_shadow_casting_local_lights: 256,
-            ibl_intensity_space: 150.0,
-            ibl_intensity_atmosphere: 1000.0,
+            ibl_intensity_space: 100.0,
+            ibl_intensity_atmosphere: 500.0,
             starfield_ambient_floor_cd_per_m2: VACUUM_AMBIENT_FLOOR_CD_PER_M2,
             directional_shadows_enabled: true,
             shadow_depth_bias: shadow_depth_bias_voxel(),
@@ -328,11 +355,39 @@ impl LightingFidelity {
         }
     }
 
+    /// Build a fully-populated [`LightingFidelity`] from the named
+    /// preset, dispatching to the per-preset constructors below. Used
+    /// by the `--graphics-preset` CLI flag and (eventually) the
+    /// in-game settings UI.
+    pub fn from_preset(preset: LightingPreset) -> Self {
+        match preset {
+            LightingPreset::Low => Self::low(),
+            LightingPreset::Medium => Self::medium(),
+            LightingPreset::High => Self::high(),
+            LightingPreset::Ultra => Self::ultra(),
+        }
+    }
+
     /// Maximum visual fidelity — high-end GPUs only.
+    ///
+    /// **Lighting values match `medium()`** — same rule as
+    /// [`Self::high`]. Ultra differs from Medium only in *fidelity*:
+    /// tighter near-cascade, longer max distance, TAA, raymarched
+    /// atmosphere, all post-FX on, larger local-light shadow budget.
+    ///
+    /// **`cascade_count` is capped at 4** because Bevy 0.18's
+    /// `MAX_CASCADES_PER_LIGHT = 4` (`bevy_pbr/src/render/light.rs:191`).
+    /// Setting more than 4 builds the extra frusta CPU-side, but
+    /// Bevy's GPU buffer only stores the first 4 — fragments past
+    /// cascade 3 sample uninitialised slots and read garbage shadow
+    /// values (often "no shadow"), making distant lit surfaces blow
+    /// out into a glowing halo. Ultra's cascade-quality advantage
+    /// over High comes from longer max distance + tighter
+    /// near-cascade + larger map, not raw cascade count.
     pub fn ultra() -> Self {
         Self {
             preset: LightingPreset::Ultra,
-            cascade_count: 6,
+            cascade_count: 4,
             shadow_map_size: 4096,
             cascade_max_distance_m: 2000.0,
             cascade_minimum_distance_m: 0.05,
@@ -341,16 +396,31 @@ impl LightingFidelity {
             aa_mode: AaMode::Taa,
             atmosphere_method: AtmosphereMethod::Raymarched,
             ssao_enabled: true,
-            ssr_enabled: true,
+            // SSR off until at least one material in this codebase
+            // opts into `OpaqueRendererMethod::Deferred`. SSR's
+            // shader unconditionally reads `deferred_prepass_texture`
+            // and dispatches on the unpacked roughness — with every
+            // material on the default `Auto → Forward` path the
+            // G-buffer is cleared zeros, the roughness reads as 0,
+            // SSR enters its ray-march branch with garbage PBR
+            // inputs, and the resulting writes to the active main
+            // texture knock out direct lighting on the forward pass
+            // that follows (verified empirically: toggling this
+            // flag is the difference between "lit" and "no sun" on
+            // the same scene). Re-enable when a material path
+            // explicitly populates the G-buffer.
+            ssr_enabled: false,
             volumetric_fog_enabled: true,
-            bloom_intensity: 0.35,
+            // Bloom / IBL / exposure / ambient-floor MUST equal medium().
+            bloom_intensity: 0.25,
             exposure_ev100_space: hdr_ev100_space(),
             exposure_ev100_surface: 14.0,
-            exposure_transition_time_s: 0.8,
-            auto_exposure_enabled: true,
+            exposure_transition_time_s: 1.5,
+            // See `Self::high` for the AutoExposure rationale.
+            auto_exposure_enabled: false,
             max_shadow_casting_local_lights: 1024,
-            ibl_intensity_space: 200.0,
-            ibl_intensity_atmosphere: 2000.0,
+            ibl_intensity_space: 100.0,
+            ibl_intensity_atmosphere: 500.0,
             starfield_ambient_floor_cd_per_m2: VACUUM_AMBIENT_FLOOR_CD_PER_M2,
             directional_shadows_enabled: true,
             shadow_depth_bias: shadow_depth_bias_voxel(),
