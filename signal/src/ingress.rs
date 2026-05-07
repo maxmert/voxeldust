@@ -83,16 +83,16 @@ pub struct IncomingSignalBuffer {
 /// arriving between ticks need to persist until the system runs.
 #[derive(Resource, Default, Debug)]
 pub struct IncomingSubscribeBuffer {
-    pub subscribes: Vec<crate::shard_message::SignalSubscribeData>,
-    pub unsubscribes: Vec<crate::shard_message::SignalUnsubscribeData>,
+    pub subscribes: Vec<crate::wire::SignalSubscribeData>,
+    pub unsubscribes: Vec<crate::wire::SignalUnsubscribeData>,
 }
 
 impl IncomingSubscribeBuffer {
-    pub fn push_subscribe(&mut self, data: crate::shard_message::SignalSubscribeData) {
+    pub fn push_subscribe(&mut self, data: crate::wire::SignalSubscribeData) {
         self.subscribes.push(data);
     }
 
-    pub fn push_unsubscribe(&mut self, data: crate::shard_message::SignalUnsubscribeData) {
+    pub fn push_unsubscribe(&mut self, data: crate::wire::SignalUnsubscribeData) {
         self.unsubscribes.push(data);
     }
 }

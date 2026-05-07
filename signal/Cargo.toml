@@ -1,0 +1,32 @@
+[package]
+name = "voxeldust-signal"
+version.workspace = true
+edition.workspace = true
+
+# The signal subsystem — channels, grants, auth, ingress, rate limiting,
+# HUD-session bookkeeping, wire-dict interning, radio-frequency / ship
+# subscription tables, plus the per-block config layer and seat-input
+# preset tables.
+#
+# Pulled out of `voxeldust-core` because:
+#  * 8.4 KL of signal-specific code in `core/` cascaded a rebuild of the
+#    block / handoff / autopilot / weather / etc. modules whenever signal
+#    iterated; signal itself is unrelated to those.
+#  * The block ↔ signal cycle that existed in core was broken by hoisting
+#    `BlockId`, `FunctionalBlockKind`, and `SignalProperty` into
+#    `voxeldust-types`; this crate depends on voxeldust-types but NOT on
+#    voxeldust-core.
+
+[dependencies]
+voxeldust-types = { workspace = true }
+voxeldust-protocol-fb = { workspace = true }
+bevy_ecs = { workspace = true }
+glam = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+smallvec = { workspace = true }
+base64 = { workspace = true }
+metrics = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }

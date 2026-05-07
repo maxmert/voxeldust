@@ -43,7 +43,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::Resource;
 
-use crate::shard_types::ShardId;
+use voxeldust_types::ShardId;
 
 /// Galaxy-shard's subscriber registry for Radio relay.
 #[derive(Resource, Debug, Default)]

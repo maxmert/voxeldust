@@ -42,7 +42,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::Resource;
 
-use crate::shard_types::ShardId;
+use voxeldust_types::ShardId;
 
 /// One ship's current freq interest set + its lease deadline.
 #[derive(Debug, Clone, PartialEq, Eq)]

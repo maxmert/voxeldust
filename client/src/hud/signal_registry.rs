@@ -1,23 +1,15 @@
 //! Client-side mirror of signal-graph values the server has authorised
 //! this player to see.
 //!
-//! # Two ingest paths (Phase 4.4 transition)
+//! # Single ingest path: TCP delta (Phase 4.4.5+)
 //!
-//!   * **Legacy UDP snapshot** — `WorldStateData.hud_signals`. Every
-//!     tick the server includes a full per-channel snapshot. Snapshot-
-//!     merge semantics: any channel present overwrites; missing channels
-//!     keep their previous value. Used by older shards + as a safety
-//!     net during the V2 cutover.
-//!
-//!   * **TCP delta** — `ServerMsg::HudSignalDelta`. Server emits ONLY
-//!     when something changed. Each entry is REGISTER (carries name,
-//!     binds wire_id), bare (value-only update for a known wire_id),
-//!     or REMOVE (drops the channel from the cache). 20× bandwidth
-//!     reduction once the legacy path is removed.
-//!
-//! Both paths populate the same [`SignalRegistry`] keyed by channel
-//! name, so widget code reads a single source of truth via
-//! `get(channel)`.
+//! `ServerMsg::HudSignalDelta`. Server emits ONLY when something
+//! changed. Each entry is REGISTER (carries name, binds wire_id),
+//! bare (value-only update for a known wire_id), or REMOVE (drops
+//! the channel from the cache). The legacy
+//! `WorldStateData.hud_signals` UDP snapshot field has been removed.
+//! Widgets read via `SignalRegistry::get(channel)` — single source
+//! of truth populated entirely from delta entries.
 //!
 //! # Per-session inbound dictionary
 //!
@@ -41,7 +33,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use voxeldust_core::client_message::{
-    hud_delta_flags, HudSignalDeltaData, HudSignalEntryV2Data, HudSignalValue, WorldStateData,
+    hud_delta_flags, HudSignalDeltaData, HudSignalEntryV2Data, HudSignalValue,
 };
 use voxeldust_core::signal::types::SignalProperty;
 use voxeldust_core::signal::wire_dict::InboundDict;
@@ -94,17 +86,6 @@ impl SignalValue {
         match self {
             SignalValue::Text(s) => Some(s.as_str()),
             _ => None,
-        }
-    }
-}
-
-impl From<&HudSignalValue> for SignalValue {
-    fn from(v: &HudSignalValue) -> Self {
-        match v {
-            HudSignalValue::Bool(b) => SignalValue::Bool(*b),
-            HudSignalValue::Float(f) => SignalValue::Float(*f),
-            HudSignalValue::State(s) => SignalValue::U8(*s),
-            HudSignalValue::Text(s) => SignalValue::Text(s.clone()),
         }
     }
 }
@@ -183,64 +164,8 @@ impl Plugin for SignalRegistryPlugin {
             .init_resource::<HudInboundState>()
             .add_systems(
                 Update,
-                (
-                    drain_signal_broadcasts,
-                    drain_hud_signal_deltas,
-                    drain_session_resets,
-                ),
+                (drain_hud_signal_deltas, drain_session_resets),
             );
-    }
-}
-
-/// Drain `NetEvent::WorldState` (primary only) into the
-/// `SignalRegistry`. Snapshot-merge semantics: any channel present
-/// in this tick's batch overwrites the registry's value; any channel
-/// missing keeps its previous value.
-///
-/// **Primary-only**: every SHIP shard the client observes (own ship
-/// as primary, every other ship as a SHIP secondary) publishes its
-/// own `ship.speed` / `ship.thrust_tier` / etc. into `hud_signals`.
-/// If we ingested secondaries too, the registry's `ship.speed` slot
-/// would be overwritten by whichever shard's WS arrived last —
-/// producing the "speed jumps between values every few seconds"
-/// symptom when multiple ships are within AOI. The HUD shows the
-/// player's own status, so primary-only is the correct scope.
-/// (System-wide signals like nearest body / warp target are
-/// published by the primary too: SHIP-primary inherits them via
-/// SystemSceneUpdate caching, SYSTEM-primary publishes them
-/// directly.)
-fn drain_signal_broadcasts(
-    mut events: MessageReader<GameEvent>,
-    mut registry: ResMut<SignalRegistry>,
-) {
-    let now = std::time::Instant::now();
-    for GameEvent(ev) in events.read() {
-        if let NetEvent::WorldState(ws) = ev {
-            ingest_ws(&mut registry, ws, now);
-        }
-    }
-}
-
-fn ingest_ws(
-    registry: &mut SignalRegistry,
-    ws: &WorldStateData,
-    now: std::time::Instant,
-) {
-    if ws.hud_signals.is_empty() {
-        return;
-    }
-    registry.last_tick = ws.tick;
-    for entry in &ws.hud_signals {
-        let property = SignalProperty::from_ordinal(entry.property)
-            .unwrap_or(SignalProperty::Status);
-        registry.by_channel.insert(
-            entry.channel_name.clone(),
-            RegisteredSignal {
-                value: SignalValue::from(&entry.value),
-                property,
-                received_at: now,
-            },
-        );
     }
 }
 

@@ -10,5 +10,7 @@ pub mod shutdown;
 pub mod handoff_pipeline;
 pub mod authorized_peers;
 pub mod grant_persistence;
+pub mod hud_delta;
+pub mod media_pipeline;
 pub mod signal_pipeline;
 pub mod wire_dict_registry;

@@ -42,7 +42,7 @@
 use bevy_ecs::prelude::*;
 use std::collections::HashMap;
 
-use crate::shard_types::SessionToken;
+use voxeldust_types::SessionToken;
 
 /// One bucket. Holds `capacity` tokens at most; refills at `refill_per_sec`
 /// while non-full. `try_consume` deducts one token if any remain.

@@ -36,10 +36,10 @@ use voxeldust_core::signal::config::{
     PublishBindingConfig, SeatInputBindingConfig, SignalRuleConfig, SubscribeBindingConfig,
 };
 use voxeldust_core::signal::converter::{SignalCondition, SignalExpression};
-use voxeldust_core::signal::types::SignalProperty;
+use voxeldust_core::signal::types::{SignalProperty, SignalScope};
 use voxeldust_core::wire_codec;
 
-use crate::config_panel::OpenConfigPanel;
+use crate::config_panel::{AddHeldGrantForm, OpenConfigPanel};
 use crate::hud::focus::{HudClickButton, HudClickEvent, HudFocusState};
 use crate::hud::panel_config::{HudPanelConfigs, HudPanelSettings, OpenHudPanelConfig};
 use crate::hud::tablet::{DespawnHeldTablet, HeldTablet};
@@ -65,7 +65,12 @@ pub struct TabletEguiContextMarker;
 /// which editor sections to surface for this block.
 mod kind {
     pub const SEAT: u8 = 5;
+    pub const ANTENNA: u8 = 10;
     pub const SIGNAL_CONVERTER: u8 = 16;
+    /// Phase D: unified Terminal block (replaces the prior split
+    /// TextDisplay + KeyboardTerminal). Position 25 in the enum
+    /// (last variant).
+    pub const TERMINAL: u8 = 25;
 }
 
 /// Size of the render target. Matches `TABLET_RES` in `tablet.rs`.
@@ -183,7 +188,6 @@ fn paint_tablet_ui(
             style_cockpit(ui);
 
             let mut close = false;
-            let mut apply = false;
 
             // Empty state — no config loaded yet.
             let Some(state) = panel.editable.as_mut() else {
@@ -247,12 +251,16 @@ fn paint_tablet_ui(
                         {
                             close = true;
                         }
-                        if ui
-                            .add(button_styled("APPLY"))
-                            .clicked()
-                        {
-                            apply = true;
-                        }
+                        // Save-on-close UX: the tablet ships a single
+                        // BlockConfigUpdate when dismissed (F-key /
+                        // ESC / Close). No live "saving…" indicator
+                        // needed — there's no running debounce. Show a
+                        // hint so the player knows what to expect.
+                        ui.label(
+                            egui::RichText::new("✎ saves on close")
+                                .color(egui::Color32::from_rgb(140, 160, 180))
+                                .size(10.0),
+                        );
                     },
                 );
             });
@@ -305,6 +313,14 @@ fn paint_tablet_ui(
                         ui.add_space(4.0);
                         render_seat_section(ui, &mut state.config);
                     }
+                    if state.config.kind == kind::ANTENNA {
+                        ui.add_space(4.0);
+                        render_antenna_section(ui, &mut state.config);
+                    }
+                    if state.config.kind == kind::TERMINAL {
+                        ui.add_space(4.0);
+                        render_terminal_section(ui, &mut state.config);
+                    }
                     if state.config.power_source.is_some() {
                         ui.add_space(4.0);
                         render_power_source_section(ui, &mut state.config);
@@ -338,6 +354,14 @@ fn paint_tablet_ui(
                         render_mechanical_section(ui, &mut state.config);
                     }
 
+                    // Phase D inline grants — shown on every block's
+                    // F-key panel so granting / requesting / managing
+                    // access happens in the context of the block being
+                    // configured. Replaces the previous standalone
+                    // G-key grants window.
+                    ui.add_space(8.0);
+                    render_grants_section(ui, &state.config, &mut state.add_grant, &tcp);
+
                     ui.add_space(8.0);
                     ui.separator();
                     ui.label(
@@ -357,42 +381,13 @@ fn paint_tablet_ui(
                 paint_in_world_cursor(ui, egui::pos2(px, py));
             }
 
-            if apply {
-                let update = BlockConfigUpdateData {
-                    block_pos: state.config.block_pos,
-                    publish_bindings: state.config.publish_bindings.clone(),
-                    subscribe_bindings: state.config.subscribe_bindings.clone(),
-                    converter_rules: state.config.converter_rules.clone(),
-                    seat_mappings: state.config.seat_mappings.clone(),
-                    seated_channel_name: state.config.seated_channel_name.clone(),
-                    power_source: state.config.power_source.clone(),
-                    power_consumer: state.config.power_consumer.clone(),
-                    flight_computer: state.config.flight_computer.clone(),
-                    hover_module: state.config.hover_module.clone(),
-                    autopilot: state.config.autopilot.clone(),
-                    warp_computer: state.config.warp_computer.clone(),
-                    engine_controller: state.config.engine_controller.clone(),
-                    mechanical: state.config.mechanical.clone(),
-                    antenna: state.config.antenna.clone(),
-                    listener: state.config.listener.clone(),
-                };
-                let msg = ClientMsg::BlockConfigUpdate(update);
-                let data = msg.serialize();
-                let mut pkt = Vec::new();
-                wire_codec::encode(&data, &mut pkt);
-                if tcp.tx.send(pkt).is_err() {
-                    tracing::warn!(
-                        "tablet apply: TCP closed while sending BlockConfigUpdate"
-                    );
-                } else {
-                    tracing::info!(
-                        block = ?(state.config.block_pos.x, state.config.block_pos.y, state.config.block_pos.z),
-                        pubs = state.config.publish_bindings.len(),
-                        subs = state.config.subscribe_bindings.len(),
-                        "tablet apply: BlockConfigUpdate sent",
-                    );
-                }
-            }
+            // Apply is implicit — the auto-save system in
+            // `config_panel::auto_save_block_config` ships any
+            // settled diff after `AUTO_SAVE_DEBOUNCE_SECS`, and the
+            // `save_on_tablet_despawn` system flushes any in-flight
+            // edit when the tablet is dismissed. The CLOSE button
+            // here just signals despawn; the save flush downstream
+            // handles persistence.
             if close {
                 despawn_tablet.write(DespawnHeldTablet);
             }
@@ -920,6 +915,7 @@ fn render_publisher_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
             ui.label(format!("{}.", i + 1));
             channel_text_edit(ui, &format!("pub-{}", i), &mut b.channel_name, &available);
             property_dropdown(ui, &format!("pub-prop-{}", i), &mut b.property, &pub_opts);
+            scope_dropdown(ui, &format!("pub-{}", i), &mut b.scope);
             if ui.add(button_icon("×")).clicked() {
                 remove = Some(i);
             }
@@ -942,6 +938,8 @@ fn render_publisher_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
         cfg.publish_bindings.push(PublishBindingConfig {
             channel_name: String::new(),
             property: default_prop,
+            scope: None,
+            grant_id: None,
         });
     }
 }
@@ -963,6 +961,7 @@ fn render_subscriber_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
             ui.label(format!("{}.", i + 1));
             channel_text_edit(ui, &format!("sub-{}", i), &mut b.channel_name, &available);
             property_dropdown(ui, &format!("sub-prop-{}", i), &mut b.property, &sub_opts);
+            scope_dropdown(ui, &format!("sub-{}", i), &mut b.scope);
             if ui.add(button_icon("×")).clicked() {
                 remove = Some(i);
             }
@@ -984,6 +983,8 @@ fn render_subscriber_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
         cfg.subscribe_bindings.push(SubscribeBindingConfig {
             channel_name: String::new(),
             property: default_prop,
+            scope: None,
+            grant_id: None,
         });
     }
 }
@@ -1436,6 +1437,485 @@ fn render_engine_controller_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConf
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Phase D — Bidirectional Antenna + unified Terminal
+//
+// One Antenna block carries optional TX + RX sides (full-duplex chat
+// at one frequency = configure both sides on the same freq). One
+// Terminal block carries optional read + write text channels. Open
+// Radio (no key on the channel) needs no grant; keyed Radio surfaces
+// a grant picker per side / a "Request access" affordance when none
+// held.
+// ─────────────────────────────────────────────────────────────────────
+
+fn render_antenna_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    use voxeldust_core::signal::config::AntennaConfig;
+    let tx_status = cfg.antenna_tx_status.clone();
+    let rx_status = cfg.antenna_rx_status.clone();
+    let antenna = cfg.antenna.get_or_insert_with(AntennaConfig::default);
+    ui.heading(
+        egui::RichText::new("ANTENNA")
+            .color(egui::Color32::from_rgb(180, 220, 255))
+            .size(12.0),
+    );
+    // Phase A3: clarify the data-flow direction with arrows. Players
+    // wire a Terminal's WRITE channel to the Antenna's SEND channel
+    // (same name on this shard). The arrow makes the direction obvious
+    // without needing an explanation paragraph.
+    render_antenna_tablet_side(
+        ui,
+        "tx",
+        "SEND",
+        "channel ──▶ frequency",
+        egui::Color32::from_rgb(120, 220, 160),
+        &mut antenna.tx,
+        tx_status.as_ref(),
+    );
+    ui.separator();
+    render_antenna_tablet_side(
+        ui,
+        "rx",
+        "RECEIVE",
+        "frequency ──▶ channel",
+        egui::Color32::from_rgb(240, 200, 60),
+        &mut antenna.rx,
+        rx_status.as_ref(),
+    );
+}
+
+fn render_antenna_tablet_side(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    label: &str,
+    arrow_hint: &str,
+    label_color: egui::Color32,
+    side: &mut Option<voxeldust_core::signal::config::AntennaSide>,
+    status: Option<&voxeldust_core::signal::config::AccessStatusForChannel>,
+) {
+    use voxeldust_core::signal::config::AntennaSide;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .color(label_color)
+                .size(11.0)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(arrow_hint)
+                .color(egui::Color32::from_rgb(140, 160, 180))
+                .size(10.0),
+        );
+        let mut enabled = side.is_some();
+        if ui.checkbox(&mut enabled, "enabled").changed() {
+            if enabled && side.is_none() {
+                *side = Some(AntennaSide::default());
+            } else if !enabled {
+                *side = None;
+            }
+        }
+    });
+    let Some(s) = side.as_mut() else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label("Channel");
+        ui.add(
+            egui::TextEdit::singleline(&mut s.local_channel_name)
+                .id_salt(format!("antenna-{}-local", id_salt))
+                .hint_text("local channel name")
+                .desired_width(240.0),
+        );
+    });
+    u32_row(
+        ui,
+        &format!("antenna-{}-freq", id_salt),
+        "Frequency",
+        &mut s.frequency,
+    );
+    render_grant_picker_tablet(ui, id_salt, &mut s.grant_id, status);
+    // Advanced: explicit remote shard target. Hidden by default — the
+    // common case is open Radio routing. Using an egui CollapsingHeader
+    // keeps the option discoverable for power users without putting it
+    // in the way of normal players.
+    egui::CollapsingHeader::new("Advanced")
+        .id_salt(format!("antenna-{}-advanced", id_salt))
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut shard_str = s
+                .remote_shard_id
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label("Target shard id");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut shard_str)
+                            .id_salt(format!("antenna-{}-shard", id_salt))
+                            .hint_text("(blank = relay-routed)")
+                            .desired_width(120.0),
+                    )
+                    .changed()
+                {
+                    s.remote_shard_id = shard_str.parse::<u64>().ok().filter(|v| *v != 0);
+                }
+            });
+        });
+}
+
+fn render_grant_picker_tablet(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    current: &mut Option<u64>,
+    status: Option<&voxeldust_core::signal::config::AccessStatusForChannel>,
+) {
+    let auth_required = status.map(|s| s.auth_required).unwrap_or(false);
+    if !auth_required {
+        ui.label(
+            egui::RichText::new("Open broadcast — no grant required")
+                .color(egui::Color32::from_rgb(140, 200, 140))
+                .size(10.0),
+        );
+        if current.is_some() {
+            *current = None;
+        }
+        return;
+    }
+    let held: &[voxeldust_core::signal::config::HeldGrantSummary] =
+        status.map(|s| s.held_grants.as_slice()).unwrap_or(&[]);
+    if held.is_empty() {
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 200, 80),
+                "Keyed channel — no held grants.",
+            );
+            // Phase D: emits ClientMsg::RequestAccess wired in a follow-up.
+            let _ = ui.button("Request access");
+        });
+        return;
+    }
+    let label = match current {
+        Some(g) => held
+            .iter()
+            .find(|h| h.grant_id == *g)
+            .map(|h| h.label.clone())
+            .unwrap_or_else(|| format!("grant {g}")),
+        None => "(pick a held grant)".into(),
+    };
+    egui::ComboBox::from_id_salt(format!("antenna-{}-grant", id_salt))
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            for g in held {
+                ui.selectable_value(current, Some(g.grant_id), g.label.clone());
+            }
+        });
+}
+
+fn render_terminal_section(ui: &mut egui::Ui, cfg: &mut BlockSignalConfig) {
+    use voxeldust_core::signal::config::TerminalConfig;
+    let term = cfg.terminal.get_or_insert_with(TerminalConfig::default);
+    ui.heading(
+        egui::RichText::new("TERMINAL")
+            .color(egui::Color32::from_rgb(180, 240, 200))
+            .size(12.0),
+    );
+    let mut sub = term.subscribe_channel_name.clone().unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label("READ");
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut sub)
+                    .id_salt("terminal-sub")
+                    .hint_text("display subscribes here")
+                    .desired_width(240.0),
+            )
+            .changed()
+        {
+            term.subscribe_channel_name = if sub.is_empty() { None } else { Some(sub.clone()) };
+        }
+    });
+    let mut pub_ = term.publish_channel_name.clone().unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label("WRITE");
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut pub_)
+                    .id_salt("terminal-pub")
+                    .hint_text("E-key sends here")
+                    .desired_width(240.0),
+            )
+            .changed()
+        {
+            term.publish_channel_name = if pub_.is_empty() { None } else { Some(pub_.clone()) };
+        }
+    });
+    let mut lines = term
+        .scrollback_lines
+        .unwrap_or(TerminalConfig::DEFAULT_SCROLLBACK);
+    ui.horizontal(|ui| {
+        ui.label("LINES");
+        let mut s = lines.to_string();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut s)
+                    .id_salt("terminal-lines")
+                    .desired_width(80.0),
+            )
+            .changed()
+        {
+            if let Ok(v) = s.parse::<u16>() {
+                lines = v;
+                term.scrollback_lines = Some(v);
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "Same channel for READ + WRITE = chat panel.\n\
+             READ-only = sign / status board. WRITE-only = input kiosk.",
+        )
+        .color(egui::Color32::from_rgb(140, 160, 180))
+        .size(10.0),
+    );
+}
+
+/// Phase D: inline grants management on every block's F-key panel.
+/// Two collapsible sub-sections inside one CollapsingHeader:
+/// - **Held grants** — what the player CAN use to authorize cross-shard
+///   access from this block. Listed from `BlockSignalConfig.held_grants`
+///   (server-filtered to the placing player's session). Each row has a
+///   Forget button (server processes via `ClientMsg::ForgetHeldGrant`).
+///   An "Add held grant" form lets the player paste `(grant_id, key,
+///   target_shard, label)` they were given out-of-band.
+/// - **Request access** — for keyed channels the player doesn't yet
+///   have a grant for. Stub for now (the proper path is per-binding /
+///   per-side request UX in the antenna config; this is the catch-all).
+///
+/// Replaces the prior G-key standalone GrantsPanel: grants are now
+/// managed in the context of the block they apply to, where the
+/// player's actually thinking about access.
+fn render_grants_section(
+    ui: &mut egui::Ui,
+    cfg: &BlockSignalConfig,
+    form: &mut AddHeldGrantForm,
+    tcp: &TcpSender,
+) {
+    egui::CollapsingHeader::new(
+        egui::RichText::new("GRANTS")
+            .color(egui::Color32::from_rgb(220, 200, 80))
+            .size(12.0),
+    )
+    .id_salt("block-grants")
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(
+                "Open Radio (channel without a key) needs no grant. \
+                 Keyed Radio: your held grants below auth your TX/RX.",
+            )
+            .color(egui::Color32::from_rgb(140, 160, 180))
+            .size(10.0),
+        );
+        ui.separator();
+
+        // ── Held grants ────────────────────────────────────────────
+        ui.label(
+            egui::RichText::new("Held grants (you've been given)")
+                .color(egui::Color32::from_rgb(140, 220, 200))
+                .size(11.0)
+                .strong(),
+        );
+        if cfg.held_grants.is_empty() {
+            ui.label(
+                egui::RichText::new("(none — paste one below if you have a key)")
+                    .color(egui::Color32::from_rgb(120, 140, 160))
+                    .size(10.0)
+                    .italics(),
+            );
+        } else {
+            for g in &cfg.held_grants {
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("0x{:016x}", g.grant_id));
+                    if !g.label.is_empty() {
+                        ui.label(format!("[{}]", g.label));
+                    }
+                    if let Some(exp) = g.expires_at_ms {
+                        ui.label(
+                            egui::RichText::new(format!("exp {}", exp))
+                                .color(egui::Color32::from_rgb(120, 140, 160))
+                                .size(9.0),
+                        );
+                    }
+                    if ui.small_button("Forget").clicked() {
+                        send_forget_held_grant(tcp, g.grant_id);
+                        form.status = format!("Forgot grant 0x{:016x}", g.grant_id);
+                    }
+                });
+            }
+        }
+
+        // ── Add held grant form ────────────────────────────────────
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Add a held grant")
+                .color(egui::Color32::from_rgb(140, 220, 200))
+                .size(11.0),
+        );
+        ui.horizontal(|ui| {
+            ui.label("grant_id");
+            ui.add(
+                egui::TextEdit::singleline(&mut form.grant_id)
+                    .id_salt("inline-grant-id")
+                    .hint_text("hex (0x…) or decimal")
+                    .desired_width(200.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("key");
+            ui.add(
+                egui::TextEdit::singleline(&mut form.key_b64)
+                    .id_salt("inline-grant-key")
+                    .hint_text("base64")
+                    .desired_width(280.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("target shard");
+            ui.add(
+                egui::TextEdit::singleline(&mut form.target_shard_id)
+                    .id_salt("inline-grant-target")
+                    .desired_width(120.0),
+            );
+            ui.label("label");
+            ui.add(
+                egui::TextEdit::singleline(&mut form.label)
+                    .id_salt("inline-grant-label")
+                    .desired_width(160.0),
+            );
+        });
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("Add").color(egui::Color32::from_rgb(10, 16, 26)),
+            )
+            .fill(egui::Color32::from_rgb(140, 220, 200)))
+            .clicked()
+        {
+            match parse_add_grant(form) {
+                Ok((gid, target, label, key)) => {
+                    send_add_held_grant(tcp, gid, key, target, label.clone());
+                    form.status = format!("Added grant 0x{:016x} ({})", gid, label);
+                    // Clear inputs but preserve the status line so the
+                    // player sees confirmation.
+                    let preserved = form.status.clone();
+                    *form = AddHeldGrantForm::default();
+                    form.status = preserved;
+                }
+                Err(e) => {
+                    form.status = format!("✗ {e}");
+                }
+            }
+        }
+        if !form.status.is_empty() {
+            ui.label(
+                egui::RichText::new(&form.status)
+                    .color(egui::Color32::from_rgb(180, 200, 140))
+                    .size(10.0),
+            );
+        }
+    });
+}
+
+fn parse_add_grant(form: &AddHeldGrantForm) -> Result<(u64, u64, String, String), &'static str> {
+    let gid = parse_u64_lenient(form.grant_id.trim()).ok_or("grant_id parse failed")?;
+    let target = form
+        .target_shard_id
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "target_shard parse failed")?;
+    let key = form.key_b64.trim().to_string();
+    if key.is_empty() {
+        return Err("key required");
+    }
+    Ok((gid, target, form.label.trim().to_string(), key))
+}
+
+fn parse_u64_lenient(s: &str) -> Option<u64> {
+    if let Some(stripped) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(stripped, 16).ok()
+    } else {
+        s.parse::<u64>().ok()
+    }
+}
+
+fn send_add_held_grant(tcp: &TcpSender, grant_id: u64, key_b64: String, target: u64, label: String) {
+    use voxeldust_core::client_message::{AddHeldGrantData, ClientMsg};
+    let msg = ClientMsg::AddHeldGrant(AddHeldGrantData {
+        grant_id,
+        key_b64,
+        target_shard_id: target,
+        label,
+    });
+    let data = msg.serialize();
+    let mut pkt = Vec::new();
+    wire_codec::encode(&data, &mut pkt);
+    if tcp.tx.send(pkt).is_err() {
+        tracing::warn!("TCP channel closed while sending AddHeldGrant");
+    }
+}
+
+fn send_forget_held_grant(tcp: &TcpSender, grant_id: u64) {
+    use voxeldust_core::client_message::{ClientMsg, ForgetHeldGrantData};
+    let msg = ClientMsg::ForgetHeldGrant(ForgetHeldGrantData { grant_id });
+    let data = msg.serialize();
+    let mut pkt = Vec::new();
+    wire_codec::encode(&data, &mut pkt);
+    if tcp.tx.send(pkt).is_err() {
+        tracing::warn!("TCP channel closed while sending ForgetHeldGrant");
+    }
+}
+
+/// Shared u32 numeric-input row. Edits a u32 in place via a text
+/// field; on parse failure the previous value sticks (no error popup
+/// — invalid mid-typing keystrokes are common).
+fn u32_row(ui: &mut egui::Ui, id: &str, label: &str, value: &mut u32) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut s = value.to_string();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut s)
+                    .id_salt(id)
+                    .desired_width(120.0),
+            )
+            .changed()
+        {
+            if let Ok(v) = s.parse::<u32>() {
+                *value = v;
+            }
+        }
+    });
+}
+
+/// Shared u64 numeric-input row. Same semantics as `u32_row` for
+/// shard ids and grant ids — both are u64 in the wire format.
+fn u64_row(ui: &mut egui::Ui, id: &str, label: &str, value: &mut u64) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut s = value.to_string();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut s)
+                    .id_salt(id)
+                    .desired_width(180.0),
+            )
+            .changed()
+        {
+            if let Ok(v) = s.parse::<u64>() {
+                *value = v;
+            }
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Mechanical (rotor / piston) — speed override
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1700,6 +2180,96 @@ fn property_dropdown(
                 ui.selectable_value(current, prop, format!("{:?}", prop));
             }
         });
+}
+
+/// Scope override picker for a publish/subscribe binding row.
+///
+/// Bindings carry an `Option<SignalScope>`:
+/// - `None` ("default") = use whatever scope the channel was created with
+///   on the home shard. This is the right answer for ~95% of bindings — the
+///   channel knows its own scope.
+/// - `Some(_)` is an explicit override. Useful for Antenna/Listener-style
+///   blocks that need to relay a Local sensor onto Radio (publish at a
+///   wider scope) or filter inbound traffic to a specific scope class.
+///
+/// Server-side `try_push_remote` validates that the override is consistent
+/// with the channel's auth + access policy before accepting.
+fn scope_dropdown(ui: &mut egui::Ui, id: &str, current: &mut Option<SignalScope>) {
+    let tag = match current {
+        None => "default",
+        Some(SignalScope::Local) => "local",
+        Some(SignalScope::ShortRange { .. }) => "short",
+        Some(SignalScope::LongRange) => "long",
+        Some(SignalScope::Radio { .. }) => "radio",
+    };
+    egui::ComboBox::from_id_salt(format!("{}-scope", id))
+        .selected_text(tag)
+        .width(80.0)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(matches!(current, None), "default").clicked() {
+                *current = None;
+            }
+            if ui
+                .selectable_label(matches!(current, Some(SignalScope::Local)), "local")
+                .clicked()
+            {
+                *current = Some(SignalScope::Local);
+            }
+            if ui
+                .selectable_label(
+                    matches!(current, Some(SignalScope::ShortRange { .. })),
+                    "short",
+                )
+                .clicked()
+                && !matches!(current, Some(SignalScope::ShortRange { .. }))
+            {
+                *current = Some(SignalScope::ShortRange { range_m: 1000.0 });
+            }
+            if ui
+                .selectable_label(matches!(current, Some(SignalScope::LongRange)), "long")
+                .clicked()
+            {
+                *current = Some(SignalScope::LongRange);
+            }
+            if ui
+                .selectable_label(matches!(current, Some(SignalScope::Radio { .. })), "radio")
+                .clicked()
+                && !matches!(current, Some(SignalScope::Radio { .. }))
+            {
+                *current = Some(SignalScope::Radio { frequency: 0 });
+            }
+        });
+    match current {
+        Some(SignalScope::ShortRange { range_m }) => {
+            let mut v = *range_m;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut v)
+                        .speed(50.0)
+                        .range(0.0..=1.0e9)
+                        .suffix(" m"),
+                )
+                .changed()
+            {
+                *range_m = v;
+            }
+        }
+        Some(SignalScope::Radio { frequency }) => {
+            let mut v = *frequency;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut v)
+                        .speed(1.0)
+                        .range(0..=u32::MAX)
+                        .prefix("ƒ "),
+                )
+                .changed()
+            {
+                *frequency = v;
+            }
+        }
+        _ => {}
+    }
 }
 
 fn button_styled(label: &str) -> egui::Button<'static> {

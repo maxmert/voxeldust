@@ -8,7 +8,7 @@ use voxeldust_core::signal::types::SignalProperty;
 use crate::hud::font;
 use crate::hud::signal_registry::SignalValue;
 use crate::hud::tile::{HudConfig, WidgetKind};
-use crate::hud::widget::{DrawCtx, HudWidget};
+use crate::hud::widget::{DrawCtx, HudWidget, HudWidgetStateData};
 
 pub struct TextWidget;
 
@@ -25,7 +25,13 @@ impl HudWidget for TextWidget {
         // property is nominally accepted so registry/panel work.
         &[SignalProperty::Status]
     }
-    fn draw(&self, ctx: DrawCtx, value: Option<SignalValue>, _config: &HudConfig) {
+    fn draw(
+        &self,
+        ctx: DrawCtx,
+        value: Option<SignalValue>,
+        _state: Option<&mut dyn HudWidgetStateData>,
+        _config: &HudConfig,
+    ) {
         let w = ctx.size as usize;
         let h = ctx.size as usize;
         let alpha = (255.0 * ctx.opacity) as u8;

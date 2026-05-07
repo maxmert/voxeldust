@@ -18,3 +18,7 @@ glam = { workspace = true }
 rapier3d = { workspace = true }
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
+# Phase 4-Persist.6: redb for `RemoteAccessGrant` durability across
+# planet-shard restarts. Same store + helpers as ship-shard's
+# Phase 4-Persist work — see `voxeldust_shard_common::grant_persistence`.
+redb = { workspace = true }

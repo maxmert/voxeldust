@@ -162,9 +162,9 @@ impl IngressRejectReason {
 /// Conversion from the channel-layer error to the metrics label so the
 /// `signal_ingest_remote` system can pass through the result without
 /// knowing the label string.
-impl From<crate::signal::channel::RemoteIngressDenied> for IngressRejectReason {
-    fn from(d: crate::signal::channel::RemoteIngressDenied) -> Self {
-        use crate::signal::channel::RemoteIngressDenied as R;
+impl From<crate::channel::RemoteIngressDenied> for IngressRejectReason {
+    fn from(d: crate::channel::RemoteIngressDenied) -> Self {
+        use crate::channel::RemoteIngressDenied as R;
         match d {
             R::UnknownChannel => Self::UnknownChannel,
             R::LocalChannelImmutable => Self::LocalChannelImmutable,
@@ -418,7 +418,7 @@ mod tests {
         // Compile-time check that every channel-layer rejection variant
         // has a metric mapping. Catches drift if a new RemoteIngressDenied
         // variant is added without a corresponding label.
-        use crate::signal::channel::RemoteIngressDenied as R;
+        use crate::channel::RemoteIngressDenied as R;
         for d in [
             R::UnknownChannel,
             R::LocalChannelImmutable,

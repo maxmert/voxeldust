@@ -64,6 +64,19 @@ pub enum NetEvent {
     GalaxyWorldState(voxeldust_core::client_message::GalaxyWorldStateData),
     /// Block signal config state from server (config UI).
     BlockConfigState(voxeldust_core::signal::config::BlockSignalConfig),
+    /// Phase D: server snapshot of the player's owned grants. Sent in
+    /// response to `GrantCreate` / `GrantRevoke` and as a one-shot after
+    /// `AddHeldGrant` so the grants panel always reflects authoritative
+    /// state.
+    GrantsSnapshot(voxeldust_core::client_message::GrantsSnapshotData),
+    /// Phase D: server response to E (INTERACT) on a Terminal block.
+    /// Carries the engaged block's position, configured channels, and
+    /// the current scrollback so the client can paint the in-world
+    /// terminal screen with content right away.
+    OpenTerminalChat(voxeldust_core::client_message::OpenTerminalChatData),
+    /// Phase D: real-time scrollback append while the player is engaged
+    /// with a terminal.
+    TerminalScrollbackDelta(voxeldust_core::client_message::TerminalScrollbackDeltaData),
     /// Seat bindings from server (when player enters a seat).
     SeatBindingsNotify(voxeldust_core::client_message::SeatBindingsNotifyData),
     /// Sub-grid block assignments from server (mechanical mount membership).
@@ -567,6 +580,15 @@ pub async fn run_network(
                             }
                             Ok(ServerMsg::BlockConfigState(config)) => {
                                 let _ = event_tx_tcp.send(NetEvent::BlockConfigState(config));
+                            }
+                            Ok(ServerMsg::GrantsSnapshot(data)) => {
+                                let _ = event_tx_tcp.send(NetEvent::GrantsSnapshot(data));
+                            }
+                            Ok(ServerMsg::OpenTerminalChat(data)) => {
+                                let _ = event_tx_tcp.send(NetEvent::OpenTerminalChat(data));
+                            }
+                            Ok(ServerMsg::TerminalScrollbackDelta(data)) => {
+                                let _ = event_tx_tcp.send(NetEvent::TerminalScrollbackDelta(data));
                             }
                             Ok(ServerMsg::SeatBindingsNotify(data)) => {
                                 let _ = event_tx_tcp.send(NetEvent::SeatBindingsNotify(data));

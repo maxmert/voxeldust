@@ -70,6 +70,13 @@ pub struct NetworkBridge {
         SessionToken,
         voxeldust_core::client_message::RemoteSignalPublishData,
     )>,
+    /// Phase D: chat lines typed on engaged Terminal blocks. Drained
+    /// per tick by the shard's interaction system into
+    /// `KeyboardTerminalInput` ECS events for the media pipeline.
+    pub terminal_chat_send_rx: mpsc::UnboundedReceiver<(
+        SessionToken,
+        voxeldust_core::client_message::TerminalChatSendData,
+    )>,
     /// Incoming inter-shard messages from QUIC.
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
@@ -240,6 +247,16 @@ pub struct ShardHarness {
         SessionToken,
         voxeldust_core::client_message::RemoteSignalPublishData,
     )>,
+    /// Phase D: terminal chat input. Drained into a per-tick ECS event
+    /// the shard's interaction system turns into `KeyboardTerminalInput`.
+    terminal_chat_send_tx: mpsc::UnboundedSender<(
+        SessionToken,
+        voxeldust_core::client_message::TerminalChatSendData,
+    )>,
+    pub terminal_chat_send_rx: mpsc::UnboundedReceiver<(
+        SessionToken,
+        voxeldust_core::client_message::TerminalChatSendData,
+    )>,
     quic_msg_tx: mpsc::UnboundedSender<QueuedShardMsg>,
     cancel: CancellationToken,
 }
@@ -258,6 +275,7 @@ impl ShardHarness {
         let (add_held_grant_tx, add_held_grant_rx) = mpsc::unbounded_channel();
         let (forget_held_grant_tx, forget_held_grant_rx) = mpsc::unbounded_channel();
         let (remote_signal_publish_tx, remote_signal_publish_rx) = mpsc::unbounded_channel();
+        let (terminal_chat_send_tx, terminal_chat_send_rx) = mpsc::unbounded_channel();
         let (quic_msg_tx, quic_msg_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = mpsc::channel(64);
         let (quic_send_tx, quic_send_rx) = mpsc::channel(256);
@@ -304,6 +322,8 @@ impl ShardHarness {
             forget_held_grant_rx,
             remote_signal_publish_tx,
             remote_signal_publish_rx,
+            terminal_chat_send_tx,
+            terminal_chat_send_rx,
             quic_msg_tx,
             cancel: CancellationToken::new(),
         }
@@ -351,6 +371,7 @@ impl ShardHarness {
             add_held_grant_tx: self.add_held_grant_tx.clone(),
             forget_held_grant_tx: self.forget_held_grant_tx.clone(),
             remote_signal_publish_tx: self.remote_signal_publish_tx.clone(),
+            terminal_chat_send_tx: self.terminal_chat_send_tx.clone(),
         };
         let tcp_registry = self.client_registry.clone();
         tokio::spawn(async move {
@@ -660,6 +681,7 @@ impl ShardHarness {
             add_held_grant_rx: self.add_held_grant_rx,
             forget_held_grant_rx: self.forget_held_grant_rx,
             remote_signal_publish_rx: self.remote_signal_publish_rx,
+            terminal_chat_send_rx: self.terminal_chat_send_rx,
             quic_msg_rx: self.quic_msg_rx,
             broadcast_tx: self.broadcast_tx.clone(),
             quic_send_tx: self.quic_send_tx.clone(),

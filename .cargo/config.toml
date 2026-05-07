@@ -1,0 +1,24 @@
+# Build perf overrides. See BUILD_PERF.md for rationale.
+#
+# split-debuginfo=unpacked skips dsymutil on macOS — the single biggest link-time
+# cost for binaries with full Bevy/wgpu/winit symbol surface. ~5–15 s saved per
+# binary, with no runtime cost.
+#
+# lld linker is optional. macOS 14+ ships `ld-prime` which is already fast, so
+# we don't enable lld by default. To opt in: `brew install llvm` then uncomment
+# the link-arg line under [target.aarch64-apple-darwin].
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "split-debuginfo=unpacked",
+    # "-C", "link-arg=-fuse-ld=/opt/homebrew/opt/llvm/bin/ld64.lld",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "split-debuginfo=unpacked",
+]
+
+[target.x86_64-unknown-linux-gnu]
+# Linux dev/CI: lld is faster than gold/bfd. Opt-in once `lld` is in PATH.
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]

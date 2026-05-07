@@ -26,6 +26,7 @@ use voxeldust_core::shard_message::{
 };
 use voxeldust_core::client_message::{EntityKind, LodTier, ObservableEntityData};
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
+use voxeldust_core::spatial::SpatialGrid;
 use voxeldust_core::system::{
     check_atmosphere, compute_full_aerodynamics, compute_gravity_acceleration, compute_lighting,
     compute_planet_position, compute_planet_velocity, compute_soi_radius, SystemParams,
@@ -497,6 +498,109 @@ fn drain_connects(
             session = conn.session_token.0,
             "player joined system (direct TCP)"
         );
+    }
+}
+
+/// Phase 4.6: cadence + radius for `broadcast_ship_neighborhoods`.
+/// 20 ticks @ 20 Hz = 1 second. Ship motion across 1 second is well
+/// within any practical ShortRange transition window, so 1Hz cadence
+/// gives the receiver fresh-enough authoritative data to drive its
+/// ShortRange routing prune without its own continuous polling.
+const SHIP_NEIGHBORHOOD_CADENCE_TICKS: u64 = 20;
+
+/// Phase 4.6: 1Hz push of authoritative nearby-ships data from
+/// system-shard to each hosted ship-shard. Replaces the ship-shard's
+/// opportunistic learn-from-traffic peer-position cache with fresh,
+/// complete coverage built from the system-shard's spatial grid.
+///
+/// Per-tick cost: O(hosted_ships × populated_cells_in_radius +
+/// peers_per_ship_in_radius) — same shape as the AOI pass, scaled by
+/// 1/20 because of the 1Hz cadence. Negligible against the AOI cost.
+fn broadcast_ship_neighborhoods(
+    ships: Query<(&ShipId, &Position, &Velocity)>,
+    vis_cfg: Res<VisibilityConfig>,
+    shard_identity: Res<ShardIdentity>,
+    bridge: Res<NetworkBridge>,
+    tick: Res<ecs::TickCounter>,
+) {
+    use voxeldust_core::shard_message::{ShipNeighborhoodData, ShipNeighborhoodEntryData};
+
+    if tick.0 % SHIP_NEIGHBORHOOD_CADENCE_TICKS != 0 {
+        return;
+    }
+
+    // Snapshot peer registry for hosted-ship endpoint info.
+    let Ok(reg) = bridge.peer_registry.try_read() else {
+        return;
+    };
+    // Map: ship_id → (its host ship-shard's id, that shard's QUIC
+    // addr). Restricted to ships hosted by THIS system-shard so we
+    // don't attempt to push to a peer system's ships.
+    let mut hosted_ships: HashMap<u64, (ShardId, SocketAddr)> = HashMap::new();
+    for info in reg.find_by_type(ShardType::Ship) {
+        if info.host_shard_id != Some(shard_identity.0) {
+            continue;
+        }
+        let Some(ship_id) = info.ship_id else {
+            continue;
+        };
+        hosted_ships.insert(ship_id, (info.id, info.endpoint.quic_addr));
+    }
+    drop(reg);
+
+    if hosted_ships.is_empty() {
+        return;
+    }
+
+    // Per-tick spatial grid keyed by ship_id, plus a side table for
+    // (position, velocity, host shard) lookup after the radius query.
+    // Same DRY pattern as `AoiSnapshot` in `broadcast_system_entities`.
+    let mut grid: SpatialGrid<u64> = SpatialGrid::default();
+    let mut ship_state: HashMap<u64, (DVec3, DVec3, ShardId)> =
+        HashMap::with_capacity(hosted_ships.len());
+    for (ship_id, pos, vel) in ships.iter() {
+        if let Some(&(host_shard, _)) = hosted_ships.get(&ship_id.0) {
+            grid.insert(ship_id.0, pos.0);
+            ship_state.insert(ship_id.0, (pos.0, vel.0, host_shard));
+        }
+    }
+
+    // Same radius the AOI uses — covers the maximum LOD tier and a
+    // hysteresis margin. Ship-shard's own ShortRange filter handles
+    // the per-entry precise check; this radius just ensures peers
+    // are available in the cache when needed.
+    let radius = vis_cfg.ship_coarse_range * vis_cfg.hysteresis;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    for (ship_id, pos, _vel) in ships.iter() {
+        let Some(&(_, _, target_shard)) = ship_state.get(&ship_id.0) else {
+            continue;
+        };
+        let Some(&(_, target_addr)) = hosted_ships.get(&ship_id.0) else {
+            continue;
+        };
+        let nearby = grid.query_radius(pos.0, radius);
+        let peers: Vec<ShipNeighborhoodEntryData> = nearby
+            .into_iter()
+            .filter(|(id, _)| *id != ship_id.0)
+            .filter_map(|(peer_id, _)| {
+                let &(peer_pos, peer_vel, peer_shard) = ship_state.get(&peer_id)?;
+                Some(ShipNeighborhoodEntryData {
+                    peer_shard_id: peer_shard.0,
+                    peer_position: peer_pos,
+                    peer_velocity: peer_vel,
+                })
+            })
+            .collect();
+        let msg = ShardMsg::ShipNeighborhood(ShipNeighborhoodData {
+            target_ship_shard_id: target_shard.0,
+            issued_at_ms: now_ms,
+            peers,
+        });
+        let _ = bridge.quic_send_tx.try_send((target_shard, target_addr, msg));
     }
 }
 
@@ -4659,9 +4763,10 @@ fn eva_broadcast(
             &ship_shards_by_id,
             &planet_shards_by_index,
         );
+        let aoi_snapshot = AoiSnapshot::build(&candidates, &vis_cfg);
         let mut merged: HashMap<u64, ObservableEntityData> = HashMap::new();
         for (session, _, pos, _, _, _) in eva_players.iter() {
-            let per = compute_aoi(pos.0, &candidates, Some(session.0.0), &vis_cfg);
+            let per = compute_aoi(pos.0, &aoi_snapshot, Some(session.0.0), &vis_cfg);
             for e in per {
                 merged
                     .entry(e.entity_id)
@@ -4711,11 +4816,11 @@ fn eva_broadcast(
         autopilot: None,
         sub_grids: vec![],
         entities,
-        // SYSTEM shard publishes observer-relevant signals (body count,
-        // nearest body) so EVA HUD tiles can render them. Observed
-        // ships' status comes via their SHIP shard's hud_signals —
-        // this shard's entries cover system-scope data only.
-        hud_signals: Vec::new(),
+        // Phase 4.4.5: HUD signal updates ship via `HudSignalDelta`
+        // TCP messages, not via this `WorldState` payload. System-
+        // shard's HUD-emit path is wired in `Phase 0` planet+system
+        // pipeline integration (deferred); for now, EVA observers
+        // rely on the primary's HUD delta stream.
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("EVA WorldState broadcast dropped — channel full");
@@ -5174,19 +5279,66 @@ fn lod_for_distance(distance: f64, is_player: bool, cfg: &VisibilityConfig) -> O
     }
 }
 
-/// Build an AOI snapshot around `observer_position`, skipping the observer itself
-/// by matching `self_entity_id` (the observer's entity_id, if any).
+/// Phase 4.5: per-tick AOI snapshot built once per
+/// `broadcast_system_entities` invocation. Holds:
+///
+///   * A [`SpatialGrid`] of every candidate's position keyed by
+///     `entity_id`. Per-observer `query_radius` calls touch only
+///     cells that intersect the radius — eliminates the O(N²) cap.
+///   * A `candidates_by_id` lookup so a grid hit can be projected
+///     into its full `AoiCandidate` (with rotation, velocity, name,
+///     etc.) without re-scanning the candidates Vec.
+///   * The single query radius observers use. Covers the maximum
+///     LOD tier × hysteresis — the per-entity `lod_for_distance`
+///     check then picks the precise tier (or rejects).
+struct AoiSnapshot<'c> {
+    grid: SpatialGrid<u64>,
+    candidates_by_id: HashMap<u64, &'c AoiCandidate>,
+    /// Maximum radius any per-observer query needs. Set to
+    /// `max(ship_coarse_range, player_coarse_range) × hysteresis` so
+    /// no candidate `lod_for_distance` would accept gets missed.
+    query_radius: f64,
+}
+
+impl<'c> AoiSnapshot<'c> {
+    fn build(candidates: &'c [AoiCandidate], cfg: &VisibilityConfig) -> Self {
+        let mut grid: SpatialGrid<u64> = SpatialGrid::default();
+        let mut candidates_by_id: HashMap<u64, &AoiCandidate> =
+            HashMap::with_capacity(candidates.len());
+        for c in candidates {
+            grid.insert(c.entity_id, c.position);
+            candidates_by_id.insert(c.entity_id, c);
+        }
+        let query_radius =
+            cfg.ship_coarse_range.max(cfg.player_coarse_range) * cfg.hysteresis;
+        Self {
+            grid,
+            candidates_by_id,
+            query_radius,
+        }
+    }
+}
+
+/// Build an AOI snapshot around `observer_position`. Phase 4.5 grid
+/// path: query the spatial grid at the snapshot's max radius, then
+/// per-entity run `lod_for_distance` to pick the precise tier (or
+/// reject). Cost: O(populated_cells_in_radius + entities_in_radius)
+/// per observer, vs O(total_candidates) for the linear scan.
 fn compute_aoi(
     observer_position: DVec3,
-    candidates: &[AoiCandidate],
+    snapshot: &AoiSnapshot<'_>,
     self_entity_id: Option<u64>,
     cfg: &VisibilityConfig,
 ) -> Vec<ObservableEntityData> {
-    let mut out = Vec::with_capacity(candidates.len());
-    for c in candidates {
-        if Some(c.entity_id) == self_entity_id {
+    let near = snapshot.grid.query_radius(observer_position, snapshot.query_radius);
+    let mut out = Vec::with_capacity(near.len());
+    for (id, _pos) in near {
+        if Some(id) == self_entity_id {
             continue;
         }
+        let Some(c) = snapshot.candidates_by_id.get(&id) else {
+            continue;
+        };
         let distance = (c.position - observer_position).length();
         let is_player = c.kind.is_player();
         let Some(tier) = lod_for_distance(distance, is_player, cfg) else {
@@ -5407,6 +5559,11 @@ fn broadcast_system_entities(
         &planet_shards_by_index,
     );
 
+    // Phase 4.5: build the spatial-grid AOI snapshot once per tick.
+    // Per-observer queries go through the grid — O(populated_cells +
+    // entities_in_radius) per call instead of O(total_candidates).
+    let aoi_snapshot = AoiSnapshot::build(&candidates, &vis_cfg);
+
     // Ship observers → the ship shard hosting each ship.
     for (ship_id, pos, _, _, _) in ships.iter() {
         let Some(&shard_id) = ship_shards_by_id.get(&ship_id.0) else {
@@ -5415,7 +5572,7 @@ fn broadcast_system_entities(
         let Some(&quic_addr) = ship_quic_addrs.get(&shard_id) else {
             continue;
         };
-        let aoi = compute_aoi(pos.0, &candidates, Some(ship_id.0), &vis_cfg);
+        let aoi = compute_aoi(pos.0, &aoi_snapshot, Some(ship_id.0), &vis_cfg);
         let upd = ShardMsg::SystemEntitiesUpdate(SystemEntitiesUpdateData {
             target: AoiTarget::Ship(ship_id.0),
             observer_position: pos.0,
@@ -5435,7 +5592,7 @@ fn broadcast_system_entities(
             continue;
         };
         let observer = planet_pos.0[idx_usize];
-        let aoi = compute_aoi(observer, &candidates, None, &vis_cfg);
+        let aoi = compute_aoi(observer, &aoi_snapshot, None, &vis_cfg);
         let upd = ShardMsg::SystemEntitiesUpdate(SystemEntitiesUpdateData {
             target: AoiTarget::Planet(idx),
             observer_position: observer,
@@ -5737,7 +5894,8 @@ fn broadcast_udp(
         autopilot: None,
         sub_grids: vec![],
         entities: vec![],
-        hud_signals: Vec::new(),
+        // Phase 4.4.5: HUD signal updates ship via `HudSignalDelta`
+        // TCP messages, not this `WorldState`.
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("WorldState broadcast dropped — channel full");
@@ -5998,6 +6156,8 @@ fn build_app(
             broadcast_udp,
             eva_broadcast,
             broadcast_system_entities,
+            // Phase 4.6: 1Hz authoritative neighborhood push.
+            broadcast_ship_neighborhoods,
         )
             .in_set(SystemShardSet::Broadcast),
     );

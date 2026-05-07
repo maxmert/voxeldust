@@ -15,7 +15,7 @@ use voxeldust_core::signal::types::SignalProperty;
 use crate::hud::font;
 use crate::hud::signal_registry::SignalValue;
 use crate::hud::tile::{HudConfig, HudPayload, WidgetKind};
-use crate::hud::widget::{DrawCtx, HudWidget};
+use crate::hud::widget::{DrawCtx, HudWidget, HudWidgetStateData};
 
 pub struct ConfigPanelWidget;
 
@@ -29,7 +29,13 @@ impl HudWidget for ConfigPanelWidget {
     fn supported_properties(&self) -> &'static [SignalProperty] {
         &[]
     }
-    fn draw(&self, mut ctx: DrawCtx, _value: Option<SignalValue>, config: &HudConfig) {
+    fn draw(
+        &self,
+        mut ctx: DrawCtx,
+        _value: Option<SignalValue>,
+        _state: Option<&mut dyn HudWidgetStateData>,
+        config: &HudConfig,
+    ) {
         let w = ctx.size as usize;
         let h = ctx.size as usize;
         let alpha = 255u8;

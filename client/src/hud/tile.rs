@@ -49,7 +49,14 @@ pub enum WidgetKind {
     /// publishes `release_value`. For now only the press fires;
     /// release-tracking lands when we thread mouse-up through.
     Button,
-    // Future: Graph, Compass, Speedo, …
+    /// On-block chat / log terminal. Stateful widget — paints
+    /// scrollback above an input line; typing fills the input;
+    /// Enter submits as `WidgetAction::SendChat` to the host block.
+    /// Backed by `TerminalWidgetState` (carries scrollback buffer +
+    /// active input). Engaged via E-press on a Terminal block →
+    /// `HudFocusState::engage_block_tile`.
+    Terminal,
+    // Future: Graph, Compass, Speedo, Console, Editor, …
 }
 
 /// Per-tile config. Server-authored via `SubBlockConfigState` for block

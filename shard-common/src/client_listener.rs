@@ -72,6 +72,14 @@ pub struct TcpMessageChannels {
         SessionToken,
         voxeldust_core::client_message::RemoteSignalPublishData,
     )>,
+    /// Phase D: chat lines typed on an engaged Terminal block.  Routed
+    /// to the shard's media pipeline as `KeyboardTerminalInput`, which
+    /// HMAC-signs (or sends bare for open channels) and ships through
+    /// the configured publish channel.
+    pub terminal_chat_send_tx: mpsc::UnboundedSender<(
+        SessionToken,
+        voxeldust_core::client_message::TerminalChatSendData,
+    )>,
 }
 
 /// Event emitted when a client connects via TCP.
@@ -549,6 +557,9 @@ async fn run_tcp_read_loop(
             }
             Ok(ClientMsg::RemoteSignalPublish(data)) => {
                 let _ = channels.remote_signal_publish_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::TerminalChatSend(data)) => {
+                let _ = channels.terminal_chat_send_tx.send((session_token, data));
             }
             Err(e) => {
                 debug!(%peer_addr, %e, "failed to deserialize TCP client message");

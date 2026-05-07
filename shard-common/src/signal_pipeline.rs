@@ -281,7 +281,7 @@ pub fn propagate_listener_frequency_interest(
     bridge: Res<NetworkBridge>,
     identity: Res<crate::harness::ShardIdentity>,
     tick: Res<voxeldust_core::ecs::TickCounter>,
-    listeners: Query<&voxeldust_core::signal::ListenerState>,
+    antennas: Query<&voxeldust_core::signal::AntennaState>,
 ) {
     use std::collections::BTreeSet;
     use voxeldust_core::shard_message::{ShardMsg, ShipFrequencyInterestData};
@@ -293,20 +293,20 @@ pub fn propagate_listener_frequency_interest(
         return;
     };
 
-    // Collect deduped frequency set across all active listeners.
-    // BTreeSet keeps the wire serialization deterministic — easier to
-    // diff in logs and tests than a HashSet's iteration order.
+    // Phase D: collect deduped RX-side frequency set across all active
+    // bidirectional Antennas. Only RX matters for interest registration —
+    // TX-only antennas don't need the relay forwarding to them. BTreeSet
+    // keeps wire output deterministic for log diffs / tests.
     let mut freqs: BTreeSet<u32> = BTreeSet::new();
-    for listener in &listeners {
-        if !listener.active {
+    for antenna in &antennas {
+        if !antenna.active {
             continue;
         }
-        if listener.frequency == 0 {
-            // Frequency 0 isn't a Radio frequency (Local-scope listener
-            // mirrors don't go through galaxy). Skip.
-            continue;
+        if let Some(rx) = &antenna.rx {
+            if rx.frequency != 0 {
+                freqs.insert(rx.frequency);
+            }
         }
-        freqs.insert(listener.frequency);
     }
     let frequencies: Vec<u32> = freqs.into_iter().collect();
 
@@ -1114,7 +1114,11 @@ pub fn apply_remote_signal_publish(
 /// request. Defends against a malicious request asking for "valid until
 /// tick 2^64" by clamping to a reasonable ceiling. 60s lease at 20Hz =
 /// 1200 ticks; 5min cap is plenty of headroom for renewals.
-const MAX_SUBSCRIBE_LEASE_TICKS: u64 = 6_000; // 5 min @ 20 Hz
+/// Max lease window the publisher will honour for a single
+/// `SignalSubscribe`. Renewal-driven systems claim this much; the
+/// publisher's `cleanup_expired_subscribers` enforces it. 5 min @ 20 Hz.
+/// Public so e2e tests can assert the lease deadline math.
+pub const MAX_SUBSCRIBE_LEASE_TICKS: u64 = 6_000;
 
 /// Drain queued `SignalSubscribe` requests, validate each, and register
 /// the subscription. The signal pipeline plugin owns the
@@ -1364,9 +1368,10 @@ pub const LISTENER_RENEWAL_CADENCE_TICKS: u64 = 60;
 pub fn listener_lease_renewal(
     bridge: Res<NetworkBridge>,
     held: Res<HeldGrants>,
+    channels: Res<SignalChannelTable>,
     identity: Res<ShardIdentity>,
     tick: Res<voxeldust_core::ecs::TickCounter>,
-    mut listeners: Query<&mut voxeldust_core::signal::ListenerState>,
+    mut antennas: Query<&mut voxeldust_core::signal::AntennaState>,
 ) {
     use voxeldust_core::shard_message::{ShardMsg, SignalSubscribeData};
     use voxeldust_core::shard_types::{SessionToken, ShardId};
@@ -1374,7 +1379,7 @@ pub fn listener_lease_renewal(
     if tick.0 % LISTENER_RENEWAL_CADENCE_TICKS != 0 {
         return;
     }
-    if listeners.is_empty() {
+    if antennas.is_empty() {
         return;
     }
 
@@ -1387,42 +1392,62 @@ pub fn listener_lease_renewal(
     // across the async boundary.
     let mut to_dispatch: Vec<(u64, SignalSubscribeData)> = Vec::new();
 
-    for mut listener in &mut listeners {
-        if !listener.active {
+    for mut antenna in &mut antennas {
+        if !antenna.active {
             continue;
         }
+        let owner = antenna.owner_session;
+        let Some(rx) = antenna.rx.as_mut() else {
+            continue;
+        };
+        // Open RX (no grant) needs no renewal — there's no auth handshake
+        // to refresh. The publisher's open broadcast is permanently open.
+        let Some(gid) = rx.grant_id else {
+            continue;
+        };
         // Renew if the lease ends within the threshold OR has already
         // expired (the publisher dropped us; re-establish from scratch).
-        let remaining = listener.lease_until_tick.saturating_sub(now_tick);
+        let remaining = rx.lease_until_tick.saturating_sub(now_tick);
         if remaining > LISTENER_RENEWAL_THRESHOLD_TICKS {
             continue;
         }
-
+        // Need explicit target to ship the renewal. Without one, the
+        // antenna is orchestrator-routed and renewal happens via a
+        // different relay path (post-Phase-3F).
+        let Some(target_shard) = rx.remote_shard_id else {
+            continue;
+        };
         // Look up the held grant's key.
-        let session = SessionToken(listener.owner_session);
-        let grant = match held.get(session, listener.grant_id) {
+        let session = SessionToken(owner);
+        let grant = match held.get(session, gid) {
             Some(g) => g,
             None => {
                 tracing::debug!(
-                    owner = listener.owner_session,
-                    grant_id = listener.grant_id,
-                    "listener lease renewal skipped: held grant missing"
+                    owner = owner,
+                    grant_id = gid,
+                    "antenna RX lease renewal skipped: held grant missing"
                 );
                 continue;
             }
         };
+        // The bridged channel name is what the publisher's shard sees
+        // — stable on this side per the convention in apply_antenna_config.
+        let Some(bridged_id) = rx.bridged_channel_id else {
+            continue;
+        };
+        let Some(bridged_ch) = channels.get_by_id(bridged_id) else {
+            continue;
+        };
+        let channel_name = bridged_ch.name.clone();
 
-        // Compute the new lease window. The publisher will clamp this to
-        // its own `MAX_SUBSCRIBE_LEASE_TICKS`, so claim the maximum and
-        // let the publisher decide.
         let new_lease_until = now_tick.saturating_add(MAX_SUBSCRIBE_LEASE_TICKS);
         let nonce = now_ms;
 
         let auth_tag = signal::auth::hmac_sign_subscribe_request(
             &grant.key,
-            &listener.remote_channel_name,
+            &channel_name,
             our_shard_id,
-            listener.grant_id,
+            gid,
             nonce,
             now_ms,
             new_lease_until,
@@ -1430,25 +1455,24 @@ pub fn listener_lease_renewal(
 
         let req = SignalSubscribeData {
             subscriber_shard_id: our_shard_id,
-            channel_name: listener.remote_channel_name.clone(),
-            grant_id: listener.grant_id,
+            channel_name,
+            grant_id: gid,
             nonce,
             timestamp_ms: now_ms,
             valid_until_tick: new_lease_until,
             auth_tag: auth_tag.to_vec(),
         };
 
-        to_dispatch.push((listener.source_shard_id, req));
-        // Update local state to reflect the renewal request.
-        listener.lease_until_tick = new_lease_until;
+        to_dispatch.push((target_shard, req));
+        rx.lease_until_tick = new_lease_until;
 
         signal_metrics::record_listener_lease_renewed();
         tracing::info!(
-            owner = listener.owner_session,
-            grant_id = listener.grant_id,
-            source_shard = listener.source_shard_id,
+            owner = owner,
+            grant_id = gid,
+            source_shard = target_shard,
             new_lease_until_tick = new_lease_until,
-            "listener lease renewal issued"
+            "antenna RX lease renewal issued"
         );
     }
 
@@ -1523,7 +1547,7 @@ pub fn antenna_publish(
     bridge: Res<NetworkBridge>,
     identity: Res<ShardIdentity>,
     policy: Res<crate::harness::WireDictSendPolicy>,
-    antennas: Query<&voxeldust_core::signal::AntennaState>,
+    mut antennas: Query<&mut voxeldust_core::signal::AntennaState>,
 ) {
     use voxeldust_core::shard_message::{ShardMsg, SignalBroadcastBatchData, SignalBroadcastEntry};
     use voxeldust_core::shard_types::{SessionToken, ShardId};
@@ -1538,48 +1562,70 @@ pub fn antenna_publish(
 
     // Snapshot per-antenna outputs first; defer QUIC dispatch to the
     // tokio::spawn at the end. Avoids holding the bevy resource borrows
-    // across the async boundary.
-    let mut to_send: Vec<(u64, SignalBroadcastEntry)> = Vec::new();
+    // across the async boundary. Each entry knows its destination —
+    // either the explicit `tx.remote_shard_id` or `None` meaning
+    // "orchestrator-routed via the relay's frequency-band table" (the
+    // post-Phase-3F path).
+    let mut to_send: Vec<(Option<u64>, SignalBroadcastEntry)> = Vec::new();
 
-    for antenna in &antennas {
+    for mut antenna in &mut antennas {
         if !antenna.active {
             continue;
         }
-        // Source channel must resolve locally.
-        let Some(source_id) = antenna.source_channel_id else {
+        // Snapshot the owner field before taking a mut borrow of `tx`
+        // (which lives inside the same component). Avoids E0502 from
+        // mixing mutable + immutable access to `antenna`.
+        let owner_session = antenna.owner_session;
+        // Phase D: TX side drives publish. RX-only antennas no-op here.
+        let Some(tx) = antenna.tx.as_mut() else {
+            continue;
+        };
+
+        // Local source channel must resolve.
+        let Some(source_id) = tx.local_channel_id else {
             continue;
         };
         let Some(ch) = channels.get_by_id(source_id) else {
             continue;
         };
 
-        // Held grant lookup. The placing player's session anchors the
-        // grant in HeldGrants (registered via `AddHeldGrant`). Missing
-        // grant = silent skip — could be a freshly-placed antenna that
-        // hasn't had AddHeldGrant processed yet, or the grant was
-        // forgotten without revoking the antenna config.
-        let session = SessionToken(antenna.owner_session);
-        let Some(grant) = held.get(session, antenna.grant_id) else {
-            tracing::debug!(
-                owner = antenna.owner_session,
-                grant_id = antenna.grant_id,
-                "antenna_publish: held grant missing — skipping (config stale?)"
-            );
-            continue;
+        // Optional grant lookup. None ⇒ open broadcast (CB-radio style):
+        // ship with grant_id=0 + auth_tag empty; receiver's try_push_remote
+        // accepts on unkeyed channels without HMAC. Some(_) ⇒ keyed
+        // channel: HMAC-sign with the held grant's key.
+        let (grant_id_wire, key_for_hmac): (u64, Option<&[u8; 32]>) = match tx.grant_id {
+            None => (0, None),
+            Some(gid) => {
+                let session = SessionToken(owner_session);
+                match held.get(session, gid) {
+                    Some(g) => {
+                        // Cross-check claimed remote_shard with the held grant's
+                        // stored target. Mismatch = stale config; skip.
+                        if let Some(claimed) = tx.remote_shard_id {
+                            if claimed != g.target_shard_id {
+                                tracing::warn!(
+                                    owner = owner_session,
+                                    grant_id = gid,
+                                    claimed,
+                                    held = g.target_shard_id,
+                                    "antenna_publish: tx remote_shard mismatch — skipping"
+                                );
+                                continue;
+                            }
+                        }
+                        (gid, Some(&g.key))
+                    }
+                    None => {
+                        tracing::debug!(
+                            owner = owner_session,
+                            grant_id = gid,
+                            "antenna_publish: tx held grant missing — skipping (stale config?)"
+                        );
+                        continue;
+                    }
+                }
+            }
         };
-
-        // Cross-check: the antenna's claimed target_shard_id must match
-        // the held grant's stored target. Mismatch = stale config.
-        if antenna.target_shard_id != grant.target_shard_id {
-            tracing::warn!(
-                owner = antenna.owner_session,
-                grant_id = antenna.grant_id,
-                claimed = antenna.target_shard_id,
-                held = grant.target_shard_id,
-                "antenna_publish: target_shard != grant.target_shard — skipping"
-            );
-            continue;
-        }
 
         // Canonicalize the value bits exactly as the receiver will when
         // verifying. Float NaN payloads round-trip via `to_bits()`
@@ -1596,33 +1642,35 @@ pub fn antenna_publish(
             }
         };
 
-        // Wire scope = 0 (Local) for the canonical "remote control of a
-        // Local channel" antenna case. The receiver's try_push_remote
-        // accepts because grant_id != 0 unlocks LocalChannelImmutable.
-        let wire_scope_code = 0_u8;
-        let frequency = antenna.frequency;
-        // Sequence: per-antenna counter would need per-AntennaState
-        // mutable state, which is awkward in a parallel-iter system.
-        // Use seq=1 + ts=now: receiver's per-(channel, sender, grant)
-        // window treats each antenna's first-tick entry as fresh. A
-        // future hardening pass adds a per-antenna AtomicU64.
-        let seq = 1_u64;
+        // Wire scope = 3 (Radio) — the antenna's TX side targets a
+        // Radio-scope channel on the remote shard at `tx.frequency`.
+        let wire_scope_code = 3_u8;
+        let frequency = tx.frequency;
+        let channel_name = ch.name.clone();
 
-        let tag = signal::auth::hmac_sign(
-            &grant.key,
-            &antenna.remote_channel_name,
-            wire_scope_code,
-            frequency,
-            value_type,
-            value_bits,
-            now_ms,
-            source_shard_id.0,
-            seq,
-            antenna.grant_id,
-        );
+        // Per-antenna monotonic outbound sequence (replay window).
+        let seq = tx.next_sequence;
+        tx.next_sequence = seq.saturating_add(1);
+
+        let auth_tag = match key_for_hmac {
+            Some(key) => signal::auth::hmac_sign(
+                key,
+                &channel_name,
+                wire_scope_code,
+                frequency,
+                value_type,
+                value_bits,
+                now_ms,
+                source_shard_id.0,
+                seq,
+                grant_id_wire,
+            )
+            .to_vec(),
+            None => Vec::new(),
+        };
 
         let entry = SignalBroadcastEntry {
-            channel_name: antenna.remote_channel_name.clone(),
+            channel_name,
             value_type,
             value_data,
             scope: wire_scope_code,
@@ -1630,10 +1678,10 @@ pub fn antenna_publish(
             frequency,
             sequence: seq,
             timestamp_ms: now_ms,
-            grant_id: antenna.grant_id,
-            auth_tag: tag.to_vec(),
+            grant_id: grant_id_wire,
+            auth_tag,
         };
-        to_send.push((antenna.target_shard_id, entry));
+        to_send.push((tx.remote_shard_id, entry));
         signal_metrics::record_antenna_publish();
     }
 
@@ -1647,17 +1695,27 @@ pub fn antenna_publish(
     let v2_enabled = policy.v2_enabled;
     tokio::spawn(async move {
         let registry = peer_registry.read().await;
-        if v2_enabled {
-            let mut wd = wire_dicts.write().await;
-            for (target_shard_id, entry) in to_send {
-                let target = ShardId(target_shard_id);
-                let Some(endpoint) = registry.endpoint(target) else {
-                    tracing::warn!(
-                        target = target_shard_id,
-                        "antenna_publish: target shard not in peer registry"
-                    );
-                    continue;
-                };
+        for (target_shard_id_opt, entry) in to_send {
+            // Phase D: explicit target ⇒ direct delivery; None ⇒ post-
+            // Phase-3F orchestrator-routed via the relay. For now, no
+            // target ⇒ skip with debug log (relay routing lands later).
+            let Some(target_shard_id) = target_shard_id_opt else {
+                tracing::debug!(
+                    "antenna_publish: open RX path requires explicit target until \
+                     orchestrator relay routing lands"
+                );
+                continue;
+            };
+            let target = ShardId(target_shard_id);
+            let Some(endpoint) = registry.endpoint(target) else {
+                tracing::warn!(
+                    target = target_shard_id,
+                    "antenna_publish: target shard not in peer registry"
+                );
+                continue;
+            };
+            if v2_enabled {
+                let mut wd = wire_dicts.write().await;
                 let v2_batch = crate::wire_dict_registry::encode_v2_batch(
                     &mut wd,
                     target,
@@ -1675,20 +1733,7 @@ pub fn antenna_publish(
                 {
                     tracing::warn!(target = target_shard_id, %e, "antenna_publish QUIC send failed (V2)");
                 }
-            }
-        } else {
-            for (target_shard_id, entry) in to_send {
-                let target = ShardId(target_shard_id);
-                let endpoint = match registry.endpoint(target) {
-                    Some(ep) => ep,
-                    None => {
-                        tracing::warn!(
-                            target = target_shard_id,
-                            "antenna_publish: target shard not in peer registry"
-                        );
-                        continue;
-                    }
-                };
+            } else {
                 let batch = SignalBroadcastBatchData {
                     source_shard_id: source_shard_id.0,
                     source_position: DVec3::ZERO,
@@ -1728,198 +1773,199 @@ pub fn antenna_publish(
 // about the auth construction.
 // ---------------------------------------------------------------------------
 
-/// Why a Listener apply step couldn't produce a valid ListenerState.
-/// Surfaced to callers so they can log structured errors rather than
-/// trying to interpret an `Option::None`.
+/// Reasons an `apply_antenna_config` call couldn't produce a valid
+/// `AntennaState`. Each variant is structured so callers can log a
+/// specific operator message (better than `Option::None`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ListenerApplyDenied {
-    /// `held_grants[(owner_session, grant_id)]` returned None. Player
-    /// hasn't registered the grant via `AddHeldGrant` yet, or forgot it.
-    GrantNotHeld,
-    /// The grant's stored target_shard doesn't match the listener's
-    /// claimed source_shard_id. Stale or hostile config.
-    SourceShardMismatch { held: u64, claimed: u64 },
+pub enum AntennaApplyDenied {
+    /// Config has neither TX nor RX side configured. Server rejects —
+    /// an empty antenna does nothing.
+    NoSideConfigured,
+    /// TX side: the local source channel doesn't exist on this shard.
+    /// Antennas can only forward channels that already exist (place the
+    /// source-publishing block first, then the antenna).
+    UnknownTxLocalChannel,
+    /// TX side: a grant id was set but isn't in the placing player's
+    /// HeldGrants. Player hasn't registered the grant via `AddHeldGrant`
+    /// yet, or forgot it. (For open Radio channels, omit `grant_id`.)
+    TxGrantNotHeld,
+    /// TX side: the held grant's target shard differs from the side's
+    /// claimed `remote_shard_id`. Stale or hostile config.
+    TxRemoteShardMismatch { held: u64, claimed: u64 },
+    /// RX side: same as TxGrantNotHeld but for the receive subscribe.
+    RxGrantNotHeld,
+    /// RX side: same as TxRemoteShardMismatch.
+    RxRemoteShardMismatch { held: u64, claimed: u64 },
     /// Channel name length out of bounds (>64 KiB) — defends the HMAC
     /// canonicalization which uses a u16 length prefix.
     ChannelNameTooLong,
 }
 
-/// Symmetric of [`ListenerApplyDenied`] for the Antenna path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AntennaApplyDenied {
-    /// Source channel doesn't exist locally. Antenna can only forward
-    /// channels that exist on this shard — the source must be pre-
-    /// configured (e.g., by another block placement or a seat binding).
-    UnknownSourceChannel,
-    GrantNotHeld,
-    TargetShardMismatch { held: u64, claimed: u64 },
-}
-
-/// Result of `apply_antenna_config`. The caller inserts `state` as a
-/// Component on the block entity and (optionally) persists the config
-/// to redb.
+/// Result of `apply_antenna_config`. The caller:
+///   * Inserts `state` as a Component on the block's entity.
+///   * If `outbound_subscribe.is_some()`, ships the pre-signed
+///     `SignalSubscribe` via QUIC to the target shard so the publisher
+///     registers us as a remote subscriber.
+///   * (Optionally) persists the config to redb for crash recovery.
 #[derive(Debug, Clone)]
 pub struct AntennaApplyOk {
     pub state: voxeldust_core::signal::AntennaState,
-}
-
-/// Result of `apply_listener_config`. The caller:
-///   * Inserts `state` as a Component on the block entity.
-///   * Ships `outbound_subscribe` via QUIC to `state.source_shard_id`.
-///   * Persists the config to redb (optional, for crash recovery).
-#[derive(Debug, Clone)]
-pub struct ListenerApplyOk {
-    pub state: voxeldust_core::signal::ListenerState,
-    pub outbound_subscribe: voxeldust_core::shard_message::SignalSubscribeData,
+    /// Pre-signed subscribe request for the RX side, when one is
+    /// configured AND keyed (`grant_id.is_some()`). `None` if the antenna
+    /// is TX-only or RX is open (no auth handshake required).
+    pub outbound_subscribe: Option<voxeldust_core::shard_message::SignalSubscribeData>,
 }
 
 /// Apply an `AntennaConfig` from a `BlockConfigUpdateData`. Returns
 /// `AntennaApplyOk` on success — the caller inserts the resolved
-/// `AntennaState` as a Component on the block's entity.
+/// `AntennaState` as a Component on the block's entity, and ships any
+/// `outbound_subscribe` to the publisher's shard.
 ///
-/// This function does NOT touch the entity-component world; it's pure
-/// validation + resolution against `SignalChannelTable` and `HeldGrants`.
-/// Splitting validation from mutation keeps the helper testable in
-/// isolation (no Bevy `Commands` needed).
+/// This function does NOT touch the entity-component world; it mutates
+/// only the signal-channel table (RX side may need to create the bridged
+/// + local mirror channels) and the grants registry (adds the bridged
+/// channel to the RX grant's cover). Pure validation + resolution. The
+/// split keeps the helper testable in isolation (no Bevy `Commands`
+/// needed).
+///
+/// **Open vs keyed**: when a side's `grant_id.is_none()`, the apply
+/// skips HMAC + held-grant lookup. The receiver's `try_push_remote`
+/// accepts open broadcasts on unkeyed channels without HMAC. This is the
+/// CB-radio default.
 pub fn apply_antenna_config(
-    channels: &SignalChannelTable,
-    held: &HeldGrants,
-    config: &voxeldust_core::signal::config::AntennaConfig,
-    owner_session: voxeldust_core::shard_types::SessionToken,
-) -> Result<AntennaApplyOk, AntennaApplyDenied> {
-    // 1. Source channel must exist. Antennas don't create channels —
-    //    they bridge ones that already exist (block placement order
-    //    constraint: place the source-publishing block first, then the
-    //    antenna).
-    let source_channel_id = channels
-        .resolve(&config.source_channel_name)
-        .ok_or(AntennaApplyDenied::UnknownSourceChannel)?;
-
-    // 2. Held grant must exist for the placing player.
-    let grant = held
-        .get(owner_session, config.grant_id)
-        .ok_or(AntennaApplyDenied::GrantNotHeld)?;
-
-    // 3. Cross-check claimed target_shard against held grant's stored
-    //    target. Mismatch = stale config from a re-pasted grant.
-    if grant.target_shard_id != config.target_shard_id {
-        return Err(AntennaApplyDenied::TargetShardMismatch {
-            held: grant.target_shard_id,
-            claimed: config.target_shard_id,
-        });
-    }
-
-    Ok(AntennaApplyOk {
-        state: voxeldust_core::signal::AntennaState {
-            source_channel_id: Some(source_channel_id),
-            remote_channel_name: config.remote_channel_name.clone(),
-            frequency: config.frequency,
-            grant_id: config.grant_id,
-            target_shard_id: config.target_shard_id,
-            owner_session: owner_session.0,
-            active: true,
-        },
-    })
-}
-
-/// Apply a `ListenerConfig`. Mutates `channels` (creates bridged + destination
-/// channels if they don't exist) and `grants` (adds bridged channel id to
-/// the mirror grant for inbound HMAC verification).
-///
-/// Returns `ListenerApplyOk { state, outbound_subscribe }`. The caller:
-///   * `commands.entity(block).insert(state)` to attach the listener's
-///     runtime state to the block entity.
-///   * Ships `outbound_subscribe` (pre-signed `ShardMsg::SignalSubscribe`)
-///     via QUIC to `state.source_shard_id` so the publisher's shard
-///     registers us as a subscriber.
-pub fn apply_listener_config(
     channels: &mut SignalChannelTable,
     grants: &mut GrantsRegistry,
     held: &HeldGrants,
-    config: &voxeldust_core::signal::config::ListenerConfig,
+    config: &voxeldust_core::signal::config::AntennaConfig,
     owner_session: voxeldust_core::shard_types::SessionToken,
     now_tick: u64,
-) -> Result<ListenerApplyOk, ListenerApplyDenied> {
+) -> Result<AntennaApplyOk, AntennaApplyDenied> {
+    use voxeldust_core::signal::components::{AntennaRxSide, AntennaTxSide};
     use voxeldust_core::signal::types::{ChannelMergeStrategy, SignalScope};
 
-    // 1. Held grant + cross-check.
-    let held_grant = held
-        .get(owner_session, config.grant_id)
-        .ok_or(ListenerApplyDenied::GrantNotHeld)?;
-    if held_grant.target_shard_id != config.source_shard_id {
-        return Err(ListenerApplyDenied::SourceShardMismatch {
-            held: held_grant.target_shard_id,
-            claimed: config.source_shard_id,
-        });
+    if !config.has_any_side() {
+        return Err(AntennaApplyDenied::NoSideConfigured);
     }
 
-    // Bound channel name length (defended-by-construction in `hmac_sign`
-    // via debug_assert; this is the production-path enforcement).
-    if config.bridged_channel_name.len() > u16::MAX as usize
-        || config.destination_channel_name.len() > u16::MAX as usize
-    {
-        return Err(ListenerApplyDenied::ChannelNameTooLong);
-    }
+    // ---- TX side -----------------------------------------------------------
+    let tx = if let Some(tx_cfg) = config.tx.as_ref().filter(|s| !s.is_empty()) {
+        // 1. Local source channel must already exist.
+        let local_channel_id = channels
+            .resolve(&tx_cfg.local_channel_name)
+            .ok_or(AntennaApplyDenied::UnknownTxLocalChannel)?;
 
-    // 2. Resolve / create the bridged Radio-scope channel. This is what
-    //    `try_push_remote` needs to find when forwarded entries arrive
-    //    from the publisher's shard.
-    let bridged_channel_id = channels.resolve_or_create(
-        &config.bridged_channel_name,
-        SignalScope::Radio { frequency: config.frequency },
-        ChannelMergeStrategy::LastWrite,
-        owner_session.0,
-    );
+        // 2. Validate the optional grant. Open channel ⇒ no key needed.
+        if let Some(gid) = tx_cfg.grant_id {
+            let grant = held
+                .get(owner_session, gid)
+                .ok_or(AntennaApplyDenied::TxGrantNotHeld)?;
+            if let Some(claimed) = tx_cfg.remote_shard_id {
+                if grant.target_shard_id != claimed {
+                    return Err(AntennaApplyDenied::TxRemoteShardMismatch {
+                        held: grant.target_shard_id,
+                        claimed,
+                    });
+                }
+            }
+        }
 
-    // 3. Resolve / create the Local destination channel. Internal
-    //    subscribers wire to this without learning about HMAC or grants.
-    let destination_channel_id = channels.resolve_or_create(
-        &config.destination_channel_name,
-        SignalScope::Local,
-        ChannelMergeStrategy::LastWrite,
-        owner_session.0,
-    );
-
-    // 4. Add bridged channel to the mirror grant in our registry so
-    //    `try_push_remote`'s `check_publish` channel-cover check passes
-    //    when forwarded entries arrive.
-    grants.add_channel_to_grant(config.grant_id, bridged_channel_id);
-
-    // 5. Build the outbound `SignalSubscribe` request, HMAC-signed under
-    //    the held grant key. The caller ships this via QUIC.
-    let now_ms = signal::current_unix_millis();
-    let nonce = signal::current_unix_millis(); // any non-replayed value works as nonce
-    let valid_until_tick = now_tick.saturating_add(MAX_SUBSCRIBE_LEASE_TICKS);
-    let auth_tag = signal::auth::hmac_sign_subscribe_request(
-        &held_grant.key,
-        &config.bridged_channel_name,
-        owner_session.0, // subscriber_shard_id == our local id; caller may override
-        config.grant_id,
-        nonce,
-        now_ms,
-        valid_until_tick,
-    );
-    let outbound_subscribe = voxeldust_core::shard_message::SignalSubscribeData {
-        subscriber_shard_id: 0, // caller fills in own shard_id before sending
-        channel_name: config.bridged_channel_name.clone(),
-        grant_id: config.grant_id,
-        nonce,
-        timestamp_ms: now_ms,
-        valid_until_tick,
-        auth_tag: auth_tag.to_vec(),
+        Some(AntennaTxSide {
+            local_channel_id: Some(local_channel_id),
+            frequency: tx_cfg.frequency,
+            grant_id: tx_cfg.grant_id,
+            remote_shard_id: tx_cfg.remote_shard_id,
+            next_sequence: 1,
+        })
+    } else {
+        None
     };
 
-    Ok(ListenerApplyOk {
-        state: voxeldust_core::signal::ListenerState {
-            destination_channel_id: Some(destination_channel_id),
+    // ---- RX side -----------------------------------------------------------
+    let mut outbound_subscribe = None;
+    let rx = if let Some(rx_cfg) = config.rx.as_ref().filter(|s| !s.is_empty()) {
+        if rx_cfg.local_channel_name.len() > u16::MAX as usize {
+            return Err(AntennaApplyDenied::ChannelNameTooLong);
+        }
+        let mut held_grant = None;
+        if let Some(gid) = rx_cfg.grant_id {
+            let g = held
+                .get(owner_session, gid)
+                .ok_or(AntennaApplyDenied::RxGrantNotHeld)?;
+            if let Some(claimed) = rx_cfg.remote_shard_id {
+                if g.target_shard_id != claimed {
+                    return Err(AntennaApplyDenied::RxRemoteShardMismatch {
+                        held: g.target_shard_id,
+                        claimed,
+                    });
+                }
+            }
+            held_grant = Some(g);
+        }
+
+        // The RX bridged channel is local-side proxy for cross-shard ingress;
+        // try_push_remote pushes inbound forwards into it. Naming convention:
+        // `<local>__radio_in_<freq>` — stable, opaque to the player, never
+        // collides with player-typed names (double underscore is reserved).
+        let bridged_name =
+            format!("{}__radio_in_{}", rx_cfg.local_channel_name, rx_cfg.frequency);
+        let bridged_channel_id = channels.resolve_or_create(
+            &bridged_name,
+            SignalScope::Radio { frequency: rx_cfg.frequency },
+            ChannelMergeStrategy::LastWrite,
+            owner_session.0,
+        );
+        let local_channel_id = channels.resolve_or_create(
+            &rx_cfg.local_channel_name,
+            SignalScope::Local,
+            ChannelMergeStrategy::LastWrite,
+            owner_session.0,
+        );
+
+        // Keyed RX: extend the grant's cover to the bridged channel id and
+        // pre-sign the SignalSubscribe the caller will ship to the publisher.
+        let valid_until_tick = now_tick.saturating_add(MAX_SUBSCRIBE_LEASE_TICKS);
+        if let (Some(gid), Some(g)) = (rx_cfg.grant_id, held_grant) {
+            grants.add_channel_to_grant(gid, bridged_channel_id);
+            let now_ms = signal::current_unix_millis();
+            let nonce = now_ms;
+            let auth_tag = signal::auth::hmac_sign_subscribe_request(
+                &g.key,
+                &bridged_name,
+                owner_session.0, // caller overrides with own shard_id before sending
+                gid,
+                nonce,
+                now_ms,
+                valid_until_tick,
+            );
+            outbound_subscribe = Some(voxeldust_core::shard_message::SignalSubscribeData {
+                subscriber_shard_id: 0,
+                channel_name: bridged_name.clone(),
+                grant_id: gid,
+                nonce,
+                timestamp_ms: now_ms,
+                valid_until_tick,
+                auth_tag: auth_tag.to_vec(),
+            });
+        }
+
+        Some(AntennaRxSide {
+            local_channel_id: Some(local_channel_id),
             bridged_channel_id: Some(bridged_channel_id),
-            remote_channel_name: config.bridged_channel_name.clone(),
-            frequency: config.frequency,
-            grant_id: config.grant_id,
-            source_shard_id: config.source_shard_id,
+            frequency: rx_cfg.frequency,
+            grant_id: rx_cfg.grant_id,
+            remote_shard_id: rx_cfg.remote_shard_id,
+            lease_until_tick: valid_until_tick,
+        })
+    } else {
+        None
+    };
+
+    Ok(AntennaApplyOk {
+        state: voxeldust_core::signal::AntennaState {
+            tx,
+            rx,
             owner_session: owner_session.0,
             active: true,
-            lease_until_tick: valid_until_tick,
         },
         outbound_subscribe,
     })
@@ -1944,17 +1990,19 @@ pub fn apply_listener_config(
 /// destination (no need to aggregate; the listener IS the publisher).
 pub fn listener_mirror(
     mut channels: ResMut<SignalChannelTable>,
-    listeners: Query<&voxeldust_core::signal::ListenerState>,
+    antennas: Query<&voxeldust_core::signal::AntennaState>,
 ) {
-    if listeners.iter().next().is_none() {
+    if antennas.iter().next().is_none() {
         return;
     }
-    for listener in &listeners {
-        if !listener.active {
+    for antenna in &antennas {
+        if !antenna.active {
             continue;
         }
-        let (Some(bridged), Some(destination)) =
-            (listener.bridged_channel_id, listener.destination_channel_id)
+        let Some(rx) = &antenna.rx else {
+            continue;
+        };
+        let (Some(bridged), Some(local)) = (rx.bridged_channel_id, rx.local_channel_id)
         else {
             continue;
         };
@@ -1964,13 +2012,13 @@ pub fn listener_mirror(
             Some(ch) => ch.value,
             None => continue,
         };
-        // Publish directly to destination — bypasses merge because the
-        // listener is the sole publisher of the destination channel.
-        // (If a player wires multiple listeners to the same destination,
+        // Publish directly to the local mirror — bypasses merge because
+        // the antenna is the sole publisher of the destination channel.
+        // (If a player wires multiple antennas to the same destination,
         // the LastWrite merge strategy makes the per-tick order
         // deterministic; if they want Sum/Average/etc., they place a
         // SignalConverter in front of the destination.)
-        channels.publish_direct_id(destination, value);
+        channels.publish_direct_id(local, value);
     }
 }
 
@@ -1978,7 +2026,7 @@ pub fn listener_mirror(
 mod tests {
     use super::*;
     use voxeldust_core::shard_types::SessionToken;
-    use voxeldust_core::signal::config::{AntennaConfig, ListenerConfig};
+    use voxeldust_core::signal::config::AntennaConfig;
     use voxeldust_core::signal::types::{ChannelMergeStrategy, SignalScope};
 
     fn fixture_session() -> SessionToken {
@@ -2021,101 +2069,136 @@ mod tests {
         assert_eq!(held.total_count(), 1);
     }
 
+    fn tx_only_keyed(channel: &str, grant_id: u64, target_shard: u64) -> AntennaConfig {
+        use voxeldust_core::signal::config::AntennaSide;
+        AntennaConfig {
+            tx: Some(AntennaSide {
+                local_channel_name: channel.into(),
+                frequency: 100,
+                grant_id: Some(grant_id),
+                remote_shard_id: Some(target_shard),
+            }),
+            rx: None,
+        }
+    }
+
+    fn rx_only_keyed(channel: &str, grant_id: u64, source_shard: u64) -> AntennaConfig {
+        use voxeldust_core::signal::config::AntennaSide;
+        AntennaConfig {
+            tx: None,
+            rx: Some(AntennaSide {
+                local_channel_name: channel.into(),
+                frequency: 100,
+                grant_id: Some(grant_id),
+                remote_shard_id: Some(source_shard),
+            }),
+        }
+    }
+
     #[test]
-    fn apply_antenna_config_resolves_state_on_happy_path() {
+    fn apply_antenna_config_tx_only_resolves_state_on_happy_path() {
         let mut channels = SignalChannelTable::new();
-        // Source channel must already exist.
         channels.get_or_create(
             "alice.local.alarm",
             SignalScope::Local,
             ChannelMergeStrategy::LastWrite,
             99,
         );
+        let mut grants = GrantsRegistry::default();
         let mut held = HeldGrants::default();
         let session = fixture_session();
         fixture_held_grant_for(&mut held, session, 0xC0FE, /*target=*/ 1);
 
-        let cfg = AntennaConfig {
-            source_channel_name: "alice.local.alarm".into(),
-            remote_channel_name: "bob.alarm-mirror".into(),
-            frequency: 0,
-            grant_id: 0xC0FE,
-            target_shard_id: 1,
-        };
-        let res =
-            apply_antenna_config(&channels, &held, &cfg, session).expect("should resolve");
-        assert_eq!(res.state.target_shard_id, 1);
-        assert_eq!(res.state.grant_id, 0xC0FE);
-        assert_eq!(res.state.owner_session, 99);
-        assert!(res.state.active);
-        assert_eq!(res.state.remote_channel_name, "bob.alarm-mirror");
+        let cfg = tx_only_keyed("alice.local.alarm", 0xC0FE, 1);
+        let res = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .expect("should resolve");
+        let state = res.state;
+        assert_eq!(state.owner_session, 99);
+        assert!(state.active);
+        let tx = state.tx.expect("tx side configured");
+        assert_eq!(tx.frequency, 100);
+        assert_eq!(tx.grant_id, Some(0xC0FE));
+        assert_eq!(tx.remote_shard_id, Some(1));
+        assert!(state.rx.is_none());
     }
 
     #[test]
-    fn apply_antenna_config_rejects_when_held_grant_missing() {
+    fn apply_antenna_config_no_side_rejected() {
         let mut channels = SignalChannelTable::new();
-        channels.get_or_create(
-            "alice.local.alarm",
-            SignalScope::Local,
-            ChannelMergeStrategy::LastWrite,
-            99,
-        );
-        let held = HeldGrants::default(); // no grants
+        let mut grants = GrantsRegistry::default();
+        let held = HeldGrants::default();
+        let session = fixture_session();
+        let cfg = AntennaConfig::default();
+        let err = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .unwrap_err();
+        assert!(matches!(err, AntennaApplyDenied::NoSideConfigured));
+    }
+
+    #[test]
+    fn apply_antenna_config_open_tx_does_not_require_grant() {
+        use voxeldust_core::signal::config::AntennaSide;
+        let mut channels = SignalChannelTable::new();
+        channels.get_or_create("src", SignalScope::Local, ChannelMergeStrategy::LastWrite, 99);
+        let mut grants = GrantsRegistry::default();
+        let held = HeldGrants::default(); // no grants — open path doesn't need any
         let session = fixture_session();
         let cfg = AntennaConfig {
-            source_channel_name: "alice.local.alarm".into(),
-            remote_channel_name: "bob.alarm".into(),
-            frequency: 0,
-            grant_id: 0xC0FE,
-            target_shard_id: 1,
+            tx: Some(AntennaSide {
+                local_channel_name: "src".into(),
+                frequency: 100,
+                grant_id: None, // open
+                remote_shard_id: Some(2),
+            }),
+            rx: None,
         };
-        let err = apply_antenna_config(&channels, &held, &cfg, session)
-            .expect_err("missing held grant must reject");
-        assert!(matches!(err, AntennaApplyDenied::GrantNotHeld));
+        let res = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .expect("open TX requires no grant");
+        let tx = res.state.tx.expect("tx configured");
+        assert!(tx.grant_id.is_none(), "open channel ⇒ grant_id stays None");
     }
 
     #[test]
-    fn apply_antenna_config_rejects_unknown_source_channel() {
-        let channels = SignalChannelTable::new();
+    fn apply_antenna_config_tx_rejects_when_keyed_grant_missing() {
+        let mut channels = SignalChannelTable::new();
+        channels.get_or_create("src", SignalScope::Local, ChannelMergeStrategy::LastWrite, 99);
+        let mut grants = GrantsRegistry::default();
+        let held = HeldGrants::default(); // no grants
+        let session = fixture_session();
+        let cfg = tx_only_keyed("src", 0xC0FE, 1);
+        let err = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .expect_err("keyed TX without held grant must reject");
+        assert!(matches!(err, AntennaApplyDenied::TxGrantNotHeld));
+    }
+
+    #[test]
+    fn apply_antenna_config_tx_rejects_unknown_local_channel() {
+        let mut channels = SignalChannelTable::new();
+        let mut grants = GrantsRegistry::default();
         let mut held = HeldGrants::default();
         let session = fixture_session();
         fixture_held_grant_for(&mut held, session, 1, 1);
-        let cfg = AntennaConfig {
-            source_channel_name: "no.such.channel".into(),
-            remote_channel_name: "x".into(),
-            frequency: 0,
-            grant_id: 1,
-            target_shard_id: 1,
-        };
-        let err = apply_antenna_config(&channels, &held, &cfg, session).unwrap_err();
-        assert!(matches!(err, AntennaApplyDenied::UnknownSourceChannel));
+        let cfg = tx_only_keyed("no.such.channel", 1, 1);
+        let err = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .unwrap_err();
+        assert!(matches!(err, AntennaApplyDenied::UnknownTxLocalChannel));
     }
 
     #[test]
-    fn apply_antenna_config_rejects_target_shard_mismatch() {
+    fn apply_antenna_config_tx_rejects_remote_shard_mismatch() {
         let mut channels = SignalChannelTable::new();
-        channels.get_or_create(
-            "src",
-            SignalScope::Local,
-            ChannelMergeStrategy::LastWrite,
-            99,
-        );
+        channels.get_or_create("src", SignalScope::Local, ChannelMergeStrategy::LastWrite, 99);
+        let mut grants = GrantsRegistry::default();
         let mut held = HeldGrants::default();
         let session = fixture_session();
         fixture_held_grant_for(&mut held, session, 1, /*target_held=*/ 1);
-        let cfg = AntennaConfig {
-            source_channel_name: "src".into(),
-            remote_channel_name: "x".into(),
-            frequency: 0,
-            grant_id: 1,
-            target_shard_id: /*claimed=*/ 999,
-        };
-        let err = apply_antenna_config(&channels, &held, &cfg, session).unwrap_err();
-        assert!(matches!(err, AntennaApplyDenied::TargetShardMismatch { .. }));
+        let cfg = tx_only_keyed("src", 1, /*claimed=*/ 999);
+        let err = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .unwrap_err();
+        assert!(matches!(err, AntennaApplyDenied::TxRemoteShardMismatch { .. }));
     }
 
     #[test]
-    fn apply_listener_config_creates_channels_and_signs_subscribe() {
+    fn apply_antenna_config_rx_creates_channels_and_signs_subscribe() {
         let mut channels = SignalChannelTable::new();
         let mut grants = GrantsRegistry::default();
         // Pre-insert a mirror grant — usually populated by
@@ -2137,52 +2220,57 @@ mod tests {
         let session = fixture_session();
         fixture_held_grant_for(&mut held, session, 0xBEEF, /*source=*/ 1);
 
-        let cfg = ListenerConfig {
-            destination_channel_name: "bob.local.health-mirror".into(),
-            bridged_channel_name: "alice.health".into(),
-            frequency: 0,
-            grant_id: 0xBEEF,
-            source_shard_id: 1,
-        };
-
-        let res =
-            apply_listener_config(&mut channels, &mut grants, &held, &cfg, session, /*now_tick=*/ 100)
-                .expect("should resolve");
-        // Both channels created.
-        assert!(channels.resolve("alice.health").is_some());
+        let cfg = rx_only_keyed("bob.local.health-mirror", 0xBEEF, 1);
+        let res = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 100)
+            .expect("should resolve");
+        // Local mirror created.
         assert!(channels.resolve("bob.local.health-mirror").is_some());
+        // Bridged radio channel created with the conventional naming.
+        let bridged_name = "bob.local.health-mirror__radio_in_100";
+        let bridged_id = channels
+            .resolve(bridged_name)
+            .expect("bridged Radio channel should exist");
         // Mirror grant now covers the bridged channel.
-        let bridged_id = channels.resolve("alice.health").unwrap();
         assert!(grants.check_publish(0xBEEF, bridged_id, 0).is_some());
-        // Outbound subscribe is signed.
-        assert_eq!(res.outbound_subscribe.grant_id, 0xBEEF);
-        assert_eq!(res.outbound_subscribe.channel_name, "alice.health");
-        assert_eq!(res.outbound_subscribe.auth_tag.len(), 16);
-        // Lease clamped reasonably (now_tick + MAX_SUBSCRIBE_LEASE_TICKS).
-        assert_eq!(
-            res.outbound_subscribe.valid_until_tick,
-            100 + MAX_SUBSCRIBE_LEASE_TICKS
-        );
+        // Outbound subscribe is signed for keyed RX.
+        let sub = res.outbound_subscribe.expect("keyed RX produces subscribe");
+        assert_eq!(sub.grant_id, 0xBEEF);
+        assert_eq!(sub.channel_name, bridged_name);
+        assert_eq!(sub.auth_tag.len(), 16);
+        assert_eq!(sub.valid_until_tick, 100 + MAX_SUBSCRIBE_LEASE_TICKS);
     }
 
     #[test]
-    fn apply_listener_config_rejects_when_held_grant_missing() {
+    fn apply_antenna_config_open_rx_does_not_emit_subscribe() {
+        use voxeldust_core::signal::config::AntennaSide;
         let mut channels = SignalChannelTable::new();
         let mut grants = GrantsRegistry::default();
         let held = HeldGrants::default();
         let session = fixture_session();
-        let cfg = ListenerConfig {
-            destination_channel_name: "x".into(),
-            bridged_channel_name: "y".into(),
-            frequency: 0,
-            grant_id: 1,
-            source_shard_id: 1,
+        let cfg = AntennaConfig {
+            tx: None,
+            rx: Some(AntennaSide {
+                local_channel_name: "ch".into(),
+                frequency: 7,
+                grant_id: None, // open ⇒ no auth handshake needed
+                remote_shard_id: Some(1),
+            }),
         };
-        let err = apply_listener_config(
-            &mut channels, &mut grants, &held, &cfg, session, /*now_tick=*/ 0,
-        )
-        .unwrap_err();
-        assert_eq!(err, ListenerApplyDenied::GrantNotHeld);
+        let res = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .expect("open RX must succeed without grants");
+        assert!(res.outbound_subscribe.is_none(), "open RX skips subscribe HMAC");
+    }
+
+    #[test]
+    fn apply_antenna_config_rx_rejects_when_keyed_grant_missing() {
+        let mut channels = SignalChannelTable::new();
+        let mut grants = GrantsRegistry::default();
+        let held = HeldGrants::default();
+        let session = fixture_session();
+        let cfg = rx_only_keyed("dest", 1, 1);
+        let err = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .unwrap_err();
+        assert_eq!(err, AntennaApplyDenied::RxGrantNotHeld);
     }
 
     #[test]
@@ -2235,21 +2323,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_listener_config_rejects_source_shard_mismatch() {
+    fn apply_antenna_config_rx_rejects_remote_shard_mismatch() {
         let mut channels = SignalChannelTable::new();
         let mut grants = GrantsRegistry::default();
         let mut held = HeldGrants::default();
         let session = fixture_session();
         fixture_held_grant_for(&mut held, session, 1, /*target_held=*/ 1);
-        let cfg = ListenerConfig {
-            destination_channel_name: "x".into(),
-            bridged_channel_name: "y".into(),
-            frequency: 0,
-            grant_id: 1,
-            source_shard_id: /*claimed=*/ 999,
-        };
-        let err = apply_listener_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+        let cfg = rx_only_keyed("dest", 1, /*claimed=*/ 999);
+        let err = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
             .unwrap_err();
-        assert!(matches!(err, ListenerApplyDenied::SourceShardMismatch { .. }));
+        assert!(matches!(err, AntennaApplyDenied::RxRemoteShardMismatch { .. }));
     }
 }

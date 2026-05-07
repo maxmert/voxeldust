@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use smallvec::SmallVec;
 
-use crate::shard_types::ShardId;
+use voxeldust_types::ShardId;
 
 use super::types::*;
 
@@ -701,7 +701,7 @@ impl SignalChannelTable {
                     ch_ref.signature
                 };
 
-                if !crate::signal::auth::hmac_verify(
+                if !crate::auth::hmac_verify(
                     &key_for_verify,
                     name,
                     wire_scope_code,
@@ -1245,7 +1245,7 @@ mod tests {
                 /*seq=*/ 0,
                 /*grant=*/ 0,
                 None,
-                &crate::signal::grants::GrantsRegistry::default(),
+                &crate::grants::GrantsRegistry::default(),
             )
             .expect_err("publish to unknown channel must be rejected");
         assert_eq!(err, RemoteIngressDenied::UnknownChannel);
@@ -1258,7 +1258,7 @@ mod tests {
         // Local channel rejects remote ingress regardless of wire scope.
         let mut t = table_with_channel("priv", SignalScope::Local);
         let err = t
-            .try_push_remote("priv", SignalValue::Bool(true), 0, 1, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+            .try_push_remote("priv", SignalValue::Bool(true), 0, 1, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect_err("Local channels must reject remote ingress");
         assert_eq!(err, RemoteIngressDenied::LocalChannelImmutable);
     }
@@ -1275,7 +1275,7 @@ mod tests {
                 SignalValue::Bool(true),
                 /*wire_scope=*/ 2,
                 1, 0, 0, 0, None,
-                &crate::signal::grants::GrantsRegistry::default(),
+                &crate::grants::GrantsRegistry::default(),
             )
             .expect_err("scope re-labeling must be rejected");
         assert_eq!(err, RemoteIngressDenied::ScopeMismatch);
@@ -1285,7 +1285,7 @@ mod tests {
     fn try_push_remote_rejects_scope_mismatch_radio_to_short() {
         let mut t = table_with_channel("hail", SignalScope::Radio { frequency: 91100 });
         let err = t
-            .try_push_remote("hail", SignalValue::Bool(true), 1, 1, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+            .try_push_remote("hail", SignalValue::Bool(true), 1, 1, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect_err("Radio channel must not accept ShortRange-tagged wire entries");
         assert_eq!(err, RemoteIngressDenied::ScopeMismatch);
     }
@@ -1293,7 +1293,7 @@ mod tests {
     #[test]
     fn try_push_remote_accepts_matching_short_range() {
         let mut t = table_with_channel("beacon", SignalScope::ShortRange { range_m: 2000.0 });
-        t.try_push_remote("beacon", SignalValue::Float(0.7), 1, 99, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Float(0.7), 1, 99, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("matching scope should accept");
         // Run the merge to surface the value.
         t.merge_pending();
@@ -1303,7 +1303,7 @@ mod tests {
     #[test]
     fn try_push_remote_accepts_matching_long_range() {
         let mut t = table_with_channel("alert", SignalScope::LongRange);
-        t.try_push_remote("alert", SignalValue::Bool(true), 2, 99, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("alert", SignalValue::Bool(true), 2, 99, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("matching scope should accept");
         t.merge_pending();
         assert_eq!(t.get("alert").unwrap().value, SignalValue::Bool(true));
@@ -1312,7 +1312,7 @@ mod tests {
     #[test]
     fn try_push_remote_accepts_matching_radio() {
         let mut t = table_with_channel("hail", SignalScope::Radio { frequency: 91100 });
-        t.try_push_remote("hail", SignalValue::Float(0.5), 3, 99, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("hail", SignalValue::Float(0.5), 3, 99, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("matching scope should accept");
         t.merge_pending();
         assert_eq!(t.get("hail").unwrap().value, SignalValue::Float(0.5));
@@ -1327,7 +1327,7 @@ mod tests {
     fn try_push_remote_local_with_local_wire_still_rejects() {
         let mut t = table_with_channel("priv", SignalScope::Local);
         let err = t
-            .try_push_remote("priv", SignalValue::Bool(true), 0, 1, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+            .try_push_remote("priv", SignalValue::Bool(true), 0, 1, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect_err("Local channels stay sealed in Phase 1A");
         assert_eq!(err, RemoteIngressDenied::LocalChannelImmutable);
     }
@@ -1452,9 +1452,9 @@ mod tests {
         // replay check. Verifies that two consecutive zero-tagged entries
         // both land (no spurious "duplicate" rejection).
         let mut t = table_with_channel("beacon", SignalScope::ShortRange { range_m: 2000.0 });
-        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("first zero-tagged accepts");
-        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("second zero-tagged accepts (replay check skipped)");
     }
 
@@ -1463,11 +1463,11 @@ mod tests {
         let mut t = table_with_channel("beacon", SignalScope::ShortRange { range_m: 2000.0 });
         let now = current_unix_millis();
         // First publish at seq=1 with current ts.
-        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, now, 1, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, now, 1, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("first seq=1 must accept");
         // Replay of the same (sender, seq, ts) — duplicate rejection.
         let err = t
-            .try_push_remote("beacon", SignalValue::Bool(true), 1, 99, now, 1, 0, None, &crate::signal::grants::GrantsRegistry::default())
+            .try_push_remote("beacon", SignalValue::Bool(true), 1, 99, now, 1, 0, None, &crate::grants::GrantsRegistry::default())
             .expect_err("replay must reject");
         assert_eq!(err, RemoteIngressDenied::Replay);
     }
@@ -1477,13 +1477,13 @@ mod tests {
         // Two distinct senders publishing the same seq must not interfere.
         let mut t = table_with_channel("beacon", SignalScope::ShortRange { range_m: 2000.0 });
         let now = current_unix_millis();
-        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 100, now, 1, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 100, now, 1, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("sender 100 seq 1 accepts");
-        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 200, now, 1, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 200, now, 1, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("sender 200 seq 1 also accepts (independent window)");
         // But each sender's own replay still rejects.
         let err = t
-            .try_push_remote("beacon", SignalValue::Bool(true), 1, 100, now, 1, 0, None, &crate::signal::grants::GrantsRegistry::default())
+            .try_push_remote("beacon", SignalValue::Bool(true), 1, 100, now, 1, 0, None, &crate::grants::GrantsRegistry::default())
             .expect_err("sender 100 replay must reject");
         assert_eq!(err, RemoteIngressDenied::Replay);
     }
@@ -1496,7 +1496,7 @@ mod tests {
         let key = t.get("beacon").unwrap().signature;
         let now = current_unix_millis();
         let value = SignalValue::Float(0.7);
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &key,
             "beacon",
             1,
@@ -1508,7 +1508,7 @@ mod tests {
             1,
             0,
         );
-        t.try_push_remote("beacon", value, 1, 99, now, 1, 0, Some(&tag), &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", value, 1, 99, now, 1, 0, Some(&tag), &crate::grants::GrantsRegistry::default())
             .expect("matching HMAC must accept");
         t.merge_pending();
         assert_eq!(t.get("beacon").unwrap().value, value);
@@ -1523,7 +1523,7 @@ mod tests {
         let key = t.get("beacon").unwrap().signature;
         let now = current_unix_millis();
         let original_value = SignalValue::Float(0.5);
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &key,
             "beacon",
             1,
@@ -1537,11 +1537,11 @@ mod tests {
         );
         let tampered = SignalValue::Float(0.99);
         let err = t
-            .try_push_remote("beacon", tampered, 1, 99, now, 1, 0, Some(&tag), &crate::signal::grants::GrantsRegistry::default())
+            .try_push_remote("beacon", tampered, 1, 99, now, 1, 0, Some(&tag), &crate::grants::GrantsRegistry::default())
             .expect_err("tampered value must reject");
         assert_eq!(err, RemoteIngressDenied::AuthFailed);
         // And the genuine value still works.
-        t.try_push_remote("beacon", original_value, 1, 99, now, 1, 0, Some(&tag), &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", original_value, 1, 99, now, 1, 0, Some(&tag), &crate::grants::GrantsRegistry::default())
             .expect("genuine value with matching tag must accept");
         let _ = original_value; // suppress unused
     }
@@ -1553,7 +1553,7 @@ mod tests {
         let mut t = table_with_channel("beacon", SignalScope::ShortRange { range_m: 2000.0 });
         let key = t.get("beacon").unwrap().signature;
         let now = current_unix_millis();
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &key, "beacon", 1, 0, 1, 0u32, now, 99, 1, 99999,
         );
         let err = t
@@ -1566,7 +1566,7 @@ mod tests {
                 1,
                 /*grant_id=*/ 99999,
                 Some(&tag),
-                &crate::signal::grants::GrantsRegistry::default(),
+                &crate::grants::GrantsRegistry::default(),
             )
             .expect_err("non-zero grant_id rejects in Phase 3A");
         assert_eq!(err, RemoteIngressDenied::AuthFailed);
@@ -1579,7 +1579,7 @@ mod tests {
         // The user's headline use case: Bob's tablet publishes to Alice's
         // Local-scoped channel (e.g., chair's `local.thrust-forward`)
         // because Alice issued Bob a grant covering it.
-        use crate::signal::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
+        use crate::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
         use smallvec::smallvec;
         let mut t = table_with_channel("alice.thrust-forward", SignalScope::Local);
         let id = t.resolve("alice.thrust-forward").unwrap();
@@ -1605,7 +1605,7 @@ mod tests {
         // Bob computes HMAC under the grant key and sends.
         let now = current_unix_millis();
         let value = SignalValue::Float(1.0);
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &grant_key,
             "alice.thrust-forward",
             /*scope_code=*/ 0,
@@ -1635,7 +1635,7 @@ mod tests {
     fn grant_revoked_locks_local_channel_publish() {
         // Same setup as above, then Alice revokes — the next publish from
         // Bob with the same key fails as AuthFailed.
-        use crate::signal::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
+        use crate::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
         use smallvec::smallvec;
         let mut t = table_with_channel("alice.door.open", SignalScope::Local);
         let id = t.resolve("alice.door.open").unwrap();
@@ -1658,7 +1658,7 @@ mod tests {
         assert!(grants.revoke(7));
 
         let now = current_unix_millis();
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &grant_key, "alice.door.open", 0, 0, 0, 1.0_f32.to_bits(), now, 99, 1, 7,
         );
         let err = t
@@ -1681,7 +1681,7 @@ mod tests {
     fn grant_publish_only_blocks_local_when_subscribe_only_grant() {
         // A subscribe-only grant must NOT let the holder publish, even on
         // a Local channel they have *some* grant for. Defense in depth.
-        use crate::signal::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
+        use crate::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
         use smallvec::smallvec;
         let mut t = table_with_channel("alice.health", SignalScope::Local);
         let id = t.resolve("alice.health").unwrap();
@@ -1701,7 +1701,7 @@ mod tests {
             mirror_of_held: false,
         });
         let now = current_unix_millis();
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &grant_key, "alice.health", 0, 0, 0, 1.0_f32.to_bits(), now, 99, 1, 33,
         );
         let err = t
@@ -1723,7 +1723,7 @@ mod tests {
         let err = t
             .try_push_remote(
                 "alice.door", SignalValue::Bool(true), 0, 99, now, 1, 42, None,
-                &crate::signal::grants::GrantsRegistry::default(),
+                &crate::grants::GrantsRegistry::default(),
             )
             .expect_err("grant_id without tag must reject");
         assert_eq!(err, RemoteIngressDenied::AuthFailed);
@@ -1743,7 +1743,7 @@ mod tests {
                 1,
                 42,
                 Some(&[]),
-                &crate::signal::grants::GrantsRegistry::default(),
+                &crate::grants::GrantsRegistry::default(),
             )
             .expect_err("grant_id with empty tag must reject");
         assert_eq!(err, RemoteIngressDenied::AuthFailed);
@@ -1754,7 +1754,7 @@ mod tests {
         // Bob has a grant covering channel A but tries to publish to
         // channel B (also owned by Alice). The HMAC verifies under the
         // grant key but the channel-cover check rejects.
-        use crate::signal::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
+        use crate::grants::{GrantOps, GrantsRegistry, RemoteAccessGrant};
         use smallvec::smallvec;
         let mut t = table_with_channel("alice.door", SignalScope::Local);
         t.get_or_create("alice.alarm", SignalScope::Local, ChannelMergeStrategy::LastWrite, 1);
@@ -1775,7 +1775,7 @@ mod tests {
             mirror_of_held: false,
         });
         let now = current_unix_millis();
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &grant_key, "alice.alarm", 0, 0, 0, 1.0_f32.to_bits(), now, 99, 1, 11,
         );
         let err = t
@@ -1810,12 +1810,12 @@ mod tests {
                 1,
                 0,
                 Some(&bogus),
-                &crate::signal::grants::GrantsRegistry::default(),
+                &crate::grants::GrantsRegistry::default(),
             )
             .expect_err("forged tag must reject");
         assert_eq!(err, RemoteIngressDenied::AuthFailed);
         // The genuine publisher's seq=1 with valid tag must still go through.
-        let real_tag = crate::signal::auth::hmac_sign(
+        let real_tag = crate::auth::hmac_sign(
             &key, "beacon", 1, 0, 1, 0.5_f32.to_bits(), now, 99, 1, 0,
         );
         t.try_push_remote(
@@ -1823,7 +1823,7 @@ mod tests {
             SignalValue::Float(0.5),
             1, 99, now, 1, 0,
             Some(&real_tag),
-            &crate::signal::grants::GrantsRegistry::default(),
+            &crate::grants::GrantsRegistry::default(),
         )
         .expect("genuine seq=1 must pass after the forged-tag rejection");
     }
@@ -1835,9 +1835,9 @@ mod tests {
         // required" gating where appropriate (e.g., Radio channels with
         // a key-required policy).
         let mut t = table_with_channel("beacon", SignalScope::ShortRange { range_m: 2000.0 });
-        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, None, &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, None, &crate::grants::GrantsRegistry::default())
             .expect("None auth_tag accepts (legacy unauthenticated)");
-        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, Some(&[]), &crate::signal::grants::GrantsRegistry::default())
+        t.try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 0, 0, 0, Some(&[]), &crate::grants::GrantsRegistry::default())
             .expect("empty auth_tag accepts (legacy unauthenticated)");
     }
 
@@ -1847,7 +1847,7 @@ mod tests {
         // ts = 0 ms, sender_shard, seq = 1 — clearly stale unless system
         // clock is January 1970 + 5 seconds (it isn't).
         let err = t
-            .try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 1, 1, 0, None, &crate::signal::grants::GrantsRegistry::default())
+            .try_push_remote("beacon", SignalValue::Bool(true), 1, 99, 1, 1, 0, None, &crate::grants::GrantsRegistry::default())
             .expect_err("stale ts must reject");
         assert_eq!(err, RemoteIngressDenied::StaleOrFutureTimestamp);
     }

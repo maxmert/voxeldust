@@ -7,6 +7,13 @@ edition.workspace = true
 name = "client"
 path = "src/main.rs"
 
+[features]
+default = []
+# Dev-only iteration speedup: builds Bevy as a dylib so editing client code
+# does not relink the ~61 Bevy crates. Use as `cargo run -p client --features fast`.
+# NEVER ship a release build with this feature — see BUILD_PERF.md.
+fast = ["bevy/dynamic_linking"]
+
 [dependencies]
 # Bevy — DefaultPlugins brings bevy_render, bevy_pbr, bevy_core_pipeline,
 # bevy_winit, bevy_asset, bevy_input, bevy_time, bevy_transform, bevy_text,

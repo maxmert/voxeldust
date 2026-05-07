@@ -249,6 +249,115 @@ table ShipNearbyInfo {
     game_time: float64;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4.6: ShipNeighborhood — system-shard → ship-shard 1Hz push of the
+// authoritative nearby-ships set for ShortRange signal routing.
+//
+// Today ship-shard learns peer positions opportunistically from incoming
+// `SignalBroadcastBatch.source_position` headers — which means a ship that
+// hasn't yet RECEIVED a signal from a peer doesn't know about that peer's
+// position, and conservatively floods them. At dense traffic this is a
+// real bandwidth + tick-budget cost.
+//
+// system-shard already has the spatial grid (Phase 4.5) and full position
+// state. Pushing the authoritative neighborhood per ship eliminates the
+// conservative-include surge: ship-shard's per-tick distance-prune now uses
+// fresh, complete data.
+//
+// Cadence: 1 Hz. Ships move at most ~10s of meters per tick; a 1s lag on
+// the neighborhood data is well under any ShortRange radius's transition
+// window. The `position`/`velocity` fields let ship-shard inter/extrapolate
+// for sub-second precision if the application wants it.
+// ---------------------------------------------------------------------------
+
+table ShipNeighborhoodEntry {
+    /// The peer ship's `shard_id` (used as the QUIC routing key).
+    peer_shard_id: uint64;
+    /// The peer ship's authoritative position, stamped at the moment the
+    /// system-shard built this batch. Receiver uses for ShortRange
+    /// distance prune.
+    peer_position: Vec3d;
+    /// Peer velocity for optional client-side extrapolation between
+    /// 1Hz pushes. Zero is a safe fallback.
+    peer_velocity: Vec3d;
+}
+
+table ShipNeighborhood {
+    /// The recipient ship's shard id — routed to this ship by the
+    /// system-shard's QUIC dispatcher.
+    target_ship_shard_id: uint64;
+    /// UNIX millis when the system-shard built this batch. Allows
+    /// the receiver to age-check + drop stale data after disconnect.
+    issued_at_ms: uint64;
+    /// Peers within the system-shard's chosen routing radius (today
+    /// `max(ShortRange tier ranges) × hysteresis`). Self is excluded.
+    peers: [ShipNeighborhoodEntry];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1: Media (text/audio/video/image) data plane.
+//
+// Parallel to `SignalBroadcastBatch` for low-bitrate use (text + small
+// frames). Audio + video at production rates want a dedicated QUIC
+// stream per active subscription — that transport is a deferred slice;
+// the wire shape below is the foundation both paths share.
+//
+// Auth: same as signal — `auth_tag` is HMAC over the canonical
+// header bytes plus a hash of `payload_data`. Verify cost is O(hash)
+// regardless of frame size, so a 25 KB video frame doesn't burn more
+// CPU than a 30-byte text line.
+//
+// Codec selection: `codec` carries the `AudioCodec` / `VideoCodec` /
+// `ImageFormat` ordinal corresponding to `payload_kind`. Mismatched
+// codecs between publisher and subscriber fail at config time in the
+// tablet UI — never a runtime transcode burden.
+// ---------------------------------------------------------------------------
+
+table MediaFrame {
+    /// Channel name. Same `<owner>.<block-uid>.<role>` convention as
+    /// the signal pipeline's channel namespace.
+    channel_name: string;
+    /// Capability lookup. Same semantics as
+    /// `SignalBroadcastEntry::grant_id` — receiver verifies
+    /// `auth_tag` against the matching grant's HMAC key.
+    grant_id: uint64;
+    /// Per-(channel, sender) monotonic sequence — drives the
+    /// receiver's replay window. Same shape as signal entries.
+    sequence: uint64;
+    /// UNIX wall-clock millis at the publisher.
+    timestamp_ms: uint64;
+    /// Payload kind: 0=Text, 1=Audio, 2=Video, 3=Image.
+    payload_kind: uint8;
+    /// Codec ordinal per `payload_kind` (0 for Text). See
+    /// `core::media::{AudioCodec, VideoCodec, ImageFormat}` for
+    /// the numeric values — wire-stable, never reused.
+    codec: uint8;
+    /// Codec-specific encoded bytes. UTF-8 for Text; Opus packet
+    /// for Audio; H.264 NAL unit / AV1 OBU for Video; PNG/JPEG
+    /// stream for Image.
+    payload_data: [uint8];
+    /// Audio: sample count in this frame. Zero for other kinds.
+    samples: uint32 = 0;
+    /// Audio: sample rate (Hz). Zero for other kinds.
+    sample_rate: uint32 = 0;
+    /// Video / Image: width in pixels.
+    width: uint32 = 0;
+    /// Video / Image: height in pixels.
+    height: uint32 = 0;
+    /// Bit 0 (Video): keyframe (1 = I-frame, 0 = delta). Other
+    /// kinds: 0.
+    flags: uint8 = 0;
+    /// HMAC-SHA256 truncated to 16 bytes. Auth input is
+    /// `(canonical_header || sha256(payload_data))`.
+    auth_tag: [uint8];
+}
+
+table MediaBroadcastBatch {
+    source_shard_id: uint64;
+    source_position: Vec3d;
+    frames: [MediaFrame];
+}
+
 /// Kind of observable entity carried in WorldState.entities and AOI updates.
 /// Ship: a physical ship grid. Identified by entity_id == ship_id.
 /// EvaPlayer: a player floating in space (system shard authoritative).
@@ -874,6 +983,12 @@ union ShardPayload {
     RadioUnsubscribe,
     /// Phase 3F.9: ship-shard → system-shard freq interest propagation.
     ShipFrequencyInterest,
+    /// Phase 4.6: system-shard → ship-shard authoritative neighborhood
+    /// for ShortRange signal routing (1 Hz cadence).
+    ShipNeighborhood,
+    /// Phase 5.1: media (text/audio/video/image) batched broadcast.
+    /// Reuses signal's auth + replay-window + scope routing.
+    MediaBroadcastBatch,
 }
 
 /// Root type for all inter-shard QUIC messages.
@@ -1096,12 +1211,11 @@ table WorldState {
     /// Source-of-truth going forward. The legacy `ships`/`players` fields
     /// will be removed once all shards and clients migrate.
     entities: [ObservableEntity];
-    /// Per-tick HUD signal snapshot. Full replacement each tick —
-    /// widgets that displayed a channel last tick but not this tick
-    /// render their "no signal" state. Server includes every channel
-    /// the player has permission to read + any server-authored text
-    /// labels (body names, warp target names, ship callsigns, …).
-    hud_signals: [HudSignalEntry];
+    // Phase 4.4.5: `hud_signals: [HudSignalEntry]` removed. Replaced
+    // by the TCP `HudSignalDelta` server message — only changed
+    // entries ship, never per-tick full-snapshot UDP. See
+    // `core::signal::hud_session` and the `ServerMsg::HudSignalDelta`
+    // path in `client_message.rs`.
 }
 
 /// Block-to-sub-grid assignment for mechanical mount membership.
@@ -1339,6 +1453,25 @@ table PlayerDestroyed {
 table SignalBindingFB {
     channel_name: string;
     property: uint8;   // SignalProperty enum
+    // Phase C — scope hint when the binding triggers fresh channel
+    // creation. Ignored when the named channel already exists
+    // (channel scope is set at create time and immutable).
+    //   0 = unspecified → server creates as `Local` (matches
+    //       pre-Phase-C behaviour; backward compat with old
+    //       client payloads that don't set the field).
+    //   1 = ShortRange (range_m carries the radius).
+    //   2 = LongRange.
+    //   3 = Radio (frequency carries the frequency).
+    scope_code: uint8 = 0;
+    /// ShortRange: physical radius in meters. Other scopes: 0.
+    range_m: float = 0;
+    /// Radio: frequency. Other scopes: 0.
+    frequency: uint32 = 0;
+    /// Phase D — held-grant id when the binding targets a keyed
+    /// remote channel (typically scope_code=3 Radio). 0 ⇒ no grant
+    /// (open channel, in-shard binding, or grant not yet picked).
+    /// Server validates: required iff resolved channel is keyed.
+    grant_id: uint64 = 0;
 }
 
 /// Per-block-kind allowed property descriptor used by the configurator UI
@@ -1442,7 +1575,12 @@ table EngineControllerConfigFB {
 /// to a Radio channel on a target shard via a held grant. The placing
 /// player's `HeldGrants[grant_id]` provides the HMAC key (looked up at
 /// apply time, then cached on `AntennaState` for the per-tick hot path).
-table AntennaConfigFB {
+///
+/// LEGACY shape — retained for one migration window. New code emits
+/// `AntennaConfigFB` (bidirectional). Server reads this on load and
+/// rewrites it into the bidirectional form (TX side only). Removed in
+/// the Phase 6 cleanup.
+table LegacyAntennaConfigFB {
     /// Local channel the antenna READS each tick.
     source_channel_name: string;
     /// Remote channel name on the target shard (the publish target).
@@ -1452,23 +1590,100 @@ table AntennaConfigFB {
     target_shard_id: uint64;
 }
 
-/// Phase 3E: Listener block config — receives a Radio channel from a
-/// remote source shard via a held grant and mirrors its value onto a
-/// chosen Local channel on this shard. Apply step creates BOTH:
-///   * a local Radio-scope channel matching `bridged_channel_name`
-///     (so try_push_remote can find it when forwarded entries arrive)
-///   * a local Local-scope channel matching `destination_channel_name`
-///     (so internal subscribers wire to it like any native Local channel).
-/// Then attaches the bridged channel id to the mirror grant in
-/// `GrantsRegistry` so HMAC verification succeeds.
-table ListenerConfigFB {
-    /// Local Local-scope channel where the bridged value gets mirrored.
+/// LEGACY shape — Listener block. Retained for one migration window.
+/// Server rewrites into a bidirectional `AntennaConfigFB` with only
+/// the RX side populated. Removed in the Phase 6 cleanup.
+table LegacyListenerConfigFB {
     destination_channel_name: string;
-    /// Cross-shard channel name (matches publisher's remote_channel_name).
     bridged_channel_name: string;
     frequency: uint32;
     grant_id: uint64;
     source_shard_id: uint64;
+}
+
+/// One side of a bidirectional Antenna bridge. The struct is symmetric
+/// for TX and RX — direction is implicit from which slot in
+/// `AntennaConfigFB` carries it. Empty `local_channel_name` means
+/// "this side is unused" (used to express tx-only or rx-only antennas
+/// since FB doesn't have native Option-of-table for `optional struct`).
+table AntennaSideFB {
+    /// Local channel:
+    ///   * TX: antenna SUBSCRIBES to this channel; values are forwarded
+    ///     to `frequency` each tick.
+    ///   * RX: antenna PUBLISHES values it receives on `frequency` to
+    ///     this channel.
+    /// Empty means "side unused".
+    local_channel_name: string;
+
+    /// Radio frequency. Routing target.
+    frequency: uint32 = 0;
+
+    /// Optional held-grant id. 0 ⇒ open radio (channel has
+    /// `auth: ChannelAuth::None`). Non-zero ⇒ keyed; server checks
+    /// the grant in the placing player's HeldGrants and verifies
+    /// it covers the resolved remote channel with the right ops.
+    grant_id: uint64 = 0;
+
+    /// Where the remote channel lives. 0 ⇒ orchestrator-routed via
+    /// the relay (per the existing frequency-band table).
+    remote_shard_id: uint64 = 0;
+}
+
+/// Bidirectional Antenna config. At least one side must have a
+/// non-empty `local_channel_name` — server rejects zero-side configs.
+/// Most antennas use BOTH sides (full-duplex chat at one frequency);
+/// uni-directional antennas (TX-only beacon, RX-only listener) leave
+/// one side empty.
+table AntennaConfigFB {
+    tx: AntennaSideFB;
+    rx: AntennaSideFB;
+}
+
+/// Per-side access status for the configurator UI. Server populates
+/// this from the resolved remote channel (via the grant lookup or the
+/// orchestrator's relay table) so the client can render the right
+/// affordance: open caption, held-grants dropdown, or "Request access".
+table AccessStatusForChannelFB {
+    /// True if the resolver knows about a remote channel for this
+    /// (frequency, remote_shard_id). False ⇒ "no channel known yet"
+    /// (client shows freq input only).
+    remote_channel_known: bool = false;
+    /// True if the remote channel is keyed (`ChannelAuth::Hmac`).
+    auth_required: bool = false;
+    /// Held grants the placing player has that cover the resolved
+    /// channel + the relevant op (Publish for TX, Subscribe for RX).
+    held_grants: [HeldGrantSummaryFB];
+}
+
+/// Compact summary of a held grant for picker dropdowns. The grant
+/// key itself is never sent to the client UI — only the picker id
+/// + label + expiry + ops bitmap.
+table HeldGrantSummaryFB {
+    grant_id: uint64;
+    label: string;
+    /// 0 ⇒ no expiry; otherwise unix-ms.
+    expires_at_ms: uint64 = 0;
+    /// Bit 0 = Publish, bit 1 = Subscribe.
+    ops_mask: uint8 = 0;
+}
+
+/// Unified Terminal block config — replaces TextDisplayState +
+/// KeyboardTerminalState wire shapes. A Terminal can subscribe (read),
+/// publish (write), or both. At least one channel must be set; server
+/// rejects fully-empty configs.
+table TerminalConfigFB {
+    /// Channel this terminal subscribes to. Inbound text frames
+    /// scroll the in-world surface. Empty ⇒ input-only kiosk
+    /// (e.g., emergency-call panel).
+    subscribe_channel_name: string;
+
+    /// Channel this terminal publishes to on E-key send. Empty ⇒
+    /// read-only sign / status board.
+    publish_channel_name: string;
+
+    /// Maximum scrollback lines retained on the entity. 0 ⇒ apply
+    /// the registry default.
+    scrollback_lines: uint16 = 0;
 }
 
 /// Server → client: seat bindings when player enters a seat.
@@ -1535,10 +1750,22 @@ table BlockConfigState {
     publish_property_options: [PropertyOptionFB];
     /// Properties this block kind can subscribe to.
     subscribe_property_options: [PropertyOptionFB];
-    /// Phase 3E: Antenna block config (None on non-antenna blocks).
+    /// Phase D: Antenna block config (None on non-antenna blocks).
+    /// Bidirectional shape; legacy uni-directional rows are migrated
+    /// at boot and never appear here.
     antenna_config: AntennaConfigFB;
-    /// Phase 3E: Listener block config (None on non-listener blocks).
-    listener_config: ListenerConfigFB;
+    /// Phase D: Per-side access status for the configurator UI —
+    /// renders the right grant affordance (open / picker / request).
+    /// Server-populated; ignored on the inbound update path.
+    antenna_tx_status: AccessStatusForChannelFB;
+    antenna_rx_status: AccessStatusForChannelFB;
+    /// Phase D: Unified Terminal block config (None on non-terminal
+    /// blocks).
+    terminal_config: TerminalConfigFB;
+    /// Phase D: Held-grant summaries for the configurator's binding
+    /// rows that target Radio scope. Picker dropdown sources its
+    /// options from this snapshot.
+    held_grants: [HeldGrantSummaryFB];
 }
 
 /// Client → server: updated signal config for a functional block.
@@ -1558,10 +1785,12 @@ table BlockConfigUpdate {
     autopilot_config: AutopilotConfigFB;
     warp_computer_config: WarpComputerConfigFB;
     engine_controller_config: EngineControllerConfigFB;
-    /// Phase 3E: Antenna block config (None on non-antenna blocks).
+    /// Phase D: Antenna block config (None on non-antenna blocks).
+    /// Bidirectional shape.
     antenna_config: AntennaConfigFB;
-    /// Phase 3E: Listener block config (None on non-listener blocks).
-    listener_config: ListenerConfigFB;
+    /// Phase D: Unified Terminal block config (None on non-terminal
+    /// blocks).
+    terminal_config: TerminalConfigFB;
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,6 +1852,37 @@ table GrantsSnapshotData {
     grants: [GrantPublicView];
 }
 
+/// Phase D: server → client "engage device" message. Sent in response
+/// to E (INTERACT) on a Terminal block. Carries everything the
+/// client needs to open the in-world chat surface: which block, what
+/// channels are wired, and the current scrollback so the player sees
+/// recent traffic immediately.
+table OpenTerminalChatData {
+    block_x: int32;
+    block_y: int32;
+    block_z: int32;
+    /// Empty string ⇒ no read side configured (input-only kiosk).
+    subscribe_channel: string;
+    /// Empty string ⇒ no write side configured (read-only sign).
+    publish_channel: string;
+    /// Most-recent scrollback at engagement time. Bounded by the
+    /// terminal's max_lines (default 64). Subsequent updates flow as
+    /// `TerminalScrollbackDelta`.
+    recent_lines: [string];
+}
+
+/// Phase D: server → client real-time scrollback update.  Pushed each
+/// time a Terminal's `recent_lines` changes (a new media frame
+/// arrived on its subscribe channel) AND the player is engaged with
+/// that terminal. The client appends to the local cached scrollback,
+/// ring-buffered to the terminal's max_lines.
+table TerminalScrollbackDeltaData {
+    block_x: int32;
+    block_y: int32;
+    block_z: int32;
+    appended_lines: [string];
+}
+
 union ServerPayload {
     JoinResponse,
     WorldState,
@@ -1645,6 +1905,10 @@ union ServerPayload {
     GrantsSnapshotData,
     /// Phase 4.4: delta-encoded HUD signal updates.
     HudSignalDelta,
+    /// Phase D: open the in-world Terminal chat surface.
+    OpenTerminalChatData,
+    /// Phase D: append lines to a Terminal's scrollback while engaged.
+    TerminalScrollbackDeltaData,
 }
 
 /// Root type for server → client messages.
@@ -1723,6 +1987,18 @@ table RemoteSignalPublish {
     value_data: float;
 }
 
+/// Phase D: client → server "user typed a line on the in-world Terminal".
+/// Server's INTERACT path turns this into a `KeyboardTerminalInput`
+/// event consumed by `terminal_publish`, which signs (or sends bare for
+/// open channels) and ships the media frame.
+table TerminalChatSendData {
+    block_x: int32;
+    block_y: int32;
+    block_z: int32;
+    /// Single line, ≤ 4 KiB (matches MediaPayload::Text size cap).
+    text: string;
+}
+
 union ClientPayload {
     Connect,
     PlayerInput,
@@ -1742,6 +2018,8 @@ union ClientPayload {
     ForgetHeldGrant,
     /// Phase 3C: publish to a remote channel via a held grant.
     RemoteSignalPublish,
+    /// Phase D: send a chat line typed on an engaged Terminal block.
+    TerminalChatSendData,
 }
 
 /// Root type for client → server messages.

@@ -22,6 +22,7 @@ use voxeldust_core::block::{
     chunk_storage::ChunkStorage,
     palette::{index_to_xyz, CHUNK_SIZE},
     sub_block::SubBlockType,
+    BlockId,
 };
 
 use crate::hud::ar::ArFilter;
@@ -65,6 +66,7 @@ pub fn spawn_hud_tiles_for_chunk(
 ) {
     for (flat_idx, elements) in chunk.iter_sub_blocks() {
         let (bx, by, bz) = index_to_xyz(flat_idx as usize);
+        let host_block = chunk.get_block(bx, by, bz);
         for elem in elements {
             if elem.element_type != SubBlockType::HudPanel {
                 continue;
@@ -76,7 +78,20 @@ pub fn spawn_hud_tiles_for_chunk(
                 block_pos: world_block,
                 face: elem.face,
             };
-            let settings = panel_configs.get_or_default(key);
+            // Panel-config priority:
+            //   1. Explicit user config saved in `HudPanelConfigs`
+            //      (player picked a kind via the F-key editor).
+            //   2. Implicit per-host-block default from
+            //      `default_settings_for_host_block` (e.g. Terminal
+            //      blocks pre-fill `WidgetKind::Terminal`).
+            //   3. Generic empty default (`WidgetKind::None`).
+            let settings = panel_configs
+                .by_key
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| {
+                    default_settings_for_host_block(host_block)
+                });
             spawn_tile(
                 commands,
                 meshes,
@@ -91,6 +106,48 @@ pub fn spawn_hud_tiles_for_chunk(
             );
         }
     }
+}
+
+/// Per-host-block sensible defaults for HUD panels at placement time.
+/// Generic shape: each host-block kind that ships a HUD subblock can
+/// declare its widget defaults here, so the player's first encounter
+/// with the panel shows the right widget without manual config.
+///
+/// Terminal blocks default to a `Terminal` widget (chat / log
+/// surface). Generic windowed blocks (cockpit canopy, future glass
+/// panels, …) keep the existing `HudPanelSettings::default` (all
+/// `WidgetKind::None` — empty pane the pilot configures).
+fn default_settings_for_host_block(
+    host: BlockId,
+) -> crate::hud::panel_config::HudPanelSettings {
+    use crate::hud::panel_config::HudPanelSettings;
+    use crate::hud::tile::{HudPanelLayout, HudWidgetSlot};
+    use voxeldust_core::signal::types::SignalProperty;
+    if host == BlockId::TERMINAL {
+        return HudPanelSettings {
+            layout: HudPanelLayout::Single,
+            slots: [
+                HudWidgetSlot {
+                    kind: WidgetKind::Terminal,
+                    channel: String::new(),
+                    property: SignalProperty::Status,
+                    caption: "TERMINAL".to_string(),
+                },
+                HudWidgetSlot::default(),
+                HudWidgetSlot::default(),
+                HudWidgetSlot::default(),
+            ],
+            opacity: 1.0,
+            ar_enabled: false,
+            ar_filter: ArFilter {
+                celestial_bodies: false,
+                remote_ships: false,
+                remote_players: false,
+                debris: false,
+            },
+        };
+    }
+    HudPanelSettings::default()
 }
 
 #[allow(clippy::too_many_arguments)]

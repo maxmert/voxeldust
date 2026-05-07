@@ -5,6 +5,7 @@ pub mod button;
 pub mod config_panel;
 pub mod gauge;
 pub mod numeric;
+pub mod terminal;
 pub mod text;
 pub mod toggle;
 
@@ -26,5 +27,6 @@ fn register_all(mut registry: ResMut<HudWidgetRegistry>) {
     registry.register(Box::new(text::TextWidget));
     registry.register(Box::new(config_panel::ConfigPanelWidget));
     registry.register(Box::new(button::ButtonWidget));
-    tracing::info!(count = 6, "hud widgets registered");
+    registry.register(Box::new(terminal::TerminalWidget));
+    tracing::info!(count = 7, "hud widgets registered");
 }

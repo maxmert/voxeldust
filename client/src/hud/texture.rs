@@ -15,7 +15,7 @@ use crate::hud::focus::HudFocusState;
 use crate::hud::signal_registry::SignalRegistry;
 use crate::hud::tablet::HeldTablet;
 use crate::hud::tile::{HudConfig, HudPanelLayout, HudTexture, HudTile, HudWidgetSlot, WidgetKind};
-use crate::hud::widget::{DrawCtx, HudWidgetRegistry};
+use crate::hud::widget::{DrawCtx, HudWidgetRegistry, HudWidgetState};
 use crate::remote::{RemoteDebris, RemotePlayers, RemoteShips};
 use crate::shard::{CameraWorldPos, PrimaryWorldState, SecondaryWorldStates};
 
@@ -28,7 +28,69 @@ impl Plugin for HudTexturePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HudWidgetRegistry>()
             .configure_sets(Update, HudTextureSet)
-            .add_systems(Update, redraw_hud_textures.in_set(HudTextureSet));
+            .add_systems(
+                Update,
+                (
+                    // Lifecycle FIRST: ensure each tile carries the
+                    // right `HudWidgetState` for its current
+                    // `HudConfig.kind` before redraw consumes it.
+                    sync_hud_widget_state,
+                    redraw_hud_textures,
+                )
+                    .chain()
+                    .in_set(HudTextureSet),
+            );
+    }
+}
+
+/// Per-tile widget-state lifecycle. For each tile we ensure:
+///   * If the widget for `config.kind` returns `Some(_)` from
+///     `init_state` AND no state component exists OR the existing
+///     state was init'd for a different `kind`, install a fresh state.
+///   * If the widget returns `None` and a state component exists,
+///     remove it (e.g. when a Terminal tile is reconfigured to a
+///     Gauge — the Gauge has no state and we drop the chat history).
+///
+/// State outlives engagement (the player can disengage and re-engage
+/// without losing scrollback) — only kind swaps, tile despawns, or
+/// chunk re-mesh wipes it. That matches Star-Citizen-style "the
+/// terminal remembers what was on it".
+fn sync_hud_widget_state(
+    registry: Res<HudWidgetRegistry>,
+    mut commands: Commands,
+    q: Query<
+        (Entity, &HudConfig, Option<&HudWidgetState>),
+        Or<(Changed<HudConfig>, Added<HudConfig>)>,
+    >,
+) {
+    for (entity, config, state) in q.iter() {
+        let Some(widget) = registry.get(config.kind) else {
+            // Unknown kind (e.g. None) — drop any stale state.
+            if state.is_some() {
+                commands.entity(entity).remove::<HudWidgetState>();
+            }
+            continue;
+        };
+        let want_state = widget.init_state(config);
+        match (state, want_state) {
+            (None, Some(data)) => {
+                commands.entity(entity).insert(HudWidgetState {
+                    kind: config.kind,
+                    data,
+                });
+            }
+            (Some(existing), Some(data)) if existing.kind != config.kind => {
+                commands.entity(entity).insert(HudWidgetState {
+                    kind: config.kind,
+                    data,
+                });
+            }
+            (Some(existing), None) if existing.kind != config.kind => {
+                // The previous widget had state, the new one doesn't.
+                commands.entity(entity).remove::<HudWidgetState>();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -51,10 +113,13 @@ fn redraw_hud_textures(
         &mut HudTexture,
         &GlobalTransform,
         Option<&HeldTablet>,
+        Option<&mut HudWidgetState>,
     )>,
 ) {
     let now = Instant::now();
-    for (entity, _tile, config, mut tex, tile_gt, is_tablet) in q.iter_mut() {
+    for (entity, _tile, config, mut tex, tile_gt, is_tablet, mut widget_state) in
+        q.iter_mut()
+    {
         // The tablet renders its surface via the egui render-to-image
         // camera in `tablet_ui::TabletPaintPass` — don't also overwrite
         // it from this CPU-painted pipeline.
@@ -86,6 +151,13 @@ fn redraw_hud_textures(
         // blit the resulting pixels into the corresponding quadrant
         // of the main buffer. `AR overlay` and `cursor` are applied
         // on top of the composited result using the full face.
+        // Slot 0 receives the per-tile widget state (Single layout
+        // OR Quad's TL slot, since `HudWidgetState` lives on the tile
+        // entity itself). Quad slots 1-3 are stateless — Quad is the
+        // composite-of-passive-readouts case; if a future stateful
+        // widget needs Quad slots, this is the place to extend.
+        let state_for_slot0: Option<&mut dyn crate::hud::widget::HudWidgetStateData> =
+            widget_state.as_deref_mut().map(|s| s.data.as_mut());
         match config.layout {
             HudPanelLayout::Single => {
                 paint_slot(
@@ -100,17 +172,18 @@ fn redraw_hud_textures(
                     &config.channel,
                     &config.caption,
                     config.opacity,
+                    state_for_slot0,
                     config,
                 );
             }
             HudPanelLayout::Quad => {
                 let half = size / 2;
-                // Slot 0 = outer HudConfig (TL).
+                // Slot 0 = outer HudConfig (TL) + per-tile state.
                 paint_slot(
                     buf.as_mut_slice(), size, 0,     0,     half,
                     &registry, &signals,
                     config.kind, &config.channel, &config.caption,
-                    config.opacity, config,
+                    config.opacity, state_for_slot0, config,
                 );
                 if let Some(extras) = &config.extra_slots {
                     let [tr, bl, br] = extras.as_ref();
@@ -183,6 +256,7 @@ fn paint_slot(
     channel: &str,
     caption: &str,
     opacity: f32,
+    state: Option<&mut dyn crate::hud::widget::HudWidgetStateData>,
     config: &HudConfig,
 ) {
     if kind == WidgetKind::None {
@@ -197,11 +271,13 @@ fn paint_slot(
         caption,
         opacity,
     };
-    widget.draw(ctx, value, config);
+    widget.draw(ctx, value, state, config);
     blit(full_buf, full_size, &sub, x, y, sub_size);
 }
 
-/// Variant for Quad slots 1-3 (read from `extra_slots`).
+/// Variant for Quad slots 1-3 (read from `extra_slots`). Quad sub-
+/// slots are stateless today — the tile's `HudWidgetState`, if any,
+/// belongs to slot 0.
 #[allow(clippy::too_many_arguments)]
 fn paint_slot_from(
     full_buf: &mut [u8],
@@ -217,7 +293,7 @@ fn paint_slot_from(
 ) {
     paint_slot(
         full_buf, full_size, x, y, sub_size, registry, signals,
-        slot.kind, &slot.channel, &slot.caption, opacity, config,
+        slot.kind, &slot.channel, &slot.caption, opacity, None, config,
     );
 }
 

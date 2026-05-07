@@ -22,6 +22,12 @@ use voxeldust_core::system::{compute_lighting, compute_planet_position, SystemPa
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 use voxeldust_shard_common::signal_pipeline::SignalPipelinePlugin;
+use voxeldust_shard_common::hud_delta::{
+    append_channel_table_entries, flush_hud_deltas, HudSessionMap,
+};
+use voxeldust_shard_common::grant_persistence::{
+    flush_grants_now, populate_registry_from_db, GrantsPersistenceQueue,
+};
 
 use voxeldust_core::character::{
     self, build_character, move_one_character, CharacterBuildSpec, CharacterCapsule,
@@ -175,6 +181,16 @@ struct ShipColliderAttached(rapier3d::geometry::ColliderHandle);
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
+
+/// Phase 4-Persist.6: planet-shard's redb file. Mirrors ship-shard's
+/// `ShipPersistence` pattern but currently houses only the grants
+/// table; planet block persistence is a separate slice. The same
+/// `voxeldust_shard_common::grant_persistence` helpers operate
+/// against this `db` field.
+#[derive(Resource)]
+struct PlanetPersistence {
+    db: redb::Database,
+}
 
 /// Rapier 3D physics context.
 #[derive(Resource)]
@@ -1377,6 +1393,61 @@ fn disconnect_cleanup(
 // Broadcast
 // ---------------------------------------------------------------------------
 
+/// Phase 4-Persist.6: load every persisted `RemoteAccessGrant` from
+/// planet-shard's redb back into the in-memory `GrantsRegistry`.
+///
+/// Channel-name resolution against the `SignalChannelTable` is best-
+/// effort: planet-shard doesn't yet persist block configs, so the
+/// channel table is empty at boot. Persisted grants whose channels
+/// can't resolve come back with an empty `channels` list — they're
+/// inert until the player re-issues. Once block persistence ships
+/// (separate slice), the same grant data will resolve correctly.
+fn load_grants_from_db(
+    persistence: Res<PlanetPersistence>,
+    channels: Res<voxeldust_core::signal::SignalChannelTable>,
+    mut registry: ResMut<voxeldust_core::signal::GrantsRegistry>,
+) {
+    let now_ms = voxeldust_core::signal::current_unix_millis();
+    let _loaded = populate_registry_from_db(&persistence.db, &channels, &mut registry, now_ms);
+}
+
+/// Phase 4-Persist.6: drain `GrantsPersistenceQueue` against
+/// planet-shard's redb at 0.5s cadence. Uses the shared
+/// `flush_grants_now` helper so the heavy lifting is identical to
+/// ship-shard's flush path — no per-shard duplication.
+fn flush_grants_to_db(
+    persistence: Res<PlanetPersistence>,
+    registry: Res<voxeldust_core::signal::GrantsRegistry>,
+    channels: Res<voxeldust_core::signal::SignalChannelTable>,
+    mut queue: ResMut<GrantsPersistenceQueue>,
+    tick: Res<ecs::TickCounter>,
+) {
+    if tick.0 % 10 != 0 {
+        return;
+    }
+    flush_grants_now(&persistence.db, &registry, &channels, &mut queue);
+}
+
+/// Phase 4.4: planet-shard HUD delta emitter. Snapshot is the channel
+/// table only — planet-shard doesn't have ship-specific auto-publish
+/// channels like `ship.speed`. The shared `flush_hud_deltas` helper
+/// owns the per-session diff + TCP fan-out.
+fn emit_planet_hud_signal_deltas(
+    players: Query<&SessionId, With<PlanetPlayer>>,
+    channels: Res<voxeldust_core::signal::SignalChannelTable>,
+    bridge: Res<NetworkBridge>,
+    mut session_map: ResMut<HudSessionMap>,
+) {
+    let mut snapshot = Vec::new();
+    append_channel_table_entries(&channels, &mut snapshot);
+    flush_hud_deltas(
+        &bridge,
+        &mut session_map,
+        &snapshot,
+        players.iter().map(|sid| sid.0),
+    );
+}
+
 fn broadcast_world_state(
     players: Query<(&SessionId, &Name, &PlanetPosition), With<PlanetPlayer>>,
     ships: Query<(&NearbyShipId, &ShipPosition, &ShipRotation), With<NearbyShip>>,
@@ -1388,7 +1459,6 @@ fn broadcast_world_state(
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
     external: Res<ExternalEntities>,
-    channels: Res<voxeldust_core::signal::SignalChannelTable>,
 ) {
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
@@ -1508,34 +1578,10 @@ fn broadcast_world_state(
         autopilot: None,
         sub_grids: vec![],
         entities,
-        // Snapshot every channel registered on this planet's
-        // `SignalChannelTable`. Future Phase 4 work narrows this to
-        // per-connection delta encoding (HudSignalDelta on TCP) — for now
-        // every primary connection gets the full snapshot, matching how
-        // ship-shard does it. Channels stay scoped to this shard, so
-        // there's zero leakage to other planets / ships.
-        hud_signals: channels
-            .iter_all()
-            .map(|(name, _id, value)| voxeldust_core::client_message::HudSignalEntryData {
-                channel_name: name.to_string(),
-                value: match value {
-                    voxeldust_core::signal::SignalValue::Bool(b) => {
-                        voxeldust_core::client_message::HudSignalValue::Bool(b)
-                    }
-                    voxeldust_core::signal::SignalValue::Float(f) => {
-                        voxeldust_core::client_message::HudSignalValue::Float(f)
-                    }
-                    voxeldust_core::signal::SignalValue::State(s) => {
-                        voxeldust_core::client_message::HudSignalValue::State(s)
-                    }
-                },
-                // Property is per-binding metadata; the channel itself
-                // doesn't carry one, so default to Active(=0) here. The
-                // configurator and widget bindings store the property
-                // separately on each subscriber/publisher binding.
-                property: 0,
-            })
-            .collect(),
+        // Phase 4.4.5: HUD signal updates ship as `HudSignalDelta`
+        // TCP messages emitted by `emit_planet_hud_signal_deltas`,
+        // running alongside this WorldState builder in the same
+        // broadcast schedule.
     });
     if bridge.broadcast_tx.try_send(ws).is_err() {
         tracing::warn!("WorldState broadcast dropped — channel full");
@@ -1644,6 +1690,15 @@ fn build_app(
 
     let mut app = App::new();
 
+    // Phase 4-Persist.6: open the planet-shard's redb file. Currently
+    // houses only the grants table; future block-persistence work
+    // will reuse the same `db` handle (mirror of ship-shard's
+    // `ShipPersistence`).
+    let db_path = format!("/tmp/voxeldust-planet-{}.redb", shard_id.0);
+    let db = redb::Database::create(&db_path)
+        .unwrap_or_else(|e| panic!("failed to create redb at {db_path}: {e}"));
+    app.insert_resource(PlanetPersistence { db });
+
     const PLANET_TICK_DT: f32 = 0.05;
     app.insert_resource(PlanetIntegrationDt(PLANET_TICK_DT));
     app.insert_resource(RapierContext {
@@ -1684,6 +1739,10 @@ fn build_app(
     app.insert_resource(ShipEntityIndex::default());
     app.insert_resource(PendingHandoffs::default());
     app.insert_resource(ExternalEntities::default());
+    // Phase 4.4.5: per-session HUD signal delta state for the
+    // `emit_planet_hud_signal_deltas` system. Lazy-populated;
+    // entries pruned on session disappearance.
+    app.insert_resource(HudSessionMap::default());
 
     // Signal pipeline — same `SignalPipelinePlugin` as ship-shard. Enables
     // placing functional blocks (seats, doors, lights, future thrusters)
@@ -1790,8 +1849,22 @@ fn build_app(
     // Broadcast.
     app.add_systems(
         Update,
-        (broadcast_world_state, send_player_digest).in_set(PlanetSet::Broadcast),
+        (
+            broadcast_world_state,
+            send_player_digest,
+            emit_planet_hud_signal_deltas,
+        )
+            .in_set(PlanetSet::Broadcast),
     );
+
+    // Phase 4-Persist.6: load persisted grants once at boot. Channel-
+    // name resolution is best-effort against the (initially empty)
+    // SignalChannelTable; future block persistence will populate it.
+    app.add_systems(Startup, load_grants_from_db);
+    // Periodic flush of GrantsPersistenceQueue → redb. 0.5s cadence
+    // mirrors ship-shard's flush rate so a planet-shard crash bounds
+    // grant-loss to <1s of in-flight ops.
+    app.add_systems(Update, flush_grants_to_db);
 
     // Diagnostics.
     app.add_systems(Update, log_state.in_set(PlanetSet::Diagnostics));

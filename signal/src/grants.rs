@@ -416,7 +416,7 @@ impl GrantsRegistry {
         &self,
         table: &super::channel::SignalChannelTable,
         viewer_player_id: u64,
-    ) -> crate::client_message::GrantsSnapshotData {
+    ) -> crate::wire::GrantsSnapshotData {
         let grants = self
             .by_id
             .values()
@@ -437,7 +437,7 @@ impl GrantsRegistry {
                     .iter()
                     .filter_map(|cid| table.name_for_id(*cid).map(|s| s.to_string()))
                     .collect();
-                crate::client_message::GrantPublicView {
+                crate::wire::GrantPublicView {
                     grant_id: g.grant_id,
                     key_b64,
                     channel_names,
@@ -455,7 +455,7 @@ impl GrantsRegistry {
                 }
             })
             .collect();
-        crate::client_message::GrantsSnapshotData { grants }
+        crate::wire::GrantsSnapshotData { grants }
     }
 }
 
@@ -635,8 +635,8 @@ mod tests {
         // Alice (owner_id=1) owns channel "alice.thrust". Bob (owner_id=2)
         // owns "bob.beacon". Bob should NOT be able to issue a grant on
         // alice.thrust.
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope};
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope};
         let mut table = SignalChannelTable::new();
         table.get_or_create("alice.thrust", SignalScope::Local, ChannelMergeStrategy::LastWrite, 1);
         table.get_or_create("bob.beacon", SignalScope::Local, ChannelMergeStrategy::LastWrite, 2);
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn create_for_owner_rejects_unknown_channel() {
-        use crate::signal::channel::SignalChannelTable;
+        use crate::channel::SignalChannelTable;
         let table = SignalChannelTable::new();
         let mut reg = GrantsRegistry::default();
         let err = reg
@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn create_for_owner_rejects_empty_channel_list() {
-        use crate::signal::channel::SignalChannelTable;
+        use crate::channel::SignalChannelTable;
         let table = SignalChannelTable::new();
         let mut reg = GrantsRegistry::default();
         let err = reg
@@ -712,8 +712,8 @@ mod tests {
         // Alice owns chA, Bob owns chB. Alice asks for a grant covering
         // BOTH. Must reject — and crucially, must NOT have inserted a
         // partial grant covering only chA. Atomic rollback.
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope};
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope};
         let mut table = SignalChannelTable::new();
         table.get_or_create("alice.a", SignalScope::Local, ChannelMergeStrategy::LastWrite, 1);
         table.get_or_create("bob.b", SignalScope::Local, ChannelMergeStrategy::LastWrite, 2);
@@ -737,8 +737,8 @@ mod tests {
 
     #[test]
     fn snapshot_for_player_filters_keys_by_ownership() {
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope};
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope};
         let mut table = SignalChannelTable::new();
         table.get_or_create("alice.thrust", SignalScope::Local, ChannelMergeStrategy::LastWrite, 1);
         let mut reg = GrantsRegistry::default();
@@ -766,10 +766,10 @@ mod tests {
         // via a held grant. Alice's `signal_broadcast_remote` (simulated
         // here without ECS) forwards a dirty value, HMAC-stamped under
         // the grant key. Bob's `try_push_remote` verifies and accepts.
-        use crate::signal::auth as signal_auth;
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope, SignalValue};
-        use crate::shard_types::ShardId;
+        use crate::auth as signal_auth;
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope, SignalValue};
+        use voxeldust_types::ShardId;
         use smallvec::smallvec;
 
         let mut alice_table = SignalChannelTable::new();
@@ -801,7 +801,7 @@ mod tests {
 
         // Bob's shard subscribes via SignalSubscribe — Alice's
         // apply_signal_subscribe (logic recreated here without ECS):
-        let now_ms = crate::signal::channel::current_unix_millis();
+        let now_ms = crate::channel::current_unix_millis();
         let bob_shard = ShardId(99);
         let nonce = 42;
         let lease_until = 10_000;
@@ -931,7 +931,7 @@ mod tests {
         // Phase 3E.4: a recipient's GrantsRegistry holds verification-
         // only mirror grants that MUST NOT appear in their tablet's
         // "Issued by me" panel.
-        use crate::signal::channel::SignalChannelTable;
+        use crate::channel::SignalChannelTable;
         let table = SignalChannelTable::new();
         let mut reg = GrantsRegistry::default();
 
@@ -1002,9 +1002,9 @@ mod tests {
         // The test exercises the cryptographic + scope + replay flow
         // without ECS — the antenna_publish system is just the per-tick
         // wrapper around exactly this canonical sequence.
-        use crate::signal::auth as signal_auth;
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope, SignalValue};
+        use crate::auth as signal_auth;
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope, SignalValue};
         use smallvec::smallvec;
 
         // Alice's side: she owns `alice.alarm` (Local) and issued a
@@ -1037,7 +1037,7 @@ mod tests {
         // Bob's antenna: simulates one tick of antenna_publish for the
         // case "source channel value is `Bool(true)`, target = Alice".
         let bob_shard_id = 99_u64;
-        let now_ms = crate::signal::channel::current_unix_millis();
+        let now_ms = crate::channel::current_unix_millis();
         let value = SignalValue::Bool(true);
         let value_bits = 1.0_f32.to_bits();
         let tag = signal_auth::hmac_sign(
@@ -1102,9 +1102,9 @@ mod tests {
         // The test exercises the cryptographic + scope + replay flow
         // without ECS scheduling — all the building blocks live in
         // core, and this test verifies the contract between them.
-        use crate::signal::auth as signal_auth;
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope, SignalValue};
+        use crate::auth as signal_auth;
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope, SignalValue};
         use smallvec::smallvec;
 
         // === Alice's side ===
@@ -1178,7 +1178,7 @@ mod tests {
 
         // === Alice broadcasts a value ===
         let alice_shard = 1u64;
-        let now_ms = crate::signal::channel::current_unix_millis();
+        let now_ms = crate::channel::current_unix_millis();
         let value = SignalValue::Float(0.65);
         let value_bits = 0.65_f32.to_bits();
         let tag = signal_auth::hmac_sign(
@@ -1234,7 +1234,7 @@ mod tests {
                 &bob_grants,
             )
             .expect_err("revoked mirror grant must reject inbound");
-        assert_eq!(err, crate::signal::channel::RemoteIngressDenied::AuthFailed);
+        assert_eq!(err, crate::channel::RemoteIngressDenied::AuthFailed);
     }
 
     #[test]
@@ -1248,8 +1248,8 @@ mod tests {
         //      We simulate that here without the network.
         //   5. try_push_remote on Alice's shard verifies via the grant key
         //      (NOT the channel signature) and accepts.
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope, SignalValue};
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope, SignalValue};
         let mut table = SignalChannelTable::new();
         table.get_or_create("alice.thrust-forward", SignalScope::Local, ChannelMergeStrategy::LastWrite, 1);
 
@@ -1276,9 +1276,9 @@ mod tests {
         assert_eq!(recovered_key, grant_key);
 
         // Bob's tablet builds a publish payload + HMAC tag.
-        let now_ms = crate::signal::channel::current_unix_millis();
+        let now_ms = crate::channel::current_unix_millis();
         let value = SignalValue::Float(1.0);
-        let tag = crate::signal::auth::hmac_sign(
+        let tag = crate::auth::hmac_sign(
             &recovered_key,
             "alice.thrust-forward",
             /*scope=Local*/ 0,
@@ -1312,7 +1312,7 @@ mod tests {
         // Now Alice revokes — same payload must reject.
         assert!(reg.revoke(grant_id));
         // Use a fresh seq since the old one is in the replay window.
-        let tag2 = crate::signal::auth::hmac_sign(
+        let tag2 = crate::auth::hmac_sign(
             &recovered_key,
             "alice.thrust-forward",
             0, 0, 1, 1.0_f32.to_bits(), now_ms, 99, 2, grant_id,
@@ -1330,13 +1330,13 @@ mod tests {
                 &reg,
             )
             .expect_err("revoked grant must reject");
-        assert_eq!(err, crate::signal::channel::RemoteIngressDenied::AuthFailed);
+        assert_eq!(err, crate::channel::RemoteIngressDenied::AuthFailed);
     }
 
     #[test]
     fn create_for_owner_rejects_invalid_ops_ordinal() {
-        use crate::signal::channel::SignalChannelTable;
-        use crate::signal::types::{ChannelMergeStrategy, SignalScope};
+        use crate::channel::SignalChannelTable;
+        use crate::types::{ChannelMergeStrategy, SignalScope};
         let mut table = SignalChannelTable::new();
         table.get_or_create("ch", SignalScope::Local, ChannelMergeStrategy::LastWrite, 1);
         let mut reg = GrantsRegistry::default();

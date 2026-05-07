@@ -7,7 +7,7 @@ use voxeldust_core::signal::types::SignalProperty;
 use crate::hud::font;
 use crate::hud::signal_registry::SignalValue;
 use crate::hud::tile::{HudConfig, WidgetKind};
-use crate::hud::widget::{DrawCtx, HudWidget};
+use crate::hud::widget::{DrawCtx, HudWidget, HudWidgetStateData};
 
 pub struct NumericWidget;
 
@@ -29,7 +29,13 @@ impl HudWidget for NumericWidget {
             SignalProperty::Boost,
         ]
     }
-    fn draw(&self, ctx: DrawCtx, value: Option<SignalValue>, config: &HudConfig) {
+    fn draw(
+        &self,
+        ctx: DrawCtx,
+        value: Option<SignalValue>,
+        _state: Option<&mut dyn HudWidgetStateData>,
+        config: &HudConfig,
+    ) {
         let w = ctx.size as usize;
         let h = ctx.size as usize;
         let alpha = (255.0 * ctx.opacity) as u8;

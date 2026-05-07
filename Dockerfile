@@ -9,6 +9,9 @@ WORKDIR /build
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
+COPY types/ types/
+COPY protocol-fb/ protocol-fb/
+COPY signal/ signal/
 COPY core/ core/
 COPY shard-common/ shard-common/
 COPY orchestrator/ orchestrator/

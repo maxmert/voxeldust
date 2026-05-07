@@ -9,7 +9,7 @@ use voxeldust_core::signal::types::SignalProperty;
 use crate::hud::font;
 use crate::hud::signal_registry::SignalValue;
 use crate::hud::tile::{HudConfig, WidgetKind};
-use crate::hud::widget::{DrawCtx, HudWidget};
+use crate::hud::widget::{DrawCtx, HudWidget, HudWidgetStateData};
 
 pub struct GaugeWidget;
 
@@ -29,7 +29,13 @@ impl HudWidget for GaugeWidget {
             SignalProperty::Boost,
         ]
     }
-    fn draw(&self, mut ctx: DrawCtx, value: Option<SignalValue>, _config: &HudConfig) {
+    fn draw(
+        &self,
+        mut ctx: DrawCtx,
+        value: Option<SignalValue>,
+        _state: Option<&mut dyn HudWidgetStateData>,
+        _config: &HudConfig,
+    ) {
         let v = value.map(|v| v.as_f32().clamp(0.0, 1.0)).unwrap_or(0.0);
         let w = ctx.size as usize;
         let h = ctx.size as usize;

@@ -367,78 +367,176 @@ impl Default for EngineControllerState {
 // ---------------------------------------------------------------------------
 
 /// Antenna: bridges a Local channel on this shard to a remote
-/// (Radio-scope) channel on the target shard. Each tick, the antenna
-/// reads its `source_channel_id`'s current value and forwards it to
-/// `target_shard_id` using the held grant's HMAC key — same path as
-/// `RemoteSignalPublish` but block-driven instead of tablet-driven.
+/// Phase D: bidirectional Antenna runtime state. Holds optional TX
+/// side (forward local-channel values onto a Radio frequency) and
+/// optional RX side (subscribe to a Radio frequency, mirror values
+/// onto a local channel). Most antennas use both sides at one
+/// frequency for full-duplex chat. Replaces the prior split
+/// AntennaState (TX-only) + ListenerState (RX-only) components.
 ///
-/// The grant lives in `HeldGrants` keyed by the block's `owner_id` (set
-/// from `BlockOwnership` at placement); the block's grant_id+target are
-/// captured here for fast per-tick lookup.
+/// Either side's `local_channel_id == None` means "side unconfigured
+/// yet" — the apply path resolves channel ids at config time. Either
+/// side's `grant_id == None` means "open channel, no key required"
+/// (CB-radio-style broadcast). Cross-shard ingress (`try_push_remote`)
+/// validates the HMAC against the matching grant when set.
 #[derive(Component, Clone, Debug, Default)]
 pub struct AntennaState {
-    /// Local channel feeding the antenna. Antenna reads this each tick.
-    pub source_channel_id: Option<ChannelId>,
-    /// Remote channel name on the target shard (must match the grant's
-    /// covered channels). Stored as a string because grants reference
-    /// channel ids on a DIFFERENT shard — name is the shard-spanning key.
-    pub remote_channel_name: String,
-    /// Radio frequency for the receiver-side filter (matches the
-    /// channel's `Radio { frequency }` scope on the target shard).
-    pub frequency: u32,
-    /// HMAC grant id authorising this antenna's outbound publishes.
-    /// Looked up in the placing player's `HeldGrants` to get the key.
-    pub grant_id: u64,
-    /// Target shard the forwarded entries are addressed to.
-    pub target_shard_id: u64,
-    /// Block owner — used to look up the grant's key in HeldGrants.
+    pub tx: Option<AntennaTxSide>,
+    pub rx: Option<AntennaRxSide>,
+    /// Block owner session — used to look up grant keys in HeldGrants.
+    /// Set at placement from `BlockOwnership`; never zero on a placed
+    /// antenna.
     pub owner_session: u64,
-    /// False = antenna mute (skip per-tick forward). Driven by an
-    /// optional Active subscriber binding (see `BlockKindSignalSchema`).
+    /// Master power: false ⇒ both sides paused (no forward, no mirror).
+    /// Driven by the antenna's own Active subscriber binding.
     pub active: bool,
 }
 
-/// Listener: receives a remote (Radio-scope) channel via a held grant
-/// and mirrors its current value onto a chosen Local channel on this
-/// shard. Subscribers in this ship that want the bridged value just bind
-/// to the local mirror channel — they don't need to know about HMAC,
-/// grants, or cross-shard plumbing.
-///
-/// The mirror runs each tick in `listener_mirror`: read the merged value
-/// of `bridged_channel_id` (which `try_push_remote` already verified +
-/// pushed), `publish_direct_id` it to `destination_channel_id`. Local
-/// subscribers see a fresh value with the listener as the apparent publisher.
-#[derive(Component, Clone, Debug, Default)]
-pub struct ListenerState {
-    /// Local channel that mirrors the bridged Radio channel's value.
+impl AntennaState {
+    /// Antenna has at least one configured side?
+    pub fn has_any_side(&self) -> bool {
+        self.tx.is_some() || self.rx.is_some()
+    }
+}
+
+/// TX side of an Antenna: the antenna SUBSCRIBES to `local_channel_id`
+/// on this shard each tick, looks up its grant's HMAC key, stamps the
+/// value with `next_sequence`, and forwards via QUIC to the remote
+/// shard hosting the matching Radio channel at `frequency`. Same wire
+/// path as the tablet `RemoteSignalPublish` flow, but block-driven.
+#[derive(Clone, Debug, Default)]
+pub struct AntennaTxSide {
+    /// Local channel feeding the antenna. Antenna reads this each tick.
+    pub local_channel_id: Option<ChannelId>,
+    /// Radio frequency. Receiver-side filter on the target shard.
+    pub frequency: u32,
+    /// Optional HMAC grant id. None ⇒ open channel (no key required).
+    pub grant_id: Option<u64>,
+    /// Target shard the forwarded entries are addressed to. None ⇒
+    /// orchestrator-routed via the relay's frequency-band table.
+    pub remote_shard_id: Option<u64>,
+    /// Monotonic outbound sequence counter for the publisher's half
+    /// of the (channel, sender) replay window. Incremented on every
+    /// successful frame ship.
+    pub next_sequence: u64,
+}
+
+/// RX side of an Antenna: the antenna issues a `SignalSubscribe` for
+/// the Radio channel at `frequency` (HMAC-stamped with its grant if
+/// keyed; bare if open) and PUBLISHES values it receives on
+/// `bridged_channel_id` (a local Radio-scope mirror) onto
+/// `local_channel_id` (a Local-scope channel that in-shard subscribers
+/// can wire to). The two-step "Radio-mirror → Local-publish" indirection
+/// keeps the cross-shard auth surface contained — internal subscribers
+/// don't need HMAC awareness.
+#[derive(Clone, Debug, Default)]
+pub struct AntennaRxSide {
+    /// Local Local-scope channel that mirrors the bridged Radio value.
     /// Created at config time with `SignalScope::Local` so internal
     /// subscribers can wire to it like any native channel.
-    pub destination_channel_id: Option<ChannelId>,
+    pub local_channel_id: Option<ChannelId>,
     /// Local Radio-scope channel that receives forwarded entries from
     /// the publisher's shard. `try_push_remote` verifies the HMAC tag
     /// against this channel's signature (or grant), then push_pendings
-    /// the value here; `listener_mirror` reads that and writes to
-    /// `destination_channel_id`.
+    /// the value here; the antenna's RX-mirror system reads from this
+    /// and writes to `local_channel_id`.
     pub bridged_channel_id: Option<ChannelId>,
-    /// Cross-shard channel name (matches the publisher's `remote_channel_name`).
-    pub remote_channel_name: String,
     /// Radio frequency.
     pub frequency: u32,
-    /// HMAC grant id authorising this listener's subscribe request.
-    pub grant_id: u64,
-    /// The shard this listener is subscribing TO (the publisher's shard).
-    pub source_shard_id: u64,
-    /// Block owner — used to look up the grant's key in HeldGrants.
-    pub owner_session: u64,
-    /// False = mirror disabled.
-    pub active: bool,
-    /// Tick number when our subscription on the publisher's side expires.
-    /// Set at apply time; refreshed by the `listener_lease_renewal`
-    /// system. When `lease_until_tick - now_tick < RENEWAL_THRESHOLD`
-    /// the renewal system re-issues `SignalSubscribe` and updates this
-    /// field. Listeners whose lease has FULLY expired (now_tick >
-    /// lease_until_tick) get re-issued anyway — the publisher's
-    /// `cleanup_expired_subscribers_system` would have dropped the
-    /// subscription, but a fresh subscribe re-establishes it.
+    /// Optional HMAC grant id. None ⇒ open channel; no SignalSubscribe
+    /// HMAC stamping required (the publisher's open-channel path
+    /// accepts unauth subscriptions).
+    pub grant_id: Option<u64>,
+    /// The shard this antenna is subscribing TO (the publisher's shard).
+    /// None ⇒ orchestrator-routed via the relay.
+    pub remote_shard_id: Option<u64>,
+    /// Tick number when our subscription on the publisher's side
+    /// expires. Refreshed by the lease-renewal system before expiry.
     pub lease_until_tick: u64,
+}
+
+/// LEGACY type alias for the Phase 3E split-block state. Retained as
+/// `ListenerState = AntennaState` so existing references in shard-
+/// common's apply / listener-mirror systems compile during the Phase 3
+/// pipeline rewrite. Removed in Phase 6 cleanup.
+#[deprecated(note = "Use AntennaState — Listener is now an RX-only Antenna")]
+pub type ListenerState = AntennaState;
+
+/// Phase D: unified Terminal block runtime state. Subscribes (read)
+/// AND publishes (write) media `Text` frames in one block. Either
+/// side can be unused: read-only sign (`publish_channel.is_none()`),
+/// input-only kiosk (`subscribe_channel.is_none()`), or full chat
+/// panel (both). Replaces the prior split TextDisplayState +
+/// KeyboardTerminalState components.
+///
+/// **Phase A1 shift**: media now flows through `ChannelMediaBuffer`
+/// keyed by `ChannelId`, not via direct shard targeting. The Terminal
+/// resolves its configured channel names to `ChannelId`s at apply
+/// time and stores them here. The cross-shard routing (target shard,
+/// grant) lives on the channel itself (its scope + auth + grants),
+/// so the Terminal no longer carries `target_shard_id`/`grant_id` —
+/// they were design smell that made same-shard chat impossible.
+///
+/// Read side: each tick `terminal_subscribe` reads frames from
+/// `ChannelMediaBuffer[subscribe_channel]` and appends to
+/// `recent_lines` (ring-buffered at `max_lines`).
+///
+/// Write side: each `KeyboardTerminalInput` event triggers
+/// `terminal_publish` to push a frame to
+/// `ChannelMediaBuffer[publish_channel]`. The same tick's
+/// `terminal_subscribe` (for in-shard subscribers) and
+/// `antenna_publish_media` (for cross-shard via Radio frequency) both
+/// read it.
+#[derive(Component, Clone, Debug, Default)]
+pub struct TerminalState {
+    /// Channel this terminal subscribes to. None = read side disabled
+    /// (input-only kiosk). ChannelId is resolved at apply time from
+    /// the configured channel name; the same-named channel must
+    /// already exist or be created with Local scope by the apply path.
+    pub subscribe_channel: Option<ChannelId>,
+    /// Channel this terminal publishes to. None = write side disabled
+    /// (read-only sign / status board).
+    pub publish_channel: Option<ChannelId>,
+    /// Most recent N inbound text lines (bounded scrollback).
+    pub recent_lines: Vec<String>,
+    /// Maximum scrollback lines retained.
+    pub max_lines: u32,
+    /// Block owner — used by future authorization paths and for
+    /// engagement bookkeeping. Sourced from `BlockOwnership` at apply
+    /// time.
+    pub owner_session: u64,
+    /// Monotonic outbound sequence counter for the publisher's half
+    /// of the (channel, sender) replay window. Incremented on every
+    /// successful frame ship; persisted across ticks so cross-shard
+    /// replay rejects stale duplicates.
+    pub next_sequence: u64,
+    /// False = terminal powered down (display blank, keyboard locked).
+    pub active: bool,
+}
+
+impl TerminalState {
+    pub const DEFAULT_MAX_LINES: u32 = 64;
+
+    /// Append an inbound line to scrollback. Drops when the terminal
+    /// is muted; ring-buffers at `max_lines` capacity.
+    pub fn push_line(&mut self, line: String) {
+        if !self.active {
+            return;
+        }
+        let cap = self.max_lines.max(1) as usize;
+        if self.recent_lines.len() >= cap {
+            self.recent_lines.remove(0);
+        }
+        self.recent_lines.push(line);
+    }
+
+    /// Read-side enabled?
+    pub fn can_read(&self) -> bool {
+        self.active && self.subscribe_channel.is_some()
+    }
+
+    /// Write-side enabled?
+    pub fn can_write(&self) -> bool {
+        self.active && self.publish_channel.is_some()
+    }
 }

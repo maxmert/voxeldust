@@ -492,6 +492,44 @@ impl GrantsPersistenceQueue {
     }
 }
 
+/// Drain `queue` and apply each op against `db`. Pure function —
+/// callable from any Bevy system that has access to all four refs.
+/// Errors are logged (warn) and the in-memory registry stays
+/// canonical; the redb file may lag by a tick after a transient I/O
+/// hiccup.
+///
+/// Phase 4-Persist.6: extracted from ship-shard's
+/// `flush_grants_to_db` so planet-shard (and any future shard with
+/// its own redb file) can reuse the same machinery via a thin Bevy
+/// wrapper.
+pub fn flush_grants_now(
+    db: &redb::Database,
+    registry: &GrantsRegistry,
+    channels: &SignalChannelTable,
+    queue: &mut GrantsPersistenceQueue,
+) {
+    let (upserts, deletes) = queue.drain();
+    if upserts.is_empty() && deletes.is_empty() {
+        return;
+    }
+    for grant_id in upserts {
+        let Some(grant) = registry.get(grant_id) else {
+            // Grant inserted then immediately removed before this
+            // sweep — rare, harmless, just skip the disk write.
+            continue;
+        };
+        let record = to_persisted(grant, channels);
+        if let Err(e) = save_grant(db, &record) {
+            tracing::warn!(grant_id, %e, "grant persistence: save failed");
+        }
+    }
+    for grant_id in deletes {
+        if let Err(e) = delete_grant(db, grant_id) {
+            tracing::warn!(grant_id, %e, "grant persistence: delete failed");
+        }
+    }
+}
+
 // `AccessPolicy` re-export so consumers don't have to know the
 // internal grants module path. Pure re-export, zero behaviour.
 pub use voxeldust_core::signal::types::AccessPolicy as ReexportedAccessPolicy;

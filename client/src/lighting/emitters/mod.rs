@@ -79,9 +79,7 @@ use voxeldust_core::blackbody::temperature_to_linear_rgb;
 use crate::config::GameConfig;
 
 pub use lamp_configs::LampConfigs;
-pub use throttle::{
-    ThrottleModulatedLight, ThrottleModulatedProxy, ThrottleSignals,
-};
+pub use throttle::{ThrottleModulatedLight, ThrottleModulatedProxy};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Plugin
@@ -92,15 +90,7 @@ pub struct LocalLightingPlugin;
 impl Plugin for LocalLightingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(lamp_configs::LampConfigsPlugin)
-            .init_resource::<ThrottleSignals>()
-            .add_systems(
-                Update,
-                (
-                    throttle::update_throttle_signals,
-                    throttle::apply_throttle_modulation,
-                )
-                    .chain(),
-            );
+            .add_systems(Update, throttle::apply_throttle_modulation);
     }
 }
 

@@ -67,8 +67,8 @@ impl SeatPreset {
     }
 
     /// Determine the seat preset for a given block ID.
-    pub fn for_block(block_id: crate::block::BlockId) -> Self {
-        use crate::block::BlockId;
+    pub fn for_block(block_id: voxeldust_types::BlockId) -> Self {
+        use voxeldust_types::BlockId;
         match block_id {
             BlockId::COCKPIT => Self::Pilot,
             BlockId::SEAT => Self::Generic,

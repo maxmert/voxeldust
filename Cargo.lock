@@ -661,6 +661,7 @@ version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd310426290cec560221f9750c2f4484be4a8eeea7de3483c423329b465c40e"
 dependencies = [
+ "bevy_dylib",
  "bevy_internal",
 ]
 
@@ -976,6 +977,15 @@ dependencies = [
  "log",
  "serde",
  "sysinfo",
+]
+
+[[package]]
+name = "bevy_dylib"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f142f72bbbc1a61338bf6da5dc7cf6dcf223683b9d53bcd635ebff4bfeb5308f"
+dependencies = [
+ "bevy_internal",
 ]
 
 [[package]]
@@ -6328,6 +6338,7 @@ dependencies = [
  "clap 4.6.0",
  "glam 0.29.3",
  "rapier3d",
+ "redb",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8659,7 +8670,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -9114,7 +9124,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "voxeldust-core"
 version = "0.1.0"
 dependencies = [
- "base64",
  "bevy_ecs",
  "binary-greedy-meshing",
  "brahe",
@@ -9124,7 +9133,6 @@ dependencies = [
  "gooding-lambert",
  "hmac",
  "lz4_flex",
- "metrics",
  "nalgebra 0.34.1",
  "rand 0.8.5",
  "rapier3d",
@@ -9133,6 +9141,16 @@ dependencies = [
  "smallvec",
  "subtle",
  "thiserror 2.0.18",
+ "voxeldust-protocol-fb",
+ "voxeldust-signal",
+ "voxeldust-types",
+]
+
+[[package]]
+name = "voxeldust-protocol-fb"
+version = "0.1.0"
+dependencies = [
+ "flatbuffers",
 ]
 
 [[package]]
@@ -9162,6 +9180,31 @@ dependencies = [
  "tokio-util",
  "tracing",
  "voxeldust-core",
+]
+
+[[package]]
+name = "voxeldust-signal"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bevy_ecs",
+ "glam 0.29.3",
+ "hmac",
+ "metrics",
+ "rand 0.8.5",
+ "sha2",
+ "smallvec",
+ "subtle",
+ "thiserror 2.0.18",
+ "voxeldust-protocol-fb",
+ "voxeldust-types",
+]
+
+[[package]]
+name = "voxeldust-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

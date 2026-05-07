@@ -51,6 +51,14 @@ pub struct SpawnHeldTablet {
 #[derive(Message, Debug, Clone, Copy)]
 pub struct DespawnHeldTablet;
 
+/// System set the despawn handler lives in. Exported so the
+/// auto-save flush in `config_panel::save_on_tablet_despawn` can
+/// order itself BEFORE the entity goes away — without this label,
+/// Bevy's parallel scheduler is free to despawn the tablet first,
+/// and the flush would miss the still-populated editable buffer.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TabletDespawnSet;
+
 pub struct HeldTabletPlugin;
 
 impl Plugin for HeldTabletPlugin {
@@ -61,7 +69,7 @@ impl Plugin for HeldTabletPlugin {
                 Update,
                 (
                     spawn_tablet,
-                    despawn_tablet,
+                    despawn_tablet.in_set(TabletDespawnSet),
                     follow_camera,
                     animate_tablet_spawn,
                 ),

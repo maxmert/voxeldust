@@ -61,8 +61,8 @@
 
 use std::collections::HashMap;
 
-use crate::client_message::hud_delta_flags::{REGISTER as FLAG_REGISTER, REMOVE as FLAG_REMOVE};
-use crate::signal::wire_dict::OutboundDict;
+use voxeldust_types::hud_delta_flags::{REGISTER as FLAG_REGISTER, REMOVE as FLAG_REMOVE};
+use crate::wire_dict::OutboundDict;
 
 /// One HUD signal observation. Mirrors the wire-side
 /// `HudSignalEntryV2` *except* values stay as the rich

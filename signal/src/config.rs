@@ -19,6 +19,18 @@ use super::types::SignalProperty;
 pub struct PublishBindingConfig {
     pub channel_name: String,
     pub property: SignalProperty,
+    /// Phase C: scope hint when this binding triggers fresh channel
+    /// creation. `None` defaults to `SignalScope::Local` (matches
+    /// pre-Phase-C behavior). Ignored when the channel already
+    /// exists — channel scope is set at create time and cannot be
+    /// changed by a later binding.
+    pub scope: Option<super::types::SignalScope>,
+    /// Phase D: held-grant id when the binding targets a keyed
+    /// remote channel (typically `scope = SignalScope::Radio { .. }`).
+    /// `None` ⇒ no grant attached (open channel, in-shard binding,
+    /// or grant not yet picked). Server validates: required iff the
+    /// resolved remote channel has `ChannelAuth::Hmac`.
+    pub grant_id: Option<u64>,
 }
 
 /// Subscribe binding in config form (string channel name).
@@ -26,6 +38,10 @@ pub struct PublishBindingConfig {
 pub struct SubscribeBindingConfig {
     pub channel_name: String,
     pub property: SignalProperty,
+    /// Phase C: same semantics as `PublishBindingConfig::scope`.
+    pub scope: Option<super::types::SignalScope>,
+    /// Phase D: same semantics as `PublishBindingConfig::grant_id`.
+    pub grant_id: Option<u64>,
 }
 
 /// Generic seat input binding in config form (string channel name).
@@ -133,36 +149,133 @@ pub struct MechanicalConfig {
     pub speed_override: Option<f32>,
 }
 
-/// Phase 3E: Antenna block config. Wire form for the F-key UI; resolved
-/// to `AntennaState` at `apply_config_updates` time. The grant key
-/// itself is NOT in this config — antennas reference a grant by id that
-/// must already be in the placing player's `HeldGrants` (registered via
-/// `ClientMsg::AddHeldGrant`).
-#[derive(Clone, Debug, Default)]
-pub struct AntennaConfig {
-    /// Local channel the antenna READS from each tick.
-    pub source_channel_name: String,
-    /// Remote channel name on the target shard (the publish target).
-    pub remote_channel_name: String,
+/// One side (TX or RX) of a bidirectional Antenna bridge. Symmetric:
+/// the same struct describes either direction; the slot it lives in
+/// (`AntennaConfig.tx` vs `AntennaConfig.rx`) gives the direction.
+///
+/// The grant key itself is NOT in this config — antennas reference a
+/// grant by id that must already be in the placing player's
+/// `HeldGrants`. Server-side `apply_config_updates` enforces:
+/// `grant_id.is_none()` ⇔ resolved remote channel is unkeyed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AntennaSide {
+    /// Local channel:
+    ///   * TX: antenna SUBSCRIBES to this channel; values are
+    ///     forwarded to `frequency` each tick.
+    ///   * RX: antenna PUBLISHES values it receives on `frequency`
+    ///     to this channel.
+    pub local_channel_name: String,
+    /// Radio frequency.
     pub frequency: u32,
-    pub grant_id: u64,
-    pub target_shard_id: u64,
+    /// Optional held-grant id. None ⇒ open radio (unkeyed channel).
+    pub grant_id: Option<u64>,
+    /// Where the remote channel lives. None ⇒ orchestrator-routed
+    /// via the relay's frequency-band table.
+    pub remote_shard_id: Option<u64>,
 }
 
-/// Phase 3E: Listener block config. Symmetric to `AntennaConfig`.
-#[derive(Clone, Debug, Default)]
-pub struct ListenerConfig {
-    /// Local Local-scope channel where the bridged value gets mirrored.
-    /// Internal subscribers wire to this.
-    pub destination_channel_name: String,
-    /// Local Radio-scope channel that receives forwarded entries.
-    /// Created automatically by the listener's apply step at the
-    /// publisher's listed `remote_channel_name` so try_push_remote
-    /// has somewhere to push to.
-    pub bridged_channel_name: String,
-    pub frequency: u32,
+impl AntennaSide {
+    /// Empty side ⇔ `local_channel_name` is empty. Used to express
+    /// "this side unused" since FB has no `Option<table>` form.
+    pub fn is_empty(&self) -> bool {
+        self.local_channel_name.is_empty()
+    }
+}
+
+/// Bidirectional Antenna config. Replaces the prior split
+/// `AntennaConfig` (TX-only) + `ListenerConfig` (RX-only). At least
+/// one side must be non-empty — server rejects fully-empty configs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AntennaConfig {
+    pub tx: Option<AntennaSide>,
+    pub rx: Option<AntennaSide>,
+}
+
+impl AntennaConfig {
+    /// Convenience: any side configured?
+    pub fn has_any_side(&self) -> bool {
+        matches!(&self.tx, Some(s) if !s.is_empty())
+            || matches!(&self.rx, Some(s) if !s.is_empty())
+    }
+}
+
+/// Unified Terminal block config — replaces the prior
+/// TextDisplayState + KeyboardTerminalState wire shapes. A Terminal
+/// can subscribe (read), publish (write), or both. At least one
+/// channel must be set; server rejects fully-empty configs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TerminalConfig {
+    /// Channel this terminal subscribes to. Inbound text frames
+    /// scroll the in-world surface. None ⇒ input-only kiosk.
+    pub subscribe_channel_name: Option<String>,
+    /// Channel this terminal publishes to on E-key send. None ⇒
+    /// read-only sign / status board.
+    pub publish_channel_name: Option<String>,
+    /// Maximum scrollback lines retained on the entity. None ⇒
+    /// apply the registry default.
+    pub scrollback_lines: Option<u16>,
+}
+
+impl TerminalConfig {
+    /// Default scrollback applied when the wire field is 0/None.
+    /// Lines are bounded so a malicious publisher can't blow the
+    /// entity's memory by spamming.
+    pub const DEFAULT_SCROLLBACK: u16 = 64;
+
+    pub fn has_any_channel(&self) -> bool {
+        self.subscribe_channel_name.as_deref().map_or(false, |s| !s.is_empty())
+            || self.publish_channel_name.as_deref().map_or(false, |s| !s.is_empty())
+    }
+
+    pub fn effective_scrollback(&self) -> u16 {
+        self.scrollback_lines
+            .filter(|n| *n > 0)
+            .unwrap_or(Self::DEFAULT_SCROLLBACK)
+    }
+}
+
+/// Compact summary of a held grant — populated by the server side
+/// for the configurator UI (Antenna grant picker, Radio binding rows).
+/// The grant key itself is never sent to the client; only the
+/// human-readable label + ops bitmap + expiry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HeldGrantSummary {
     pub grant_id: u64,
-    pub source_shard_id: u64,
+    pub label: String,
+    /// None ⇒ no expiry; otherwise unix-ms.
+    pub expires_at_ms: Option<u64>,
+    /// Bit 0 = Publish, bit 1 = Subscribe.
+    pub ops_mask: u8,
+}
+
+impl HeldGrantSummary {
+    pub const OP_PUBLISH: u8 = 1 << 0;
+    pub const OP_SUBSCRIBE: u8 = 1 << 1;
+
+    pub fn allows_publish(&self) -> bool {
+        self.ops_mask & Self::OP_PUBLISH != 0
+    }
+
+    pub fn allows_subscribe(&self) -> bool {
+        self.ops_mask & Self::OP_SUBSCRIBE != 0
+    }
+}
+
+/// Per-side / per-binding access status for the configurator UI.
+/// Server-populated from the resolved remote channel's auth state +
+/// the placing player's `HeldGrants` (filtered to grants that cover
+/// the resolved channel for the relevant op).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AccessStatusForChannel {
+    /// True if the resolver knows about a remote channel for this
+    /// (frequency, remote_shard_id). False ⇒ "no channel known yet"
+    /// (client shows freq input only — open by default).
+    pub remote_channel_known: bool,
+    /// True ⇔ remote channel has `ChannelAuth::Hmac`.
+    pub auth_required: bool,
+    /// Held grants the placing player has that cover this channel
+    /// + the relevant op (Publish for TX, Subscribe for RX).
+    pub held_grants: Vec<HeldGrantSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,8 +355,19 @@ pub struct BlockSignalConfig {
     pub warp_computer: Option<WarpComputerConfig>,
     pub engine_controller: Option<EngineControllerConfig>,
     pub mechanical: Option<MechanicalConfig>,
+    /// Phase D: bidirectional Antenna config. None on non-antenna blocks.
     pub antenna: Option<AntennaConfig>,
-    pub listener: Option<ListenerConfig>,
+    /// Phase D: per-side access status the UI uses to render the right
+    /// grant affordance (open caption / picker dropdown / request button).
+    /// Server-populated only; ignored on the inbound update path.
+    pub antenna_tx_status: Option<AccessStatusForChannel>,
+    pub antenna_rx_status: Option<AccessStatusForChannel>,
+    /// Phase D: unified Terminal config. None on non-terminal blocks.
+    pub terminal: Option<TerminalConfig>,
+    /// Phase D: held-grant summaries for binding rows targeting Radio.
+    /// Picker dropdown sources its options from this snapshot.
+    /// Server-populated; ignored on the inbound update path.
+    pub held_grants: Vec<HeldGrantSummary>,
 }
 
 impl BlockSignalConfig {
@@ -252,7 +376,7 @@ impl BlockSignalConfig {
     /// shared with `apply_config_updates` validation.
     pub fn set_property_options_from_kind(
         &mut self,
-        kind: crate::block::registry::FunctionalBlockKind,
+        kind: voxeldust_types::FunctionalBlockKind,
     ) {
         let schema = kind.signal_schema();
         let hint_for = |prop: SignalProperty| -> String {
@@ -285,13 +409,13 @@ pub enum ConfigInvalid {
     /// kind's `publish_properties` schema. Carries the offending property
     /// and the kind's allowed set for human-readable error rendering.
     PublishPropertyNotSupported {
-        kind: crate::block::registry::FunctionalBlockKind,
+        kind: voxeldust_types::FunctionalBlockKind,
         property: SignalProperty,
         allowed: Vec<SignalProperty>,
     },
     /// Symmetric for subscribe bindings.
     SubscribePropertyNotSupported {
-        kind: crate::block::registry::FunctionalBlockKind,
+        kind: voxeldust_types::FunctionalBlockKind,
         property: SignalProperty,
         allowed: Vec<SignalProperty>,
     },
@@ -303,7 +427,7 @@ impl ConfigInvalid {
     /// violation. Caller is responsible for surfacing the error.
     pub fn validate_against_kind(
         update: &BlockConfigUpdateData,
-        kind: crate::block::registry::FunctionalBlockKind,
+        kind: voxeldust_types::FunctionalBlockKind,
     ) -> Result<(), Self> {
         let schema = kind.signal_schema();
         for b in &update.publish_bindings {
@@ -365,7 +489,7 @@ fn format_property_list(props: &[SignalProperty]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::registry::FunctionalBlockKind;
+    use voxeldust_types::FunctionalBlockKind;
 
     #[test]
     fn validate_rejects_pressure_on_thruster() {
@@ -373,6 +497,8 @@ mod tests {
         update.subscribe_bindings.push(SubscribeBindingConfig {
             channel_name: "test".into(),
             property: SignalProperty::Pressure,
+            scope: None,
+            grant_id: None,
         });
         let err = ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster)
             .expect_err("Pressure must not be allowed on a Thruster");
@@ -391,6 +517,8 @@ mod tests {
         update.subscribe_bindings.push(SubscribeBindingConfig {
             channel_name: "test".into(),
             property: SignalProperty::Throttle,
+            scope: None,
+            grant_id: None,
         });
         ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster)
             .expect("Throttle is in the Thruster's subscribe schema");
@@ -403,6 +531,8 @@ mod tests {
         update.publish_bindings.push(PublishBindingConfig {
             channel_name: "test".into(),
             property: SignalProperty::Throttle,
+            scope: None,
+            grant_id: None,
         });
         let err = ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster)
             .expect_err("Thrusters must not publish anything");
@@ -418,6 +548,8 @@ mod tests {
         update.subscribe_bindings.push(SubscribeBindingConfig {
             channel_name: "test".into(),
             property: SignalProperty::Speed,
+            scope: None,
+            grant_id: None,
         });
         let err =
             ConfigInvalid::validate_against_kind(&update, FunctionalBlockKind::Thruster).unwrap_err();
@@ -469,6 +601,8 @@ pub struct BlockConfigUpdateData {
     pub warp_computer: Option<WarpComputerConfig>,
     pub engine_controller: Option<EngineControllerConfig>,
     pub mechanical: Option<MechanicalConfig>,
+    /// Phase D: bidirectional Antenna config. None on non-antenna blocks.
     pub antenna: Option<AntennaConfig>,
-    pub listener: Option<ListenerConfig>,
+    /// Phase D: unified Terminal config. None on non-terminal blocks.
+    pub terminal: Option<TerminalConfig>,
 }

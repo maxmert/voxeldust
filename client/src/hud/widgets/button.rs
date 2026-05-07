@@ -10,7 +10,7 @@ use crate::hud::focus::HudClickButton;
 use crate::hud::font;
 use crate::hud::signal_registry::SignalValue;
 use crate::hud::tile::{HudConfig, WidgetKind};
-use crate::hud::widget::{ClickAction, DrawCtx, HudWidget};
+use crate::hud::widget::{DrawCtx, HudWidget, HudWidgetStateData, WidgetAction};
 
 pub struct ButtonWidget;
 
@@ -24,7 +24,16 @@ impl HudWidget for ButtonWidget {
     fn supported_properties(&self) -> &'static [SignalProperty] {
         &[SignalProperty::Active, SignalProperty::Throttle]
     }
-    fn draw(&self, ctx: DrawCtx, value: Option<SignalValue>, _config: &HudConfig) {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+    fn draw(
+        &self,
+        ctx: DrawCtx,
+        value: Option<SignalValue>,
+        _state: Option<&mut dyn HudWidgetStateData>,
+        _config: &HudConfig,
+    ) {
         let w = ctx.size as usize;
         let h = ctx.size as usize;
         let alpha = (255.0 * ctx.opacity) as u8;
@@ -87,8 +96,9 @@ impl HudWidget for ButtonWidget {
         _uv: bevy::prelude::Vec2,
         button: HudClickButton,
         _value: Option<&SignalValue>,
+        _state: Option<&mut dyn HudWidgetStateData>,
         config: &HudConfig,
-    ) -> Option<ClickAction> {
+    ) -> Option<WidgetAction> {
         if config.channel.is_empty() {
             return None;
         }
@@ -99,7 +109,7 @@ impl HudWidget for ButtonWidget {
             HudClickButton::Right => CoreSignalValue::Float(0.0),
             HudClickButton::Middle => return None,
         };
-        Some(ClickAction::Publish {
+        Some(WidgetAction::Publish {
             channel: config.channel.clone(),
             value,
         })

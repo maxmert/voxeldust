@@ -68,6 +68,17 @@ pub struct ShipGrid {
     /// Persisted seat configuration per block (generic seat format).
     /// If present, replaces the preset defaults on load.
     saved_seat_configs: HashMap<IVec3, SavedSeatConfig>,
+    /// Phase D: persisted bidirectional Antenna config per block.
+    /// Loaded from redb on startup; the per-shard boot system uses
+    /// these to re-apply open (no-grant) antennas so they survive
+    /// restart. Keyed antennas remain saved here until the placing
+    /// player reconnects with their grants and re-Applies via F-key.
+    saved_antenna_configs: HashMap<IVec3, crate::signal::config::AntennaConfig>,
+    /// Phase D: persisted unified Terminal config per block. Same
+    /// load + restore semantics as antennas. Terminal apply doesn't
+    /// depend on grants, so any saved terminal can be re-applied at
+    /// boot.
+    saved_terminal_configs: HashMap<IVec3, crate::signal::config::TerminalConfig>,
     /// Per-lamp configuration for sub-block surface lights, keyed by
     /// `(host_block_pos, face)`. Player-edited via the lamp config
     /// panel; broadcast to clients on chunk snapshot / delta. Absent
@@ -86,6 +97,8 @@ impl ShipGrid {
             sub_grid_assignments: HashMap::new(),
             saved_signal_bindings: HashMap::new(),
             saved_seat_configs: HashMap::new(),
+            saved_antenna_configs: HashMap::new(),
+            saved_terminal_configs: HashMap::new(),
             lamp_configs: HashMap::new(),
         }
     }
@@ -211,6 +224,67 @@ impl ShipGrid {
     /// Get saved seat configuration for a block, if any.
     pub fn saved_seat_config(&self, pos: IVec3) -> Option<&SavedSeatConfig> {
         self.saved_seat_configs.get(&pos)
+    }
+
+    /// Phase D: store the player's last-applied bidirectional Antenna
+    /// config. Set on every `BlockConfigUpdate` apply; loaded from
+    /// redb on startup. Empty config (no sides) clears the entry so
+    /// stale entries don't accumulate.
+    pub fn set_saved_antenna_config(
+        &mut self,
+        pos: IVec3,
+        config: crate::signal::config::AntennaConfig,
+    ) {
+        if !config.has_any_side() {
+            self.saved_antenna_configs.remove(&pos);
+        } else {
+            self.saved_antenna_configs.insert(pos, config);
+        }
+    }
+
+    pub fn saved_antenna_config(
+        &self,
+        pos: IVec3,
+    ) -> Option<&crate::signal::config::AntennaConfig> {
+        self.saved_antenna_configs.get(&pos)
+    }
+
+    /// Phase D: iterate every saved Antenna config — used by the boot
+    /// re-apply system to walk all persisted antennas after entities
+    /// have spawned.
+    pub fn iter_saved_antenna_configs(
+        &self,
+    ) -> impl Iterator<Item = (&IVec3, &crate::signal::config::AntennaConfig)> {
+        self.saved_antenna_configs.iter()
+    }
+
+    /// Phase D: store the player's last-applied unified Terminal
+    /// config. Same load + restore semantics as antenna; terminal
+    /// configs are always safe to re-apply at boot (no grant
+    /// dependency).
+    pub fn set_saved_terminal_config(
+        &mut self,
+        pos: IVec3,
+        config: crate::signal::config::TerminalConfig,
+    ) {
+        if !config.has_any_channel() {
+            self.saved_terminal_configs.remove(&pos);
+        } else {
+            self.saved_terminal_configs.insert(pos, config);
+        }
+    }
+
+    pub fn saved_terminal_config(
+        &self,
+        pos: IVec3,
+    ) -> Option<&crate::signal::config::TerminalConfig> {
+        self.saved_terminal_configs.get(&pos)
+    }
+
+    pub fn iter_saved_terminal_configs(
+        &self,
+    ) -> impl Iterator<Item = (&IVec3, &crate::signal::config::TerminalConfig)> {
+        self.saved_terminal_configs.iter()
     }
 
     /// Iterate all channel overrides (position → channel name).
@@ -978,24 +1052,48 @@ pub fn build_starter_ship(layout: &StarterShipLayout) -> ShipGrid {
     //   grant's target shard. Used for outbound Radio publication
     //   (e.g., faction comms, fleet coordination).
     //
-    // - Listener at (2, 1, -1): subscribes to a remote Radio channel
-    //   via a held grant; mirrors received values onto a local channel
-    //   so in-ship subscribers (HUD widgets, lights, sirens) can wire
-    //   to it like any native publisher.
+    // - Phase D bidirectional Antenna at (2, 1, -2): one block carries
+    //   both TX (forward a local channel onto a Radio frequency) AND
+    //   RX (mirror a Radio frequency onto a local channel) sides. The
+    //   prior split Antenna+Listener pair has been consolidated into
+    //   this single block.
+    // - Terminal at (2, 1, -1): unified read+write text panel via the
+    //   media pipeline. E-key activation opens the in-world chat
+    //   overlay (scrollback + input). Replaces the prior split
+    //   TextDisplay + KeyboardTerminal pair.
     //
     // Power is on the "main" circuit at moderate consumption (10 kW
-    // antenna, 5 kW listener — see registry's power_props entries).
+    // antenna, 1.5 kW terminal — see registry's power_props entries).
     // -----------------------------------------------------------------------
     grid.set_block(2, 1, -2, BlockId::ANTENNA);
     grid.set_power_config(2, 1, -2, PowerConfig::Consumer {
         reactor_pos,
         circuit: "main".to_string(),
     });
-    grid.set_block(2, 1, -1, BlockId::LISTENER);
+    grid.set_block(2, 1, -1, BlockId::TERMINAL);
     grid.set_power_config(2, 1, -1, PowerConfig::Consumer {
         reactor_pos,
         circuit: "main".to_string(),
     });
+    // HUD subblock for the Terminal's display face. The client's
+    // `TerminalBridgePlugin` finds this tile by `(block_pos, face=4)`
+    // and routes the server's chat protocol into its widget state.
+    // Face 4 (+Z) is the Terminal block's outward face — the player
+    // approaches from +Z and the screen faces them.
+    {
+        use sub_block::{SubBlockElement, SubBlockType};
+        grid.add_sub_block(
+            2,
+            1,
+            -1,
+            SubBlockElement {
+                face: 4,
+                element_type: SubBlockType::HudPanel,
+                rotation: 0,
+                flags: 0,
+            },
+        );
+    }
 
     // --- Interior lamps (sub-block elements, not full blocks) ---
     //
@@ -1301,13 +1399,14 @@ mod tests {
         // Ownership core at center
         assert_eq!(grid.get_block(0, 1, 0), BlockId::OWNERSHIP_CORE);
 
-        // Comms station — Antenna + Listener on the +X side of the
-        // cabin. Mirror of the system blocks at -X. Both must be
-        // present so the player can configure Radio publication +
-        // subscription via the F-key tablet UI without first having
-        // to place these blocks themselves.
+        // Phase D comms station — bidirectional Antenna + unified
+        // Terminal on the +X side of the cabin. Mirror of the system
+        // blocks at -X. Both must be present so the player can
+        // configure Radio TX/RX + chat via the F-key config tablet
+        // and the E-key chat overlay without first having to place
+        // these blocks themselves.
         assert_eq!(grid.get_block(2, 1, -2), BlockId::ANTENNA);
-        assert_eq!(grid.get_block(2, 1, -1), BlockId::LISTENER);
+        assert_eq!(grid.get_block(2, 1, -1), BlockId::TERMINAL);
 
         // Outside the ship should be air
         assert_eq!(grid.get_block(50, 50, 50), BlockId::AIR);

@@ -387,61 +387,192 @@ fn decode_engine_controller_config(fb: &fb::EngineControllerConfigFB<'_>) -> cra
     }
 }
 
-// -- Phase 3E: Antenna / Listener config codec --------------------------------
+// -- Phase D: Bidirectional Antenna + unified Terminal codecs -----------------
+//
+// Replaces the prior split AntennaConfigFB (TX-only) + ListenerConfigFB
+// (RX-only) and the never-shipped TextDisplay/KeyboardTerminal wire shapes.
+// Legacy FB tables (`LegacyAntennaConfigFB`, `LegacyListenerConfigFB`) are
+// kept readable by the persistence layer's boot-time migration; they don't
+// appear in fresh wire traffic.
+
+fn encode_antenna_side<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    side: &crate::signal::config::AntennaSide,
+) -> flatbuffers::WIPOffset<fb::AntennaSideFB<'a>> {
+    let lc = builder.create_string(&side.local_channel_name);
+    fb::AntennaSideFB::create(
+        builder,
+        &fb::AntennaSideFBArgs {
+            local_channel_name: Some(lc),
+            frequency: side.frequency,
+            grant_id: side.grant_id.unwrap_or(0),
+            remote_shard_id: side.remote_shard_id.unwrap_or(0),
+        },
+    )
+}
+
+/// Decode a side. Wire convention: empty `local_channel_name` ⇔ side unused.
+/// Returns `None` for unused sides so the decoded `AntennaConfig` mirrors
+/// the in-memory `Option<AntennaSide>` shape exactly.
+fn decode_antenna_side(fb: &fb::AntennaSideFB<'_>) -> Option<crate::signal::config::AntennaSide> {
+    let local = fb.local_channel_name().unwrap_or("");
+    if local.is_empty() {
+        return None;
+    }
+    Some(crate::signal::config::AntennaSide {
+        local_channel_name: local.into(),
+        frequency: fb.frequency(),
+        grant_id: (fb.grant_id() != 0).then_some(fb.grant_id()),
+        remote_shard_id: (fb.remote_shard_id() != 0).then_some(fb.remote_shard_id()),
+    })
+}
 
 fn encode_antenna_config<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     cfg: &crate::signal::config::AntennaConfig,
 ) -> flatbuffers::WIPOffset<fb::AntennaConfigFB<'a>> {
-    let src = builder.create_string(&cfg.source_channel_name);
-    let rem = builder.create_string(&cfg.remote_channel_name);
+    use crate::signal::config::AntennaSide;
+    let empty = AntennaSide::default();
+    let tx = encode_antenna_side(builder, cfg.tx.as_ref().unwrap_or(&empty));
+    let rx = encode_antenna_side(builder, cfg.rx.as_ref().unwrap_or(&empty));
     fb::AntennaConfigFB::create(
         builder,
         &fb::AntennaConfigFBArgs {
-            source_channel_name: Some(src),
-            remote_channel_name: Some(rem),
-            frequency: cfg.frequency,
-            grant_id: cfg.grant_id,
-            target_shard_id: cfg.target_shard_id,
+            tx: Some(tx),
+            rx: Some(rx),
         },
     )
 }
 
 fn decode_antenna_config(fb: &fb::AntennaConfigFB<'_>) -> crate::signal::config::AntennaConfig {
     crate::signal::config::AntennaConfig {
-        source_channel_name: fb.source_channel_name().unwrap_or("").into(),
-        remote_channel_name: fb.remote_channel_name().unwrap_or("").into(),
-        frequency: fb.frequency(),
-        grant_id: fb.grant_id(),
-        target_shard_id: fb.target_shard_id(),
+        tx: fb.tx().and_then(|s| decode_antenna_side(&s)),
+        rx: fb.rx().and_then(|s| decode_antenna_side(&s)),
     }
 }
 
-fn encode_listener_config<'a>(
+fn encode_terminal_config<'a>(
     builder: &mut FlatBufferBuilder<'a>,
-    cfg: &crate::signal::config::ListenerConfig,
-) -> flatbuffers::WIPOffset<fb::ListenerConfigFB<'a>> {
-    let dst = builder.create_string(&cfg.destination_channel_name);
-    let bri = builder.create_string(&cfg.bridged_channel_name);
-    fb::ListenerConfigFB::create(
+    cfg: &crate::signal::config::TerminalConfig,
+) -> flatbuffers::WIPOffset<fb::TerminalConfigFB<'a>> {
+    let sub = builder.create_string(cfg.subscribe_channel_name.as_deref().unwrap_or(""));
+    let pub_ = builder.create_string(cfg.publish_channel_name.as_deref().unwrap_or(""));
+    fb::TerminalConfigFB::create(
         builder,
-        &fb::ListenerConfigFBArgs {
-            destination_channel_name: Some(dst),
-            bridged_channel_name: Some(bri),
-            frequency: cfg.frequency,
-            grant_id: cfg.grant_id,
-            source_shard_id: cfg.source_shard_id,
+        &fb::TerminalConfigFBArgs {
+            subscribe_channel_name: Some(sub),
+            publish_channel_name: Some(pub_),
+            scrollback_lines: cfg.scrollback_lines.unwrap_or(0),
         },
     )
 }
 
-fn decode_listener_config(fb: &fb::ListenerConfigFB<'_>) -> crate::signal::config::ListenerConfig {
-    crate::signal::config::ListenerConfig {
-        destination_channel_name: fb.destination_channel_name().unwrap_or("").into(),
-        bridged_channel_name: fb.bridged_channel_name().unwrap_or("").into(),
-        frequency: fb.frequency(),
+fn decode_terminal_config(fb: &fb::TerminalConfigFB<'_>) -> crate::signal::config::TerminalConfig {
+    let sub = fb.subscribe_channel_name().unwrap_or("");
+    let pub_ = fb.publish_channel_name().unwrap_or("");
+    let lines = fb.scrollback_lines();
+    crate::signal::config::TerminalConfig {
+        subscribe_channel_name: (!sub.is_empty()).then(|| sub.into()),
+        publish_channel_name: (!pub_.is_empty()).then(|| pub_.into()),
+        scrollback_lines: (lines != 0).then_some(lines),
+    }
+}
+
+fn encode_held_grant_summary<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    g: &crate::signal::config::HeldGrantSummary,
+) -> flatbuffers::WIPOffset<fb::HeldGrantSummaryFB<'a>> {
+    let label = builder.create_string(&g.label);
+    fb::HeldGrantSummaryFB::create(
+        builder,
+        &fb::HeldGrantSummaryFBArgs {
+            grant_id: g.grant_id,
+            label: Some(label),
+            expires_at_ms: g.expires_at_ms.unwrap_or(0),
+            ops_mask: g.ops_mask,
+        },
+    )
+}
+
+fn decode_held_grant_summary(
+    fb: &fb::HeldGrantSummaryFB<'_>,
+) -> crate::signal::config::HeldGrantSummary {
+    crate::signal::config::HeldGrantSummary {
         grant_id: fb.grant_id(),
-        source_shard_id: fb.source_shard_id(),
+        label: fb.label().unwrap_or("").into(),
+        expires_at_ms: (fb.expires_at_ms() != 0).then_some(fb.expires_at_ms()),
+        ops_mask: fb.ops_mask(),
+    }
+}
+
+fn encode_access_status<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    st: &crate::signal::config::AccessStatusForChannel,
+) -> flatbuffers::WIPOffset<fb::AccessStatusForChannelFB<'a>> {
+    let grant_offsets: Vec<_> = st
+        .held_grants
+        .iter()
+        .map(|g| encode_held_grant_summary(builder, g))
+        .collect();
+    let grants_vec = builder.create_vector(&grant_offsets);
+    fb::AccessStatusForChannelFB::create(
+        builder,
+        &fb::AccessStatusForChannelFBArgs {
+            remote_channel_known: st.remote_channel_known,
+            auth_required: st.auth_required,
+            held_grants: Some(grants_vec),
+        },
+    )
+}
+
+fn decode_access_status(
+    fb: &fb::AccessStatusForChannelFB<'_>,
+) -> crate::signal::config::AccessStatusForChannel {
+    let held_grants = fb
+        .held_grants()
+        .map(|v| v.iter().map(|g| decode_held_grant_summary(&g)).collect())
+        .unwrap_or_default();
+    crate::signal::config::AccessStatusForChannel {
+        remote_channel_known: fb.remote_channel_known(),
+        auth_required: fb.auth_required(),
+        held_grants,
+    }
+}
+
+/// Migration reader for legacy `LegacyAntennaConfigFB` rows persisted
+/// before the bidirectional refactor. Maps a TX-only row onto the new
+/// `AntennaConfig.tx` slot. Only invoked by the persistence layer's
+/// boot-time migration sweep — never on the client wire path (the FB
+/// `BlockConfigState`/`Update` tables only carry the new shape).
+pub fn migrate_legacy_antenna_config(
+    fb: &fb::LegacyAntennaConfigFB<'_>,
+) -> crate::signal::config::AntennaConfig {
+    let src = fb.source_channel_name().unwrap_or("");
+    crate::signal::config::AntennaConfig {
+        tx: (!src.is_empty()).then(|| crate::signal::config::AntennaSide {
+            local_channel_name: src.into(),
+            frequency: fb.frequency(),
+            grant_id: (fb.grant_id() != 0).then_some(fb.grant_id()),
+            remote_shard_id: (fb.target_shard_id() != 0).then_some(fb.target_shard_id()),
+        }),
+        rx: None,
+    }
+}
+
+/// Migration reader for legacy `LegacyListenerConfigFB`. Maps an RX-only
+/// row onto the new `AntennaConfig.rx` slot.
+pub fn migrate_legacy_listener_config(
+    fb: &fb::LegacyListenerConfigFB<'_>,
+) -> crate::signal::config::AntennaConfig {
+    let dst = fb.destination_channel_name().unwrap_or("");
+    crate::signal::config::AntennaConfig {
+        tx: None,
+        rx: (!dst.is_empty()).then(|| crate::signal::config::AntennaSide {
+            local_channel_name: dst.into(),
+            frequency: fb.frequency(),
+            grant_id: (fb.grant_id() != 0).then_some(fb.grant_id()),
+            remote_shard_id: (fb.source_shard_id() != 0).then_some(fb.source_shard_id()),
+        }),
     }
 }
 
@@ -456,6 +587,45 @@ fn u8_to_signal_property(v: u8) -> SignalProperty {
         6 => SignalProperty::Level,
         7 => SignalProperty::SwitchState,
         _ => SignalProperty::Active,
+    }
+}
+
+/// Phase C: decode a binding's wire scope fields back into the
+/// optional Rust `SignalScope`. `scope_code == 0` (the schema
+/// default) is unspecified — the server defaults to `Local`. This
+/// preserves backward compat with old payloads that don't set the
+/// field. Unknown codes also return `None` to fail-soft.
+fn decode_binding_scope(
+    scope_code: u8,
+    range_m: f32,
+    frequency: u32,
+) -> Option<crate::signal::types::SignalScope> {
+    use crate::signal::types::SignalScope;
+    match scope_code {
+        1 => Some(SignalScope::ShortRange {
+            range_m: range_m as f64,
+        }),
+        2 => Some(SignalScope::LongRange),
+        3 => Some(SignalScope::Radio { frequency }),
+        // 0 = unspecified (default to Local at apply time);
+        // anything else = corrupt → drop to None.
+        _ => None,
+    }
+}
+
+/// Phase C: encode an `Option<SignalScope>` to the wire shape
+/// (scope_code, range_m, frequency). `None` produces the
+/// (0, 0.0, 0) tuple matching the FB defaults — wire-compact for
+/// the common Local case.
+fn encode_binding_scope(
+    scope: &Option<crate::signal::types::SignalScope>,
+) -> (u8, f32, u32) {
+    use crate::signal::types::SignalScope;
+    match scope {
+        None | Some(SignalScope::Local) => (0, 0.0, 0),
+        Some(SignalScope::ShortRange { range_m }) => (1, *range_m as f32, 0),
+        Some(SignalScope::LongRange) => (2, 0.0, 0),
+        Some(SignalScope::Radio { frequency }) => (3, 0.0, *frequency),
     }
 }
 
@@ -497,6 +667,21 @@ pub enum ClientMsg {
     /// Primary shard signs HMAC + ships a `SignalBroadcastBatch` to the
     /// target shard via QUIC.
     RemoteSignalPublish(RemoteSignalPublishData),
+    /// Phase D: send a chat line typed on an engaged Terminal block.
+    /// Server's INTERACT path turns this into a `KeyboardTerminalInput`
+    /// that the media pipeline ships through the configured publish
+    /// channel.
+    TerminalChatSend(TerminalChatSendData),
+}
+
+/// Payload for `ClientMsg::TerminalChatSend`. The block_pos identifies
+/// which Terminal entity the player typed at; the server resolves it
+/// via the same `block_index` lookup used by `BlockEditRequest`. The
+/// text is bounded to ≤ 4 KiB to match `MediaPayload::Text`'s cap.
+#[derive(Debug, Clone, Default)]
+pub struct TerminalChatSendData {
+    pub block_pos: glam::IVec3,
+    pub text: String,
 }
 
 /// Payload for `ClientMsg::AddHeldGrant`.
@@ -543,34 +728,11 @@ pub struct GrantRevokeData {
     pub grant_id: u64,
 }
 
-/// Public view of one `RemoteAccessGrant` for the owner's tablet UI. Lives
-/// in `core::client_message` (and not in `signal::grants`) because it's
-/// the wire-format shape, not the in-memory store.
-#[derive(Debug, Clone, Default)]
-pub struct GrantPublicView {
-    pub grant_id: u64,
-    /// Base64-encoded 32-byte HMAC key. **Empty for non-owner recipients
-    /// of the snapshot.** The server populates this only when the recipient
-    /// owns the grant — defending against accidental key disclosure to
-    /// other players in the same shard.
-    pub key_b64: String,
-    pub channel_names: Vec<String>,
-    pub ops: u8,
-    pub label: String,
-    pub created_at_ms: u64,
-    pub expires_at_ms: u64,
-    pub created_by: u64,
-    pub revoked: bool,
-    pub namespace_glob: String,
-}
-
-/// Server → client snapshot of one player's owned grants. Sent in response
-/// to any `GrantCreate` / `GrantRevoke` that mutates state for them.
-/// Replaces, not merges — the snapshot is authoritative.
-#[derive(Debug, Clone, Default)]
-pub struct GrantsSnapshotData {
-    pub grants: Vec<GrantPublicView>,
-}
+// Grant wire-format types now live in `voxeldust-signal::wire` (next to the
+// signal logic that builds them); re-exported here so the FlatBuffers
+// serialize/deserialize functions below — and any downstream consumer using
+// `voxeldust_core::client_message::GrantsSnapshotData` — keep resolving.
+pub use voxeldust_signal::wire::{GrantPublicView, GrantsSnapshotData};
 
 /// Payload for `ClientMsg::LampConfigUpdate`. Carries the
 /// `(block_pos, face)` of the lamp sub-block being edited and the new
@@ -627,6 +789,35 @@ pub enum ServerMsg {
     /// only when something changed since the last batch — no per-tick
     /// snapshot.
     HudSignalDelta(HudSignalDeltaData),
+    /// Phase D: open the in-world Terminal chat surface for the
+    /// engaged Terminal block. Sent in response to E (INTERACT) on a
+    /// Terminal kind, NOT on F (which still ships BlockConfigState
+    /// for the regular config tablet).
+    OpenTerminalChat(OpenTerminalChatData),
+    /// Phase D: append lines to a Terminal's scrollback while the
+    /// player is engaged. Each delta is bounded to the terminal's
+    /// max_lines so a flood doesn't overwhelm the wire.
+    TerminalScrollbackDelta(TerminalScrollbackDeltaData),
+}
+
+/// Payload for `ServerMsg::OpenTerminalChat`.
+#[derive(Debug, Clone, Default)]
+pub struct OpenTerminalChatData {
+    pub block_pos: glam::IVec3,
+    /// `None` ⇒ no read side configured (input-only kiosk).
+    pub subscribe_channel: Option<String>,
+    /// `None` ⇒ no write side configured (read-only sign).
+    pub publish_channel: Option<String>,
+    /// Most-recent scrollback at engagement time. Bounded by the
+    /// terminal's max_lines (default 64).
+    pub recent_lines: Vec<String>,
+}
+
+/// Payload for `ServerMsg::TerminalScrollbackDelta`.
+#[derive(Debug, Clone, Default)]
+pub struct TerminalScrollbackDeltaData {
+    pub block_pos: glam::IVec3,
+    pub appended_lines: Vec<String>,
 }
 
 /// Seat bindings sent to client when player enters a seat.
@@ -787,22 +978,10 @@ pub struct WorldStateData {
     /// Source-of-truth going forward; the legacy `ships`/`players` fields
     /// mirror a subset for backward compatibility and will be removed.
     pub entities: Vec<ObservableEntityData>,
-    /// HUD signal snapshot. Server-authored per-tick replacement for the
-    /// client's `SignalRegistry`: every channel the player has
-    /// permission to read, plus server-authored string labels (body
-    /// names, warp targets, ship callsigns). Empty on minor ticks if
-    /// the server chooses to skip — client retains previous values.
-    pub hud_signals: Vec<HudSignalEntryData>,
-}
-
-/// Single HUD signal entry in a `WorldStateData.hud_signals` batch.
-/// See `HudSignalValue` for the value encoding.
-#[derive(Debug, Clone)]
-pub struct HudSignalEntryData {
-    pub channel_name: String,
-    pub value: HudSignalValue,
-    /// `SignalProperty` ordinal (Active=0, Throttle=1, …, Text=10).
-    pub property: u8,
+    // Phase 4.4.5: `hud_signals: Vec<HudSignalEntryData>` removed.
+    // HUD updates now ship as delta-encoded `ServerMsg::HudSignalDelta`
+    // over TCP. See `core::signal::hud_session` for the diff engine
+    // and `HudSignalDeltaData` for the wire shape.
 }
 
 /// Superset of the numeric-only core `SignalValue`, adding a `Text`
@@ -852,15 +1031,10 @@ impl HudSignalValue {
 }
 
 /// Bit flags for [`HudSignalEntryV2Data::flags`].
-pub mod hud_delta_flags {
-    /// The entry carries a fresh `wire_id → name` binding. Receiver
-    /// inserts/overwrites in its inbound dict before resolving.
-    pub const REGISTER: u8 = 0x01;
-    /// The wire_id is being dropped from the session's dictionary.
-    /// `value_type`, `value_num`, `value_text`, `property` are all
-    /// ignored. `channel_name` is empty.
-    pub const REMOVE: u8 = 0x02;
-}
+///
+/// Definitions live in `voxeldust-types` so signal hud-session code can
+/// reach the constants without going through `client_message`.
+pub use voxeldust_types::hud_delta_flags;
 
 /// Phase 4.4: one entry in a `HudSignalDelta`. See the FB schema
 /// header for the layout rationale.
@@ -1433,69 +1607,10 @@ pub(crate) fn decode_lamp_configs(
         .collect()
 }
 
-/// Encode HUD signal snapshot for `WorldState.hud_signals`.
-pub(crate) fn encode_hud_signals<'a>(
-    builder: &mut FlatBufferBuilder<'a>,
-    entries: &[HudSignalEntryData],
-) -> Option<
-    flatbuffers::WIPOffset<
-        flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::HudSignalEntry<'a>>>,
-    >,
-> {
-    if entries.is_empty() {
-        return None;
-    }
-    let offsets: Vec<_> = entries
-        .iter()
-        .map(|e| {
-            let name = builder.create_string(&e.channel_name);
-            let text = if matches!(e.value, HudSignalValue::Text(_)) {
-                Some(builder.create_string(e.value.text_repr()))
-            } else {
-                None
-            };
-            fb::HudSignalEntry::create(
-                builder,
-                &fb::HudSignalEntryArgs {
-                    channel_name: Some(name),
-                    value_type: e.value.type_code(),
-                    value_num: e.value.numeric_repr(),
-                    value_text: text,
-                    property: e.property,
-                },
-            )
-        })
-        .collect();
-    Some(builder.create_vector(&offsets))
-}
-
-/// Decode HUD signal entries from a WorldState frame.
-pub(crate) fn decode_hud_signals(
-    entries: Option<
-        flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::HudSignalEntry<'_>>>,
-    >,
-) -> Vec<HudSignalEntryData> {
-    let Some(v) = entries else { return Vec::new() };
-    v.iter()
-        .filter_map(|e| {
-            let name = e.channel_name()?;
-            let value = match e.value_type() {
-                0 => HudSignalValue::Bool(e.value_num() > 0.5),
-                1 => HudSignalValue::Float(e.value_num()),
-                2 => HudSignalValue::State(e.value_num() as u8),
-                3 => HudSignalValue::Text(
-                    e.value_text().map(|s| s.to_string()).unwrap_or_default(),
-                ),
-                _ => return None,
-            };
-            Some(HudSignalEntryData {
-                channel_name: name.to_string(),
-                value,
-                property: e.property(),
-            })
-        })
-        .collect()
-}
+// Phase 4.4.5: encode_hud_signals / decode_hud_signals removed —
+// the `WorldState.hud_signals` field they served is gone. HUD updates
+// now ship via `ServerMsg::HudSignalDelta` over TCP. See
+// `core::signal::hud_session` + `HudSignalDeltaData`.
 
 impl ClientMsg {
     pub fn serialize(&self) -> Vec<u8> {
@@ -1583,14 +1698,26 @@ impl ClientMsg {
             ClientMsg::BlockConfigUpdate(data) => {
                 let pub_b: Vec<_> = data.publish_bindings.iter().map(|b| {
                     let n = builder.create_string(&b.channel_name);
+                    let (scope_code, range_m, frequency) = encode_binding_scope(&b.scope);
                     fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
-                        channel_name: Some(n), property: b.property as u8,
+                        channel_name: Some(n),
+                        property: b.property as u8,
+                        scope_code,
+                        range_m,
+                        frequency,
+                        grant_id: b.grant_id.unwrap_or(0),
                     })
                 }).collect();
                 let sub_b: Vec<_> = data.subscribe_bindings.iter().map(|b| {
                     let n = builder.create_string(&b.channel_name);
+                    let (scope_code, range_m, frequency) = encode_binding_scope(&b.scope);
                     fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
-                        channel_name: Some(n), property: b.property as u8,
+                        channel_name: Some(n),
+                        property: b.property as u8,
+                        scope_code,
+                        range_m,
+                        frequency,
+                        grant_id: b.grant_id.unwrap_or(0),
                     })
                 }).collect();
                 let rules: Vec<_> = data.converter_rules.iter().map(|r| {
@@ -1617,7 +1744,7 @@ impl ClientMsg {
                 let wc = data.warp_computer.as_ref().map(|c| encode_warp_computer_config(&mut builder, c));
                 let ec = data.engine_controller.as_ref().map(|c| encode_engine_controller_config(&mut builder, c));
                 let ant = data.antenna.as_ref().map(|c| encode_antenna_config(&mut builder, c));
-                let lis = data.listener.as_ref().map(|c| encode_listener_config(&mut builder, c));
+                let term = data.terminal.as_ref().map(|c| encode_terminal_config(&mut builder, c));
                 let bcu = fb::BlockConfigUpdate::create(&mut builder, &fb::BlockConfigUpdateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
                     publish_bindings: Some(pv), subscribe_bindings: Some(sv),
@@ -1626,7 +1753,7 @@ impl ClientMsg {
                     seated_channel_name: seated_ch,
                     flight_computer_config: fc, hover_module_config: hm,
                     autopilot_config: ap, warp_computer_config: wc, engine_controller_config: ec,
-                    antenna_config: ant, listener_config: lis,
+                    antenna_config: ant, terminal_config: term,
                 });
                 let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
                     payload_type: fb::ClientPayload::BlockConfigUpdate,
@@ -1838,6 +1965,26 @@ impl ClientMsg {
                 );
                 builder.finish(msg, None);
             }
+            ClientMsg::TerminalChatSend(data) => {
+                let text = builder.create_string(&data.text);
+                let tcs = fb::TerminalChatSendData::create(
+                    &mut builder,
+                    &fb::TerminalChatSendDataArgs {
+                        block_x: data.block_pos.x,
+                        block_y: data.block_pos.y,
+                        block_z: data.block_pos.z,
+                        text: Some(text),
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::TerminalChatSendData,
+                        payload: Some(tcs.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -1902,12 +2049,16 @@ impl ClientMsg {
                     crate::signal::config::PublishBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
+                        scope: decode_binding_scope(b.scope_code(), b.range_m(), b.frequency()),
+                        grant_id: (b.grant_id() != 0).then_some(b.grant_id()),
                     }
                 }).collect()).unwrap_or_default();
                 let sub_b = bcu.subscribe_bindings().map(|v| v.iter().map(|b| {
                     crate::signal::config::SubscribeBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
+                        scope: decode_binding_scope(b.scope_code(), b.range_m(), b.frequency()),
+                        grant_id: (b.grant_id() != 0).then_some(b.grant_id()),
                     }
                 }).collect()).unwrap_or_default();
                 let rules = bcu.converter_rules().map(|v| v.iter().map(|r| {
@@ -1936,12 +2087,11 @@ impl ClientMsg {
                     warp_computer: bcu.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
                     engine_controller: bcu.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
                     mechanical: None, // TODO: decode from FlatBuffers when schema is extended
-                    // Phase 3E.3: antenna + listener configs round-trip
-                    // through the wire. Optional FB fields decode as None
-                    // on legacy messages (forward compat) and as Some on
-                    // updates carrying the actual config.
+                    // Phase D: bidirectional Antenna + unified Terminal.
+                    // Optional FB fields decode as None on legacy/empty
+                    // messages.
                     antenna: bcu.antenna_config().map(|c| decode_antenna_config(&c)),
-                    listener: bcu.listener_config().map(|c| decode_listener_config(&c)),
+                    terminal: bcu.terminal_config().map(|c| decode_terminal_config(&c)),
                 }))
             }
             fb::ClientPayload::SubBlockEditRequest => {
@@ -2065,6 +2215,15 @@ impl ClientMsg {
                     grant_id: rsp.grant_id(),
                     value_type: rsp.value_type(),
                     value_data: rsp.value_data(),
+                }))
+            }
+            fb::ClientPayload::TerminalChatSendData => {
+                let tcs = msg
+                    .payload_as_terminal_chat_send_data()
+                    .ok_or(MessageError::MissingField("TerminalChatSend payload"))?;
+                Ok(ClientMsg::TerminalChatSend(TerminalChatSendData {
+                    block_pos: glam::IVec3::new(tcs.block_x(), tcs.block_y(), tcs.block_z()),
+                    text: tcs.text().unwrap_or("").to_string(),
                 }))
             }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),
@@ -2241,7 +2400,6 @@ impl ServerMsg {
                 let sub_grids_vec = if sg_fbs.is_empty() { None } else { Some(builder.create_vector(&sg_fbs)) };
 
                 let entities_vec = encode_observable_entities(&mut builder, &data.entities);
-                let hud_signals_vec = encode_hud_signals(&mut builder, &data.hud_signals);
 
                 let ws = fb::WorldState::create(&mut builder, &fb::WorldStateArgs {
                     tick: data.tick,
@@ -2255,7 +2413,6 @@ impl ServerMsg {
                     autopilot: ap_offset,
                     sub_grids: sub_grids_vec,
                     entities: entities_vec,
-                    hud_signals: hud_signals_vec,
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::WorldState,
@@ -2415,14 +2572,26 @@ impl ServerMsg {
             ServerMsg::BlockConfigState(data) => {
                 let pub_bindings: Vec<_> = data.publish_bindings.iter().map(|b| {
                     let name = builder.create_string(&b.channel_name);
+                    let (scope_code, range_m, frequency) = encode_binding_scope(&b.scope);
                     fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
-                        channel_name: Some(name), property: b.property as u8,
+                        channel_name: Some(name),
+                        property: b.property as u8,
+                        scope_code,
+                        range_m,
+                        frequency,
+                        grant_id: b.grant_id.unwrap_or(0),
                     })
                 }).collect();
                 let sub_bindings: Vec<_> = data.subscribe_bindings.iter().map(|b| {
                     let name = builder.create_string(&b.channel_name);
+                    let (scope_code, range_m, frequency) = encode_binding_scope(&b.scope);
                     fb::SignalBindingFB::create(&mut builder, &fb::SignalBindingFBArgs {
-                        channel_name: Some(name), property: b.property as u8,
+                        channel_name: Some(name),
+                        property: b.property as u8,
+                        scope_code,
+                        range_m,
+                        frequency,
+                        grant_id: b.grant_id.unwrap_or(0),
                     })
                 }).collect();
                 let rules: Vec<_> = data.converter_rules.iter().map(|r| {
@@ -2469,7 +2638,21 @@ impl ServerMsg {
                 let pub_opts_vec = builder.create_vector(&pub_opts);
                 let sub_opts_vec = builder.create_vector(&sub_opts);
                 let ant = data.antenna.as_ref().map(|c| encode_antenna_config(&mut builder, c));
-                let lis = data.listener.as_ref().map(|c| encode_listener_config(&mut builder, c));
+                let term = data.terminal.as_ref().map(|c| encode_terminal_config(&mut builder, c));
+                let tx_status = data
+                    .antenna_tx_status
+                    .as_ref()
+                    .map(|s| encode_access_status(&mut builder, s));
+                let rx_status = data
+                    .antenna_rx_status
+                    .as_ref()
+                    .map(|s| encode_access_status(&mut builder, s));
+                let held_grants_offsets: Vec<_> = data
+                    .held_grants
+                    .iter()
+                    .map(|g| encode_held_grant_summary(&mut builder, g))
+                    .collect();
+                let held_grants_vec = builder.create_vector(&held_grants_offsets);
 
                 let bcs = fb::BlockConfigState::create(&mut builder, &fb::BlockConfigStateArgs {
                     block_x: data.block_pos.x, block_y: data.block_pos.y, block_z: data.block_pos.z,
@@ -2483,7 +2666,9 @@ impl ServerMsg {
                     autopilot_config: ap, warp_computer_config: wc, engine_controller_config: ec,
                     publish_property_options: Some(pub_opts_vec),
                     subscribe_property_options: Some(sub_opts_vec),
-                    antenna_config: ant, listener_config: lis,
+                    antenna_config: ant, terminal_config: term,
+                    antenna_tx_status: tx_status, antenna_rx_status: rx_status,
+                    held_grants: Some(held_grants_vec),
                 });
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::BlockConfigState,
@@ -2631,6 +2816,54 @@ impl ServerMsg {
                 let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
                     payload_type: fb::ServerPayload::HudSignalDelta,
                     payload: Some(delta.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
+            ServerMsg::OpenTerminalChat(data) => {
+                let sub = builder.create_string(data.subscribe_channel.as_deref().unwrap_or(""));
+                let pub_ = builder.create_string(data.publish_channel.as_deref().unwrap_or(""));
+                let lines: Vec<_> = data
+                    .recent_lines
+                    .iter()
+                    .map(|l| builder.create_string(l))
+                    .collect();
+                let lines_vec = builder.create_vector(&lines);
+                let otc = fb::OpenTerminalChatData::create(
+                    &mut builder,
+                    &fb::OpenTerminalChatDataArgs {
+                        block_x: data.block_pos.x,
+                        block_y: data.block_pos.y,
+                        block_z: data.block_pos.z,
+                        subscribe_channel: Some(sub),
+                        publish_channel: Some(pub_),
+                        recent_lines: Some(lines_vec),
+                    },
+                );
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::OpenTerminalChatData,
+                    payload: Some(otc.as_union_value()),
+                });
+                builder.finish(msg, None);
+            }
+            ServerMsg::TerminalScrollbackDelta(data) => {
+                let lines: Vec<_> = data
+                    .appended_lines
+                    .iter()
+                    .map(|l| builder.create_string(l))
+                    .collect();
+                let lines_vec = builder.create_vector(&lines);
+                let tsd = fb::TerminalScrollbackDeltaData::create(
+                    &mut builder,
+                    &fb::TerminalScrollbackDeltaDataArgs {
+                        block_x: data.block_pos.x,
+                        block_y: data.block_pos.y,
+                        block_z: data.block_pos.z,
+                        appended_lines: Some(lines_vec),
+                    },
+                );
+                let msg = fb::ServerMessage::create(&mut builder, &fb::ServerMessageArgs {
+                    payload_type: fb::ServerPayload::TerminalScrollbackDeltaData,
+                    payload: Some(tsd.as_union_value()),
                 });
                 builder.finish(msg, None);
             }
@@ -2791,7 +3024,6 @@ impl ServerMsg {
                 }).collect()).unwrap_or_default();
 
                 let entities = decode_observable_entities(ws.entities());
-                let hud_signals = decode_hud_signals(ws.hud_signals());
 
                 Ok(ServerMsg::WorldState(WorldStateData {
                     tick: ws.tick(),
@@ -2805,7 +3037,6 @@ impl ServerMsg {
                     autopilot,
                     sub_grids,
                     entities,
-                    hud_signals,
                 }))
             }
             fb::ServerPayload::ChunkBlockMods => {
@@ -2947,12 +3178,16 @@ impl ServerMsg {
                     crate::signal::config::PublishBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
+                        scope: decode_binding_scope(b.scope_code(), b.range_m(), b.frequency()),
+                        grant_id: (b.grant_id() != 0).then_some(b.grant_id()),
                     }
                 }).collect()).unwrap_or_default();
                 let sub_b = bcs.subscribe_bindings().map(|v| v.iter().map(|b| {
                     crate::signal::config::SubscribeBindingConfig {
                         channel_name: b.channel_name().unwrap_or("").to_string(),
                         property: u8_to_signal_property(b.property()),
+                        scope: decode_binding_scope(b.scope_code(), b.range_m(), b.frequency()),
+                        grant_id: (b.grant_id() != 0).then_some(b.grant_id()),
                     }
                 }).collect()).unwrap_or_default();
                 let rules = bcs.converter_rules().map(|v| v.iter().map(|r| {
@@ -2997,9 +3232,15 @@ impl ServerMsg {
                     warp_computer: bcs.warp_computer_config().map(|c| decode_warp_computer_config(&c)),
                     engine_controller: bcs.engine_controller_config().map(|c| decode_engine_controller_config(&c)),
                     mechanical: None, // TODO: decode from FlatBuffers when schema is extended
-                    // Phase 3E.3: antenna/listener configs flow on the wire.
+                    // Phase D: bidirectional Antenna + unified Terminal.
                     antenna: bcs.antenna_config().map(|c| decode_antenna_config(&c)),
-                    listener: bcs.listener_config().map(|c| decode_listener_config(&c)),
+                    antenna_tx_status: bcs.antenna_tx_status().map(|s| decode_access_status(&s)),
+                    antenna_rx_status: bcs.antenna_rx_status().map(|s| decode_access_status(&s)),
+                    terminal: bcs.terminal_config().map(|c| decode_terminal_config(&c)),
+                    held_grants: bcs
+                        .held_grants()
+                        .map(|v| v.iter().map(|g| decode_held_grant_summary(&g)).collect())
+                        .unwrap_or_default(),
                 }))
             }
             fb::ServerPayload::SeatBindingsNotify => {
@@ -3120,6 +3361,36 @@ impl ServerMsg {
                     dict_seq: delta.dict_seq(),
                     batch_seq: delta.batch_seq(),
                     entries,
+                }))
+            }
+            fb::ServerPayload::OpenTerminalChatData => {
+                let otc = msg
+                    .payload_as_open_terminal_chat_data()
+                    .ok_or(MessageError::MissingField("OpenTerminalChat payload"))?;
+                let sub = otc.subscribe_channel().unwrap_or("");
+                let pub_ = otc.publish_channel().unwrap_or("");
+                let lines = otc
+                    .recent_lines()
+                    .map(|v| v.iter().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                Ok(ServerMsg::OpenTerminalChat(OpenTerminalChatData {
+                    block_pos: glam::IVec3::new(otc.block_x(), otc.block_y(), otc.block_z()),
+                    subscribe_channel: (!sub.is_empty()).then(|| sub.to_string()),
+                    publish_channel: (!pub_.is_empty()).then(|| pub_.to_string()),
+                    recent_lines: lines,
+                }))
+            }
+            fb::ServerPayload::TerminalScrollbackDeltaData => {
+                let tsd = msg
+                    .payload_as_terminal_scrollback_delta_data()
+                    .ok_or(MessageError::MissingField("TerminalScrollbackDelta payload"))?;
+                let lines = tsd
+                    .appended_lines()
+                    .map(|v| v.iter().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                Ok(ServerMsg::TerminalScrollbackDelta(TerminalScrollbackDeltaData {
+                    block_pos: glam::IVec3::new(tsd.block_x(), tsd.block_y(), tsd.block_z()),
+                    appended_lines: lines,
                 }))
             }
             fb::ServerPayload::NONE => Err(MessageError::UnknownPayload(0)),
@@ -3302,18 +3573,6 @@ mod tests {
                 health: 0.0,
                 shield: 0.0,
             }],
-            hud_signals: vec![
-                HudSignalEntryData {
-                    channel_name: "ship.speed".into(),
-                    value: HudSignalValue::Float(42.5),
-                    property: crate::signal::types::SignalProperty::Speed.as_ordinal(),
-                },
-                HudSignalEntryData {
-                    channel_name: "ship.callsign".into(),
-                    value: HudSignalValue::Text("TestPilot-1".into()),
-                    property: crate::signal::types::SignalProperty::Text.as_ordinal(),
-                },
-            ],
         });
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();
@@ -3452,92 +3711,107 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_block_config_update_with_antenna() {
-        // Phase 3E.3: AntennaConfig flows through the BlockConfigUpdate
-        // wire path. Round-trip the full message and assert every
-        // antenna field survives.
-        use crate::signal::config::{AntennaConfig, BlockConfigUpdateData};
+    fn roundtrip_block_config_update_with_bidirectional_antenna() {
+        // Phase D: bidirectional AntennaConfig flows through
+        // BlockConfigUpdate. TX + RX sides must both survive the
+        // round-trip with all their optional grant/target fields.
+        use crate::signal::config::{
+            AntennaConfig, AntennaSide, BlockConfigUpdateData,
+        };
         let mut data = BlockConfigUpdateData::default();
         data.block_pos = glam::IVec3::new(1, 2, 3);
         data.antenna = Some(AntennaConfig {
-            source_channel_name: "alice.local.alarm".into(),
-            remote_channel_name: "bob.alarm-mirror".into(),
-            frequency: 0xCAFEBABE,
-            grant_id: 0xDEADBEEF_DEADBEEF,
-            target_shard_id: 99,
+            tx: Some(AntennaSide {
+                local_channel_name: "alice.local.alarm".into(),
+                frequency: 0xCAFEBABE,
+                grant_id: Some(0xDEADBEEF_DEADBEEF),
+                remote_shard_id: Some(99),
+            }),
+            rx: Some(AntennaSide {
+                local_channel_name: "alice.local.health-mirror".into(),
+                frequency: 47291,
+                grant_id: None, // open RX
+                remote_shard_id: Some(1),
+            }),
         });
         let msg = ClientMsg::BlockConfigUpdate(data);
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
         let ClientMsg::BlockConfigUpdate(d) = decoded else { panic!("wrong variant") };
         let a = d.antenna.expect("antenna config must round-trip");
-        assert_eq!(a.source_channel_name, "alice.local.alarm");
-        assert_eq!(a.remote_channel_name, "bob.alarm-mirror");
-        assert_eq!(a.frequency, 0xCAFEBABE);
-        assert_eq!(a.grant_id, 0xDEADBEEF_DEADBEEF);
-        assert_eq!(a.target_shard_id, 99);
-        // Listener field stays None when not set.
-        assert!(d.listener.is_none());
+        let tx = a.tx.expect("tx side present");
+        assert_eq!(tx.local_channel_name, "alice.local.alarm");
+        assert_eq!(tx.frequency, 0xCAFEBABE);
+        assert_eq!(tx.grant_id, Some(0xDEADBEEF_DEADBEEF));
+        assert_eq!(tx.remote_shard_id, Some(99));
+        let rx = a.rx.expect("rx side present");
+        assert_eq!(rx.local_channel_name, "alice.local.health-mirror");
+        assert_eq!(rx.frequency, 47291);
+        assert!(rx.grant_id.is_none(), "open RX leaves grant_id None");
+        assert_eq!(rx.remote_shard_id, Some(1));
+        // Terminal field stays None when not set.
+        assert!(d.terminal.is_none());
     }
 
     #[test]
-    fn roundtrip_block_config_update_with_listener() {
-        use crate::signal::config::{BlockConfigUpdateData, ListenerConfig};
+    fn roundtrip_block_config_update_with_terminal() {
+        // Phase D: TerminalConfig flows through BlockConfigUpdate.
+        // Read + write channels both round-trip (the unified Terminal
+        // replaces the prior split TextDisplay + KeyboardTerminal).
+        use crate::signal::config::{BlockConfigUpdateData, TerminalConfig};
         let mut data = BlockConfigUpdateData::default();
         data.block_pos = glam::IVec3::new(7, 8, 9);
-        data.listener = Some(ListenerConfig {
-            destination_channel_name: "bob.local.health-mirror".into(),
-            bridged_channel_name: "alice.health".into(),
-            frequency: 47291,
-            grant_id: 0xBEEF,
-            source_shard_id: 1,
+        data.terminal = Some(TerminalConfig {
+            subscribe_channel_name: Some("ship.chat".into()),
+            publish_channel_name: Some("ship.chat".into()),
+            scrollback_lines: Some(128),
         });
         let msg = ClientMsg::BlockConfigUpdate(data);
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
         let ClientMsg::BlockConfigUpdate(d) = decoded else { panic!("wrong variant") };
-        let l = d.listener.expect("listener config must round-trip");
-        assert_eq!(l.destination_channel_name, "bob.local.health-mirror");
-        assert_eq!(l.bridged_channel_name, "alice.health");
-        assert_eq!(l.frequency, 47291);
-        assert_eq!(l.grant_id, 0xBEEF);
-        assert_eq!(l.source_shard_id, 1);
+        let t = d.terminal.expect("terminal config must round-trip");
+        assert_eq!(t.subscribe_channel_name.as_deref(), Some("ship.chat"));
+        assert_eq!(t.publish_channel_name.as_deref(), Some("ship.chat"));
+        assert_eq!(t.scrollback_lines, Some(128));
         assert!(d.antenna.is_none());
     }
 
     #[test]
-    fn roundtrip_block_config_state_with_antenna_and_listener() {
-        // Server → client snapshot path (BlockConfigState). Both configs
-        // present simultaneously, both must round-trip.
+    fn roundtrip_block_config_state_with_antenna_and_terminal() {
+        // Server → client snapshot path (BlockConfigState). Both
+        // configs present simultaneously, both must round-trip.
         use crate::signal::config::{
-            AntennaConfig, BlockSignalConfig, ListenerConfig,
+            AntennaConfig, AntennaSide, BlockSignalConfig, TerminalConfig,
         };
         let mut snap = BlockSignalConfig::default();
         snap.block_pos = glam::IVec3::new(0, 0, 0);
         snap.antenna = Some(AntennaConfig {
-            source_channel_name: "src".into(),
-            remote_channel_name: "rem".into(),
-            frequency: 1,
-            grant_id: 2,
-            target_shard_id: 3,
+            tx: Some(AntennaSide {
+                local_channel_name: "src".into(),
+                frequency: 1,
+                grant_id: Some(2),
+                remote_shard_id: Some(3),
+            }),
+            rx: None,
         });
-        snap.listener = Some(ListenerConfig {
-            destination_channel_name: "dst".into(),
-            bridged_channel_name: "bri".into(),
-            frequency: 4,
-            grant_id: 5,
-            source_shard_id: 6,
+        snap.terminal = Some(TerminalConfig {
+            subscribe_channel_name: Some("read".into()),
+            publish_channel_name: None,
+            scrollback_lines: None,
         });
         let msg = ServerMsg::BlockConfigState(snap);
         let bytes = msg.serialize();
         let decoded = ServerMsg::deserialize(&bytes).unwrap();
         let ServerMsg::BlockConfigState(s) = decoded else { panic!("wrong variant") };
         let a = s.antenna.expect("antenna round-trip");
-        assert_eq!(a.source_channel_name, "src");
-        assert_eq!(a.target_shard_id, 3);
-        let l = s.listener.expect("listener round-trip");
-        assert_eq!(l.destination_channel_name, "dst");
-        assert_eq!(l.source_shard_id, 6);
+        let tx = a.tx.expect("tx round-trip");
+        assert_eq!(tx.local_channel_name, "src");
+        assert_eq!(tx.remote_shard_id, Some(3));
+        assert!(a.rx.is_none(), "rx side stays None");
+        let t = s.terminal.expect("terminal round-trip");
+        assert_eq!(t.subscribe_channel_name.as_deref(), Some("read"));
+        assert!(t.publish_channel_name.is_none());
     }
 
     #[test]

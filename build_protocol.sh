@@ -3,7 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FBS_FILE="$SCRIPT_DIR/protocol/voxeldust.fbs"
-OUT_DIR="$SCRIPT_DIR/core/src"
+# Generated wire types live in their own crate (`voxeldust-protocol-fb`) so
+# schema regeneration does not invalidate the rest of `core/`. See BUILD_PERF.md.
+OUT_DIR="$SCRIPT_DIR/protocol-fb/src"
 
 if ! command -v flatc &> /dev/null; then
     echo "Error: flatc not found. Install FlatBuffers compiler:"

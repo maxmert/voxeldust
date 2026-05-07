@@ -1,0 +1,20 @@
+[package]
+name = "voxeldust-types"
+version.workspace = true
+edition.workspace = true
+
+# Foundational primitive types shared by `voxeldust-core`, `voxeldust-signal`,
+# and the shard binaries. Pulled out as the lowest layer of the crate graph so
+# that:
+#
+#  * the block ↔ signal cycle that existed when both lived in `core/` is broken
+#    — both depend on this crate, neither depends on the other.
+#  * editing higher-level logic in core or signal does not invalidate the
+#    cached compilation of these primitive enums.
+#
+# Keep this crate's dependency surface ABSOLUTE-MINIMUM (serde + std). New
+# types should land here only when they are TRULY shared primitives — see
+# BUILD_PERF.md §"Workspace layout".
+
+[dependencies]
+serde = { workspace = true }

@@ -39,6 +39,18 @@ impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Hotbar>()
             .init_resource::<SubBlockTool>()
+            .configure_sets(
+                Update,
+                // Dispatch runs BEFORE HudFocusSet so that an
+                // E-press while engaged with a HUD subblock is
+                // observed by dispatch with `hud_focus.active=true`
+                // (the early-out fires) — and only AFTER that does
+                // HudFocusSet's `toggle_focus_mode` flip the engage
+                // off. Without this ordering, the disengage and the
+                // INTERACT could land on the same frame and produce
+                // a re-engage loop.
+                InteractionSet.before(crate::hud::HudFocusSet),
+            )
             .add_systems(
                 Update,
                 (toggle_sub_block_tool, dispatch_interactions)

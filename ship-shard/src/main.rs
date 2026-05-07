@@ -14,6 +14,7 @@ use voxeldust_core::block::{
     StarterShipLayout, build_starter_ship,
     edit_pipeline::{self, BlockEditQueue, BlockEdit, EditSource, EntityOp},
     raycast,
+    registry::InteractionType,
 };
 use voxeldust_core::ecs::components::FunctionalBlockRef;
 use voxeldust_core::signal::{
@@ -41,6 +42,7 @@ use voxeldust_core::system::{self, SystemParams};
 use voxeldust_shard_common::authorized_peers::AuthorizedPeers;
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
+use voxeldust_shard_common::media_pipeline::MediaPipelinePlugin;
 use voxeldust_shard_common::signal_pipeline::{SignalPipelinePlugin, SignalSet};
 use voxeldust_shard_common::wire_dict_registry::decode_v2_batch;
 
@@ -596,6 +598,23 @@ struct ShipInteriorMask(voxeldust_core::block::interior_mask::InteriorMask);
 #[derive(Resource, Default)]
 struct FunctionalBlockIndex(std::collections::HashMap<glam::IVec3, Entity>);
 
+/// Phase D: which Terminal each session is currently engaged with,
+/// plus the last-streamed scrollback length so per-tick deltas only
+/// ship NEW lines. One engagement per session — engaging a fresh
+/// Terminal drops the previous entry. Cleared when the session
+/// disconnects (handled by `client_registry` cleanup, not here).
+///
+/// The bound is intentionally one-per-session: the player isn't
+/// engaged with two terminals simultaneously, so a HashMap<Session, _>
+/// caps memory at O(connected players) rather than growing per-block.
+#[derive(Resource, Default)]
+struct EngagedTerminalBySession {
+    map: std::collections::HashMap<
+        voxeldust_core::shard_types::SessionToken,
+        (glam::IVec3, usize),
+    >,
+}
+
 /// Pending entity lifecycle operations from the edit pipeline.
 /// Set by apply_block_edits, consumed by process_entity_ops.
 #[derive(Resource, Default)]
@@ -788,6 +807,16 @@ struct SignalQueryCtx<'w, 's> {
     wc_query: Query<'w, 's, &'static WarpComputerState>,
     ec_query: Query<'w, 's, &'static EngineControllerState>,
     mech_query: Query<'w, 's, &'static MechanicalState>,
+    // Phase D: bidirectional Antenna + unified Terminal read-back so
+    // re-opening the config UI shows the player's current settings
+    // (without these the form is empty and player thinks Apply lost
+    // their config).
+    antenna_query: Query<'w, 's, &'static voxeldust_core::signal::AntennaState>,
+    terminal_query: Query<'w, 's, &'static voxeldust_core::signal::TerminalState>,
+    /// Phase D: held-grants snapshot for the configurator's grant
+    /// picker. Server filters by session so we only ever surface
+    /// grants the placing player owns.
+    held_grants: Res<'w, voxeldust_shard_common::signal_pipeline::HeldGrants>,
 }
 
 // ---------------------------------------------------------------------------
@@ -943,14 +972,32 @@ struct DrainInputDiag {
     total_matched: u64,
 }
 
-/// Bundle the two signal-pipeline ingress buffers as one SystemParam so
-/// `drain_quic` stays under Bevy's 16-parameter limit. The two buffers
+/// Bundle the signal + media ingress resources as one SystemParam so
+/// `drain_quic` stays under Bevy's 16-parameter limit. The buffers
 /// are written by adjacent QUIC ingress paths and drained by sibling
-/// systems in `SignalSet::Ingest` — bundling has zero runtime cost.
+/// systems; bundling has zero runtime cost.
+///
+/// `channel_table` and `grants` are read-only here (the QUIC drain
+/// validates incoming media frames via `try_push_remote_media`, which
+/// reads the channel table + grants registry but doesn't mutate them).
+/// `media_replay` is `ResMut` because successful frame validation
+/// records the seq into the per-(channel, sender) sliding window.
 #[derive(bevy_ecs::system::SystemParam)]
 struct SignalIngressBuffers<'w> {
     signals: ResMut<'w, IncomingSignalBuffer>,
     subscribes: ResMut<'w, voxeldust_core::signal::IncomingSubscribeBuffer>,
+    /// Phase A1: per-channel incoming media buffer (replaces the
+    /// flat IncomingMediaBuffer).
+    media: ResMut<'w, voxeldust_core::media::ChannelMediaBuffer>,
+    /// Read-only channel table for media's channel-name resolution +
+    /// signature lookup at QUIC ingress.
+    channel_table: Res<'w, voxeldust_core::signal::SignalChannelTable>,
+    /// Read-only grant registry for media frames carrying a
+    /// `grant_id != 0`.
+    grants: Res<'w, voxeldust_core::signal::GrantsRegistry>,
+    /// Phase 5.2.B: per-(channel, sender) sliding-window replay
+    /// defense for media frames.
+    media_replay: ResMut<'w, voxeldust_core::media::MediaReplayRegistry>,
 }
 
 fn drain_quic(
@@ -973,6 +1020,10 @@ fn drain_quic(
 ) {
     let incoming_signals = &mut *signal_buffers.signals;
     let incoming_subscribes = &mut *signal_buffers.subscribes;
+    let incoming_media = &mut *signal_buffers.media;
+    let channel_table = &*signal_buffers.channel_table;
+    let grants_registry = &*signal_buffers.grants;
+    let media_replay = &mut *signal_buffers.media_replay;
     for _ in 0..32 {
         let queued = match bridge.quic_msg_rx.try_recv() {
             Ok(q) => q,
@@ -1323,6 +1374,72 @@ fn drain_quic(
                         grant_id: entry.grant_id,
                         auth_tag: entry.auth_tag,
                     });
+                }
+            }
+            ShardMsg::MediaBroadcastBatch(batch) => {
+                // Phase 5.2.B + A1: full cross-shard ingress validation
+                // for media frames. `try_push_remote_media` runs the
+                // same checks as signal's `try_push_remote`:
+                // channel-name resolution, grant lookup OR channel-
+                // signature key, HMAC verify (constant-time), per-
+                // (channel, sender) replay window, freshness window.
+                // On accept, the frame is pushed directly into
+                // `ChannelMediaBuffer` keyed by the resolved
+                // ChannelId — subscribers never see unauthenticated
+                // data; readers iterate by channel id.
+                let now_ms = voxeldust_core::signal::current_unix_millis();
+                let source_shard_id = batch.source_shard_id;
+                let mut rejected_counts: [usize; 4] = [0; 4];
+                for frame in batch.frames {
+                    match voxeldust_core::media::try_push_remote_media(
+                        channel_table,
+                        grants_registry,
+                        media_replay,
+                        incoming_media,
+                        source_shard_id,
+                        now_ms,
+                        frame,
+                    ) {
+                        Ok(_channel_id) => {}
+                        Err(reason) => {
+                            use voxeldust_core::media::MediaIngressDenied as D;
+                            let idx = match reason {
+                                D::UnknownChannel => 0,
+                                D::AuthFailed => 1,
+                                D::StaleOrFutureTimestamp => 2,
+                                D::Replay => 3,
+                            };
+                            rejected_counts[idx] += 1;
+                        }
+                    }
+                }
+                let total_rejected: usize = rejected_counts.iter().sum();
+                if total_rejected > 0 {
+                    tracing::debug!(
+                        source = source_shard_id,
+                        unknown_channel = rejected_counts[0],
+                        auth_failed = rejected_counts[1],
+                        stale_ts = rejected_counts[2],
+                        replay = rejected_counts[3],
+                        "MediaBroadcastBatch: rejected frames"
+                    );
+                }
+            }
+            ShardMsg::ShipNeighborhood(neighborhood) => {
+                // Phase 4.6: replace `peer_positions` with the
+                // system-shard's authoritative coverage. Ignores
+                // pushes addressed to a different ship-shard
+                // (defensive — system-shard QUIC dispatch already
+                // routes per target).
+                if neighborhood.target_ship_shard_id != config.shard_id.0 {
+                    continue;
+                }
+                peer_positions.positions.clear();
+                for entry in neighborhood.peers {
+                    peer_positions.positions.insert(
+                        voxeldust_core::shard_types::ShardId(entry.peer_shard_id),
+                        entry.peer_position,
+                    );
                 }
             }
             ShardMsg::SystemEntitiesUpdate(data) => {
@@ -2642,13 +2759,11 @@ fn tick_counter(mut tick: ResMut<ecs::TickCounter>) {
 // Broadcast
 // ---------------------------------------------------------------------------
 
-/// Phase 4.4: shared HUD signal snapshot builder. Returns the FULL
-/// current set of (channel_name, value, property) tuples a HUD
-/// client should be aware of. Used by:
-///   * `broadcast_world_state` — converts to V1 `HudSignalEntryData`
-///     for the legacy UDP `WorldState.hud_signals` field.
-///   * `emit_hud_signal_deltas` — feeds into per-session
-///     `HudSession::produce_delta` for delta-encoded TCP emission.
+/// Phase 4.4: HUD signal snapshot builder for ship-shard. Returns the
+/// FULL current set of (channel_name, value, property) tuples a HUD
+/// client should be aware of. Consumed by `emit_hud_signal_deltas`,
+/// which feeds it to per-session `HudSession::produce_delta` for
+/// delta-encoded TCP emission via `ServerMsg::HudSignalDelta`.
 ///
 /// Two sources combine:
 ///
@@ -2723,37 +2838,16 @@ fn build_hud_signal_snapshot(
     out
 }
 
-/// Phase 4.4: per-session HUD signal state, keyed by `SessionToken`.
-/// Each connected client gets its own [`HudSession`] (lazy-inserted
-/// on first emit) tracking its own `OutboundDict` + last-sent values.
+/// Phase 4.4: per-tick system that builds the ship-flavored HUD
+/// snapshot, drains the live `Player` query for session tokens, and
+/// hands both off to the shard-common
+/// [`flush_hud_deltas`](voxeldust_shard_common::hud_delta::flush_hud_deltas)
+/// helper which owns the per-session diff + TCP fan-out.
 ///
-/// Lifecycle:
-///   * Insert: `emit_hud_signal_deltas` lazy-inserts on first contact
-///     with a `Player` entity's session id.
-///   * Evict: per-tick prune walks the map and drops sessions no
-///     longer present in the live `Player` set. Bounded memory under
-///     player churn — no orphaned sessions accumulate.
-#[derive(Resource, Default)]
-struct HudSessionMap {
-    sessions: std::collections::HashMap<
-        voxeldust_core::shard_types::SessionToken,
-        voxeldust_core::signal::hud_session::HudSession,
-    >,
-}
-
-/// Phase 4.4: per-tick system that builds the HUD snapshot once,
-/// runs each `HudSession::produce_delta`, and ships non-empty deltas
-/// over TCP via `ServerMsg::HudSignalDelta`.
-///
-/// Bandwidth model:
+/// Bandwidth model (see `hud_delta` module docs):
 ///   * First batch per session: ~50 channels × ~30B (REGISTER) ≈ 1.5 KB.
 ///   * Steady state: only changed entries × ~14B (bare) ≈ ~50-200 B/tick.
-///   * Empty deltas (zero changes) are SKIPPED entirely — no TCP send.
-///
-/// The legacy UDP `WorldState.hud_signals` path stays alive in this
-/// PR — both run in parallel. Once the client-side decode lands the
-/// `WorldState` field becomes redundant and gets removed (separate
-/// slice).
+///   * Empty deltas are SKIPPED entirely — no TCP send.
 fn emit_hud_signal_deltas(
     players: Query<&SessionId, With<Player>>,
     exterior: Res<ShipExterior>,
@@ -2761,81 +2855,15 @@ fn emit_hud_signal_deltas(
     config: Res<ShipConfig>,
     channels: Res<SignalChannelTable>,
     bridge: Res<NetworkBridge>,
-    mut session_map: ResMut<HudSessionMap>,
+    mut session_map: ResMut<voxeldust_shard_common::hud_delta::HudSessionMap>,
 ) {
-    use voxeldust_core::client_message::{
-        HudSignalDeltaData, HudSignalEntryV2Data, ServerMsg,
-    };
-
-    // Build the snapshot once per tick — same data the legacy path
-    // would build, but as `HudSignalValueRepr` for the diff engine.
     let snapshot = build_hud_signal_snapshot(&exterior, &autopilot_cache, &config, &channels);
-
-    // Walk the live player set. Lazy-insert HudSession for new
-    // session tokens; collect tokens we've seen this tick for the
-    // post-loop prune.
-    let mut seen: std::collections::HashSet<voxeldust_core::shard_types::SessionToken> =
-        std::collections::HashSet::new();
-    let mut to_send: Vec<(voxeldust_core::shard_types::SessionToken, ServerMsg)> = Vec::new();
-
-    for sid in &players {
-        let token = sid.0;
-        seen.insert(token);
-        let session = session_map
-            .sessions
-            .entry(token)
-            .or_insert_with(voxeldust_core::signal::hud_session::HudSession::new);
-        let entries = session.produce_delta(&snapshot);
-        if entries.is_empty() {
-            continue;
-        }
-        // Convert HudDeltaEntry → wire-shaped HudSignalEntryV2Data.
-        // The two types are isomorphic; the split is so `core` doesn't
-        // depend on `client_message` ordering details.
-        let wire_entries: Vec<HudSignalEntryV2Data> = entries
-            .into_iter()
-            .map(|e| HudSignalEntryV2Data {
-                flags: e.flags,
-                wire_id: e.wire_id,
-                channel_name: e.channel_name,
-                value_type: e.value.type_code,
-                value_num: e.value.num,
-                value_text: e.value.text,
-                property: e.property,
-                seq: e.seq,
-            })
-            .collect();
-        let msg = ServerMsg::HudSignalDelta(HudSignalDeltaData {
-            dict_seq: session.dict_seq(),
-            batch_seq: session.batch_seq(),
-            entries: wire_entries,
-        });
-        to_send.push((token, msg));
-    }
-
-    // Prune sessions that disconnected or otherwise vanished.
-    session_map.sessions.retain(|tok, _| seen.contains(tok));
-
-    if to_send.is_empty() {
-        return;
-    }
-    // TCP fan-out via `client_registry.send_tcp` — same fire-and-
-    // forget pattern used by `apply_grant_create` etc. Deferred to a
-    // tokio task so we don't block the per-tick schedule on socket
-    // writes.
-    let cr = bridge.client_registry.clone();
-    tokio::spawn(async move {
-        let reg = cr.read().await;
-        for (token, msg) in to_send {
-            if let Err(e) = reg.send_tcp(token, &msg).await {
-                tracing::debug!(
-                    session = token.0,
-                    %e,
-                    "HudSignalDelta TCP send failed (client likely disconnected)"
-                );
-            }
-        }
-    });
+    voxeldust_shard_common::hud_delta::flush_hud_deltas(
+        &bridge,
+        &mut session_map,
+        &snapshot,
+        players.iter().map(|sid| sid.0),
+    );
 }
 
 fn broadcast_world_state(
@@ -3012,30 +3040,11 @@ fn broadcast_world_state(
         });
     }
 
-    // HUD signal snapshot for every subscribed client. Built via the
-    // shared `build_hud_signal_snapshot` helper so the legacy UDP path
-    // (this `WorldState.hud_signals` field) and the Phase 4.4 TCP
-    // delta path (`emit_hud_signal_deltas`) draw from a single source
-    // of truth — no risk of the two diverging.
-    let snapshot = build_hud_signal_snapshot(&exterior, &autopilot_cache, &config, &channels);
-    let hud_signals: Vec<voxeldust_core::client_message::HudSignalEntryData> = snapshot
-        .iter()
-        .map(|(name, repr, property)| {
-            use voxeldust_core::client_message::{HudSignalEntryData, HudSignalValue};
-            let value = match repr.type_code {
-                0 => HudSignalValue::Bool(repr.num > 0.5),
-                1 => HudSignalValue::Float(repr.num),
-                2 => HudSignalValue::State(repr.num as u8),
-                3 => HudSignalValue::Text(repr.text.clone()),
-                _ => HudSignalValue::Float(repr.num),
-            };
-            HudSignalEntryData {
-                channel_name: name.clone(),
-                value,
-                property: *property,
-            }
-        })
-        .collect();
+    // Phase 4.4.5: HUD signal snapshot is no longer carried in
+    // `WorldState`. Delta-encoded updates ship via the dedicated
+    // TCP `ServerMsg::HudSignalDelta` path emitted by
+    // `emit_hud_signal_deltas` running in the same `ShipSet::Broadcast`
+    // slot as this builder.
 
     let mut ws = ServerMsg::WorldState(WorldStateData {
         tick: tick.0,
@@ -3049,7 +3058,6 @@ fn broadcast_world_state(
         autopilot: autopilot_cache.snapshot.clone(),
         sub_grids: Vec::new(), // Populated below after WorldStateData construction.
         entities,
-        hud_signals,
     });
     // Build sub-grid transforms from MechanicalState (clean joint angle + axis)
     // instead of raw Rapier body quaternions (which have solver noise on off-axes).
@@ -3210,6 +3218,13 @@ struct BlockConfigRecord {
     publish_bindings: Vec<(String, u8)>,
     /// Seat config (generic bindings + seated channel name).
     seat_config: block::SavedSeatConfig,
+    /// Phase D: bidirectional Antenna config. None on non-antenna
+    /// blocks (and on legacy records pre-Phase-D — the deserializer
+    /// reads None when the trailing bytes for this field are absent,
+    /// preserving backward compatibility).
+    antenna: Option<voxeldust_core::signal::config::AntennaConfig>,
+    /// Phase D: unified Terminal config. Same backward-compat shape.
+    terminal: Option<voxeldust_core::signal::config::TerminalConfig>,
 }
 
 /// Serialize a BlockConfigRecord to bytes.
@@ -3292,7 +3307,110 @@ fn serialize_block_config(record: &BlockConfigRecord) -> Vec<u8> {
     let scb = record.seat_config.seated_channel_name.as_bytes();
     buf.extend_from_slice(&(scb.len() as u32).to_le_bytes());
     buf.extend_from_slice(scb);
+
+    // Phase D: antenna + terminal trailers. Old records (saved before
+    // this slice) end here and the deserializer returns None for both
+    // — that's the backward-compat read path.
+    serialize_optional_antenna(&mut buf, record.antenna.as_ref());
+    serialize_optional_terminal(&mut buf, record.terminal.as_ref());
+
     buf
+}
+
+/// Serialize an optional `AntennaConfig` to the persistence buffer.
+/// Format:
+///   tag: u8  (0 = None, 1 = Some)
+///   if Some:
+///     tx_tag: u8  (0/1) + AntennaSide if Some
+///     rx_tag: u8  (0/1) + AntennaSide if Some
+fn serialize_optional_antenna(
+    buf: &mut Vec<u8>,
+    cfg: Option<&voxeldust_core::signal::config::AntennaConfig>,
+) {
+    match cfg {
+        None => buf.push(0),
+        Some(a) => {
+            buf.push(1);
+            serialize_optional_antenna_side(buf, a.tx.as_ref());
+            serialize_optional_antenna_side(buf, a.rx.as_ref());
+        }
+    }
+}
+
+/// Serialize one side of a bidirectional antenna. Symmetric for tx/rx
+/// since `AntennaSide` itself doesn't carry direction.
+fn serialize_optional_antenna_side(
+    buf: &mut Vec<u8>,
+    side: Option<&voxeldust_core::signal::config::AntennaSide>,
+) {
+    match side {
+        None => buf.push(0),
+        Some(s) => {
+            buf.push(1);
+            // local_channel_name
+            let lb = s.local_channel_name.as_bytes();
+            buf.extend_from_slice(&(lb.len() as u32).to_le_bytes());
+            buf.extend_from_slice(lb);
+            // frequency
+            buf.extend_from_slice(&s.frequency.to_le_bytes());
+            // grant_id (Option<u64>)
+            match s.grant_id {
+                None => buf.push(0),
+                Some(g) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&g.to_le_bytes());
+                }
+            }
+            // remote_shard_id (Option<u64>)
+            match s.remote_shard_id {
+                None => buf.push(0),
+                Some(r) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&r.to_le_bytes());
+                }
+            }
+        }
+    }
+}
+
+/// Serialize an optional `TerminalConfig` to the persistence buffer.
+/// Format:
+///   tag: u8  (0 = None, 1 = Some)
+///   if Some:
+///     subscribe_channel_name: optional length-prefixed string
+///     publish_channel_name:   optional length-prefixed string
+///     scrollback_lines:       optional u16
+fn serialize_optional_terminal(
+    buf: &mut Vec<u8>,
+    cfg: Option<&voxeldust_core::signal::config::TerminalConfig>,
+) {
+    match cfg {
+        None => buf.push(0),
+        Some(t) => {
+            buf.push(1);
+            serialize_optional_string(buf, t.subscribe_channel_name.as_deref());
+            serialize_optional_string(buf, t.publish_channel_name.as_deref());
+            match t.scrollback_lines {
+                None => buf.push(0),
+                Some(n) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&n.to_le_bytes());
+                }
+            }
+        }
+    }
+}
+
+fn serialize_optional_string(buf: &mut Vec<u8>, s: Option<&str>) {
+    match s {
+        None => buf.push(0),
+        Some(s) => {
+            buf.push(1);
+            let b = s.as_bytes();
+            buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            buf.extend_from_slice(b);
+        }
+    }
 }
 
 /// Deserialize a BlockConfigRecord from bytes.
@@ -3308,7 +3426,7 @@ fn deserialize_block_config(data: &[u8]) -> Option<BlockConfigRecord> {
     pos += co_len;
 
     // boost_channel
-    if pos + 4 > data.len() { return Some(BlockConfigRecord { channel_override, boost_channel: String::new(), power_config: None, subscribe_bindings: Vec::new(), publish_bindings: Vec::new(), seat_config: block::SavedSeatConfig::default() }); }
+    if pos + 4 > data.len() { return Some(BlockConfigRecord { channel_override, boost_channel: String::new(), power_config: None, subscribe_bindings: Vec::new(), publish_bindings: Vec::new(), seat_config: block::SavedSeatConfig::default(), antenna: None, terminal: None }); }
     let bc_len = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize;
     pos += 4;
     if pos + bc_len > data.len() { return None; }
@@ -3463,7 +3581,218 @@ fn deserialize_block_config(data: &[u8]) -> Option<BlockConfigRecord> {
         // v1 (old format) or unknown: seat_config stays empty → uses preset defaults
     }
 
-    Some(BlockConfigRecord { channel_override, boost_channel, power_config, subscribe_bindings, publish_bindings, seat_config })
+    // Phase D: antenna + terminal trailers. Older records (saved
+    // before this slice) end here — `deserialize_optional_*` reads
+    // None when the buffer is exhausted, preserving forward compat.
+    let (antenna, advance) = deserialize_optional_antenna(&data[pos..]);
+    pos += advance;
+    let (terminal, _advance) = deserialize_optional_terminal(&data[pos..]);
+
+    Some(BlockConfigRecord {
+        channel_override,
+        boost_channel,
+        power_config,
+        subscribe_bindings,
+        publish_bindings,
+        seat_config,
+        antenna,
+        terminal,
+    })
+}
+
+/// Read an optional `AntennaConfig` from a tail slice; returns
+/// `(value, bytes_consumed)`. Returns `(None, 0)` when the slice is
+/// empty (legacy record) so callers can chain reads safely.
+fn deserialize_optional_antenna(
+    data: &[u8],
+) -> (Option<voxeldust_core::signal::config::AntennaConfig>, usize) {
+    if data.is_empty() {
+        return (None, 0);
+    }
+    let mut pos = 1; // skipped tag
+    match data[0] {
+        0 => (None, pos),
+        1 => {
+            let (tx, adv) = deserialize_optional_antenna_side(&data[pos..]);
+            pos += adv;
+            let (rx, adv) = deserialize_optional_antenna_side(&data[pos..]);
+            pos += adv;
+            (
+                Some(voxeldust_core::signal::config::AntennaConfig { tx, rx }),
+                pos,
+            )
+        }
+        // Unknown tag — corrupted record; refuse to interpret further.
+        // Returns (None, full-slice-consumed) to skip the rest cleanly.
+        _ => (None, data.len()),
+    }
+}
+
+fn deserialize_optional_antenna_side(
+    data: &[u8],
+) -> (Option<voxeldust_core::signal::config::AntennaSide>, usize) {
+    if data.is_empty() {
+        return (None, 0);
+    }
+    let mut pos = 1;
+    match data[0] {
+        0 => (None, pos),
+        1 => {
+            // local_channel_name
+            if data.len() < pos + 4 {
+                return (None, data.len());
+            }
+            let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap_or([0; 4])) as usize;
+            pos += 4;
+            if data.len() < pos + len {
+                return (None, data.len());
+            }
+            let local_channel_name =
+                std::str::from_utf8(&data[pos..pos + len]).unwrap_or("").to_string();
+            pos += len;
+            // frequency
+            if data.len() < pos + 4 {
+                return (None, data.len());
+            }
+            let frequency =
+                u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap_or([0; 4]));
+            pos += 4;
+            // grant_id Option<u64>
+            if data.len() < pos + 1 {
+                return (None, data.len());
+            }
+            let grant_id = match data[pos] {
+                0 => {
+                    pos += 1;
+                    None
+                }
+                1 => {
+                    pos += 1;
+                    if data.len() < pos + 8 {
+                        return (None, data.len());
+                    }
+                    let v =
+                        u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
+                    pos += 8;
+                    Some(v)
+                }
+                _ => return (None, data.len()),
+            };
+            // remote_shard_id Option<u64>
+            if data.len() < pos + 1 {
+                return (None, data.len());
+            }
+            let remote_shard_id = match data[pos] {
+                0 => {
+                    pos += 1;
+                    None
+                }
+                1 => {
+                    pos += 1;
+                    if data.len() < pos + 8 {
+                        return (None, data.len());
+                    }
+                    let v =
+                        u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
+                    pos += 8;
+                    Some(v)
+                }
+                _ => return (None, data.len()),
+            };
+            (
+                Some(voxeldust_core::signal::config::AntennaSide {
+                    local_channel_name,
+                    frequency,
+                    grant_id,
+                    remote_shard_id,
+                }),
+                pos,
+            )
+        }
+        _ => (None, data.len()),
+    }
+}
+
+fn deserialize_optional_terminal(
+    data: &[u8],
+) -> (Option<voxeldust_core::signal::config::TerminalConfig>, usize) {
+    if data.is_empty() {
+        return (None, 0);
+    }
+    let mut pos = 1;
+    match data[0] {
+        0 => (None, pos),
+        1 => {
+            let (subscribe_channel_name, adv) = deserialize_optional_string(&data[pos..]);
+            pos += adv;
+            let (publish_channel_name, adv) = deserialize_optional_string(&data[pos..]);
+            pos += adv;
+            // scrollback_lines Option<u16>
+            if data.len() < pos + 1 {
+                return (
+                    Some(voxeldust_core::signal::config::TerminalConfig {
+                        subscribe_channel_name,
+                        publish_channel_name,
+                        scrollback_lines: None,
+                    }),
+                    pos,
+                );
+            }
+            let scrollback_lines = match data[pos] {
+                0 => {
+                    pos += 1;
+                    None
+                }
+                1 => {
+                    pos += 1;
+                    if data.len() < pos + 2 {
+                        return (None, data.len());
+                    }
+                    let v =
+                        u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap_or([0; 2]));
+                    pos += 2;
+                    Some(v)
+                }
+                _ => return (None, data.len()),
+            };
+            (
+                Some(voxeldust_core::signal::config::TerminalConfig {
+                    subscribe_channel_name,
+                    publish_channel_name,
+                    scrollback_lines,
+                }),
+                pos,
+            )
+        }
+        _ => (None, data.len()),
+    }
+}
+
+fn deserialize_optional_string(data: &[u8]) -> (Option<String>, usize) {
+    if data.is_empty() {
+        return (None, 0);
+    }
+    let mut pos = 1;
+    match data[0] {
+        0 => (None, pos),
+        1 => {
+            if data.len() < pos + 4 {
+                return (None, data.len());
+            }
+            let len =
+                u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap_or([0; 4])) as usize;
+            pos += 4;
+            if data.len() < pos + len {
+                return (None, data.len());
+            }
+            let s = std::str::from_utf8(&data[pos..pos + len])
+                .unwrap_or("")
+                .to_string();
+            pos += len;
+            (Some(s), pos)
+        }
+        _ => (None, data.len()),
+    }
 }
 
 /// Load block configs from redb into a ShipGrid's channel_overrides and power_configs.
@@ -3506,6 +3835,18 @@ fn load_block_configs(db: &redb::Database, grid: &mut ShipGrid) {
             if !record.seat_config.bindings.is_empty() || !record.seat_config.seated_channel_name.is_empty() {
                 grid.set_saved_seat_config(block_pos, record.seat_config);
             }
+            // Phase D: hand the antenna + terminal configs to the
+            // grid's saved-config storage. The boot-time re-apply
+            // system reads them after entities spawn; the F-key
+            // snapshot falls back to them when the runtime
+            // AntennaState/TerminalState component isn't (yet) on
+            // the entity.
+            if let Some(antenna) = record.antenna {
+                grid.set_saved_antenna_config(block_pos, antenna);
+            }
+            if let Some(terminal) = record.terminal {
+                grid.set_saved_terminal_config(block_pos, terminal);
+            }
             count += 1;
         }
     }
@@ -3546,6 +3887,13 @@ fn save_block_configs(db: &redb::Database, grid: &ShipGrid) {
                 subscribe_bindings: Vec::new(),
                 publish_bindings: Vec::new(),
                 seat_config: block::SavedSeatConfig::default(),
+                // Phase D: bulk save preserves whatever the grid has
+                // already learned for this block — `iter_saved_*`
+                // gives us the durable picture even when this site is
+                // re-saving "channel/power" state without a fresh
+                // edit having come through `save_single_block_config`.
+                antenna: grid.saved_antenna_config(*pos).cloned(),
+                terminal: grid.saved_terminal_config(*pos).cloned(),
             };
             let key_bytes = chunk_key_bytes(*pos);
             let data = serialize_block_config(&record);
@@ -3885,6 +4233,120 @@ fn drain_client_signal_publishes(
     }
 }
 
+/// Phase D: ship terminal-scrollback deltas to engaged sessions.
+/// Walks `EngagedTerminalBySession` once per tick; for each engaged
+/// (session, block) pair, computes the diff between the terminal's
+/// current `recent_lines.len()` and the last-streamed length. Ships
+/// only the new tail as `ServerMsg::TerminalScrollbackDelta` so the
+/// per-frame wire footprint stays bounded by the chat's actual rate.
+///
+/// Engagement is auto-pruned when the session disconnects via the
+/// client_registry teardown — we don't try to detect Esc/F-disengage
+/// on the server (the player can re-engage with no cost; the stale
+/// entry just produces "nothing to ship" iterations).
+fn stream_terminal_scrollback(
+    bridge: Res<NetworkBridge>,
+    block_index: Res<FunctionalBlockIndex>,
+    mut engaged: ResMut<EngagedTerminalBySession>,
+    terminals: Query<&voxeldust_core::signal::TerminalState>,
+) {
+    if engaged.map.is_empty() {
+        return;
+    }
+    let mut deltas: Vec<(
+        voxeldust_core::shard_types::SessionToken,
+        glam::IVec3,
+        Vec<String>,
+    )> = Vec::new();
+    let mut prune: Vec<voxeldust_core::shard_types::SessionToken> = Vec::new();
+
+    for (session, (block_pos, last_count)) in engaged.map.iter_mut() {
+        let Some(&entity) = block_index.0.get(block_pos) else {
+            // Block no longer exists (broken / unloaded). Drop the
+            // engagement entry — sending to it would be a no-op forever.
+            prune.push(*session);
+            continue;
+        };
+        let Ok(state) = terminals.get(entity) else {
+            // Entity no longer has a TerminalState (config removed,
+            // block re-typed). Drop.
+            prune.push(*session);
+            continue;
+        };
+        let cur = state.recent_lines.len();
+        if cur > *last_count {
+            let new_lines: Vec<String> = state.recent_lines[*last_count..cur].to_vec();
+            deltas.push((*session, *block_pos, new_lines));
+            *last_count = cur;
+        } else if cur < *last_count {
+            // Ring buffer wrapped (max_lines saturated). Re-baseline
+            // without sending — the client already saw the wrapped
+            // lines on engage.
+            *last_count = cur;
+        }
+    }
+    for s in prune {
+        engaged.map.remove(&s);
+    }
+
+    if deltas.is_empty() {
+        return;
+    }
+
+    let cr = bridge.client_registry.clone();
+    tokio::spawn(async move {
+        let reg = cr.read().await;
+        for (session, block_pos, lines) in deltas {
+            let msg = ServerMsg::TerminalScrollbackDelta(
+                voxeldust_core::client_message::TerminalScrollbackDeltaData {
+                    block_pos,
+                    appended_lines: lines,
+                },
+            );
+            let _ = reg.send_tcp(session, &msg).await;
+        }
+    });
+}
+
+/// Phase D: drain `ClientMsg::TerminalChatSend` from the bridge into
+/// `KeyboardTerminalInput` ECS events that `terminal_publish` (in
+/// shard-common's media pipeline) consumes. Bridges the network-layer
+/// per-block-position addressing to the ECS-layer per-entity addressing
+/// using the existing `block_index` map.
+///
+/// Bounded per-tick drain (64 lines max) so a flooding client can't
+/// crowd out other systems.
+fn drain_terminal_chat_send(
+    mut bridge: ResMut<NetworkBridge>,
+    block_index: Res<FunctionalBlockIndex>,
+    mut writer: bevy_ecs::message::MessageWriter<
+        voxeldust_shard_common::media_pipeline::KeyboardTerminalInput,
+    >,
+) {
+    for _ in 0..64 {
+        let (_session, data) = match bridge.terminal_chat_send_rx.try_recv() {
+            Ok(d) => d,
+            Err(_) => break,
+        };
+        let Some(&entity) = block_index.0.get(&data.block_pos) else {
+            tracing::debug!(
+                block = ?data.block_pos,
+                "TerminalChatSend dropped: no entity at block position"
+            );
+            continue;
+        };
+        // Bound the line at 4 KiB before queuing — matches MediaPayload::Text.
+        let mut line = data.text;
+        if line.len() > 4096 {
+            line.truncate(4096);
+        }
+        writer.write(voxeldust_shard_common::media_pipeline::KeyboardTerminalInput {
+            entity,
+            line,
+        });
+    }
+}
+
 /// Apply config updates received from clients to entity signal components.
 /// Resolves string channel names → ChannelId at this boundary.
 /// Bundle of Phase 3E.3 inputs for the antenna/listener apply path. Lifts
@@ -3909,7 +4371,10 @@ fn apply_config_updates(
     mut reactor_query: Query<(&mut ReactorState, Option<&mut ReactorConsumerCache>)>,
     block_ref_query: Query<&FunctionalBlockRef>,
     registry: Res<BlockRegistryResource>,
-    grid: Res<ShipGridResource>,
+    // Phase D: ResMut so we can mirror antenna+terminal config into
+    // the grid's saved-config storage on every apply (read by boot
+    // restore + F-key snapshot fallback).
+    mut grid: ResMut<ShipGridResource>,
     persistence: Option<Res<ShipPersistence>>,
     mut mech_state_query: Query<&mut MechanicalState>,
     mut antenna_listener: AntennaListenerInputs,
@@ -3945,17 +4410,30 @@ fn apply_config_updates(
         }
 
         // Resolve config types (string) → runtime types (ChannelId).
+        // Phase C: when a binding carries a scope hint AND the channel
+        // doesn't yet exist, create it with that scope. Existing
+        // channels keep their original scope (immutable invariant).
         if !update.publish_bindings.is_empty() {
             commands.entity(entity).insert(SignalPublisher {
                 bindings: update.publish_bindings.iter().map(|b| PublishBinding {
-                    channel_id: channels.resolve_or_create(&b.channel_name, default_scope, default_merge, 0),
+                    channel_id: channels.resolve_or_create(
+                        &b.channel_name,
+                        b.scope.clone().unwrap_or(default_scope),
+                        default_merge,
+                        0,
+                    ),
                     property: b.property,
                 }).collect(),
             });
         }
         if !update.subscribe_bindings.is_empty() {
             let bindings: Vec<SubscribeBinding> = update.subscribe_bindings.iter().map(|b| SubscribeBinding {
-                channel_id: channels.resolve_or_create(&b.channel_name, default_scope, default_merge, 0),
+                channel_id: channels.resolve_or_create(
+                    &b.channel_name,
+                    b.scope.clone().unwrap_or(default_scope),
+                    default_merge,
+                    0,
+                ),
                 property: b.property,
             }).collect();
             commands.entity(entity).insert(SignalSubscriber { bindings });
@@ -4075,7 +4553,28 @@ fn apply_config_updates(
                         .collect(),
                     seated_channel_name: update.seated_channel_name.clone(),
                 },
+                // Phase D: persist the full antenna + terminal config
+                // the player just applied. Mirror into the grid's
+                // saved-config storage so boot-time restore + F-key
+                // snapshot fallback both see the latest state.
+                antenna: update.antenna.clone(),
+                terminal: update.terminal.clone(),
             };
+            // Mirror into the in-memory grid storage so boot-time
+            // restore + F-key snapshot fallback both see the latest
+            // state.
+            if let Some(ref a) = update.antenna {
+                grid.0.set_saved_antenna_config(update.block_pos, a.clone());
+            } else {
+                grid.0
+                    .set_saved_antenna_config(update.block_pos, Default::default());
+            }
+            if let Some(ref t) = update.terminal {
+                grid.0.set_saved_terminal_config(update.block_pos, t.clone());
+            } else {
+                grid.0
+                    .set_saved_terminal_config(update.block_pos, Default::default());
+            }
             save_single_block_config(&persist.db, update.block_pos, &record);
         }
 
@@ -4093,9 +4592,8 @@ fn apply_config_updates(
             }
         }
 
-        // Phase 3E.3: apply Antenna config (block-bound outbound bridge).
-        // Resolution + validation lives in shard-common's helper so the
-        // ship-shard's job here is just dispatch + persistence.
+        // Phase D: apply bidirectional Antenna config (TX + RX in one block).
+        // Resolution + validation lives in shard-common's helper.
         if let Some(ref ac) = update.antenna {
             // Owner session derived from the BlockOwnership component.
             // Attached at placement; falls back to event.session as a
@@ -4104,15 +4602,47 @@ fn apply_config_updates(
                 .map(|bo| voxeldust_core::shard_types::SessionToken(bo.owner_id))
                 .unwrap_or(event.session);
             match voxeldust_shard_common::signal_pipeline::apply_antenna_config(
-                &channels, &antenna_listener.held_grants, ac, owner_session,
+                &mut channels,
+                &mut antenna_listener.grants_registry,
+                &antenna_listener.held_grants,
+                ac,
+                owner_session,
+                antenna_listener.tick.0,
             ) {
-                Ok(ok) => {
-                    commands.entity(entity).insert(ok.state);
+                Ok(mut ok) => {
+                    commands.entity(entity).insert(ok.state.clone());
+                    // RX side: ship the pre-signed SignalSubscribe to the
+                    // publisher's shard so it registers us as a remote sub.
+                    if let Some(mut subscribe) = ok.outbound_subscribe.take() {
+                        subscribe.subscriber_shard_id = antenna_listener.config.shard_id.0;
+                        let target_shard_id = ac
+                            .rx
+                            .as_ref()
+                            .and_then(|s| s.remote_shard_id)
+                            .unwrap_or(0);
+                        if target_shard_id != 0 {
+                            let target = ShardId(target_shard_id);
+                            let msg = ShardMsg::SignalSubscribe(subscribe);
+                            if let Ok(reg) = antenna_listener.bridge.peer_registry.try_read() {
+                                if let Some(addr) = reg.quic_addr(target) {
+                                    let _ = antenna_listener
+                                        .bridge
+                                        .quic_send_tx
+                                        .try_send((target, addr, msg));
+                                } else {
+                                    warn!(
+                                        target = ?target,
+                                        "Antenna RX subscribe: source shard not in peer registry"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     info!(
                         block = ?update.block_pos,
-                        target_shard = ac.target_shard_id,
-                        grant_id = ac.grant_id,
-                        "applied AntennaConfig"
+                        tx_present = ac.tx.is_some(),
+                        rx_present = ac.rx.is_some(),
+                        "applied AntennaConfig (bidirectional)"
                     );
                 }
                 Err(reason) => {
@@ -4125,54 +4655,64 @@ fn apply_config_updates(
             }
         }
 
-        // Phase 3E.3: apply Listener config. The helper mutates the
-        // SignalChannelTable + GrantsRegistry (creating bridged + dest
-        // channels and registering the bridged channel under the mirror
-        // grant). The returned `outbound_subscribe` ships to the source
-        // shard via QUIC so the publisher registers us as a subscriber.
-        if let Some(ref lc) = update.listener {
-            let owner_session = antenna_listener.block_owner_query.get(entity).ok()
-                .map(|bo| voxeldust_core::shard_types::SessionToken(bo.owner_id))
-                .unwrap_or(event.session);
-            match voxeldust_shard_common::signal_pipeline::apply_listener_config(
-                &mut channels,
-                &mut antenna_listener.grants_registry,
-                &antenna_listener.held_grants,
-                lc,
-                owner_session,
-                antenna_listener.tick.0,
-            ) {
-                Ok(mut ok) => {
-                    // Fill in our shard id so the receiver knows where to
-                    // ship forwarded entries.
-                    ok.outbound_subscribe.subscriber_shard_id = antenna_listener.config.shard_id.0;
-                    commands.entity(entity).insert(ok.state);
-                    let target = ShardId(lc.source_shard_id);
-                    let msg = ShardMsg::SignalSubscribe(ok.outbound_subscribe);
-                    if let Ok(reg) = antenna_listener.bridge.peer_registry.try_read() {
-                        if let Some(addr) = reg.quic_addr(target) {
-                            let _ = antenna_listener.bridge.quic_send_tx.try_send((target, addr, msg));
-                        } else {
-                            warn!(
-                                target = ?target,
-                                "Listener subscribe: source shard not in peer registry"
-                            );
-                        }
-                    }
-                    info!(
-                        block = ?update.block_pos,
-                        source_shard = lc.source_shard_id,
-                        grant_id = lc.grant_id,
-                        "applied ListenerConfig + dispatched SignalSubscribe"
-                    );
-                }
-                Err(reason) => {
-                    warn!(
-                        block = ?update.block_pos,
-                        ?reason,
-                        "ListenerConfig rejected"
-                    );
-                }
+        // Phase D: apply unified Terminal config (read + write text).
+        // Either side can be empty (read-only sign / input-only kiosk);
+        // both empty is rejected at the wire level. The server resolves
+        // the channel names at apply time and constructs `TerminalState`.
+        if let Some(ref tc) = update.terminal {
+            if !tc.has_any_channel() {
+                warn!(
+                    block = ?update.block_pos,
+                    "TerminalConfig rejected: neither subscribe nor publish channel set"
+                );
+            } else {
+                use voxeldust_core::signal::types::{ChannelMergeStrategy, SignalScope};
+                let owner_session = antenna_listener
+                    .block_owner_query
+                    .get(entity)
+                    .ok()
+                    .map(|bo| bo.owner_id)
+                    .unwrap_or(event.session.0);
+                let max_lines = tc.effective_scrollback() as u32;
+                // Phase A1: resolve channel names → ChannelIds at apply
+                // time. Channels are auto-created with Local scope if
+                // they don't exist (matching the antenna apply path).
+                // The Terminal then runs purely on ids — no per-tick
+                // string lookups.
+                let subscribe_channel = tc.subscribe_channel_name.as_deref().map(|name| {
+                    channels.resolve_or_create(
+                        name,
+                        SignalScope::Local,
+                        ChannelMergeStrategy::LastWrite,
+                        owner_session,
+                    )
+                });
+                let publish_channel = tc.publish_channel_name.as_deref().map(|name| {
+                    channels.resolve_or_create(
+                        name,
+                        SignalScope::Local,
+                        ChannelMergeStrategy::LastWrite,
+                        owner_session,
+                    )
+                });
+                let term = voxeldust_core::signal::TerminalState {
+                    subscribe_channel,
+                    publish_channel,
+                    recent_lines: Vec::new(),
+                    max_lines,
+                    owner_session,
+                    next_sequence: 0,
+                    active: true,
+                };
+                commands.entity(entity).insert(term);
+                info!(
+                    block = ?update.block_pos,
+                    sub = ?tc.subscribe_channel_name,
+                    pub_ = ?tc.publish_channel_name,
+                    sub_id = ?subscribe_channel,
+                    pub_id = ?publish_channel,
+                    "applied TerminalConfig"
+                );
             }
         }
 
@@ -4356,6 +4896,7 @@ fn produce_player_edits(
     mut signal_ctx: SignalQueryCtx,
     world_isos: Res<MechanicalWorldIsometries>,
     sub_grids: Res<SubGridRegistry>,
+    mut engaged_terminals: ResMut<EngagedTerminalBySession>,
 ) {
 
     for event in events.read() {
@@ -4601,13 +5142,107 @@ fn produce_player_edits(
                                         info!(active = rs.active, block = ?hit.world_pos, "reactor toggled");
                                     }
                                 }
-                                _ => {
-                                    info!(
-                                        kind = ?kind,
-                                        interaction = interaction_def.label,
-                                        block = ?hit.world_pos,
-                                        "interaction not yet implemented"
+                                FunctionalBlockKind::Terminal => {
+                                    // Phase D + A1: E on a Terminal engages
+                                    // the in-world chat surface — NOT the
+                                    // tablet config UI. Server replies with
+                                    // the current scrollback so the player
+                                    // sees recent traffic immediately on
+                                    // engage. The terminal carries ChannelIds
+                                    // now (Phase A1); we reverse-map them to
+                                    // names for the wire payload.
+                                    let (sub, pub_, recent) = signal_ctx
+                                        .terminal_query
+                                        .get(entity)
+                                        .ok()
+                                        .map(|st| {
+                                            let sub_name = st
+                                                .subscribe_channel
+                                                .and_then(|id| {
+                                                    signal_ctx
+                                                        .channels
+                                                        .name_for_id(id)
+                                                        .map(|s| s.to_string())
+                                                });
+                                            let pub_name = st
+                                                .publish_channel
+                                                .and_then(|id| {
+                                                    signal_ctx
+                                                        .channels
+                                                        .name_for_id(id)
+                                                        .map(|s| s.to_string())
+                                                });
+                                            (sub_name, pub_name, st.recent_lines.clone())
+                                        })
+                                        .unwrap_or((None, None, Vec::new()));
+                                    let session = event.session;
+                                    // Mark engagement so the per-tick delta
+                                    // streamer ships subsequent appends to
+                                    // this player only.
+                                    engaged_terminals
+                                        .map
+                                        .insert(session, (hit.world_pos, recent.len()));
+                                    let msg = ServerMsg::OpenTerminalChat(
+                                        voxeldust_core::client_message::OpenTerminalChatData {
+                                            block_pos: hit.world_pos,
+                                            subscribe_channel: sub,
+                                            publish_channel: pub_,
+                                            recent_lines: recent,
+                                        },
                                     );
+                                    let cr = bridge.client_registry.clone();
+                                    tokio::spawn(async move {
+                                        if let Ok(reg) = cr.try_read() {
+                                            let _ = reg.send_tcp(session, &msg).await;
+                                        }
+                                    });
+                                    info!(block = ?hit.world_pos, "E engaged Terminal");
+                                }
+                                _ => {
+                                    // Phase D: any kind whose schema declares
+                                    // OpenUI on E (Antenna, Terminal,
+                                    // SignalConverter, Computer) gets the
+                                    // same response as F — server ships a
+                                    // BlockConfigState back so the client
+                                    // opens the config panel. Players try E
+                                    // first; without this they got silent
+                                    // no-op + a debug log.
+                                    if matches!(
+                                        interaction_def.interaction_type,
+                                        InteractionType::OpenUI
+                                    ) {
+                                        let session = event.session;
+                                        let config = build_config_snapshot(
+                                            entity, hit.world_pos, block_id, kind,
+                                            &signal_ctx.pub_query, &signal_ctx.sub_query,
+                                            &signal_ctx.converter_query, &signal_ctx.seat_query,
+                                            &signal_ctx.channels,
+                                            &signal_ctx.reactor_query,
+                                            &signal_ctx.powered_by_query,
+                                            &registry.0,
+                                            &signal_ctx.fc_query, &signal_ctx.hm_query,
+                                            &signal_ctx.ap_query, &signal_ctx.wc_query,
+                                            &signal_ctx.ec_query, &signal_ctx.mech_query,
+                                            &signal_ctx.antenna_query, &signal_ctx.terminal_query,
+                                            &signal_ctx.held_grants, session,
+                                            &grid.0,
+                                        );
+                                        let msg = ServerMsg::BlockConfigState(config);
+                                        let cr = bridge.client_registry.clone();
+                                        tokio::spawn(async move {
+                                            if let Ok(reg) = cr.try_read() {
+                                                let _ = reg.send_tcp(session, &msg).await;
+                                            }
+                                        });
+                                        info!(kind = ?kind, block = ?hit.world_pos, "E opened config panel");
+                                    } else {
+                                        info!(
+                                            kind = ?kind,
+                                            interaction = interaction_def.label,
+                                            block = ?hit.world_pos,
+                                            "interaction not yet implemented"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -4629,6 +5264,7 @@ fn produce_player_edits(
                             signal_ctx.block_ref_query.get(entity).ok().map(|r| r.kind)
                         });
                     if let Some(kind) = kind {
+                        let session = event.session;
                         let config = build_config_snapshot(
                             entity, hit.world_pos, block_id, kind,
                             &signal_ctx.pub_query, &signal_ctx.sub_query,
@@ -4640,9 +5276,11 @@ fn produce_player_edits(
                             &signal_ctx.fc_query, &signal_ctx.hm_query,
                             &signal_ctx.ap_query, &signal_ctx.wc_query,
                             &signal_ctx.ec_query, &signal_ctx.mech_query,
+                            &signal_ctx.antenna_query, &signal_ctx.terminal_query,
+                            &signal_ctx.held_grants, session,
+                            &grid.0,
                         );
                         {
-                            let session = event.session;
                             let msg = ServerMsg::BlockConfigState(config);
                             let cr = bridge.client_registry.clone();
                             tokio::spawn(async move {
@@ -4681,6 +5319,11 @@ fn build_config_snapshot(
     wc_query: &Query<&WarpComputerState>,
     ec_query: &Query<&EngineControllerState>,
     mech_query: &Query<&MechanicalState>,
+    antenna_query: &Query<&voxeldust_core::signal::AntennaState>,
+    terminal_query: &Query<&voxeldust_core::signal::TerminalState>,
+    held_grants: &voxeldust_shard_common::signal_pipeline::HeldGrants,
+    session: voxeldust_core::shard_types::SessionToken,
+    grid: &ShipGrid,
 ) -> voxeldust_core::signal::config::BlockSignalConfig {
     use voxeldust_core::signal::config::*;
 
@@ -4688,10 +5331,23 @@ fn build_config_snapshot(
         channels.name_of(id).unwrap_or("?").to_string()
     };
 
+    // Phase C: include the scope of each binding's channel so the
+    // client UI shows the player what scope is currently set.
+    // Channel scope is immutable after creation so this is purely
+    // read-only metadata for the client.
+    let id_to_scope = |id: voxeldust_core::signal::ChannelId| -> Option<voxeldust_core::signal::SignalScope> {
+        channels.get_by_id(id).map(|c| c.scope.clone())
+    };
+
     let publish_bindings = pub_query.get(entity)
         .map(|p| p.bindings.iter().map(|b| PublishBindingConfig {
             channel_name: id_to_name(b.channel_id),
             property: b.property,
+            scope: id_to_scope(b.channel_id),
+            // Phase D: in-shard bindings carry no grant. Cross-shard
+            // Radio bindings populate this from the resolved channel +
+            // the placing player's HeldGrants in the apply path.
+            grant_id: None,
         }).collect())
         .unwrap_or_default();
 
@@ -4699,6 +5355,8 @@ fn build_config_snapshot(
         .map(|s| s.bindings.iter().map(|b| SubscribeBindingConfig {
             channel_name: id_to_name(b.channel_id),
             property: b.property,
+            scope: id_to_scope(b.channel_id),
+            grant_id: None,
         }).collect())
         .unwrap_or_default();
 
@@ -4857,13 +5515,69 @@ fn build_config_snapshot(
                 speed_override: Some(ms.max_speed),
             }
         }),
-        // Phase 3E: antenna/listener configs are emitted by their own
-        // dedicated build paths (driven by AntennaState/ListenerState
-        // entity components — added in a follow-up iteration). Today's
-        // build_config_snapshot leaves them None, since this loop targets
-        // the existing ship-side functional blocks.
-        antenna: None,
-        listener: None,
+        // Phase D: read AntennaState / TerminalState back into the
+        // config so re-opening the UI shows the player's current
+        // settings. Three-tier source preference:
+        //   1. Runtime component (live state — most authoritative).
+        //   2. Grid's saved-config (persisted record — survives
+        //      restart even when the component hasn't been re-applied
+        //      yet, e.g. keyed antenna waiting for grants).
+        //   3. None (block has never been configured).
+        antenna: antenna_query
+            .get(entity)
+            .ok()
+            .map(|st| AntennaConfig {
+                tx: st.tx.as_ref().and_then(|tx| {
+                    let name = tx.local_channel_id.and_then(|id| channels.name_for_id(id))?;
+                    Some(AntennaSide {
+                        local_channel_name: name.to_string(),
+                        frequency: tx.frequency,
+                        grant_id: tx.grant_id,
+                        remote_shard_id: tx.remote_shard_id,
+                    })
+                }),
+                rx: st.rx.as_ref().and_then(|rx| {
+                    let name = rx.local_channel_id.and_then(|id| channels.name_for_id(id))?;
+                    Some(AntennaSide {
+                        local_channel_name: name.to_string(),
+                        frequency: rx.frequency,
+                        grant_id: rx.grant_id,
+                        remote_shard_id: rx.remote_shard_id,
+                    })
+                }),
+            })
+            .or_else(|| grid.saved_antenna_config(pos).cloned()),
+        // Status fields are populated below by the server's grant lookup.
+        antenna_tx_status: None,
+        antenna_rx_status: None,
+        terminal: terminal_query
+            .get(entity)
+            .ok()
+            .map(|st| TerminalConfig {
+                // Phase A1: TerminalState carries ChannelIds; reverse-map
+                // back to names from the channel table for the wire form.
+                subscribe_channel_name: st
+                    .subscribe_channel
+                    .and_then(|id| channels.name_for_id(id).map(|s| s.to_string())),
+                publish_channel_name: st
+                    .publish_channel
+                    .and_then(|id| channels.name_for_id(id).map(|s| s.to_string())),
+                scrollback_lines: Some(st.max_lines as u16),
+            })
+            .or_else(|| grid.saved_terminal_config(pos).cloned()),
+        // Phase D: ship the placing player's held-grant summaries so
+        // the configurator's grant picker has a populated dropdown.
+        // Filtered server-side by session so a player never sees
+        // someone else's grants.
+        held_grants: held_grants
+            .iter_for_session(session)
+            .map(|(gid, g)| HeldGrantSummary {
+                grant_id: gid,
+                label: g.label.clone(),
+                expires_at_ms: None,
+                ops_mask: HeldGrantSummary::OP_PUBLISH | HeldGrantSummary::OP_SUBSCRIBE,
+            })
+            .collect(),
     };
     // Filter the configurator dropdown to the property set this block kind
     // actually supports — so a Thruster's dropdown lists Throttle/Boost/Active
@@ -5121,32 +5835,15 @@ fn flush_grants_to_db(
     mut queue: ResMut<voxeldust_shard_common::grant_persistence::GrantsPersistenceQueue>,
     tick: Res<voxeldust_core::ecs::TickCounter>,
 ) {
-    use voxeldust_shard_common::grant_persistence::{
-        delete_grant, save_grant, to_persisted,
-    };
     if tick.0 % 10 != 0 {
         return;
     }
-    let (upserts, deletes) = queue.drain();
-    if upserts.is_empty() && deletes.is_empty() {
-        return;
-    }
-    for grant_id in upserts {
-        let Some(grant) = registry.get(grant_id) else {
-            // Grant was inserted then immediately removed (rare race
-            // — shouldn't happen via apply_grant_* paths). Skip.
-            continue;
-        };
-        let record = to_persisted(grant, &channels);
-        if let Err(e) = save_grant(&persistence.db, &record) {
-            warn!(grant_id, %e, "grant persistence: save failed");
-        }
-    }
-    for grant_id in deletes {
-        if let Err(e) = delete_grant(&persistence.db, grant_id) {
-            warn!(grant_id, %e, "grant persistence: delete failed");
-        }
-    }
+    voxeldust_shard_common::grant_persistence::flush_grants_now(
+        &persistence.db,
+        &registry,
+        &channels,
+        &mut queue,
+    );
 }
 
 /// Startup system: scan the ShipGrid for existing functional blocks and spawn entities.
@@ -5248,6 +5945,137 @@ fn process_entity_ops(
                 grid.0.remove_meta(pos.x, pos.y, pos.z);
             }
         }
+    }
+}
+
+/// Phase D: re-apply saved Antenna + Terminal configs to spawned
+/// entities once at boot.
+///
+/// At startup, `load_block_configs` populates the grid's
+/// `saved_antenna_configs` / `saved_terminal_configs` from redb, but
+/// the runtime `AntennaState` / `TerminalState` components only get
+/// attached when the player applies a config via the F-key panel.
+/// Without this system, antennas wouldn't actually forward media
+/// frames after a server restart until the player walked to each
+/// antenna and re-Applied — defeating the purpose of persistence.
+///
+/// This system runs once after the first tick (`Local<bool>` guard)
+/// and walks every saved config:
+/// - Open antennas (no grant on either side) re-apply directly.
+/// - Keyed antennas can't apply at boot (no session has connected
+///   yet, so `HeldGrants` is empty); they remain in the grid's saved
+///   storage. The F-key snapshot fallback shows them; the player
+///   re-Applies after attaching their grants.
+/// - Terminals always re-apply (no grant dependency).
+fn restore_saved_configs_on_boot(
+    mut ran: Local<bool>,
+    mut commands: Commands,
+    grid: Res<ShipGridResource>,
+    block_index: Res<FunctionalBlockIndex>,
+    mut channels: ResMut<SignalChannelTable>,
+    mut grants_registry: ResMut<voxeldust_core::signal::GrantsRegistry>,
+    held_grants: Res<voxeldust_shard_common::signal_pipeline::HeldGrants>,
+    block_owner: Query<&voxeldust_core::ecs::components::BlockOwnership>,
+    tick: Res<voxeldust_core::ecs::TickCounter>,
+) {
+    if *ran {
+        return;
+    }
+    // Wait for at least one tick so process_entity_ops has had a
+    // chance to spawn entities + populate the block index.
+    if tick.0 == 0 {
+        return;
+    }
+    *ran = true;
+
+    let mut antenna_applied: usize = 0;
+    let mut antenna_skipped: usize = 0;
+    for (pos, cfg) in grid.0.iter_saved_antenna_configs() {
+        let Some(&entity) = block_index.0.get(pos) else {
+            antenna_skipped += 1;
+            continue;
+        };
+        let owner_session = block_owner
+            .get(entity)
+            .ok()
+            .map(|bo| voxeldust_core::shard_types::SessionToken(bo.owner_id))
+            .unwrap_or(voxeldust_core::shard_types::SessionToken(0));
+        match voxeldust_shard_common::signal_pipeline::apply_antenna_config(
+            &mut channels,
+            &mut grants_registry,
+            &held_grants,
+            cfg,
+            owner_session,
+            tick.0,
+        ) {
+            Ok(ok) => {
+                commands.entity(entity).insert(ok.state);
+                antenna_applied += 1;
+                // Note: keyed RX antennas would normally ship a
+                // SignalSubscribe here. At boot the held-grant lookup
+                // would have failed already (returning RxGrantNotHeld
+                // below); this Ok arm only fires for open configs
+                // which produce no outbound_subscribe.
+            }
+            Err(reason) => {
+                tracing::debug!(
+                    block = ?pos,
+                    ?reason,
+                    "boot-restore: antenna saved-config not applied (open + valid required at boot)"
+                );
+                antenna_skipped += 1;
+            }
+        }
+    }
+    let mut terminal_applied: usize = 0;
+    for (pos, cfg) in grid.0.iter_saved_terminal_configs() {
+        let Some(&entity) = block_index.0.get(pos) else {
+            continue;
+        };
+        let owner_session = block_owner
+            .get(entity)
+            .ok()
+            .map(|bo| bo.owner_id)
+            .unwrap_or(0);
+        // Terminal apply is mechanical: resolve subscribe + publish
+        // channel ids (creating Local channels lazily), build
+        // TerminalState, insert. No grant dependency.
+        use voxeldust_core::signal::types::{ChannelMergeStrategy, SignalScope};
+        let subscribe_channel = cfg.subscribe_channel_name.as_deref().map(|name| {
+            channels.resolve_or_create(
+                name,
+                SignalScope::Local,
+                ChannelMergeStrategy::LastWrite,
+                owner_session,
+            )
+        });
+        let publish_channel = cfg.publish_channel_name.as_deref().map(|name| {
+            channels.resolve_or_create(
+                name,
+                SignalScope::Local,
+                ChannelMergeStrategy::LastWrite,
+                owner_session,
+            )
+        });
+        let term = voxeldust_core::signal::TerminalState {
+            subscribe_channel,
+            publish_channel,
+            recent_lines: Vec::new(),
+            max_lines: cfg.effective_scrollback() as u32,
+            owner_session,
+            next_sequence: 0,
+            active: true,
+        };
+        commands.entity(entity).insert(term);
+        terminal_applied += 1;
+    }
+    if antenna_applied + antenna_skipped + terminal_applied > 0 {
+        info!(
+            antenna_applied,
+            antenna_skipped,
+            terminal_applied,
+            "boot-restore: re-applied saved Antenna/Terminal configs"
+        );
     }
 }
 
@@ -7612,6 +8440,7 @@ fn build_ship_interior(
     app.insert_resource(ChunkColliderHandles(chunk_collider_handles));
     app.insert_resource(PendingEntityOps::default());
     app.insert_resource(FunctionalBlockIndex::default());
+    app.insert_resource(EngagedTerminalBySession::default());
     app.insert_resource(ShipProps(ShipPhysicalProperties::starter_ship()));
     app.insert_resource(PilotAccumulator::default());
     // SeatInputValues, ActiveSeatEntity are now per-entity Components.
@@ -7642,11 +8471,19 @@ fn build_ship_interior(
     // ClearDirty stages. Ship-specific systems slot into Publish/Process/
     // Subscribe further down.
     app.add_plugins(SignalPipelinePlugin);
+    // Phase 5.2: media data plane. `MediaPipelinePlugin` registers
+    // `IncomingMediaBuffer` + `MediaPublishQueue` resources and the
+    // generic `media_ingest_clear` + `media_publish_remote` systems.
+    // Block-kind subscribers/publishers (Mic, Speaker, TextDisplay,
+    // KeyboardTerminal, etc.) slot into `MediaSet::Subscribe` /
+    // `MediaSet::Publish` as the block kinds come online.
+    app.add_plugins(MediaPipelinePlugin);
     app.insert_resource(PeerPositionCache::default());
-    // Phase 4.4: per-session HUD signal delta state. Lazy-populated
-    // by `emit_hud_signal_deltas`; entries pruned when a session
-    // disappears from the live `Player` set.
-    app.insert_resource(HudSessionMap::default());
+    // Phase 4.4: per-session HUD signal delta state, owned by
+    // shard-common. Lazy-populated by `emit_hud_signal_deltas`;
+    // entries pruned when a session disappears from the live
+    // `Player` set.
+    app.insert_resource(voxeldust_shard_common::hud_delta::HudSessionMap::default());
     app.insert_resource(ship_persistence);
 
     // Messages.
@@ -7684,7 +8521,7 @@ fn build_ship_interior(
     // Bridge: drain async channels.
     app.add_systems(
         Update,
-        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_sub_block_edits, drain_client_signal_publishes, drain_lamp_config_updates, drain_quic).in_set(ShipSet::Bridge),
+        (drain_connects, drain_input, drain_block_edits, drain_config_updates, drain_sub_block_edits, drain_client_signal_publishes, drain_lamp_config_updates, drain_quic, drain_terminal_chat_send).in_set(ShipSet::Bridge),
     );
 
     // Input: process connects, player input, preconnect, config updates.
@@ -7707,6 +8544,12 @@ fn build_ship_interior(
     // (0.5s @ 20Hz). Sparse enough that fsync cost amortizes; frequent
     // enough that crash-loss bound is < 1s of grant ops in flight.
     app.add_systems(Update, flush_grants_to_db);
+
+    // Phase D save-on-close persistence: replay the persisted
+    // Antenna + Terminal configs onto entities once the first tick
+    // has spawned them. Open antennas re-apply automatically; keyed
+    // antennas wait until the placing player reconnects with grants.
+    app.add_systems(Update, restore_saved_configs_on_boot);
 
     // Block editing: produce edits, apply to grid, process entity lifecycle.
     app.add_systems(
@@ -7803,6 +8646,10 @@ fn build_ship_interior(
     // during the migration window — once client-side decode lands
     // the legacy field becomes redundant.
     app.add_systems(Update, emit_hud_signal_deltas.in_set(ShipSet::Broadcast));
+    // Phase D: stream terminal-scrollback deltas to engaged sessions.
+    // Runs in Broadcast so it sees the latest TerminalState after all
+    // signal/media-pipeline systems have written their pending updates.
+    app.add_systems(Update, stream_terminal_scrollback.in_set(ShipSet::Broadcast));
 
     // Diagnostics.
     app.add_systems(Update, (persist_chunks, log_state).in_set(ShipSet::Diagnostics));

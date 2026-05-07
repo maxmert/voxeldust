@@ -20,3 +20,6 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Build / verification log directory (transient)
+/logs/

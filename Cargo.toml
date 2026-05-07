@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "types",
+    "protocol-fb",
+    "signal",
     "core",
     "shard-common",
     "orchestrator",
@@ -19,12 +22,24 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+voxeldust-types = { path = "types" }
+voxeldust-protocol-fb = { path = "protocol-fb" }
+voxeldust-signal = { path = "signal" }
 voxeldust-core = { path = "core" }
 voxeldust-shard-common = { path = "shard-common" }
 glam = { version = "0.29", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+    "signal",
+    "process",
+] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -95,8 +110,63 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false }
 # reference it without re-pinning a version.
 tempfile = "3"
 
+[profile.dev]
+# `line-tables-only` keeps line numbers in panics/backtraces but halves the
+# debuginfo we copy through the linker — meaningful saving on binaries that
+# pull all of Bevy + wgpu + rapier.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+incremental = true
+
+[profile.dev.package."*"]
+# Bevy book recommendation: optimize all deps in dev (one-time compile cost,
+# big runtime gain). Combined with "debug = false" the cached artifacts are
+# also smaller, which speeds up linking.
+opt-level = 3
+debug = false
+
 [profile.dev.package.noise]
 opt-level = 3
 
 [profile.dev.package.voxeldust-core]
 opt-level = 2
+
+# brahe v1.2 declares `pyo3` / `numpy` / `polars` / `rsofa` as MANDATORY
+# (non-feature-gated) deps — its Cargo.toml is poorly factored. None of these
+# are runtime hot-path code for voxeldust (orbital math runs once per planet
+# tick, never per-frame), so we drop the whole chain to opt-level = 0 to skip
+# the multi-minute compile cost they otherwise incur at the workspace-default
+# `[profile.dev.package."*"] opt-level = 3`. See BUILD_PERF.md §"Heavy-dep
+# overrides" for the full rationale + how to spot future offenders.
+[profile.dev.package.brahe]
+opt-level = 0
+
+[profile.dev.package.pyo3]
+opt-level = 0
+
+[profile.dev.package.numpy]
+opt-level = 0
+
+[profile.dev.package.polars]
+opt-level = 0
+
+[profile.dev.package.rsofa]
+opt-level = 0
+
+# ─── release profile ────────────────────────────────────────────────────────
+# Tuned for distributed shard binaries + the client. Keep line-tables in release
+# so production logs still carry stack-trace line numbers — one of the only
+# ways we have to debug a server-side incident post-mortem.
+
+[profile.release]
+lto = "thin"           # 10–15 % runtime, ~2× release-build time (acceptable)
+codegen-units = 1      # max inlining
+panic = "abort"        # smaller binaries, no unwind tables
+strip = "symbols"
+debug = "line-tables-only"
+
+# `dist` profile: one-off slow build for shipped artifacts. Use `cargo build
+# --profile dist` when cutting a release. PGO recipe documented in BUILD_PERF.md.
+[profile.dist]
+inherits = "release"
+lto = "fat"

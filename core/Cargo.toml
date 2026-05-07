@@ -8,6 +8,9 @@ rapier = ["dep:rapier3d"]
 bytemuck = ["dep:bytemuck"]
 
 [dependencies]
+voxeldust-types = { workspace = true }
+voxeldust-protocol-fb = { workspace = true }
+voxeldust-signal = { workspace = true }
 glam = { workspace = true }
 serde = { workspace = true }
 flatbuffers = { workspace = true }
@@ -20,10 +23,12 @@ bevy_ecs = { workspace = true }
 rapier3d = { workspace = true, optional = true }
 binary-greedy-meshing = { workspace = true }
 bytemuck = { workspace = true, optional = true }
-rand = { workspace = true }
+smallvec = { workspace = true }
+# `media.rs` reuses signal's HMAC infrastructure for media-payload auth
+# (hmac/sha2/subtle); `ecs/components.rs` uses `rand` for one-shot RNG seeds
+# at component spawn. `base64` and `metrics` were exclusively signal deps and
+# moved with the subsystem to `voxeldust-signal`'s manifest.
 hmac = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
-smallvec = { workspace = true }
-base64 = { workspace = true }
-metrics = { workspace = true }
+rand = { workspace = true }

@@ -110,10 +110,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for EntityKind {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SHARD_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 27;
+pub const ENUM_MAX_SHARD_PAYLOAD: u8 = 29;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 28] = [
+pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 30] = [
   ShardPayload::NONE,
   ShardPayload::PlayerHandoff,
   ShardPayload::HandoffAccepted,
@@ -142,6 +142,8 @@ pub const ENUM_VALUES_SHARD_PAYLOAD: [ShardPayload; 28] = [
   ShardPayload::RadioSubscribe,
   ShardPayload::RadioUnsubscribe,
   ShardPayload::ShipFrequencyInterest,
+  ShardPayload::ShipNeighborhood,
+  ShardPayload::MediaBroadcastBatch,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -189,9 +191,15 @@ impl ShardPayload {
   pub const RadioUnsubscribe: Self = Self(26);
   /// Phase 3F.9: ship-shard → system-shard freq interest propagation.
   pub const ShipFrequencyInterest: Self = Self(27);
+  /// Phase 4.6: system-shard → ship-shard authoritative neighborhood
+  /// for ShortRange signal routing (1 Hz cadence).
+  pub const ShipNeighborhood: Self = Self(28);
+  /// Phase 5.1: media (text/audio/video/image) batched broadcast.
+  /// Reuses signal's auth + replay-window + scope routing.
+  pub const MediaBroadcastBatch: Self = Self(29);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 27;
+  pub const ENUM_MAX: u8 = 29;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::PlayerHandoff,
@@ -221,6 +229,8 @@ impl ShardPayload {
     Self::RadioSubscribe,
     Self::RadioUnsubscribe,
     Self::ShipFrequencyInterest,
+    Self::ShipNeighborhood,
+    Self::MediaBroadcastBatch,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -253,6 +263,8 @@ impl ShardPayload {
       Self::RadioSubscribe => Some("RadioSubscribe"),
       Self::RadioUnsubscribe => Some("RadioUnsubscribe"),
       Self::ShipFrequencyInterest => Some("ShipFrequencyInterest"),
+      Self::ShipNeighborhood => Some("ShipNeighborhood"),
+      Self::MediaBroadcastBatch => Some("MediaBroadcastBatch"),
       _ => None,
     }
   }
@@ -312,10 +324,10 @@ pub struct ShardPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SERVER_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 18;
+pub const ENUM_MAX_SERVER_PAYLOAD: u8 = 20;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 19] = [
+pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 21] = [
   ServerPayload::NONE,
   ServerPayload::JoinResponse,
   ServerPayload::WorldState,
@@ -335,6 +347,8 @@ pub const ENUM_VALUES_SERVER_PAYLOAD: [ServerPayload; 19] = [
   ServerPayload::ShardHandoffMsg,
   ServerPayload::GrantsSnapshotData,
   ServerPayload::HudSignalDelta,
+  ServerPayload::OpenTerminalChatData,
+  ServerPayload::TerminalScrollbackDeltaData,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -364,9 +378,13 @@ impl ServerPayload {
   pub const GrantsSnapshotData: Self = Self(17);
   /// Phase 4.4: delta-encoded HUD signal updates.
   pub const HudSignalDelta: Self = Self(18);
+  /// Phase D: open the in-world Terminal chat surface.
+  pub const OpenTerminalChatData: Self = Self(19);
+  /// Phase D: append lines to a Terminal's scrollback while engaged.
+  pub const TerminalScrollbackDeltaData: Self = Self(20);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 18;
+  pub const ENUM_MAX: u8 = 20;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::JoinResponse,
@@ -387,6 +405,8 @@ impl ServerPayload {
     Self::ShardHandoffMsg,
     Self::GrantsSnapshotData,
     Self::HudSignalDelta,
+    Self::OpenTerminalChatData,
+    Self::TerminalScrollbackDeltaData,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -410,6 +430,8 @@ impl ServerPayload {
       Self::ShardHandoffMsg => Some("ShardHandoffMsg"),
       Self::GrantsSnapshotData => Some("GrantsSnapshotData"),
       Self::HudSignalDelta => Some("HudSignalDelta"),
+      Self::OpenTerminalChatData => Some("OpenTerminalChatData"),
+      Self::TerminalScrollbackDeltaData => Some("TerminalScrollbackDeltaData"),
       _ => None,
     }
   }
@@ -469,10 +491,10 @@ pub struct ServerPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 13;
+pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 14;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 14] = [
+pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 15] = [
   ClientPayload::NONE,
   ClientPayload::Connect,
   ClientPayload::PlayerInput,
@@ -487,6 +509,7 @@ pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 14] = [
   ClientPayload::AddHeldGrant,
   ClientPayload::ForgetHeldGrant,
   ClientPayload::RemoteSignalPublish,
+  ClientPayload::TerminalChatSendData,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -513,9 +536,11 @@ impl ClientPayload {
   pub const ForgetHeldGrant: Self = Self(12);
   /// Phase 3C: publish to a remote channel via a held grant.
   pub const RemoteSignalPublish: Self = Self(13);
+  /// Phase D: send a chat line typed on an engaged Terminal block.
+  pub const TerminalChatSendData: Self = Self(14);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 13;
+  pub const ENUM_MAX: u8 = 14;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::Connect,
@@ -531,6 +556,7 @@ impl ClientPayload {
     Self::AddHeldGrant,
     Self::ForgetHeldGrant,
     Self::RemoteSignalPublish,
+    Self::TerminalChatSendData,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -549,6 +575,7 @@ impl ClientPayload {
       Self::AddHeldGrant => Some("AddHeldGrant"),
       Self::ForgetHeldGrant => Some("ForgetHeldGrant"),
       Self::RemoteSignalPublish => Some("RemoteSignalPublish"),
+      Self::TerminalChatSendData => Some("TerminalChatSendData"),
       _ => None,
     }
   }
@@ -4880,6 +4907,731 @@ impl ::core::fmt::Debug for ShipNearbyInfo<'_> {
       ds.field("rotation", &self.rotation());
       ds.field("velocity", &self.velocity());
       ds.field("game_time", &self.game_time());
+      ds.finish()
+  }
+}
+pub enum ShipNeighborhoodEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct ShipNeighborhoodEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ShipNeighborhoodEntry<'a> {
+  type Inner = ShipNeighborhoodEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ShipNeighborhoodEntry<'a> {
+  pub const VT_PEER_SHARD_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_PEER_POSITION: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PEER_VELOCITY: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ShipNeighborhoodEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ShipNeighborhoodEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ShipNeighborhoodEntry<'bldr>> {
+    let mut builder = ShipNeighborhoodEntryBuilder::new(_fbb);
+    builder.add_peer_shard_id(args.peer_shard_id);
+    if let Some(x) = args.peer_velocity { builder.add_peer_velocity(x); }
+    if let Some(x) = args.peer_position { builder.add_peer_position(x); }
+    builder.finish()
+  }
+
+
+  /// The peer ship's `shard_id` (used as the QUIC routing key).
+  #[inline]
+  pub fn peer_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShipNeighborhoodEntry::VT_PEER_SHARD_ID, Some(0)).unwrap()}
+  }
+  /// The peer ship's authoritative position, stamped at the moment the
+  /// system-shard built this batch. Receiver uses for ShortRange
+  /// distance prune.
+  #[inline]
+  pub fn peer_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ShipNeighborhoodEntry::VT_PEER_POSITION, None)}
+  }
+  /// Peer velocity for optional client-side extrapolation between
+  /// 1Hz pushes. Zero is a safe fallback.
+  #[inline]
+  pub fn peer_velocity(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(ShipNeighborhoodEntry::VT_PEER_VELOCITY, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ShipNeighborhoodEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("peer_shard_id", Self::VT_PEER_SHARD_ID, false)?
+     .visit_field::<Vec3d>("peer_position", Self::VT_PEER_POSITION, false)?
+     .visit_field::<Vec3d>("peer_velocity", Self::VT_PEER_VELOCITY, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ShipNeighborhoodEntryArgs<'a> {
+    pub peer_shard_id: u64,
+    pub peer_position: Option<&'a Vec3d>,
+    pub peer_velocity: Option<&'a Vec3d>,
+}
+impl<'a> Default for ShipNeighborhoodEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ShipNeighborhoodEntryArgs {
+      peer_shard_id: 0,
+      peer_position: None,
+      peer_velocity: None,
+    }
+  }
+}
+
+pub struct ShipNeighborhoodEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipNeighborhoodEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_peer_shard_id(&mut self, peer_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(ShipNeighborhoodEntry::VT_PEER_SHARD_ID, peer_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_peer_position(&mut self, peer_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ShipNeighborhoodEntry::VT_PEER_POSITION, peer_position);
+  }
+  #[inline]
+  pub fn add_peer_velocity(&mut self, peer_velocity: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(ShipNeighborhoodEntry::VT_PEER_VELOCITY, peer_velocity);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipNeighborhoodEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ShipNeighborhoodEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ShipNeighborhoodEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ShipNeighborhoodEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ShipNeighborhoodEntry");
+      ds.field("peer_shard_id", &self.peer_shard_id());
+      ds.field("peer_position", &self.peer_position());
+      ds.field("peer_velocity", &self.peer_velocity());
+      ds.finish()
+  }
+}
+pub enum ShipNeighborhoodOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct ShipNeighborhood<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for ShipNeighborhood<'a> {
+  type Inner = ShipNeighborhood<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> ShipNeighborhood<'a> {
+  pub const VT_TARGET_SHIP_SHARD_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_ISSUED_AT_MS: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PEERS: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    ShipNeighborhood { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args ShipNeighborhoodArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<ShipNeighborhood<'bldr>> {
+    let mut builder = ShipNeighborhoodBuilder::new(_fbb);
+    builder.add_issued_at_ms(args.issued_at_ms);
+    builder.add_target_ship_shard_id(args.target_ship_shard_id);
+    if let Some(x) = args.peers { builder.add_peers(x); }
+    builder.finish()
+  }
+
+
+  /// The recipient ship's shard id — routed to this ship by the
+  /// system-shard's QUIC dispatcher.
+  #[inline]
+  pub fn target_ship_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShipNeighborhood::VT_TARGET_SHIP_SHARD_ID, Some(0)).unwrap()}
+  }
+  /// UNIX millis when the system-shard built this batch. Allows
+  /// the receiver to age-check + drop stale data after disconnect.
+  #[inline]
+  pub fn issued_at_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ShipNeighborhood::VT_ISSUED_AT_MS, Some(0)).unwrap()}
+  }
+  /// Peers within the system-shard's chosen routing radius (today
+  /// `max(ShortRange tier ranges) × hysteresis`). Self is excluded.
+  #[inline]
+  pub fn peers(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ShipNeighborhoodEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ShipNeighborhoodEntry>>>>(ShipNeighborhood::VT_PEERS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for ShipNeighborhood<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("target_ship_shard_id", Self::VT_TARGET_SHIP_SHARD_ID, false)?
+     .visit_field::<u64>("issued_at_ms", Self::VT_ISSUED_AT_MS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ShipNeighborhoodEntry>>>>("peers", Self::VT_PEERS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct ShipNeighborhoodArgs<'a> {
+    pub target_ship_shard_id: u64,
+    pub issued_at_ms: u64,
+    pub peers: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ShipNeighborhoodEntry<'a>>>>>,
+}
+impl<'a> Default for ShipNeighborhoodArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    ShipNeighborhoodArgs {
+      target_ship_shard_id: 0,
+      issued_at_ms: 0,
+      peers: None,
+    }
+  }
+}
+
+pub struct ShipNeighborhoodBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ShipNeighborhoodBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_target_ship_shard_id(&mut self, target_ship_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(ShipNeighborhood::VT_TARGET_SHIP_SHARD_ID, target_ship_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_issued_at_ms(&mut self, issued_at_ms: u64) {
+    self.fbb_.push_slot::<u64>(ShipNeighborhood::VT_ISSUED_AT_MS, issued_at_ms, 0);
+  }
+  #[inline]
+  pub fn add_peers(&mut self, peers: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<ShipNeighborhoodEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ShipNeighborhood::VT_PEERS, peers);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ShipNeighborhoodBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    ShipNeighborhoodBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<ShipNeighborhood<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for ShipNeighborhood<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("ShipNeighborhood");
+      ds.field("target_ship_shard_id", &self.target_ship_shard_id());
+      ds.field("issued_at_ms", &self.issued_at_ms());
+      ds.field("peers", &self.peers());
+      ds.finish()
+  }
+}
+pub enum MediaFrameOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct MediaFrame<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for MediaFrame<'a> {
+  type Inner = MediaFrame<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> MediaFrame<'a> {
+  pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_GRANT_ID: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SEQUENCE: ::flatbuffers::VOffsetT = 8;
+  pub const VT_TIMESTAMP_MS: ::flatbuffers::VOffsetT = 10;
+  pub const VT_PAYLOAD_KIND: ::flatbuffers::VOffsetT = 12;
+  pub const VT_CODEC: ::flatbuffers::VOffsetT = 14;
+  pub const VT_PAYLOAD_DATA: ::flatbuffers::VOffsetT = 16;
+  pub const VT_SAMPLES: ::flatbuffers::VOffsetT = 18;
+  pub const VT_SAMPLE_RATE: ::flatbuffers::VOffsetT = 20;
+  pub const VT_WIDTH: ::flatbuffers::VOffsetT = 22;
+  pub const VT_HEIGHT: ::flatbuffers::VOffsetT = 24;
+  pub const VT_FLAGS: ::flatbuffers::VOffsetT = 26;
+  pub const VT_AUTH_TAG: ::flatbuffers::VOffsetT = 28;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    MediaFrame { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args MediaFrameArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<MediaFrame<'bldr>> {
+    let mut builder = MediaFrameBuilder::new(_fbb);
+    builder.add_timestamp_ms(args.timestamp_ms);
+    builder.add_sequence(args.sequence);
+    builder.add_grant_id(args.grant_id);
+    if let Some(x) = args.auth_tag { builder.add_auth_tag(x); }
+    builder.add_height(args.height);
+    builder.add_width(args.width);
+    builder.add_sample_rate(args.sample_rate);
+    builder.add_samples(args.samples);
+    if let Some(x) = args.payload_data { builder.add_payload_data(x); }
+    if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    builder.add_flags(args.flags);
+    builder.add_codec(args.codec);
+    builder.add_payload_kind(args.payload_kind);
+    builder.finish()
+  }
+
+
+  /// Channel name. Same `<owner>.<block-uid>.<role>` convention as
+  /// the signal pipeline's channel namespace.
+  #[inline]
+  pub fn channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(MediaFrame::VT_CHANNEL_NAME, None)}
+  }
+  /// Capability lookup. Same semantics as
+  /// `SignalBroadcastEntry::grant_id` — receiver verifies
+  /// `auth_tag` against the matching grant's HMAC key.
+  #[inline]
+  pub fn grant_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MediaFrame::VT_GRANT_ID, Some(0)).unwrap()}
+  }
+  /// Per-(channel, sender) monotonic sequence — drives the
+  /// receiver's replay window. Same shape as signal entries.
+  #[inline]
+  pub fn sequence(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MediaFrame::VT_SEQUENCE, Some(0)).unwrap()}
+  }
+  /// UNIX wall-clock millis at the publisher.
+  #[inline]
+  pub fn timestamp_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MediaFrame::VT_TIMESTAMP_MS, Some(0)).unwrap()}
+  }
+  /// Payload kind: 0=Text, 1=Audio, 2=Video, 3=Image.
+  #[inline]
+  pub fn payload_kind(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(MediaFrame::VT_PAYLOAD_KIND, Some(0)).unwrap()}
+  }
+  /// Codec ordinal per `payload_kind` (0 for Text). See
+  /// `core::media::{AudioCodec, VideoCodec, ImageFormat}` for
+  /// the numeric values — wire-stable, never reused.
+  #[inline]
+  pub fn codec(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(MediaFrame::VT_CODEC, Some(0)).unwrap()}
+  }
+  /// Codec-specific encoded bytes. UTF-8 for Text; Opus packet
+  /// for Audio; H.264 NAL unit / AV1 OBU for Video; PNG/JPEG
+  /// stream for Image.
+  #[inline]
+  pub fn payload_data(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(MediaFrame::VT_PAYLOAD_DATA, None)}
+  }
+  /// Audio: sample count in this frame. Zero for other kinds.
+  #[inline]
+  pub fn samples(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(MediaFrame::VT_SAMPLES, Some(0)).unwrap()}
+  }
+  /// Audio: sample rate (Hz). Zero for other kinds.
+  #[inline]
+  pub fn sample_rate(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(MediaFrame::VT_SAMPLE_RATE, Some(0)).unwrap()}
+  }
+  /// Video / Image: width in pixels.
+  #[inline]
+  pub fn width(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(MediaFrame::VT_WIDTH, Some(0)).unwrap()}
+  }
+  /// Video / Image: height in pixels.
+  #[inline]
+  pub fn height(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(MediaFrame::VT_HEIGHT, Some(0)).unwrap()}
+  }
+  /// Bit 0 (Video): keyframe (1 = I-frame, 0 = delta). Other
+  /// kinds: 0.
+  #[inline]
+  pub fn flags(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(MediaFrame::VT_FLAGS, Some(0)).unwrap()}
+  }
+  /// HMAC-SHA256 truncated to 16 bytes. Auth input is
+  /// `(canonical_header || sha256(payload_data))`.
+  #[inline]
+  pub fn auth_tag(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(MediaFrame::VT_AUTH_TAG, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for MediaFrame<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
+     .visit_field::<u64>("grant_id", Self::VT_GRANT_ID, false)?
+     .visit_field::<u64>("sequence", Self::VT_SEQUENCE, false)?
+     .visit_field::<u64>("timestamp_ms", Self::VT_TIMESTAMP_MS, false)?
+     .visit_field::<u8>("payload_kind", Self::VT_PAYLOAD_KIND, false)?
+     .visit_field::<u8>("codec", Self::VT_CODEC, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("payload_data", Self::VT_PAYLOAD_DATA, false)?
+     .visit_field::<u32>("samples", Self::VT_SAMPLES, false)?
+     .visit_field::<u32>("sample_rate", Self::VT_SAMPLE_RATE, false)?
+     .visit_field::<u32>("width", Self::VT_WIDTH, false)?
+     .visit_field::<u32>("height", Self::VT_HEIGHT, false)?
+     .visit_field::<u8>("flags", Self::VT_FLAGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("auth_tag", Self::VT_AUTH_TAG, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct MediaFrameArgs<'a> {
+    pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub grant_id: u64,
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub payload_kind: u8,
+    pub codec: u8,
+    pub payload_data: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub samples: u32,
+    pub sample_rate: u32,
+    pub width: u32,
+    pub height: u32,
+    pub flags: u8,
+    pub auth_tag: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+}
+impl<'a> Default for MediaFrameArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    MediaFrameArgs {
+      channel_name: None,
+      grant_id: 0,
+      sequence: 0,
+      timestamp_ms: 0,
+      payload_kind: 0,
+      codec: 0,
+      payload_data: None,
+      samples: 0,
+      sample_rate: 0,
+      width: 0,
+      height: 0,
+      flags: 0,
+      auth_tag: None,
+    }
+  }
+}
+
+pub struct MediaFrameBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MediaFrameBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_channel_name(&mut self, channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MediaFrame::VT_CHANNEL_NAME, channel_name);
+  }
+  #[inline]
+  pub fn add_grant_id(&mut self, grant_id: u64) {
+    self.fbb_.push_slot::<u64>(MediaFrame::VT_GRANT_ID, grant_id, 0);
+  }
+  #[inline]
+  pub fn add_sequence(&mut self, sequence: u64) {
+    self.fbb_.push_slot::<u64>(MediaFrame::VT_SEQUENCE, sequence, 0);
+  }
+  #[inline]
+  pub fn add_timestamp_ms(&mut self, timestamp_ms: u64) {
+    self.fbb_.push_slot::<u64>(MediaFrame::VT_TIMESTAMP_MS, timestamp_ms, 0);
+  }
+  #[inline]
+  pub fn add_payload_kind(&mut self, payload_kind: u8) {
+    self.fbb_.push_slot::<u8>(MediaFrame::VT_PAYLOAD_KIND, payload_kind, 0);
+  }
+  #[inline]
+  pub fn add_codec(&mut self, codec: u8) {
+    self.fbb_.push_slot::<u8>(MediaFrame::VT_CODEC, codec, 0);
+  }
+  #[inline]
+  pub fn add_payload_data(&mut self, payload_data: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MediaFrame::VT_PAYLOAD_DATA, payload_data);
+  }
+  #[inline]
+  pub fn add_samples(&mut self, samples: u32) {
+    self.fbb_.push_slot::<u32>(MediaFrame::VT_SAMPLES, samples, 0);
+  }
+  #[inline]
+  pub fn add_sample_rate(&mut self, sample_rate: u32) {
+    self.fbb_.push_slot::<u32>(MediaFrame::VT_SAMPLE_RATE, sample_rate, 0);
+  }
+  #[inline]
+  pub fn add_width(&mut self, width: u32) {
+    self.fbb_.push_slot::<u32>(MediaFrame::VT_WIDTH, width, 0);
+  }
+  #[inline]
+  pub fn add_height(&mut self, height: u32) {
+    self.fbb_.push_slot::<u32>(MediaFrame::VT_HEIGHT, height, 0);
+  }
+  #[inline]
+  pub fn add_flags(&mut self, flags: u8) {
+    self.fbb_.push_slot::<u8>(MediaFrame::VT_FLAGS, flags, 0);
+  }
+  #[inline]
+  pub fn add_auth_tag(&mut self, auth_tag: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MediaFrame::VT_AUTH_TAG, auth_tag);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MediaFrameBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    MediaFrameBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<MediaFrame<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for MediaFrame<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("MediaFrame");
+      ds.field("channel_name", &self.channel_name());
+      ds.field("grant_id", &self.grant_id());
+      ds.field("sequence", &self.sequence());
+      ds.field("timestamp_ms", &self.timestamp_ms());
+      ds.field("payload_kind", &self.payload_kind());
+      ds.field("codec", &self.codec());
+      ds.field("payload_data", &self.payload_data());
+      ds.field("samples", &self.samples());
+      ds.field("sample_rate", &self.sample_rate());
+      ds.field("width", &self.width());
+      ds.field("height", &self.height());
+      ds.field("flags", &self.flags());
+      ds.field("auth_tag", &self.auth_tag());
+      ds.finish()
+  }
+}
+pub enum MediaBroadcastBatchOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct MediaBroadcastBatch<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for MediaBroadcastBatch<'a> {
+  type Inner = MediaBroadcastBatch<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> MediaBroadcastBatch<'a> {
+  pub const VT_SOURCE_SHARD_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SOURCE_POSITION: ::flatbuffers::VOffsetT = 6;
+  pub const VT_FRAMES: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    MediaBroadcastBatch { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args MediaBroadcastBatchArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<MediaBroadcastBatch<'bldr>> {
+    let mut builder = MediaBroadcastBatchBuilder::new(_fbb);
+    builder.add_source_shard_id(args.source_shard_id);
+    if let Some(x) = args.frames { builder.add_frames(x); }
+    if let Some(x) = args.source_position { builder.add_source_position(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn source_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MediaBroadcastBatch::VT_SOURCE_SHARD_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn source_position(&self) -> Option<&'a Vec3d> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Vec3d>(MediaBroadcastBatch::VT_SOURCE_POSITION, None)}
+  }
+  #[inline]
+  pub fn frames(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MediaFrame<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MediaFrame>>>>(MediaBroadcastBatch::VT_FRAMES, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for MediaBroadcastBatch<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("source_shard_id", Self::VT_SOURCE_SHARD_ID, false)?
+     .visit_field::<Vec3d>("source_position", Self::VT_SOURCE_POSITION, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<MediaFrame>>>>("frames", Self::VT_FRAMES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct MediaBroadcastBatchArgs<'a> {
+    pub source_shard_id: u64,
+    pub source_position: Option<&'a Vec3d>,
+    pub frames: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MediaFrame<'a>>>>>,
+}
+impl<'a> Default for MediaBroadcastBatchArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    MediaBroadcastBatchArgs {
+      source_shard_id: 0,
+      source_position: None,
+      frames: None,
+    }
+  }
+}
+
+pub struct MediaBroadcastBatchBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MediaBroadcastBatchBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_source_shard_id(&mut self, source_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(MediaBroadcastBatch::VT_SOURCE_SHARD_ID, source_shard_id, 0);
+  }
+  #[inline]
+  pub fn add_source_position(&mut self, source_position: &Vec3d) {
+    self.fbb_.push_slot_always::<&Vec3d>(MediaBroadcastBatch::VT_SOURCE_POSITION, source_position);
+  }
+  #[inline]
+  pub fn add_frames(&mut self, frames: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<MediaFrame<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MediaBroadcastBatch::VT_FRAMES, frames);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MediaBroadcastBatchBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    MediaBroadcastBatchBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<MediaBroadcastBatch<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for MediaBroadcastBatch<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("MediaBroadcastBatch");
+      ds.field("source_shard_id", &self.source_shard_id());
+      ds.field("source_position", &self.source_position());
+      ds.field("frames", &self.frames());
       ds.finish()
   }
 }
@@ -10678,6 +11430,36 @@ impl<'a> ShardMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_ship_neighborhood(&self) -> Option<ShipNeighborhood<'a>> {
+    if self.payload_type() == ShardPayload::ShipNeighborhood {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { ShipNeighborhood::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_media_broadcast_batch(&self) -> Option<MediaBroadcastBatch<'a>> {
+    if self.payload_type() == ShardPayload::MediaBroadcastBatch {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { MediaBroadcastBatch::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ShardMessage<'_> {
@@ -10715,6 +11497,8 @@ impl ::flatbuffers::Verifiable for ShardMessage<'_> {
           ShardPayload::RadioSubscribe => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<RadioSubscribe>>("ShardPayload::RadioSubscribe", pos),
           ShardPayload::RadioUnsubscribe => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<RadioUnsubscribe>>("ShardPayload::RadioUnsubscribe", pos),
           ShardPayload::ShipFrequencyInterest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipFrequencyInterest>>("ShardPayload::ShipFrequencyInterest", pos),
+          ShardPayload::ShipNeighborhood => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShipNeighborhood>>("ShardPayload::ShipNeighborhood", pos),
+          ShardPayload::MediaBroadcastBatch => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MediaBroadcastBatch>>("ShardPayload::MediaBroadcastBatch", pos),
           _ => Ok(()),
         }
      })?
@@ -10953,6 +11737,20 @@ impl ::core::fmt::Debug for ShardMessage<'_> {
         },
         ShardPayload::ShipFrequencyInterest => {
           if let Some(x) = self.payload_as_ship_frequency_interest() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::ShipNeighborhood => {
+          if let Some(x) = self.payload_as_ship_neighborhood() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ShardPayload::MediaBroadcastBatch => {
+          if let Some(x) = self.payload_as_media_broadcast_batch() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
@@ -13109,7 +13907,6 @@ impl<'a> WorldState<'a> {
   pub const VT_AUTOPILOT: ::flatbuffers::VOffsetT = 20;
   pub const VT_SUB_GRIDS: ::flatbuffers::VOffsetT = 22;
   pub const VT_ENTITIES: ::flatbuffers::VOffsetT = 24;
-  pub const VT_HUD_SIGNALS: ::flatbuffers::VOffsetT = 26;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -13123,7 +13920,6 @@ impl<'a> WorldState<'a> {
     let mut builder = WorldStateBuilder::new(_fbb);
     builder.add_game_time(args.game_time);
     builder.add_tick(args.tick);
-    if let Some(x) = args.hud_signals { builder.add_hud_signals(x); }
     if let Some(x) = args.entities { builder.add_entities(x); }
     if let Some(x) = args.sub_grids { builder.add_sub_grids(x); }
     if let Some(x) = args.autopilot { builder.add_autopilot(x); }
@@ -13221,18 +14017,6 @@ impl<'a> WorldState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>(WorldState::VT_ENTITIES, None)}
   }
-  /// Per-tick HUD signal snapshot. Full replacement each tick —
-  /// widgets that displayed a channel last tick but not this tick
-  /// render their "no signal" state. Server includes every channel
-  /// the player has permission to read + any server-authored text
-  /// labels (body names, warp target names, ship callsigns, …).
-  #[inline]
-  pub fn hud_signals(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HudSignalEntry<'a>>>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HudSignalEntry>>>>(WorldState::VT_HUD_SIGNALS, None)}
-  }
 }
 
 impl ::flatbuffers::Verifiable for WorldState<'_> {
@@ -13252,7 +14036,6 @@ impl ::flatbuffers::Verifiable for WorldState<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<AutopilotSnapshot>>("autopilot", Self::VT_AUTOPILOT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SubGridTransform>>>>("sub_grids", Self::VT_SUB_GRIDS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ObservableEntity>>>>("entities", Self::VT_ENTITIES, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<HudSignalEntry>>>>("hud_signals", Self::VT_HUD_SIGNALS, false)?
      .finish();
     Ok(())
   }
@@ -13269,7 +14052,6 @@ pub struct WorldStateArgs<'a> {
     pub autopilot: Option<::flatbuffers::WIPOffset<AutopilotSnapshot<'a>>>,
     pub sub_grids: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SubGridTransform<'a>>>>>,
     pub entities: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ObservableEntity<'a>>>>>,
-    pub hud_signals: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HudSignalEntry<'a>>>>>,
 }
 impl<'a> Default for WorldStateArgs<'a> {
   #[inline]
@@ -13286,7 +14068,6 @@ impl<'a> Default for WorldStateArgs<'a> {
       autopilot: None,
       sub_grids: None,
       entities: None,
-      hud_signals: None,
     }
   }
 }
@@ -13341,10 +14122,6 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> WorldStateBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WorldState::VT_ENTITIES, entities);
   }
   #[inline]
-  pub fn add_hud_signals(&mut self, hud_signals: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<HudSignalEntry<'b >>>>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(WorldState::VT_HUD_SIGNALS, hud_signals);
-  }
-  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> WorldStateBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     WorldStateBuilder {
@@ -13373,7 +14150,6 @@ impl ::core::fmt::Debug for WorldState<'_> {
       ds.field("autopilot", &self.autopilot());
       ds.field("sub_grids", &self.sub_grids());
       ds.field("entities", &self.entities());
-      ds.field("hud_signals", &self.hud_signals());
       ds.finish()
   }
 }
@@ -16526,6 +17302,10 @@ impl<'a> ::flatbuffers::Follow<'a> for SignalBindingFB<'a> {
 impl<'a> SignalBindingFB<'a> {
   pub const VT_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
   pub const VT_PROPERTY: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SCOPE_CODE: ::flatbuffers::VOffsetT = 8;
+  pub const VT_RANGE_M: ::flatbuffers::VOffsetT = 10;
+  pub const VT_FREQUENCY: ::flatbuffers::VOffsetT = 12;
+  pub const VT_GRANT_ID: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -16537,7 +17317,11 @@ impl<'a> SignalBindingFB<'a> {
     args: &'args SignalBindingFBArgs<'args>
   ) -> ::flatbuffers::WIPOffset<SignalBindingFB<'bldr>> {
     let mut builder = SignalBindingFBBuilder::new(_fbb);
+    builder.add_grant_id(args.grant_id);
+    builder.add_frequency(args.frequency);
+    builder.add_range_m(args.range_m);
     if let Some(x) = args.channel_name { builder.add_channel_name(x); }
+    builder.add_scope_code(args.scope_code);
     builder.add_property(args.property);
     builder.finish()
   }
@@ -16557,6 +17341,40 @@ impl<'a> SignalBindingFB<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u8>(SignalBindingFB::VT_PROPERTY, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn scope_code(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(SignalBindingFB::VT_SCOPE_CODE, Some(0)).unwrap()}
+  }
+  /// ShortRange: physical radius in meters. Other scopes: 0.
+  #[inline]
+  pub fn range_m(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(SignalBindingFB::VT_RANGE_M, Some(0.0)).unwrap()}
+  }
+  /// Radio: frequency. Other scopes: 0.
+  #[inline]
+  pub fn frequency(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SignalBindingFB::VT_FREQUENCY, Some(0)).unwrap()}
+  }
+  /// Phase D — held-grant id when the binding targets a keyed
+  /// remote channel (typically scope_code=3 Radio). 0 ⇒ no grant
+  /// (open channel, in-shard binding, or grant not yet picked).
+  /// Server validates: required iff resolved channel is keyed.
+  #[inline]
+  pub fn grant_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SignalBindingFB::VT_GRANT_ID, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for SignalBindingFB<'_> {
@@ -16567,6 +17385,10 @@ impl ::flatbuffers::Verifiable for SignalBindingFB<'_> {
     v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("channel_name", Self::VT_CHANNEL_NAME, false)?
      .visit_field::<u8>("property", Self::VT_PROPERTY, false)?
+     .visit_field::<u8>("scope_code", Self::VT_SCOPE_CODE, false)?
+     .visit_field::<f32>("range_m", Self::VT_RANGE_M, false)?
+     .visit_field::<u32>("frequency", Self::VT_FREQUENCY, false)?
+     .visit_field::<u64>("grant_id", Self::VT_GRANT_ID, false)?
      .finish();
     Ok(())
   }
@@ -16574,6 +17396,10 @@ impl ::flatbuffers::Verifiable for SignalBindingFB<'_> {
 pub struct SignalBindingFBArgs<'a> {
     pub channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub property: u8,
+    pub scope_code: u8,
+    pub range_m: f32,
+    pub frequency: u32,
+    pub grant_id: u64,
 }
 impl<'a> Default for SignalBindingFBArgs<'a> {
   #[inline]
@@ -16581,6 +17407,10 @@ impl<'a> Default for SignalBindingFBArgs<'a> {
     SignalBindingFBArgs {
       channel_name: None,
       property: 0,
+      scope_code: 0,
+      range_m: 0.0,
+      frequency: 0,
+      grant_id: 0,
     }
   }
 }
@@ -16597,6 +17427,22 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SignalBindingFBBuilder<'a, 'b
   #[inline]
   pub fn add_property(&mut self, property: u8) {
     self.fbb_.push_slot::<u8>(SignalBindingFB::VT_PROPERTY, property, 0);
+  }
+  #[inline]
+  pub fn add_scope_code(&mut self, scope_code: u8) {
+    self.fbb_.push_slot::<u8>(SignalBindingFB::VT_SCOPE_CODE, scope_code, 0);
+  }
+  #[inline]
+  pub fn add_range_m(&mut self, range_m: f32) {
+    self.fbb_.push_slot::<f32>(SignalBindingFB::VT_RANGE_M, range_m, 0.0);
+  }
+  #[inline]
+  pub fn add_frequency(&mut self, frequency: u32) {
+    self.fbb_.push_slot::<u32>(SignalBindingFB::VT_FREQUENCY, frequency, 0);
+  }
+  #[inline]
+  pub fn add_grant_id(&mut self, grant_id: u64) {
+    self.fbb_.push_slot::<u64>(SignalBindingFB::VT_GRANT_ID, grant_id, 0);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SignalBindingFBBuilder<'a, 'b, A> {
@@ -16618,6 +17464,10 @@ impl ::core::fmt::Debug for SignalBindingFB<'_> {
     let mut ds = f.debug_struct("SignalBindingFB");
       ds.field("channel_name", &self.channel_name());
       ds.field("property", &self.property());
+      ds.field("scope_code", &self.scope_code());
+      ds.field("range_m", &self.range_m());
+      ds.field("frequency", &self.frequency());
+      ds.field("grant_id", &self.grant_id());
       ds.finish()
   }
 }
@@ -18330,26 +19180,31 @@ impl ::core::fmt::Debug for EngineControllerConfigFB<'_> {
       ds.finish()
   }
 }
-pub enum AntennaConfigFBOffset {}
+pub enum LegacyAntennaConfigFBOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
 /// Phase 3E: Antenna block config — bridges a Local channel on this shard
 /// to a Radio channel on a target shard via a held grant. The placing
 /// player's `HeldGrants[grant_id]` provides the HMAC key (looked up at
 /// apply time, then cached on `AntennaState` for the per-tick hot path).
-pub struct AntennaConfigFB<'a> {
+///
+/// LEGACY shape — retained for one migration window. New code emits
+/// `AntennaConfigFB` (bidirectional). Server reads this on load and
+/// rewrites it into the bidirectional form (TX side only). Removed in
+/// the Phase 6 cleanup.
+pub struct LegacyAntennaConfigFB<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
 
-impl<'a> ::flatbuffers::Follow<'a> for AntennaConfigFB<'a> {
-  type Inner = AntennaConfigFB<'a>;
+impl<'a> ::flatbuffers::Follow<'a> for LegacyAntennaConfigFB<'a> {
+  type Inner = LegacyAntennaConfigFB<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
     Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
   }
 }
 
-impl<'a> AntennaConfigFB<'a> {
+impl<'a> LegacyAntennaConfigFB<'a> {
   pub const VT_SOURCE_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
   pub const VT_REMOTE_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
   pub const VT_FREQUENCY: ::flatbuffers::VOffsetT = 8;
@@ -18358,14 +19213,14 @@ impl<'a> AntennaConfigFB<'a> {
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-    AntennaConfigFB { _tab: table }
+    LegacyAntennaConfigFB { _tab: table }
   }
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args AntennaConfigFBArgs<'args>
-  ) -> ::flatbuffers::WIPOffset<AntennaConfigFB<'bldr>> {
-    let mut builder = AntennaConfigFBBuilder::new(_fbb);
+    args: &'args LegacyAntennaConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<LegacyAntennaConfigFB<'bldr>> {
+    let mut builder = LegacyAntennaConfigFBBuilder::new(_fbb);
     builder.add_target_shard_id(args.target_shard_id);
     builder.add_grant_id(args.grant_id);
     builder.add_frequency(args.frequency);
@@ -18381,7 +19236,7 @@ impl<'a> AntennaConfigFB<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AntennaConfigFB::VT_SOURCE_CHANNEL_NAME, None)}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(LegacyAntennaConfigFB::VT_SOURCE_CHANNEL_NAME, None)}
   }
   /// Remote channel name on the target shard (the publish target).
   #[inline]
@@ -18389,32 +19244,32 @@ impl<'a> AntennaConfigFB<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AntennaConfigFB::VT_REMOTE_CHANNEL_NAME, None)}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(LegacyAntennaConfigFB::VT_REMOTE_CHANNEL_NAME, None)}
   }
   #[inline]
   pub fn frequency(&self) -> u32 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u32>(AntennaConfigFB::VT_FREQUENCY, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u32>(LegacyAntennaConfigFB::VT_FREQUENCY, Some(0)).unwrap()}
   }
   #[inline]
   pub fn grant_id(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(AntennaConfigFB::VT_GRANT_ID, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(LegacyAntennaConfigFB::VT_GRANT_ID, Some(0)).unwrap()}
   }
   #[inline]
   pub fn target_shard_id(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(AntennaConfigFB::VT_TARGET_SHARD_ID, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(LegacyAntennaConfigFB::VT_TARGET_SHARD_ID, Some(0)).unwrap()}
   }
 }
 
-impl ::flatbuffers::Verifiable for AntennaConfigFB<'_> {
+impl ::flatbuffers::Verifiable for LegacyAntennaConfigFB<'_> {
   #[inline]
   fn run_verifier(
     v: &mut ::flatbuffers::Verifier, pos: usize
@@ -18429,22 +19284,487 @@ impl ::flatbuffers::Verifiable for AntennaConfigFB<'_> {
     Ok(())
   }
 }
-pub struct AntennaConfigFBArgs<'a> {
+pub struct LegacyAntennaConfigFBArgs<'a> {
     pub source_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub remote_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub frequency: u32,
     pub grant_id: u64,
     pub target_shard_id: u64,
 }
-impl<'a> Default for AntennaConfigFBArgs<'a> {
+impl<'a> Default for LegacyAntennaConfigFBArgs<'a> {
   #[inline]
   fn default() -> Self {
-    AntennaConfigFBArgs {
+    LegacyAntennaConfigFBArgs {
       source_channel_name: None,
       remote_channel_name: None,
       frequency: 0,
       grant_id: 0,
       target_shard_id: 0,
+    }
+  }
+}
+
+pub struct LegacyAntennaConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LegacyAntennaConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_source_channel_name(&mut self, source_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(LegacyAntennaConfigFB::VT_SOURCE_CHANNEL_NAME, source_channel_name);
+  }
+  #[inline]
+  pub fn add_remote_channel_name(&mut self, remote_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(LegacyAntennaConfigFB::VT_REMOTE_CHANNEL_NAME, remote_channel_name);
+  }
+  #[inline]
+  pub fn add_frequency(&mut self, frequency: u32) {
+    self.fbb_.push_slot::<u32>(LegacyAntennaConfigFB::VT_FREQUENCY, frequency, 0);
+  }
+  #[inline]
+  pub fn add_grant_id(&mut self, grant_id: u64) {
+    self.fbb_.push_slot::<u64>(LegacyAntennaConfigFB::VT_GRANT_ID, grant_id, 0);
+  }
+  #[inline]
+  pub fn add_target_shard_id(&mut self, target_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(LegacyAntennaConfigFB::VT_TARGET_SHARD_ID, target_shard_id, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> LegacyAntennaConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    LegacyAntennaConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<LegacyAntennaConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for LegacyAntennaConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("LegacyAntennaConfigFB");
+      ds.field("source_channel_name", &self.source_channel_name());
+      ds.field("remote_channel_name", &self.remote_channel_name());
+      ds.field("frequency", &self.frequency());
+      ds.field("grant_id", &self.grant_id());
+      ds.field("target_shard_id", &self.target_shard_id());
+      ds.finish()
+  }
+}
+pub enum LegacyListenerConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// LEGACY shape — Listener block. Retained for one migration window.
+/// Server rewrites into a bidirectional `AntennaConfigFB` with only
+/// the RX side populated. Removed in the Phase 6 cleanup.
+pub struct LegacyListenerConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for LegacyListenerConfigFB<'a> {
+  type Inner = LegacyListenerConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> LegacyListenerConfigFB<'a> {
+  pub const VT_DESTINATION_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BRIDGED_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_FREQUENCY: ::flatbuffers::VOffsetT = 8;
+  pub const VT_GRANT_ID: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SOURCE_SHARD_ID: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    LegacyListenerConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args LegacyListenerConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<LegacyListenerConfigFB<'bldr>> {
+    let mut builder = LegacyListenerConfigFBBuilder::new(_fbb);
+    builder.add_source_shard_id(args.source_shard_id);
+    builder.add_grant_id(args.grant_id);
+    builder.add_frequency(args.frequency);
+    if let Some(x) = args.bridged_channel_name { builder.add_bridged_channel_name(x); }
+    if let Some(x) = args.destination_channel_name { builder.add_destination_channel_name(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn destination_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(LegacyListenerConfigFB::VT_DESTINATION_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn bridged_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(LegacyListenerConfigFB::VT_BRIDGED_CHANNEL_NAME, None)}
+  }
+  #[inline]
+  pub fn frequency(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(LegacyListenerConfigFB::VT_FREQUENCY, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn grant_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(LegacyListenerConfigFB::VT_GRANT_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn source_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(LegacyListenerConfigFB::VT_SOURCE_SHARD_ID, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for LegacyListenerConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("destination_channel_name", Self::VT_DESTINATION_CHANNEL_NAME, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("bridged_channel_name", Self::VT_BRIDGED_CHANNEL_NAME, false)?
+     .visit_field::<u32>("frequency", Self::VT_FREQUENCY, false)?
+     .visit_field::<u64>("grant_id", Self::VT_GRANT_ID, false)?
+     .visit_field::<u64>("source_shard_id", Self::VT_SOURCE_SHARD_ID, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct LegacyListenerConfigFBArgs<'a> {
+    pub destination_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub bridged_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub frequency: u32,
+    pub grant_id: u64,
+    pub source_shard_id: u64,
+}
+impl<'a> Default for LegacyListenerConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    LegacyListenerConfigFBArgs {
+      destination_channel_name: None,
+      bridged_channel_name: None,
+      frequency: 0,
+      grant_id: 0,
+      source_shard_id: 0,
+    }
+  }
+}
+
+pub struct LegacyListenerConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LegacyListenerConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_destination_channel_name(&mut self, destination_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(LegacyListenerConfigFB::VT_DESTINATION_CHANNEL_NAME, destination_channel_name);
+  }
+  #[inline]
+  pub fn add_bridged_channel_name(&mut self, bridged_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(LegacyListenerConfigFB::VT_BRIDGED_CHANNEL_NAME, bridged_channel_name);
+  }
+  #[inline]
+  pub fn add_frequency(&mut self, frequency: u32) {
+    self.fbb_.push_slot::<u32>(LegacyListenerConfigFB::VT_FREQUENCY, frequency, 0);
+  }
+  #[inline]
+  pub fn add_grant_id(&mut self, grant_id: u64) {
+    self.fbb_.push_slot::<u64>(LegacyListenerConfigFB::VT_GRANT_ID, grant_id, 0);
+  }
+  #[inline]
+  pub fn add_source_shard_id(&mut self, source_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(LegacyListenerConfigFB::VT_SOURCE_SHARD_ID, source_shard_id, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> LegacyListenerConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    LegacyListenerConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<LegacyListenerConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for LegacyListenerConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("LegacyListenerConfigFB");
+      ds.field("destination_channel_name", &self.destination_channel_name());
+      ds.field("bridged_channel_name", &self.bridged_channel_name());
+      ds.field("frequency", &self.frequency());
+      ds.field("grant_id", &self.grant_id());
+      ds.field("source_shard_id", &self.source_shard_id());
+      ds.finish()
+  }
+}
+pub enum AntennaSideFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// One side of a bidirectional Antenna bridge. The struct is symmetric
+/// for TX and RX — direction is implicit from which slot in
+/// `AntennaConfigFB` carries it. Empty `local_channel_name` means
+/// "this side is unused" (used to express tx-only or rx-only antennas
+/// since FB doesn't have native Option-of-table for `optional struct`).
+pub struct AntennaSideFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for AntennaSideFB<'a> {
+  type Inner = AntennaSideFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> AntennaSideFB<'a> {
+  pub const VT_LOCAL_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_FREQUENCY: ::flatbuffers::VOffsetT = 6;
+  pub const VT_GRANT_ID: ::flatbuffers::VOffsetT = 8;
+  pub const VT_REMOTE_SHARD_ID: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    AntennaSideFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args AntennaSideFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<AntennaSideFB<'bldr>> {
+    let mut builder = AntennaSideFBBuilder::new(_fbb);
+    builder.add_remote_shard_id(args.remote_shard_id);
+    builder.add_grant_id(args.grant_id);
+    builder.add_frequency(args.frequency);
+    if let Some(x) = args.local_channel_name { builder.add_local_channel_name(x); }
+    builder.finish()
+  }
+
+
+  /// Local channel:
+  ///   * TX: antenna SUBSCRIBES to this channel; values are forwarded
+  ///     to `frequency` each tick.
+  ///   * RX: antenna PUBLISHES values it receives on `frequency` to
+  ///     this channel.
+  /// Empty means "side unused".
+  #[inline]
+  pub fn local_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(AntennaSideFB::VT_LOCAL_CHANNEL_NAME, None)}
+  }
+  /// Radio frequency. Routing target.
+  #[inline]
+  pub fn frequency(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(AntennaSideFB::VT_FREQUENCY, Some(0)).unwrap()}
+  }
+  /// Optional held-grant id. 0 ⇒ open radio (channel has
+  /// `auth: ChannelAuth::None`). Non-zero ⇒ keyed; server checks
+  /// the grant in the placing player's HeldGrants and verifies
+  /// it covers the resolved remote channel with the right ops.
+  #[inline]
+  pub fn grant_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(AntennaSideFB::VT_GRANT_ID, Some(0)).unwrap()}
+  }
+  /// Where the remote channel lives. 0 ⇒ orchestrator-routed via
+  /// the relay (per the existing frequency-band table).
+  #[inline]
+  pub fn remote_shard_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(AntennaSideFB::VT_REMOTE_SHARD_ID, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for AntennaSideFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("local_channel_name", Self::VT_LOCAL_CHANNEL_NAME, false)?
+     .visit_field::<u32>("frequency", Self::VT_FREQUENCY, false)?
+     .visit_field::<u64>("grant_id", Self::VT_GRANT_ID, false)?
+     .visit_field::<u64>("remote_shard_id", Self::VT_REMOTE_SHARD_ID, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct AntennaSideFBArgs<'a> {
+    pub local_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub frequency: u32,
+    pub grant_id: u64,
+    pub remote_shard_id: u64,
+}
+impl<'a> Default for AntennaSideFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    AntennaSideFBArgs {
+      local_channel_name: None,
+      frequency: 0,
+      grant_id: 0,
+      remote_shard_id: 0,
+    }
+  }
+}
+
+pub struct AntennaSideFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AntennaSideFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_local_channel_name(&mut self, local_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AntennaSideFB::VT_LOCAL_CHANNEL_NAME, local_channel_name);
+  }
+  #[inline]
+  pub fn add_frequency(&mut self, frequency: u32) {
+    self.fbb_.push_slot::<u32>(AntennaSideFB::VT_FREQUENCY, frequency, 0);
+  }
+  #[inline]
+  pub fn add_grant_id(&mut self, grant_id: u64) {
+    self.fbb_.push_slot::<u64>(AntennaSideFB::VT_GRANT_ID, grant_id, 0);
+  }
+  #[inline]
+  pub fn add_remote_shard_id(&mut self, remote_shard_id: u64) {
+    self.fbb_.push_slot::<u64>(AntennaSideFB::VT_REMOTE_SHARD_ID, remote_shard_id, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> AntennaSideFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    AntennaSideFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<AntennaSideFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for AntennaSideFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("AntennaSideFB");
+      ds.field("local_channel_name", &self.local_channel_name());
+      ds.field("frequency", &self.frequency());
+      ds.field("grant_id", &self.grant_id());
+      ds.field("remote_shard_id", &self.remote_shard_id());
+      ds.finish()
+  }
+}
+pub enum AntennaConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Bidirectional Antenna config. At least one side must have a
+/// non-empty `local_channel_name` — server rejects zero-side configs.
+/// Most antennas use BOTH sides (full-duplex chat at one frequency);
+/// uni-directional antennas (TX-only beacon, RX-only listener) leave
+/// one side empty.
+pub struct AntennaConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for AntennaConfigFB<'a> {
+  type Inner = AntennaConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> AntennaConfigFB<'a> {
+  pub const VT_TX: ::flatbuffers::VOffsetT = 4;
+  pub const VT_RX: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    AntennaConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args AntennaConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<AntennaConfigFB<'bldr>> {
+    let mut builder = AntennaConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.rx { builder.add_rx(x); }
+    if let Some(x) = args.tx { builder.add_tx(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn tx(&self) -> Option<AntennaSideFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AntennaSideFB>>(AntennaConfigFB::VT_TX, None)}
+  }
+  #[inline]
+  pub fn rx(&self) -> Option<AntennaSideFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AntennaSideFB>>(AntennaConfigFB::VT_RX, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for AntennaConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AntennaSideFB>>("tx", Self::VT_TX, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AntennaSideFB>>("rx", Self::VT_RX, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct AntennaConfigFBArgs<'a> {
+    pub tx: Option<::flatbuffers::WIPOffset<AntennaSideFB<'a>>>,
+    pub rx: Option<::flatbuffers::WIPOffset<AntennaSideFB<'a>>>,
+}
+impl<'a> Default for AntennaConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    AntennaConfigFBArgs {
+      tx: None,
+      rx: None,
     }
   }
 }
@@ -18455,24 +19775,12 @@ pub struct AntennaConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> 
 }
 impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AntennaConfigFBBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_source_channel_name(&mut self, source_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AntennaConfigFB::VT_SOURCE_CHANNEL_NAME, source_channel_name);
+  pub fn add_tx(&mut self, tx: ::flatbuffers::WIPOffset<AntennaSideFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AntennaSideFB>>(AntennaConfigFB::VT_TX, tx);
   }
   #[inline]
-  pub fn add_remote_channel_name(&mut self, remote_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AntennaConfigFB::VT_REMOTE_CHANNEL_NAME, remote_channel_name);
-  }
-  #[inline]
-  pub fn add_frequency(&mut self, frequency: u32) {
-    self.fbb_.push_slot::<u32>(AntennaConfigFB::VT_FREQUENCY, frequency, 0);
-  }
-  #[inline]
-  pub fn add_grant_id(&mut self, grant_id: u64) {
-    self.fbb_.push_slot::<u64>(AntennaConfigFB::VT_GRANT_ID, grant_id, 0);
-  }
-  #[inline]
-  pub fn add_target_shard_id(&mut self, target_shard_id: u64) {
-    self.fbb_.push_slot::<u64>(AntennaConfigFB::VT_TARGET_SHARD_ID, target_shard_id, 0);
+  pub fn add_rx(&mut self, rx: ::flatbuffers::WIPOffset<AntennaSideFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AntennaSideFB>>(AntennaConfigFB::VT_RX, rx);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> AntennaConfigFBBuilder<'a, 'b, A> {
@@ -18492,186 +19800,441 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AntennaConfigFBBuilder<'a, 'b
 impl ::core::fmt::Debug for AntennaConfigFB<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("AntennaConfigFB");
-      ds.field("source_channel_name", &self.source_channel_name());
-      ds.field("remote_channel_name", &self.remote_channel_name());
-      ds.field("frequency", &self.frequency());
-      ds.field("grant_id", &self.grant_id());
-      ds.field("target_shard_id", &self.target_shard_id());
+      ds.field("tx", &self.tx());
+      ds.field("rx", &self.rx());
       ds.finish()
   }
 }
-pub enum ListenerConfigFBOffset {}
+pub enum AccessStatusForChannelFBOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// Phase 3E: Listener block config — receives a Radio channel from a
-/// remote source shard via a held grant and mirrors its value onto a
-/// chosen Local channel on this shard. Apply step creates BOTH:
-///   * a local Radio-scope channel matching `bridged_channel_name`
-///     (so try_push_remote can find it when forwarded entries arrive)
-///   * a local Local-scope channel matching `destination_channel_name`
-///     (so internal subscribers wire to it like any native Local channel).
-/// Then attaches the bridged channel id to the mirror grant in
-/// `GrantsRegistry` so HMAC verification succeeds.
-pub struct ListenerConfigFB<'a> {
+/// Per-side access status for the configurator UI. Server populates
+/// this from the resolved remote channel (via the grant lookup or the
+/// orchestrator's relay table) so the client can render the right
+/// affordance: open caption, held-grants dropdown, or "Request access".
+pub struct AccessStatusForChannelFB<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
 
-impl<'a> ::flatbuffers::Follow<'a> for ListenerConfigFB<'a> {
-  type Inner = ListenerConfigFB<'a>;
+impl<'a> ::flatbuffers::Follow<'a> for AccessStatusForChannelFB<'a> {
+  type Inner = AccessStatusForChannelFB<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
     Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
   }
 }
 
-impl<'a> ListenerConfigFB<'a> {
-  pub const VT_DESTINATION_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
-  pub const VT_BRIDGED_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
-  pub const VT_FREQUENCY: ::flatbuffers::VOffsetT = 8;
-  pub const VT_GRANT_ID: ::flatbuffers::VOffsetT = 10;
-  pub const VT_SOURCE_SHARD_ID: ::flatbuffers::VOffsetT = 12;
+impl<'a> AccessStatusForChannelFB<'a> {
+  pub const VT_REMOTE_CHANNEL_KNOWN: ::flatbuffers::VOffsetT = 4;
+  pub const VT_AUTH_REQUIRED: ::flatbuffers::VOffsetT = 6;
+  pub const VT_HELD_GRANTS: ::flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-    ListenerConfigFB { _tab: table }
+    AccessStatusForChannelFB { _tab: table }
   }
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args ListenerConfigFBArgs<'args>
-  ) -> ::flatbuffers::WIPOffset<ListenerConfigFB<'bldr>> {
-    let mut builder = ListenerConfigFBBuilder::new(_fbb);
-    builder.add_source_shard_id(args.source_shard_id);
-    builder.add_grant_id(args.grant_id);
-    builder.add_frequency(args.frequency);
-    if let Some(x) = args.bridged_channel_name { builder.add_bridged_channel_name(x); }
-    if let Some(x) = args.destination_channel_name { builder.add_destination_channel_name(x); }
+    args: &'args AccessStatusForChannelFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<AccessStatusForChannelFB<'bldr>> {
+    let mut builder = AccessStatusForChannelFBBuilder::new(_fbb);
+    if let Some(x) = args.held_grants { builder.add_held_grants(x); }
+    builder.add_auth_required(args.auth_required);
+    builder.add_remote_channel_known(args.remote_channel_known);
     builder.finish()
   }
 
 
-  /// Local Local-scope channel where the bridged value gets mirrored.
+  /// True if the resolver knows about a remote channel for this
+  /// (frequency, remote_shard_id). False ⇒ "no channel known yet"
+  /// (client shows freq input only).
   #[inline]
-  pub fn destination_channel_name(&self) -> Option<&'a str> {
+  pub fn remote_channel_known(&self) -> bool {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ListenerConfigFB::VT_DESTINATION_CHANNEL_NAME, None)}
+    unsafe { self._tab.get::<bool>(AccessStatusForChannelFB::VT_REMOTE_CHANNEL_KNOWN, Some(false)).unwrap()}
   }
-  /// Cross-shard channel name (matches publisher's remote_channel_name).
+  /// True if the remote channel is keyed (`ChannelAuth::Hmac`).
   #[inline]
-  pub fn bridged_channel_name(&self) -> Option<&'a str> {
+  pub fn auth_required(&self) -> bool {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ListenerConfigFB::VT_BRIDGED_CHANNEL_NAME, None)}
+    unsafe { self._tab.get::<bool>(AccessStatusForChannelFB::VT_AUTH_REQUIRED, Some(false)).unwrap()}
   }
+  /// Held grants the placing player has that cover the resolved
+  /// channel + the relevant op (Publish for TX, Subscribe for RX).
   #[inline]
-  pub fn frequency(&self) -> u32 {
+  pub fn held_grants(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB<'a>>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u32>(ListenerConfigFB::VT_FREQUENCY, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn grant_id(&self) -> u64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(ListenerConfigFB::VT_GRANT_ID, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn source_shard_id(&self) -> u64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(ListenerConfigFB::VT_SOURCE_SHARD_ID, Some(0)).unwrap()}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB>>>>(AccessStatusForChannelFB::VT_HELD_GRANTS, None)}
   }
 }
 
-impl ::flatbuffers::Verifiable for ListenerConfigFB<'_> {
+impl ::flatbuffers::Verifiable for AccessStatusForChannelFB<'_> {
   #[inline]
   fn run_verifier(
     v: &mut ::flatbuffers::Verifier, pos: usize
   ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
     v.visit_table(pos)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("destination_channel_name", Self::VT_DESTINATION_CHANNEL_NAME, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("bridged_channel_name", Self::VT_BRIDGED_CHANNEL_NAME, false)?
-     .visit_field::<u32>("frequency", Self::VT_FREQUENCY, false)?
-     .visit_field::<u64>("grant_id", Self::VT_GRANT_ID, false)?
-     .visit_field::<u64>("source_shard_id", Self::VT_SOURCE_SHARD_ID, false)?
+     .visit_field::<bool>("remote_channel_known", Self::VT_REMOTE_CHANNEL_KNOWN, false)?
+     .visit_field::<bool>("auth_required", Self::VT_AUTH_REQUIRED, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB>>>>("held_grants", Self::VT_HELD_GRANTS, false)?
      .finish();
     Ok(())
   }
 }
-pub struct ListenerConfigFBArgs<'a> {
-    pub destination_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
-    pub bridged_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
-    pub frequency: u32,
-    pub grant_id: u64,
-    pub source_shard_id: u64,
+pub struct AccessStatusForChannelFBArgs<'a> {
+    pub remote_channel_known: bool,
+    pub auth_required: bool,
+    pub held_grants: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB<'a>>>>>,
 }
-impl<'a> Default for ListenerConfigFBArgs<'a> {
+impl<'a> Default for AccessStatusForChannelFBArgs<'a> {
   #[inline]
   fn default() -> Self {
-    ListenerConfigFBArgs {
-      destination_channel_name: None,
-      bridged_channel_name: None,
-      frequency: 0,
-      grant_id: 0,
-      source_shard_id: 0,
+    AccessStatusForChannelFBArgs {
+      remote_channel_known: false,
+      auth_required: false,
+      held_grants: None,
     }
   }
 }
 
-pub struct ListenerConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+pub struct AccessStatusForChannelFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
   fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
   start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ListenerConfigFBBuilder<'a, 'b, A> {
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> AccessStatusForChannelFBBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_destination_channel_name(&mut self, destination_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ListenerConfigFB::VT_DESTINATION_CHANNEL_NAME, destination_channel_name);
+  pub fn add_remote_channel_known(&mut self, remote_channel_known: bool) {
+    self.fbb_.push_slot::<bool>(AccessStatusForChannelFB::VT_REMOTE_CHANNEL_KNOWN, remote_channel_known, false);
   }
   #[inline]
-  pub fn add_bridged_channel_name(&mut self, bridged_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ListenerConfigFB::VT_BRIDGED_CHANNEL_NAME, bridged_channel_name);
+  pub fn add_auth_required(&mut self, auth_required: bool) {
+    self.fbb_.push_slot::<bool>(AccessStatusForChannelFB::VT_AUTH_REQUIRED, auth_required, false);
   }
   #[inline]
-  pub fn add_frequency(&mut self, frequency: u32) {
-    self.fbb_.push_slot::<u32>(ListenerConfigFB::VT_FREQUENCY, frequency, 0);
+  pub fn add_held_grants(&mut self, held_grants: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(AccessStatusForChannelFB::VT_HELD_GRANTS, held_grants);
   }
   #[inline]
-  pub fn add_grant_id(&mut self, grant_id: u64) {
-    self.fbb_.push_slot::<u64>(ListenerConfigFB::VT_GRANT_ID, grant_id, 0);
-  }
-  #[inline]
-  pub fn add_source_shard_id(&mut self, source_shard_id: u64) {
-    self.fbb_.push_slot::<u64>(ListenerConfigFB::VT_SOURCE_SHARD_ID, source_shard_id, 0);
-  }
-  #[inline]
-  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ListenerConfigFBBuilder<'a, 'b, A> {
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> AccessStatusForChannelFBBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
-    ListenerConfigFBBuilder {
+    AccessStatusForChannelFBBuilder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> ::flatbuffers::WIPOffset<ListenerConfigFB<'a>> {
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<AccessStatusForChannelFB<'a>> {
     let o = self.fbb_.end_table(self.start_);
     ::flatbuffers::WIPOffset::new(o.value())
   }
 }
 
-impl ::core::fmt::Debug for ListenerConfigFB<'_> {
+impl ::core::fmt::Debug for AccessStatusForChannelFB<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-    let mut ds = f.debug_struct("ListenerConfigFB");
-      ds.field("destination_channel_name", &self.destination_channel_name());
-      ds.field("bridged_channel_name", &self.bridged_channel_name());
-      ds.field("frequency", &self.frequency());
+    let mut ds = f.debug_struct("AccessStatusForChannelFB");
+      ds.field("remote_channel_known", &self.remote_channel_known());
+      ds.field("auth_required", &self.auth_required());
+      ds.field("held_grants", &self.held_grants());
+      ds.finish()
+  }
+}
+pub enum HeldGrantSummaryFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Compact summary of a held grant for picker dropdowns. The grant
+/// key itself is never sent to the client UI — only the picker id
+/// + label + expiry + ops bitmap.
+pub struct HeldGrantSummaryFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for HeldGrantSummaryFB<'a> {
+  type Inner = HeldGrantSummaryFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> HeldGrantSummaryFB<'a> {
+  pub const VT_GRANT_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_LABEL: ::flatbuffers::VOffsetT = 6;
+  pub const VT_EXPIRES_AT_MS: ::flatbuffers::VOffsetT = 8;
+  pub const VT_OPS_MASK: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    HeldGrantSummaryFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args HeldGrantSummaryFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<HeldGrantSummaryFB<'bldr>> {
+    let mut builder = HeldGrantSummaryFBBuilder::new(_fbb);
+    builder.add_expires_at_ms(args.expires_at_ms);
+    builder.add_grant_id(args.grant_id);
+    if let Some(x) = args.label { builder.add_label(x); }
+    builder.add_ops_mask(args.ops_mask);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn grant_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(HeldGrantSummaryFB::VT_GRANT_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn label(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HeldGrantSummaryFB::VT_LABEL, None)}
+  }
+  /// 0 ⇒ no expiry; otherwise unix-ms.
+  #[inline]
+  pub fn expires_at_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(HeldGrantSummaryFB::VT_EXPIRES_AT_MS, Some(0)).unwrap()}
+  }
+  /// Bit 0 = Publish, bit 1 = Subscribe.
+  #[inline]
+  pub fn ops_mask(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(HeldGrantSummaryFB::VT_OPS_MASK, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for HeldGrantSummaryFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("grant_id", Self::VT_GRANT_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("label", Self::VT_LABEL, false)?
+     .visit_field::<u64>("expires_at_ms", Self::VT_EXPIRES_AT_MS, false)?
+     .visit_field::<u8>("ops_mask", Self::VT_OPS_MASK, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct HeldGrantSummaryFBArgs<'a> {
+    pub grant_id: u64,
+    pub label: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub expires_at_ms: u64,
+    pub ops_mask: u8,
+}
+impl<'a> Default for HeldGrantSummaryFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    HeldGrantSummaryFBArgs {
+      grant_id: 0,
+      label: None,
+      expires_at_ms: 0,
+      ops_mask: 0,
+    }
+  }
+}
+
+pub struct HeldGrantSummaryFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HeldGrantSummaryFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_grant_id(&mut self, grant_id: u64) {
+    self.fbb_.push_slot::<u64>(HeldGrantSummaryFB::VT_GRANT_ID, grant_id, 0);
+  }
+  #[inline]
+  pub fn add_label(&mut self, label: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HeldGrantSummaryFB::VT_LABEL, label);
+  }
+  #[inline]
+  pub fn add_expires_at_ms(&mut self, expires_at_ms: u64) {
+    self.fbb_.push_slot::<u64>(HeldGrantSummaryFB::VT_EXPIRES_AT_MS, expires_at_ms, 0);
+  }
+  #[inline]
+  pub fn add_ops_mask(&mut self, ops_mask: u8) {
+    self.fbb_.push_slot::<u8>(HeldGrantSummaryFB::VT_OPS_MASK, ops_mask, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HeldGrantSummaryFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    HeldGrantSummaryFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<HeldGrantSummaryFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for HeldGrantSummaryFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("HeldGrantSummaryFB");
       ds.field("grant_id", &self.grant_id());
-      ds.field("source_shard_id", &self.source_shard_id());
+      ds.field("label", &self.label());
+      ds.field("expires_at_ms", &self.expires_at_ms());
+      ds.field("ops_mask", &self.ops_mask());
+      ds.finish()
+  }
+}
+pub enum TerminalConfigFBOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Unified Terminal block config — replaces TextDisplayState +
+/// KeyboardTerminalState wire shapes. A Terminal can subscribe (read),
+/// publish (write), or both. At least one channel must be set; server
+/// rejects fully-empty configs.
+pub struct TerminalConfigFB<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for TerminalConfigFB<'a> {
+  type Inner = TerminalConfigFB<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> TerminalConfigFB<'a> {
+  pub const VT_SUBSCRIBE_CHANNEL_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_PUBLISH_CHANNEL_NAME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SCROLLBACK_LINES: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    TerminalConfigFB { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args TerminalConfigFBArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<TerminalConfigFB<'bldr>> {
+    let mut builder = TerminalConfigFBBuilder::new(_fbb);
+    if let Some(x) = args.publish_channel_name { builder.add_publish_channel_name(x); }
+    if let Some(x) = args.subscribe_channel_name { builder.add_subscribe_channel_name(x); }
+    builder.add_scrollback_lines(args.scrollback_lines);
+    builder.finish()
+  }
+
+
+  /// Channel this terminal subscribes to. Inbound text frames
+  /// scroll the in-world surface. Empty ⇒ input-only kiosk
+  /// (e.g., emergency-call panel).
+  #[inline]
+  pub fn subscribe_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(TerminalConfigFB::VT_SUBSCRIBE_CHANNEL_NAME, None)}
+  }
+  /// Channel this terminal publishes to on E-key send. Empty ⇒
+  /// read-only sign / status board.
+  #[inline]
+  pub fn publish_channel_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(TerminalConfigFB::VT_PUBLISH_CHANNEL_NAME, None)}
+  }
+  /// Maximum scrollback lines retained on the entity. 0 ⇒ apply
+  /// the registry default.
+  #[inline]
+  pub fn scrollback_lines(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(TerminalConfigFB::VT_SCROLLBACK_LINES, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for TerminalConfigFB<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("subscribe_channel_name", Self::VT_SUBSCRIBE_CHANNEL_NAME, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("publish_channel_name", Self::VT_PUBLISH_CHANNEL_NAME, false)?
+     .visit_field::<u16>("scrollback_lines", Self::VT_SCROLLBACK_LINES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct TerminalConfigFBArgs<'a> {
+    pub subscribe_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub publish_channel_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub scrollback_lines: u16,
+}
+impl<'a> Default for TerminalConfigFBArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    TerminalConfigFBArgs {
+      subscribe_channel_name: None,
+      publish_channel_name: None,
+      scrollback_lines: 0,
+    }
+  }
+}
+
+pub struct TerminalConfigFBBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> TerminalConfigFBBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_subscribe_channel_name(&mut self, subscribe_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(TerminalConfigFB::VT_SUBSCRIBE_CHANNEL_NAME, subscribe_channel_name);
+  }
+  #[inline]
+  pub fn add_publish_channel_name(&mut self, publish_channel_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(TerminalConfigFB::VT_PUBLISH_CHANNEL_NAME, publish_channel_name);
+  }
+  #[inline]
+  pub fn add_scrollback_lines(&mut self, scrollback_lines: u16) {
+    self.fbb_.push_slot::<u16>(TerminalConfigFB::VT_SCROLLBACK_LINES, scrollback_lines, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> TerminalConfigFBBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    TerminalConfigFBBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<TerminalConfigFB<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for TerminalConfigFB<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("TerminalConfigFB");
+      ds.field("subscribe_channel_name", &self.subscribe_channel_name());
+      ds.field("publish_channel_name", &self.publish_channel_name());
+      ds.field("scrollback_lines", &self.scrollback_lines());
       ds.finish()
   }
 }
@@ -19420,7 +20983,10 @@ impl<'a> BlockConfigState<'a> {
   pub const VT_PUBLISH_PROPERTY_OPTIONS: ::flatbuffers::VOffsetT = 42;
   pub const VT_SUBSCRIBE_PROPERTY_OPTIONS: ::flatbuffers::VOffsetT = 44;
   pub const VT_ANTENNA_CONFIG: ::flatbuffers::VOffsetT = 46;
-  pub const VT_LISTENER_CONFIG: ::flatbuffers::VOffsetT = 48;
+  pub const VT_ANTENNA_TX_STATUS: ::flatbuffers::VOffsetT = 48;
+  pub const VT_ANTENNA_RX_STATUS: ::flatbuffers::VOffsetT = 50;
+  pub const VT_TERMINAL_CONFIG: ::flatbuffers::VOffsetT = 52;
+  pub const VT_HELD_GRANTS: ::flatbuffers::VOffsetT = 54;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -19432,7 +20998,10 @@ impl<'a> BlockConfigState<'a> {
     args: &'args BlockConfigStateArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BlockConfigState<'bldr>> {
     let mut builder = BlockConfigStateBuilder::new(_fbb);
-    if let Some(x) = args.listener_config { builder.add_listener_config(x); }
+    if let Some(x) = args.held_grants { builder.add_held_grants(x); }
+    if let Some(x) = args.terminal_config { builder.add_terminal_config(x); }
+    if let Some(x) = args.antenna_rx_status { builder.add_antenna_rx_status(x); }
+    if let Some(x) = args.antenna_tx_status { builder.add_antenna_tx_status(x); }
     if let Some(x) = args.antenna_config { builder.add_antenna_config(x); }
     if let Some(x) = args.subscribe_property_options { builder.add_subscribe_property_options(x); }
     if let Some(x) = args.publish_property_options { builder.add_publish_property_options(x); }
@@ -19609,7 +21178,9 @@ impl<'a> BlockConfigState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PropertyOptionFB>>>>(BlockConfigState::VT_SUBSCRIBE_PROPERTY_OPTIONS, None)}
   }
-  /// Phase 3E: Antenna block config (None on non-antenna blocks).
+  /// Phase D: Antenna block config (None on non-antenna blocks).
+  /// Bidirectional shape; legacy uni-directional rows are migrated
+  /// at boot and never appear here.
   #[inline]
   pub fn antenna_config(&self) -> Option<AntennaConfigFB<'a>> {
     // Safety:
@@ -19617,13 +21188,41 @@ impl<'a> BlockConfigState<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AntennaConfigFB>>(BlockConfigState::VT_ANTENNA_CONFIG, None)}
   }
-  /// Phase 3E: Listener block config (None on non-listener blocks).
+  /// Phase D: Per-side access status for the configurator UI —
+  /// renders the right grant affordance (open / picker / request).
+  /// Server-populated; ignored on the inbound update path.
   #[inline]
-  pub fn listener_config(&self) -> Option<ListenerConfigFB<'a>> {
+  pub fn antenna_tx_status(&self) -> Option<AccessStatusForChannelFB<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<ListenerConfigFB>>(BlockConfigState::VT_LISTENER_CONFIG, None)}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AccessStatusForChannelFB>>(BlockConfigState::VT_ANTENNA_TX_STATUS, None)}
+  }
+  #[inline]
+  pub fn antenna_rx_status(&self) -> Option<AccessStatusForChannelFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AccessStatusForChannelFB>>(BlockConfigState::VT_ANTENNA_RX_STATUS, None)}
+  }
+  /// Phase D: Unified Terminal block config (None on non-terminal
+  /// blocks).
+  #[inline]
+  pub fn terminal_config(&self) -> Option<TerminalConfigFB<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<TerminalConfigFB>>(BlockConfigState::VT_TERMINAL_CONFIG, None)}
+  }
+  /// Phase D: Held-grant summaries for the configurator's binding
+  /// rows that target Radio scope. Picker dropdown sources its
+  /// options from this snapshot.
+  #[inline]
+  pub fn held_grants(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB>>>>(BlockConfigState::VT_HELD_GRANTS, None)}
   }
 }
 
@@ -19655,7 +21254,10 @@ impl ::flatbuffers::Verifiable for BlockConfigState<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PropertyOptionFB>>>>("publish_property_options", Self::VT_PUBLISH_PROPERTY_OPTIONS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PropertyOptionFB>>>>("subscribe_property_options", Self::VT_SUBSCRIBE_PROPERTY_OPTIONS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<AntennaConfigFB>>("antenna_config", Self::VT_ANTENNA_CONFIG, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<ListenerConfigFB>>("listener_config", Self::VT_LISTENER_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AccessStatusForChannelFB>>("antenna_tx_status", Self::VT_ANTENNA_TX_STATUS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<AccessStatusForChannelFB>>("antenna_rx_status", Self::VT_ANTENNA_RX_STATUS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<TerminalConfigFB>>("terminal_config", Self::VT_TERMINAL_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB>>>>("held_grants", Self::VT_HELD_GRANTS, false)?
      .finish();
     Ok(())
   }
@@ -19683,7 +21285,10 @@ pub struct BlockConfigStateArgs<'a> {
     pub publish_property_options: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PropertyOptionFB<'a>>>>>,
     pub subscribe_property_options: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PropertyOptionFB<'a>>>>>,
     pub antenna_config: Option<::flatbuffers::WIPOffset<AntennaConfigFB<'a>>>,
-    pub listener_config: Option<::flatbuffers::WIPOffset<ListenerConfigFB<'a>>>,
+    pub antenna_tx_status: Option<::flatbuffers::WIPOffset<AccessStatusForChannelFB<'a>>>,
+    pub antenna_rx_status: Option<::flatbuffers::WIPOffset<AccessStatusForChannelFB<'a>>>,
+    pub terminal_config: Option<::flatbuffers::WIPOffset<TerminalConfigFB<'a>>>,
+    pub held_grants: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB<'a>>>>>,
 }
 impl<'a> Default for BlockConfigStateArgs<'a> {
   #[inline]
@@ -19711,7 +21316,10 @@ impl<'a> Default for BlockConfigStateArgs<'a> {
       publish_property_options: None,
       subscribe_property_options: None,
       antenna_config: None,
-      listener_config: None,
+      antenna_tx_status: None,
+      antenna_rx_status: None,
+      terminal_config: None,
+      held_grants: None,
     }
   }
 }
@@ -19810,8 +21418,20 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigStateBuilder<'a, '
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AntennaConfigFB>>(BlockConfigState::VT_ANTENNA_CONFIG, antenna_config);
   }
   #[inline]
-  pub fn add_listener_config(&mut self, listener_config: ::flatbuffers::WIPOffset<ListenerConfigFB<'b >>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<ListenerConfigFB>>(BlockConfigState::VT_LISTENER_CONFIG, listener_config);
+  pub fn add_antenna_tx_status(&mut self, antenna_tx_status: ::flatbuffers::WIPOffset<AccessStatusForChannelFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AccessStatusForChannelFB>>(BlockConfigState::VT_ANTENNA_TX_STATUS, antenna_tx_status);
+  }
+  #[inline]
+  pub fn add_antenna_rx_status(&mut self, antenna_rx_status: ::flatbuffers::WIPOffset<AccessStatusForChannelFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AccessStatusForChannelFB>>(BlockConfigState::VT_ANTENNA_RX_STATUS, antenna_rx_status);
+  }
+  #[inline]
+  pub fn add_terminal_config(&mut self, terminal_config: ::flatbuffers::WIPOffset<TerminalConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<TerminalConfigFB>>(BlockConfigState::VT_TERMINAL_CONFIG, terminal_config);
+  }
+  #[inline]
+  pub fn add_held_grants(&mut self, held_grants: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<HeldGrantSummaryFB<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BlockConfigState::VT_HELD_GRANTS, held_grants);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigStateBuilder<'a, 'b, A> {
@@ -19853,7 +21473,10 @@ impl ::core::fmt::Debug for BlockConfigState<'_> {
       ds.field("publish_property_options", &self.publish_property_options());
       ds.field("subscribe_property_options", &self.subscribe_property_options());
       ds.field("antenna_config", &self.antenna_config());
-      ds.field("listener_config", &self.listener_config());
+      ds.field("antenna_tx_status", &self.antenna_tx_status());
+      ds.field("antenna_rx_status", &self.antenna_rx_status());
+      ds.field("terminal_config", &self.terminal_config());
+      ds.field("held_grants", &self.held_grants());
       ds.finish()
   }
 }
@@ -19890,7 +21513,7 @@ impl<'a> BlockConfigUpdate<'a> {
   pub const VT_WARP_COMPUTER_CONFIG: ::flatbuffers::VOffsetT = 30;
   pub const VT_ENGINE_CONTROLLER_CONFIG: ::flatbuffers::VOffsetT = 32;
   pub const VT_ANTENNA_CONFIG: ::flatbuffers::VOffsetT = 34;
-  pub const VT_LISTENER_CONFIG: ::flatbuffers::VOffsetT = 36;
+  pub const VT_TERMINAL_CONFIG: ::flatbuffers::VOffsetT = 36;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -19902,7 +21525,7 @@ impl<'a> BlockConfigUpdate<'a> {
     args: &'args BlockConfigUpdateArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BlockConfigUpdate<'bldr>> {
     let mut builder = BlockConfigUpdateBuilder::new(_fbb);
-    if let Some(x) = args.listener_config { builder.add_listener_config(x); }
+    if let Some(x) = args.terminal_config { builder.add_terminal_config(x); }
     if let Some(x) = args.antenna_config { builder.add_antenna_config(x); }
     if let Some(x) = args.engine_controller_config { builder.add_engine_controller_config(x); }
     if let Some(x) = args.warp_computer_config { builder.add_warp_computer_config(x); }
@@ -20028,7 +21651,8 @@ impl<'a> BlockConfigUpdate<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<EngineControllerConfigFB>>(BlockConfigUpdate::VT_ENGINE_CONTROLLER_CONFIG, None)}
   }
-  /// Phase 3E: Antenna block config (None on non-antenna blocks).
+  /// Phase D: Antenna block config (None on non-antenna blocks).
+  /// Bidirectional shape.
   #[inline]
   pub fn antenna_config(&self) -> Option<AntennaConfigFB<'a>> {
     // Safety:
@@ -20036,13 +21660,14 @@ impl<'a> BlockConfigUpdate<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<AntennaConfigFB>>(BlockConfigUpdate::VT_ANTENNA_CONFIG, None)}
   }
-  /// Phase 3E: Listener block config (None on non-listener blocks).
+  /// Phase D: Unified Terminal block config (None on non-terminal
+  /// blocks).
   #[inline]
-  pub fn listener_config(&self) -> Option<ListenerConfigFB<'a>> {
+  pub fn terminal_config(&self) -> Option<TerminalConfigFB<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<ListenerConfigFB>>(BlockConfigUpdate::VT_LISTENER_CONFIG, None)}
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<TerminalConfigFB>>(BlockConfigUpdate::VT_TERMINAL_CONFIG, None)}
   }
 }
 
@@ -20068,7 +21693,7 @@ impl ::flatbuffers::Verifiable for BlockConfigUpdate<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<WarpComputerConfigFB>>("warp_computer_config", Self::VT_WARP_COMPUTER_CONFIG, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<EngineControllerConfigFB>>("engine_controller_config", Self::VT_ENGINE_CONTROLLER_CONFIG, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<AntennaConfigFB>>("antenna_config", Self::VT_ANTENNA_CONFIG, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<ListenerConfigFB>>("listener_config", Self::VT_LISTENER_CONFIG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<TerminalConfigFB>>("terminal_config", Self::VT_TERMINAL_CONFIG, false)?
      .finish();
     Ok(())
   }
@@ -20090,7 +21715,7 @@ pub struct BlockConfigUpdateArgs<'a> {
     pub warp_computer_config: Option<::flatbuffers::WIPOffset<WarpComputerConfigFB<'a>>>,
     pub engine_controller_config: Option<::flatbuffers::WIPOffset<EngineControllerConfigFB<'a>>>,
     pub antenna_config: Option<::flatbuffers::WIPOffset<AntennaConfigFB<'a>>>,
-    pub listener_config: Option<::flatbuffers::WIPOffset<ListenerConfigFB<'a>>>,
+    pub terminal_config: Option<::flatbuffers::WIPOffset<TerminalConfigFB<'a>>>,
 }
 impl<'a> Default for BlockConfigUpdateArgs<'a> {
   #[inline]
@@ -20112,7 +21737,7 @@ impl<'a> Default for BlockConfigUpdateArgs<'a> {
       warp_computer_config: None,
       engine_controller_config: None,
       antenna_config: None,
-      listener_config: None,
+      terminal_config: None,
     }
   }
 }
@@ -20187,8 +21812,8 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlockConfigUpdateBuilder<'a, 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<AntennaConfigFB>>(BlockConfigUpdate::VT_ANTENNA_CONFIG, antenna_config);
   }
   #[inline]
-  pub fn add_listener_config(&mut self, listener_config: ::flatbuffers::WIPOffset<ListenerConfigFB<'b >>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<ListenerConfigFB>>(BlockConfigUpdate::VT_LISTENER_CONFIG, listener_config);
+  pub fn add_terminal_config(&mut self, terminal_config: ::flatbuffers::WIPOffset<TerminalConfigFB<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<TerminalConfigFB>>(BlockConfigUpdate::VT_TERMINAL_CONFIG, terminal_config);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlockConfigUpdateBuilder<'a, 'b, A> {
@@ -20224,7 +21849,7 @@ impl ::core::fmt::Debug for BlockConfigUpdate<'_> {
       ds.field("warp_computer_config", &self.warp_computer_config());
       ds.field("engine_controller_config", &self.engine_controller_config());
       ds.field("antenna_config", &self.antenna_config());
-      ds.field("listener_config", &self.listener_config());
+      ds.field("terminal_config", &self.terminal_config());
       ds.finish()
   }
 }
@@ -20859,6 +22484,349 @@ impl ::core::fmt::Debug for GrantsSnapshotData<'_> {
       ds.finish()
   }
 }
+pub enum OpenTerminalChatDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Phase D: server → client "engage device" message. Sent in response
+/// to E (INTERACT) on a Terminal block. Carries everything the
+/// client needs to open the in-world chat surface: which block, what
+/// channels are wired, and the current scrollback so the player sees
+/// recent traffic immediately.
+pub struct OpenTerminalChatData<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for OpenTerminalChatData<'a> {
+  type Inner = OpenTerminalChatData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> OpenTerminalChatData<'a> {
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_SUBSCRIBE_CHANNEL: ::flatbuffers::VOffsetT = 10;
+  pub const VT_PUBLISH_CHANNEL: ::flatbuffers::VOffsetT = 12;
+  pub const VT_RECENT_LINES: ::flatbuffers::VOffsetT = 14;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    OpenTerminalChatData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args OpenTerminalChatDataArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<OpenTerminalChatData<'bldr>> {
+    let mut builder = OpenTerminalChatDataBuilder::new(_fbb);
+    if let Some(x) = args.recent_lines { builder.add_recent_lines(x); }
+    if let Some(x) = args.publish_channel { builder.add_publish_channel(x); }
+    if let Some(x) = args.subscribe_channel { builder.add_subscribe_channel(x); }
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(OpenTerminalChatData::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(OpenTerminalChatData::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(OpenTerminalChatData::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+  /// Empty string ⇒ no read side configured (input-only kiosk).
+  #[inline]
+  pub fn subscribe_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(OpenTerminalChatData::VT_SUBSCRIBE_CHANNEL, None)}
+  }
+  /// Empty string ⇒ no write side configured (read-only sign).
+  #[inline]
+  pub fn publish_channel(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(OpenTerminalChatData::VT_PUBLISH_CHANNEL, None)}
+  }
+  /// Most-recent scrollback at engagement time. Bounded by the
+  /// terminal's max_lines (default 64). Subsequent updates flow as
+  /// `TerminalScrollbackDelta`.
+  #[inline]
+  pub fn recent_lines(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(OpenTerminalChatData::VT_RECENT_LINES, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for OpenTerminalChatData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("subscribe_channel", Self::VT_SUBSCRIBE_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("publish_channel", Self::VT_PUBLISH_CHANNEL, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("recent_lines", Self::VT_RECENT_LINES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct OpenTerminalChatDataArgs<'a> {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub subscribe_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub publish_channel: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub recent_lines: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
+}
+impl<'a> Default for OpenTerminalChatDataArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    OpenTerminalChatDataArgs {
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+      subscribe_channel: None,
+      publish_channel: None,
+      recent_lines: None,
+    }
+  }
+}
+
+pub struct OpenTerminalChatDataBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> OpenTerminalChatDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(OpenTerminalChatData::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(OpenTerminalChatData::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(OpenTerminalChatData::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn add_subscribe_channel(&mut self, subscribe_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(OpenTerminalChatData::VT_SUBSCRIBE_CHANNEL, subscribe_channel);
+  }
+  #[inline]
+  pub fn add_publish_channel(&mut self, publish_channel: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(OpenTerminalChatData::VT_PUBLISH_CHANNEL, publish_channel);
+  }
+  #[inline]
+  pub fn add_recent_lines(&mut self, recent_lines: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<&'b  str>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(OpenTerminalChatData::VT_RECENT_LINES, recent_lines);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> OpenTerminalChatDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    OpenTerminalChatDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<OpenTerminalChatData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for OpenTerminalChatData<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("OpenTerminalChatData");
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.field("subscribe_channel", &self.subscribe_channel());
+      ds.field("publish_channel", &self.publish_channel());
+      ds.field("recent_lines", &self.recent_lines());
+      ds.finish()
+  }
+}
+pub enum TerminalScrollbackDeltaDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Phase D: server → client real-time scrollback update.  Pushed each
+/// time a Terminal's `recent_lines` changes (a new media frame
+/// arrived on its subscribe channel) AND the player is engaged with
+/// that terminal. The client appends to the local cached scrollback,
+/// ring-buffered to the terminal's max_lines.
+pub struct TerminalScrollbackDeltaData<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for TerminalScrollbackDeltaData<'a> {
+  type Inner = TerminalScrollbackDeltaData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> TerminalScrollbackDeltaData<'a> {
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_APPENDED_LINES: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    TerminalScrollbackDeltaData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args TerminalScrollbackDeltaDataArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<TerminalScrollbackDeltaData<'bldr>> {
+    let mut builder = TerminalScrollbackDeltaDataBuilder::new(_fbb);
+    if let Some(x) = args.appended_lines { builder.add_appended_lines(x); }
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TerminalScrollbackDeltaData::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TerminalScrollbackDeltaData::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TerminalScrollbackDeltaData::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn appended_lines(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(TerminalScrollbackDeltaData::VT_APPENDED_LINES, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for TerminalScrollbackDeltaData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("appended_lines", Self::VT_APPENDED_LINES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct TerminalScrollbackDeltaDataArgs<'a> {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub appended_lines: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
+}
+impl<'a> Default for TerminalScrollbackDeltaDataArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    TerminalScrollbackDeltaDataArgs {
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+      appended_lines: None,
+    }
+  }
+}
+
+pub struct TerminalScrollbackDeltaDataBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> TerminalScrollbackDeltaDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(TerminalScrollbackDeltaData::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(TerminalScrollbackDeltaData::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(TerminalScrollbackDeltaData::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn add_appended_lines(&mut self, appended_lines: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<&'b  str>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(TerminalScrollbackDeltaData::VT_APPENDED_LINES, appended_lines);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> TerminalScrollbackDeltaDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    TerminalScrollbackDeltaDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<TerminalScrollbackDeltaData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for TerminalScrollbackDeltaData<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("TerminalScrollbackDeltaData");
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.field("appended_lines", &self.appended_lines());
+      ds.finish()
+  }
+}
 pub enum ServerMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -21179,6 +23147,36 @@ impl<'a> ServerMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_open_terminal_chat_data(&self) -> Option<OpenTerminalChatData<'a>> {
+    if self.payload_type() == ServerPayload::OpenTerminalChatData {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { OpenTerminalChatData::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_terminal_scrollback_delta_data(&self) -> Option<TerminalScrollbackDeltaData<'a>> {
+    if self.payload_type() == ServerPayload::TerminalScrollbackDeltaData {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { TerminalScrollbackDeltaData::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ServerMessage<'_> {
@@ -21207,6 +23205,8 @@ impl ::flatbuffers::Verifiable for ServerMessage<'_> {
           ServerPayload::ShardHandoffMsg => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ShardHandoffMsg>>("ServerPayload::ShardHandoffMsg", pos),
           ServerPayload::GrantsSnapshotData => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<GrantsSnapshotData>>("ServerPayload::GrantsSnapshotData", pos),
           ServerPayload::HudSignalDelta => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<HudSignalDelta>>("ServerPayload::HudSignalDelta", pos),
+          ServerPayload::OpenTerminalChatData => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<OpenTerminalChatData>>("ServerPayload::OpenTerminalChatData", pos),
+          ServerPayload::TerminalScrollbackDeltaData => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<TerminalScrollbackDeltaData>>("ServerPayload::TerminalScrollbackDeltaData", pos),
           _ => Ok(()),
         }
      })?
@@ -21382,6 +23382,20 @@ impl ::core::fmt::Debug for ServerMessage<'_> {
         },
         ServerPayload::HudSignalDelta => {
           if let Some(x) = self.payload_as_hud_signal_delta() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::OpenTerminalChatData => {
+          if let Some(x) = self.payload_as_open_terminal_chat_data() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ServerPayload::TerminalScrollbackDeltaData => {
+          if let Some(x) = self.payload_as_terminal_scrollback_delta_data() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
@@ -22226,6 +24240,158 @@ impl ::core::fmt::Debug for RemoteSignalPublish<'_> {
       ds.finish()
   }
 }
+pub enum TerminalChatSendDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Phase D: client → server "user typed a line on the in-world Terminal".
+/// Server's INTERACT path turns this into a `KeyboardTerminalInput`
+/// event consumed by `terminal_publish`, which signs (or sends bare for
+/// open channels) and ships the media frame.
+pub struct TerminalChatSendData<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for TerminalChatSendData<'a> {
+  type Inner = TerminalChatSendData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> TerminalChatSendData<'a> {
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 8;
+  pub const VT_TEXT: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    TerminalChatSendData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args TerminalChatSendDataArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<TerminalChatSendData<'bldr>> {
+    let mut builder = TerminalChatSendDataBuilder::new(_fbb);
+    if let Some(x) = args.text { builder.add_text(x); }
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TerminalChatSendData::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TerminalChatSendData::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TerminalChatSendData::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+  /// Single line, ≤ 4 KiB (matches MediaPayload::Text size cap).
+  #[inline]
+  pub fn text(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(TerminalChatSendData::VT_TEXT, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for TerminalChatSendData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("text", Self::VT_TEXT, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct TerminalChatSendDataArgs<'a> {
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+    pub text: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for TerminalChatSendDataArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    TerminalChatSendDataArgs {
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+      text: None,
+    }
+  }
+}
+
+pub struct TerminalChatSendDataBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> TerminalChatSendDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(TerminalChatSendData::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(TerminalChatSendData::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(TerminalChatSendData::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn add_text(&mut self, text: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(TerminalChatSendData::VT_TEXT, text);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> TerminalChatSendDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    TerminalChatSendDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<TerminalChatSendData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for TerminalChatSendData<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("TerminalChatSendData");
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.field("text", &self.text());
+      ds.finish()
+  }
+}
 pub enum ClientMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -22471,6 +24637,21 @@ impl<'a> ClientMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_terminal_chat_send_data(&self) -> Option<TerminalChatSendData<'a>> {
+    if self.payload_type() == ClientPayload::TerminalChatSendData {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { TerminalChatSendData::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ClientMessage<'_> {
@@ -22494,6 +24675,7 @@ impl ::flatbuffers::Verifiable for ClientMessage<'_> {
           ClientPayload::AddHeldGrant => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<AddHeldGrant>>("ClientPayload::AddHeldGrant", pos),
           ClientPayload::ForgetHeldGrant => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ForgetHeldGrant>>("ClientPayload::ForgetHeldGrant", pos),
           ClientPayload::RemoteSignalPublish => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<RemoteSignalPublish>>("ClientPayload::RemoteSignalPublish", pos),
+          ClientPayload::TerminalChatSendData => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<TerminalChatSendData>>("ClientPayload::TerminalChatSendData", pos),
           _ => Ok(()),
         }
      })?
@@ -22634,6 +24816,13 @@ impl ::core::fmt::Debug for ClientMessage<'_> {
         },
         ClientPayload::RemoteSignalPublish => {
           if let Some(x) = self.payload_as_remote_signal_publish() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::TerminalChatSendData => {
+          if let Some(x) = self.payload_as_terminal_chat_send_data() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
