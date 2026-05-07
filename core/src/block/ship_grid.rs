@@ -429,6 +429,71 @@ impl ShipGrid {
         }
     }
 
+    /// Idempotent migration: every TERMINAL block must have a
+    /// `HudPanel` sub-block on its outward (+Z, face 4) display face
+    /// so the client can render the on-block chat HUD. Returns the
+    /// set of chunk keys that were modified so the caller can mark
+    /// them dirty + persist on next save.
+    ///
+    /// Required for ships persisted before the HUD-subblock-on-Terminal
+    /// landed: `build_starter_ship` adds the sub-block at fresh
+    /// generation, but redb-restored grids skip that path. Running
+    /// this once at boot (after load) catches every Terminal a
+    /// player has placed since.
+    ///
+    /// Idempotent: no-op when the sub-block is already present, so
+    /// safe to call every boot.
+    pub fn ensure_terminal_hud_panels(&mut self) -> Vec<IVec3> {
+        const TERMINAL_FACE: u8 = 4;
+        let mut dirty = Vec::new();
+        let cs = CHUNK_SIZE as i32;
+        // Snapshot world positions first to satisfy the borrow checker
+        // (mutation inside the loop would alias the iter borrow).
+        let mut to_add: Vec<IVec3> = Vec::new();
+        let cs_u = CHUNK_SIZE as u8;
+        for (chunk_key, chunk) in self.chunks.iter() {
+            if chunk.is_empty() {
+                continue;
+            }
+            let chunk_origin = IVec3::new(chunk_key.x * cs, chunk_key.y * cs, chunk_key.z * cs);
+            for bz in 0..cs_u {
+                for by in 0..cs_u {
+                    for bx in 0..cs_u {
+                        if chunk.get_block(bx, by, bz) != BlockId::TERMINAL {
+                            continue;
+                        }
+                        if chunk.has_sub_block(bx, by, bz, TERMINAL_FACE) {
+                            continue;
+                        }
+                        let world_pos = chunk_origin
+                            + IVec3::new(bx as i32, by as i32, bz as i32);
+                        to_add.push(world_pos);
+                    }
+                }
+            }
+        }
+        for world_pos in to_add {
+            let added = self.add_sub_block(
+                world_pos.x,
+                world_pos.y,
+                world_pos.z,
+                sub_block::SubBlockElement {
+                    face: TERMINAL_FACE,
+                    element_type: sub_block::SubBlockType::HudPanel,
+                    rotation: 0,
+                    flags: 0,
+                },
+            );
+            if added {
+                let (chunk_key, _, _, _) = Self::world_to_chunk(world_pos.x, world_pos.y, world_pos.z);
+                if !dirty.contains(&chunk_key) {
+                    dirty.push(chunk_key);
+                }
+            }
+        }
+        dirty
+    }
+
     /// Apply damage to a block at world-space position.
     pub fn damage_block(
         &mut self,

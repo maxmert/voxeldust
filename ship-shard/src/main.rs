@@ -8192,7 +8192,7 @@ fn build_ship_interior(
     let db_path = format!("/tmp/voxeldust-ship-{ship_id}.redb");
     let db = redb::Database::create(&db_path)
         .unwrap_or_else(|e| panic!("failed to create redb at {db_path}: {e}"));
-    let ship_persistence = ShipPersistence {
+    let mut ship_persistence = ShipPersistence {
         db,
         pending_saves: std::collections::HashSet::new(),
         last_save_tick: 0,
@@ -8205,6 +8205,23 @@ fn build_ship_interior(
         Some(mut saved_grid) => {
             // Load channel overrides and power configs from the block_configs table.
             load_block_configs(&ship_persistence.db, &mut saved_grid);
+            // Idempotent migration for ships persisted before the
+            // HUD-subblock-on-Terminal landed: ensure every TERMINAL
+            // block has a HudPanel sub-block on its outward face.
+            // Without this, the client cannot find a HudTile to engage
+            // when the player presses E on the Terminal — there's no
+            // sub-block to spawn the tile from. Running every boot is
+            // safe (no-op when sub-blocks are already present); the
+            // returned dirty list is queued for the next save tick so
+            // the migration sticks across restarts.
+            let migrated_chunks = saved_grid.ensure_terminal_hud_panels();
+            if !migrated_chunks.is_empty() {
+                info!(
+                    chunks = migrated_chunks.len(),
+                    "migrated Terminal blocks: added HudPanel sub-blocks on outward face"
+                );
+                ship_persistence.pending_saves.extend(migrated_chunks);
+            }
             info!(
                 blocks = saved_grid.total_block_count(),
                 chunks = saved_grid.chunk_count(),
