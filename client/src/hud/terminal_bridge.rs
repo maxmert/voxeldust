@@ -76,11 +76,48 @@ fn ingest_open_chat(
             continue;
         };
         let block_pos = ivec3_from_wire(data.block_pos);
+        // Diagnostic: enumerate every HudTile present so we can see
+        // whether the chunk has been meshed (and the HudPanel sub-block
+        // discovered) by the time E-engagement arrives.
+        let tile_count = tiles.iter().count();
+        let block_attachment_count = tiles
+            .iter()
+            .filter(|(_, t)| {
+                matches!(
+                    t.attachment,
+                    crate::hud::tile::HudAttachment::Block { .. }
+                )
+            })
+            .count();
+        tracing::info!(
+            block = ?(block_pos.x, block_pos.y, block_pos.z),
+            tiles_total = tile_count,
+            block_face_tiles = block_attachment_count,
+            "OpenTerminalChat received — searching for matching HUD tile"
+        );
         let Some(tile) = find_block_face_tile_any_shard(
             block_pos,
             TERMINAL_FACE,
             &tiles,
         ) else {
+            // Dump every block-face tile we DO have so the user / dev
+            // can spot the mismatch (wrong face, wrong block_pos, no
+            // HudPanel sub-block at all).
+            for (e, t) in tiles.iter() {
+                if let crate::hud::tile::HudAttachment::Block {
+                    block_pos: bp,
+                    face,
+                    ..
+                } = t.attachment
+                {
+                    tracing::warn!(
+                        ?e,
+                        block = ?(bp.x, bp.y, bp.z),
+                        face,
+                        "available block-face HudTile"
+                    );
+                }
+            }
             tracing::warn!(
                 block = ?(block_pos.x, block_pos.y, block_pos.z),
                 face = TERMINAL_FACE,
