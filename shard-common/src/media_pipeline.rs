@@ -328,9 +328,21 @@ pub fn terminal_publish(
     let now_ms = voxeldust_core::signal::current_unix_millis();
     for evt in events.read() {
         let Ok(mut state) = terminals.get_mut(evt.entity) else {
+            tracing::info!(
+                entity = ?evt.entity,
+                line = %evt.line,
+                "terminal_publish: entity has no TerminalState — dropped"
+            );
             continue;
         };
         if !state.can_write() {
+            tracing::info!(
+                entity = ?evt.entity,
+                line = %evt.line,
+                active = state.active,
+                has_publish_channel = state.publish_channel.is_some(),
+                "terminal_publish: !can_write — dropped"
+            );
             continue;
         }
         let publish_channel_id = state
@@ -341,13 +353,20 @@ pub fn terminal_publish(
         // the channel's signature for open broadcast). Missing channel
         // = stale state; skip with a debug log.
         let Some(channel) = channels.get_by_id(publish_channel_id) else {
-            tracing::debug!(
+            tracing::info!(
                 owner = state.owner_session,
                 channel_id = publish_channel_id.0,
-                "terminal_publish: channel id not in table — skipping (stale state?)"
+                line = %evt.line,
+                "terminal_publish: channel id not in table — dropped"
             );
             continue;
         };
+        tracing::info!(
+            channel = %channel.name,
+            channel_id = publish_channel_id.0,
+            line = %evt.line,
+            "terminal_publish: pushing media frame"
+        );
 
         let sequence = state.next_sequence.wrapping_add(1);
         state.next_sequence = sequence;

@@ -4329,9 +4329,10 @@ fn drain_terminal_chat_send(
             Err(_) => break,
         };
         let Some(&entity) = block_index.0.get(&data.block_pos) else {
-            tracing::debug!(
+            tracing::info!(
                 block = ?data.block_pos,
-                "TerminalChatSend dropped: no entity at block position"
+                text_len = data.text.len(),
+                "drain_terminal_chat_send: dropped — no entity at block position"
             );
             continue;
         };
@@ -4340,6 +4341,12 @@ fn drain_terminal_chat_send(
         if line.len() > 4096 {
             line.truncate(4096);
         }
+        tracing::info!(
+            block = ?data.block_pos,
+            ?entity,
+            line = %line,
+            "drain_terminal_chat_send: forwarding to terminal_publish"
+        );
         writer.write(voxeldust_shard_common::media_pipeline::KeyboardTerminalInput {
             entity,
             line,
