@@ -112,12 +112,32 @@ fn dispatch_hud_text_input(
 ) {
     for ev in events.read() {
         let Ok((_tile, config, mut state)) = tiles.get_mut(ev.tile) else {
+            tracing::info!(
+                tile = ?ev.tile,
+                input = ?ev.input,
+                "dispatch_hud_text_input: tile entity gone"
+            );
             continue;
         };
-        let Some(widget) = registry.get(config.kind) else { continue };
+        let Some(widget) = registry.get(config.kind) else {
+            tracing::info!(
+                kind = ?config.kind,
+                input = ?ev.input,
+                "dispatch_hud_text_input: no widget registered for kind"
+            );
+            continue;
+        };
+        let has_state = state.is_some();
         let state_ref: Option<&mut dyn HudWidgetStateData> =
             state.as_deref_mut().map(|s| s.data.as_mut());
         let action = widget.on_text(ev.input.clone(), state_ref, config);
+        tracing::info!(
+            kind = ?config.kind,
+            input = ?ev.input,
+            has_state,
+            action = ?action,
+            "dispatch_hud_text_input"
+        );
         let consumed = matches!(action, Some(WidgetAction::Consumed));
         if let Some(action) = action {
             apply_widget_action(action, &mut publishes, &tcp);

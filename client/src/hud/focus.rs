@@ -373,19 +373,39 @@ fn emit_text_inputs(
     };
     // Gate by widget interactivity — a passive widget on a block
     // face shouldn't capture text even when "focused".
-    let interactive = config_q
-        .get(tile)
-        .ok()
-        .and_then(|c| registry.get(c.kind))
+    let kind = config_q.get(tile).ok().map(|c| c.kind);
+    let interactive = kind
+        .and_then(|k| registry.get(k))
         .map(|w| w.is_interactive())
         .unwrap_or(false);
     if !interactive {
+        // Diagnostic: if the focus thinks we're on an interactive
+        // tile but the lookup says otherwise, that's a routing bug
+        // worth logging once.
+        let pending = keyboard_events.read().count();
+        if pending > 0 {
+            tracing::info!(
+                ?tile,
+                ?kind,
+                pending_keyboard_events = pending,
+                "emit_text_inputs: focused tile is NOT interactive — dropping keys"
+            );
+        }
         return;
     }
     for ev in keyboard_events.read() {
         if !ev.state.is_pressed() {
             continue;
         }
+        // Trace the raw event so we can correlate user keypresses
+        // with widget on_text invocations.
+        tracing::info!(
+            ?tile,
+            ?kind,
+            logical_key = ?ev.logical_key,
+            repeat = ev.repeat,
+            "emit_text_inputs: routing key to widget"
+        );
         let mapped = match &ev.logical_key {
             KbKey::Character(s) => {
                 // Multi-char strings (extremely rare from a single
