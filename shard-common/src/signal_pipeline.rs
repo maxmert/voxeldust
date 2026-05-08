@@ -1864,7 +1864,27 @@ pub fn apply_antenna_config(
             owner_session.0,
         );
 
-        // 2. Validate the optional grant. Open channel ⇒ no key needed.
+        // 2. Bridged Radio channel — `<local>__radio_out_<freq>` (the
+        //    runtime path `antenna_publish_media` resolves this name to
+        //    obtain the channel signature for HMAC stamping when the TX
+        //    side is OPEN, i.e. no grant). Symmetric with the RX side
+        //    creating `__radio_in_<freq>`. Without this, open-broadcast
+        //    Antennas silently skip every frame because the bridged
+        //    channel doesn't exist in the table.
+        if tx_cfg.grant_id.is_none() {
+            let bridged_name = format!(
+                "{}__radio_out_{}",
+                tx_cfg.local_channel_name, tx_cfg.frequency,
+            );
+            let _ = channels.resolve_or_create(
+                &bridged_name,
+                SignalScope::Radio { frequency: tx_cfg.frequency },
+                ChannelMergeStrategy::LastWrite,
+                owner_session.0,
+            );
+        }
+
+        // 3. Validate the optional grant. Open channel ⇒ no key needed.
         if let Some(gid) = tx_cfg.grant_id {
             let grant = held
                 .get(owner_session, gid)

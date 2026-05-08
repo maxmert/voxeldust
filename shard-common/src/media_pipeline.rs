@@ -68,11 +68,20 @@ use crate::harness::{NetworkBridge, ShardIdentity};
 /// this tick don't see it next tick (matches the signal pipeline's
 /// `pending` semantics — keeps the system memoryless).
 ///
-/// Phase ordering is critical: Receive runs before RxMirror so an
-/// inbound radio frame can be mirrored to a local channel in the same
-/// tick. Publish runs before Subscribe so locally-typed text reaches
-/// in-shard subscribers without a one-tick delay. TxBridge runs after
-/// Publish so newly-typed text is forwarded out the same tick.
+/// Phase ordering is critical:
+/// * `Receive` runs before `RxMirror` so an inbound radio frame can be
+///   mirrored to a local channel in the same tick.
+/// * `Publish` runs before `TxBridge` so newly-typed text is forwarded
+///   out the same tick.
+/// * `Subscribe` runs AFTER `TxBridge` so the antenna's intra-shard
+///   echo path (TX antenna pushing into a co-located RX antenna's
+///   local channel for same-shard loopback / two-antenna intercom)
+///   delivers the frame to subscribers in the same tick — without
+///   this, single-shard chat-with-self over Radio would never close
+///   the loop because `media_publish_remote` only ships outbound to
+///   peer shards. Subscribers reading from a directly-published Local
+///   channel (no antenna) still see the frame the same tick because
+///   `terminal_publish` runs in `Publish`, before `Subscribe`.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MediaSet {
     /// Drop last tick's `ChannelMediaBuffer`. Generic.
@@ -86,13 +95,14 @@ pub enum MediaSet {
     /// Block-kind producers push to `ChannelMediaBuffer` for the
     /// channel they publish to. Per-shard.
     Publish,
+    /// Antenna TX bridges scan their TX-side local channel and
+    /// enqueue frames to `MediaOutboundQueue` for QUIC dispatch +
+    /// deliver them to co-located RX antennas tuned to the same
+    /// frequency (intra-shard radio echo). Generic.
+    TxBridge,
     /// Block-kind consumers read frames from `ChannelMediaBuffer`.
     /// Per-shard.
     Subscribe,
-    /// Antenna TX bridges scan their TX-side local channel and
-    /// enqueue frames to `MediaOutboundQueue` for QUIC dispatch.
-    /// Generic.
-    TxBridge,
     /// Drain `MediaOutboundQueue` → QUIC. Generic.
     Dispatch,
 }
@@ -123,8 +133,8 @@ impl Plugin for MediaPipelinePlugin {
                     MediaSet::Receive,
                     MediaSet::RxMirror,
                     MediaSet::Publish,
-                    MediaSet::Subscribe,
                     MediaSet::TxBridge,
+                    MediaSet::Subscribe,
                     MediaSet::Dispatch,
                 )
                     .chain(),
@@ -435,7 +445,7 @@ pub fn terminal_publish(
 /// trust-translation point: locally trusted (in-shard memory) → wire-
 /// authenticated (HMAC over the Radio channel's identity).
 pub fn antenna_publish_media(
-    buffer: Res<ChannelMediaBuffer>,
+    mut buffer: ResMut<ChannelMediaBuffer>,
     channels: Res<voxeldust_core::signal::SignalChannelTable>,
     mut outbound: ResMut<MediaOutboundQueue>,
     held: Res<crate::signal_pipeline::HeldGrants>,
@@ -445,7 +455,30 @@ pub fn antenna_publish_media(
     if buffer.is_empty() {
         return;
     }
+    // Snapshot every active RX antenna's (frequency, local_channel_id)
+    // pair so the TX pass below can deliver intra-shard echoes without
+    // re-borrowing the antennas query mutably while it's already lent
+    // out for `tx.next_sequence` mutation. Same antenna with both TX
+    // and RX (the user's chat-with-self loopback) lands in this map
+    // exactly once, on its own frequency.
+    let local_rx_targets: Vec<(u32, voxeldust_core::signal::ChannelId)> = antennas
+        .iter()
+        .filter(|a| a.active)
+        .filter_map(|a| {
+            let rx = a.rx.as_ref()?;
+            let local = rx.local_channel_id?;
+            Some((rx.frequency, local))
+        })
+        .collect();
+
     let now_ms = voxeldust_core::signal::current_unix_millis();
+    // Frames we'll push into local RX channels at the END of this
+    // system. Buffered up so we don't `&mut buffer` while still
+    // holding `&buffer.frames_for(...)` borrow inside the TX loop.
+    let mut intra_shard_deliveries: Vec<(
+        voxeldust_core::signal::ChannelId,
+        voxeldust_core::media::MediaFrame,
+    )> = Vec::new();
     for mut antenna in antennas.iter_mut() {
         if !antenna.active {
             continue;
@@ -486,16 +519,18 @@ pub fn antenna_publish_media(
         // grant's key.
         let (grant_id_wire, key) = match tx.grant_id {
             None => {
-                // Open broadcast — the bridged Radio channel may or
-                // may not exist locally. If it doesn't, skip with a
-                // debug log: apply_antenna_config should have created
-                // it. (Avoids a mutable-borrow conflict here on
-                // SignalChannelTable.)
+                // Open broadcast — the bridged Radio channel must exist
+                // locally for HMAC keying. `apply_antenna_config` creates
+                // it on the TX side (symmetric with RX); this lookup is
+                // a should-never-fire guard. INFO-level so any future
+                // regression in the apply path is loud, not silent.
                 let Some(bridged_id) = channels.resolve(&bridged_name) else {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = owner_session,
                         bridged = %bridged_name,
-                        "antenna_publish_media: bridged Radio channel not in table — skipping"
+                        local_channel_id = local_id.0,
+                        "antenna_publish_media: bridged Radio channel not in table — \
+                         skipping. (apply_antenna_config TX side should have created it.)"
                     );
                     continue;
                 };
@@ -507,7 +542,7 @@ pub fn antenna_publish_media(
             Some(gid) => {
                 let session = voxeldust_core::shard_types::SessionToken(owner_session);
                 let Some(grant) = held.get(session, gid) else {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = owner_session,
                         grant_id = gid,
                         "antenna_publish_media: held grant missing — skipping"
@@ -557,10 +592,39 @@ pub fn antenna_publish_media(
                 payload: frame.payload.clone(),
                 auth_tag,
             };
+            // Intra-shard echo: deliver to every local RX antenna
+            // listening on this same frequency. Same-shard self-
+            // loopback (single antenna with both TX + RX), or two
+            // antennas in the same shard tuned to the same freq
+            // (intercom). The cross-shard QUIC fan-out below covers
+            // peer shards; this branch closes the local loop without
+            // a network round-trip. Authoritative semantics: same
+            // payload, same timestamp / sequence as the outbound
+            // frame; receivers see "now_ms" and the antenna's own
+            // sequence counter.
+            for (rx_freq, rx_local_id) in &local_rx_targets {
+                if *rx_freq == tx.frequency {
+                    intra_shard_deliveries.push((*rx_local_id, outbound_frame.clone()));
+                }
+            }
             outbound.enqueue(
                 voxeldust_core::media::MediaTarget::RadioFrequency(tx.frequency),
                 outbound_frame,
             );
+        }
+    }
+    // Apply the buffered intra-shard deliveries. Done after the
+    // antenna loop so `antennas.iter_mut()` doesn't conflict with
+    // `buffer` mutation (Bevy's borrow checker resolves this fine
+    // because `buffer` and `antennas` are different params, but the
+    // collect-then-apply pattern keeps the loop body small + readable).
+    if !intra_shard_deliveries.is_empty() {
+        tracing::info!(
+            count = intra_shard_deliveries.len(),
+            "antenna_publish_media: intra-shard echoes delivered"
+        );
+        for (channel_id, frame) in intra_shard_deliveries {
+            buffer.push(channel_id, frame);
         }
     }
 }
