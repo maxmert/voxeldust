@@ -1781,9 +1781,10 @@ pub enum AntennaApplyDenied {
     /// Config has neither TX nor RX side configured. Server rejects —
     /// an empty antenna does nothing.
     NoSideConfigured,
-    /// TX side: the local source channel doesn't exist on this shard.
-    /// Antennas can only forward channels that already exist (place the
-    /// source-publishing block first, then the antenna).
+    /// (Retired.) TX side previously rejected unknown local channels.
+    /// The apply path now `resolve_or_create`s them so the player can
+    /// configure the antenna before the producer block exists. Variant
+    /// retained for wire/version compatibility; never returned today.
     UnknownTxLocalChannel,
     /// TX side: a grant id was set but isn't in the placing player's
     /// HeldGrants. Player hasn't registered the grant via `AddHeldGrant`
@@ -1849,10 +1850,19 @@ pub fn apply_antenna_config(
 
     // ---- TX side -----------------------------------------------------------
     let tx = if let Some(tx_cfg) = config.tx.as_ref().filter(|s| !s.is_empty()) {
-        // 1. Local source channel must already exist.
-        let local_channel_id = channels
-            .resolve(&tx_cfg.local_channel_name)
-            .ok_or(AntennaApplyDenied::UnknownTxLocalChannel)?;
+        // 1. Local source channel — `resolve_or_create` (NOT `resolve`),
+        //    so configuring the antenna BEFORE the producer block (e.g.
+        //    placing an Antenna and pointing it at "ship-chat" before the
+        //    Terminal that publishes to "ship-chat" exists) doesn't reject.
+        //    Symmetric with the RX-side handling below. The first publisher
+        //    to actually push to the channel will fill it; until then the
+        //    antenna sees an empty buffer (no-op, harmless).
+        let local_channel_id = channels.resolve_or_create(
+            &tx_cfg.local_channel_name,
+            SignalScope::Local,
+            ChannelMergeStrategy::LastWrite,
+            owner_session.0,
+        );
 
         // 2. Validate the optional grant. Open channel ⇒ no key needed.
         if let Some(gid) = tx_cfg.grant_id {
@@ -2171,16 +2181,30 @@ mod tests {
     }
 
     #[test]
-    fn apply_antenna_config_tx_rejects_unknown_local_channel() {
+    fn apply_antenna_config_tx_creates_unknown_local_channel() {
+        // Antennas may be configured BEFORE their local source publisher
+        // exists (the user places the antenna first, then the Terminal /
+        // sensor that fills the channel). Apply-time creates the local
+        // channel as Local scope; the future producer's `resolve_or_create`
+        // returns the same id.
         let mut channels = SignalChannelTable::new();
         let mut grants = GrantsRegistry::default();
         let mut held = HeldGrants::default();
         let session = fixture_session();
         fixture_held_grant_for(&mut held, session, 1, 1);
-        let cfg = tx_only_keyed("no.such.channel", 1, 1);
-        let err = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
-            .unwrap_err();
-        assert!(matches!(err, AntennaApplyDenied::UnknownTxLocalChannel));
+        let cfg = tx_only_keyed("late.channel", 1, 1);
+        let ok = apply_antenna_config(&mut channels, &mut grants, &held, &cfg, session, 0)
+            .expect("antenna apply succeeds even when local channel is fresh");
+        let id = ok
+            .state
+            .tx
+            .as_ref()
+            .and_then(|tx| tx.local_channel_id)
+            .expect("TX side resolved local channel");
+        // The channel now exists in the table — a future Terminal config
+        // that publishes to "late.channel" resolves to the same id.
+        let resolved = channels.resolve("late.channel").expect("channel exists");
+        assert_eq!(id, resolved);
     }
 
     #[test]
