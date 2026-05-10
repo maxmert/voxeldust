@@ -227,6 +227,31 @@ pub struct CharacterClass {
     /// assume the floor is at the animated position (no lift).
     pub foot_ik_max_ascent: f32,
 
+    // -- IK blend timings (Phase G + H polish) ----------------------
+    /// Time to ramp foot-IK strength UP when the character enters
+    /// `Grounded` (e.g. landing from a jump). Slow-in feels like the
+    /// foot "settling" onto the floor instead of snapping. Seconds.
+    pub foot_blend_in_secs: f32,
+    /// Time to ramp foot-IK strength DOWN when leaving `Grounded`
+    /// (e.g. starting a jump). Faster than blend-in: once the foot
+    /// leaves the ground the IK has no business influencing it.
+    pub foot_blend_out_secs: f32,
+    /// Time to ramp look-at IK strength UP when a `LookTarget`
+    /// appears. Slow enough that nearby characters' attention
+    /// doesn't read as machine-gun snap-tracking. Seconds.
+    pub look_blend_in_secs: f32,
+    /// Time to ramp look-at IK strength DOWN when the `LookTarget`
+    /// goes `None`. Slightly slower than blend-in so the head
+    /// "lingers" briefly on the released target — readable as
+    /// natural disengage.
+    pub look_blend_out_secs: f32,
+    /// Time constant for smoothing the look-at TARGET POSITION when
+    /// it changes from one value to another (e.g. attention shifts
+    /// from player A to B). The solver chases an exponentially-
+    /// smoothed target so the head sweeps smoothly between targets
+    /// instead of teleporting.
+    pub look_target_smoothing_secs: f32,
+
     // -- Look-at IK (Phase H) ---------------------------------------
     /// Forward axis of the head + neck bones in their LOCAL frame
     /// after bind. Mixamo Y-bot via FBX2glTF + Y-up: +Z. The look-at
@@ -343,6 +368,23 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
     // matches the KCC's `autostep_height` so the visual doesn't lag
     // the physics step.
     foot_ik_max_ascent: 0.30,
+
+    // -- IK blend timings ---------------------------------------------
+    // 150 ms feels like the foot deliberately settles after a jump;
+    // any slower and the player notices "floating" mid-blend.
+    foot_blend_in_secs: 0.15,
+    // 80 ms — almost instant disengage so jumping doesn't drag the
+    // last frame of foot correction into the air.
+    foot_blend_out_secs: 0.08,
+    // 200 ms turn-to-look. Industry sweet spot — fast enough to feel
+    // attentive, slow enough to read as deliberate.
+    look_blend_in_secs: 0.20,
+    // 250 ms disengage. Lingering ~1/4 s on the last target before
+    // returning to neutral matches how real attention "softens" off.
+    look_blend_out_secs: 0.25,
+    // 150 ms target chase. When attention shifts between players, the
+    // head sweeps over this time constant rather than snapping.
+    look_target_smoothing_secs: 0.15,
 
     // -- Look-at IK ---------------------------------------------------
     // Mixamo Y-bot via FBX2glTF + Y-up: head/neck bind faces +Z, up = +Y.

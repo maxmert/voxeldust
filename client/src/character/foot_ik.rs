@@ -81,10 +81,27 @@ use super::render::{BoneRegistry, RemoteCharacterTag};
 #[derive(SystemSet, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct CharacterFootIkSet;
 
+/// Per-character fade strength for foot IK. Ramps to 1 when the
+/// character enters [`LocomotionState::Grounded`] and to 0 when it
+/// leaves (jump, ragdoll, ...). Multiplied with the per-foot lift
+/// weight inside `apply_one_leg`. AAA convention: foot IK fades IN
+/// gradually after a landing (looks like the foot "settles") and
+/// OUT quickly on lift-off (no ghost correction in the air).
+#[derive(Component, Debug, Default)]
+pub struct FootIkBlendState {
+    /// 0..1. Driven each frame toward `target_weight` by
+    /// `update_foot_blend`.
+    pub weight: f32,
+}
+
 pub struct CharacterFootIkPlugin;
 
 impl Plugin for CharacterFootIkPlugin {
     fn build(&self, app: &mut App) {
+        // Blend update runs in the EARLIER `Update` schedule so by
+        // the time the IK system samples the weight in `PostUpdate`
+        // it reflects this tick's locomotion state.
+        app.add_systems(Update, update_foot_blend);
         // Run after AnimationSystems (so we layer on the clip-driven
         // pose) and before TransformSystems::Propagate (so the IK'd
         // local rotations fold into this frame's GlobalTransform).
@@ -101,8 +118,82 @@ impl Plugin for CharacterFootIkPlugin {
     }
 }
 
+/// Drives the per-character `FootIkBlendState` toward the target
+/// weight implied by the locomotion state. Ensures any visual that
+/// has a `BoneRegistry` (i.e. is ready for IK) also has the blend
+/// component, lazily inserting it on the first tick.
+fn update_foot_blend(
+    mut commands: Commands,
+    time: Res<Time>,
+    asset_registry: Res<CharacterAssetRegistry>,
+    remote_players: Res<RemotePlayers>,
+    mut visuals: Query<
+        (Entity, &RemoteCharacterTag, Option<&mut FootIkBlendState>),
+    >,
+) {
+    let dt = time.delta().as_secs_f32().min(0.25);
+    for (entity, tag, blend_opt) in &mut visuals {
+        let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
+            continue;
+        };
+        let Some(assets) = asset_registry.ready(tag.class_id) else {
+            continue;
+        };
+        let class = assets.class;
+        let target = if matches!(
+            LocomotionState::from_u8(remote.locomotion),
+            LocomotionState::Grounded
+        ) {
+            1.0
+        } else {
+            0.0
+        };
+        match blend_opt {
+            Some(mut blend) => {
+                advance_blend(
+                    &mut blend.weight,
+                    target,
+                    dt,
+                    class.foot_blend_in_secs,
+                    class.foot_blend_out_secs,
+                );
+            }
+            None => {
+                commands
+                    .entity(entity)
+                    .insert(FootIkBlendState { weight: target });
+            }
+        }
+    }
+}
+
+/// Lerp `weight` toward `target` by `dt` at a per-direction rate.
+/// Separate in/out rates let us shape the easing — fast disengage,
+/// slow reattach, etc.
+pub(super) fn advance_blend(
+    weight: &mut f32,
+    target: f32,
+    dt: f32,
+    blend_in_secs: f32,
+    blend_out_secs: f32,
+) {
+    let going_up = target > *weight;
+    let denom = if going_up { blend_in_secs } else { blend_out_secs };
+    let step = if denom <= 1e-6 {
+        target - *weight
+    } else {
+        (target - *weight).clamp(-dt / denom, dt / denom)
+    };
+    *weight = (*weight + step).clamp(0.0, 1.0);
+}
+
 fn apply_foot_ik(
-    visuals: Query<(Entity, &RemoteCharacterTag, &BoneRegistry)>,
+    visuals: Query<(
+        Entity,
+        &RemoteCharacterTag,
+        &BoneRegistry,
+        Option<&FootIkBlendState>,
+    )>,
     remote_players: Res<RemotePlayers>,
     asset_registry: Res<CharacterAssetRegistry>,
     chunk_storage: Res<ChunkStorageCache>,
@@ -114,20 +205,19 @@ fn apply_foot_ik(
     mut transforms: Query<&mut Transform>,
 ) {
 
-    for (visual_e, tag, bones) in &visuals {
+    for (visual_e, tag, bones, blend) in &visuals {
         if !bones.resolved {
             continue;
         }
         let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
             continue;
         };
-        // IK only on grounded characters — Airborne (jump/fall),
-        // Seated, Ragdoll all leave the legs to the animation /
-        // override systems.
-        if !matches!(
-            LocomotionState::from_u8(remote.locomotion),
-            LocomotionState::Grounded
-        ) {
+        // The blend weight smoothly fades IK in and out at state
+        // transitions (see `update_foot_blend`). When a character is
+        // mid-jump and still partially planted, this avoids a hard
+        // pop. Once weight reaches zero we can skip the per-leg work.
+        let blend_weight = blend.map(|b| b.weight).unwrap_or(0.0);
+        if blend_weight < 0.01 {
             continue;
         }
         let Some(assets) = asset_registry.ready(tag.class_id) else {
@@ -160,6 +250,7 @@ fn apply_foot_ik(
                 &foot_side,
                 visual_e,
                 remote.locomotion_speed,
+                blend_weight,
                 bones,
                 remote.shard,
                 shard_origin,
@@ -224,6 +315,7 @@ fn apply_one_leg(
     side: &FootSide,
     visual_e: Entity,
     locomotion_speed: f32,
+    state_blend_weight: f32,
     bones: &BoneRegistry,
     shard: crate::shard::ShardKey,
     shard_origin: &ShardOrigin,
@@ -352,7 +444,7 @@ fn apply_one_leg(
     const STRIDE_LIFT: f32 = 0.30;
     const SPEED_IDLE_THRESHOLD: f32 = 0.5;
     let raw_lift = (ankle_local.y - target_local.y).max(0.0);
-    let ik_weight = if locomotion_speed < SPEED_IDLE_THRESHOLD {
+    let lift_weight = if locomotion_speed < SPEED_IDLE_THRESHOLD {
         1.0
     } else if raw_lift <= PLANT_LIFT {
         1.0
@@ -361,6 +453,10 @@ fn apply_one_leg(
     } else {
         1.0 - (raw_lift - PLANT_LIFT) / (STRIDE_LIFT - PLANT_LIFT)
     };
+    // Final IK weight composes the per-foot lift detection (per-step
+    // anti-leg-straightening) with the per-character state blend
+    // (jump-landing fade-in / lift-off fade-out).
+    let ik_weight = lift_weight * state_blend_weight;
     if ik_weight < 0.01 {
         return;
     }

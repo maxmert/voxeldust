@@ -63,10 +63,25 @@ use crate::shard::{CameraWorldPos, ShardOrigin};
 
 use super::assets::CharacterAssetRegistry;
 use super::camera_attach::CharacterCameraSet;
+use super::foot_ik::advance_blend;
 use super::render::{BoneRegistry, RemoteCharacterTag};
 
 #[derive(SystemSet, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct CharacterLookIkSet;
+
+/// Per-character fade strength + smoothed target for look-at IK.
+///
+/// `weight` ramps to 1 when the broadcast `LookTarget` is present
+/// and to 0 when it goes `None`. `smoothed_target_world` chases
+/// the incoming target with exponential-style lerp so attention
+/// shifts (player A → player B) sweep smoothly through the air
+/// rather than snapping. World here means Bevy camera-relative
+/// (the same frame the IK solver works in).
+#[derive(Component, Debug, Default)]
+pub struct LookIkBlendState {
+    pub weight: f32,
+    pub smoothed_target_world: Option<Vec3>,
+}
 
 pub struct CharacterLookIkPlugin;
 
@@ -89,7 +104,14 @@ impl Plugin for CharacterLookIkPlugin {
 }
 
 fn apply_look_ik(
-    visuals: Query<(Entity, &RemoteCharacterTag, &BoneRegistry)>,
+    mut commands: Commands,
+    time: Res<Time>,
+    mut visuals: Query<(
+        Entity,
+        &RemoteCharacterTag,
+        &BoneRegistry,
+        Option<&mut LookIkBlendState>,
+    )>,
     remote_players: Res<RemotePlayers>,
     asset_registry: Res<CharacterAssetRegistry>,
     camera_world: Res<CameraWorldPos>,
@@ -98,14 +120,12 @@ fn apply_look_ik(
     parents: Query<&ChildOf>,
     mut transforms: Query<&mut Transform>,
 ) {
-    for (visual_e, tag, bones) in &visuals {
+    let dt = time.delta().as_secs_f32().min(0.25);
+    for (visual_e, tag, bones, blend_opt) in &mut visuals {
         if !bones.resolved {
             continue;
         }
         let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
-            continue;
-        };
-        let Some(delta_f32) = remote.look_target_delta else {
             continue;
         };
         let Some(assets) = asset_registry.ready(tag.class_id) else {
@@ -113,26 +133,85 @@ fn apply_look_ik(
         };
         let class = assets.class;
 
-        let Some(&source_entity) = sources.by_shard.get(&remote.shard) else {
-            continue;
+        // Compute the broadcast target in Bevy camera-relative space
+        // (same frame the IK solver lives in). `None` if the server
+        // didn't set a target this tick.
+        let target_world_now: Option<Vec3> = if let Some(delta_f32) = remote.look_target_delta {
+            let Some(&source_entity) = sources.by_shard.get(&remote.shard) else {
+                continue;
+            };
+            let Ok(shard_origin) = shard_origins.get(source_entity) else {
+                continue;
+            };
+            let target_shard_local = remote.position
+                + DVec3::new(delta_f32.x as f64, delta_f32.y as f64, delta_f32.z as f64);
+            let target_system = shard_origin.origin + shard_origin.rotation * target_shard_local;
+            let target_world_dvec = target_system - camera_world.pos;
+            Some(Vec3::new(
+                target_world_dvec.x as f32,
+                target_world_dvec.y as f32,
+                target_world_dvec.z as f32,
+            ))
+        } else {
+            None
         };
-        let Ok(shard_origin) = shard_origins.get(source_entity) else {
+
+        // Lazily insert the per-character blend state on first tick.
+        // Costs one frame of "no IK" before the next tick picks it up,
+        // which is invisible at 60 fps.
+        let Some(mut blend) = blend_opt else {
+            commands
+                .entity(visual_e)
+                .insert(LookIkBlendState::default());
             continue;
         };
 
-        // Reconstruct the target in Bevy camera-relative space:
-        //   target_shard_local (DVec3) = position + delta
-        //   target_system = shard.origin + shard.rotation * shard_local
-        //   target_world  = target_system - camera_world.pos
-        let target_shard_local =
-            remote.position + DVec3::new(delta_f32.x as f64, delta_f32.y as f64, delta_f32.z as f64);
-        let target_system = shard_origin.origin + shard_origin.rotation * target_shard_local;
-        let target_world_dvec = target_system - camera_world.pos;
-        let target_world = Vec3::new(
-            target_world_dvec.x as f32,
-            target_world_dvec.y as f32,
-            target_world_dvec.z as f32,
+        // -- Advance the blend state ----------------------------------
+        //
+        // Four cases — separately handled so the smoothed-target chase
+        // and the weight fade are decoupled:
+        //  1. (had target, still have target) — chase the new target
+        //     position via exponential-style lerp; hold weight at 1.
+        //  2. (no target, target appeared)    — snap smoothed = new,
+        //     fade weight in from 0.
+        //  3. (had target, target gone)       — keep smoothed at the
+        //     last position so the head LINGERS while weight fades
+        //     out — releases naturally instead of snapping back.
+        //  4. (no target, no target)          — weight stays at 0.
+        let target_active = target_world_now.is_some();
+        match (blend.smoothed_target_world, target_world_now) {
+            (Some(prev), Some(new)) => {
+                let alpha = (dt / class.look_target_smoothing_secs.max(1e-3)).clamp(0.0, 1.0);
+                blend.smoothed_target_world = Some(prev.lerp(new, alpha));
+            }
+            (None, Some(new)) => {
+                blend.smoothed_target_world = Some(new);
+            }
+            (Some(_), None) | (None, None) => {
+                // Don't touch the smoothed value — let the weight
+                // fade carry the visual handover.
+            }
+        }
+        let target_weight = if target_active { 1.0 } else { 0.0 };
+        advance_blend(
+            &mut blend.weight,
+            target_weight,
+            dt,
+            class.look_blend_in_secs,
+            class.look_blend_out_secs,
         );
+        if blend.weight < 1e-3 && !target_active {
+            // Fully faded out; release the cached target so a future
+            // re-acquire snaps fresh (case 2 above).
+            blend.smoothed_target_world = None;
+            continue;
+        }
+        if blend.weight < 0.01 {
+            continue;
+        }
+        let Some(target_world) = blend.smoothed_target_world else {
+            continue;
+        };
 
         let (Some(neck_e), Some(head_e)) = (
             bones.get(class.neck_bone),
@@ -167,8 +246,14 @@ fn apply_look_ik(
             head_pitch_limit: class.look_head_pitch_limit,
         });
 
-        let neck_delta = g_to_bevy_quat(solve.neck_delta_world);
-        let head_delta = g_to_bevy_quat(solve.head_delta_world);
+        // Scale per-bone deltas by the blend weight via slerp from
+        // identity. At weight=1 we apply the full solver output; at
+        // weight=0 we'd apply identity (no rotation). The earlier
+        // `< 0.01` guard means we don't reach here for ~zero weight.
+        let neck_delta_full = g_to_bevy_quat(solve.neck_delta_world);
+        let head_delta_full = g_to_bevy_quat(solve.head_delta_world);
+        let neck_delta = Quat::IDENTITY.slerp(neck_delta_full, blend.weight);
+        let head_delta = Quat::IDENTITY.slerp(head_delta_full, blend.weight);
 
         // Apply NECK first — the head bone's parent rotation
         // changes by `neck_delta`, so we must compute the head's
