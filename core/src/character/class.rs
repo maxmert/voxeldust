@@ -190,7 +190,12 @@ pub struct CharacterClass {
     /// a clear error (asset / class drift detection).
     pub head_bone: &'static str,
     pub neck_bone: &'static str,
+    /// Per-leg bone chain for foot-IK 2-bone solver.
+    pub left_hip_bone: &'static str,
+    pub left_knee_bone: &'static str,
     pub left_foot_bone: &'static str,
+    pub right_hip_bone: &'static str,
+    pub right_knee_bone: &'static str,
     pub right_foot_bone: &'static str,
     /// Top-of-skin bone whose XZ translation gets zeroed each frame
     /// after animation to strip "root motion" — the forward
@@ -204,6 +209,23 @@ pub struct CharacterClass {
     /// first-person (Phase E). Mostly head + clavicles + upper arms so
     /// the player doesn't see their own neck stub when looking down.
     pub fp_cull_bones: &'static [&'static str],
+
+    // -- Foot IK (Phase G) ------------------------------------------
+    /// Vertical distance from the ankle bone's pivot to the foot's
+    /// sole, in metres. Used so we plant the SOLE of the foot on the
+    /// ground, not the ankle bone (which sits ~10 cm above the
+    /// floor in bind pose). Positive = sole below ankle.
+    pub foot_ik_sole_offset: f32,
+    /// Maximum descent below the animated ankle position the IK
+    /// will search for ground. Capped to avoid catastrophic over-
+    /// stretch when the player's feet briefly leave terrain (jump,
+    /// edge of platform); above this distance the foot stays at the
+    /// animated position.
+    pub foot_ik_max_descent: f32,
+    /// Maximum ascent above the animated ankle position the IK will
+    /// raycast (covers small steps, slope crests). Above this we
+    /// assume the floor is at the animated position (no lift).
+    pub foot_ik_max_ascent: f32,
 }
 
 /// Default humanoid class. Mixamo Y-bot rig (~22 bones), targets the
@@ -258,7 +280,11 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
 
     head_bone: "mixamorig:Head",
     neck_bone: "mixamorig:Neck",
+    left_hip_bone: "mixamorig:LeftUpLeg",
+    left_knee_bone: "mixamorig:LeftLeg",
     left_foot_bone: "mixamorig:LeftFoot",
+    right_hip_bone: "mixamorig:RightUpLeg",
+    right_knee_bone: "mixamorig:RightLeg",
     right_foot_bone: "mixamorig:RightFoot",
     root_bone: "mixamorig:Hips",
     fp_cull_bones: &[
@@ -268,6 +294,15 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
         "mixamorig:LeftArm",
         "mixamorig:RightArm",
     ],
+    // Mixamo Y-bot ankle bone sits ~10 cm above the foot sole.
+    foot_ik_sole_offset: 0.10,
+    // 60 cm: covers a full leg's down-stretch on a deep step. Beyond
+    // this we'd risk hyper-extending the knee through the back.
+    foot_ik_max_descent: 0.60,
+    // 30 cm: tallest step we expect the IK to fix transparently —
+    // matches the KCC's `autostep_height` so the visual doesn't lag
+    // the physics step.
+    foot_ik_max_ascent: 0.30,
 };
 
 const HUMAN_DEFAULT_CLIPS: [ClipDef; 8] = [

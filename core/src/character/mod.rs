@@ -42,6 +42,7 @@ pub mod components;
 pub mod desired;
 pub mod handoff_blob;
 pub mod hooks;
+pub mod ik;
 pub mod locomotion;
 pub mod stance;
 pub mod state_machine;
@@ -60,6 +61,7 @@ pub use components::{CharacterCapsule, IsCharacter};
 pub use desired::{DesiredMovement, PlatformDelta};
 pub use handoff_blob::{decode as decode_character_state, encode as encode_character_state, CharacterStateBlob, SCHEMA_VERSION as CHARACTER_SCHEMA_VERSION};
 pub use hooks::{ActiveItem, CharacterComponentTag, DamageResistance, EquipmentLoad, Stamina};
+pub use ik::{solve_two_bone_ik, TwoBoneInput, TwoBoneOutput};
 pub use locomotion::{
     CharacterVelocity, GravityOverride, LandedEvent, LocalUp, LocomotionState,
     PlatformSnapSuppressed,

@@ -25,6 +25,7 @@ use bevy::prelude::*;
 pub mod anim;
 pub mod assets;
 pub mod camera_attach;
+pub mod foot_ik;
 pub mod loader;
 pub mod render;
 
@@ -33,6 +34,7 @@ pub use assets::{AssetState, CharacterAssetRegistry, ClassAssets};
 pub use camera_attach::{
     CameraMode, CharacterCameraPlugin, CharacterCameraSet, LocalCharacterTag,
 };
+pub use foot_ik::{CharacterFootIkPlugin, CharacterFootIkSet};
 pub use render::{BoneRegistry, CharacterRenderPlugin, CharacterRenderSet, RemoteCharacterTag};
 
 /// SystemSet for character-asset loading — placed after `Startup` so
@@ -76,6 +78,7 @@ impl Plugin for CharacterPlugin {
         app.add_plugins(CharacterAssetPlugin)
             .add_plugins(CharacterRenderPlugin)
             .add_plugins(CharacterAnimPlugin)
-            .add_plugins(CharacterCameraPlugin);
+            .add_plugins(CharacterCameraPlugin)
+            .add_plugins(CharacterFootIkPlugin);
     }
 }
