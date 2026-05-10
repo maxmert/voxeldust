@@ -15,6 +15,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 
 mod camera;
+mod character;
 mod chunk;
 mod config;
 mod config_panel;
@@ -102,6 +103,7 @@ fn main() {
     .add_plugins(NetworkPlugin {
         gateway: cli.gateway,
         player_name: cli.name.clone(),
+        ship_join_key: cli.ship_join.clone(),
     })
     .add_plugins(ShardRegistryPlugin)
     .add_plugins(ShardTransitionPlugin)
@@ -116,6 +118,11 @@ fn main() {
     .add_plugins(InteractionPlugin)
     .add_plugins(subgrid::SubGridPlugin)
     .add_plugins(remote::RemoteEntitiesPlugin)
+    // Character system (Phase B): loads per-class skeletal assets +
+    // builds AnimationGraph at startup. Phase C+ adds rendering /
+    // animation driver / camera-bone / IK / ragdoll on top of this
+    // single registry resource.
+    .add_plugins(character::CharacterPlugin)
     .add_plugins(config_panel::ConfigPanelPlugin)
     .add_plugins(focus::FocusInteractionPlugin)
     .add_plugins(hud::HudPlugin)

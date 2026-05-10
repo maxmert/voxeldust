@@ -4691,6 +4691,18 @@ fn eva_broadcast(
                 health: 100.0,
                 shield: 100.0,
                 seated: false,
+                // EVA players don't run the body/head decoupling state
+                // machine yet (Phase A scope is on-foot walkers in
+                // ship-shard + planet-shard). Defaults render the avatar
+                // with body-only rotation, identical to pre-Phase-A.
+                body_yaw: 0.0,
+                head_yaw: 0.0,
+                head_pitch: 0.0,
+                locomotion: 0,
+                locomotion_speed: 0.0,
+                is_turning: false,
+                turn_target_yaw: 0.0,
+                turn_t: 0.0,
             }
         })
         .collect();
@@ -5230,6 +5242,62 @@ struct AoiCandidate {
     shard_type: u8,
     health: f32,
     shield: f32,
+    // -- Body/head decoupling forwarded from authoritative shards ----
+    // System-shard's AOI feed is a coarse aggregate. Ship-shard /
+    // planet-shard players get their body/head broadcast directly to
+    // the owning client via WorldState.players + ObservableEntity from
+    // their own shard's broadcast. System-shard candidates (EVA + ship
+    // hulls + cross-shard projections) keep these zero today; a future
+    // phase populates them when a third-party observer needs to see
+    // another shard's player avatars at distance.
+    body_yaw: f32,
+    head_yaw: f32,
+    head_pitch: f32,
+    locomotion: u8,
+    locomotion_speed: f32,
+    is_turning: bool,
+    turn_target_yaw: f32,
+    turn_t: f32,
+}
+
+impl AoiCandidate {
+    /// Construct with the body/head fields zeroed — the common case for
+    /// system-shard AOI today (ship hulls and EVA players).
+    fn new(
+        entity_id: u64,
+        kind: EntityKind,
+        position: DVec3,
+        velocity: DVec3,
+        rotation: DQuat,
+        bounding_radius: f32,
+        name: String,
+        shard_id: u64,
+        shard_type: u8,
+        health: f32,
+        shield: f32,
+    ) -> Self {
+        Self {
+            entity_id,
+            kind,
+            position,
+            velocity,
+            rotation,
+            bounding_radius,
+            name,
+            shard_id,
+            shard_type,
+            health,
+            shield,
+            body_yaw: 0.0,
+            head_yaw: 0.0,
+            head_pitch: 0.0,
+            locomotion: 0,
+            locomotion_speed: 0.0,
+            is_turning: false,
+            turn_target_yaw: 0.0,
+            turn_t: 0.0,
+        }
+    }
 }
 
 /// Bounding-radius fallback for ships whose `ShipPhysics` is missing a dimensions field.
@@ -5358,6 +5426,14 @@ fn compute_aoi(
             name: c.name.clone(),
             health: c.health,
             shield: c.shield,
+            body_yaw: c.body_yaw,
+            head_yaw: c.head_yaw,
+            head_pitch: c.head_pitch,
+            locomotion: c.locomotion,
+            locomotion_speed: c.locomotion_speed,
+            is_turning: c.is_turning,
+            turn_target_yaw: c.turn_target_yaw,
+            turn_t: c.turn_t,
         });
     }
     out
@@ -5393,38 +5469,38 @@ fn collect_aoi_candidates<EvaFilter: bevy_ecs::query::QueryFilter>(
             .get(&ship_id.0)
             .map(|s| s.0)
             .unwrap_or(0);
-        out.push(AoiCandidate {
-            entity_id: ship_id.0,
-            kind: EntityKind::Ship,
-            position: pos.0,
-            velocity: vel.0,
-            rotation: rot.0,
-            bounding_radius: ship_bounding_radius(phys),
-            name: String::new(),
+        out.push(AoiCandidate::new(
+            ship_id.0,
+            EntityKind::Ship,
+            pos.0,
+            vel.0,
+            rot.0,
+            ship_bounding_radius(phys),
+            String::new(),
             shard_id,
-            shard_type: ShardType::Ship as u8,
-            health: 0.0,
-            shield: 0.0,
-        });
+            ShardType::Ship as u8,
+            0.0,
+            0.0,
+        ));
     }
 
     for (session, name, pos, vel, rot, _input) in eva.iter() {
         // Body frame only (NOT composed with input head look) —
         // see the matching player_snapshots comment above. Client
         // composes camera = body × LocalLook.
-        out.push(AoiCandidate {
-            entity_id: session.0.0,
-            kind: EntityKind::EvaPlayer,
-            position: pos.0,
-            velocity: vel.0,
-            rotation: rot.0,
-            bounding_radius: PLAYER_BOUNDING_RADIUS_M,
-            name: name.0.clone(),
-            shard_id: 0, // EVA lives on system shard — no secondary needed.
-            shard_type: ShardType::System as u8,
-            health: 100.0,
-            shield: 100.0,
-        });
+        out.push(AoiCandidate::new(
+            session.0.0,
+            EntityKind::EvaPlayer,
+            pos.0,
+            vel.0,
+            rot.0,
+            PLAYER_BOUNDING_RADIUS_M,
+            name.0.clone(),
+            0, // EVA lives on system shard — no secondary needed.
+            ShardType::System as u8,
+            100.0,
+            100.0,
+        ));
     }
 
     for (token, rec) in &surface.players {
@@ -5433,19 +5509,19 @@ fn collect_aoi_candidates<EvaFilter: bevy_ecs::query::QueryFilter>(
             .copied()
             .unwrap_or(rec.planet_shard)
             .0;
-        out.push(AoiCandidate {
-            entity_id: *token,
-            kind: EntityKind::GroundedPlayer,
-            position: rec.position,
-            velocity: DVec3::ZERO,
-            rotation: rec.rotation,
-            bounding_radius: PLAYER_BOUNDING_RADIUS_M,
-            name: rec.player_name.clone(),
+        out.push(AoiCandidate::new(
+            *token,
+            EntityKind::GroundedPlayer,
+            rec.position,
+            DVec3::ZERO,
+            rec.rotation,
+            PLAYER_BOUNDING_RADIUS_M,
+            rec.player_name.clone(),
             shard_id,
-            shard_type: ShardType::Planet as u8,
-            health: 100.0,
-            shield: 100.0,
-        });
+            ShardType::Planet as u8,
+            100.0,
+            100.0,
+        ));
     }
 
     out

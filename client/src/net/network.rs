@@ -127,9 +127,15 @@ pub enum NetEvent {
 }
 
 /// Run the network loop on a tokio runtime. Handles shard transitions.
+///
+/// `ship_join_key` is the optional `--ship-join` CLI value. When
+/// non-empty, the gateway hashes it (instead of `player_name`) to pick
+/// the ship_id, so two clients sharing a join key land on the same
+/// ship. Sessions remain keyed on `player_name` either way.
 pub async fn run_network(
     gateway_addr: SocketAddr,
     player_name: String,
+    ship_join_key: String,
     event_tx: mpsc::UnboundedSender<NetEvent>,
     input_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<PlayerInputData>>>,
     block_edit_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<BlockEditData>>>,
@@ -149,7 +155,7 @@ pub async fn run_network(
         (tcp, udp)
     } else {
         info!(%gateway_addr, "connecting to gateway");
-        let redirect = match connect_to_gateway(gateway_addr, &player_name).await {
+        let redirect = match connect_to_gateway(gateway_addr, &player_name, &ship_join_key).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = event_tx.send(NetEvent::Disconnected(format!("gateway error: {e}")));
@@ -185,7 +191,7 @@ pub async fn run_network(
     // Main shard connection loop — reconnects on ShardRedirect.
     loop {
         info!(%shard_tcp_addr, %shard_udp_addr, "connecting to shard");
-        let (tcp_stream, jr) = match connect_to_shard_full(shard_tcp_addr, &player_name).await {
+        let (tcp_stream, jr) = match connect_to_shard_full(shard_tcp_addr, &player_name, &ship_join_key).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(%shard_tcp_addr, %e, "connect_to_shard_full FAILED — session will disconnect");
@@ -722,9 +728,13 @@ fn build_block_edit(edit: &BlockEditData) -> Vec<u8> {
 async fn connect_to_gateway(
     addr: SocketAddr,
     player_name: &str,
+    ship_join_key: &str,
 ) -> Result<ShardRedirect, Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(addr).await?;
-    send_msg(&mut stream, &ClientMsg::Connect { player_name: player_name.to_string() }).await?;
+    send_msg(&mut stream, &ClientMsg::Connect {
+        player_name: player_name.to_string(),
+        ship_join_key: ship_join_key.to_string(),
+    }).await?;
     let response = recv_server_msg(&mut stream).await?;
     match response {
         ServerMsg::ShardRedirect(r) => Ok(r),
@@ -737,13 +747,17 @@ async fn connect_to_gateway(
 async fn connect_to_shard_full(
     addr: SocketAddr,
     player_name: &str,
+    ship_join_key: &str,
 ) -> Result<(TcpStream, voxeldust_core::client_message::JoinResponseData), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(addr).await?;
 
     // Set TCP nodelay for low latency.
     let _ = stream.set_nodelay(true);
 
-    send_msg(&mut stream, &ClientMsg::Connect { player_name: player_name.to_string() }).await?;
+    send_msg(&mut stream, &ClientMsg::Connect {
+        player_name: player_name.to_string(),
+        ship_join_key: ship_join_key.to_string(),
+    }).await?;
     let response = recv_server_msg(&mut stream).await?;
     match response {
         ServerMsg::JoinResponse(jr) => Ok((stream, jr)),

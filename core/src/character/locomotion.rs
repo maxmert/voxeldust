@@ -12,18 +12,24 @@ use serde::{Deserialize, Serialize};
 
 /// Coarse locomotion state — drives animation selection, gameplay gating
 /// (e.g. you can't jump from `Seated`), and KCC skip logic.
+///
+/// `#[repr(u8)]` with explicit discriminants makes the wire encoding
+/// (PlayerSnapshot.locomotion / ObservableEntity.locomotion fields)
+/// stable across Rust toolchain changes. Discriminant values are
+/// stable forever — append-only; never repurpose.
+#[repr(u8)]
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocomotionState {
     /// Standing/walking on a ground surface detected by the KCC.
-    Grounded,
+    Grounded = 0,
     /// In free-fall / mid-jump — gravity integrates into vertical velocity.
-    Airborne,
+    Airborne = 1,
     /// Occupying a seat — KCC skips; transform follows the seat.
-    Seated,
+    Seated = 2,
     /// Holding a ladder / cliff edge (reserved).
-    Climbing,
+    Climbing = 3,
     /// Temporarily ragdolled (reserved — body swapped dynamic on knockdown).
-    Ragdoll,
+    Ragdoll = 4,
 }
 
 impl Default for LocomotionState {
@@ -48,6 +54,29 @@ impl LocomotionState {
     #[inline]
     pub fn is_grounded(self) -> bool {
         matches!(self, LocomotionState::Grounded)
+    }
+
+    /// Wire-format byte. Stable across releases.
+    #[inline]
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a wire-format byte. Unknown values fall back to
+    /// `Default::default()` so a future shard adding a new state can
+    /// still be observed by an older client without a panic — the
+    /// observer just sees the player as airborne until it learns the
+    /// new variant.
+    #[inline]
+    pub fn from_u8(b: u8) -> Self {
+        match b {
+            0 => LocomotionState::Grounded,
+            1 => LocomotionState::Airborne,
+            2 => LocomotionState::Seated,
+            3 => LocomotionState::Climbing,
+            4 => LocomotionState::Ragdoll,
+            _ => LocomotionState::default(),
+        }
     }
 }
 

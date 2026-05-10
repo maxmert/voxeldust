@@ -5668,6 +5668,14 @@ impl<'a> ObservableEntity<'a> {
   pub const VT_NAME: ::flatbuffers::VOffsetT = 24;
   pub const VT_HEALTH: ::flatbuffers::VOffsetT = 26;
   pub const VT_SHIELD: ::flatbuffers::VOffsetT = 28;
+  pub const VT_BODY_YAW: ::flatbuffers::VOffsetT = 30;
+  pub const VT_HEAD_YAW: ::flatbuffers::VOffsetT = 32;
+  pub const VT_HEAD_PITCH: ::flatbuffers::VOffsetT = 34;
+  pub const VT_LOCOMOTION: ::flatbuffers::VOffsetT = 36;
+  pub const VT_LOCOMOTION_SPEED: ::flatbuffers::VOffsetT = 38;
+  pub const VT_IS_TURNING: ::flatbuffers::VOffsetT = 40;
+  pub const VT_TURN_TARGET_YAW: ::flatbuffers::VOffsetT = 42;
+  pub const VT_TURN_T: ::flatbuffers::VOffsetT = 44;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5681,6 +5689,12 @@ impl<'a> ObservableEntity<'a> {
     let mut builder = ObservableEntityBuilder::new(_fbb);
     builder.add_shard_id(args.shard_id);
     builder.add_entity_id(args.entity_id);
+    builder.add_turn_t(args.turn_t);
+    builder.add_turn_target_yaw(args.turn_target_yaw);
+    builder.add_locomotion_speed(args.locomotion_speed);
+    builder.add_head_pitch(args.head_pitch);
+    builder.add_head_yaw(args.head_yaw);
+    builder.add_body_yaw(args.body_yaw);
     builder.add_shield(args.shield);
     builder.add_health(args.health);
     if let Some(x) = args.name { builder.add_name(x); }
@@ -5688,6 +5702,8 @@ impl<'a> ObservableEntity<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_is_turning(args.is_turning);
+    builder.add_locomotion(args.locomotion);
     builder.add_is_own(args.is_own);
     builder.add_shard_type(args.shard_type);
     builder.add_lod_tier(args.lod_tier);
@@ -5799,6 +5815,62 @@ impl<'a> ObservableEntity<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(ObservableEntity::VT_SHIELD, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn body_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_BODY_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn head_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_HEAD_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn head_pitch(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_HEAD_PITCH, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn locomotion(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(ObservableEntity::VT_LOCOMOTION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn locomotion_speed(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_LOCOMOTION_SPEED, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn is_turning(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ObservableEntity::VT_IS_TURNING, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn turn_target_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_TURN_TARGET_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn turn_t(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_TURN_T, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
@@ -5820,6 +5892,14 @@ impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, false)?
      .visit_field::<f32>("health", Self::VT_HEALTH, false)?
      .visit_field::<f32>("shield", Self::VT_SHIELD, false)?
+     .visit_field::<f32>("body_yaw", Self::VT_BODY_YAW, false)?
+     .visit_field::<f32>("head_yaw", Self::VT_HEAD_YAW, false)?
+     .visit_field::<f32>("head_pitch", Self::VT_HEAD_PITCH, false)?
+     .visit_field::<u8>("locomotion", Self::VT_LOCOMOTION, false)?
+     .visit_field::<f32>("locomotion_speed", Self::VT_LOCOMOTION_SPEED, false)?
+     .visit_field::<bool>("is_turning", Self::VT_IS_TURNING, false)?
+     .visit_field::<f32>("turn_target_yaw", Self::VT_TURN_TARGET_YAW, false)?
+     .visit_field::<f32>("turn_t", Self::VT_TURN_T, false)?
      .finish();
     Ok(())
   }
@@ -5838,6 +5918,14 @@ pub struct ObservableEntityArgs<'a> {
     pub name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub health: f32,
     pub shield: f32,
+    pub body_yaw: f32,
+    pub head_yaw: f32,
+    pub head_pitch: f32,
+    pub locomotion: u8,
+    pub locomotion_speed: f32,
+    pub is_turning: bool,
+    pub turn_target_yaw: f32,
+    pub turn_t: f32,
 }
 impl<'a> Default for ObservableEntityArgs<'a> {
   #[inline]
@@ -5856,6 +5944,14 @@ impl<'a> Default for ObservableEntityArgs<'a> {
       name: None,
       health: 0.0,
       shield: 0.0,
+      body_yaw: 0.0,
+      head_yaw: 0.0,
+      head_pitch: 0.0,
+      locomotion: 0,
+      locomotion_speed: 0.0,
+      is_turning: false,
+      turn_target_yaw: 0.0,
+      turn_t: 0.0,
     }
   }
 }
@@ -5918,6 +6014,38 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ObservableEntityBuilder<'a, '
     self.fbb_.push_slot::<f32>(ObservableEntity::VT_SHIELD, shield, 0.0);
   }
   #[inline]
+  pub fn add_body_yaw(&mut self, body_yaw: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_BODY_YAW, body_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_head_yaw(&mut self, head_yaw: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_HEAD_YAW, head_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_head_pitch(&mut self, head_pitch: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_HEAD_PITCH, head_pitch, 0.0);
+  }
+  #[inline]
+  pub fn add_locomotion(&mut self, locomotion: u8) {
+    self.fbb_.push_slot::<u8>(ObservableEntity::VT_LOCOMOTION, locomotion, 0);
+  }
+  #[inline]
+  pub fn add_locomotion_speed(&mut self, locomotion_speed: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_LOCOMOTION_SPEED, locomotion_speed, 0.0);
+  }
+  #[inline]
+  pub fn add_is_turning(&mut self, is_turning: bool) {
+    self.fbb_.push_slot::<bool>(ObservableEntity::VT_IS_TURNING, is_turning, false);
+  }
+  #[inline]
+  pub fn add_turn_target_yaw(&mut self, turn_target_yaw: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_TURN_TARGET_YAW, turn_target_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_turn_t(&mut self, turn_t: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_TURN_T, turn_t, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ObservableEntityBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ObservableEntityBuilder {
@@ -5948,6 +6076,14 @@ impl ::core::fmt::Debug for ObservableEntity<'_> {
       ds.field("name", &self.name());
       ds.field("health", &self.health());
       ds.field("shield", &self.shield());
+      ds.field("body_yaw", &self.body_yaw());
+      ds.field("head_yaw", &self.head_yaw());
+      ds.field("head_pitch", &self.head_pitch());
+      ds.field("locomotion", &self.locomotion());
+      ds.field("locomotion_speed", &self.locomotion_speed());
+      ds.field("is_turning", &self.is_turning());
+      ds.field("turn_target_yaw", &self.turn_target_yaw());
+      ds.field("turn_t", &self.turn_t());
       ds.finish()
   }
 }
@@ -11781,6 +11917,7 @@ impl<'a> ::flatbuffers::Follow<'a> for Connect<'a> {
 
 impl<'a> Connect<'a> {
   pub const VT_PLAYER_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SHIP_JOIN_KEY: ::flatbuffers::VOffsetT = 6;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -11792,6 +11929,7 @@ impl<'a> Connect<'a> {
     args: &'args ConnectArgs<'args>
   ) -> ::flatbuffers::WIPOffset<Connect<'bldr>> {
     let mut builder = ConnectBuilder::new(_fbb);
+    if let Some(x) = args.ship_join_key { builder.add_ship_join_key(x); }
     if let Some(x) = args.player_name { builder.add_player_name(x); }
     builder.finish()
   }
@@ -11804,6 +11942,23 @@ impl<'a> Connect<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(Connect::VT_PLAYER_NAME, None)}
   }
+  /// Optional ship-grouping key. When non-empty, the gateway hashes
+  /// THIS string instead of `player_name` to derive the ship_id —
+  /// so two distinct players sharing the same `ship_join_key` land
+  /// on the same ship shard. Empty (the default) preserves the
+  /// legacy per-player-hash behaviour: every fresh player spawns on
+  /// their own ship. Used by playtests / multi-client dev sessions
+  /// (`--ship-join NAME`) and the future "join my ship" social
+  /// flow. Never collapses sessions: the session store stays keyed
+  /// on `player_name`, so distinct players always retain distinct
+  /// identities even when they share a ship.
+  #[inline]
+  pub fn ship_join_key(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(Connect::VT_SHIP_JOIN_KEY, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Connect<'_> {
@@ -11813,18 +11968,21 @@ impl ::flatbuffers::Verifiable for Connect<'_> {
   ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
     v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("player_name", Self::VT_PLAYER_NAME, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("ship_join_key", Self::VT_SHIP_JOIN_KEY, false)?
      .finish();
     Ok(())
   }
 }
 pub struct ConnectArgs<'a> {
     pub player_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub ship_join_key: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for ConnectArgs<'a> {
   #[inline]
   fn default() -> Self {
     ConnectArgs {
       player_name: None,
+      ship_join_key: None,
     }
   }
 }
@@ -11837,6 +11995,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ConnectBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_player_name(&mut self, player_name: ::flatbuffers::WIPOffset<&'b  str>) {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Connect::VT_PLAYER_NAME, player_name);
+  }
+  #[inline]
+  pub fn add_ship_join_key(&mut self, ship_join_key: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Connect::VT_SHIP_JOIN_KEY, ship_join_key);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ConnectBuilder<'a, 'b, A> {
@@ -11857,6 +12019,7 @@ impl ::core::fmt::Debug for Connect<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("Connect");
       ds.field("player_name", &self.player_name());
+      ds.field("ship_join_key", &self.ship_join_key());
       ds.finish()
   }
 }
@@ -12882,6 +13045,14 @@ impl<'a> PlayerSnapshot<'a> {
   pub const VT_HEALTH: ::flatbuffers::VOffsetT = 14;
   pub const VT_SHIELD: ::flatbuffers::VOffsetT = 16;
   pub const VT_SEATED: ::flatbuffers::VOffsetT = 18;
+  pub const VT_BODY_YAW: ::flatbuffers::VOffsetT = 20;
+  pub const VT_HEAD_YAW: ::flatbuffers::VOffsetT = 22;
+  pub const VT_HEAD_PITCH: ::flatbuffers::VOffsetT = 24;
+  pub const VT_LOCOMOTION: ::flatbuffers::VOffsetT = 26;
+  pub const VT_LOCOMOTION_SPEED: ::flatbuffers::VOffsetT = 28;
+  pub const VT_IS_TURNING: ::flatbuffers::VOffsetT = 30;
+  pub const VT_TURN_TARGET_YAW: ::flatbuffers::VOffsetT = 32;
+  pub const VT_TURN_T: ::flatbuffers::VOffsetT = 34;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -12894,11 +13065,19 @@ impl<'a> PlayerSnapshot<'a> {
   ) -> ::flatbuffers::WIPOffset<PlayerSnapshot<'bldr>> {
     let mut builder = PlayerSnapshotBuilder::new(_fbb);
     builder.add_player_id(args.player_id);
+    builder.add_turn_t(args.turn_t);
+    builder.add_turn_target_yaw(args.turn_target_yaw);
+    builder.add_locomotion_speed(args.locomotion_speed);
+    builder.add_head_pitch(args.head_pitch);
+    builder.add_head_yaw(args.head_yaw);
+    builder.add_body_yaw(args.body_yaw);
     builder.add_shield(args.shield);
     builder.add_health(args.health);
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_is_turning(args.is_turning);
+    builder.add_locomotion(args.locomotion);
     builder.add_seated(args.seated);
     builder.add_grounded(args.grounded);
     builder.finish()
@@ -12961,6 +13140,68 @@ impl<'a> PlayerSnapshot<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(PlayerSnapshot::VT_SEATED, Some(false)).unwrap()}
   }
+  #[inline]
+  pub fn body_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_BODY_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn head_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_HEAD_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn head_pitch(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_HEAD_PITCH, Some(0.0)).unwrap()}
+  }
+  /// `voxeldust_core::character::LocomotionState as u8`:
+  /// 0=Grounded, 1=Airborne, 2=Seated, 3=Climbing, 4=Ragdoll.
+  /// Distinct from `grounded: bool` (which is a coarse two-state
+  /// view); animation graph drives clip selection from this byte.
+  #[inline]
+  pub fn locomotion(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(PlayerSnapshot::VT_LOCOMOTION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn locomotion_speed(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_LOCOMOTION_SPEED, Some(0.0)).unwrap()}
+  }
+  /// True when the player is mid-turn-in-place; `turn_target_yaw`
+  /// and `turn_t` are only meaningful in that case.
+  #[inline]
+  pub fn is_turning(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerSnapshot::VT_IS_TURNING, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn turn_target_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_TURN_TARGET_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn turn_t(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_TURN_T, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
@@ -12977,6 +13218,14 @@ impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
      .visit_field::<f32>("health", Self::VT_HEALTH, false)?
      .visit_field::<f32>("shield", Self::VT_SHIELD, false)?
      .visit_field::<bool>("seated", Self::VT_SEATED, false)?
+     .visit_field::<f32>("body_yaw", Self::VT_BODY_YAW, false)?
+     .visit_field::<f32>("head_yaw", Self::VT_HEAD_YAW, false)?
+     .visit_field::<f32>("head_pitch", Self::VT_HEAD_PITCH, false)?
+     .visit_field::<u8>("locomotion", Self::VT_LOCOMOTION, false)?
+     .visit_field::<f32>("locomotion_speed", Self::VT_LOCOMOTION_SPEED, false)?
+     .visit_field::<bool>("is_turning", Self::VT_IS_TURNING, false)?
+     .visit_field::<f32>("turn_target_yaw", Self::VT_TURN_TARGET_YAW, false)?
+     .visit_field::<f32>("turn_t", Self::VT_TURN_T, false)?
      .finish();
     Ok(())
   }
@@ -12990,6 +13239,14 @@ pub struct PlayerSnapshotArgs<'a> {
     pub health: f32,
     pub shield: f32,
     pub seated: bool,
+    pub body_yaw: f32,
+    pub head_yaw: f32,
+    pub head_pitch: f32,
+    pub locomotion: u8,
+    pub locomotion_speed: f32,
+    pub is_turning: bool,
+    pub turn_target_yaw: f32,
+    pub turn_t: f32,
 }
 impl<'a> Default for PlayerSnapshotArgs<'a> {
   #[inline]
@@ -13003,6 +13260,14 @@ impl<'a> Default for PlayerSnapshotArgs<'a> {
       health: 0.0,
       shield: 0.0,
       seated: false,
+      body_yaw: 0.0,
+      head_yaw: 0.0,
+      head_pitch: 0.0,
+      locomotion: 0,
+      locomotion_speed: 0.0,
+      is_turning: false,
+      turn_target_yaw: 0.0,
+      turn_t: 0.0,
     }
   }
 }
@@ -13045,6 +13310,38 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerSnapshotBuilder<'a, 'b,
     self.fbb_.push_slot::<bool>(PlayerSnapshot::VT_SEATED, seated, false);
   }
   #[inline]
+  pub fn add_body_yaw(&mut self, body_yaw: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_BODY_YAW, body_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_head_yaw(&mut self, head_yaw: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_HEAD_YAW, head_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_head_pitch(&mut self, head_pitch: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_HEAD_PITCH, head_pitch, 0.0);
+  }
+  #[inline]
+  pub fn add_locomotion(&mut self, locomotion: u8) {
+    self.fbb_.push_slot::<u8>(PlayerSnapshot::VT_LOCOMOTION, locomotion, 0);
+  }
+  #[inline]
+  pub fn add_locomotion_speed(&mut self, locomotion_speed: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_LOCOMOTION_SPEED, locomotion_speed, 0.0);
+  }
+  #[inline]
+  pub fn add_is_turning(&mut self, is_turning: bool) {
+    self.fbb_.push_slot::<bool>(PlayerSnapshot::VT_IS_TURNING, is_turning, false);
+  }
+  #[inline]
+  pub fn add_turn_target_yaw(&mut self, turn_target_yaw: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_TURN_TARGET_YAW, turn_target_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_turn_t(&mut self, turn_t: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_TURN_T, turn_t, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerSnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerSnapshotBuilder {
@@ -13070,6 +13367,14 @@ impl ::core::fmt::Debug for PlayerSnapshot<'_> {
       ds.field("health", &self.health());
       ds.field("shield", &self.shield());
       ds.field("seated", &self.seated());
+      ds.field("body_yaw", &self.body_yaw());
+      ds.field("head_yaw", &self.head_yaw());
+      ds.field("head_pitch", &self.head_pitch());
+      ds.field("locomotion", &self.locomotion());
+      ds.field("locomotion_speed", &self.locomotion_speed());
+      ds.field("is_turning", &self.is_turning());
+      ds.field("turn_target_yaw", &self.turn_target_yaw());
+      ds.field("turn_t", &self.turn_t());
       ds.finish()
   }
 }

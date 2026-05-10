@@ -44,6 +44,8 @@ pub struct NetworkBridgeSet;
 pub struct NetworkPlugin {
     pub gateway: SocketAddr,
     pub player_name: String,
+    /// Optional `--ship-join` value. Empty = legacy per-player ship.
+    pub ship_join_key: String,
 }
 
 impl Plugin for NetworkPlugin {
@@ -64,6 +66,7 @@ impl Plugin for NetworkPlugin {
 
         let gateway = self.gateway;
         let name = self.player_name.clone();
+        let ship_join_key = self.ship_join_key.clone();
         std::thread::Builder::new()
             .name("client-net".into())
             .spawn(move || {
@@ -82,6 +85,7 @@ impl Plugin for NetworkPlugin {
                     run_network(
                         gateway,
                         name,
+                        ship_join_key,
                         event_tx,
                         input_rx,
                         block_edit_rx,

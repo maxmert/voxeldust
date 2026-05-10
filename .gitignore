@@ -23,3 +23,7 @@ Thumbs.db
 
 # Build / verification log directory (transient)
 /logs/
+
+# FBX2glTF binary (~12 MB) — downloadable per
+# tools/fbx_to_glb/README.md, installed locally per developer.
+tools/fbx_to_glb/bin/

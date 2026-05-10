@@ -23,6 +23,7 @@ use glam::{DQuat, DVec3};
 
 use voxeldust_core::client_message::{EntityKind, ObservableEntityData};
 
+use crate::net::NetConnection;
 use crate::shard::{
     PrimaryShard, PrimaryWorldState, SecondaryWorldStates, ShardKey, WorldStateIngestSet,
 };
@@ -45,6 +46,23 @@ pub struct RemoteEntity {
     pub name: String,
     pub health: f32,
     pub shield: f32,
+    // -- Body / head decoupling (Phase A — surfaced for Phase C+) ----
+    /// Server-broadcast body yaw in tangent frame (radians).
+    pub body_yaw: f32,
+    /// Server-broadcast head yaw relative to body (radians).
+    pub head_yaw: f32,
+    /// Server-broadcast head pitch (radians).
+    pub head_pitch: f32,
+    /// `LocomotionState as u8` — drives Phase D animation graph.
+    pub locomotion: u8,
+    /// Horizontal speed (m/s) — walk/run blend driver in Phase D.
+    pub locomotion_speed: f32,
+    /// Mid-turn-in-place flag — Phase F triggers TIP clip on rising edge.
+    pub is_turning: bool,
+    /// Target body yaw during the active turn (only meaningful when `is_turning`).
+    pub turn_target_yaw: f32,
+    /// 0..1 progress through the active turn-in-place clip.
+    pub turn_t: f32,
 }
 
 /// Remote players (EVA + grounded + seated, excluding the own player).
@@ -85,6 +103,7 @@ fn track_remote_entities(
     primary: Res<PrimaryShard>,
     primary_ws: Res<PrimaryWorldState>,
     secondary_ws: Res<SecondaryWorldStates>,
+    conn: Res<NetConnection>,
     mut players: ResMut<RemotePlayers>,
     mut ships: ResMut<RemoteShips>,
     mut debris: ResMut<RemoteDebris>,
@@ -97,9 +116,10 @@ fn track_remote_entities(
     ships.by_id.clear();
     debris.by_id.clear();
 
+    let own_player_id = conn.player_id;
     if let Some(ws) = primary_ws.latest.as_ref() {
         if let Some(key) = primary.current {
-            ingest(ws, key, &mut players, &mut ships, &mut debris);
+            ingest(ws, key, own_player_id, &mut players, &mut ships, &mut debris);
         }
     }
     for (&shard_type, (ws, _)) in &secondary_ws.by_shard_type {
@@ -112,18 +132,31 @@ fn track_remote_entities(
             shard_type,
             seed: 0,
         };
-        ingest(ws, placeholder, &mut players, &mut ships, &mut debris);
+        ingest(ws, placeholder, own_player_id, &mut players, &mut ships, &mut debris);
     }
 }
 
 fn ingest(
     ws: &voxeldust_core::client_message::WorldStateData,
     observer: ShardKey,
+    _own_player_id: u64,
     players: &mut RemotePlayers,
     ships: &mut RemoteShips,
     debris: &mut RemoteDebris,
 ) {
     for e in &ws.entities {
+        // `is_own` filters out the OWN-SHIP entry (system-shard sets
+        // it on the observer's own ship). Ship-shard hardcodes it to
+        // `false` for every player today, so the local player IS in
+        // `RemotePlayers` — and that's intentional for Phase C, so
+        // the local player gets a visual rendered via the same
+        // skinned-mesh pipeline. Phase E adds the FP bone-mask cull
+        // (head + clavicles + upper arms hidden in first-person) so
+        // the body doesn't overlap the camera; until that lands the
+        // user will see their own avatar at the camera position
+        // (looking through the back of their own neck), which is the
+        // right visual smoke-test that the spawn / pose-sync
+        // pipeline is wired correctly.
         if e.is_own {
             continue;
         }
@@ -147,22 +180,54 @@ fn ingest(
 }
 
 fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
+    // Per-kind shard-key composition. Players are always observed by
+    // their authoritative shard's WorldState (a ground player on this
+    // ship is broadcast by THIS ship-shard; an EVA player by the
+    // system-shard; a planet surface player by their planet-shard) —
+    // so for them the `observer` ShardKey is the right entry into
+    // `SourceIndex.by_shard` for parenting visuals. Ships, on the
+    // other hand, may be cross-shard observable via the system-shard's
+    // AOI feed; for those we honour `e.shard_id` so the renderer can
+    // parent them under the secondary SHIP ChunkSource (matched by
+    // the same seed `find_secondary_pose` uses).
+    //
+    // The asymmetry is load-bearing: ship-shard stamps
+    // `entities[].shard_id = config.shard_id.0` (the orchestrator-
+    // assigned id), which is *not* the wire seed used as
+    // `ShardKey.seed`. For players that mismatch silently broke
+    // SourceIndex lookups; for ships the secondary registration uses
+    // `find_secondary_pose`'s own match against `shard_id` so it
+    // doesn't go through SourceIndex.by_shard the same way.
+    let shard = match e.kind {
+        EntityKind::EvaPlayer | EntityKind::GroundedPlayer | EntityKind::Seated => observer,
+        EntityKind::Ship => {
+            if e.shard_id != 0 {
+                ShardKey {
+                    shard_type: e.shard_type,
+                    seed: e.shard_id,
+                }
+            } else {
+                observer
+            }
+        }
+    };
     RemoteEntity {
         entity_id: e.entity_id,
         kind: e.kind,
         position: DVec3::new(e.position.x, e.position.y, e.position.z),
         rotation: DQuat::from_xyzw(e.rotation.x, e.rotation.y, e.rotation.z, e.rotation.w),
         velocity: DVec3::new(e.velocity.x, e.velocity.y, e.velocity.z),
-        shard: if e.shard_id != 0 {
-            ShardKey {
-                shard_type: e.shard_type,
-                seed: e.shard_id,
-            }
-        } else {
-            observer
-        },
+        shard,
         name: e.name.clone(),
         health: e.health,
         shield: e.shield,
+        body_yaw: e.body_yaw,
+        head_yaw: e.head_yaw,
+        head_pitch: e.head_pitch,
+        locomotion: e.locomotion,
+        locomotion_speed: e.locomotion_speed,
+        is_turning: e.is_turning,
+        turn_target_yaw: e.turn_target_yaw,
+        turn_t: e.turn_t,
     }
 }

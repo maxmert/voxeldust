@@ -30,10 +30,11 @@ use voxeldust_shard_common::grant_persistence::{
 };
 
 use voxeldust_core::character::{
-    self, build_character, move_one_character, CharacterBuildSpec, CharacterCapsule,
-    CharacterCollisionEvent, CharacterController, CharacterMoveInput, CharacterVelocity,
-    DesiredMovement, IsCharacter, LandedEvent, LocalUp, LocomotionState, MovementStats,
-    PlatformDelta, PlatformSnapSuppressed, RapierWorld,
+    self, apply_update, build_character, move_one_character, step_body_head, BodyYaw,
+    CharacterBuildSpec, CharacterCapsule, CharacterClassComp, CharacterCollisionEvent,
+    CharacterController, CharacterMoveInput, CharacterVelocity, DesiredMovement, HeadPitch,
+    HeadYaw, IsCharacter, LandedEvent, LocalUp, LocomotionState, MovementStats, PlatformDelta,
+    PlatformSnapSuppressed, RapierWorld, TurnInPlace, HUMAN_DEFAULT,
 };
 
 // ---------------------------------------------------------------------------
@@ -122,9 +123,18 @@ impl TangentFrame {
 #[derive(Component)]
 struct RapierOrigin(DVec3);
 
-/// Player yaw on the surface.
-#[derive(Component)]
-struct PlayerYaw(f32);
+// `BodyYaw`, `HeadYaw`, `HeadPitch` are imported from
+// `voxeldust_core::character` — the shared body/head decoupling state.
+// The planet-shard's old private `PlayerYaw(f32)` was renamed in Phase A
+// (semantics preserved: it was always body yaw on the surface).
+
+/// Per-player look input as received from the client this tick. Written
+/// by `process_input`; consumed by `update_body_head_state`.
+#[derive(Component, Default, Clone, Copy)]
+struct CamLookInput {
+    cam_yaw: f32,
+    cam_pitch: f32,
+}
 
 /// Player session token.
 #[derive(Component)]
@@ -278,6 +288,13 @@ struct ShipEntityIndex(HashMap<u64, Entity>);
 /// Avoids deferred-Commands visibility issues (Commands not materialized in same tick).
 struct HandoffSpawnInfo {
     surface_pos: DVec3,
+    /// `PlayerHandoff::schema_version` from the source shard. When >=
+    /// the local `CHARACTER_SCHEMA_VERSION` we decode `character_state`
+    /// to restore body/head pose; otherwise we spawn with defaults.
+    schema_version: u16,
+    /// Raw blob bytes; decoded in `process_connects` after the entity
+    /// exists. Empty when the source shard didn't pack one.
+    character_state: Vec<u8>,
 }
 
 /// Pending handoffs keyed by player name. process_handoffs inserts, process_connects consumes.
@@ -519,6 +536,24 @@ fn process_connects(
                 handoff_info.surface_pos,
             );
             player_index.0.insert(token, entity);
+            // Restore body/head/turn pose from the handoff blob if the
+            // source shard packed one (schema_version >= 2). Legacy
+            // handoffs (version 0/1) leave the spawn defaults.
+            if handoff_info.schema_version
+                >= voxeldust_core::character::CHARACTER_SCHEMA_VERSION
+            {
+                let blob = voxeldust_core::character::decode_character_state(
+                    &handoff_info.character_state,
+                );
+                commands.entity(entity).insert((
+                    BodyYaw(blob.body_yaw),
+                    HeadYaw(blob.head_yaw),
+                    HeadPitch(blob.head_pitch),
+                ));
+                if let Some(turn) = blob.turn {
+                    commands.entity(entity).insert(turn);
+                }
+            }
             handoff_info.surface_pos
         } else {
             // New player — spawn at default position.
@@ -630,7 +665,11 @@ fn spawn_player(
         PlanetPosition(planet_local_pos),
         frame,
         RapierOrigin(DVec3::new(0.0, height, 0.0)),
-        PlayerYaw(0.0),
+        BodyYaw(0.0),
+        HeadYaw(0.0),
+        HeadPitch(0.0),
+        CamLookInput::default(),
+        CharacterClassComp(HUMAN_DEFAULT),
         SessionId(session_token),
         Name(name),
         ActionState {
@@ -688,6 +727,8 @@ fn process_handoffs(
         // same tick (bevy_ecs ApplyDeferred timing).
         pending.0.insert(h.player_name.clone(), HandoffSpawnInfo {
             surface_pos,
+            schema_version: h.schema_version,
+            character_state: h.character_state.clone(),
         });
 
         // Send HandoffAccepted back to the relay system shard.
@@ -989,7 +1030,7 @@ fn process_input(
     mut events: MessageReader<PlayerInputMsg>,
     player_index: Res<PlayerEntityIndex>,
     mut players: Query<
-        (&mut PlayerYaw, &mut ActionState, &mut DesiredMovement),
+        (&mut CamLookInput, &mut ActionState, &mut DesiredMovement),
         With<PlanetPlayer>,
     >,
 ) {
@@ -999,13 +1040,19 @@ fn process_input(
             Some(&e) => e,
             None => continue,
         };
-        let Ok((mut yaw, mut actions, mut desired)) = players.get_mut(entity) else {
+        let Ok((mut look, mut actions, mut desired)) = players.get_mut(entity) else {
             continue;
         };
 
         actions.previous = actions.current;
         actions.current = event.input.action;
-        yaw.0 = event.input.look_yaw;
+        // Stash latest camera angles for the body/head state machine
+        // (`update_body_head_state`, in the Physics set).
+        look.cam_yaw = event.input.look_yaw;
+        look.cam_pitch = event.input.look_pitch.clamp(
+            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
+        );
 
         // Planet-local horizontal input: [strafe, forward] — same
         // semantics as ship-shard.
@@ -1023,6 +1070,82 @@ fn process_input(
         };
         if new_stance.is_some() {
             desired.stance_action = new_stance;
+        }
+    }
+}
+
+/// Body / head decoupling — same shared state machine as ship-shard.
+/// Runs in `PlanetSet::Physics` before `kcc_move_characters_system` so
+/// the KCC reads the new `BodyYaw` for character heading. On the planet
+/// the character lives in flat Rapier space (re-centered each tick) so
+/// the velocity direction is read from the local XZ plane just like
+/// ship interior — `tangent_frame_sync` handles the sphere remapping.
+fn update_body_head_state(
+    mut commands: Commands,
+    integration: Res<PlanetIntegrationDt>,
+    tick: Res<ecs::TickCounter>,
+    mut players: Query<
+        (
+            Entity,
+            &CharacterClassComp,
+            &CamLookInput,
+            &CharacterVelocity,
+            &mut BodyYaw,
+            &mut HeadYaw,
+            &mut HeadPitch,
+            Option<&TurnInPlace>,
+        ),
+        With<PlanetPlayer>,
+    >,
+) {
+    let dt = integration.0;
+    let one_hz = tick.0.is_multiple_of(20);
+    for (entity, class, look, vel, mut by, mut hy, mut hp, prev_turn) in &mut players {
+        // Body chases CAMERA direction, not velocity — see ship-shard
+        // for the rationale.
+        let speed = vel.horizontal().length();
+        let update = step_body_head(
+            &class.0,
+            by.0,
+            prev_turn.copied(),
+            look.cam_yaw,
+            look.cam_pitch,
+            speed,
+            dt,
+        );
+        apply_update(&mut by, &mut hy, &mut hp, &update);
+        match (prev_turn.is_some(), update.turn) {
+            (false, Some(t)) => {
+                info!(
+                    body_yaw = format!("{:.2}", by.0),
+                    target = format!("{:.2}", t.target_body_yaw),
+                    cam_yaw = format!("{:.2}", look.cam_yaw),
+                    "character: turn-in-place START"
+                );
+                commands.entity(entity).insert(t);
+            }
+            (true, Some(t)) => {
+                commands.entity(entity).insert(t);
+            }
+            (true, None) => {
+                info!(
+                    body_yaw = format!("{:.2}", by.0),
+                    "character: turn-in-place END"
+                );
+                commands.entity(entity).remove::<TurnInPlace>();
+            }
+            (false, None) => {}
+        }
+
+        if one_hz {
+            info!(
+                body_yaw = format!("{:.2}", by.0),
+                head_yaw = format!("{:.2}", hy.0),
+                head_pitch = format!("{:.2}", hp.0),
+                speed = format!("{:.2}", update.locomotion_speed),
+                turning = update.turn.is_some(),
+                "character diag (1Hz)"
+            );
         }
     }
 }
@@ -1049,7 +1172,11 @@ fn kcc_move_characters_system(
             &MovementStats,
             &mut CharacterVelocity,
             &mut LocomotionState,
-            &PlayerYaw,
+            // KCC reads CAMERA yaw, not body yaw — see ship-shard's
+            // matching kcc_move_characters_system for rationale. WASD
+            // is camera-relative; body chases the resulting velocity
+            // direction in `update_body_head_state`.
+            &CamLookInput,
             &PlatformSnapSuppressed,
         ),
         With<IsCharacter>,
@@ -1067,7 +1194,7 @@ fn kcc_move_characters_system(
     // walks toward +Z as before.
     const PLANET_YAW_OFFSET: f32 = std::f32::consts::FRAC_PI_2;
 
-    for (entity, ctrl, mut desired, platform, stats, mut vel, mut state, yaw, snap) in
+    for (entity, ctrl, mut desired, platform, stats, mut vel, mut state, look, snap) in
         characters.iter_mut()
     {
         if state.skips_kcc() {
@@ -1081,7 +1208,7 @@ fn kcc_move_characters_system(
             desired: *desired,
             platform_delta: *platform,
             gravity,
-            yaw: yaw.0 + PLANET_YAW_OFFSET,
+            yaw: look.cam_yaw + PLANET_YAW_OFFSET,
             stats,
             crouching: desired.crouch,
             jump_grace_remaining: 0.0,
@@ -1255,7 +1382,20 @@ fn ship_proximity(
     planet_pos: Res<PlanetPositionInSystem>,
     celestial_time: Res<CelestialTimeRes>,
     players: Query<
-        (Entity, &SessionId, &Name, &PlanetPosition, &ActionState, Has<HandoffPending>),
+        (
+            Entity,
+            &SessionId,
+            &Name,
+            &PlanetPosition,
+            &ActionState,
+            Has<HandoffPending>,
+            &BodyYaw,
+            &HeadYaw,
+            &HeadPitch,
+            &CharacterVelocity,
+            &LocomotionState,
+            Option<&TurnInPlace>,
+        ),
         With<PlanetPlayer>,
     >,
     ships: Query<(&NearbyShipId, &NearbyShipShard, &ShipPosition), With<NearbyShip>>,
@@ -1266,7 +1406,21 @@ fn ship_proximity(
         return;
     }
 
-    for (entity, session_id, name, pos, actions, has_handoff) in &players {
+    for (
+        entity,
+        session_id,
+        name,
+        pos,
+        actions,
+        has_handoff,
+        body_yaw,
+        head_yaw,
+        head_pitch,
+        char_vel,
+        loco,
+        turn,
+    ) in &players
+    {
         if has_handoff {
             continue;
         }
@@ -1282,13 +1436,23 @@ fn ship_proximity(
             }
 
             let player_system = pos.0 + planet_pos.0;
+            let char_blob = voxeldust_core::character::encode_character_state(
+                &voxeldust_core::character::CharacterStateBlob {
+                    body_yaw: body_yaw.0,
+                    head_yaw: head_yaw.0,
+                    head_pitch: head_pitch.0,
+                    locomotion: loco.as_u8(),
+                    locomotion_speed: char_vel.horizontal().length(),
+                    turn: turn.copied(),
+                },
+            );
 
             let h = handoff::PlayerHandoff {
                 session_token: session_id.0,
                 player_name: name.0.clone(),
                 position: player_system,
                 velocity: DVec3::ZERO,
-                rotation: DQuat::IDENTITY,
+                rotation: DQuat::from_axis_angle(DVec3::Y, body_yaw.0 as f64),
                 forward: DVec3::NEG_Z,
                 fly_mode: false,
                 speed_tier: 0,
@@ -1309,8 +1473,8 @@ fn ship_proximity(
                 warp_target_star_index: None,
                 warp_velocity_gu: None,
                 target_system_eva: false,
-                schema_version: 1,
-                character_state: Vec::new(),
+                schema_version: voxeldust_core::character::CHARACTER_SCHEMA_VERSION,
+                character_state: char_blob,
             };
 
             // Mark player as pending handoff.
@@ -1449,7 +1613,20 @@ fn emit_planet_hud_signal_deltas(
 }
 
 fn broadcast_world_state(
-    players: Query<(&SessionId, &Name, &PlanetPosition), With<PlanetPlayer>>,
+    players: Query<
+        (
+            &SessionId,
+            &Name,
+            &PlanetPosition,
+            &BodyYaw,
+            &HeadYaw,
+            &HeadPitch,
+            &CharacterVelocity,
+            &LocomotionState,
+            Option<&TurnInPlace>,
+        ),
+        With<PlanetPlayer>,
+    >,
     ships: Query<(&NearbyShipId, &ShipPosition, &ShipRotation), With<NearbyShip>>,
     config: Res<PlanetConfig>,
     sys_params: Res<SystemParamsRes>,
@@ -1462,15 +1639,31 @@ fn broadcast_world_state(
 ) {
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos)| PlayerSnapshotData {
+        .map(|(sid, _, pos, body, head_y, head_p, vel, loco, turn)| PlayerSnapshotData {
             player_id: sid.0.0,
             position: pos.0,
+            // Identity for the planet shard. The camera composes
+            // `body × rotation_from_look(LocalLook)`, where head_look
+            // already encodes the player's full camera yaw/pitch in
+            // the planet's flat-Y-up frame — applying body_yaw here
+            // would double-count it. Renderers wanting the player's
+            // visual body rotation read the dedicated `body_yaw`
+            // field below and apply `Quat::from_axis_angle(Y, body_yaw)`
+            // to the planet shard's flat frame.
             rotation: DQuat::IDENTITY,
             velocity: DVec3::ZERO,
             grounded: true,
             health: 100.0,
             shield: 100.0,
             seated: false,
+            body_yaw: body.0,
+            head_yaw: head_y.0,
+            head_pitch: head_p.0,
+            locomotion: loco.as_u8(),
+            locomotion_speed: vel.horizontal().length(),
+            is_turning: turn.is_some(),
+            turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
+            turn_t: turn.map(|t| t.t).unwrap_or(0.0),
         })
         .collect();
 
@@ -1510,7 +1703,7 @@ fn broadcast_world_state(
     let first_player_pos = players
         .iter()
         .next()
-        .map(|(_, _, p)| p.0)
+        .map(|(_, _, p, ..)| p.0)
         .unwrap_or(DVec3::new(0.0, config.planet_radius + 2.0, 0.0));
 
     let lighting = if let Some(ref sys) = sys_params.0 {
@@ -1548,11 +1741,12 @@ fn broadcast_world_state(
         entity.position = e.position - planet_pos.0;
         entities.push(entity);
     }
-    for (sid, name, pos) in players.iter() {
+    for (sid, name, pos, body, head_y, head_p, vel, loco, turn) in players.iter() {
         entities.push(ObservableEntityData {
             entity_id: sid.0.0,
             kind: EntityKind::GroundedPlayer,
             position: pos.0,
+            // Identity — same rationale as PlayerSnapshot above.
             rotation: DQuat::IDENTITY,
             velocity: DVec3::ZERO,
             bounding_radius: 1.0,
@@ -1563,6 +1757,14 @@ fn broadcast_world_state(
             name: name.0.clone(),
             health: 100.0,
             shield: 100.0,
+            body_yaw: body.0,
+            head_yaw: head_y.0,
+            head_pitch: head_p.0,
+            locomotion: loco.as_u8(),
+            locomotion_speed: vel.horizontal().length(),
+            is_turning: turn.is_some(),
+            turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
+            turn_t: turn.map(|t| t.t).unwrap_or(0.0),
         });
     }
 
@@ -1822,6 +2024,8 @@ fn build_app(
     app.add_systems(
         Update,
         (
+            // Body/head decoupling first, so the new BodyYaw drives KCC.
+            update_body_head_state,
             kcc_move_characters_system,
             physics_step,
             refresh_planet_position_cache,

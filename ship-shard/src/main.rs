@@ -47,10 +47,11 @@ use voxeldust_shard_common::signal_pipeline::{SignalPipelinePlugin, SignalSet};
 use voxeldust_shard_common::wire_dict_registry::decode_v2_batch;
 
 use voxeldust_core::character::{
-    self, build_character, kcc_move_all, move_one_character, CharacterBuildSpec, CharacterCapsule,
-    CharacterController, CharacterMoveInput, CharacterVelocity, CharacterCollisionEvent,
-    DesiredMovement, IsCharacter, LandedEvent, LocalUp, LocomotionState, MovementStats,
-    PlatformDelta, PlatformSnapSuppressed, RapierWorld,
+    self, apply_update, build_character, kcc_move_all, move_one_character, step_body_head,
+    BodyYaw, CharacterBuildSpec, CharacterCapsule, CharacterClassComp, CharacterController,
+    CharacterMoveInput, CharacterVelocity, CharacterCollisionEvent, DesiredMovement, HeadPitch,
+    HeadYaw, IsCharacter, LandedEvent, LocalUp, LocomotionState, MovementStats, PlatformDelta,
+    PlatformSnapSuppressed, RapierWorld, TurnInPlace, HUMAN_DEFAULT,
 };
 
 // ---------------------------------------------------------------------------
@@ -508,17 +509,22 @@ struct PlayerName(String);
 #[derive(Component)]
 struct PlayerPosition(Vec3);
 
-/// Per-player yaw angle (radians).
-#[derive(Component)]
-struct PlayerYaw(f32);
+// `BodyYaw`, `HeadYaw`, `HeadPitch` are imported from
+// `voxeldust_core::character` — shared body/head decoupling state. The
+// ship-shard's old `PlayerYaw` / `PlayerPitch` private structs were
+// removed in Phase A; semantic parity is preserved (PlayerYaw was always
+// body yaw, PlayerPitch was always head pitch).
 
-/// Per-player pitch angle (radians, -π/2 .. π/2). Tracked server-side
-/// so the ship-shard can compose and broadcast the full camera
-/// world rotation `exterior_rot × quat_from_yaw_pitch(yaw, pitch)` as
-/// authoritative — removing any need for the client to compose
-/// rotation from its local `LocalLook` state.
-#[derive(Component, Default)]
-struct PlayerPitch(f32);
+/// Per-player look input as received from the client this tick. Written
+/// by `process_input`; consumed by `update_body_head_state` which
+/// decomposes it into BodyYaw / HeadYaw / HeadPitch via the shared
+/// state machine. Kept as a separate component so the state machine can
+/// read the previous-tick body yaw without race.
+#[derive(Component, Default, Clone, Copy)]
+struct CamLookInput {
+    cam_yaw: f32,
+    cam_pitch: f32,
+}
 
 // `SeatedState` and `SeatInputValues` moved to core/src/ecs/components.rs
 // (re-imported above). The fields and shape are identical.
@@ -722,7 +728,7 @@ struct PendingMessages {
 }
 
 // Character physics + transform components (CharacterController,
-// PlayerPosition, PlayerYaw, SeatedState, InputActions, MovementStats,
+// PlayerPosition, BodyYaw, SeatedState, InputActions, MovementStats,
 // CharacterVelocity, LocomotionState, LocalUp, DesiredMovement,
 // PlatformDelta, PlatformSnapSuppressed) are attached per-entity in
 // `spawn_player`. See `voxeldust_core::character` for the shared layer.
@@ -1574,8 +1580,11 @@ fn spawn_player(
         SessionId(token),
         PlayerName(name),
         PlayerPosition(spawn_pos),
-        PlayerYaw(0.0),
-        PlayerPitch(0.0),
+        BodyYaw(0.0),
+        HeadYaw(0.0),
+        HeadPitch(0.0),
+        CamLookInput::default(),
+        CharacterClassComp(HUMAN_DEFAULT),
         SeatedState::default(),
         InputActions::default(),
         SeatInputValues::default(),
@@ -1697,7 +1706,9 @@ fn process_connects(
         }
 
         // Check if this player has a pending handoff (re-entering the ship).
-        let spawn_pos = if let Some(handoff_info) = pending_handoffs.incoming.remove(&player_name) {
+        let (spawn_pos, handoff_char_blob) = if let Some(handoff_info) =
+            pending_handoffs.incoming.remove(&player_name)
+        {
             // Re-entry: transform the EVA's handoff system-space position
             // into ship-local coords. Critical: use the ship's pose AT THE
             // MOMENT OF HANDOFF (carried in `ship_system_position` and
@@ -1711,14 +1722,28 @@ fn process_connects(
             let ship_pos = handoff_info.ship_system_position.unwrap_or(exterior.position);
             let ship_rot = handoff_info.ship_rotation.unwrap_or(exterior.rotation);
             let local = ship_rot.inverse() * (sys_pos - ship_pos);
-            Vec3::new(local.x as f32, local.y as f32, local.z as f32)
+            // Decode the body/head/turn blob — gated by schema_version
+            // so legacy handoffs (version 0/1) round-trip as defaults.
+            let blob = if handoff_info.schema_version
+                >= voxeldust_core::character::CHARACTER_SCHEMA_VERSION
+            {
+                Some(voxeldust_core::character::decode_character_state(
+                    &handoff_info.character_state,
+                ))
+            } else {
+                None
+            };
+            (
+                Vec3::new(local.x as f32, local.y as f32, local.z as f32),
+                blob,
+            )
         } else {
             // Fresh connect: spawn at cockpit position (computed at startup).
-            default_spawn.0
+            (default_spawn.0, None)
         };
 
         // Spawn player entity with kinematic character controller.
-        spawn_player(
+        let entity = spawn_player(
             &mut commands,
             &mut rapier,
             &mut player_index,
@@ -1727,6 +1752,19 @@ fn process_connects(
             spawn_pos,
             MovementStats::default(),
         );
+
+        // Restore body/head/turn pose from the handoff blob if present —
+        // otherwise the spawn defaults (neutral pose) stand.
+        if let Some(blob) = handoff_char_blob {
+            commands.entity(entity).insert((
+                BodyYaw(blob.body_yaw),
+                HeadYaw(blob.head_yaw),
+                HeadPitch(blob.head_pitch),
+            ));
+            if let Some(turn) = blob.turn {
+                commands.entity(entity).insert(turn);
+            }
+        }
 
         let tcp_write = event.tcp_write.clone();
         let ship_pos = exterior.position;
@@ -1877,8 +1915,7 @@ fn process_input(
     mut events: MessageReader<PlayerInputMsg>,
     player_index: Res<PlayerEntityIndex>,
     mut players: Query<(
-        &mut PlayerYaw,
-        &mut PlayerPitch,
+        &mut CamLookInput,
         &mut InputActions,
         &SeatedState,
         &mut SeatInputValues,
@@ -1893,7 +1930,7 @@ fn process_input(
             Some(&e) => e,
             None => continue,
         };
-        let Ok((mut yaw, mut pitch, mut actions, seated, mut seat_input, mut desired)) =
+        let Ok((mut look, mut actions, seated, mut seat_input, mut desired)) =
             players.get_mut(entity)
         else {
             continue;
@@ -1902,10 +1939,13 @@ fn process_input(
         let input = &event.input;
         actions.previous = actions.current;
         actions.current = input.action;
-        yaw.0 = input.look_yaw;
-        // Pitch is ship-local — clamped to [-π/2, π/2] so looking
-        // straight up or down doesn't flip the camera frame.
-        pitch.0 = input.look_pitch.clamp(
+        // Stash the latest camera angles for the body/head decoupling
+        // state machine (`update_body_head_state`, in the Physics set).
+        // Pre-clamp pitch here so transient overshoot from a runaway
+        // mouse-delta is bounded; the state machine re-clamps to the
+        // class-specific limit (which is tighter than ±π/2).
+        look.cam_yaw = input.look_yaw;
+        look.cam_pitch = input.look_pitch.clamp(
             -std::f32::consts::FRAC_PI_2,
             std::f32::consts::FRAC_PI_2,
         );
@@ -2127,8 +2167,12 @@ fn hull_exit_check(
             &SessionId,
             &PlayerName,
             &PlayerPosition,
-            &PlayerYaw,
-            &PlayerPitch,
+            &BodyYaw,
+            &HeadYaw,
+            &HeadPitch,
+            &CharacterVelocity,
+            &LocomotionState,
+            Option<&TurnInPlace>,
         ),
         (With<Player>, Without<HandoffPending>),
     >,
@@ -2152,8 +2196,34 @@ fn hull_exit_check(
     if interior_mask.0.is_empty() {
         return;
     }
-    for (entity, session_id, player_name, player_pos, yaw, pitch) in &players {
+    for (
+        entity,
+        session_id,
+        player_name,
+        player_pos,
+        body_yaw,
+        head_yaw,
+        head_pitch,
+        char_vel,
+        loco,
+        turn,
+    ) in &players
+    {
         let pos = player_pos.0;
+        // Pre-pack the body/head/turn state into the handoff blob —
+        // both branches below (planet handoff + EVA handoff) carry it
+        // so the destination shard restores the in-flight pose.
+        let char_blob =
+            voxeldust_core::character::encode_character_state(&voxeldust_core::character::CharacterStateBlob {
+                body_yaw: body_yaw.0,
+                head_yaw: head_yaw.0,
+                head_pitch: head_pitch.0,
+                locomotion: loco.as_u8(),
+                locomotion_speed: char_vel.horizontal().length(),
+                turn: turn.copied(),
+            });
+        let yaw = body_yaw;
+        let pitch = head_pitch;
         // Interior volume mask — symmetric with `eva_boarding_detection` on
         // the system shard. Both sides use the exact same mask data (shipped
         // alongside colliders), so entry and exit observe the identical
@@ -2230,8 +2300,8 @@ fn hull_exit_check(
                             warp_target_star_index: None,
                             warp_velocity_gu: None,
                             target_system_eva: false,
-                            schema_version: 1,
-                            character_state: Vec::new(),
+                            schema_version: voxeldust_core::character::CHARACTER_SCHEMA_VERSION,
+                            character_state: char_blob.clone(),
                         };
                         pending_handoffs.outgoing.insert(session_id.0, h.clone());
                         commands.entity(entity).insert(HandoffPending);
@@ -2306,8 +2376,8 @@ fn hull_exit_check(
                 warp_target_star_index: None,
                 warp_velocity_gu: None,
                 target_system_eva: true,
-                schema_version: 1,
-                character_state: Vec::new(),
+                schema_version: voxeldust_core::character::CHARACTER_SCHEMA_VERSION,
+                character_state: char_blob.clone(),
             };
             // Stash the outgoing handoff keyed by session so the
             // `HandoffAccepted` handler can populate the client-bound
@@ -2410,6 +2480,96 @@ fn pilot_send(
 // ---------------------------------------------------------------------------
 // Physics
 // ---------------------------------------------------------------------------
+
+/// Body / head decoupling — split the camera angles the client sent
+/// into a body-frame yaw and head yaw / pitch, and trigger turn-in-place
+/// rotation when the head reaches its swing limit.
+///
+/// Runs in `ShipSet::Physics` after `update_player_platform` and before
+/// `kcc_move_characters_system`, so KCC reads the new `BodyYaw` for
+/// character heading. Reads last-tick `CharacterVelocity` to decide
+/// whether the body should chase the velocity vector — one tick of lag
+/// between input and body alignment is invisible at 20 Hz.
+fn update_body_head_state(
+    mut commands: Commands,
+    integration: Res<ShipIntegrationDt>,
+    tick: Res<ecs::TickCounter>,
+    mut players: Query<
+        (
+            Entity,
+            &CharacterClassComp,
+            &CamLookInput,
+            &CharacterVelocity,
+            &mut BodyYaw,
+            &mut HeadYaw,
+            &mut HeadPitch,
+            Option<&TurnInPlace>,
+        ),
+        With<Player>,
+    >,
+) {
+    let dt = integration.0;
+    // Phase A bring-up diagnostic: log per-player body/head/locomotion
+    // every 20 ticks (1 Hz) so the user can verify the state machine is
+    // ticking even without triggering a turn-in-place. Remove once
+    // Phase D animation rendering replaces the textual diagnostic.
+    let one_hz = tick.0.is_multiple_of(20);
+    for (entity, class, look, vel, mut by, mut hy, mut hp, prev_turn) in &mut players {
+        // Ship interior is Y-up; horizontal plane is XZ, body yaw spins
+        // around +Y. Movement-direction yaw uses atan2(z, x) wrapped into
+        // The state machine no longer needs the velocity direction —
+        // body chases CAMERA direction, not movement direction (AAA
+        // convention: pressing S backpedals while still facing
+        // forward; A/D strafes; W faces forward). `speed` still
+        // drives the moving-vs-stationary branch.
+        let speed = vel.horizontal().length();
+
+        let update = step_body_head(
+            &class.0,
+            by.0,
+            prev_turn.copied(),
+            look.cam_yaw,
+            look.cam_pitch,
+            speed,
+            dt,
+        );
+        apply_update(&mut by, &mut hy, &mut hp, &update);
+
+        match (prev_turn.is_some(), update.turn) {
+            (false, Some(t)) => {
+                info!(
+                    body_yaw = format!("{:.2}", by.0),
+                    target = format!("{:.2}", t.target_body_yaw),
+                    cam_yaw = format!("{:.2}", look.cam_yaw),
+                    "character: turn-in-place START"
+                );
+                commands.entity(entity).insert(t);
+            }
+            (true, Some(t)) => {
+                commands.entity(entity).insert(t);
+            }
+            (true, None) => {
+                info!(
+                    body_yaw = format!("{:.2}", by.0),
+                    "character: turn-in-place END"
+                );
+                commands.entity(entity).remove::<TurnInPlace>();
+            }
+            (false, None) => {}
+        }
+
+        if one_hz {
+            info!(
+                body_yaw = format!("{:.2}", by.0),
+                head_yaw = format!("{:.2}", hy.0),
+                head_pitch = format!("{:.2}", hp.0),
+                speed = format!("{:.2}", update.locomotion_speed),
+                turning = update.turn.is_some(),
+                "character diag (1Hz)"
+            );
+        }
+    }
+}
 
 /// Detect which sub-grid the player is standing on and emit the platform
 /// motion delta for the KCC to consume.
@@ -2565,7 +2725,14 @@ fn kcc_move_characters_system(
             &mut LocomotionState,
             &LocalUp,
             &PlatformSnapSuppressed,
-            &PlayerYaw,
+            // The KCC needs CAMERA yaw — not body yaw — to interpret
+            // WASD: pressing W must move the character in the direction
+            // the camera is facing, regardless of where the body is
+            // currently rotated. The body chases the resulting velocity
+            // direction via `update_body_head_state` (Phase A); using
+            // body yaw here would create a circular dependency where
+            // pressing W could perpetually chase a rotating body.
+            &CamLookInput,
         ),
         With<IsCharacter>,
     >,
@@ -2590,7 +2757,7 @@ fn kcc_move_characters_system(
     // is idempotent per tick.
     rapier.refresh_query_pipeline();
 
-    for (entity, ctrl, mut desired, platform, stats, mut vel, mut state, local_up, snap, yaw) in
+    for (entity, ctrl, mut desired, platform, stats, mut vel, mut state, local_up, snap, look) in
         characters.iter_mut()
     {
         if state.skips_kcc() {
@@ -2615,7 +2782,10 @@ fn kcc_move_characters_system(
             platform_delta: *platform,
             gravity,
             // Ship-shard yaw=0 faces +X, same as KCC convention → no offset.
-            yaw: yaw.0,
+            // Camera yaw drives WASD interpretation so movement is
+            // camera-relative; body yaw chases the resulting velocity
+            // direction in `update_body_head_state`.
+            yaw: look.cam_yaw,
             stats,
             crouching: desired.crouch,
             jump_grace_remaining: 0.0,
@@ -2873,8 +3043,12 @@ fn broadcast_world_state(
             &PlayerName,
             &PlayerPosition,
             &SeatedState,
-            &PlayerYaw,
-            &PlayerPitch,
+            &BodyYaw,
+            &HeadYaw,
+            &HeadPitch,
+            &CharacterVelocity,
+            &LocomotionState,
+            Option<&TurnInPlace>,
         ),
         With<Player>,
     >,
@@ -2945,7 +3119,7 @@ fn broadcast_world_state(
     // avatar animation is wired up.
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, seated, _yaw, _pitch)| {
+        .map(|(sid, _, pos, seated, body, head_y, head_p, vel, loco, turn)| {
             PlayerSnapshotData {
                 player_id: sid.0.0,
                 position: DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64),
@@ -2955,6 +3129,14 @@ fn broadcast_world_state(
                 health: 100.0,
                 shield: 100.0,
                 seated: seated.seated,
+                body_yaw: body.0,
+                head_yaw: head_y.0,
+                head_pitch: head_p.0,
+                locomotion: loco.as_u8(),
+                locomotion_speed: vel.horizontal().length(),
+                is_turning: turn.is_some(),
+                turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
+                turn_t: turn.map(|t| t.t).unwrap_or(0.0),
             }
         })
         .collect();
@@ -2998,6 +3180,15 @@ fn broadcast_world_state(
         name: String::new(),
         health: 100.0,
         shield: 100.0,
+        // Non-player kinds: body/head fields ignored by the renderer.
+        body_yaw: 0.0,
+        head_yaw: 0.0,
+        head_pitch: 0.0,
+        locomotion: 0,
+        locomotion_speed: 0.0,
+        is_turning: false,
+        turn_target_yaw: 0.0,
+        turn_t: 0.0,
     });
     for e in &external.entities {
         let mut entity = e.clone();
@@ -3010,7 +3201,7 @@ fn broadcast_world_state(
         }
         entities.push(entity);
     }
-    for (sid, name, pos, seated, yaw, pitch) in players.iter() {
+    for (sid, name, pos, seated, body, head_y, head_p, vel, loco, turn) in players.iter() {
         // Kind reflects the player's actual posture. Copy-paste bug here
         // previously emitted `Seated` in both branches, which permanently
         // stuck every client's pilot-mode detection on.
@@ -3037,6 +3228,14 @@ fn broadcast_world_state(
             name: name.0.clone(),
             health: 100.0,
             shield: 100.0,
+            body_yaw: body.0,
+            head_yaw: head_y.0,
+            head_pitch: head_p.0,
+            locomotion: loco.as_u8(),
+            locomotion_speed: vel.horizontal().length(),
+            is_turning: turn.is_some(),
+            turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
+            turn_t: turn.map(|t| t.t).unwrap_or(0.0),
         });
     }
 
@@ -8646,6 +8845,12 @@ fn build_ship_interior(
         (
             tick_counter,
             update_player_platform,
+            // Body / head decoupling — runs after platform delta but
+            // before KCC so KCC reads the new BodyYaw for character
+            // heading. Uses last-tick CharacterVelocity to drive the
+            // body-chase-velocity branch (one tick of lag, invisible at
+            // 20 Hz).
+            update_body_head_state,
             kcc_move_characters_system,
             physics_pipeline_step,
             sync_position_from_kcc,

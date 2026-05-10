@@ -94,12 +94,26 @@ async fn handle_client(
         .map_err(|e| format!("wire decode: {e}"))?;
     let msg = ClientMsg::deserialize(&decoded)?;
 
-    let player_name = match msg {
-        ClientMsg::Connect { ref player_name } => player_name.clone(),
+    let (player_name, ship_join_key) = match msg {
+        ClientMsg::Connect {
+            ref player_name,
+            ref ship_join_key,
+        } => (player_name.clone(), ship_join_key.clone()),
         _ => return Err("expected Connect message".into()),
     };
 
-    info!(%peer_addr, %player_name, "client connecting via gateway");
+    // Routing key for ship_id derivation: explicit join key when set,
+    // else fall back to the player's name (legacy single-ship-per-player
+    // behavior). Sessions stay keyed on `player_name` either way, so
+    // distinct players retain distinct identities even when they share
+    // a ship.
+    let ship_routing_key = if ship_join_key.is_empty() {
+        player_name.clone()
+    } else {
+        ship_join_key.clone()
+    };
+
+    info!(%peer_addr, %player_name, %ship_routing_key, "client connecting via gateway");
 
     // Check for existing session — validate shard is still alive.
     if let Some(session) = session_store.find_by_name(&player_name) {
@@ -127,7 +141,11 @@ async fn handle_client(
     }
 
     // Provision a ship shard for this player (ensures system shard exists too).
-    let shard_info = router.find_shard_for_player(default_system_seed, &player_name, galaxy_seed, star_index).await?;
+    // The ship_id is hashed from `ship_routing_key` so two players with the
+    // same join key end up on the same ship shard.
+    let shard_info = router
+        .find_shard_for_player(default_system_seed, &ship_routing_key, galaxy_seed, star_index)
+        .await?;
 
     // Generate session token.
     let session_token = SessionToken(rand_u64());

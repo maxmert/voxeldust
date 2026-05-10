@@ -13,6 +13,7 @@ voxeldust-protocol-fb = { workspace = true }
 voxeldust-signal = { workspace = true }
 glam = { workspace = true }
 serde = { workspace = true }
+bincode = { workspace = true }
 flatbuffers = { workspace = true }
 thiserror = { workspace = true }
 brahe = { workspace = true }

@@ -368,7 +368,10 @@ async fn handle_client_connection(
     };
 
     match first_msg {
-        ClientMsg::Connect { player_name } => {
+        // Shard ignores `ship_join_key` — that's gateway-only routing
+        // metadata. Once the client is on the shard, the ship is
+        // already chosen.
+        ClientMsg::Connect { player_name, ship_join_key: _ } => {
             let token = SessionToken(rand_u64());
             info!(%peer_addr, %player_name, session_token = token.0, "client connected");
 

@@ -24,14 +24,20 @@ impl Router {
         }
     }
 
-    /// Find or provision a ship shard for a new player.
+    /// Find or provision a ship shard for a connecting client.
     /// 1. Ensures the system shard exists (provisions on demand)
     /// 2. Provisions a ship shard with the system shard as host
     /// 3. Returns the ship shard endpoint
+    ///
+    /// `ship_routing_key` is the string hashed into `ship_id`. When
+    /// the client's `Connect.ship_join_key` is empty, the gateway
+    /// passes the player's name here (legacy: each player gets their
+    /// own ship). When a join key IS set, distinct players sharing
+    /// the same key collapse onto the same ship_id.
     pub async fn find_shard_for_player(
         &self,
         system_seed: u64,
-        player_name: &str,
+        ship_routing_key: &str,
         galaxy_seed: u64,
         star_index: u32,
     ) -> Result<ShardInfo, Box<dyn std::error::Error>> {
@@ -51,8 +57,10 @@ impl Router {
 
         info!(system_shard_id = system_shard.id.0, "system shard ready");
 
-        // Step 2: Provision ship shard for this player.
-        let ship_id = hash_player_name(player_name);
+        // Step 2: Provision ship shard. `ship_routing_key` is either
+        // the player's name (legacy, one ship per player) or a shared
+        // join key (multiple players, same ship).
+        let ship_id = hash_routing_key(ship_routing_key);
 
         // Check if ship shard already exists.
         let ship_url = format!("{}/ship/{}", self.orchestrator_url, ship_id);
@@ -104,9 +112,10 @@ impl Router {
     }
 }
 
-/// Deterministic ship_id from player name.
-fn hash_player_name(name: &str) -> u64 {
+/// Deterministic ship_id from a routing key (player name or shared
+/// join key). Same input → same hash → same ship_id → same shard.
+fn hash_routing_key(key: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
-    name.hash(&mut hasher);
+    key.hash(&mut hasher);
     hasher.finish()
 }

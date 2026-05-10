@@ -36,11 +36,15 @@
 //! placeholder `apply_movement_modifiers` system so future gameplay lands
 //! without another character-physics refactor.
 
+pub mod body_head;
+pub mod class;
 pub mod components;
 pub mod desired;
+pub mod handoff_blob;
 pub mod hooks;
 pub mod locomotion;
 pub mod stance;
+pub mod state_machine;
 pub mod stats;
 
 #[cfg(feature = "rapier")]
@@ -48,14 +52,20 @@ pub mod controller;
 #[cfg(feature = "rapier")]
 pub mod kcc_sys;
 
+pub use body_head::{BodyYaw, CharacterClassComp, HeadPitch, HeadYaw, TurnInPlace};
+pub use class::{
+    class_by_id, CharacterClass, ClipDef, ClipKind, ClipLabel, ALL_CLASSES, HUMAN_DEFAULT,
+};
 pub use components::{CharacterCapsule, IsCharacter};
 pub use desired::{DesiredMovement, PlatformDelta};
+pub use handoff_blob::{decode as decode_character_state, encode as encode_character_state, CharacterStateBlob, SCHEMA_VERSION as CHARACTER_SCHEMA_VERSION};
 pub use hooks::{ActiveItem, CharacterComponentTag, DamageResistance, EquipmentLoad, Stamina};
 pub use locomotion::{
     CharacterVelocity, GravityOverride, LandedEvent, LocalUp, LocomotionState,
     PlatformSnapSuppressed,
 };
 pub use stance::{CharacterStance, StanceAction};
+pub use state_machine::{apply_update, step_body_head, wrap_pi, BodyHeadUpdate};
 pub use stats::MovementStats;
 
 #[cfg(feature = "rapier")]

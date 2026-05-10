@@ -632,7 +632,12 @@ fn encode_binding_scope(
 /// Client → server messages.
 #[derive(Debug, Clone)]
 pub enum ClientMsg {
-    Connect { player_name: String },
+    Connect {
+        player_name: String,
+        /// Optional ship-grouping key — see FBS schema docs. Empty
+        /// string preserves the legacy per-player-hash routing.
+        ship_join_key: String,
+    },
     PlayerInput(PlayerInputData),
     BlockEditRequest(BlockEditData),
     /// Signal config update for a functional block (client → server).
@@ -1243,6 +1248,15 @@ pub struct ObservableEntityData {
     pub health: f32,
     /// Shield (0 for non-player kinds).
     pub shield: f32,
+    // -- Body / head decoupling (Phase A; player kinds only) --------
+    pub body_yaw: f32,
+    pub head_yaw: f32,
+    pub head_pitch: f32,
+    pub locomotion: u8,
+    pub locomotion_speed: f32,
+    pub is_turning: bool,
+    pub turn_target_yaw: f32,
+    pub turn_t: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -1263,6 +1277,23 @@ pub struct PlayerSnapshotData {
     pub health: f32,
     pub shield: f32,
     pub seated: bool,
+    // -- Body / head decoupling (Phase A) ---------------------------
+    /// Body's facing yaw in the player's local tangent frame (rad).
+    pub body_yaw: f32,
+    /// Head yaw RELATIVE to body (rad), clamped per class.
+    pub head_yaw: f32,
+    /// Head pitch (rad), clamped per class.
+    pub head_pitch: f32,
+    /// `LocomotionState as u8` (0=Grounded, 1=Airborne, ...). Defaults
+    /// to 0 in old payloads — observers render Grounded.
+    pub locomotion: u8,
+    /// Horizontal speed (m/s); drives walk/run blend.
+    pub locomotion_speed: f32,
+    /// True when the player is mid-turn-in-place. The two fields below
+    /// are only meaningful in that case.
+    pub is_turning: bool,
+    pub turn_target_yaw: f32,
+    pub turn_t: f32,
 }
 
 /// Transform of a mechanical sub-grid body (rotor, piston, hinge, slider).
@@ -1506,6 +1537,14 @@ pub(crate) fn encode_observable_entities<'a>(
                     name: Some(name),
                     health: e.health,
                     shield: e.shield,
+                    body_yaw: e.body_yaw,
+                    head_yaw: e.head_yaw,
+                    head_pitch: e.head_pitch,
+                    locomotion: e.locomotion,
+                    locomotion_speed: e.locomotion_speed,
+                    is_turning: e.is_turning,
+                    turn_target_yaw: e.turn_target_yaw,
+                    turn_t: e.turn_t,
                 },
             )
         })
@@ -1539,6 +1578,14 @@ pub(crate) fn decode_observable_entities(
                 name: e.name().unwrap_or("").to_string(),
                 health: e.health(),
                 shield: e.shield(),
+                body_yaw: e.body_yaw(),
+                head_yaw: e.head_yaw(),
+                head_pitch: e.head_pitch(),
+                locomotion: e.locomotion(),
+                locomotion_speed: e.locomotion_speed(),
+                is_turning: e.is_turning(),
+                turn_target_yaw: e.turn_target_yaw(),
+                turn_t: e.turn_t(),
             }
         })
         .collect()
@@ -1617,12 +1664,14 @@ impl ClientMsg {
         let mut builder = crate::builder_pool::acquire(256);
 
         match self {
-            ClientMsg::Connect { player_name } => {
+            ClientMsg::Connect { player_name, ship_join_key } => {
                 let name = builder.create_string(player_name);
+                let join_key = builder.create_string(ship_join_key);
                 let connect = fb::Connect::create(
                     &mut builder,
                     &fb::ConnectArgs {
                         player_name: Some(name),
+                        ship_join_key: Some(join_key),
                     },
                 );
                 let msg = fb::ClientMessage::create(
@@ -2006,6 +2055,8 @@ impl ClientMsg {
                         .player_name()
                         .ok_or(MessageError::MissingField("player_name"))?
                         .to_string(),
+                    // Default-empty for old clients that don't send it.
+                    ship_join_key: c.ship_join_key().unwrap_or("").to_string(),
                 })
             }
             fb::ClientPayload::PlayerInput => {
@@ -2323,6 +2374,14 @@ impl ServerMsg {
                         health: p.health,
                         shield: p.shield,
                         seated: p.seated,
+                        body_yaw: p.body_yaw,
+                        head_yaw: p.head_yaw,
+                        head_pitch: p.head_pitch,
+                        locomotion: p.locomotion,
+                        locomotion_speed: p.locomotion_speed,
+                        is_turning: p.is_turning,
+                        turn_target_yaw: p.turn_target_yaw,
+                        turn_t: p.turn_t,
                     })
                 }).collect();
                 let players = builder.create_vector(&snapshots);
@@ -2958,6 +3017,14 @@ impl ServerMsg {
                             health: p.health(),
                             shield: p.shield(),
                             seated: p.seated(),
+                            body_yaw: p.body_yaw(),
+                            head_yaw: p.head_yaw(),
+                            head_pitch: p.head_pitch(),
+                            locomotion: p.locomotion(),
+                            locomotion_speed: p.locomotion_speed(),
+                            is_turning: p.is_turning(),
+                            turn_target_yaw: p.turn_target_yaw(),
+                            turn_t: p.turn_t(),
                         }
                     }).collect()
                 }).unwrap_or_default();
@@ -3407,12 +3474,14 @@ mod tests {
     fn roundtrip_connect() {
         let msg = ClientMsg::Connect {
             player_name: "Cosmonaut".to_string(),
+            ship_join_key: "alpha-team".to_string(),
         };
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
 
-        if let ClientMsg::Connect { player_name } = decoded {
+        if let ClientMsg::Connect { player_name, ship_join_key } = decoded {
             assert_eq!(player_name, "Cosmonaut");
+            assert_eq!(ship_join_key, "alpha-team");
         } else {
             panic!("expected Connect");
         }
@@ -3528,6 +3597,14 @@ mod tests {
                 health: 95.0,
                 shield: 50.0,
                 seated: false,
+                body_yaw: 0.0,
+                head_yaw: 0.0,
+                head_pitch: 0.0,
+                locomotion: 0,
+                locomotion_speed: 0.0,
+                is_turning: false,
+                turn_target_yaw: 0.0,
+                turn_t: 0.0,
             }],
             bodies: vec![CelestialBodyData {
                 body_id: 0, position: DVec3::ZERO, radius: 6.96e8, color: [1.0, 0.95, 0.8],
@@ -3572,6 +3649,14 @@ mod tests {
                 name: String::new(),
                 health: 0.0,
                 shield: 0.0,
+                body_yaw: 0.0,
+                head_yaw: 0.0,
+                head_pitch: 0.0,
+                locomotion: 0,
+                locomotion_speed: 0.0,
+                is_turning: false,
+                turn_target_yaw: 0.0,
+                turn_t: 0.0,
             }],
         });
         let bytes = msg.serialize();

@@ -400,6 +400,18 @@ table ObservableEntity {
     health: float = 0;
     /// Player shield (0 for non-player kinds).
     shield: float = 0;
+    // -- Body / head decoupling (Phase A; player kinds only) --------
+    // Same semantics as the matching fields on PlayerSnapshot. Always
+    // present in the table to keep the FB layout uniform; clients that
+    // render non-player kinds simply ignore these.
+    body_yaw: float = 0;
+    head_yaw: float = 0;
+    head_pitch: float = 0;
+    locomotion: uint8 = 0;
+    locomotion_speed: float = 0;
+    is_turning: bool = false;
+    turn_target_yaw: float = 0;
+    turn_t: float = 0;
 }
 
 /// System shard → ship/planet shard: AOI entity set for a single observer.
@@ -1002,6 +1014,17 @@ table ShardMessage {
 
 table Connect {
     player_name: string;
+    /// Optional ship-grouping key. When non-empty, the gateway hashes
+    /// THIS string instead of `player_name` to derive the ship_id —
+    /// so two distinct players sharing the same `ship_join_key` land
+    /// on the same ship shard. Empty (the default) preserves the
+    /// legacy per-player-hash behaviour: every fresh player spawns on
+    /// their own ship. Used by playtests / multi-client dev sessions
+    /// (`--ship-join NAME`) and the future "join my ship" social
+    /// flow. Never collapses sessions: the session store stays keyed
+    /// on `player_name`, so distinct players always retain distinct
+    /// identities even when they share a ship.
+    ship_join_key: string;
 }
 
 table JoinResponse {
@@ -1083,6 +1106,27 @@ table PlayerSnapshot {
     health: float;
     shield: float;
     seated: bool;       // player is in any seat (pilot, gunner, passenger)
+    // -- Body / head decoupling (Phase A) ---------------------------
+    // All angles in radians, in the player's local tangent frame
+    // (planet) or ship-local Y-up (ship interior). Together with the
+    // existing `rotation` field they let observers render the same
+    // body-vs-head pose as the owning client. Defaults to 0/false so
+    // older clients that don't read these fields stay correct: the
+    // identity body orientation + neutral head pose.
+    body_yaw: float = 0;
+    head_yaw: float = 0;     // relative to body, ±class.head_yaw_limit
+    head_pitch: float = 0;   // ±class.head_pitch_limit
+    /// `voxeldust_core::character::LocomotionState as u8`:
+    /// 0=Grounded, 1=Airborne, 2=Seated, 3=Climbing, 4=Ragdoll.
+    /// Distinct from `grounded: bool` (which is a coarse two-state
+    /// view); animation graph drives clip selection from this byte.
+    locomotion: uint8 = 0;
+    locomotion_speed: float = 0;   // m/s — drives walk/run blend
+    /// True when the player is mid-turn-in-place; `turn_target_yaw`
+    /// and `turn_t` are only meaningful in that case.
+    is_turning: bool = false;
+    turn_target_yaw: float = 0;    // absolute body_yaw target (rad)
+    turn_t: float = 0;             // 0..1 progress through TIP clip
 }
 
 /// Transform of a mechanical sub-grid (rotor, piston, hinge, slider) body.

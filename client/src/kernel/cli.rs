@@ -16,6 +16,14 @@ pub struct Cli {
     #[arg(long, default_value = "Player")]
     pub name: String,
 
+    /// Optional ship-grouping key. When set, the gateway hashes THIS
+    /// instead of `--name` to derive the ship_id, so two clients with
+    /// distinct names sharing the same `--ship-join` value land on
+    /// the same ship shard. Default empty = legacy per-player ship.
+    /// Used for multi-client playtests / "join my ship" flows.
+    #[arg(long, default_value = "")]
+    pub ship_join: String,
+
     /// Lighting / rendering fidelity preset. Affects shadows, AA,
     /// post-FX presence, atmosphere method, and IBL intensity — but
     /// **not** any lighting *value* (sun colour, illuminance,

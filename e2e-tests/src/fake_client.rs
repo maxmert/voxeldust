@@ -22,6 +22,8 @@ impl FakeClient {
     pub async fn send_connect(&mut self, player_name: &str) -> Result<(), std::io::Error> {
         let msg = ClientMsg::Connect {
             player_name: player_name.to_string(),
+            // E2E tests exercise legacy per-player-ship routing.
+            ship_join_key: String::new(),
         };
         let data = msg.serialize();
         let len = (data.len() as u32).to_be_bytes();

@@ -1,0 +1,28 @@
+# Mixamo FBX → output GLB mapping for the `human_default` character class.
+#
+# Format: each non-comment / non-blank line is
+#     <input-fbx-name><TAB><output-glb-path-relative-to-repo-root>
+# A literal TAB separator (not spaces) — Mixamo download filenames
+# typically contain spaces ("Falling Idle.fbx", "Left Turn 90.fbx"),
+# so the loose `awk '{print $1}'` split won't work; the parser uses
+# `IFS=$'\t'` to consume each row as exactly two fields.
+#
+# Input names match the **default Mixamo download names** so a fresh
+# Mixamo session lands files in `~/Downloads/` ready to import without
+# renaming. The `character.fbx` line covers Mixamo's character export
+# whose filename is hardcoded by Mixamo (not the character name).
+#
+# `import_class.sh human_default <download-dir>` reads this file and
+# runs `convert.sh` for every entry, validating every required input
+# is present BEFORE starting any conversion.
+
+character.fbx	client/assets/characters/human_default/y_bot.glb
+
+Idle.fbx	client/assets/characters/human_default/animations/idle.glb
+Walking.fbx	client/assets/characters/human_default/animations/walk.glb
+Running.fbx	client/assets/characters/human_default/animations/run.glb
+Jumping Up.fbx	client/assets/characters/human_default/animations/jump.glb
+Falling Idle.fbx	client/assets/characters/human_default/animations/falling.glb
+Sitting Idle.fbx	client/assets/characters/human_default/animations/sit_chair.glb
+Left Turn 90.fbx	client/assets/characters/human_default/animations/turn_l_90.glb
+Right Turn 90.fbx	client/assets/characters/human_default/animations/turn_r_90.glb
