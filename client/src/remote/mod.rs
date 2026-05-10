@@ -63,6 +63,11 @@ pub struct RemoteEntity {
     pub turn_target_yaw: f32,
     /// 0..1 progress through the active turn-in-place clip.
     pub turn_t: f32,
+    /// Server-broadcast look-at attention target encoded as a delta
+    /// from `position` (Phase H). `None` = no target — head returns
+    /// to the animation pose. The client converts to absolute world
+    /// space at render time.
+    pub look_target_delta: Option<glam::Vec3>,
 }
 
 /// Remote players (EVA + grounded + seated, excluding the own player).
@@ -229,5 +234,6 @@ fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
         is_turning: e.is_turning,
         turn_target_yaw: e.turn_target_yaw,
         turn_t: e.turn_t,
+        look_target_delta: e.look_target_delta,
     }
 }

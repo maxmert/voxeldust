@@ -1583,6 +1583,7 @@ fn spawn_player(
         BodyYaw(0.0),
         HeadYaw(0.0),
         HeadPitch(0.0),
+        voxeldust_core::character::LookTarget::cleared(),
         CamLookInput::default(),
         CharacterClassComp(HUMAN_DEFAULT),
         SeatedState::default(),
@@ -2571,6 +2572,75 @@ fn update_body_head_state(
     }
 }
 
+/// Phase H — populate each player's `LookTarget` with the world-space
+/// position of the *nearest other player* in the ship interior that
+/// lies inside the peripheral attention cone. Mirrors the
+/// planet-shard implementation (see comments there); the only
+/// difference is `PlayerPosition` is `Vec3` (ship-local f32) here,
+/// and the "world-space" frame the target lives in is ship-local.
+/// `LookTarget` itself stores `DVec3` so the wire layer doesn't care
+/// which shard kind generated it.
+fn update_look_targets(
+    mut players: Query<
+        (
+            Entity,
+            &PlayerPosition,
+            &BodyYaw,
+            &CharacterClassComp,
+            &mut voxeldust_core::character::LookTarget,
+        ),
+        With<Player>,
+    >,
+) {
+    let positions: Vec<(Entity, DVec3)> = players
+        .iter()
+        .map(|(e, p, _, _, _)| {
+            (
+                e,
+                DVec3::new(p.0.x as f64, p.0.y as f64, p.0.z as f64),
+            )
+        })
+        .collect();
+    for (entity, my_pos, body_yaw, class, mut look) in players.iter_mut() {
+        let cls = &class.0;
+        let max_dist_sq = (cls.look_attention_distance as f64).powi(2);
+        let cos_fov = (cls.look_attention_fov_half as f64).cos();
+        let eye_offset = cls.look_eye_world_offset as f64;
+        let by = body_yaw.0 as f64;
+        let forward = DVec3::new(by.cos(), 0.0, by.sin());
+        let my_pos_d = DVec3::new(
+            my_pos.0.x as f64,
+            my_pos.0.y as f64,
+            my_pos.0.z as f64,
+        );
+
+        let mut best: Option<(f64, DVec3)> = None;
+        for (other_e, other_pos) in &positions {
+            if *other_e == entity {
+                continue;
+            }
+            let delta = *other_pos - my_pos_d;
+            let dist_sq = delta.length_squared();
+            if dist_sq < 0.25 || dist_sq > max_dist_sq {
+                continue;
+            }
+            let dist = dist_sq.sqrt();
+            let dir = delta / dist;
+            if dir.dot(forward) < cos_fov {
+                continue;
+            }
+            let target = *other_pos + DVec3::new(0.0, eye_offset, 0.0);
+            if best.map(|(d, _)| dist < d).unwrap_or(true) {
+                best = Some((dist, target));
+            }
+        }
+        let new_target = best.map(|(_, t)| t);
+        if look.0 != new_target {
+            look.0 = new_target;
+        }
+    }
+}
+
 /// Detect which sub-grid the player is standing on and emit the platform
 /// motion delta for the KCC to consume.
 ///
@@ -3049,6 +3119,7 @@ fn broadcast_world_state(
             &CharacterVelocity,
             &LocomotionState,
             Option<&TurnInPlace>,
+            &voxeldust_core::character::LookTarget,
         ),
         With<Player>,
     >,
@@ -3119,10 +3190,11 @@ fn broadcast_world_state(
     // avatar animation is wired up.
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, seated, body, head_y, head_p, vel, loco, turn)| {
+        .map(|(sid, _, pos, seated, body, head_y, head_p, vel, loco, turn, look)| {
+            let pos_d = DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64);
             PlayerSnapshotData {
                 player_id: sid.0.0,
-                position: DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64),
+                position: pos_d,
                 rotation: exterior.rotation,
                 velocity: exterior.velocity,
                 grounded: !seated.seated,
@@ -3137,6 +3209,7 @@ fn broadcast_world_state(
                 is_turning: turn.is_some(),
                 turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
                 turn_t: turn.map(|t| t.t).unwrap_or(0.0),
+                look_target_delta: look.0.map(|t| (t - pos_d).as_vec3()),
             }
         })
         .collect();
@@ -3189,6 +3262,7 @@ fn broadcast_world_state(
         is_turning: false,
         turn_target_yaw: 0.0,
         turn_t: 0.0,
+        look_target_delta: None,
     });
     for e in &external.entities {
         let mut entity = e.clone();
@@ -3201,7 +3275,7 @@ fn broadcast_world_state(
         }
         entities.push(entity);
     }
-    for (sid, name, pos, seated, body, head_y, head_p, vel, loco, turn) in players.iter() {
+    for (sid, name, pos, seated, body, head_y, head_p, vel, loco, turn, look) in players.iter() {
         // Kind reflects the player's actual posture. Copy-paste bug here
         // previously emitted `Seated` in both branches, which permanently
         // stuck every client's pilot-mode detection on.
@@ -3214,10 +3288,11 @@ fn broadcast_world_state(
         // player_snapshots above: client composes camera =
         // body × rotation_from_look(LocalLook) so head yaw/pitch and
         // ship roll are preserved without lossy decomposition.
+        let pos_d = DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64);
         entities.push(ObservableEntityData {
             entity_id: sid.0.0,
             kind,
-            position: DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64),
+            position: pos_d,
             rotation: exterior.rotation,
             velocity: exterior.velocity,
             bounding_radius: 1.0,
@@ -3236,6 +3311,7 @@ fn broadcast_world_state(
             is_turning: turn.is_some(),
             turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
             turn_t: turn.map(|t| t.t).unwrap_or(0.0),
+            look_target_delta: look.0.map(|t| (t - pos_d).as_vec3()),
         });
     }
 
@@ -8851,6 +8927,10 @@ fn build_ship_interior(
             // body-chase-velocity branch (one tick of lag, invisible at
             // 20 Hz).
             update_body_head_state,
+            // Phase H: attention/look-at runs after BodyYaw is fresh
+            // (FOV cone direction) and before broadcast so the new
+            // target ships out this tick.
+            update_look_targets,
             kcc_move_characters_system,
             physics_pipeline_step,
             sync_position_from_kcc,

@@ -27,6 +27,7 @@ pub mod assets;
 pub mod camera_attach;
 pub mod foot_ik;
 pub mod loader;
+pub mod look_ik;
 pub mod render;
 
 pub use anim::{CharacterAnimPlugin, CharacterAnimSet, LocomotionAnimState};
@@ -35,6 +36,7 @@ pub use camera_attach::{
     CameraMode, CharacterCameraPlugin, CharacterCameraSet, LocalCharacterTag,
 };
 pub use foot_ik::{CharacterFootIkPlugin, CharacterFootIkSet};
+pub use look_ik::{CharacterLookIkPlugin, CharacterLookIkSet};
 pub use render::{BoneRegistry, CharacterRenderPlugin, CharacterRenderSet, RemoteCharacterTag};
 
 /// SystemSet for character-asset loading — placed after `Startup` so
@@ -79,6 +81,7 @@ impl Plugin for CharacterPlugin {
             .add_plugins(CharacterRenderPlugin)
             .add_plugins(CharacterAnimPlugin)
             .add_plugins(CharacterCameraPlugin)
-            .add_plugins(CharacterFootIkPlugin);
+            .add_plugins(CharacterFootIkPlugin)
+            .add_plugins(CharacterLookIkPlugin);
     }
 }

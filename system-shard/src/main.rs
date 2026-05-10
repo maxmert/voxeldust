@@ -4703,6 +4703,10 @@ fn eva_broadcast(
                 is_turning: false,
                 turn_target_yaw: 0.0,
                 turn_t: 0.0,
+                // EVA isn't part of the look-at attention pass yet
+                // (Phase H scope is on-foot walkers in ship + planet
+                // shards). `None` keeps the renderer in animation pose.
+                look_target_delta: None,
             }
         })
         .collect();
@@ -5258,6 +5262,10 @@ struct AoiCandidate {
     is_turning: bool,
     turn_target_yaw: f32,
     turn_t: f32,
+    // Look-at attention target forwarded from authoritative shards
+    // (Phase H). System-shard AOI defaults to `None`; the actual
+    // target arrives from the planet/ship shard's broadcast.
+    look_target_delta: Option<glam::Vec3>,
 }
 
 impl AoiCandidate {
@@ -5296,6 +5304,7 @@ impl AoiCandidate {
             is_turning: false,
             turn_target_yaw: 0.0,
             turn_t: 0.0,
+            look_target_delta: None,
         }
     }
 }
@@ -5434,6 +5443,10 @@ fn compute_aoi(
             is_turning: c.is_turning,
             turn_target_yaw: c.turn_target_yaw,
             turn_t: c.turn_t,
+            // System-shard relays the upstream shard's look target
+            // verbatim — surface players' look targets originate
+            // on planet/ship shards.
+            look_target_delta: c.look_target_delta,
         });
     }
     out

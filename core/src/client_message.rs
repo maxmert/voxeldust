@@ -1257,6 +1257,12 @@ pub struct ObservableEntityData {
     pub is_turning: bool,
     pub turn_target_yaw: f32,
     pub turn_t: f32,
+    // -- Look-at attention target (Phase H; player kinds only) ------
+    /// `None` = no target, head stays in animation pose.
+    /// `Some(delta)` = world-space target encoded as a delta from
+    /// `position` (kept as f32 deltas to avoid f32 precision loss
+    /// for very far-from-origin shards).
+    pub look_target_delta: Option<glam::Vec3>,
 }
 
 #[derive(Debug, Clone)]
@@ -1294,6 +1300,9 @@ pub struct PlayerSnapshotData {
     pub is_turning: bool,
     pub turn_target_yaw: f32,
     pub turn_t: f32,
+    /// Look-at attention target encoded as a delta from `position`
+    /// (Phase H). `None` = no target, head stays in animation pose.
+    pub look_target_delta: Option<glam::Vec3>,
 }
 
 /// Transform of a mechanical sub-grid body (rotor, piston, hinge, slider).
@@ -1545,6 +1554,10 @@ pub(crate) fn encode_observable_entities<'a>(
                     is_turning: e.is_turning,
                     turn_target_yaw: e.turn_target_yaw,
                     turn_t: e.turn_t,
+                    look_target_set: e.look_target_delta.is_some(),
+                    look_dx: e.look_target_delta.map(|d| d.x).unwrap_or(0.0),
+                    look_dy: e.look_target_delta.map(|d| d.y).unwrap_or(0.0),
+                    look_dz: e.look_target_delta.map(|d| d.z).unwrap_or(0.0),
                 },
             )
         })
@@ -1586,6 +1599,11 @@ pub(crate) fn decode_observable_entities(
                 is_turning: e.is_turning(),
                 turn_target_yaw: e.turn_target_yaw(),
                 turn_t: e.turn_t(),
+                look_target_delta: if e.look_target_set() {
+                    Some(glam::Vec3::new(e.look_dx(), e.look_dy(), e.look_dz()))
+                } else {
+                    None
+                },
             }
         })
         .collect()
@@ -2382,6 +2400,10 @@ impl ServerMsg {
                         is_turning: p.is_turning,
                         turn_target_yaw: p.turn_target_yaw,
                         turn_t: p.turn_t,
+                        look_target_set: p.look_target_delta.is_some(),
+                        look_dx: p.look_target_delta.map(|d| d.x).unwrap_or(0.0),
+                        look_dy: p.look_target_delta.map(|d| d.y).unwrap_or(0.0),
+                        look_dz: p.look_target_delta.map(|d| d.z).unwrap_or(0.0),
                     })
                 }).collect();
                 let players = builder.create_vector(&snapshots);
@@ -3025,6 +3047,11 @@ impl ServerMsg {
                             is_turning: p.is_turning(),
                             turn_target_yaw: p.turn_target_yaw(),
                             turn_t: p.turn_t(),
+                            look_target_delta: if p.look_target_set() {
+                                Some(glam::Vec3::new(p.look_dx(), p.look_dy(), p.look_dz()))
+                            } else {
+                                None
+                            },
                         }
                     }).collect()
                 }).unwrap_or_default();
@@ -3605,6 +3632,7 @@ mod tests {
                 is_turning: false,
                 turn_target_yaw: 0.0,
                 turn_t: 0.0,
+                look_target_delta: None,
             }],
             bodies: vec![CelestialBodyData {
                 body_id: 0, position: DVec3::ZERO, radius: 6.96e8, color: [1.0, 0.95, 0.8],
@@ -3657,6 +3685,7 @@ mod tests {
                 is_turning: false,
                 turn_target_yaw: 0.0,
                 turn_t: 0.0,
+                look_target_delta: None,
             }],
         });
         let bytes = msg.serialize();

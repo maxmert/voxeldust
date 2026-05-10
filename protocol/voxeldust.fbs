@@ -412,6 +412,16 @@ table ObservableEntity {
     is_turning: bool = false;
     turn_target_yaw: float = 0;
     turn_t: float = 0;
+    // -- Look-at attention target (Phase H; player kinds only) -----
+    // World-space target the character is looking at, encoded as a
+    // delta from `position` (so f32 precision is fine even for very
+    // far-from-origin shards). `look_target_set = false` means no
+    // target — the head returns to the animation pose. Defaults
+    // preserve old-client behaviour (no look-at).
+    look_target_set: bool = false;
+    look_dx: float = 0;
+    look_dy: float = 0;
+    look_dz: float = 0;
 }
 
 /// System shard → ship/planet shard: AOI entity set for a single observer.
@@ -1127,6 +1137,15 @@ table PlayerSnapshot {
     is_turning: bool = false;
     turn_target_yaw: float = 0;    // absolute body_yaw target (rad)
     turn_t: float = 0;             // 0..1 progress through TIP clip
+    // -- Look-at attention target (Phase H) -------------------------
+    // World-space target this character is looking at, encoded as a
+    // delta from `position` (f32 deltas keep precision even for very
+    // far-from-origin shards). `look_target_set = false` means no
+    // target — head stays in animation pose.
+    look_target_set: bool = false;
+    look_dx: float = 0;
+    look_dy: float = 0;
+    look_dz: float = 0;
 }
 
 /// Transform of a mechanical sub-grid (rotor, piston, hinge, slider) body.

@@ -44,6 +44,7 @@ pub mod handoff_blob;
 pub mod hooks;
 pub mod ik;
 pub mod locomotion;
+pub mod look_target;
 pub mod stance;
 pub mod state_machine;
 pub mod stats;
@@ -61,11 +62,12 @@ pub use components::{CharacterCapsule, IsCharacter};
 pub use desired::{DesiredMovement, PlatformDelta};
 pub use handoff_blob::{decode as decode_character_state, encode as encode_character_state, CharacterStateBlob, SCHEMA_VERSION as CHARACTER_SCHEMA_VERSION};
 pub use hooks::{ActiveItem, CharacterComponentTag, DamageResistance, EquipmentLoad, Stamina};
-pub use ik::{solve_two_bone_ik, TwoBoneInput, TwoBoneOutput};
+pub use ik::{solve_aim_chain, solve_two_bone_ik, AimChainInput, AimChainOutput, TwoBoneInput, TwoBoneOutput};
 pub use locomotion::{
     CharacterVelocity, GravityOverride, LandedEvent, LocalUp, LocomotionState,
     PlatformSnapSuppressed,
 };
+pub use look_target::LookTarget;
 pub use stance::{CharacterStance, StanceAction};
 pub use state_machine::{apply_update, step_body_head, wrap_pi, BodyHeadUpdate};
 pub use stats::MovementStats;

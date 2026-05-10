@@ -5676,6 +5676,10 @@ impl<'a> ObservableEntity<'a> {
   pub const VT_IS_TURNING: ::flatbuffers::VOffsetT = 40;
   pub const VT_TURN_TARGET_YAW: ::flatbuffers::VOffsetT = 42;
   pub const VT_TURN_T: ::flatbuffers::VOffsetT = 44;
+  pub const VT_LOOK_TARGET_SET: ::flatbuffers::VOffsetT = 46;
+  pub const VT_LOOK_DX: ::flatbuffers::VOffsetT = 48;
+  pub const VT_LOOK_DY: ::flatbuffers::VOffsetT = 50;
+  pub const VT_LOOK_DZ: ::flatbuffers::VOffsetT = 52;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5689,6 +5693,9 @@ impl<'a> ObservableEntity<'a> {
     let mut builder = ObservableEntityBuilder::new(_fbb);
     builder.add_shard_id(args.shard_id);
     builder.add_entity_id(args.entity_id);
+    builder.add_look_dz(args.look_dz);
+    builder.add_look_dy(args.look_dy);
+    builder.add_look_dx(args.look_dx);
     builder.add_turn_t(args.turn_t);
     builder.add_turn_target_yaw(args.turn_target_yaw);
     builder.add_locomotion_speed(args.locomotion_speed);
@@ -5702,6 +5709,7 @@ impl<'a> ObservableEntity<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_look_target_set(args.look_target_set);
     builder.add_is_turning(args.is_turning);
     builder.add_locomotion(args.locomotion);
     builder.add_is_own(args.is_own);
@@ -5871,6 +5879,34 @@ impl<'a> ObservableEntity<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(ObservableEntity::VT_TURN_T, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn look_target_set(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ObservableEntity::VT_LOOK_TARGET_SET, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dx(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_LOOK_DX, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dy(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_LOOK_DY, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dz(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_LOOK_DZ, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
@@ -5900,6 +5936,10 @@ impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
      .visit_field::<bool>("is_turning", Self::VT_IS_TURNING, false)?
      .visit_field::<f32>("turn_target_yaw", Self::VT_TURN_TARGET_YAW, false)?
      .visit_field::<f32>("turn_t", Self::VT_TURN_T, false)?
+     .visit_field::<bool>("look_target_set", Self::VT_LOOK_TARGET_SET, false)?
+     .visit_field::<f32>("look_dx", Self::VT_LOOK_DX, false)?
+     .visit_field::<f32>("look_dy", Self::VT_LOOK_DY, false)?
+     .visit_field::<f32>("look_dz", Self::VT_LOOK_DZ, false)?
      .finish();
     Ok(())
   }
@@ -5926,6 +5966,10 @@ pub struct ObservableEntityArgs<'a> {
     pub is_turning: bool,
     pub turn_target_yaw: f32,
     pub turn_t: f32,
+    pub look_target_set: bool,
+    pub look_dx: f32,
+    pub look_dy: f32,
+    pub look_dz: f32,
 }
 impl<'a> Default for ObservableEntityArgs<'a> {
   #[inline]
@@ -5952,6 +5996,10 @@ impl<'a> Default for ObservableEntityArgs<'a> {
       is_turning: false,
       turn_target_yaw: 0.0,
       turn_t: 0.0,
+      look_target_set: false,
+      look_dx: 0.0,
+      look_dy: 0.0,
+      look_dz: 0.0,
     }
   }
 }
@@ -6046,6 +6094,22 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ObservableEntityBuilder<'a, '
     self.fbb_.push_slot::<f32>(ObservableEntity::VT_TURN_T, turn_t, 0.0);
   }
   #[inline]
+  pub fn add_look_target_set(&mut self, look_target_set: bool) {
+    self.fbb_.push_slot::<bool>(ObservableEntity::VT_LOOK_TARGET_SET, look_target_set, false);
+  }
+  #[inline]
+  pub fn add_look_dx(&mut self, look_dx: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_LOOK_DX, look_dx, 0.0);
+  }
+  #[inline]
+  pub fn add_look_dy(&mut self, look_dy: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_LOOK_DY, look_dy, 0.0);
+  }
+  #[inline]
+  pub fn add_look_dz(&mut self, look_dz: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_LOOK_DZ, look_dz, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ObservableEntityBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ObservableEntityBuilder {
@@ -6084,6 +6148,10 @@ impl ::core::fmt::Debug for ObservableEntity<'_> {
       ds.field("is_turning", &self.is_turning());
       ds.field("turn_target_yaw", &self.turn_target_yaw());
       ds.field("turn_t", &self.turn_t());
+      ds.field("look_target_set", &self.look_target_set());
+      ds.field("look_dx", &self.look_dx());
+      ds.field("look_dy", &self.look_dy());
+      ds.field("look_dz", &self.look_dz());
       ds.finish()
   }
 }
@@ -13053,6 +13121,10 @@ impl<'a> PlayerSnapshot<'a> {
   pub const VT_IS_TURNING: ::flatbuffers::VOffsetT = 30;
   pub const VT_TURN_TARGET_YAW: ::flatbuffers::VOffsetT = 32;
   pub const VT_TURN_T: ::flatbuffers::VOffsetT = 34;
+  pub const VT_LOOK_TARGET_SET: ::flatbuffers::VOffsetT = 36;
+  pub const VT_LOOK_DX: ::flatbuffers::VOffsetT = 38;
+  pub const VT_LOOK_DY: ::flatbuffers::VOffsetT = 40;
+  pub const VT_LOOK_DZ: ::flatbuffers::VOffsetT = 42;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -13065,6 +13137,9 @@ impl<'a> PlayerSnapshot<'a> {
   ) -> ::flatbuffers::WIPOffset<PlayerSnapshot<'bldr>> {
     let mut builder = PlayerSnapshotBuilder::new(_fbb);
     builder.add_player_id(args.player_id);
+    builder.add_look_dz(args.look_dz);
+    builder.add_look_dy(args.look_dy);
+    builder.add_look_dx(args.look_dx);
     builder.add_turn_t(args.turn_t);
     builder.add_turn_target_yaw(args.turn_target_yaw);
     builder.add_locomotion_speed(args.locomotion_speed);
@@ -13076,6 +13151,7 @@ impl<'a> PlayerSnapshot<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_look_target_set(args.look_target_set);
     builder.add_is_turning(args.is_turning);
     builder.add_locomotion(args.locomotion);
     builder.add_seated(args.seated);
@@ -13202,6 +13278,34 @@ impl<'a> PlayerSnapshot<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_TURN_T, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn look_target_set(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerSnapshot::VT_LOOK_TARGET_SET, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dx(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_LOOK_DX, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dy(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_LOOK_DY, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dz(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_LOOK_DZ, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
@@ -13226,6 +13330,10 @@ impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
      .visit_field::<bool>("is_turning", Self::VT_IS_TURNING, false)?
      .visit_field::<f32>("turn_target_yaw", Self::VT_TURN_TARGET_YAW, false)?
      .visit_field::<f32>("turn_t", Self::VT_TURN_T, false)?
+     .visit_field::<bool>("look_target_set", Self::VT_LOOK_TARGET_SET, false)?
+     .visit_field::<f32>("look_dx", Self::VT_LOOK_DX, false)?
+     .visit_field::<f32>("look_dy", Self::VT_LOOK_DY, false)?
+     .visit_field::<f32>("look_dz", Self::VT_LOOK_DZ, false)?
      .finish();
     Ok(())
   }
@@ -13247,6 +13355,10 @@ pub struct PlayerSnapshotArgs<'a> {
     pub is_turning: bool,
     pub turn_target_yaw: f32,
     pub turn_t: f32,
+    pub look_target_set: bool,
+    pub look_dx: f32,
+    pub look_dy: f32,
+    pub look_dz: f32,
 }
 impl<'a> Default for PlayerSnapshotArgs<'a> {
   #[inline]
@@ -13268,6 +13380,10 @@ impl<'a> Default for PlayerSnapshotArgs<'a> {
       is_turning: false,
       turn_target_yaw: 0.0,
       turn_t: 0.0,
+      look_target_set: false,
+      look_dx: 0.0,
+      look_dy: 0.0,
+      look_dz: 0.0,
     }
   }
 }
@@ -13342,6 +13458,22 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerSnapshotBuilder<'a, 'b,
     self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_TURN_T, turn_t, 0.0);
   }
   #[inline]
+  pub fn add_look_target_set(&mut self, look_target_set: bool) {
+    self.fbb_.push_slot::<bool>(PlayerSnapshot::VT_LOOK_TARGET_SET, look_target_set, false);
+  }
+  #[inline]
+  pub fn add_look_dx(&mut self, look_dx: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_LOOK_DX, look_dx, 0.0);
+  }
+  #[inline]
+  pub fn add_look_dy(&mut self, look_dy: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_LOOK_DY, look_dy, 0.0);
+  }
+  #[inline]
+  pub fn add_look_dz(&mut self, look_dz: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_LOOK_DZ, look_dz, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerSnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerSnapshotBuilder {
@@ -13375,6 +13507,10 @@ impl ::core::fmt::Debug for PlayerSnapshot<'_> {
       ds.field("is_turning", &self.is_turning());
       ds.field("turn_target_yaw", &self.turn_target_yaw());
       ds.field("turn_t", &self.turn_t());
+      ds.field("look_target_set", &self.look_target_set());
+      ds.field("look_dx", &self.look_dx());
+      ds.field("look_dy", &self.look_dy());
+      ds.field("look_dz", &self.look_dz());
       ds.finish()
   }
 }

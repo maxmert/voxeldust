@@ -668,6 +668,7 @@ fn spawn_player(
         BodyYaw(0.0),
         HeadYaw(0.0),
         HeadPitch(0.0),
+        voxeldust_core::character::LookTarget::cleared(),
         CamLookInput::default(),
         CharacterClassComp(HUMAN_DEFAULT),
         SessionId(session_token),
@@ -1150,6 +1151,73 @@ fn update_body_head_state(
     }
 }
 
+/// Phase H — populate each player's `LookTarget` with the world-space
+/// position of the *nearest other player* that lies inside their
+/// peripheral attention cone. Falls back to `None` when the player
+/// has no neighbour worth looking at, so the character's head simply
+/// stays in its animation pose (no IK overhead, no fake "always
+/// staring forward" behaviour).
+///
+/// All math is in the planet shard's flat Y-up frame — same frame
+/// `PlanetPosition` lives in. The wire layer encodes the broadcast
+/// target as a delta from `position` so f32 precision is fine.
+fn update_look_targets(
+    mut players: Query<
+        (
+            Entity,
+            &PlanetPosition,
+            &BodyYaw,
+            &CharacterClassComp,
+            &mut voxeldust_core::character::LookTarget,
+        ),
+        With<PlanetPlayer>,
+    >,
+) {
+    let positions: Vec<(Entity, DVec3)> = players
+        .iter()
+        .map(|(e, p, _, _, _)| (e, p.0))
+        .collect();
+    for (entity, my_pos, body_yaw, class, mut look) in players.iter_mut() {
+        let cls = &class.0;
+        let max_dist_sq = (cls.look_attention_distance as f64).powi(2);
+        let cos_fov = (cls.look_attention_fov_half as f64).cos();
+        let eye_offset = cls.look_eye_world_offset as f64;
+        // Body-forward in the planet shard's flat frame. Server's
+        // `body_yaw` convention is `0 = +X`, `+ve = clockwise from
+        // above` — see `client::character::render` for the matching
+        // visual rotation derivation.
+        let by = body_yaw.0 as f64;
+        let forward = DVec3::new(by.cos(), 0.0, by.sin());
+
+        let mut best: Option<(f64, DVec3)> = None;
+        for (other_e, other_pos) in &positions {
+            if *other_e == entity {
+                continue;
+            }
+            let delta = *other_pos - my_pos.0;
+            let dist_sq = delta.length_squared();
+            if dist_sq < 0.25 || dist_sq > max_dist_sq {
+                continue;
+            }
+            let dist = dist_sq.sqrt();
+            let dir = delta / dist;
+            if dir.dot(forward) < cos_fov {
+                continue;
+            }
+            // Aim at the OTHER player's eye level, not their hip
+            // (their `position` is the capsule centre).
+            let target = *other_pos + DVec3::new(0.0, eye_offset, 0.0);
+            if best.map(|(d, _)| dist < d).unwrap_or(true) {
+                best = Some((dist, target));
+            }
+        }
+        let new_target = best.map(|(_, t)| t);
+        if look.0 != new_target {
+            look.0 = new_target;
+        }
+    }
+}
+
 /// Drive the kinematic character controllers for planet-surface walkers.
 ///
 /// The planet-shard uses the `TangentFrame` + `RapierOrigin` re-center
@@ -1624,6 +1692,7 @@ fn broadcast_world_state(
             &CharacterVelocity,
             &LocomotionState,
             Option<&TurnInPlace>,
+            &voxeldust_core::character::LookTarget,
         ),
         With<PlanetPlayer>,
     >,
@@ -1639,7 +1708,7 @@ fn broadcast_world_state(
 ) {
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, body, head_y, head_p, vel, loco, turn)| PlayerSnapshotData {
+        .map(|(sid, _, pos, body, head_y, head_p, vel, loco, turn, look)| PlayerSnapshotData {
             player_id: sid.0.0,
             position: pos.0,
             // Identity for the planet shard. The camera composes
@@ -1664,6 +1733,12 @@ fn broadcast_world_state(
             is_turning: turn.is_some(),
             turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
             turn_t: turn.map(|t| t.t).unwrap_or(0.0),
+            // Look-at target encoded as a delta from `position` —
+            // f32 deltas are precision-safe because the target sits
+            // within `look_attention_distance` (~30 m) of the player.
+            look_target_delta: look
+                .0
+                .map(|t| (t - pos.0).as_vec3()),
         })
         .collect();
 
@@ -1741,7 +1816,7 @@ fn broadcast_world_state(
         entity.position = e.position - planet_pos.0;
         entities.push(entity);
     }
-    for (sid, name, pos, body, head_y, head_p, vel, loco, turn) in players.iter() {
+    for (sid, name, pos, body, head_y, head_p, vel, loco, turn, look) in players.iter() {
         entities.push(ObservableEntityData {
             entity_id: sid.0.0,
             kind: EntityKind::GroundedPlayer,
@@ -1765,6 +1840,9 @@ fn broadcast_world_state(
             is_turning: turn.is_some(),
             turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
             turn_t: turn.map(|t| t.t).unwrap_or(0.0),
+            look_target_delta: look
+                .0
+                .map(|t| (t - pos.0).as_vec3()),
         });
     }
 
@@ -2026,6 +2104,10 @@ fn build_app(
         (
             // Body/head decoupling first, so the new BodyYaw drives KCC.
             update_body_head_state,
+            // Phase H: attention/look-at runs after body_yaw is fresh
+            // (so the FOV cone is in the right direction) and before
+            // broadcast so the new target ships out this tick.
+            update_look_targets,
             kcc_move_characters_system,
             physics_step,
             refresh_planet_position_cache,

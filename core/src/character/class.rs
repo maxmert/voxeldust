@@ -226,6 +226,46 @@ pub struct CharacterClass {
     /// raycast (covers small steps, slope crests). Above this we
     /// assume the floor is at the animated position (no lift).
     pub foot_ik_max_ascent: f32,
+
+    // -- Look-at IK (Phase H) ---------------------------------------
+    /// Forward axis of the head + neck bones in their LOCAL frame
+    /// after bind. Mixamo Y-bot via FBX2glTF + Y-up: +Z. The look-at
+    /// solver rotates the bone so this axis points at the target.
+    pub look_forward_local: Vec3,
+    /// Up axis of the head + neck bones in their LOCAL frame after
+    /// bind — used as the YAW axis of the look-at decomposition.
+    /// Mixamo Y-bot: +Y.
+    pub look_up_local: Vec3,
+    /// Fraction of the look-at rotation applied at the NECK bone
+    /// (`0.0..1.0`). Industry convention: ~0.3 — the neck does
+    /// roughly a third of the work, the head finishes. Higher values
+    /// make the upper body lean into the look; lower values produce
+    /// snappy "head only" tracking (uncanny on long turns).
+    pub look_neck_share: f32,
+    /// Hard limits on neck rotation, half-cones in radians.
+    pub look_neck_yaw_limit: f32,
+    pub look_neck_pitch_limit: f32,
+    /// Hard limits on head rotation (applied after neck), half-cones
+    /// in radians. Together with the neck limits this caps the
+    /// reachable target cone (e.g. neck 30° + head 60° = 90°
+    /// effective head turn before the body must rotate).
+    pub look_head_yaw_limit: f32,
+    pub look_head_pitch_limit: f32,
+    /// Maximum range at which a character will pay attention to
+    /// other characters for the "track nearby player" behaviour.
+    /// Beyond this distance other players don't draw the head.
+    pub look_attention_distance: f32,
+    /// Half-angle of the attention FOV cone, in radians. A character
+    /// only registers other players whose direction from this
+    /// character is within this cone of its body-forward — a player
+    /// directly behind is ignored, you have to body-turn to notice
+    /// them. Common AAA value: 60° (π/3) — peripheral-vision wide.
+    pub look_attention_fov_half: f32,
+    /// Vertical offset added to the OBSERVED player's `Position`
+    /// (which is the capsule centre) along shard up to land at
+    /// roughly eye level — gives the look at the right point on the
+    /// other character's head, not their hip.
+    pub look_eye_world_offset: f32,
 }
 
 /// Default humanoid class. Mixamo Y-bot rig (~22 bones), targets the
@@ -303,6 +343,34 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
     // matches the KCC's `autostep_height` so the visual doesn't lag
     // the physics step.
     foot_ik_max_ascent: 0.30,
+
+    // -- Look-at IK ---------------------------------------------------
+    // Mixamo Y-bot via FBX2glTF + Y-up: head/neck bind faces +Z, up = +Y.
+    look_forward_local: Vec3::Z,
+    look_up_local: Vec3::Y,
+    // 30/70 split — industry standard. Neck contributes a subtle lean
+    // that sells the look without flipping the upper body.
+    look_neck_share: 0.30,
+    // Real cervical spine: ~25° yaw, ~15° pitch on the neck itself.
+    // Slightly under-cap so the head finishes the look, even when the
+    // neck has run out of room.
+    look_neck_yaw_limit: 0.4363,   // 25°
+    look_neck_pitch_limit: 0.2618, // 15°
+    // Head joint: ~60° yaw, ~30° pitch — the rest of the cervical range.
+    // Total reach with neck: 85° yaw / 45° pitch — enough for
+    // peripheral-attention turns; deeper turns require body rotation
+    // (the body/head decoupling state machine handles that).
+    look_head_yaw_limit: 1.0472,   // 60°
+    look_head_pitch_limit: 0.5236, // 30°
+    // 30 m: comfortable indoor / surface attention range. Outside this
+    // you barely register another player's facial detail anyway.
+    look_attention_distance: 30.0,
+    // 60° half-cone = 120° total peripheral vision — humans are ~110°
+    // monocular each side; AAA games average ~120° (Detroit, RDR2).
+    look_attention_fov_half: 1.0472,
+    // Player capsule is 1.2 m total height with `Position` at the
+    // centre, so eye level is roughly capsule centre + 0.5 m.
+    look_eye_world_offset: 0.5,
 };
 
 const HUMAN_DEFAULT_CLIPS: [ClipDef; 8] = [
