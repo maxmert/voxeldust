@@ -227,6 +227,36 @@ pub struct CharacterClass {
     /// assume the floor is at the animated position (no lift).
     pub foot_ik_max_ascent: f32,
 
+    // -- Third-person camera (Phase E polish) -----------------------
+    /// Distance behind the head bone the third-person camera sits at
+    /// (along the head's local +Z, which faces backwards in the
+    /// glTF Y-up convention used by Mixamo). Industry default 2.5 m
+    /// — close enough to feel connected to the avatar, far enough
+    /// to see the body and surroundings.
+    pub tp_camera_distance: f32,
+    /// Buffer subtracted from a wall-collision hit when the camera's
+    /// raycast finds geometry between the head and the desired TP
+    /// position. Without this the camera lands flush on the wall and
+    /// the near plane clips through. 10 cm is the AAA sweet spot.
+    pub tp_camera_collision_buffer: f32,
+    /// Lower bound on the TP camera distance after collision pull-in.
+    /// When the player is jammed against a wall and the raycast
+    /// clamps to ~0, falling back to this minimum keeps the camera a
+    /// reasonable distance off the head instead of dropping into FP.
+    pub tp_camera_min_distance: f32,
+    /// Time to interpolate the camera's offset between the FP and TP
+    /// targets when the user toggles modes (V key). Without this the
+    /// transition is a one-frame snap; with it the avatar appears to
+    /// "step out of" the camera, which reads as natural.
+    pub camera_mode_blend_secs: f32,
+    /// Low-pass time constant for the wall-collision-clamped TP
+    /// distance. Smooths sub-block jitter from the head bone bobbing
+    /// across a voxel boundary so the camera doesn't pop in/out by
+    /// 2 m every frame (visible as walls blinking transparent). Keep
+    /// short — this isn't for cinematic damping, it's just to
+    /// suppress 1-frame raycast noise.
+    pub tp_distance_smoothing_secs: f32,
+
     // -- IK blend timings (Phase G + H polish) ----------------------
     /// Time to ramp foot-IK strength UP when the character enters
     /// `Grounded` (e.g. landing from a jump). Slow-in feels like the
@@ -332,7 +362,11 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
     head_yaw_limit: std::f32::consts::FRAC_PI_2,           // 90°
     head_pitch_limit: 1.4835298_f32,                       // 85° in radians
     turn_reanchor_fraction: 0.78,
-    head_yaw_sign: 1.0,
+    // Same convention flip as `body_yaw_sign`: KCC head_yaw is +ve =
+    // CW-from-above (right-of-body), but `Quat::from_rotation_y` is
+    // CCW. Negate so the head visually turns the same direction as
+    // the camera, observable in TP when orbiting around the body.
+    head_yaw_sign: -1.0,
     head_pitch_sign: -1.0, // Mixamo head bone local X is flipped — see field doc.
 
     turn_in_place_duration: 0.5,
@@ -368,6 +402,13 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
     // matches the KCC's `autostep_height` so the visual doesn't lag
     // the physics step.
     foot_ik_max_ascent: 0.30,
+
+    // -- Third-person camera ------------------------------------------
+    tp_camera_distance: 2.5,
+    tp_camera_collision_buffer: 0.10,
+    tp_camera_min_distance: 0.30,
+    camera_mode_blend_secs: 0.30,
+    tp_distance_smoothing_secs: 0.08,
 
     // -- IK blend timings ---------------------------------------------
     // 150 ms feels like the foot deliberately settles after a jump;

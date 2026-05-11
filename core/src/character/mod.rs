@@ -67,7 +67,7 @@ pub use locomotion::{
     CharacterVelocity, GravityOverride, LandedEvent, LocalUp, LocomotionState,
     PlatformSnapSuppressed,
 };
-pub use look_target::LookTarget;
+pub use look_target::{LookAtIkEnabled, LookTarget};
 pub use stance::{CharacterStance, StanceAction};
 pub use state_machine::{apply_update, step_body_head, wrap_pi, BodyHeadUpdate};
 pub use stats::MovementStats;

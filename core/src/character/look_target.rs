@@ -30,6 +30,28 @@ use glam::DVec3;
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub struct LookTarget(pub Option<DVec3>);
 
+/// Opt-in marker for the client-side look-at IK system. Without this
+/// component on the visual entity, the IK is a no-op even if a
+/// `LookTarget` is set.
+///
+/// # Why opt-in?
+///
+/// Players already drive their head pose from their input (camera
+/// yaw/pitch → server `head_yaw`/`head_pitch` → client additive
+/// rotation). Auto-tracking on top of that would FIGHT player
+/// intent: you'd be looking where you click, but the IK would yank
+/// the head toward the nearest neighbour. Bad.
+///
+/// NPCs (future) have no such input — for them, look-at IK *is*
+/// where their attention comes from. They'll spawn with this marker
+/// and the IK will animate their heads naturally.
+///
+/// Today no entity has this marker, so the IK system runs but
+/// matches no visuals (zero per-frame cost). When NPCs land it's a
+/// one-line addition at the visual-spawn site.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct LookAtIkEnabled;
+
 impl LookTarget {
     /// Convenience: `Some(target)` constructor.
     #[inline]

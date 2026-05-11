@@ -56,7 +56,7 @@ use bevy::transform::TransformSystems;
 
 use glam::{DVec3, Quat as GQuat, Vec3 as GVec3};
 
-use voxeldust_core::character::{solve_aim_chain, AimChainInput};
+use voxeldust_core::character::{solve_aim_chain, AimChainInput, LookAtIkEnabled};
 
 use crate::remote::RemotePlayers;
 use crate::shard::{CameraWorldPos, ShardOrigin};
@@ -106,12 +106,18 @@ impl Plugin for CharacterLookIkPlugin {
 fn apply_look_ik(
     mut commands: Commands,
     time: Res<Time>,
-    mut visuals: Query<(
-        Entity,
-        &RemoteCharacterTag,
-        &BoneRegistry,
-        Option<&mut LookIkBlendState>,
-    )>,
+    mut visuals: Query<
+        (
+            Entity,
+            &RemoteCharacterTag,
+            &BoneRegistry,
+            Option<&mut LookIkBlendState>,
+        ),
+        // Opt-in marker — players don't get it (their input drives
+        // the head); NPCs spawn with it so attention behaviour
+        // animates their heads. See `core::character::LookAtIkEnabled`.
+        With<LookAtIkEnabled>,
+    >,
     remote_players: Res<RemotePlayers>,
     asset_registry: Res<CharacterAssetRegistry>,
     camera_world: Res<CameraWorldPos>,

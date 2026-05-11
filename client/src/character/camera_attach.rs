@@ -57,10 +57,15 @@ use bevy::input::ButtonInput;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
-use glam::DVec3;
+use glam::{DVec3, IVec3 as GIVec3, Vec3 as GVec3};
 
+use voxeldust_core::block::{
+    chunk_storage::ChunkStorage, raycast as core_raycast, ship_grid::ShipGrid,
+};
+
+use crate::chunk::{stream::SharedBlockRegistry, ChunkStorageCache};
 use crate::net::NetConnection;
-use crate::shard::{CameraWorldPos, ShardOriginSet};
+use crate::shard::{CameraWorldPos, ShardOrigin, ShardOriginSet};
 
 use super::assets::CharacterAssetRegistry;
 use super::render::{BoneRegistry, RemoteCharacterTag};
@@ -106,6 +111,33 @@ impl Default for CameraMode {
     }
 }
 
+/// Smooth-blend state for the camera-mode transition. Lerps from 0
+/// (FP eye position) to 1 (TP behind-head position) when the user
+/// toggles modes, instead of snapping. Lives as a [`Resource`] (one
+/// camera per client) so the data flow is plain and the smoothing
+/// constants come from `CharacterClass`.
+#[derive(Resource, Default, Debug)]
+pub struct CameraModeBlend {
+    /// Currently rendered blend weight: 0 = pure FP, 1 = pure TP.
+    pub current: f32,
+    /// Where `current` is heading. Updated by [`toggle_camera_mode`]
+    /// (or any future code that flips [`CameraMode`]).
+    pub target: f32,
+}
+
+/// Per-camera low-pass state for the wall-collision-clamped TP
+/// distance. Init to NaN so the first valid raw distance seeds the
+/// filter without a transient jump.
+#[derive(Resource, Debug)]
+pub struct TpDistanceSmoothed {
+    pub distance: f32,
+}
+impl Default for TpDistanceSmoothed {
+    fn default() -> Self {
+        Self { distance: f32::NAN }
+    }
+}
+
 #[derive(SystemSet, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct CharacterCameraSet;
 
@@ -114,16 +146,26 @@ pub struct CharacterCameraPlugin;
 impl Plugin for CharacterCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraMode>()
-            // Update systems — local-visual tagging, mode toggle, FP
-            // body cull, and the camera follow (gated to before the
-            // floating-origin rebase reads CameraWorldPos).
+            .init_resource::<CameraModeBlend>()
+            .init_resource::<TpDistanceSmoothed>()
+            // `camera_follow_head` runs AFTER `PlayerSyncSet` so it
+            // sees the FP eye position `apply_worldstate_pose` just
+            // wrote and ADDITIVELY adds the TP body-back offset on
+            // top. In FP mode the additive offset is zero, so the
+            // value pose.rs wrote stays as-is (no math, no drift,
+            // no GlobalTransform read — the FP path is unchanged).
+            // In TP mode the offset is `body_back * tp_distance *
+            // blend.current`, smoothly animating the camera out
+            // behind the player as V toggles.
             .add_systems(
                 Update,
                 (
                     promote_local_visual,
                     toggle_camera_mode,
                     apply_fp_body_cull,
-                    camera_follow_head.before(ShardOriginSet),
+                    camera_follow_head
+                        .after(crate::camera::PlayerSyncSet)
+                        .before(ShardOriginSet),
                 )
                     .in_set(CharacterCameraSet),
             )
@@ -175,16 +217,31 @@ fn promote_local_visual(
 // 2. Camera mode toggle (V key)
 // ────────────────────────────────────────────────────────────────────
 
-/// V key toggles between FirstPerson and ThirdPerson. Distance
-/// default of 2.5 m matches AAA convention (close enough to feel
-/// connected, far enough to see the body).
-fn toggle_camera_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<CameraMode>) {
+/// V key toggles between FirstPerson and ThirdPerson. Distance is
+/// the per-class TP convention (`tp_camera_distance` in
+/// [`voxeldust_core::character::CharacterClass`]); the actual
+/// rendered distance is wall-collision-clamped each frame in
+/// [`camera_follow_head`].
+fn toggle_camera_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<CameraMode>,
+    mut blend: ResMut<CameraModeBlend>,
+    asset_registry: Res<CharacterAssetRegistry>,
+) {
     if !keys.just_pressed(KeyCode::KeyV) {
         return;
     }
+    let tp_distance = asset_registry
+        .ready(0)
+        .map(|a| a.class.tp_camera_distance)
+        .unwrap_or(2.5);
     *mode = match *mode {
-        CameraMode::FirstPerson => CameraMode::ThirdPerson { distance: 2.5 },
+        CameraMode::FirstPerson => CameraMode::ThirdPerson { distance: tp_distance },
         CameraMode::ThirdPerson { .. } => CameraMode::FirstPerson,
+    };
+    blend.target = match *mode {
+        CameraMode::FirstPerson => 0.0,
+        CameraMode::ThirdPerson { .. } => 1.0,
     };
     info!(?mode, "character camera: mode toggled");
 }
@@ -259,63 +316,188 @@ fn apply_head_local_rotation(
 /// back; that gives a stable result regardless of how far the player
 /// has travelled in absolute world space.
 fn camera_follow_head(
-    local_visual: Query<(&RemoteCharacterTag, &BoneRegistry), With<LocalCharacterTag>>,
+    local_visual: Query<&RemoteCharacterTag, With<LocalCharacterTag>>,
     asset_registry: Res<CharacterAssetRegistry>,
-    global_transforms: Query<&GlobalTransform>,
     mode: Res<CameraMode>,
     mut camera_world: ResMut<CameraWorldPos>,
+    time: Res<Time>,
+    mut blend: ResMut<CameraModeBlend>,
+    mut tp_smoothed: ResMut<TpDistanceSmoothed>,
+    cam_q: Query<&Transform, With<crate::MainCamera>>,
+    remote_players: Res<RemotePlayers>,
+    sources: Res<crate::shard::SourceIndex>,
+    shard_origins: Query<&ShardOrigin>,
+    chunk_storage: Res<ChunkStorageCache>,
+    block_registry: Res<SharedBlockRegistry>,
 ) {
-    let Ok((tag, bones)) = local_visual.single() else {
+    let Ok(tag) = local_visual.single() else {
         return;
     };
-    if !bones.resolved {
-        return;
-    }
-    let Some(assets) = asset_registry.ready(tag.class_id) else {
+    let Some(assets) = asset_registry.ready(0) else {
         return;
     };
     let class = assets.class;
 
-    let Some(head_bone) = bones.get(class.head_bone) else {
+    // -- Advance the FP↔TP smoothing blend ---------------------------
+    blend.target = match *mode {
+        CameraMode::FirstPerson => 0.0,
+        CameraMode::ThirdPerson { .. } => 1.0,
+    };
+    let dt = time.delta().as_secs_f32().min(0.25);
+    let blend_secs = class.camera_mode_blend_secs.max(1e-3);
+    let step = dt / blend_secs;
+    let delta = (blend.target - blend.current).clamp(-step, step);
+    blend.current = (blend.current + delta).clamp(0.0, 1.0);
+
+    // FP — pose.rs already wrote `camera_world.pos = body + EYE`.
+    // We do nothing, leaving the value untouched. No GlobalTransform
+    // read, no math, no per-frame jitter on the rebase base. This is
+    // exactly the FP behaviour confirmed working without blink.
+    if blend.current < 1e-3 {
+        return;
+    }
+
+    // TP (or transitioning). Camera orbits around the body anchor
+    // along the freshly-applied camera direction (`pose.rs` ran in
+    // `PlayerSyncSet` just before us, so `MainCamera.rotation` is
+    // current). Bevy cameras look down -Z, so `rotation * +Z` is
+    // world-space camera-back.
+    let Ok(cam_tf) = cam_q.single() else {
         return;
     };
-    let Ok(head_world) = global_transforms.get(head_bone) else {
-        return;
+    let cam_back_world = cam_tf.rotation * Vec3::Z;
+    let raw_tp_distance = match *mode {
+        CameraMode::ThirdPerson { distance } => distance,
+        CameraMode::FirstPerson => class.tp_camera_distance,
     };
 
-    // GlobalTransform decomposed: position is camera-relative,
-    // rotation is world-space (rebase only shifts translation).
-    let head_pos_relative = head_world.translation();
-    let head_rot_world = head_world.rotation();
-
-    // FP eye offset is in head-bone local frame; rotate by the
-    // head's world rotation to get the world-space delta. The class
-    // type uses workspace `glam::Vec3` (0.29) and Bevy uses its
-    // vendored 0.30 — same memory layout, but the type-system
-    // doesn't know it; cast through tuple.
-    let eye_local_bevy = Vec3::new(
-        class.eye_offset_local.x,
-        class.eye_offset_local.y,
-        class.eye_offset_local.z,
+    // Wall-collision pull-in. RAYCAST FROM THE BODY ANCHOR
+    // (`camera_world.pos`, which is the server-authoritative
+    // `body + EYE_HEIGHT` written by `apply_worldstate_pose`) — NOT
+    // from the head bone. The head bone bobs sub-block per frame
+    // due to the idle / walk animation, which previously caused the
+    // raycast start cell to flip between solid and air, blinking
+    // walls. The body anchor is stable per server tick.
+    let raw_clamped = compute_wall_clamped_distance(
+        tag.player_id,
+        camera_world.pos,
+        cam_back_world,
+        raw_tp_distance,
+        class,
+        &remote_players,
+        &sources,
+        &shard_origins,
+        &chunk_storage,
+        &block_registry.0,
     );
-    // ThirdPerson offset is along world-space camera-back (head's
-    // local +Z, which faces backwards in glTF Y-up convention).
-    let offset_world: Vec3 = match *mode {
-        CameraMode::FirstPerson => head_rot_world * eye_local_bevy,
-        CameraMode::ThirdPerson { distance } => head_rot_world * (Vec3::Z * distance),
+    // Low-pass smoothing on the clamped distance to bridge any
+    // residual frame-to-frame raycast variation (e.g., edge of a
+    // doorway sweeping in/out as the camera orbits past).
+    let tp_distance = if tp_smoothed.distance.is_nan() {
+        tp_smoothed.distance = raw_clamped;
+        raw_clamped
+    } else {
+        let alpha = (dt / class.tp_distance_smoothing_secs.max(1e-3)).clamp(0.0, 1.0);
+        tp_smoothed.distance = tp_smoothed.distance * (1.0 - alpha) + raw_clamped * alpha;
+        tp_smoothed.distance
     };
 
-    // System-space head position = previous_camera_world + relative.
-    // System-space target = head + offset.
-    let target_system: DVec3 = camera_world.pos
-        + DVec3::new(
-            (head_pos_relative.x + offset_world.x) as f64,
-            (head_pos_relative.y + offset_world.y) as f64,
-            (head_pos_relative.z + offset_world.z) as f64,
-        );
-
-    camera_world.pos = target_system;
+    let blended_offset = cam_back_world * (tp_distance * blend.current);
+    camera_world.pos += DVec3::new(
+        blended_offset.x as f64,
+        blended_offset.y as f64,
+        blended_offset.z as f64,
+    );
 }
+
+/// Wall-collision-clamped TP camera distance. Raycasts from
+/// `anchor_world` (the body+EYE position, system-space) along
+/// `direction_world` (the camera-back direction in world). Returns
+/// `raw_distance` when there's no shard info or no obstruction.
+#[allow(clippy::too_many_arguments)]
+fn compute_wall_clamped_distance(
+    player_id: u64,
+    anchor_world: DVec3,
+    direction_world: Vec3,
+    raw_distance: f32,
+    class: &voxeldust_core::character::CharacterClass,
+    remote_players: &RemotePlayers,
+    sources: &crate::shard::SourceIndex,
+    shard_origins: &Query<&ShardOrigin>,
+    chunk_storage: &ChunkStorageCache,
+    block_registry: &voxeldust_core::block::registry::BlockRegistry,
+) -> f32 {
+    let Some(remote) = remote_players.by_id.get(&player_id) else {
+        return raw_distance;
+    };
+    let Some(&source_entity) = sources.by_shard.get(&remote.shard) else {
+        return raw_distance;
+    };
+    let Ok(shard_origin) = shard_origins.get(source_entity) else {
+        return raw_distance;
+    };
+
+    // Anchor → shard-local block coords.
+    let anchor_local_d = shard_origin.rotation.inverse() * (anchor_world - shard_origin.origin);
+    let anchor_local = GVec3::new(
+        anchor_local_d.x as f32,
+        anchor_local_d.y as f32,
+        anchor_local_d.z as f32,
+    );
+
+    // Direction (world) → shard-local.
+    let dir_world_d = DVec3::new(
+        direction_world.x as f64,
+        direction_world.y as f64,
+        direction_world.z as f64,
+    );
+    let dir_local_d = shard_origin.rotation.inverse() * dir_world_d;
+    let dir_local = GVec3::new(
+        dir_local_d.x as f32,
+        dir_local_d.y as f32,
+        dir_local_d.z as f32,
+    )
+    .normalize_or_zero();
+    if dir_local.length_squared() < 0.5 {
+        return raw_distance;
+    }
+
+    let shard = remote.shard;
+    let hit = core_raycast::raycast(anchor_local, dir_local, raw_distance, |x, y, z| {
+        let (chunk_key, lx, ly, lz) = ShipGrid::world_to_chunk(x, y, z);
+        chunk_storage
+            .get(shard, to_bevy_ivec3(chunk_key))
+            .map(|c: &ChunkStorage| block_registry.is_solid(c.get_block(lx, ly, lz)))
+            .unwrap_or(false)
+    });
+    if let Some(hit) = hit {
+        // `face_normal == ZERO` = raycast started inside a solid
+        // block (anchor inside a wall, e.g. server position
+        // momentarily clipped through during transition). Treat as
+        // no-hit so we don't snap-zoom into the player's face.
+        if hit.face_normal == GIVec3::ZERO {
+            return raw_distance;
+        }
+        (hit.distance - class.tp_camera_collision_buffer)
+            .max(class.tp_camera_min_distance)
+            .min(raw_distance)
+    } else {
+        raw_distance
+    }
+}
+
+#[inline]
+fn to_bevy_ivec3(v: GIVec3) -> bevy::math::IVec3 {
+    bevy::math::IVec3::new(v.x, v.y, v.z)
+}
+
+// Wall-collision raycast deliberately not implemented at this stage.
+// The previous attempts caused per-frame "transparent walls" because
+// the head bone's animated Y position straddled voxel boundaries and
+// the raycast result oscillated. We'll re-add it once we have a
+// stable TP baseline confirmed and can sample multiple raycasts (toe
+// + heel + horizontal sweep) for a robust pull-in that doesn't
+// flicker.
 
 // ────────────────────────────────────────────────────────────────────
 // 5. Root-motion stripping
