@@ -1263,6 +1263,9 @@ pub struct ObservableEntityData {
     /// `position` (kept as f32 deltas to avoid f32 precision loss
     /// for very far-from-origin shards).
     pub look_target_delta: Option<glam::Vec3>,
+    /// Per-bone world transforms during the active ragdoll window
+    /// (Phase I). Empty for any state other than `Ragdoll`.
+    pub ragdoll_bones: Vec<crate::character::RagdollBoneTransform>,
 }
 
 #[derive(Debug, Clone)]
@@ -1303,6 +1306,9 @@ pub struct PlayerSnapshotData {
     /// Look-at attention target encoded as a delta from `position`
     /// (Phase H). `None` = no target, head stays in animation pose.
     pub look_target_delta: Option<glam::Vec3>,
+    /// Per-bone world transforms during ragdoll simulation
+    /// (Phase I). Empty for any non-Ragdoll locomotion state.
+    pub ragdoll_bones: Vec<crate::character::RagdollBoneTransform>,
 }
 
 /// Transform of a mechanical sub-grid body (rotor, piston, hinge, slider).
@@ -1530,6 +1536,21 @@ pub(crate) fn encode_observable_entities<'a>(
             let pos = to_fb_vec3d(&e.position);
             let rot = to_fb_quatd(&e.rotation);
             let vel = to_fb_vec3d(&e.velocity);
+            // Phase I ragdoll-bones — encode each bone (vector of
+            // tables) before the ObservableEntity table.
+            let ragdoll_offsets: Vec<_> = e.ragdoll_bones.iter().map(|b| {
+                let bn = builder.create_string(&b.bone_name);
+                fb::RagdollBoneSnapshot::create(builder, &fb::RagdollBoneSnapshotArgs {
+                    bone_name: Some(bn),
+                    pos_x: b.translation.x, pos_y: b.translation.y, pos_z: b.translation.z,
+                    rot_x: b.rotation.x, rot_y: b.rotation.y, rot_z: b.rotation.z, rot_w: b.rotation.w,
+                })
+            }).collect();
+            let ragdoll_bones = if ragdoll_offsets.is_empty() {
+                None
+            } else {
+                Some(builder.create_vector(&ragdoll_offsets))
+            };
             fb::ObservableEntity::create(
                 builder,
                 &fb::ObservableEntityArgs {
@@ -1558,6 +1579,7 @@ pub(crate) fn encode_observable_entities<'a>(
                     look_dx: e.look_target_delta.map(|d| d.x).unwrap_or(0.0),
                     look_dy: e.look_target_delta.map(|d| d.y).unwrap_or(0.0),
                     look_dz: e.look_target_delta.map(|d| d.z).unwrap_or(0.0),
+                    ragdoll_bones,
                 },
             )
         })
@@ -1604,6 +1626,13 @@ pub(crate) fn decode_observable_entities(
                 } else {
                     None
                 },
+                ragdoll_bones: e.ragdoll_bones().map(|v| v.iter().map(|b| {
+                    crate::character::RagdollBoneTransform {
+                        bone_name: b.bone_name().unwrap_or("").to_string(),
+                        translation: glam::Vec3::new(b.pos_x(), b.pos_y(), b.pos_z()),
+                        rotation: glam::Quat::from_xyzw(b.rot_x(), b.rot_y(), b.rot_z(), b.rot_w()),
+                    }
+                }).collect()).unwrap_or_default(),
             }
         })
         .collect()
@@ -2383,6 +2412,21 @@ impl ServerMsg {
                     let pos = to_fb_vec3d(&p.position);
                     let rot = to_fb_quatd(&p.rotation);
                     let vel = to_fb_vec3d(&p.velocity);
+                    // Phase I: ragdoll bones — empty vector when not
+                    // ragdolling, otherwise per-bone world transforms.
+                    let ragdoll_offsets: Vec<_> = p.ragdoll_bones.iter().map(|b| {
+                        let name = builder.create_string(&b.bone_name);
+                        fb::RagdollBoneSnapshot::create(&mut builder, &fb::RagdollBoneSnapshotArgs {
+                            bone_name: Some(name),
+                            pos_x: b.translation.x, pos_y: b.translation.y, pos_z: b.translation.z,
+                            rot_x: b.rotation.x, rot_y: b.rotation.y, rot_z: b.rotation.z, rot_w: b.rotation.w,
+                        })
+                    }).collect();
+                    let ragdoll_bones = if ragdoll_offsets.is_empty() {
+                        None
+                    } else {
+                        Some(builder.create_vector(&ragdoll_offsets))
+                    };
                     fb::PlayerSnapshot::create(&mut builder, &fb::PlayerSnapshotArgs {
                         player_id: p.player_id,
                         position: Some(&pos),
@@ -2404,6 +2448,7 @@ impl ServerMsg {
                         look_dx: p.look_target_delta.map(|d| d.x).unwrap_or(0.0),
                         look_dy: p.look_target_delta.map(|d| d.y).unwrap_or(0.0),
                         look_dz: p.look_target_delta.map(|d| d.z).unwrap_or(0.0),
+                        ragdoll_bones,
                     })
                 }).collect();
                 let players = builder.create_vector(&snapshots);
@@ -3052,6 +3097,13 @@ impl ServerMsg {
                             } else {
                                 None
                             },
+                            ragdoll_bones: p.ragdoll_bones().map(|v| v.iter().map(|b| {
+                                crate::character::RagdollBoneTransform {
+                                    bone_name: b.bone_name().unwrap_or("").to_string(),
+                                    translation: glam::Vec3::new(b.pos_x(), b.pos_y(), b.pos_z()),
+                                    rotation: glam::Quat::from_xyzw(b.rot_x(), b.rot_y(), b.rot_z(), b.rot_w()),
+                                }
+                            }).collect()).unwrap_or_default(),
                         }
                     }).collect()
                 }).unwrap_or_default();
@@ -3633,6 +3685,7 @@ mod tests {
                 turn_target_yaw: 0.0,
                 turn_t: 0.0,
                 look_target_delta: None,
+                ragdoll_bones: Vec::new(),
             }],
             bodies: vec![CelestialBodyData {
                 body_id: 0, position: DVec3::ZERO, radius: 6.96e8, color: [1.0, 0.95, 0.8],
@@ -3686,6 +3739,7 @@ mod tests {
                 turn_target_yaw: 0.0,
                 turn_t: 0.0,
                 look_target_delta: None,
+                ragdoll_bones: Vec::new(),
             }],
         });
         let bytes = msg.serialize();

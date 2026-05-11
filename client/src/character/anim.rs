@@ -330,6 +330,7 @@ mod tests {
             turn_target_yaw: 0.0,
             turn_t: 0.0,
             look_target_delta: None,
+            ragdoll_bones: Vec::new(),
         }
     }
 

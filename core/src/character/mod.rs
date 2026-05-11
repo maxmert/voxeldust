@@ -45,6 +45,7 @@ pub mod hooks;
 pub mod ik;
 pub mod locomotion;
 pub mod look_target;
+pub mod ragdoll;
 pub mod stance;
 pub mod state_machine;
 pub mod stats;
@@ -68,6 +69,11 @@ pub use locomotion::{
     PlatformSnapSuppressed,
 };
 pub use look_target::{LookAtIkEnabled, LookTarget};
+pub use ragdoll::{
+    RagdollBoneSpec, RagdollBoneTransform, RagdollJointType, RagdollLifetime,
+};
+#[cfg(feature = "rapier")]
+pub use ragdoll::{despawn_ragdoll_bodies, spawn_ragdoll_bodies, RagdollHandles};
 pub use stance::{CharacterStance, StanceAction};
 pub use state_machine::{apply_update, step_body_head, wrap_pi, BodyHeadUpdate};
 pub use stats::MovementStats;

@@ -1176,6 +1176,72 @@ fn update_body_head_state(
     }
 }
 
+/// Phase I — read each ragdoll body's pose from rapier and pack into
+/// the per-tick wire snapshot. See ship-shard's matching helper for
+/// the full rationale; the two are kept in lockstep to avoid
+/// observable shard-vs-shard divergence.
+fn collect_ragdoll_bones(
+    handles: Option<&voxeldust_core::character::RagdollHandles>,
+    rapier: &RapierContext,
+) -> Vec<voxeldust_core::character::RagdollBoneTransform> {
+    let Some(handles) = handles else {
+        return Vec::new();
+    };
+    handles
+        .bodies
+        .iter()
+        .filter_map(|(name, h)| {
+            let body = rapier.rigid_body_set.get(*h)?;
+            let pose = body.position();
+            Some(voxeldust_core::character::RagdollBoneTransform {
+                bone_name: name.to_string(),
+                translation: glam::Vec3::new(
+                    pose.translation.x,
+                    pose.translation.y,
+                    pose.translation.z,
+                ),
+                rotation: glam::Quat::from_xyzw(
+                    pose.rotation.x,
+                    pose.rotation.y,
+                    pose.rotation.z,
+                    pose.rotation.w,
+                ),
+            })
+        })
+        .collect()
+}
+
+/// Phase I — tick down each `RagdollLifetime`. When the timer expires,
+/// the rapier bodies are removed and the entity despawned. No-op
+/// every tick until a death event ever inserts a ragdoll.
+fn update_ragdoll_lifetime(
+    mut commands: Commands,
+    mut rapier: ResMut<RapierContext>,
+    integration: Res<PlanetIntegrationDt>,
+    mut ragdolls: Query<(
+        Entity,
+        &voxeldust_core::character::RagdollHandles,
+        &mut voxeldust_core::character::RagdollLifetime,
+    )>,
+) {
+    let dt = integration.0;
+    for (entity, handles, mut lifetime) in &mut ragdolls {
+        if !lifetime.tick(dt) {
+            continue;
+        }
+        let ctx = &mut *rapier;
+        voxeldust_core::character::despawn_ragdoll_bodies(
+            &mut ctx.rigid_body_set,
+            &mut ctx.collider_set,
+            &mut ctx.impulse_joint_set,
+            &mut ctx.multibody_joint_set,
+            &mut ctx.island_manager,
+            handles,
+        );
+        commands.entity(entity).despawn();
+    }
+}
+
 /// Phase H — populate each player's `LookTarget` with the world-space
 /// position of the *nearest other player* that lies inside their
 /// peripheral attention cone. Falls back to `None` when the player
@@ -1720,6 +1786,8 @@ fn broadcast_world_state(
             &LocomotionState,
             Option<&TurnInPlace>,
             &voxeldust_core::character::LookTarget,
+            // Phase I: present only while ragdolling.
+            Option<&voxeldust_core::character::RagdollHandles>,
         ),
         With<PlanetPlayer>,
     >,
@@ -1732,10 +1800,14 @@ fn broadcast_world_state(
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
     external: Res<ExternalEntities>,
+    // Phase I: needed for `collect_ragdoll_bones` to read each
+    // active ragdoll body's pose. Read-only — broadcast doesn't
+    // mutate the rapier world.
+    rapier: Res<RapierContext>,
 ) {
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, body, head_y, head_p, vel, loco, turn, look)| PlayerSnapshotData {
+        .map(|(sid, _, pos, body, head_y, head_p, vel, loco, turn, look, ragdoll)| PlayerSnapshotData {
             player_id: sid.0.0,
             position: pos.0,
             // Identity for the planet shard. The camera composes
@@ -1766,6 +1838,7 @@ fn broadcast_world_state(
             look_target_delta: look
                 .0
                 .map(|t| (t - pos.0).as_vec3()),
+            ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
         })
         .collect();
 
@@ -1843,7 +1916,7 @@ fn broadcast_world_state(
         entity.position = e.position - planet_pos.0;
         entities.push(entity);
     }
-    for (sid, name, pos, body, head_y, head_p, vel, loco, turn, look) in players.iter() {
+    for (sid, name, pos, body, head_y, head_p, vel, loco, turn, look, ragdoll) in players.iter() {
         entities.push(ObservableEntityData {
             entity_id: sid.0.0,
             kind: EntityKind::GroundedPlayer,
@@ -1870,6 +1943,7 @@ fn broadcast_world_state(
             look_target_delta: look
                 .0
                 .map(|t| (t - pos.0).as_vec3()),
+            ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
         });
     }
 
@@ -2142,6 +2216,9 @@ fn build_app(
             // (so the FOV cone is in the right direction) and before
             // broadcast so the new target ships out this tick.
             update_look_targets,
+            // Phase I: ragdoll lifetime tick — see ship-shard's
+            // matching note for the rationale.
+            update_ragdoll_lifetime,
             kcc_move_characters_system,
             physics_step,
             refresh_planet_position_cache,

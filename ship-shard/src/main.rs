@@ -2577,6 +2577,80 @@ fn update_body_head_state(
     }
 }
 
+/// Phase I — read each ragdoll body's pose from rapier and pack into
+/// the per-tick wire snapshot. Returns an empty vector when the
+/// character isn't ragdolling (no `RagdollHandles` component) so the
+/// FlatBuffers vector field is omitted.
+fn collect_ragdoll_bones(
+    handles: Option<&voxeldust_core::character::RagdollHandles>,
+    rapier: &RapierContext,
+) -> Vec<voxeldust_core::character::RagdollBoneTransform> {
+    let Some(handles) = handles else {
+        return Vec::new();
+    };
+    handles
+        .bodies
+        .iter()
+        .filter_map(|(name, h)| {
+            let body = rapier.rigid_body_set.get(*h)?;
+            let pose = body.position();
+            // Rapier 0.32 uses glamx-bundled glam 0.30; workspace
+            // glam is 0.29. Same memory layout, different types —
+            // convert at the boundary.
+            Some(voxeldust_core::character::RagdollBoneTransform {
+                bone_name: name.to_string(),
+                translation: glam::Vec3::new(
+                    pose.translation.x,
+                    pose.translation.y,
+                    pose.translation.z,
+                ),
+                rotation: glam::Quat::from_xyzw(
+                    pose.rotation.x,
+                    pose.rotation.y,
+                    pose.rotation.z,
+                    pose.rotation.w,
+                ),
+            })
+        })
+        .collect()
+}
+
+/// Phase I — tick down each `RagdollLifetime`. When the timer
+/// expires the dynamic bodies + joints are removed from the rapier
+/// world AND the character entity is despawned. Until a death
+/// event ever inserts a `RagdollLifetime` this is a no-op every
+/// tick.
+fn update_ragdoll_lifetime(
+    mut commands: Commands,
+    mut rapier: ResMut<RapierContext>,
+    integration: Res<ShipIntegrationDt>,
+    mut ragdolls: Query<(
+        Entity,
+        &voxeldust_core::character::RagdollHandles,
+        &mut voxeldust_core::character::RagdollLifetime,
+    )>,
+) {
+    let dt = integration.0;
+    for (entity, handles, mut lifetime) in &mut ragdolls {
+        if !lifetime.tick(dt) {
+            continue;
+        }
+        // Lifetime expired — clean up the rapier world and the
+        // entity. Future loot system: instead of `despawn`, swap
+        // for a corpse interactable component here.
+        let ctx = &mut *rapier;
+        voxeldust_core::character::despawn_ragdoll_bodies(
+            &mut ctx.rigid_body_set,
+            &mut ctx.collider_set,
+            &mut ctx.impulse_joint_set,
+            &mut ctx.multibody_joint_set,
+            &mut ctx.island_manager,
+            handles,
+        );
+        commands.entity(entity).despawn();
+    }
+}
+
 /// Phase H — populate each player's `LookTarget` with the world-space
 /// position of the *nearest other player* in the ship interior that
 /// lies inside the peripheral attention cone. Mirrors the
@@ -3131,6 +3205,11 @@ fn broadcast_world_state(
             &LocomotionState,
             Option<&TurnInPlace>,
             &voxeldust_core::character::LookTarget,
+            // Phase I: present only while the character is mid-
+            // ragdoll. Broadcast reads each body's pose from
+            // `rapier.rigid_body_set` and ships the per-bone
+            // transforms in `PlayerSnapshotData.ragdoll_bones`.
+            Option<&voxeldust_core::character::RagdollHandles>,
         ),
         With<Player>,
     >,
@@ -3201,7 +3280,7 @@ fn broadcast_world_state(
     // avatar animation is wired up.
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, seated, body, head_y, head_p, vel, loco, turn, look)| {
+        .map(|(sid, _, pos, seated, body, head_y, head_p, vel, loco, turn, look, ragdoll)| {
             let pos_d = DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64);
             PlayerSnapshotData {
                 player_id: sid.0.0,
@@ -3221,6 +3300,7 @@ fn broadcast_world_state(
                 turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
                 turn_t: turn.map(|t| t.t).unwrap_or(0.0),
                 look_target_delta: look.0.map(|t| (t - pos_d).as_vec3()),
+                ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
             }
         })
         .collect();
@@ -3274,6 +3354,8 @@ fn broadcast_world_state(
         turn_target_yaw: 0.0,
         turn_t: 0.0,
         look_target_delta: None,
+        // Ships never ragdoll.
+        ragdoll_bones: Vec::new(),
     });
     for e in &external.entities {
         let mut entity = e.clone();
@@ -3286,7 +3368,7 @@ fn broadcast_world_state(
         }
         entities.push(entity);
     }
-    for (sid, name, pos, seated, body, head_y, head_p, vel, loco, turn, look) in players.iter() {
+    for (sid, name, pos, seated, body, head_y, head_p, vel, loco, turn, look, ragdoll) in players.iter() {
         // Kind reflects the player's actual posture. Copy-paste bug here
         // previously emitted `Seated` in both branches, which permanently
         // stuck every client's pilot-mode detection on.
@@ -3323,6 +3405,10 @@ fn broadcast_world_state(
             turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
             turn_t: turn.map(|t| t.t).unwrap_or(0.0),
             look_target_delta: look.0.map(|t| (t - pos_d).as_vec3()),
+            // Mirror what `PlayerSnapshot.ragdoll_bones` ships — the
+            // unified ObservableEntity ingestion path is the one the
+            // client renders from.
+            ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
         });
     }
 
@@ -8952,6 +9038,12 @@ fn build_ship_interior(
             // (FOV cone direction) and before broadcast so the new
             // target ships out this tick.
             update_look_targets,
+            // Phase I: ragdoll lifetime tick — counts down each
+            // active ragdoll and despawns rapier bodies + entity on
+            // expiry. No-op until a death event ever spawns a
+            // ragdoll. Runs after the physics step so the despawn
+            // doesn't yank a body out from under the integrator.
+            update_ragdoll_lifetime,
             kcc_move_characters_system,
             physics_pipeline_step,
             sync_position_from_kcc,

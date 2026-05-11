@@ -5680,6 +5680,7 @@ impl<'a> ObservableEntity<'a> {
   pub const VT_LOOK_DX: ::flatbuffers::VOffsetT = 48;
   pub const VT_LOOK_DY: ::flatbuffers::VOffsetT = 50;
   pub const VT_LOOK_DZ: ::flatbuffers::VOffsetT = 52;
+  pub const VT_RAGDOLL_BONES: ::flatbuffers::VOffsetT = 54;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5693,6 +5694,7 @@ impl<'a> ObservableEntity<'a> {
     let mut builder = ObservableEntityBuilder::new(_fbb);
     builder.add_shard_id(args.shard_id);
     builder.add_entity_id(args.entity_id);
+    if let Some(x) = args.ragdoll_bones { builder.add_ragdoll_bones(x); }
     builder.add_look_dz(args.look_dz);
     builder.add_look_dy(args.look_dy);
     builder.add_look_dx(args.look_dx);
@@ -5907,6 +5909,13 @@ impl<'a> ObservableEntity<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(ObservableEntity::VT_LOOK_DZ, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn ragdoll_bones(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>(ObservableEntity::VT_RAGDOLL_BONES, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
@@ -5940,6 +5949,7 @@ impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
      .visit_field::<f32>("look_dx", Self::VT_LOOK_DX, false)?
      .visit_field::<f32>("look_dy", Self::VT_LOOK_DY, false)?
      .visit_field::<f32>("look_dz", Self::VT_LOOK_DZ, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>("ragdoll_bones", Self::VT_RAGDOLL_BONES, false)?
      .finish();
     Ok(())
   }
@@ -5970,6 +5980,7 @@ pub struct ObservableEntityArgs<'a> {
     pub look_dx: f32,
     pub look_dy: f32,
     pub look_dz: f32,
+    pub ragdoll_bones: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'a>>>>>,
 }
 impl<'a> Default for ObservableEntityArgs<'a> {
   #[inline]
@@ -6000,6 +6011,7 @@ impl<'a> Default for ObservableEntityArgs<'a> {
       look_dx: 0.0,
       look_dy: 0.0,
       look_dz: 0.0,
+      ragdoll_bones: None,
     }
   }
 }
@@ -6110,6 +6122,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ObservableEntityBuilder<'a, '
     self.fbb_.push_slot::<f32>(ObservableEntity::VT_LOOK_DZ, look_dz, 0.0);
   }
   #[inline]
+  pub fn add_ragdoll_bones(&mut self, ragdoll_bones: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ObservableEntity::VT_RAGDOLL_BONES, ragdoll_bones);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ObservableEntityBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ObservableEntityBuilder {
@@ -6152,6 +6168,7 @@ impl ::core::fmt::Debug for ObservableEntity<'_> {
       ds.field("look_dx", &self.look_dx());
       ds.field("look_dy", &self.look_dy());
       ds.field("look_dz", &self.look_dz());
+      ds.field("ragdoll_bones", &self.ragdoll_bones());
       ds.finish()
   }
 }
@@ -13125,6 +13142,7 @@ impl<'a> PlayerSnapshot<'a> {
   pub const VT_LOOK_DX: ::flatbuffers::VOffsetT = 38;
   pub const VT_LOOK_DY: ::flatbuffers::VOffsetT = 40;
   pub const VT_LOOK_DZ: ::flatbuffers::VOffsetT = 42;
+  pub const VT_RAGDOLL_BONES: ::flatbuffers::VOffsetT = 44;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -13137,6 +13155,7 @@ impl<'a> PlayerSnapshot<'a> {
   ) -> ::flatbuffers::WIPOffset<PlayerSnapshot<'bldr>> {
     let mut builder = PlayerSnapshotBuilder::new(_fbb);
     builder.add_player_id(args.player_id);
+    if let Some(x) = args.ragdoll_bones { builder.add_ragdoll_bones(x); }
     builder.add_look_dz(args.look_dz);
     builder.add_look_dy(args.look_dy);
     builder.add_look_dx(args.look_dx);
@@ -13306,6 +13325,13 @@ impl<'a> PlayerSnapshot<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_LOOK_DZ, Some(0.0)).unwrap()}
   }
+  #[inline]
+  pub fn ragdoll_bones(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>(PlayerSnapshot::VT_RAGDOLL_BONES, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
@@ -13334,6 +13360,7 @@ impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
      .visit_field::<f32>("look_dx", Self::VT_LOOK_DX, false)?
      .visit_field::<f32>("look_dy", Self::VT_LOOK_DY, false)?
      .visit_field::<f32>("look_dz", Self::VT_LOOK_DZ, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>("ragdoll_bones", Self::VT_RAGDOLL_BONES, false)?
      .finish();
     Ok(())
   }
@@ -13359,6 +13386,7 @@ pub struct PlayerSnapshotArgs<'a> {
     pub look_dx: f32,
     pub look_dy: f32,
     pub look_dz: f32,
+    pub ragdoll_bones: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'a>>>>>,
 }
 impl<'a> Default for PlayerSnapshotArgs<'a> {
   #[inline]
@@ -13384,6 +13412,7 @@ impl<'a> Default for PlayerSnapshotArgs<'a> {
       look_dx: 0.0,
       look_dy: 0.0,
       look_dz: 0.0,
+      ragdoll_bones: None,
     }
   }
 }
@@ -13474,6 +13503,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerSnapshotBuilder<'a, 'b,
     self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_LOOK_DZ, look_dz, 0.0);
   }
   #[inline]
+  pub fn add_ragdoll_bones(&mut self, ragdoll_bones: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PlayerSnapshot::VT_RAGDOLL_BONES, ragdoll_bones);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerSnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerSnapshotBuilder {
@@ -13511,6 +13544,227 @@ impl ::core::fmt::Debug for PlayerSnapshot<'_> {
       ds.field("look_dx", &self.look_dx());
       ds.field("look_dy", &self.look_dy());
       ds.field("look_dz", &self.look_dz());
+      ds.field("ragdoll_bones", &self.ragdoll_bones());
+      ds.finish()
+  }
+}
+pub enum RagdollBoneSnapshotOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Per-bone transform during ragdoll simulation. See
+/// `PlayerSnapshot.ragdoll_bones`.
+pub struct RagdollBoneSnapshot<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RagdollBoneSnapshot<'a> {
+  type Inner = RagdollBoneSnapshot<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RagdollBoneSnapshot<'a> {
+  pub const VT_BONE_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_POS_X: ::flatbuffers::VOffsetT = 6;
+  pub const VT_POS_Y: ::flatbuffers::VOffsetT = 8;
+  pub const VT_POS_Z: ::flatbuffers::VOffsetT = 10;
+  pub const VT_ROT_X: ::flatbuffers::VOffsetT = 12;
+  pub const VT_ROT_Y: ::flatbuffers::VOffsetT = 14;
+  pub const VT_ROT_Z: ::flatbuffers::VOffsetT = 16;
+  pub const VT_ROT_W: ::flatbuffers::VOffsetT = 18;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RagdollBoneSnapshot { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RagdollBoneSnapshotArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RagdollBoneSnapshot<'bldr>> {
+    let mut builder = RagdollBoneSnapshotBuilder::new(_fbb);
+    builder.add_rot_w(args.rot_w);
+    builder.add_rot_z(args.rot_z);
+    builder.add_rot_y(args.rot_y);
+    builder.add_rot_x(args.rot_x);
+    builder.add_pos_z(args.pos_z);
+    builder.add_pos_y(args.pos_y);
+    builder.add_pos_x(args.pos_x);
+    if let Some(x) = args.bone_name { builder.add_bone_name(x); }
+    builder.finish()
+  }
+
+
+  /// Mixamo-convention bone name (e.g. `mixamorig:LeftLeg`).
+  #[inline]
+  pub fn bone_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(RagdollBoneSnapshot::VT_BONE_NAME, None)}
+  }
+  /// Translation in shard-local coords.
+  #[inline]
+  pub fn pos_x(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(RagdollBoneSnapshot::VT_POS_X, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn pos_y(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(RagdollBoneSnapshot::VT_POS_Y, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn pos_z(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(RagdollBoneSnapshot::VT_POS_Z, Some(0.0)).unwrap()}
+  }
+  /// Unit quaternion (XYZW).
+  #[inline]
+  pub fn rot_x(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(RagdollBoneSnapshot::VT_ROT_X, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn rot_y(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(RagdollBoneSnapshot::VT_ROT_Y, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn rot_z(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(RagdollBoneSnapshot::VT_ROT_Z, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn rot_w(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(RagdollBoneSnapshot::VT_ROT_W, Some(1.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RagdollBoneSnapshot<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("bone_name", Self::VT_BONE_NAME, false)?
+     .visit_field::<f32>("pos_x", Self::VT_POS_X, false)?
+     .visit_field::<f32>("pos_y", Self::VT_POS_Y, false)?
+     .visit_field::<f32>("pos_z", Self::VT_POS_Z, false)?
+     .visit_field::<f32>("rot_x", Self::VT_ROT_X, false)?
+     .visit_field::<f32>("rot_y", Self::VT_ROT_Y, false)?
+     .visit_field::<f32>("rot_z", Self::VT_ROT_Z, false)?
+     .visit_field::<f32>("rot_w", Self::VT_ROT_W, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RagdollBoneSnapshotArgs<'a> {
+    pub bone_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub pos_x: f32,
+    pub pos_y: f32,
+    pub pos_z: f32,
+    pub rot_x: f32,
+    pub rot_y: f32,
+    pub rot_z: f32,
+    pub rot_w: f32,
+}
+impl<'a> Default for RagdollBoneSnapshotArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RagdollBoneSnapshotArgs {
+      bone_name: None,
+      pos_x: 0.0,
+      pos_y: 0.0,
+      pos_z: 0.0,
+      rot_x: 0.0,
+      rot_y: 0.0,
+      rot_z: 0.0,
+      rot_w: 1.0,
+    }
+  }
+}
+
+pub struct RagdollBoneSnapshotBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RagdollBoneSnapshotBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_bone_name(&mut self, bone_name: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RagdollBoneSnapshot::VT_BONE_NAME, bone_name);
+  }
+  #[inline]
+  pub fn add_pos_x(&mut self, pos_x: f32) {
+    self.fbb_.push_slot::<f32>(RagdollBoneSnapshot::VT_POS_X, pos_x, 0.0);
+  }
+  #[inline]
+  pub fn add_pos_y(&mut self, pos_y: f32) {
+    self.fbb_.push_slot::<f32>(RagdollBoneSnapshot::VT_POS_Y, pos_y, 0.0);
+  }
+  #[inline]
+  pub fn add_pos_z(&mut self, pos_z: f32) {
+    self.fbb_.push_slot::<f32>(RagdollBoneSnapshot::VT_POS_Z, pos_z, 0.0);
+  }
+  #[inline]
+  pub fn add_rot_x(&mut self, rot_x: f32) {
+    self.fbb_.push_slot::<f32>(RagdollBoneSnapshot::VT_ROT_X, rot_x, 0.0);
+  }
+  #[inline]
+  pub fn add_rot_y(&mut self, rot_y: f32) {
+    self.fbb_.push_slot::<f32>(RagdollBoneSnapshot::VT_ROT_Y, rot_y, 0.0);
+  }
+  #[inline]
+  pub fn add_rot_z(&mut self, rot_z: f32) {
+    self.fbb_.push_slot::<f32>(RagdollBoneSnapshot::VT_ROT_Z, rot_z, 0.0);
+  }
+  #[inline]
+  pub fn add_rot_w(&mut self, rot_w: f32) {
+    self.fbb_.push_slot::<f32>(RagdollBoneSnapshot::VT_ROT_W, rot_w, 1.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RagdollBoneSnapshotBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RagdollBoneSnapshotBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RagdollBoneSnapshot<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RagdollBoneSnapshot<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RagdollBoneSnapshot");
+      ds.field("bone_name", &self.bone_name());
+      ds.field("pos_x", &self.pos_x());
+      ds.field("pos_y", &self.pos_y());
+      ds.field("pos_z", &self.pos_z());
+      ds.field("rot_x", &self.rot_x());
+      ds.field("rot_y", &self.rot_y());
+      ds.field("rot_z", &self.rot_z());
+      ds.field("rot_w", &self.rot_w());
       ds.finish()
   }
 }

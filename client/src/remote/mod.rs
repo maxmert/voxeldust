@@ -68,6 +68,11 @@ pub struct RemoteEntity {
     /// to the animation pose. The client converts to absolute world
     /// space at render time.
     pub look_target_delta: Option<glam::Vec3>,
+    /// Per-bone world transforms during the active ragdoll window
+    /// (Phase I). Empty for any state other than `Ragdoll`. Bones
+    /// are identified by name (Mixamo convention) so the wire
+    /// format is robust to per-class skeleton spec changes.
+    pub ragdoll_bones: Vec<voxeldust_core::character::RagdollBoneTransform>,
 }
 
 /// Remote players (EVA + grounded + seated, excluding the own player).
@@ -235,5 +240,11 @@ fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
         turn_target_yaw: e.turn_target_yaw,
         turn_t: e.turn_t,
         look_target_delta: e.look_target_delta,
+        // Phase I — the wire format on `ObservableEntity` mirrors
+        // `PlayerSnapshot` so the unified ingestion path renders
+        // ragdolls directly. Cloned (rather than moved) so the
+        // source data stays intact for any other system reading
+        // the WorldState the same tick.
+        ragdoll_bones: e.ragdoll_bones.clone(),
     }
 }

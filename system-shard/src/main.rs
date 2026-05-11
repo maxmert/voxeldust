@@ -4707,6 +4707,9 @@ fn eva_broadcast(
                 // (Phase H scope is on-foot walkers in ship + planet
                 // shards). `None` keeps the renderer in animation pose.
                 look_target_delta: None,
+                // EVA can't ragdoll on the system shard yet
+                // (Phase I owns that on the on-foot shards only).
+                ragdoll_bones: Vec::new(),
             }
         })
         .collect();
@@ -5266,6 +5269,9 @@ struct AoiCandidate {
     // (Phase H). System-shard AOI defaults to `None`; the actual
     // target arrives from the planet/ship shard's broadcast.
     look_target_delta: Option<glam::Vec3>,
+    // Ragdoll bones forwarded from authoritative shards (Phase I).
+    // Empty unless the upstream shard simulates a ragdoll.
+    ragdoll_bones: Vec<voxeldust_core::character::RagdollBoneTransform>,
 }
 
 impl AoiCandidate {
@@ -5305,6 +5311,7 @@ impl AoiCandidate {
             turn_target_yaw: 0.0,
             turn_t: 0.0,
             look_target_delta: None,
+            ragdoll_bones: Vec::new(),
         }
     }
 }
@@ -5447,6 +5454,10 @@ fn compute_aoi(
             // verbatim — surface players' look targets originate
             // on planet/ship shards.
             look_target_delta: c.look_target_delta,
+            // Same for ragdoll bones — system-shard is a pass-through
+            // for AOI relay; the ragdoll itself simulates on the
+            // upstream shard.
+            ragdoll_bones: c.ragdoll_bones.clone(),
         });
     }
     out

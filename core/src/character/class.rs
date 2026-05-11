@@ -11,6 +11,7 @@
 //! audible footsteps follow automatically.
 
 use super::components::CharacterCapsule;
+use super::ragdoll::{RagdollBoneSpec, RagdollJointType};
 use glam::Vec3;
 
 /// Stable label for a clip slot in the animation graph. Phase D maps
@@ -321,6 +322,17 @@ pub struct CharacterClass {
     /// roughly eye level — gives the look at the right point on the
     /// other character's head, not their hip.
     pub look_eye_world_offset: f32,
+
+    // -- Ragdoll (Phase I) ------------------------------------------
+    /// How long the dynamic ragdoll bodies persist after death
+    /// before the entity despawns. AAA convention: 4–6 s — long
+    /// enough to read as "they fell" before bodies vanish, short
+    /// enough that 100 stacked corpses don't tank the physics step.
+    pub ragdoll_lifetime_secs: f32,
+    /// Skeleton spec used to build the ragdoll. Ordered parent-
+    /// before-child so [`super::ragdoll::spawn_ragdoll_bodies`] can
+    /// chain world poses in one pass.
+    pub ragdoll_bones: &'static [RagdollBoneSpec],
 }
 
 /// Default humanoid class. Mixamo Y-bot rig (~22 bones), targets the
@@ -454,7 +466,209 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
     // Player capsule is 1.2 m total height with `Position` at the
     // centre, so eye level is roughly capsule centre + 0.5 m.
     look_eye_world_offset: 0.5,
+
+    // -- Ragdoll ------------------------------------------------------
+    ragdoll_lifetime_secs: 5.0,
+    ragdoll_bones: &HUMAN_DEFAULT_RAGDOLL_BONES,
 };
+
+/// Mixamo Y-bot rag-doll skeleton — 13 segments + biomechanical
+/// joint limits. Parent-before-child order; `spawn_ragdoll_bodies`
+/// chains the world poses in one pass.
+///
+/// Capsule sizes are in metres for a 1.6 m-tall humanoid. Mass
+/// distribution sums to ~70 kg, weighted heavier near the pelvis so
+/// the ragdoll lands butt-first instead of fluttering. Joint cones
+/// match the lower bound of real-human range-of-motion (Mobile
+/// AAA convention — slightly under-articulated reads as more
+/// natural than full ROM, which feels rubbery).
+const HUMAN_DEFAULT_RAGDOLL_BONES: [RagdollBoneSpec; 13] = [
+    // Root: pelvis. World-positioned at the dying character's hips.
+    RagdollBoneSpec {
+        bone_name: "mixamorig:Hips",
+        parent_bone: None,
+        capsule_half_height: 0.05,
+        capsule_radius: 0.12,
+        mass: 12.0,
+        local_anchor_in_parent: Vec3::ZERO,
+        local_anchor_in_self: Vec3::ZERO,
+        joint_type: RagdollJointType::Root,
+        joint_yaw_limit: 0.0,
+        joint_pitch_limit: 0.0,
+        joint_roll_limit: 0.0,
+    },
+    // Torso (Hips → Neck). Spine + Chest combined into one segment
+    // for a clean, stable ragdoll. A 3-segment spine looks better but
+    // costs solver iterations and tends to noodle on contact.
+    RagdollBoneSpec {
+        bone_name: "mixamorig:Spine",
+        parent_bone: Some("mixamorig:Hips"),
+        capsule_half_height: 0.20,
+        capsule_radius: 0.10,
+        mass: 14.0,
+        // Rises from the pelvis along +Y by capsule length.
+        local_anchor_in_parent: Vec3::new(0.0, 0.10, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, -0.20, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 0.5236,    // 30°
+        joint_pitch_limit: 0.5236,  // 30°
+        joint_roll_limit: 0.3491,   // 20°
+    },
+    // Head (sits on top of spine).
+    RagdollBoneSpec {
+        bone_name: "mixamorig:Head",
+        parent_bone: Some("mixamorig:Spine"),
+        capsule_half_height: 0.06,
+        capsule_radius: 0.10,
+        mass: 5.0,
+        local_anchor_in_parent: Vec3::new(0.0, 0.20, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, -0.06, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 1.0472,    // 60°
+        joint_pitch_limit: 0.7854,  // 45°
+        joint_roll_limit: 0.5236,   // 30°
+    },
+    // Left arm chain.
+    RagdollBoneSpec {
+        bone_name: "mixamorig:LeftArm",
+        parent_bone: Some("mixamorig:Spine"),
+        capsule_half_height: 0.13,
+        capsule_radius: 0.05,
+        mass: 3.0,
+        // Out the side of the chest, near the top.
+        local_anchor_in_parent: Vec3::new(0.18, 0.15, 0.0),
+        local_anchor_in_self: Vec3::new(-0.13, 0.0, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 1.5708,    // 90°
+        joint_pitch_limit: 1.5708,  // 90°
+        joint_roll_limit: 1.0472,   // 60°
+    },
+    RagdollBoneSpec {
+        bone_name: "mixamorig:LeftForeArm",
+        parent_bone: Some("mixamorig:LeftArm"),
+        capsule_half_height: 0.12,
+        capsule_radius: 0.04,
+        mass: 2.0,
+        // Continues outward along the upper arm's local +X.
+        local_anchor_in_parent: Vec3::new(0.13, 0.0, 0.0),
+        local_anchor_in_self: Vec3::new(-0.12, 0.0, 0.0),
+        // Elbow: hinge, ~150° flexion (no extension past straight).
+        joint_type: RagdollJointType::Revolute,
+        joint_yaw_limit: 0.0,
+        joint_pitch_limit: 2.6180,  // 150°
+        joint_roll_limit: 0.0,
+    },
+    // Right arm chain (mirror of left).
+    RagdollBoneSpec {
+        bone_name: "mixamorig:RightArm",
+        parent_bone: Some("mixamorig:Spine"),
+        capsule_half_height: 0.13,
+        capsule_radius: 0.05,
+        mass: 3.0,
+        local_anchor_in_parent: Vec3::new(-0.18, 0.15, 0.0),
+        local_anchor_in_self: Vec3::new(0.13, 0.0, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 1.5708,
+        joint_pitch_limit: 1.5708,
+        joint_roll_limit: 1.0472,
+    },
+    RagdollBoneSpec {
+        bone_name: "mixamorig:RightForeArm",
+        parent_bone: Some("mixamorig:RightArm"),
+        capsule_half_height: 0.12,
+        capsule_radius: 0.04,
+        mass: 2.0,
+        local_anchor_in_parent: Vec3::new(-0.13, 0.0, 0.0),
+        local_anchor_in_self: Vec3::new(0.12, 0.0, 0.0),
+        joint_type: RagdollJointType::Revolute,
+        joint_yaw_limit: 0.0,
+        joint_pitch_limit: 2.6180,
+        joint_roll_limit: 0.0,
+    },
+    // Left leg chain.
+    RagdollBoneSpec {
+        bone_name: "mixamorig:LeftUpLeg",
+        parent_bone: Some("mixamorig:Hips"),
+        capsule_half_height: 0.20,
+        capsule_radius: 0.08,
+        mass: 8.0,
+        // Down + slightly out from pelvis.
+        local_anchor_in_parent: Vec3::new(0.10, -0.05, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, 0.20, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 0.5236,    // 30°
+        joint_pitch_limit: 1.5708,  // 90° flexion
+        joint_roll_limit: 0.5236,   // 30°
+    },
+    RagdollBoneSpec {
+        bone_name: "mixamorig:LeftLeg",
+        parent_bone: Some("mixamorig:LeftUpLeg"),
+        capsule_half_height: 0.18,
+        capsule_radius: 0.06,
+        mass: 4.0,
+        local_anchor_in_parent: Vec3::new(0.0, -0.20, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, 0.18, 0.0),
+        // Knee: hinge, ~130° flexion (no hyperextension).
+        joint_type: RagdollJointType::Revolute,
+        joint_yaw_limit: 0.0,
+        joint_pitch_limit: 2.2689,  // 130°
+        joint_roll_limit: 0.0,
+    },
+    // Right leg chain (mirror of left).
+    RagdollBoneSpec {
+        bone_name: "mixamorig:RightUpLeg",
+        parent_bone: Some("mixamorig:Hips"),
+        capsule_half_height: 0.20,
+        capsule_radius: 0.08,
+        mass: 8.0,
+        local_anchor_in_parent: Vec3::new(-0.10, -0.05, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, 0.20, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 0.5236,
+        joint_pitch_limit: 1.5708,
+        joint_roll_limit: 0.5236,
+    },
+    RagdollBoneSpec {
+        bone_name: "mixamorig:RightLeg",
+        parent_bone: Some("mixamorig:RightUpLeg"),
+        capsule_half_height: 0.18,
+        capsule_radius: 0.06,
+        mass: 4.0,
+        local_anchor_in_parent: Vec3::new(0.0, -0.20, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, 0.18, 0.0),
+        joint_type: RagdollJointType::Revolute,
+        joint_yaw_limit: 0.0,
+        joint_pitch_limit: 2.2689,
+        joint_roll_limit: 0.0,
+    },
+    // Feet — short, wide capsules so the ragdoll lands on its soles.
+    RagdollBoneSpec {
+        bone_name: "mixamorig:LeftFoot",
+        parent_bone: Some("mixamorig:LeftLeg"),
+        capsule_half_height: 0.06,
+        capsule_radius: 0.05,
+        mass: 1.5,
+        local_anchor_in_parent: Vec3::new(0.0, -0.18, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, 0.06, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 0.3491,    // 20°
+        joint_pitch_limit: 0.5236,  // 30°
+        joint_roll_limit: 0.3491,   // 20°
+    },
+    RagdollBoneSpec {
+        bone_name: "mixamorig:RightFoot",
+        parent_bone: Some("mixamorig:RightLeg"),
+        capsule_half_height: 0.06,
+        capsule_radius: 0.05,
+        mass: 1.5,
+        local_anchor_in_parent: Vec3::new(0.0, -0.18, 0.0),
+        local_anchor_in_self: Vec3::new(0.0, 0.06, 0.0),
+        joint_type: RagdollJointType::Spherical,
+        joint_yaw_limit: 0.3491,
+        joint_pitch_limit: 0.5236,
+        joint_roll_limit: 0.3491,
+    },
+];
 
 const HUMAN_DEFAULT_CLIPS: [ClipDef; 8] = [
     ClipDef {
