@@ -61,7 +61,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 brahe = "1.2"
 gooding-lambert = "0.2"
 nalgebra = "0.34"
-rapier3d = "0.22"
+rapier3d = "0.32"
 wgpu = "23"
 winit = "0.30"
 egui = "0.30"

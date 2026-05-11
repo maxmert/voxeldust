@@ -46,14 +46,21 @@ impl DesiredMovement {
 /// Written by `update_player_platform`; consumed by `kcc_move_characters`
 /// which folds it into the KCC's desired translation. Reset to identity at
 /// the start of each Physics tick.
+///
+/// Rapier 0.32 migrated its math layer from nalgebra to glam:
+/// `Isometry<f32>` became `Pose` (= `glamx::Pose3`) and `Vector<f32>` is
+/// now a plain `glam::Vec3` re-exported as `rapier3d::math::Vector`. The
+/// translation field is no longer wrapped in a `Translation` newtype —
+/// it's a `Vec3` directly, so `.translation.vector` collapses to
+/// `.translation`.
 #[cfg(feature = "rapier")]
 #[derive(Component, Clone, Copy, Debug)]
-pub struct PlatformDelta(pub rapier3d::math::Isometry<f32>);
+pub struct PlatformDelta(pub rapier3d::math::Pose);
 
 #[cfg(feature = "rapier")]
 impl Default for PlatformDelta {
     fn default() -> Self {
-        Self(rapier3d::math::Isometry::identity())
+        Self(rapier3d::math::Pose::IDENTITY)
     }
 }
 
@@ -61,14 +68,14 @@ impl Default for PlatformDelta {
 impl PlatformDelta {
     /// Translation component extracted for KCC input.
     #[inline]
-    pub fn translation(&self) -> rapier3d::math::Vector<f32> {
-        self.0.translation.vector
+    pub fn translation(&self) -> rapier3d::math::Vector {
+        self.0.translation
     }
 
     /// Reset to identity (start of Physics tick).
     #[inline]
     pub fn reset(&mut self) {
-        self.0 = rapier3d::math::Isometry::identity();
+        self.0 = rapier3d::math::Pose::IDENTITY;
     }
 }
 

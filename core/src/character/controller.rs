@@ -10,8 +10,7 @@ use rapier3d::control::{
 };
 use rapier3d::dynamics::{IslandManager, RigidBodyBuilder, RigidBodyHandle, RigidBodySet};
 use rapier3d::geometry::{Collider, ColliderBuilder, ColliderHandle, ColliderSet};
-use rapier3d::math::{Isometry, Real, Vector};
-use rapier3d::na::{UnitVector3, Vector3};
+use rapier3d::math::{Pose, Vector};
 
 use super::components::{CharacterCapsule, CharacterController};
 use super::stats::MovementStats;
@@ -21,24 +20,29 @@ use super::stats::MovementStats;
 /// Kept as a struct (rather than positional args) because a character's
 /// shape + stats are stable at spawn time but additional knobs might be
 /// added — new fields get `Default` values without breaking callers.
+///
+/// Rapier 0.32: `Vector` is now `glam::Vec3` (formerly the parameterized
+/// `Vector<Real>` from nalgebra). The KCC's up-axis is also a plain
+/// `Vector` — must be unit-length, but the static type no longer enforces
+/// it (was `UnitVector3<Real>` in older Rapier).
 #[derive(Clone, Copy, Debug)]
 pub struct CharacterBuildSpec {
-    pub position: Vector<Real>,
+    pub position: Vector,
     pub capsule: CharacterCapsule,
     pub stats: MovementStats,
     /// World-space up axis passed to the KCC. For ship interior and
     /// planet surface this is `Y` (KCC always runs in the locally-flat
     /// Rapier frame). Override for rotating stations.
-    pub up_axis: UnitVector3<Real>,
+    pub up_axis: Vector,
 }
 
 impl Default for CharacterBuildSpec {
     fn default() -> Self {
         Self {
-            position: Vector::zeros(),
+            position: Vector::ZERO,
             capsule: CharacterCapsule::default(),
             stats: MovementStats::default(),
-            up_axis: Vector3::y_axis(),
+            up_axis: Vector::Y,
         }
     }
 }
@@ -100,7 +104,7 @@ pub fn resize_capsule(
 pub fn reconfigure_kcc(
     ctrl: &mut CharacterController,
     stats: &MovementStats,
-    up_axis: UnitVector3<Real>,
+    up_axis: Vector,
 ) {
     ctrl.kcc = configure_kcc(stats, up_axis);
 }
@@ -118,7 +122,7 @@ fn make_collider(capsule: &CharacterCapsule) -> Collider {
 
 fn configure_kcc(
     stats: &MovementStats,
-    up_axis: UnitVector3<Real>,
+    up_axis: Vector,
 ) -> KinematicCharacterController {
     let mut kcc = KinematicCharacterController::default();
     kcc.up = up_axis;
@@ -158,13 +162,15 @@ fn configure_kcc(
     kcc
 }
 
-/// Build an `Isometry` for the KCC's `character_pos` from the body's
-/// current translation.
+/// Build a `Pose` for the KCC's `character_pos` from the body's
+/// current translation. Rapier 0.32 returns `Pose` (= glamx `Pose3`)
+/// from `RigidBody::position()`; older versions returned
+/// `Isometry<Real>`.
 #[inline]
 pub fn isometry_for_body(
     bodies: &RigidBodySet,
     handle: RigidBodyHandle,
-) -> Option<Isometry<Real>> {
+) -> Option<Pose> {
     bodies.get(handle).map(|rb| *rb.position())
 }
 

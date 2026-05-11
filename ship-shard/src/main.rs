@@ -101,6 +101,11 @@ struct Args {
 // ---------------------------------------------------------------------------
 
 /// Rapier 3D physics context — all physics primitives in one resource.
+///
+/// Rapier 0.32: `QueryPipeline` is a `Copy` view over a `BroadPhaseBvh`
+/// + `NarrowPhase` + the body / collider sets, no longer a stored
+/// resource. The view is built on demand via
+/// `BroadPhaseBvh::as_query_pipeline`.
 #[derive(Resource)]
 struct RapierContext {
     rigid_body_set: RigidBodySet,
@@ -108,16 +113,11 @@ struct RapierContext {
     integration_params: IntegrationParameters,
     physics_pipeline: PhysicsPipeline,
     island_manager: IslandManager,
-    broad_phase: DefaultBroadPhase,
+    broad_phase: BroadPhaseBvh,
     narrow_phase: NarrowPhase,
     impulse_joint_set: ImpulseJointSet,
     multibody_joint_set: MultibodyJointSet,
     ccd_solver: CCDSolver,
-    query_pipeline: QueryPipeline,
-    /// True after `refresh_query_pipeline` runs this tick. `kcc_move_all` and
-    /// `update_player_platform` both need fresh collider data but must not
-    /// double-update — the flag is cleared at the end of the Physics set.
-    query_pipeline_fresh: bool,
 }
 
 /// Adapter so the shared `kcc_move_all` function can drive our context.
@@ -128,18 +128,19 @@ impl RapierWorld for RapierContext {
     fn colliders(&self) -> &ColliderSet {
         &self.collider_set
     }
-    fn queries(&self) -> &QueryPipeline {
-        &self.query_pipeline
+    fn query_pipeline(&self) -> rapier3d::pipeline::QueryPipeline<'_> {
+        self.broad_phase.as_query_pipeline(
+            self.narrow_phase.query_dispatcher(),
+            &self.rigid_body_set,
+            &self.collider_set,
+            rapier3d::pipeline::QueryFilter::default(),
+        )
     }
     fn bodies_mut(&mut self) -> &mut RigidBodySet {
         &mut self.rigid_body_set
     }
-    fn refresh_query_pipeline(&mut self) {
-        if !self.query_pipeline_fresh {
-            self.query_pipeline.update(&self.collider_set);
-            self.query_pipeline_fresh = true;
-        }
-    }
+    // Default no-op `refresh_query_pipeline`: Rapier 0.32 keeps the
+    // broad-phase BVH refreshed inside `physics_pipeline.step()` itself.
 }
 
 /// Configurable gravity source — future: one per gravity block entity.
@@ -165,11 +166,13 @@ impl GravitySource {
         }
     }
 
-    fn gravity_at(&self, _position: Vec3) -> Vector<f32> {
+    fn gravity_at(&self, _position: Vec3) -> Vector {
         match self.shape {
             GravityShape::Uniform => {
                 let g = self.direction * self.strength;
-                vector![g.x, g.y, g.z]
+                // Rapier 0.32: `vector!` macro is gone (was nalgebra);
+                // use the glam `Vector::new` constructor directly.
+                rapier3d::math::Vector::new(g.x, g.y, g.z)
             }
         }
     }
@@ -454,7 +457,7 @@ impl Default for SubGridRegistry {
 /// to know where sub-grid blocks are in world space.
 #[derive(Resource, Default)]
 struct MechanicalWorldIsometries(
-    std::collections::HashMap<voxeldust_core::ecs::components::SubGridId, rapier3d::math::Isometry<f32>>,
+    std::collections::HashMap<voxeldust_core::ecs::components::SubGridId, rapier3d::math::Pose>,
 );
 
 // PlayerPlatform moved to per-entity PlayerPlatformState component above.
@@ -553,7 +556,7 @@ struct PlayerPlatformState {
     /// Sub-grid the player is currently riding (standing on).
     riding: Option<voxeldust_core::ecs::components::SubGridId>,
     /// World isometry of the sub-grid at the END of last tick.
-    prev_iso: Option<rapier3d::math::Isometry<f32>>,
+    prev_iso: Option<rapier3d::math::Pose>,
 }
 
 /// Component on seat entities — tracks who occupies this seat.
@@ -1567,10 +1570,12 @@ fn spawn_player(
         &mut rapier.rigid_body_set,
         &mut rapier.collider_set,
         CharacterBuildSpec {
-            position: vector![spawn_pos.x, spawn_pos.y, spawn_pos.z],
+            // Rapier 0.32: glam-typed `Vector` (no more nalgebra
+            // `vector!` macro; no `na::Vector3::y_axis()`).
+            position: rapier3d::math::Vector::new(spawn_pos.x, spawn_pos.y, spawn_pos.z),
             capsule,
             stats,
-            up_axis: rapier3d::na::Vector3::y_axis(),
+            up_axis: rapier3d::math::Vector::Y,
         },
     );
 
@@ -2669,34 +2674,40 @@ fn update_player_platform(
     // snap would undo the lift. Tuned empirically.
     const LARGE_VERTICAL_DELTA: f32 = 0.3;
 
-    // Refresh query pipeline once per Physics set.
+    // Rapier 0.32: no separate query-pipeline refresh — the broad-
+    // phase BVH is updated inside `physics_pipeline.step()`.
     let ctx = &mut *rapier;
-    if !ctx.query_pipeline_fresh {
-        ctx.query_pipeline.update(&ctx.collider_set);
-        ctx.query_pipeline_fresh = true;
-    }
 
     for (ctrl, mut platform, mut delta_out, mut snap_suppress) in &mut players {
         // Reset per-tick outputs.
         delta_out.reset();
         snap_suppress.0 = false;
 
+        // Rapier 0.32: `RigidBody::translation()` now returns
+        // `Vector` BY VALUE (was `&Vector` in 0.22).
         let player_pos = match ctx.rigid_body_set.get(ctrl.body) {
-            Some(body) => *body.translation(),
+            Some(body) => body.translation(),
             None => continue,
         };
 
-        let ray_origin = rapier3d::math::Point::new(player_pos.x, player_pos.y - 0.1, player_pos.z);
+        let ray_origin = rapier3d::math::Vector::new(player_pos.x, player_pos.y - 0.1, player_pos.z);
         let ray_dir = rapier3d::math::Vector::new(0.0, -1.0, 0.0);
         let max_dist = 0.5;
 
-        let hit = ctx.query_pipeline.cast_ray(
+        // Rapier 0.32: build the QueryPipeline view on demand from
+        // BroadPhaseBvh + sets, with the self-exclude filter baked in.
+        // Old API stored QueryPipeline as a long-lived resource and
+        // took the filter as a `cast_ray` argument.
+        let queries = ctx.broad_phase.as_query_pipeline(
+            ctx.narrow_phase.query_dispatcher(),
             &ctx.rigid_body_set,
             &ctx.collider_set,
+            rapier3d::pipeline::QueryFilter::default().exclude_rigid_body(ctrl.body),
+        );
+        let hit = queries.cast_ray(
             &rapier3d::geometry::Ray::new(ray_origin, ray_dir),
             max_dist,
             true,
-            rapier3d::pipeline::QueryFilter::default().exclude_rigid_body(ctrl.body),
         );
 
         let mut riding_sg: Option<SubGridId> = None;
@@ -2725,7 +2736,7 @@ fn update_player_platform(
                         // consume. The rotational part is applied
                         // purely as a positional offset around the
                         // player's current translation.
-                        let current_pt = rapier3d::math::Point::new(
+                        let current_pt = rapier3d::math::Vector::new(
                             player_pos.x,
                             player_pos.y,
                             player_pos.z,
@@ -2736,7 +2747,7 @@ fn update_player_platform(
                             new_pt.y - player_pos.y,
                             new_pt.z - player_pos.z,
                         );
-                        delta_out.0 = rapier3d::math::Isometry::translation(
+                        delta_out.0 = rapier3d::math::Pose::translation(
                             translation.x,
                             translation.y,
                             translation.z,
@@ -2763,15 +2774,15 @@ fn sample_ship_gravity(
     gravity_sources: &GravitySources,
     gravity_enabled: &GravityEnabled,
     sample_pos: Vec3,
-) -> rapier3d::math::Vector<f32> {
+) -> rapier3d::math::Vector {
     if gravity_enabled.0 {
-        let mut total = vector![0.0, 0.0, 0.0];
+        let mut total = rapier3d::math::Vector::ZERO;
         for source in &gravity_sources.0 {
             total += source.gravity_at(sample_pos);
         }
         total
     } else {
-        vector![0.0, 0.0, 0.0]
+        rapier3d::math::Vector::ZERO
     }
 }
 
@@ -2865,13 +2876,13 @@ fn kcc_move_characters_system(
         let prev_pos = rapier
             .rigid_body_set
             .get(ctrl.body)
-            .map(|b| b.position().translation.vector)
+            .map(|b| b.position().translation)
             .unwrap_or_default();
 
         let result = move_one_character(
             &rapier.rigid_body_set,
             &rapier.collider_set,
-            &rapier.query_pipeline,
+            rapier.query_pipeline(),
             ctrl,
             input,
             |hit| {
@@ -2912,7 +2923,8 @@ fn kcc_move_characters_system(
         // converts `next_position - position` into an implicit velocity
         // that pushes dynamics correctly.
         if let Some(body) = rapier.rigid_body_set.get_mut(ctrl.body) {
-            let cur = body.position().translation.vector;
+            // Rapier 0.32: `position().translation` is plain `Vec3`.
+            let cur = body.position().translation;
             body.set_next_kinematic_translation(cur + result.translation);
         }
 
@@ -2949,9 +2961,12 @@ fn physics_pipeline_step(
         .unwrap_or(Vec3::ZERO);
     let gravity = sample_ship_gravity(&gravity_sources, &gravity_enabled, sample_pos);
 
+    // Rapier 0.32: `step` takes `gravity` by VALUE (was `&Vector` in
+    // 0.22) and the broad-phase BVH is the only spatial-query store
+    // — `query_pipeline` is no longer a `step` parameter.
     let ctx = &mut *rapier;
     ctx.physics_pipeline.step(
-        &gravity,
+        gravity,
         &ctx.integration_params,
         &mut ctx.island_manager,
         &mut ctx.broad_phase,
@@ -2961,13 +2976,9 @@ fn physics_pipeline_step(
         &mut ctx.impulse_joint_set,
         &mut ctx.multibody_joint_set,
         &mut ctx.ccd_solver,
-        Some(&mut ctx.query_pipeline),
         &(),
         &(),
     );
-    // Step invalidates the query pipeline's snapshot; next set needs a
-    // fresh `refresh_query_pipeline` call.
-    ctx.query_pipeline_fresh = false;
 }
 
 /// Sync the character body's post-step translation back to
@@ -3355,7 +3366,9 @@ fn broadcast_world_state(
             Some(SubGridTransformData {
                 sub_grid_id: state.child_grid_id.0,
                 translation: glam::Vec3::new(t.x, t.y, t.z),
-                rotation: glam::Quat::from_xyzw(r.i, r.j, r.k, r.w),
+                // Rapier 0.32: `Rotation` is `glam::Quat` (was
+                // nalgebra `UnitQuaternion`). Quat fields are .x/.y/.z/.w.
+                rotation: glam::Quat::from_xyzw(r.x, r.y, r.z, r.w),
                 parent_grid: sg_data.parent_grid.0,
                 anchor,
                 mount_pos: sg_data.mount_pos,
@@ -5248,7 +5261,7 @@ fn produce_player_edits(
                 sg_data.mount_pos.z as f32 + 0.5 + axis_offset.z as f32 * 0.5,
             );
             let iso_inv = iso.inverse();
-            let local_eye_pt = iso_inv * rapier3d::math::Point::new(eye.x, eye.y, eye.z);
+            let local_eye_pt = iso_inv * rapier3d::math::Vector::new(eye.x, eye.y, eye.z);
             let local_look_v = iso_inv.rotation * rapier3d::math::Vector::new(look.x, look.y, look.z);
             // Shift from body-local to root-space (add anchor back).
             let local_eye = glam::Vec3::new(
@@ -5893,7 +5906,7 @@ fn rebuild_chunk_collider(
     let root_shapes = grid.chunk_collider_shapes_filtered(chunk_key, glam::Vec3::ZERO, registry, None);
     if !root_shapes.is_empty() {
         let compound: Vec<_> = root_shapes.iter().map(|&(pos, he)| {
-            (Isometry::translation(pos.x, pos.y, pos.z), SharedShape::cuboid(he.x, he.y, he.z))
+            (Pose::translation(pos.x, pos.y, pos.z), SharedShape::cuboid(he.x, he.y, he.z))
         }).collect();
         let collider = ColliderBuilder::compound(compound).build();
         let handle = rapier.collider_set.insert_with_parent(
@@ -5929,7 +5942,7 @@ fn rebuild_chunk_collider(
                 sg_data.mount_pos.z as f32 + 0.5 + axis_offset.z as f32 * 0.5,
             );
             let compound: Vec<_> = sg_shapes.iter().map(|&(pos, he)| {
-                let local = Isometry::translation(
+                let local = Pose::translation(
                     pos.x - body_pos.x,
                     pos.y - body_pos.y,
                     pos.z - body_pos.z,
@@ -8064,7 +8077,7 @@ fn apply_mechanical_transforms(
 
     // Phase 1: Compute all world isometries in a local map (no Rapier dependency).
     // Topological order: multi-pass, parents before children.
-    let mut world_isometries: std::collections::HashMap<SubGridId, rapier3d::math::Isometry<f32>> =
+    let mut world_isometries: std::collections::HashMap<SubGridId, rapier3d::math::Pose> =
         std::collections::HashMap::new();
 
     for _depth in 0..8 {
@@ -8088,21 +8101,29 @@ fn apply_mechanical_transforms(
             );
 
             // Own local rotation + position from target angle.
+            // Rapier 0.32: `Rotation` is `glam::Quat`; build axis-angle
+            // via `Quat::from_axis_angle`. No `UnitVector::new_normalize`
+            // needed — axis_f is already unit length here.
             let (own_rot, own_pos) = match w.joint_type {
                 block::JointType::Revolute => {
-                    let unit_axis = rapier3d::math::UnitVector::new_normalize(axis_f);
-                    let rot = rapier3d::math::Rotation::new(*unit_axis * w.target.to_radians());
+                    let rot = rapier3d::math::Rotation::from_axis_angle(
+                        axis_f.normalize(),
+                        w.target.to_radians(),
+                    );
                     (rot, anchor_root)
                 }
                 block::JointType::Prismatic => {
                     let offset = axis_f * w.target;
-                    (rapier3d::math::Rotation::identity(), anchor_root + offset)
+                    (rapier3d::math::Rotation::IDENTITY, anchor_root + offset)
                 }
             };
 
             let world_iso = if w.parent_grid == SubGridId::ROOT {
                 // Root-level: own transform is the world transform.
-                rapier3d::math::Isometry::from_parts(own_pos.into(), own_rot)
+                // Rapier 0.32: `Pose::from_parts(translation: Vec3,
+                // rotation: Quat)` — no `Translation`/`UnitQuaternion`
+                // wrappers, no `na::` indirection.
+                rapier3d::math::Pose::from_parts(own_pos, own_rot)
             } else {
                 // Nested: compose with parent's already-computed world transform.
                 let parent_iso = world_isometries[&w.parent_grid];
@@ -8117,11 +8138,13 @@ fn apply_mechanical_transforms(
 
                 // Transform child anchor through parent: rotate (anchor - parent_anchor)
                 // by parent rotation, then add parent world position.
+                // Rapier 0.32: `parent_iso.translation` is plain Vec3
+                // (no `.vector` accessor).
                 let child_relative = anchor_root - parent_anchor;
-                let child_world_pos = parent_iso.translation.vector + parent_iso.rotation * child_relative;
+                let child_world_pos = parent_iso.translation + parent_iso.rotation * child_relative;
                 let child_world_rot = parent_iso.rotation * own_rot;
 
-                rapier3d::math::Isometry::from_parts(child_world_pos.into(), child_world_rot)
+                rapier3d::math::Pose::from_parts(child_world_pos, child_world_rot)
             };
 
             world_isometries.insert(w.sg_id, world_iso);
@@ -8436,10 +8459,10 @@ fn build_chunk_collider(
         return None;
     }
 
-    let compound_shapes: Vec<(Isometry<f32>, SharedShape)> = shapes
+    let compound_shapes: Vec<(Pose, SharedShape)> = shapes
         .iter()
         .map(|&(pos, he)| {
-            let iso = Isometry::translation(pos.x, pos.y, pos.z);
+            let iso = Pose::translation(pos.x, pos.y, pos.z);
             let shape = SharedShape::cuboid(he.x, he.y, he.z);
             (iso, shape)
         })
@@ -8466,7 +8489,7 @@ fn build_ship_interior(
     // All non-sub-grid chunk colliders are parented to this body.
     // Required for mechanical joints (rotors, pistons) to have an anchor.
     let root_body = rapier3d::dynamics::RigidBodyBuilder::fixed()
-        .translation(rapier3d::math::Vector::zeros())
+        .translation(rapier3d::math::Vector::ZERO)
         .build();
     let root_body_handle = rigid_body_set.insert(root_body);
 
@@ -8675,13 +8698,11 @@ fn build_ship_interior(
         },
         physics_pipeline: PhysicsPipeline::new(),
         island_manager: IslandManager::new(),
-        broad_phase: DefaultBroadPhase::new(),
+        broad_phase: BroadPhaseBvh::new(),
         narrow_phase: NarrowPhase::new(),
         impulse_joint_set: ImpulseJointSet::new(),
         multibody_joint_set: MultibodyJointSet::new(),
         ccd_solver: CCDSolver::new(),
-        query_pipeline: QueryPipeline::new(),
-        query_pipeline_fresh: false,
     });
     app.insert_resource(GravitySources(vec![GravitySource::default_floor_plates()]));
     app.insert_resource(RootBodyHandle(root_body_handle));

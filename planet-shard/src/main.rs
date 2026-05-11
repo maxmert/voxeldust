@@ -203,6 +203,10 @@ struct PlanetPersistence {
 }
 
 /// Rapier 3D physics context.
+///
+/// Rapier 0.32: `QueryPipeline` is no longer a stored resource — it's a
+/// `Copy` view derived from `BroadPhaseBvh` + `NarrowPhase` + the body /
+/// collider sets, built on demand via `BroadPhaseBvh::as_query_pipeline`.
 #[derive(Resource)]
 struct RapierContext {
     rigid_body_set: RigidBodySet,
@@ -210,28 +214,28 @@ struct RapierContext {
     integration_params: IntegrationParameters,
     physics_pipeline: PhysicsPipeline,
     island_manager: IslandManager,
-    broad_phase: DefaultBroadPhase,
+    broad_phase: BroadPhaseBvh,
     narrow_phase: NarrowPhase,
     impulse_joint_set: ImpulseJointSet,
     multibody_joint_set: MultibodyJointSet,
     ccd_solver: CCDSolver,
-    query_pipeline: QueryPipeline,
-    /// Set true after `refresh_query_pipeline`; cleared after
-    /// `physics_pipeline.step()` invalidates the BVH snapshot.
-    query_pipeline_fresh: bool,
 }
 
 impl RapierWorld for RapierContext {
     fn bodies(&self) -> &RigidBodySet { &self.rigid_body_set }
     fn colliders(&self) -> &ColliderSet { &self.collider_set }
-    fn queries(&self) -> &QueryPipeline { &self.query_pipeline }
-    fn bodies_mut(&mut self) -> &mut RigidBodySet { &mut self.rigid_body_set }
-    fn refresh_query_pipeline(&mut self) {
-        if !self.query_pipeline_fresh {
-            self.query_pipeline.update(&self.collider_set);
-            self.query_pipeline_fresh = true;
-        }
+    fn query_pipeline(&self) -> rapier3d::pipeline::QueryPipeline<'_> {
+        self.broad_phase.as_query_pipeline(
+            self.narrow_phase.query_dispatcher(),
+            &self.rigid_body_set,
+            &self.collider_set,
+            rapier3d::pipeline::QueryFilter::default(),
+        )
     }
+    fn bodies_mut(&mut self) -> &mut RigidBodySet { &mut self.rigid_body_set }
+    // Default no-op `refresh_query_pipeline`: Rapier 0.32 keeps the
+    // broad-phase BVH refreshed inside `physics_pipeline.step()` itself,
+    // so there's no separate refresh phase to wire up.
 }
 
 /// Planet physics dt. Shared between KCC + Rapier step so they integrate
@@ -645,18 +649,28 @@ fn spawn_player(
         &mut rapier.rigid_body_set,
         &mut rapier.collider_set,
         CharacterBuildSpec {
-            position: vector![0.0, height as f32, 0.0],
+            // Rapier 0.32: `vector!` macro produced a `nalgebra::Vector3`
+            // — replace with a plain glam `Vec3` since the build spec's
+            // `position` field is now `Vector` (= `Vec3`).
+            position: rapier3d::math::Vector::new(0.0, height as f32, 0.0),
             capsule,
             stats,
-            up_axis: rapier3d::na::Vector3::y_axis(),
+            // Rapier 0.32: `up_axis` is a plain `Vector` (= glam Vec3),
+            // no longer wrapped in `UnitVector3`.
+            up_axis: rapier3d::math::Vector::Y,
         },
     );
     // Apply planet-specific collision groups so players don't get
     // filtered out by the existing planet-shard raycast filters.
     if let Some(col) = rapier.collider_set.get_mut(ctrl.collider) {
+        // Rapier 0.32: `InteractionGroups::new` gained an
+        // `InteractionTestMode` parameter (And vs Or). Old AND-style
+        // matching is the default — use it explicitly to preserve
+        // the previous behaviour.
         col.set_collision_groups(InteractionGroups::new(
             Group::GROUP_1,
             Group::GROUP_1 | Group::GROUP_2,
+            InteractionTestMode::default(),
         ));
     }
 
@@ -883,10 +897,13 @@ fn process_ship_colliders(
         }
 
         // Build compound shape from all chunks' collider shapes.
-        let mut shapes: Vec<(Isometry<f32>, SharedShape)> = Vec::new();
+        // Rapier 0.32: `Pose` (= glamx `Pose3`) replaces `Isometry<f32>`,
+        // and `Pose::translation(x, y, z)` is the translation-only
+        // constructor (not the `.translation` field).
+        let mut shapes: Vec<(Pose, SharedShape)> = Vec::new();
         for chunk in &data.chunks {
             for &(center, half_extents) in &chunk.shapes {
-                let iso = Isometry::translation(center.x, center.y, center.z);
+                let iso = Pose::translation(center.x, center.y, center.z);
                 let shape = SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z);
                 shapes.push((iso, shape));
             }
@@ -910,8 +927,15 @@ fn process_ship_colliders(
         );
 
         // Create KinematicPositionBased body (position updated each tick).
+        // Rapier 0.32: `RigidBodyBuilder::translation` takes `Vector` (=
+        // glamx-bundled glam 0.30 `Vec3`); workspace `glam` is 0.29.
+        // Same memory layout, distinct types — convert at the boundary.
         let rb = RigidBodyBuilder::kinematic_position_based()
-            .translation(vector![ship_pos_f32.x, ship_pos_f32.y, ship_pos_f32.z])
+            .translation(rapier3d::math::Vector::new(
+                ship_pos_f32.x,
+                ship_pos_f32.y,
+                ship_pos_f32.z,
+            ))
             .build();
         let ctx = &mut *rapier;
         let body_handle = ctx.rigid_body_set.insert(rb);
@@ -942,16 +966,17 @@ fn update_ship_collider_positions(
 ) {
     for (pos, rot, body_comp) in &ships {
         if let Some(body) = rapier.rigid_body_set.get_mut(body_comp.0) {
-            let p = glam::Vec3::new(pos.0.x as f32, pos.0.y as f32, pos.0.z as f32);
-            let r = glam::Quat::from_xyzw(
+            // Rapier 0.32: `Pose::from_parts(translation: Vec3,
+            // rotation: Quat)` — no separate `Translation3`/`UnitQuaternion`
+            // wrappers. Workspace `glam` is 0.29 / rapier's `glamx`
+            // re-exports glam 0.30; convert at the boundary.
+            let p = rapier3d::math::Vector::new(
+                pos.0.x as f32, pos.0.y as f32, pos.0.z as f32,
+            );
+            let r = rapier3d::math::Rotation::from_xyzw(
                 rot.0.x as f32, rot.0.y as f32, rot.0.z as f32, rot.0.w as f32,
             );
-            body.set_next_kinematic_position(rapier3d::na::Isometry3::from_parts(
-                rapier3d::na::Translation3::new(p.x, p.y, p.z),
-                rapier3d::na::UnitQuaternion::new_normalize(
-                    rapier3d::na::Quaternion::new(r.w, r.x, r.y, r.z),
-                ),
-            ));
+            body.set_next_kinematic_position(rapier3d::math::Pose::from_parts(p, r));
         }
     }
 }
@@ -1285,7 +1310,7 @@ fn kcc_move_characters_system(
         let result = move_one_character(
             &rapier.rigid_body_set,
             &rapier.collider_set,
-            &rapier.query_pipeline,
+            rapier.query_pipeline(),
             ctrl,
             input,
             |hit| {
@@ -1293,7 +1318,9 @@ fn kcc_move_characters_system(
             },
         );
         if let Some(body) = rapier.rigid_body_set.get_mut(ctrl.body) {
-            let cur = body.position().translation.vector;
+            // Rapier 0.32: `position().translation` is a plain `Vec3`
+            // (no `.vector` accessor — `Translation` newtype is gone).
+            let cur = body.position().translation;
             body.set_next_kinematic_translation(cur + result.translation);
         }
         vel.0 = result.new_velocity;
@@ -1337,11 +1364,14 @@ fn physics_step(
         &mut planet_pos,
     );
 
-    // Step Rapier with surface gravity.
-    let gravity = vector![0.0, -(config.surface_gravity as f32), 0.0];
+    // Step Rapier with surface gravity. Rapier 0.32: `step` takes
+    // `gravity` by VALUE (was `&Vector` in 0.22) and the broad-phase
+    // is the only spatial-query store — `query_pipeline` is no longer
+    // a separate argument here.
+    let gravity = rapier3d::math::Vector::new(0.0, -(config.surface_gravity as f32), 0.0);
     let ctx = &mut *rapier;
     ctx.physics_pipeline.step(
-        &gravity,
+        gravity,
         &ctx.integration_params,
         &mut ctx.island_manager,
         &mut ctx.broad_phase,
@@ -1351,12 +1381,9 @@ fn physics_step(
         &mut ctx.impulse_joint_set,
         &mut ctx.multibody_joint_set,
         &mut ctx.ccd_solver,
-        Some(&mut ctx.query_pipeline),
         &(),
         &(),
     );
-    // Step invalidates the BVH snapshot; next Physics set must refresh.
-    ctx.query_pipeline_fresh = false;
 }
 
 /// Tangent frame sync: maps Rapier flat-space deltas to sphere surface movement.
@@ -1434,7 +1461,7 @@ fn tangent_frame_sync(
         char_vel.0 = Vec3::new(new_vx, new_vy, new_vz);
 
         // Re-center the body to (0, height, 0) in flat space.
-        body.set_translation(vector![0.0, t.y, 0.0], true);
+        body.set_translation(rapier3d::math::Vector::new(0.0, t.y, 0.0), true);
 
         rapier_origin.0 = DVec3::new(0.0, height, 0.0);
     }
@@ -1954,11 +1981,20 @@ fn build_app(
     let rigid_body_set = RigidBodySet::new();
     let mut collider_set = ColliderSet::new();
 
-    // Ground: halfspace at Y=0.
-    let ground = ColliderBuilder::halfspace(nalgebra::Unit::new_normalize(vector![0.0, 1.0, 0.0]))
-        .translation(vector![0.0, 0.0, 0.0])
-        .collision_groups(InteractionGroups::new(Group::GROUP_2, Group::GROUP_1))
-        .build();
+    // Ground: halfspace at Y=0. Rapier 0.32: `halfspace` still wraps
+    // the normal in `Unit<Vector>`, but `Vector` is glam `Vec3` now and
+    // doesn't impl nalgebra's `Normed`. `Unit::new_unchecked` doesn't
+    // require it; we feed `Vector::Y` directly since it's known unit.
+    let ground = ColliderBuilder::halfspace(nalgebra::Unit::new_unchecked(
+        rapier3d::math::Vector::Y,
+    ))
+    .translation(rapier3d::math::Vector::ZERO)
+    .collision_groups(InteractionGroups::new(
+        Group::GROUP_2,
+        Group::GROUP_1,
+        InteractionTestMode::default(),
+    ))
+    .build();
     collider_set.insert(ground);
 
     let system_params = system_seed.map(SystemParams::from_seed);
@@ -1991,13 +2027,11 @@ fn build_app(
         },
         physics_pipeline: PhysicsPipeline::new(),
         island_manager: IslandManager::new(),
-        broad_phase: DefaultBroadPhase::new(),
+        broad_phase: BroadPhaseBvh::new(),
         narrow_phase: NarrowPhase::new(),
         impulse_joint_set: ImpulseJointSet::new(),
         multibody_joint_set: MultibodyJointSet::new(),
         ccd_solver: CCDSolver::new(),
-        query_pipeline: QueryPipeline::new(),
-        query_pipeline_fresh: false,
     });
     app.insert_resource(PlanetConfig {
         shard_id,

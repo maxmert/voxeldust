@@ -15,8 +15,8 @@ use glam::{Vec2, Vec3};
 
 use rapier3d::control::CharacterCollision;
 use rapier3d::dynamics::RigidBodySet;
-use rapier3d::geometry::ColliderSet;
-use rapier3d::math::{Isometry, Real, Vector};
+use rapier3d::geometry::{BroadPhaseBvh, ColliderSet, NarrowPhase};
+use rapier3d::math::{Pose, Vector};
 use rapier3d::pipeline::{QueryFilter, QueryPipeline};
 
 use super::components::CharacterController;
@@ -42,11 +42,11 @@ pub struct CharacterCollisionEvent {
 /// so we can unit-test `move_one_character` in isolation.
 ///
 /// `EffectiveCharacterMovement` from Rapier doesn't implement `Copy`/`Debug`
-/// (`translation: Vector<Real>` is `Copy` but the struct itself isn't
-/// marked) — we flatten the three fields we actually use instead.
+/// — we flatten the three fields we actually use instead. Rapier 0.32:
+/// `Vector` is glam `Vec3` (was `nalgebra::Vector<Real>`).
 #[derive(Clone, Copy, Debug)]
 pub struct CharacterMoveResult {
-    pub translation: Vector<Real>,
+    pub translation: Vector,
     pub grounded: bool,
     pub is_sliding_down_slope: bool,
     pub new_velocity: Vec3,
@@ -90,7 +90,7 @@ pub struct CharacterMoveInput<'a> {
 pub fn move_one_character(
     bodies: &RigidBodySet,
     colliders: &ColliderSet,
-    queries: &QueryPipeline,
+    queries: QueryPipeline<'_>,
     ctrl: &CharacterController,
     input: CharacterMoveInput,
     mut on_hit: impl FnMut(CharacterCollision),
@@ -102,7 +102,7 @@ pub fn move_one_character(
         .get(ctrl.collider)
         .expect("CharacterController.collider missing from ColliderSet");
     let shape = collider.shape();
-    let char_pos: Isometry<Real> = *body.position();
+    let char_pos: Pose = *body.position();
 
     // 1. Horizontal target from input — rotated from character-local
     //    (strafe/forward) into the KCC frame by the current yaw.
@@ -191,16 +191,18 @@ pub fn move_one_character(
         ctrl.kcc
     };
 
-    let filter = QueryFilter::new().exclude_rigid_body(ctrl.body);
+    // Rapier 0.32: `move_shape` is now `(dt, queries, shape, pose,
+    // translation, events)`. The body/collider sets and filter moved
+    // INTO the `QueryPipeline` view (`.with_filter(...)` adds the
+    // self-exclude). One source of truth for what the KCC's
+    // sub-queries can see.
+    let filtered = queries.with_filter(QueryFilter::new().exclude_rigid_body(ctrl.body));
     let effective = kcc.move_shape(
         input.dt,
-        bodies,
-        colliders,
-        queries,
+        &filtered,
         shape,
         &char_pos,
         desired_translation,
-        filter,
         |c| on_hit(c),
     );
 
@@ -276,14 +278,27 @@ fn clamp_horizontal_input(raw: Vec2) -> Vec2 {
 /// Abstraction over the shard's Rapier resource. Each shard implements
 /// this on a newtype wrapping its `RapierContext` to keep the core crate
 /// ignorant of shard-specific resource layout.
+///
+/// Rapier 0.32 reshape: `QueryPipeline` is no longer a stored resource
+/// — it's a `Copy` view (`&'a Bvh + &'a RigidBodySet + &'a ColliderSet +
+/// QueryFilter`) constructed on demand from a stored `BroadPhaseBvh`
+/// plus the active `NarrowPhase` and the body / collider sets. The
+/// trait reflects that: implementors return a fresh view via
+/// `query_pipeline(&self)`. `refresh_query_pipeline` is kept as a
+/// no-op-by-default hook since the BVH is refreshed by the physics
+/// step itself in the new API.
 pub trait RapierWorld {
     fn bodies(&self) -> &RigidBodySet;
     fn colliders(&self) -> &ColliderSet;
-    fn queries(&self) -> &QueryPipeline;
+    /// Build a `Copy` view over the broad phase + body/collider sets.
+    /// Per-call cost is just borrowing — no work.
+    fn query_pipeline(&self) -> QueryPipeline<'_>;
     fn bodies_mut(&mut self) -> &mut RigidBodySet;
-    /// Update the query pipeline from the current collider state.
-    /// Must be idempotent within a tick — call only once per Physics set.
-    fn refresh_query_pipeline(&mut self);
+    /// Hook for shards that still need a per-tick query-pipeline tick.
+    /// Default no-op: the rapier 0.32 broad-phase tracks collider
+    /// changes incrementally inside the physics step, so refreshing is
+    /// no longer a separate phase.
+    fn refresh_query_pipeline(&mut self) {}
 }
 
 /// The ECS-side loop. Unit-tested indirectly via `move_one_character`.
@@ -299,9 +314,9 @@ pub fn kcc_move_all<W: RapierWorld>(
 
     // Separate read and write phases so the borrow checker is happy.
     let results: Vec<(usize, CharacterMoveResult)> = {
+        let queries = world.query_pipeline();
         let bodies = world.bodies();
         let colliders = world.colliders();
-        let queries = world.queries();
 
         characters
             .iter()
@@ -332,12 +347,14 @@ pub fn kcc_move_all<W: RapierWorld>(
             .collect()
     };
 
-    // Apply writes (position + persisted state).
+    // Apply writes (position + persisted state). Rapier 0.32: the
+    // pose's translation field is a plain `Vec3` now; the wrapped
+    // `Translation` newtype is gone.
     let bodies_mut = world.bodies_mut();
     for (idx, result) in results {
         let rec = &mut characters[idx];
         if let Some(body) = bodies_mut.get_mut(rec.ctrl.body) {
-            let cur = body.position().translation.vector;
+            let cur = body.position().translation;
             body.set_next_kinematic_translation(cur + result.translation);
         }
         rec.velocity.0 = result.new_velocity;
@@ -384,17 +401,20 @@ impl<'a> CharacterRecord<'a> {
 mod tests {
     use super::*;
     use rapier3d::dynamics::{IslandManager, IntegrationParameters, CCDSolver, ImpulseJointSet, MultibodyJointSet};
-    use rapier3d::geometry::{BroadPhaseMultiSap, ColliderBuilder, DefaultBroadPhase, NarrowPhase};
+    use rapier3d::geometry::{BroadPhaseBvh, ColliderBuilder, NarrowPhase};
     use rapier3d::pipeline::PhysicsPipeline;
 
     use crate::character::controller::{build_character, CharacterBuildSpec};
 
+    /// Rapier 0.32 test world. The previously-stored `QueryPipeline`
+    /// is now a `Copy` view derived from `BroadPhaseBvh`; we hold the
+    /// broad/narrow phases instead and build the view per query via
+    /// `BroadPhaseBvh::as_query_pipeline`.
     struct TestWorld {
         rigid_bodies: RigidBodySet,
         colliders: ColliderSet,
-        queries: QueryPipeline,
         islands: IslandManager,
-        broad: DefaultBroadPhase,
+        broad: BroadPhaseBvh,
         narrow: NarrowPhase,
         joints: ImpulseJointSet,
         mb_joints: MultibodyJointSet,
@@ -410,9 +430,8 @@ mod tests {
             Self {
                 rigid_bodies: RigidBodySet::new(),
                 colliders: ColliderSet::new(),
-                queries: QueryPipeline::new(),
                 islands: IslandManager::new(),
-                broad: DefaultBroadPhase::new(),
+                broad: BroadPhaseBvh::new(),
                 narrow: NarrowPhase::new(),
                 joints: ImpulseJointSet::new(),
                 mb_joints: MultibodyJointSet::new(),
@@ -424,7 +443,7 @@ mod tests {
 
         fn step(&mut self) {
             self.pipeline.step(
-                &Vector::zeros(),
+                Vector::ZERO,
                 &self.params,
                 &mut self.islands,
                 &mut self.broad,
@@ -434,10 +453,18 @@ mod tests {
                 &mut self.joints,
                 &mut self.mb_joints,
                 &mut self.ccd,
-                Some(&mut self.queries),
                 &(),
                 &(),
             );
+        }
+
+        fn queries(&self) -> QueryPipeline<'_> {
+            self.broad.as_query_pipeline(
+                self.narrow.query_dispatcher(),
+                &self.rigid_bodies,
+                &self.colliders,
+                QueryFilter::default(),
+            )
         }
 
         fn add_floor(&mut self) {
@@ -470,7 +497,6 @@ mod tests {
         let ctrl = spawn_character(&mut w, 0.31); // capsule bottom just above floor
         // Settle onto floor.
         w.step();
-        w.queries.update(&w.colliders);
 
         let stats = MovementStats::default();
         let mut vel = CharacterVelocity::zero();
@@ -481,7 +507,7 @@ mod tests {
             let result = move_one_character(
                 &w.rigid_bodies,
                 &w.colliders,
-                &w.queries,
+                w.queries(),
                 &ctrl,
                 CharacterMoveInput {
                     dt: 0.05,
@@ -502,13 +528,12 @@ mod tests {
                 |_| {},
             );
             if let Some(body) = w.rigid_bodies.get_mut(ctrl.body) {
-                let cur = body.position().translation.vector;
+                let cur = body.position().translation;
                 body.set_next_kinematic_translation(cur + result.translation);
             }
             vel.0 = result.new_velocity;
             state = result.new_state;
             w.step();
-            w.queries.update(&w.colliders);
         }
         // By now horizontal-speed magnitude must be at (or very close to)
         // walk_speed. Direction depends on yaw convention; this test uses
@@ -533,7 +558,6 @@ mod tests {
         w.add_floor();
         let ctrl = spawn_character(&mut w, 0.31);
         w.step();
-        w.queries.update(&w.colliders);
 
         let stats = MovementStats::default();
         let mut vel = CharacterVelocity(Vec3::new(0.0, 0.0, stats.walk_speed));
@@ -543,7 +567,7 @@ mod tests {
         let result = move_one_character(
             &w.rigid_bodies,
             &w.colliders,
-            &w.queries,
+            w.queries(),
             &ctrl,
             CharacterMoveInput {
                 dt: 0.05,
@@ -573,7 +597,7 @@ mod tests {
             let r = move_one_character(
                 &w.rigid_bodies,
                 &w.colliders,
-                &w.queries,
+                w.queries(),
                 &ctrl,
                 CharacterMoveInput {
                     dt: 0.05,
@@ -606,7 +630,6 @@ mod tests {
         w.add_floor();
         let ctrl = spawn_character(&mut w, 0.31);
         w.step();
-        w.queries.update(&w.colliders);
 
         let stats = MovementStats::default();
         let mut vel = CharacterVelocity::zero();
@@ -623,7 +646,7 @@ mod tests {
             let result = move_one_character(
                 &w.rigid_bodies,
                 &w.colliders,
-                &w.queries,
+                w.queries(),
                 &ctrl,
                 CharacterMoveInput {
                     dt: 0.05,
@@ -641,7 +664,7 @@ mod tests {
                 |_| {},
             );
             if let Some(body) = w.rigid_bodies.get_mut(ctrl.body) {
-                let cur = body.position().translation.vector;
+                let cur = body.position().translation;
                 body.set_next_kinematic_translation(cur + result.translation);
             }
             if result.new_state != state {
@@ -653,7 +676,6 @@ mod tests {
             vel.0 = result.new_velocity;
             state = result.new_state;
             w.step();
-            w.queries.update(&w.colliders);
         }
         // Must have seen Grounded → Airborne and back.
         assert!(
@@ -684,7 +706,6 @@ mod tests {
         w.add_floor();
         let ctrl = spawn_character(&mut w, 0.31);
         w.step();
-        w.queries.update(&w.colliders);
 
         let stats = MovementStats::default();
         let vel = CharacterVelocity::zero();
@@ -695,16 +716,15 @@ mod tests {
             .get(ctrl.body)
             .unwrap()
             .position()
-            .translation
-            .vector;
+            .translation;
 
         let mut platform = PlatformDelta::default();
-        platform.0.translation.vector = Vector::new(1.0, 0.0, 0.0);
+        platform.0.translation = Vector::new(1.0, 0.0, 0.0);
 
         let result = move_one_character(
             &w.rigid_bodies,
             &w.colliders,
-            &w.queries,
+            w.queries(),
             &ctrl,
             CharacterMoveInput {
                 dt: 0.05,
@@ -722,7 +742,7 @@ mod tests {
             |_| {},
         );
         if let Some(body) = w.rigid_bodies.get_mut(ctrl.body) {
-            let cur = body.position().translation.vector;
+            let cur = body.position().translation;
             body.set_next_kinematic_translation(cur + result.translation);
         }
         w.step();
@@ -731,8 +751,7 @@ mod tests {
             .get(ctrl.body)
             .unwrap()
             .position()
-            .translation
-            .vector;
+            .translation;
         let delta = end - start;
         assert!(
             (delta.x - 1.0).abs() < 0.05,
