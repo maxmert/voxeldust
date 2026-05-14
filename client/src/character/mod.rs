@@ -24,15 +24,18 @@ use bevy::prelude::*;
 
 pub mod anim;
 pub mod assets;
+pub mod bind_pose;
 pub mod camera_attach;
 pub mod foot_ik;
 pub mod loader;
 pub mod look_ik;
 pub mod ragdoll_render;
 pub mod render;
+pub mod tablet_ik;
 
 pub use anim::{CharacterAnimPlugin, CharacterAnimSet, LocomotionAnimState};
 pub use assets::{AssetState, CharacterAssetRegistry, ClassAssets};
+pub use bind_pose::{CharacterBindPosePlugin, CharacterBindPoseSet, HandBindData};
 pub use camera_attach::{
     CameraMode, CharacterCameraPlugin, CharacterCameraSet, LocalCharacterTag,
 };
@@ -40,6 +43,7 @@ pub use foot_ik::{CharacterFootIkPlugin, CharacterFootIkSet};
 pub use look_ik::{CharacterLookIkPlugin, CharacterLookIkSet};
 pub use ragdoll_render::{CharacterRagdollPlugin, CharacterRagdollSet};
 pub use render::{BoneRegistry, CharacterRenderPlugin, CharacterRenderSet, RemoteCharacterTag};
+pub use tablet_ik::{CharacterTabletIkPlugin, CharacterTabletIkSet};
 
 /// SystemSet for character-asset loading — placed after `Startup` so
 /// downstream systems can `.after(CharacterAssetSet)` if they need a
@@ -83,8 +87,10 @@ impl Plugin for CharacterPlugin {
             .add_plugins(CharacterRenderPlugin)
             .add_plugins(CharacterAnimPlugin)
             .add_plugins(CharacterCameraPlugin)
+            .add_plugins(CharacterBindPosePlugin)
             .add_plugins(CharacterFootIkPlugin)
             .add_plugins(CharacterLookIkPlugin)
+            .add_plugins(CharacterTabletIkPlugin)
             .add_plugins(CharacterRagdollPlugin);
     }
 }

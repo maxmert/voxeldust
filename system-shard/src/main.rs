@@ -4710,6 +4710,10 @@ fn eva_broadcast(
                 // EVA can't ragdoll on the system shard yet
                 // (Phase I owns that on the on-foot shards only).
                 ragdoll_bones: Vec::new(),
+                // EVA can't open a tablet either; defaults preserve
+                // the no-IK / no-tablet path on the renderer.
+                is_holding_tablet: false,
+                tablet_cursor_uv: glam::Vec2::ZERO,
             }
         })
         .collect();
@@ -5272,6 +5276,10 @@ struct AoiCandidate {
     // Ragdoll bones forwarded from authoritative shards (Phase I).
     // Empty unless the upstream shard simulates a ragdoll.
     ragdoll_bones: Vec<voxeldust_core::character::RagdollBoneTransform>,
+    // Tablet hold state forwarded from authoritative shards
+    // (Phase J).
+    is_holding_tablet: bool,
+    tablet_cursor_uv: glam::Vec2,
 }
 
 impl AoiCandidate {
@@ -5312,6 +5320,8 @@ impl AoiCandidate {
             turn_t: 0.0,
             look_target_delta: None,
             ragdoll_bones: Vec::new(),
+            is_holding_tablet: false,
+            tablet_cursor_uv: glam::Vec2::ZERO,
         }
     }
 }
@@ -5458,6 +5468,10 @@ fn compute_aoi(
             // for AOI relay; the ragdoll itself simulates on the
             // upstream shard.
             ragdoll_bones: c.ragdoll_bones.clone(),
+            // Phase J: tablet hold state passes through identically
+            // (server-owned on the upstream shard).
+            is_holding_tablet: c.is_holding_tablet,
+            tablet_cursor_uv: c.tablet_cursor_uv,
         });
     }
     out

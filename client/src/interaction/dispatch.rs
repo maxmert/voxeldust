@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use voxeldust_core::client_message::{
-    action as edit_action, BlockEditData, ClientMsg, SubBlockEditData,
+    action as edit_action, BlockEditData, ClientMsg, SubBlockEditData, TabletInteractData,
 };
 use voxeldust_core::wire_codec;
 
@@ -213,8 +213,12 @@ fn dispatch_interactions(
         // Consumed by the tablet's egui context.
     } else if keys.just_pressed(KeyCode::KeyF) {
         if existing_tablet.iter().next().is_some() {
-            // Tablet currently visible → dismiss.
+            // Tablet currently visible → dismiss. Local visual goes away
+            // immediately; the server-broadcast `IsHoldingTablet` flag
+            // also flips so remote viewers' arm-IK pose drops on the
+            // next broadcast tick.
             despawn_tablet.write(DespawnHeldTablet);
+            send_tablet_interact(&tcp, TabletInteractData::Close);
         } else {
             // Tablet currently hidden → summon. Route based on what's
             // under the crosshair:
@@ -285,6 +289,19 @@ fn dispatch_interactions(
                 })
             });
 
+            // Phase J: every "tablet open" path below also sends a
+            // `TabletInteract(Open)` to the owning shard so the server-
+            // authoritative `IsHoldingTablet` flag is set. Local visual
+            // spawns instantly via `SpawnHeldTablet` (no roundtrip);
+            // remote viewers see the arm-IK pose after the broadcast
+            // tick lands. The block_pos for validation is the hit
+            // block — for non-functional hits (rare in practice; F is
+            // typically pressed on a functional block) the server
+            // accepts within a 4 m radius regardless of block type.
+            let interact_block_pos = target.hit.map(|h| {
+                glam::IVec3::new(h.block_pos.x, h.block_pos.y, h.block_pos.z)
+            });
+
             if let Some((shard, block_pos, face, sub_type)) = lamp_hit {
                 let world_pos = glam::IVec3::new(block_pos.x, block_pos.y, block_pos.z);
                 let key = crate::lighting::emitters::lamp_configs::LampConfigKey {
@@ -308,6 +325,9 @@ fn dispatch_interactions(
                     shard,
                     config: voxeldust_core::signal::config::BlockSignalConfig::default(),
                 });
+                if let Some(bp) = interact_block_pos {
+                    send_tablet_interact(&tcp, TabletInteractData::Open { block_pos: bp });
+                }
                 tracing::info!(
                     block = ?(block_pos.x, block_pos.y, block_pos.z),
                     face,
@@ -329,6 +349,9 @@ fn dispatch_interactions(
                     shard,
                     config: voxeldust_core::signal::config::BlockSignalConfig::default(),
                 });
+                if let Some(bp) = interact_block_pos {
+                    send_tablet_interact(&tcp, TabletInteractData::Open { block_pos: bp });
+                }
                 tracing::info!(
                     block = ?(block_pos.x, block_pos.y, block_pos.z),
                     face,
@@ -355,6 +378,16 @@ fn dispatch_interactions(
                         },
                         Some(hit.shard),
                         &primary,
+                    );
+                    send_tablet_interact(
+                        &tcp,
+                        TabletInteractData::Open {
+                            block_pos: glam::IVec3::new(
+                                hit.block_pos.x,
+                                hit.block_pos.y,
+                                hit.block_pos.z,
+                            ),
+                        },
                     );
                 }
             }
@@ -528,6 +561,21 @@ fn send_edit(
 
 fn dvec3_from_vec3(v: glam::Vec3) -> glam::DVec3 {
     glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64)
+}
+
+/// Phase J — open / close the server-authoritative tablet hold state.
+/// Mirrors `send_edit`'s framing; routing is primary-only because the
+/// owning-shard pattern hasn't been wired for tablet interaction yet.
+/// Server validates a 4 m radius from the player to the target block
+/// and silently drops out-of-range opens.
+fn send_tablet_interact(tcp: &TcpSender, data: TabletInteractData) {
+    let msg = ClientMsg::TabletInteract(data);
+    let bytes = msg.serialize();
+    let mut pkt = Vec::new();
+    wire_codec::encode(&bytes, &mut pkt);
+    if tcp.tx.send(pkt).is_err() {
+        tracing::warn!("TCP channel closed while sending TabletInteract");
+    }
 }
 
 /// Send a `SubBlockEditRequest` routed to the owning shard's TCP.

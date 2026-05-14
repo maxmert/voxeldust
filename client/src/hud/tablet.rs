@@ -13,13 +13,18 @@
 
 use bevy::prelude::*;
 
+use voxeldust_core::client_message::ClientMsg;
 use voxeldust_core::signal::config::BlockSignalConfig;
+use voxeldust_core::wire_codec;
 
+use crate::character::{BoneRegistry, CharacterAssetRegistry, LocalCharacterTag, RemoteCharacterTag};
+use crate::hud::focus::{HudFocusOrigin, HudFocusState};
 use crate::hud::material::new_egui_target_image;
 use crate::hud::tablet_ui::spawn_tablet_egui_camera;
 use crate::hud::tile::{
     HudAttachment, HudConfig, HudPayload, HudTexture, HudTile, WidgetKind,
 };
+use crate::net::TcpSender;
 use crate::shard::ShardKey;
 
 /// Marker component on the one (or zero) currently-held tablet.
@@ -65,6 +70,7 @@ impl Plugin for HeldTabletPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SpawnHeldTablet>()
             .add_message::<DespawnHeldTablet>()
+            .init_resource::<TabletCursorStreamState>()
             .add_systems(
                 Update,
                 (
@@ -72,9 +78,86 @@ impl Plugin for HeldTabletPlugin {
                     despawn_tablet.in_set(TabletDespawnSet),
                     follow_camera,
                     animate_tablet_spawn,
+                    stream_tablet_cursor,
                 ),
             );
     }
+}
+
+/// Phase J — sender state for the throttled cursor stream. The
+/// last-sent UV is kept so we suppress redundant ticks (player
+/// holding the cursor still). Last-sent time is kept so we cap the
+/// stream at ~20 Hz; well-below the default 60 Hz client loop and
+/// well-above the 20 Hz server tick where cursor data ultimately
+/// matters for remote replication.
+#[derive(Resource, Debug, Clone, Copy)]
+struct TabletCursorStreamState {
+    last_uv: Vec2,
+    last_send: f64,
+}
+
+impl Default for TabletCursorStreamState {
+    fn default() -> Self {
+        Self {
+            // (-1, -1) is unreachable — `cursor_uv` is always clamped
+            // to `[0, 1]` — so the first tick after the tablet opens
+            // always passes the "value changed" gate even if the
+            // cursor sits dead-centre.
+            last_uv: Vec2::new(-1.0, -1.0),
+            last_send: f64::NEG_INFINITY,
+        }
+    }
+}
+
+/// Phase J — at ~20 Hz, push `HudFocusState.cursor_uv` to the server
+/// so remote viewers' finger-IK tracks the local player's cursor.
+/// No-op when no tablet is held or focus is not on the tablet.
+/// Suppresses redundant sends by gating on a 1-pixel-equivalent UV
+/// delta (≈ 0.0025) — the same threshold the cursor accumulator
+/// uses, so any meaningful movement always replicates.
+fn stream_tablet_cursor(
+    focus: Res<HudFocusState>,
+    tablet: Query<(), With<HeldTablet>>,
+    tcp: Res<TcpSender>,
+    time: Res<Time>,
+    mut state: ResMut<TabletCursorStreamState>,
+) {
+    /// 50 ms = 20 Hz. Matches the server-shard tick so each broadcast
+    /// carries the freshest cursor sample (within one client frame
+    /// of the broadcast).
+    const MIN_INTERVAL_S: f64 = 0.05;
+    /// 1-pixel delta in UV space at the focus cursor's sensitivity.
+    /// Below this, treat as "no movement" and skip the wire write.
+    const MIN_DELTA: f32 = 0.0025;
+
+    if tablet.is_empty() || !matches!(focus.origin, HudFocusOrigin::Tablet) {
+        // Tablet closed or focus moved — reset so the next open
+        // re-syncs from a clean slate.
+        if state.last_uv != Vec2::new(-1.0, -1.0) {
+            *state = TabletCursorStreamState::default();
+        }
+        return;
+    }
+    let now = time.elapsed().as_secs_f64();
+    if now - state.last_send < MIN_INTERVAL_S {
+        return;
+    }
+    let delta = (focus.cursor_uv - state.last_uv).abs();
+    if delta.x < MIN_DELTA && delta.y < MIN_DELTA && state.last_uv.x >= 0.0 {
+        return;
+    }
+    // bevy's `Vec2` is `glam` 0.30; `ClientMsg` uses workspace-pinned
+    // `glam` 0.29. Bridge by component-wise construction.
+    let msg = ClientMsg::TabletCursorUpdate(glam::Vec2::new(focus.cursor_uv.x, focus.cursor_uv.y));
+    let bytes = msg.serialize();
+    let mut pkt = Vec::new();
+    wire_codec::encode(&bytes, &mut pkt);
+    if tcp.tx.send(pkt).is_err() {
+        tracing::warn!("TCP channel closed while sending TabletCursorUpdate");
+        return;
+    }
+    state.last_uv = focus.cursor_uv;
+    state.last_send = now;
 }
 
 /// Width / height in world meters. Square 1:1 tablet matches the
@@ -269,34 +352,148 @@ fn despawn_tablet(
     }
 }
 
-/// Keep the tablet pinned at a fixed offset in camera-local space
-/// every frame. Camera-relative rather than parented-to-camera so the
-/// render transform can still be rebased by the floating-origin
-/// system without fighting the tablet's own Transform.
+/// Phase J — AAA "in-hand" architecture. The tablet entity is reparented
+/// to the local player's RIGHT HAND bone the first frame both bones
+/// resolve. From that point on Bevy's transform propagation drives the
+/// tablet's world pose entirely from the hand bone's pose — body sway,
+/// walk bobs, IK adjustments, every animation frame propagates 1:1
+/// without a per-frame world-write race.
+///
+/// To make the constant local Transform deterministic, `tablet_ik`
+/// **overrides the right wrist's world rotation** to a fixed grip pose
+/// (`visual_rot * class.right_hand_grip_rotation_in_body`). With the
+/// wrist locked to body-aligned axes, the tablet's local Transform is
+/// a closed-form expression of the desired body-local pose:
+///
+///   * Wrist sits at the tablet's right edge (W/2 to body-LEFT of the
+///     screen centre), pulled slightly back along body forward so the
+///     hand wraps the back of the bezel.
+///   * Mesh axes map to body axes: mesh +X → body right, mesh +Y →
+///     body up (pitched toward the face), mesh +Z → body back (pitched
+///     toward the face — i.e. the screen normal points at the player).
+///
+/// Fallback (`cam`): camera-relative pinning until the visual + right
+/// hand bone resolve, then hand-parented every frame after.
 fn follow_camera(
+    mut commands: Commands,
     cam: Query<&GlobalTransform, With<crate::MainCamera>>,
-    mut tablet: Query<(&mut Transform, Option<&TabletSpawnAnim>), With<HeldTablet>>,
+    local: Query<(&BoneRegistry, &RemoteCharacterTag), With<LocalCharacterTag>>,
+    asset_registry: Res<CharacterAssetRegistry>,
+    mut tablet: Query<
+        (Entity, &mut Transform, Option<&ChildOf>, Option<&TabletSpawnAnim>),
+        With<HeldTablet>,
+    >,
 ) {
+    let Ok((tablet_e, mut tf, child_of, anim)) = tablet.single_mut() else { return };
+    let scale = anim
+        .map(|a| spawn_scale_from_elapsed(a.elapsed))
+        .unwrap_or(1.0);
+
+    let attached = local.single().ok().and_then(|(bones, tag)| {
+        if !bones.resolved {
+            return None;
+        }
+        let assets = asset_registry.ready(tag.class_id)?;
+        let hand_e = bones.get(assets.class.right_hand_bone)?;
+        Some((hand_e, assets.class))
+    });
+
+    if let Some((hand_e, class)) = attached {
+        let already_parented = child_of.map(|c| c.parent() == hand_e).unwrap_or(false);
+        if !already_parented {
+            // The naive `commands.entity(hand_e).add_child(tablet_e)`
+            // panics in `apply_deferred` if EITHER entity is despawned
+            // by the time the buffer applies. The race we hit:
+            //   * Tick T: spawn_tablet queues despawn(old_tablet) +
+            //     spawn(new_tablet). follow_camera also runs in T,
+            //     reads `tablet.single_mut()` which still sees the
+            //     OLD tablet (despawn isn't applied yet), queues
+            //     `add_child(hand_e, old_tablet)`.
+            //   * apply_deferred (FIFO): old_tablet despawn applies,
+            //     then add_child runs against the dead entity →
+            //     panic in the relationship hook at
+            //     `bevy_ecs/relationship/related_methods.rs:46`.
+            //
+            // Bevy's `commands.get_entity` checks the LIVE entity
+            // table at queue time, but a same-tick queued despawn
+            // hasn't applied yet — so it returns Ok and we still
+            // crash at apply time.
+            //
+            // Fix: queue a world-level closure that re-validates
+            // BOTH entities at apply time, after all earlier-queued
+            // commands have run. If either is dead, silently skip;
+            // the next frame will re-attempt with fresh entities.
+            let parent = hand_e;
+            let child = tablet_e;
+            commands.queue(move |world: &mut bevy::ecs::world::World| {
+                if world.get_entity(parent).is_ok() && world.get_entity(child).is_ok() {
+                    world.entity_mut(parent).add_child(child);
+                }
+            });
+        }
+
+        // Closed-form local Transform derivation. Symbols:
+        //   * `grip` = class.right_hand_grip_rotation_in_body, which
+        //     `tablet_ik` enforces as the wrist's rotation in body-local.
+        //   * `inv = grip⁻¹`. Maps body-local axes BACK into bone-local
+        //     axes (the frame the tablet's local Transform lives in).
+        //
+        // Body axes in body-local: body_left = +X, body_up = +Y,
+        // body_back = -Z, body_right = -X, body_forward = +Z.
+        //
+        // Translation: tablet centre = chest + visual_rot * hold_offset.
+        // Wrist (post-IK) = chest + visual_rot * (hold_offset.x - W/2,
+        //                              hold_offset.y, hold_offset.z + grip_back).
+        // Tablet relative to wrist in body-local =
+        //   (W/2, 0, -grip_back) — W/2 to body-LEFT, grip_back behind
+        //   the screen plane (toward body forward).
+        // In hand-local: inv · (W/2, 0, -grip_back).
+        //
+        // Rotation: each mesh axis maps to a body axis (pitched).
+        //   mesh +X → body_right = -X body-local. In hand-local: inv · -X.
+        //   mesh +Y → pitched body_up. Pitch axis = body_right (-X body).
+        //   mesh +Z → pitched body_back = pitched -Z body.
+        // In hand-local, pitch axis = inv · -X.
+        let grip = crate::character::tablet_ik::right_hand_grip_in_body_rot(class);
+        let inv = grip.inverse();
+
+        let half_w = class.tablet_width / 2.0;
+        // Tablet centre relative to the wrist in body-local frame.
+        // Mirror of `tablet_ik`'s right_grip_world derivation: wrist
+        // sits at `(-half_w - outside_offset, 0, +grip_back_depth)`
+        // from the pad centre, so pad centre is the negation:
+        // `(+half_w + outside_offset, 0, -grip_back_depth)`. Both
+        // must use the SAME outside_offset or wrist and pad drift
+        // apart visually.
+        let body_local_offset = Vec3::new(
+            half_w + class.tablet_right_hand_outside_offset,
+            0.0,
+            -class.tablet_grip_back_depth,
+        );
+        let tablet_local_pos = inv * body_local_offset;
+
+        let pitch_axis_local = inv * Vec3::NEG_X;
+        let pitch = Quat::from_axis_angle(pitch_axis_local, class.tablet_hold_pitch);
+        let basis = Mat3::from_cols(
+            inv * Vec3::NEG_X,            // mesh +X → body right
+            pitch * (inv * Vec3::Y),      // mesh +Y → body up (pitched)
+            pitch * (inv * Vec3::NEG_Z),  // mesh +Z → body back (pitched, screen → player)
+        );
+
+        tf.translation = tablet_local_pos;
+        tf.rotation = Quat::from_mat3(&basis);
+        tf.scale = Vec3::splat(scale);
+        return;
+    }
+
+    // Fallback before the local visual's bones resolve. Once the
+    // tablet is parented this branch never runs again.
     let Ok(cam_gt) = cam.single() else { return };
-    let Ok((mut tf, anim)) = tablet.single_mut() else { return };
     let cam_translation: Vec3 = cam_gt.translation();
     let cam_rot = cam_gt.rotation();
     let local_offset = cam_rot * TABLET_OFFSET_LOCAL;
     tf.translation = cam_translation + local_offset;
-    // Face the camera + reading-angle tilt (see constant above).
-    // Front normal = cam_rot * +Z = direction back toward the
-    // player's eye; the extra local-X rotation tips the top edge
-    // away so it feels held rather than floating.
     tf.rotation = cam_rot * Quat::from_rotation_x(TABLET_READING_TILT_RAD);
-
-    // Hold the scale from the animation system. When there's no
-    // `TabletSpawnAnim`, the animation is complete — scale is 1.
-    // The scale is written here (not in `animate_tablet_spawn`)
-    // because `follow_camera` is the sole writer of `Transform` for
-    // the tablet; writing from both causes one-frame flicker.
-    let scale = anim
-        .map(|a| spawn_scale_from_elapsed(a.elapsed))
-        .unwrap_or(1.0);
     tf.scale = Vec3::splat(scale);
 }
 

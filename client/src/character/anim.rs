@@ -331,6 +331,8 @@ mod tests {
             turn_t: 0.0,
             look_target_delta: None,
             ragdoll_bones: Vec::new(),
+            is_holding_tablet: false,
+            tablet_cursor_uv: glam::Vec2::ZERO,
         }
     }
 

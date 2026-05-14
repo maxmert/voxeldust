@@ -49,6 +49,7 @@ pub mod ragdoll;
 pub mod stance;
 pub mod state_machine;
 pub mod stats;
+pub mod tablet_state;
 
 #[cfg(feature = "rapier")]
 pub mod controller;
@@ -74,6 +75,7 @@ pub use ragdoll::{
 };
 #[cfg(feature = "rapier")]
 pub use ragdoll::{despawn_ragdoll_bodies, spawn_ragdoll_bodies, RagdollHandles};
+pub use tablet_state::{IsHoldingTablet, TabletCursor};
 pub use stance::{CharacterStance, StanceAction};
 pub use state_machine::{apply_update, step_body_head, wrap_pi, BodyHeadUpdate};
 pub use stats::MovementStats;

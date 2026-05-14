@@ -491,10 +491,10 @@ pub struct ServerPayloadUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_PAYLOAD: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 14;
+pub const ENUM_MAX_CLIENT_PAYLOAD: u8 = 16;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 15] = [
+pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 17] = [
   ClientPayload::NONE,
   ClientPayload::Connect,
   ClientPayload::PlayerInput,
@@ -510,6 +510,8 @@ pub const ENUM_VALUES_CLIENT_PAYLOAD: [ClientPayload; 15] = [
   ClientPayload::ForgetHeldGrant,
   ClientPayload::RemoteSignalPublish,
   ClientPayload::TerminalChatSendData,
+  ClientPayload::TabletInteractRequest,
+  ClientPayload::TabletCursorUpdate,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -538,9 +540,15 @@ impl ClientPayload {
   pub const RemoteSignalPublish: Self = Self(13);
   /// Phase D: send a chat line typed on an engaged Terminal block.
   pub const TerminalChatSendData: Self = Self(14);
+  /// Phase J: open or close a tablet on a functional block.
+  pub const TabletInteractRequest: Self = Self(15);
+  /// Phase J: high-frequency cursor position update during the
+  /// tablet hold (server passes through to broadcast for remote
+  /// finger-IK replication; never read for gameplay decisions).
+  pub const TabletCursorUpdate: Self = Self(16);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 14;
+  pub const ENUM_MAX: u8 = 16;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::Connect,
@@ -557,6 +565,8 @@ impl ClientPayload {
     Self::ForgetHeldGrant,
     Self::RemoteSignalPublish,
     Self::TerminalChatSendData,
+    Self::TabletInteractRequest,
+    Self::TabletCursorUpdate,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -576,6 +586,8 @@ impl ClientPayload {
       Self::ForgetHeldGrant => Some("ForgetHeldGrant"),
       Self::RemoteSignalPublish => Some("RemoteSignalPublish"),
       Self::TerminalChatSendData => Some("TerminalChatSendData"),
+      Self::TabletInteractRequest => Some("TabletInteractRequest"),
+      Self::TabletCursorUpdate => Some("TabletCursorUpdate"),
       _ => None,
     }
   }
@@ -5681,6 +5693,9 @@ impl<'a> ObservableEntity<'a> {
   pub const VT_LOOK_DY: ::flatbuffers::VOffsetT = 50;
   pub const VT_LOOK_DZ: ::flatbuffers::VOffsetT = 52;
   pub const VT_RAGDOLL_BONES: ::flatbuffers::VOffsetT = 54;
+  pub const VT_IS_HOLDING_TABLET: ::flatbuffers::VOffsetT = 56;
+  pub const VT_TABLET_CURSOR_U: ::flatbuffers::VOffsetT = 58;
+  pub const VT_TABLET_CURSOR_V: ::flatbuffers::VOffsetT = 60;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5694,6 +5709,8 @@ impl<'a> ObservableEntity<'a> {
     let mut builder = ObservableEntityBuilder::new(_fbb);
     builder.add_shard_id(args.shard_id);
     builder.add_entity_id(args.entity_id);
+    builder.add_tablet_cursor_v(args.tablet_cursor_v);
+    builder.add_tablet_cursor_u(args.tablet_cursor_u);
     if let Some(x) = args.ragdoll_bones { builder.add_ragdoll_bones(x); }
     builder.add_look_dz(args.look_dz);
     builder.add_look_dy(args.look_dy);
@@ -5711,6 +5728,7 @@ impl<'a> ObservableEntity<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_is_holding_tablet(args.is_holding_tablet);
     builder.add_look_target_set(args.look_target_set);
     builder.add_is_turning(args.is_turning);
     builder.add_locomotion(args.locomotion);
@@ -5916,6 +5934,27 @@ impl<'a> ObservableEntity<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>(ObservableEntity::VT_RAGDOLL_BONES, None)}
   }
+  #[inline]
+  pub fn is_holding_tablet(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ObservableEntity::VT_IS_HOLDING_TABLET, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn tablet_cursor_u(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_TABLET_CURSOR_U, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn tablet_cursor_v(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(ObservableEntity::VT_TABLET_CURSOR_V, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
@@ -5950,6 +5989,9 @@ impl ::flatbuffers::Verifiable for ObservableEntity<'_> {
      .visit_field::<f32>("look_dy", Self::VT_LOOK_DY, false)?
      .visit_field::<f32>("look_dz", Self::VT_LOOK_DZ, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>("ragdoll_bones", Self::VT_RAGDOLL_BONES, false)?
+     .visit_field::<bool>("is_holding_tablet", Self::VT_IS_HOLDING_TABLET, false)?
+     .visit_field::<f32>("tablet_cursor_u", Self::VT_TABLET_CURSOR_U, false)?
+     .visit_field::<f32>("tablet_cursor_v", Self::VT_TABLET_CURSOR_V, false)?
      .finish();
     Ok(())
   }
@@ -5981,6 +6023,9 @@ pub struct ObservableEntityArgs<'a> {
     pub look_dy: f32,
     pub look_dz: f32,
     pub ragdoll_bones: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'a>>>>>,
+    pub is_holding_tablet: bool,
+    pub tablet_cursor_u: f32,
+    pub tablet_cursor_v: f32,
 }
 impl<'a> Default for ObservableEntityArgs<'a> {
   #[inline]
@@ -6012,6 +6057,9 @@ impl<'a> Default for ObservableEntityArgs<'a> {
       look_dy: 0.0,
       look_dz: 0.0,
       ragdoll_bones: None,
+      is_holding_tablet: false,
+      tablet_cursor_u: 0.0,
+      tablet_cursor_v: 0.0,
     }
   }
 }
@@ -6126,6 +6174,18 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ObservableEntityBuilder<'a, '
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ObservableEntity::VT_RAGDOLL_BONES, ragdoll_bones);
   }
   #[inline]
+  pub fn add_is_holding_tablet(&mut self, is_holding_tablet: bool) {
+    self.fbb_.push_slot::<bool>(ObservableEntity::VT_IS_HOLDING_TABLET, is_holding_tablet, false);
+  }
+  #[inline]
+  pub fn add_tablet_cursor_u(&mut self, tablet_cursor_u: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_TABLET_CURSOR_U, tablet_cursor_u, 0.0);
+  }
+  #[inline]
+  pub fn add_tablet_cursor_v(&mut self, tablet_cursor_v: f32) {
+    self.fbb_.push_slot::<f32>(ObservableEntity::VT_TABLET_CURSOR_V, tablet_cursor_v, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ObservableEntityBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ObservableEntityBuilder {
@@ -6169,6 +6229,9 @@ impl ::core::fmt::Debug for ObservableEntity<'_> {
       ds.field("look_dy", &self.look_dy());
       ds.field("look_dz", &self.look_dz());
       ds.field("ragdoll_bones", &self.ragdoll_bones());
+      ds.field("is_holding_tablet", &self.is_holding_tablet());
+      ds.field("tablet_cursor_u", &self.tablet_cursor_u());
+      ds.field("tablet_cursor_v", &self.tablet_cursor_v());
       ds.finish()
   }
 }
@@ -13143,6 +13206,9 @@ impl<'a> PlayerSnapshot<'a> {
   pub const VT_LOOK_DY: ::flatbuffers::VOffsetT = 40;
   pub const VT_LOOK_DZ: ::flatbuffers::VOffsetT = 42;
   pub const VT_RAGDOLL_BONES: ::flatbuffers::VOffsetT = 44;
+  pub const VT_IS_HOLDING_TABLET: ::flatbuffers::VOffsetT = 46;
+  pub const VT_TABLET_CURSOR_U: ::flatbuffers::VOffsetT = 48;
+  pub const VT_TABLET_CURSOR_V: ::flatbuffers::VOffsetT = 50;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -13155,6 +13221,8 @@ impl<'a> PlayerSnapshot<'a> {
   ) -> ::flatbuffers::WIPOffset<PlayerSnapshot<'bldr>> {
     let mut builder = PlayerSnapshotBuilder::new(_fbb);
     builder.add_player_id(args.player_id);
+    builder.add_tablet_cursor_v(args.tablet_cursor_v);
+    builder.add_tablet_cursor_u(args.tablet_cursor_u);
     if let Some(x) = args.ragdoll_bones { builder.add_ragdoll_bones(x); }
     builder.add_look_dz(args.look_dz);
     builder.add_look_dy(args.look_dy);
@@ -13170,6 +13238,7 @@ impl<'a> PlayerSnapshot<'a> {
     if let Some(x) = args.velocity { builder.add_velocity(x); }
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
+    builder.add_is_holding_tablet(args.is_holding_tablet);
     builder.add_look_target_set(args.look_target_set);
     builder.add_is_turning(args.is_turning);
     builder.add_locomotion(args.locomotion);
@@ -13332,6 +13401,27 @@ impl<'a> PlayerSnapshot<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>(PlayerSnapshot::VT_RAGDOLL_BONES, None)}
   }
+  #[inline]
+  pub fn is_holding_tablet(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlayerSnapshot::VT_IS_HOLDING_TABLET, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn tablet_cursor_u(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_TABLET_CURSOR_U, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn tablet_cursor_v(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlayerSnapshot::VT_TABLET_CURSOR_V, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
@@ -13361,6 +13451,9 @@ impl ::flatbuffers::Verifiable for PlayerSnapshot<'_> {
      .visit_field::<f32>("look_dy", Self::VT_LOOK_DY, false)?
      .visit_field::<f32>("look_dz", Self::VT_LOOK_DZ, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot>>>>("ragdoll_bones", Self::VT_RAGDOLL_BONES, false)?
+     .visit_field::<bool>("is_holding_tablet", Self::VT_IS_HOLDING_TABLET, false)?
+     .visit_field::<f32>("tablet_cursor_u", Self::VT_TABLET_CURSOR_U, false)?
+     .visit_field::<f32>("tablet_cursor_v", Self::VT_TABLET_CURSOR_V, false)?
      .finish();
     Ok(())
   }
@@ -13387,6 +13480,9 @@ pub struct PlayerSnapshotArgs<'a> {
     pub look_dy: f32,
     pub look_dz: f32,
     pub ragdoll_bones: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RagdollBoneSnapshot<'a>>>>>,
+    pub is_holding_tablet: bool,
+    pub tablet_cursor_u: f32,
+    pub tablet_cursor_v: f32,
 }
 impl<'a> Default for PlayerSnapshotArgs<'a> {
   #[inline]
@@ -13413,6 +13509,9 @@ impl<'a> Default for PlayerSnapshotArgs<'a> {
       look_dy: 0.0,
       look_dz: 0.0,
       ragdoll_bones: None,
+      is_holding_tablet: false,
+      tablet_cursor_u: 0.0,
+      tablet_cursor_v: 0.0,
     }
   }
 }
@@ -13507,6 +13606,18 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerSnapshotBuilder<'a, 'b,
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(PlayerSnapshot::VT_RAGDOLL_BONES, ragdoll_bones);
   }
   #[inline]
+  pub fn add_is_holding_tablet(&mut self, is_holding_tablet: bool) {
+    self.fbb_.push_slot::<bool>(PlayerSnapshot::VT_IS_HOLDING_TABLET, is_holding_tablet, false);
+  }
+  #[inline]
+  pub fn add_tablet_cursor_u(&mut self, tablet_cursor_u: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_TABLET_CURSOR_U, tablet_cursor_u, 0.0);
+  }
+  #[inline]
+  pub fn add_tablet_cursor_v(&mut self, tablet_cursor_v: f32) {
+    self.fbb_.push_slot::<f32>(PlayerSnapshot::VT_TABLET_CURSOR_V, tablet_cursor_v, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerSnapshotBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerSnapshotBuilder {
@@ -13545,6 +13656,9 @@ impl ::core::fmt::Debug for PlayerSnapshot<'_> {
       ds.field("look_dy", &self.look_dy());
       ds.field("look_dz", &self.look_dz());
       ds.field("ragdoll_bones", &self.ragdoll_bones());
+      ds.field("is_holding_tablet", &self.is_holding_tablet());
+      ds.field("tablet_cursor_u", &self.tablet_cursor_u());
+      ds.field("tablet_cursor_v", &self.tablet_cursor_v());
       ds.finish()
   }
 }
@@ -25087,6 +25201,280 @@ impl ::core::fmt::Debug for TerminalChatSendData<'_> {
       ds.finish()
   }
 }
+pub enum TabletInteractRequestOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Phase J: client opens / closes a held tablet.
+///
+/// `Open` requires `block_x/y/z` to identify the functional block
+/// being interacted with — server validates the target exists, is
+/// interactive, and the player is within range before inserting
+/// `IsHoldingTablet` on the character. `Close` ignores those fields.
+pub struct TabletInteractRequest<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for TabletInteractRequest<'a> {
+  type Inner = TabletInteractRequest<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> TabletInteractRequest<'a> {
+  pub const VT_ACTION: ::flatbuffers::VOffsetT = 4;
+  pub const VT_BLOCK_X: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BLOCK_Y: ::flatbuffers::VOffsetT = 8;
+  pub const VT_BLOCK_Z: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    TabletInteractRequest { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args TabletInteractRequestArgs
+  ) -> ::flatbuffers::WIPOffset<TabletInteractRequest<'bldr>> {
+    let mut builder = TabletInteractRequestBuilder::new(_fbb);
+    builder.add_block_z(args.block_z);
+    builder.add_block_y(args.block_y);
+    builder.add_block_x(args.block_x);
+    builder.add_action(args.action);
+    builder.finish()
+  }
+
+
+  /// 1 = open, 2 = close.
+  #[inline]
+  pub fn action(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(TabletInteractRequest::VT_ACTION, Some(0)).unwrap()}
+  }
+  /// Functional block coordinates in the player's authoritative
+  /// shard (ship-local or planet-local i32). Ignored when
+  /// `action == 2`.
+  #[inline]
+  pub fn block_x(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TabletInteractRequest::VT_BLOCK_X, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_y(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TabletInteractRequest::VT_BLOCK_Y, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn block_z(&self) -> i32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i32>(TabletInteractRequest::VT_BLOCK_Z, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for TabletInteractRequest<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u8>("action", Self::VT_ACTION, false)?
+     .visit_field::<i32>("block_x", Self::VT_BLOCK_X, false)?
+     .visit_field::<i32>("block_y", Self::VT_BLOCK_Y, false)?
+     .visit_field::<i32>("block_z", Self::VT_BLOCK_Z, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct TabletInteractRequestArgs {
+    pub action: u8,
+    pub block_x: i32,
+    pub block_y: i32,
+    pub block_z: i32,
+}
+impl<'a> Default for TabletInteractRequestArgs {
+  #[inline]
+  fn default() -> Self {
+    TabletInteractRequestArgs {
+      action: 0,
+      block_x: 0,
+      block_y: 0,
+      block_z: 0,
+    }
+  }
+}
+
+pub struct TabletInteractRequestBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> TabletInteractRequestBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_action(&mut self, action: u8) {
+    self.fbb_.push_slot::<u8>(TabletInteractRequest::VT_ACTION, action, 0);
+  }
+  #[inline]
+  pub fn add_block_x(&mut self, block_x: i32) {
+    self.fbb_.push_slot::<i32>(TabletInteractRequest::VT_BLOCK_X, block_x, 0);
+  }
+  #[inline]
+  pub fn add_block_y(&mut self, block_y: i32) {
+    self.fbb_.push_slot::<i32>(TabletInteractRequest::VT_BLOCK_Y, block_y, 0);
+  }
+  #[inline]
+  pub fn add_block_z(&mut self, block_z: i32) {
+    self.fbb_.push_slot::<i32>(TabletInteractRequest::VT_BLOCK_Z, block_z, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> TabletInteractRequestBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    TabletInteractRequestBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<TabletInteractRequest<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for TabletInteractRequest<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("TabletInteractRequest");
+      ds.field("action", &self.action());
+      ds.field("block_x", &self.block_x());
+      ds.field("block_y", &self.block_y());
+      ds.field("block_z", &self.block_z());
+      ds.finish()
+  }
+}
+pub enum TabletCursorUpdateOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Phase J: cursor position on the held tablet's screen, in UV
+/// space `[0, 1]`. Sent at ~20 Hz (throttled client-side); server
+/// clamps to range and broadcasts via `PlayerSnapshot.tablet_cursor_*`
+/// for remote finger-IK replication.
+pub struct TabletCursorUpdate<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for TabletCursorUpdate<'a> {
+  type Inner = TabletCursorUpdate<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> TabletCursorUpdate<'a> {
+  pub const VT_U: ::flatbuffers::VOffsetT = 4;
+  pub const VT_V: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    TabletCursorUpdate { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args TabletCursorUpdateArgs
+  ) -> ::flatbuffers::WIPOffset<TabletCursorUpdate<'bldr>> {
+    let mut builder = TabletCursorUpdateBuilder::new(_fbb);
+    builder.add_v(args.v);
+    builder.add_u(args.u);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn u(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(TabletCursorUpdate::VT_U, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn v(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(TabletCursorUpdate::VT_V, Some(0.0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for TabletCursorUpdate<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<f32>("u", Self::VT_U, false)?
+     .visit_field::<f32>("v", Self::VT_V, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct TabletCursorUpdateArgs {
+    pub u: f32,
+    pub v: f32,
+}
+impl<'a> Default for TabletCursorUpdateArgs {
+  #[inline]
+  fn default() -> Self {
+    TabletCursorUpdateArgs {
+      u: 0.0,
+      v: 0.0,
+    }
+  }
+}
+
+pub struct TabletCursorUpdateBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> TabletCursorUpdateBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_u(&mut self, u: f32) {
+    self.fbb_.push_slot::<f32>(TabletCursorUpdate::VT_U, u, 0.0);
+  }
+  #[inline]
+  pub fn add_v(&mut self, v: f32) {
+    self.fbb_.push_slot::<f32>(TabletCursorUpdate::VT_V, v, 0.0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> TabletCursorUpdateBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    TabletCursorUpdateBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<TabletCursorUpdate<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for TabletCursorUpdate<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("TabletCursorUpdate");
+      ds.field("u", &self.u());
+      ds.field("v", &self.v());
+      ds.finish()
+  }
+}
 pub enum ClientMessageOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -25347,6 +25735,36 @@ impl<'a> ClientMessage<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_tablet_interact_request(&self) -> Option<TabletInteractRequest<'a>> {
+    if self.payload_type() == ClientPayload::TabletInteractRequest {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { TabletInteractRequest::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn payload_as_tablet_cursor_update(&self) -> Option<TabletCursorUpdate<'a>> {
+    if self.payload_type() == ClientPayload::TabletCursorUpdate {
+      self.payload().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { TabletCursorUpdate::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl ::flatbuffers::Verifiable for ClientMessage<'_> {
@@ -25371,6 +25789,8 @@ impl ::flatbuffers::Verifiable for ClientMessage<'_> {
           ClientPayload::ForgetHeldGrant => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ForgetHeldGrant>>("ClientPayload::ForgetHeldGrant", pos),
           ClientPayload::RemoteSignalPublish => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<RemoteSignalPublish>>("ClientPayload::RemoteSignalPublish", pos),
           ClientPayload::TerminalChatSendData => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<TerminalChatSendData>>("ClientPayload::TerminalChatSendData", pos),
+          ClientPayload::TabletInteractRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<TabletInteractRequest>>("ClientPayload::TabletInteractRequest", pos),
+          ClientPayload::TabletCursorUpdate => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<TabletCursorUpdate>>("ClientPayload::TabletCursorUpdate", pos),
           _ => Ok(()),
         }
      })?
@@ -25518,6 +25938,20 @@ impl ::core::fmt::Debug for ClientMessage<'_> {
         },
         ClientPayload::TerminalChatSendData => {
           if let Some(x) = self.payload_as_terminal_chat_send_data() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::TabletInteractRequest => {
+          if let Some(x) = self.payload_as_tablet_interact_request() {
+            ds.field("payload", &x)
+          } else {
+            ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        ClientPayload::TabletCursorUpdate => {
+          if let Some(x) = self.payload_as_tablet_cursor_update() {
             ds.field("payload", &x)
           } else {
             ds.field("payload", &"InvalidFlatbuffer: Union discriminant does not match value.")

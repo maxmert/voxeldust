@@ -11,7 +11,7 @@ use std::time::Instant;
 use bevy::prelude::*;
 
 use crate::hud::ar::{draw_ar_markers, ArDrawCtx};
-use crate::hud::focus::HudFocusState;
+use crate::hud::focus::{HudFocusOrigin, HudFocusState};
 use crate::hud::signal_registry::SignalRegistry;
 use crate::hud::tablet::HeldTablet;
 use crate::hud::tile::{HudConfig, HudPanelLayout, HudTexture, HudTile, HudWidgetSlot, WidgetKind};
@@ -209,8 +209,13 @@ fn redraw_hud_textures(
             draw_ar_markers(buf.as_mut_slice(), size, config, &ctx);
         }
 
-        // In-game cursor.
-        if focus.focused_tile == Some(entity) {
+        // In-game cursor. Phase J: when the focused tile IS the held
+        // tablet, the IK-driven left index finger is the cursor — no
+        // 2D crosshair on the texture. Block-face HUD tiles still get
+        // the on-tile cursor since there's no finger pose for those.
+        if focus.focused_tile == Some(entity)
+            && !matches!(focus.origin, HudFocusOrigin::Tablet)
+        {
             draw_cursor(buf.as_mut_slice(), size, focus.cursor_uv);
         }
 

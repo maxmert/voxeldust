@@ -1047,6 +1047,86 @@ fn process_handoff_accepted(
 }
 
 // ---------------------------------------------------------------------------
+// Tablet interaction (Phase J)
+// ---------------------------------------------------------------------------
+
+/// Phase J — server-authoritative tablet open/close. Mirrors the ship-shard
+/// implementation; the only difference is the planet-local position type
+/// (`PlanetPosition`) used for the distance check. The block coordinate is
+/// already in planet-local frame on the wire because the client transforms
+/// before sending.
+fn process_tablet_interact(
+    mut commands: Commands,
+    mut bridge: ResMut<NetworkBridge>,
+    player_index: Res<PlayerEntityIndex>,
+    players: Query<&PlanetPosition, With<PlanetPlayer>>,
+) {
+    /// 4 metres — matches the ship-shard radius; kept as a per-shard const
+    /// rather than a `CharacterClass` field because it's a gameplay-tuning
+    /// distance, not a per-character property.
+    const TABLET_INTERACT_RADIUS_M: f32 = 4.0;
+    for _ in 0..64 {
+        let Ok((session, data)) = bridge.tablet_interact_rx.try_recv() else {
+            break;
+        };
+        let Some(&entity) = player_index.0.get(&session) else {
+            continue;
+        };
+        match data {
+            voxeldust_core::client_message::TabletInteractData::Open { block_pos } => {
+                let Ok(player_pos) = players.get(entity) else {
+                    continue;
+                };
+                let block_centre = DVec3::new(
+                    block_pos.x as f64 + 0.5,
+                    block_pos.y as f64 + 0.5,
+                    block_pos.z as f64 + 0.5,
+                );
+                if player_pos.0.distance(block_centre) > TABLET_INTERACT_RADIUS_M as f64 {
+                    tracing::info!(
+                        ?session,
+                        ?block_pos,
+                        player = ?player_pos.0,
+                        "TabletInteract: rejected — too far from target block"
+                    );
+                    continue;
+                }
+                commands.entity(entity).insert((
+                    voxeldust_core::character::IsHoldingTablet,
+                    voxeldust_core::character::TabletCursor(glam::Vec2::new(0.5, 0.5)),
+                ));
+            }
+            voxeldust_core::client_message::TabletInteractData::Close => {
+                commands
+                    .entity(entity)
+                    .remove::<voxeldust_core::character::IsHoldingTablet>()
+                    .remove::<voxeldust_core::character::TabletCursor>();
+            }
+        }
+    }
+}
+
+/// Phase J — high-frequency cursor stream. Pure passthrough; client-side
+/// `ClientMsg::deserialize` already clamps `u/v` to [0, 1].
+fn process_tablet_cursor_updates(
+    mut bridge: ResMut<NetworkBridge>,
+    player_index: Res<PlayerEntityIndex>,
+    mut cursors: Query<&mut voxeldust_core::character::TabletCursor>,
+) {
+    for _ in 0..256 {
+        let Ok((session, uv)) = bridge.tablet_cursor_update_rx.try_recv() else {
+            break;
+        };
+        let Some(&entity) = player_index.0.get(&session) else {
+            continue;
+        };
+        if let Ok(mut cur) = cursors.get_mut(entity) {
+            cur.0 = uv;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
 
@@ -1788,6 +1868,10 @@ fn broadcast_world_state(
             &voxeldust_core::character::LookTarget,
             // Phase I: present only while ragdolling.
             Option<&voxeldust_core::character::RagdollHandles>,
+            // Phase J: present only while the player is engaged with a
+            // functional block via the tablet HUD.
+            Option<&voxeldust_core::character::IsHoldingTablet>,
+            Option<&voxeldust_core::character::TabletCursor>,
         ),
         With<PlanetPlayer>,
     >,
@@ -1807,7 +1891,7 @@ fn broadcast_world_state(
 ) {
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, body, head_y, head_p, vel, loco, turn, look, ragdoll)| PlayerSnapshotData {
+        .map(|(sid, _, pos, body, head_y, head_p, vel, loco, turn, look, ragdoll, holding, cursor)| PlayerSnapshotData {
             player_id: sid.0.0,
             position: pos.0,
             // Identity for the planet shard. The camera composes
@@ -1839,6 +1923,8 @@ fn broadcast_world_state(
                 .0
                 .map(|t| (t - pos.0).as_vec3()),
             ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
+            is_holding_tablet: holding.is_some(),
+            tablet_cursor_uv: cursor.map(|c| c.0).unwrap_or(glam::Vec2::ZERO),
         })
         .collect();
 
@@ -1916,7 +2002,7 @@ fn broadcast_world_state(
         entity.position = e.position - planet_pos.0;
         entities.push(entity);
     }
-    for (sid, name, pos, body, head_y, head_p, vel, loco, turn, look, ragdoll) in players.iter() {
+    for (sid, name, pos, body, head_y, head_p, vel, loco, turn, look, ragdoll, holding, cursor) in players.iter() {
         entities.push(ObservableEntityData {
             entity_id: sid.0.0,
             kind: EntityKind::GroundedPlayer,
@@ -1944,6 +2030,8 @@ fn broadcast_world_state(
                 .0
                 .map(|t| (t - pos.0).as_vec3()),
             ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
+            is_holding_tablet: holding.is_some(),
+            tablet_cursor_uv: cursor.map(|c| c.0).unwrap_or(glam::Vec2::ZERO),
         });
     }
 
@@ -2230,9 +2318,21 @@ fn build_app(
     );
 
     // Detection.
+    // `process_tablet_*` slot in here so their `Commands` mutations
+    // (insert/remove `IsHoldingTablet` + `TabletCursor`) flush through
+    // the post-Detection `apply_deferred` and are visible to
+    // `broadcast_world_state` on the same tick. Putting them in
+    // `Input` instead would leave the inserts pending until physics
+    // ran a system with a `Commands` parameter.
     app.add_systems(
         Update,
-        (ship_proximity, disconnect_cleanup).in_set(PlanetSet::Detection),
+        (
+            ship_proximity,
+            disconnect_cleanup,
+            process_tablet_interact,
+            process_tablet_cursor_updates,
+        )
+            .in_set(PlanetSet::Detection),
     );
 
     // apply_deferred so despawned entities don't appear in broadcast.

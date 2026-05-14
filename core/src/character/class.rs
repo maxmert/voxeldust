@@ -12,7 +12,7 @@
 
 use super::components::CharacterCapsule;
 use super::ragdoll::{RagdollBoneSpec, RagdollJointType};
-use glam::Vec3;
+use glam::{Quat, Vec2, Vec3};
 
 /// Stable label for a clip slot in the animation graph. Phase D maps
 /// `Locomotion.state` → `ClipLabel` → graph node weights, so adding a
@@ -333,6 +333,191 @@ pub struct CharacterClass {
     /// before-child so [`super::ragdoll::spawn_ragdoll_bodies`] can
     /// chain world poses in one pass.
     pub ragdoll_bones: &'static [RagdollBoneSpec],
+
+    // -- Arm bones (shared by Phase J tablet IK + future hand IK) ---
+    /// Per-arm bone chain for shoulder→elbow→wrist 2-bone IK. The
+    /// shoulder is the parent in the Mixamo rig (`mixamorig:LeftArm`);
+    /// the forearm is `mixamorig:LeftForeArm`; the wrist/hand is
+    /// `mixamorig:LeftHand`.
+    pub left_arm_bone: &'static str,
+    pub left_forearm_bone: &'static str,
+    pub left_hand_bone: &'static str,
+    pub right_arm_bone: &'static str,
+    pub right_forearm_bone: &'static str,
+    pub right_hand_bone: &'static str,
+    /// Mid-spine bone the tablet anchors to (chest height). On
+    /// Mixamo Y-bot we use `mixamorig:Spine2` — high enough that
+    /// the tablet sits in front of the chest, low enough that it
+    /// doesn't occlude the head.
+    pub chest_bone: &'static str,
+
+    // -- Tablet hold pose (Phase J) ---------------------------------
+    /// Where the held tablet's CENTRE sits in the chest bone's
+    /// LOCAL frame. Tilted forward + slightly down — Star Citizen-
+    /// style "looking at the screen" reading angle. Y is up, Z is
+    /// the chest's forward axis (Mixamo bind: chest +Z = body +X
+    /// after the visual rotation, but the chest bone's own +Z is
+    /// where its forward points — same convention as `look_forward_local`).
+    pub tablet_hold_offset_local: Vec3,
+    /// Pitch (radians, around the chest's local right axis) the
+    /// tablet's normal tilts down from horizontal so the screen
+    /// faces the player's eyes. Negative tilts the top of the
+    /// tablet toward the player.
+    pub tablet_hold_pitch: f32,
+    /// Physical width / height of the tablet (metres) — used to
+    /// project a UV cursor onto the world tablet plane.
+    pub tablet_width: f32,
+    pub tablet_height: f32,
+    /// Where the right hand grips the tablet, in tablet-local
+    /// space. `(0, 0)` is the tablet centre; `+X` toward the
+    /// tablet's right edge; `+Y` toward the top edge. The IK
+    /// target is `tablet_world_centre + tablet_rotation * (X, Y, 0)`.
+    pub tablet_right_grip_uv: Vec2,
+    /// Vertical distance the index fingertip floats ABOVE the
+    /// screen surface (positive = above). Tiny positive value
+    /// avoids the finger clipping into the tablet mesh while still
+    /// reading as "touching".
+    pub tablet_finger_lift: f32,
+    /// How far BEHIND the screen plane (toward body forward) the
+    /// right-hand grip sits, so the hand wraps around the back of
+    /// the tablet instead of clipping through it. ~5 cm clears the
+    /// hand mesh thickness — at 2 cm the palm visibly penetrates.
+    pub tablet_grip_back_depth: f32,
+    /// How far OUTSIDE the pad's right edge the wrist sits (metres).
+    /// 0 = wrist exactly at the pad's right edge, fingers extend
+    /// ACROSS the screen (looks like reaching THROUGH the device).
+    /// ~8 cm = wrist beside the bezel, fingers reach BACK toward
+    /// the pad — natural "hand grips the edge" hold.
+    pub tablet_right_hand_outside_offset: f32,
+    /// Distance from the LEFT hand bone (wrist pivot) to the index
+    /// fingertip along `hand_finger_axis_local`. Used to displace
+    /// the IK target so the FINGERTIP — not the wrist — lands at
+    /// the cursor position. Mixamo Y-bot's LeftHandIndex chain is
+    /// ~10 cm end-to-end from the wrist.
+    pub index_finger_length: f32,
+    /// Extra distance the LEFT-hand wrist sits BEYOND the cursor in
+    /// the finger direction, so the visible hand body lands OUTSIDE
+    /// the pad area instead of being occluded by the pad. The pad
+    /// is 30 cm wide; with `index_finger_length` alone (10 cm), the
+    /// wrist sits inside the pad area for any cursor position and
+    /// the hand disappears behind the screen. Adding ~12 cm more
+    /// pushes the wrist clear of the pad's edge for cursors near
+    /// the centre. The visible fingertip ends short of the cursor
+    /// by this offset, but reads as "pointing at the cursor" — an
+    /// acceptable trade for keeping the hand visible.
+    pub tablet_left_hand_outside_offset: f32,
+    /// Angle (radians) the cursor-finger axis tilts AWAY from the
+    /// screen normal toward `-tablet_up` (i.e., the fingertip
+    /// approaches from above the pad at this tilt instead of
+    /// stabbing perpendicularly). 0 = perpendicular (90° to screen,
+    /// looks robotic). π/4 (~45°) = approach at a natural angle —
+    /// matches how a person actually points at a touchscreen.
+    pub tablet_finger_tilt: f32,
+    /// Bone names of finger SEGMENTS to curl into a fist while the
+    /// LEFT hand is in cursor-pointing pose (everything except the
+    /// index finger, which stays extended as the cursor). Each bone
+    /// is rotated by `tablet_left_hand_finger_curl_angle` around
+    /// its local +X axis. Mixamo Y-bot has 3 segments per finger
+    /// (Middle1/2/3, Ring1/2/3, Pinky1/2/3, Thumb1/2/3).
+    pub tablet_left_hand_curl_bones: &'static [&'static str],
+    /// Per-segment curl angle (radians, negative = curl toward
+    /// palm). −1.0 rad ≈ −57°, summed across 3 segments = ~170°
+    /// per finger ≈ a closed fist.
+    pub tablet_left_hand_finger_curl_angle: f32,
+    /// Local axis of the hand bone that points along the index
+    /// finger (= along the bone, wrist → fingertip).
+    ///
+    /// Mixamo Y-bot uses `+Y` for ALL bone axes (Blender-style
+    /// "bone +Y is along the bone"). The same convention applies
+    /// to both LEFT and RIGHT hand bones — bone-local axes are
+    /// symmetric in bind pose; only the bone's WORLD orientation
+    /// flips for the right side. Used to:
+    ///   * orient the wrist (`+Y` → `-tablet_normal` = into screen),
+    ///   * compute the wrist-position IK target so the FINGERTIP,
+    ///     not the wrist, lands at the cursor UV.
+    pub hand_finger_axis_local: Vec3,
+    /// **Right-hand grip orientation in body-local frame.** Applied
+    /// as `visual_rot * this_quat` to fix the wrist's WORLD rotation
+    /// when the right hand grips the tablet. Default puts:
+    ///   * bone +Y (= fingertips, Mixamo bone direction) → body LEFT
+    ///     (fingers reach across the body to wrap the right edge).
+    ///   * bone +X → body forward (palm presses the BACK of the pad).
+    ///   * bone +Z → body up (thumb upright).
+    /// **Empirical knob** — if the palm faces the wrong way, tweak
+    /// this Quat. Tunable per-rig.
+    pub right_hand_grip_rotation_in_body: Quat,
+    /// **Left-hand pointing orientation in body-local frame.** Same
+    /// as `right_hand_grip_rotation_in_body` but for the LEFT hand
+    /// in "cursor-finger" pose. Default puts:
+    ///   * bone +Y (fingertips) → body forward (finger points
+    ///     INTO the screen).
+    ///   * bone +X (palm side) → body DOWN (palm faces the floor
+    ///     for a natural "tap from above" gesture).
+    ///   * bone +Z → body right (thumb on the body's right side).
+    /// Tunable per-rig.
+    pub left_hand_pointing_rotation_in_body: Quat,
+    /// Head pitch (radians) applied additively when this character
+    /// is holding a tablet — the head tilts DOWN toward the device
+    /// for a natural reading posture. Negative = pitch down.
+    pub tablet_head_look_pitch: f32,
+    /// FP camera pitch (radians) applied when the LOCAL player is
+    /// holding a tablet. The camera tilts DOWN to look at the chest-
+    /// held device so the player can read it without having to
+    /// manually pitch the mouse. Negative = down. Composed AFTER
+    /// the player's mouse-look pitch, so player input still works
+    /// with the offset baked in.
+    pub tablet_fp_camera_pitch: f32,
+    /// Per-bone IK blend timings (seconds). Fade in over
+    /// `arm_blend_in_secs` after `IsHoldingTablet` is observed,
+    /// out over `arm_blend_out_secs` once it goes away. Same
+    /// pattern as foot IK + look-at IK (`advance_blend`).
+    pub arm_blend_in_secs: f32,
+    pub arm_blend_out_secs: f32,
+    /// Phase J — finger-tap animation timing. On click, the index
+    /// fingertip lerps from `tablet_finger_lift` down to 0 over
+    /// `tap_press_secs`, then back up over `tap_release_secs`. Total
+    /// is the visible "click" — under ~150 ms reads as crisp; over
+    /// ~250 ms reads as deliberate touch.
+    pub tap_press_secs: f32,
+    pub tap_release_secs: f32,
+}
+
+/// Build the Mixamo Y-bot right-hand grip rotation. Mixamo's Maya-
+/// origin rigs use the **Convention C** axis layout for hand bones:
+///   * bone +Y = along the bone, wrist → fingertip.
+///   * bone +X = thumb side (= body_forward in the T-pose bind).
+///   * bone +Z = palm-BACK direction (= opposite of the palm normal;
+///     in the palm-down bind pose, bone +Z world = body_up).
+///
+/// Grip pose for the right hand:
+///   * bone +X (thumb)     → body up    (thumb upright)
+///   * bone +Y (fingertip) → body LEFT  (fingers across body)
+///   * bone +Z (palm-back) → body BACK  (so palm normal = body_forward,
+///     palm presses the BACK of the pad)
+///
+/// Mat3 cols `(+Y, +X, -Z)` body-local → 180° rotation around the
+/// `(1, 1, 0)/√2` axis. Closed-form: w = cos(90°) = 0, (x, y, z)
+/// = sin(90°) · (1, 1, 0)/√2 = (1/√2, 1/√2, 0).
+const fn mixamo_right_hand_grip_quat() -> Quat {
+    Quat::from_xyzw(0.7071068, 0.7071068, 0.0, 0.0)
+}
+
+/// Build the Mixamo Y-bot left-hand pointing rotation.
+///
+/// Goal: a "fist with index pointing at the pad" pose with the palm
+/// flat against the pad surface direction. For the LEFT hand on the
+/// body's left reaching ACROSS to the centred pad, that means:
+///   * bone +X (thumb)      → body UP      (thumb upright)
+///   * bone +Y (fingertip)  → body RIGHT   (finger crosses body
+///     to reach the pad)
+///   * bone +Z (palm direction) → body FORWARD (palm parallel to
+///     pad surface; palm normal aligns with pad's normal axis)
+///
+/// Mat3 cols `(+Y, -X, +Z)` body-local. Closed-form: 90° rotation
+/// around the world's +Z axis. w = cos(45°) = 1/√2, (x, y, z) =
+/// sin(45°) · (0, 0, 1) = (0, 0, 1/√2).
+const fn mixamo_left_hand_pointing_quat() -> Quat {
+    Quat::from_xyzw(0.0, 0.0, 0.7071068, 0.7071068)
 }
 
 /// Default humanoid class. Mixamo Y-bot rig (~22 bones), targets the
@@ -470,6 +655,142 @@ pub const HUMAN_DEFAULT: CharacterClass = CharacterClass {
     // -- Ragdoll ------------------------------------------------------
     ragdoll_lifetime_secs: 5.0,
     ragdoll_bones: &HUMAN_DEFAULT_RAGDOLL_BONES,
+
+    // -- Arm bones (Mixamo Y-bot) -------------------------------------
+    left_arm_bone: "mixamorig:LeftArm",
+    left_forearm_bone: "mixamorig:LeftForeArm",
+    left_hand_bone: "mixamorig:LeftHand",
+    right_arm_bone: "mixamorig:RightArm",
+    right_forearm_bone: "mixamorig:RightForeArm",
+    right_hand_bone: "mixamorig:RightHand",
+    chest_bone: "mixamorig:Spine2",
+
+    // -- Tablet hold pose ---------------------------------------------
+    // Coordinates are in the **visual root's** local frame (body
+    // coords), NOT the chest bone's local frame. The chest bone
+    // (Mixamo Spine2) has bind axes that align with world, not body —
+    // so `chest_rot * Vec3` doesn't give body directions. The follower
+    // and IK use the visual root rotation for axis transforms instead;
+    // chest bone provides only the world-space height anchor.
+    //
+    // Visual root local frame (matches `mesh_yaw_offset = +π/2` +
+    // `body_yaw_sign = -1`):
+    //   +Z = body forward
+    //   +Y = body up
+    //   -X = body right (so +X = body left)
+    //
+    // 45 cm forward, AT chest height — the LEFT hand's max reach
+    // (~50 cm shoulder-to-fingertip on a Mixamo Y-bot) bounds how
+    // far the pad can sit while still letting the LEFT index
+    // finger cover the whole pad surface as the cursor moves. At
+    // (chest_y, 0.45 forward) the LEFT shoulder→pad-far-edge
+    // distance is √(0.30² + 0.45²) ≈ 54 cm; barely within reach.
+    // Moving farther leaves the right edge unreachable. The camera
+    // auto-pitches via `tablet_ik::apply_fp_tablet_camera_pitch`
+    // so the pad stays centred in the FP view at this distance.
+    tablet_hold_offset_local: Vec3::new(0.0, 0.0, 0.45),
+    // **NEGATIVE** ~26° tilt — for a chest-held tablet to be
+    // readable, the SCREEN must angle UP toward the eyes (which
+    // sit ~50 cm above the device). Pitch is around the body's
+    // right axis; geometrically:
+    //   * Negative angle tilts the TOP edge body-FORWARD (away
+    //     from the player) and the screen normal toward
+    //     body_UP + body_BACK — i.e. toward the player's face.
+    //   * Positive angle tilts the screen normal toward
+    //     body_DOWN + body_BACK — the player sees the BACK of
+    //     the tablet, not the screen. (This was the bug.)
+    tablet_hold_pitch: -0.45,
+    // 30 cm × 30 cm tablet — same physical size the existing
+    // `client::hud::tablet` uses (TABLET_PHYSICAL_SIZE).
+    tablet_width: 0.30,
+    tablet_height: 0.30,
+    // Right hand grips the right edge of the tablet, vertically
+    // centred. UV convention: (0,0) = top-left, (1,1) = bottom-right.
+    // 0.95 puts the grip just inside the right bezel; 0.5 keeps it
+    // mid-height. The 2-bone IK target is exactly this point in
+    // world space — see `tablet_ik::apply_tablet_ik`.
+    tablet_right_grip_uv: Vec2::new(0.95, 0.5),
+    // 2 cm finger float — keeps the index fingertip mesh clear of
+    // the pad surface so the finger doesn't visibly clip through
+    // the screen geometry.
+    tablet_finger_lift: 0.02,
+    // 7 cm behind the screen plane — sweet spot between 5 cm
+    // (fingers poke through near the bezel) and 10 cm (whole hand
+    // pushed out of view). Combined with `outside_offset = 0.10`
+    // (fingertips end at pad edge horizontally), the hand body
+    // sits visibly alongside the bezel while the finger geometry
+    // has enough body_forward clearance to stay hidden behind the
+    // pad in the column where pad and finger overlap.
+    tablet_grip_back_depth: 0.07,
+    // 10 cm outside the right edge — matches the Mixamo Y-bot
+    // finger length so the fingertips END EXACTLY at the pad's
+    // right edge. Combined with the Convention C grip Quat (fingers
+    // point body_LEFT toward the pad), this puts the wrist visibly
+    // BESIDE the bezel with the fingertips just touching the edge —
+    // none of the finger geometry is inside the pad area.
+    tablet_right_hand_outside_offset: 0.10,
+    // Wrist (mixamorig:LeftHand pivot) → index fingertip ≈ 13 cm
+    // on the Mixamo Y-bot. Used to displace the IK target so the
+    // INDEX TIP — not the wrist — lands at the focus cursor's UV
+    // position. Underestimating this length leaves the fingertip
+    // BEYOND the cursor (visible as cursor-finger drift); over-
+    // estimating leaves the fingertip SHORT of the cursor.
+    index_finger_length: 0.13,
+    // 0 — no extra lateral offset. The natural finger tilt (see
+    // `tablet_finger_tilt` and `apply_tablet_ik`) gives the wrist a
+    // body_BACK component relative to the cursor, putting the hand
+    // body IN FRONT of the pad surface in screen space. Hand
+    // hovers OVER the pad like a real touchscreen interaction.
+    tablet_left_hand_outside_offset: 0.0,
+    // ~35° tilt from perpendicular — the finger approaches the pad
+    // from above-and-back at a natural touchscreen-poking angle.
+    // 0 = robotic 90° stab; π/2 = parallel along screen surface.
+    tablet_finger_tilt: 0.6,
+    // 12 bones — Middle, Ring, Pinky, Thumb chains (3 segments each).
+    // Index is omitted — it stays straight as the cursor finger.
+    tablet_left_hand_curl_bones: &[
+        "mixamorig:LeftHandMiddle1",
+        "mixamorig:LeftHandMiddle2",
+        "mixamorig:LeftHandMiddle3",
+        "mixamorig:LeftHandRing1",
+        "mixamorig:LeftHandRing2",
+        "mixamorig:LeftHandRing3",
+        "mixamorig:LeftHandPinky1",
+        "mixamorig:LeftHandPinky2",
+        "mixamorig:LeftHandPinky3",
+        "mixamorig:LeftHandThumb1",
+        "mixamorig:LeftHandThumb2",
+        "mixamorig:LeftHandThumb3",
+    ],
+    // ≈ −57° per segment × 3 = ~170° total per finger = closed fist.
+    tablet_left_hand_finger_curl_angle: -1.0,
+    // Mixamo Y-bot: bone +Y = wrist→fingertip direction (Blender
+    // bone convention). Symmetric for both hands.
+    hand_finger_axis_local: Vec3::Y,
+    // Mixamo Y-bot bone-axis cycle: bone(X→Z, Y→X, Z→Y) in body-local.
+    // Right hand: fingers across body (left), palm forward, thumb up.
+    right_hand_grip_rotation_in_body: mixamo_right_hand_grip_quat(),
+    // Left hand: bone(X→-Y, Y→Z, Z→-X) — fingers forward (into pad),
+    // palm down, thumb right. Natural "tap from above" pose.
+    left_hand_pointing_rotation_in_body: mixamo_left_hand_pointing_quat(),
+    // ~25° head tilt toward the tablet — natural reading posture
+    // without going so far the chin hits the chest.
+    tablet_head_look_pitch: -0.45,
+    // ~50° FP camera pitch DOWN — points the eye line at the
+    // chest-held pad. Derived from geometry: with the head bone
+    // ~50 cm above chest and the pad centre at (chest_y, 0.45 fwd),
+    // `atan2(0.50, 0.45) ≈ 0.84 rad` aligns the camera direction
+    // with the pad centre. A small extra margin ensures the full
+    // pad height stays within the camera FOV.
+    tablet_fp_camera_pitch: -0.85,
+    // 200 ms in, 250 ms out — same easing as look-at IK; reads as
+    // a deliberate "I'm picking this up" gesture.
+    arm_blend_in_secs: 0.20,
+    arm_blend_out_secs: 0.25,
+    // 60 ms press + 100 ms release = ~160 ms tap. Crisp enough to
+    // read as a deliberate touch without feeling like a slap.
+    tap_press_secs: 0.06,
+    tap_release_secs: 0.10,
 };
 
 /// Mixamo Y-bot rag-doll skeleton — 13 segments + biomechanical

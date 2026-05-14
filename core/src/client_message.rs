@@ -677,6 +677,25 @@ pub enum ClientMsg {
     /// that the media pipeline ships through the configured publish
     /// channel.
     TerminalChatSend(TerminalChatSendData),
+    /// Phase J: open / close the held tablet on a functional block.
+    /// Server validates target + range and inserts / removes
+    /// `IsHoldingTablet` on the character.
+    TabletInteract(TabletInteractData),
+    /// Phase J: high-frequency cursor position update during the
+    /// hold. Server passes through to broadcast for remote
+    /// finger-IK; never used in gameplay decisions.
+    TabletCursorUpdate(glam::Vec2),
+}
+
+/// Payload for `ClientMsg::TabletInteract`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabletInteractData {
+    /// Open the tablet on the functional block at the given
+    /// shard-local coordinates. Server validates the block exists,
+    /// is interactive, and the player is within range.
+    Open { block_pos: glam::IVec3 },
+    /// Close the active tablet. Idempotent.
+    Close,
 }
 
 /// Payload for `ClientMsg::TerminalChatSend`. The block_pos identifies
@@ -1266,6 +1285,11 @@ pub struct ObservableEntityData {
     /// Per-bone world transforms during the active ragdoll window
     /// (Phase I). Empty for any state other than `Ragdoll`.
     pub ragdoll_bones: Vec<crate::character::RagdollBoneTransform>,
+    /// Phase J: server-side tablet hold state. Mirrors what's on
+    /// `PlayerSnapshotData` for the unified ObservableEntity
+    /// ingestion path.
+    pub is_holding_tablet: bool,
+    pub tablet_cursor_uv: glam::Vec2,
 }
 
 #[derive(Debug, Clone)]
@@ -1309,6 +1333,12 @@ pub struct PlayerSnapshotData {
     /// Per-bone world transforms during ragdoll simulation
     /// (Phase I). Empty for any non-Ragdoll locomotion state.
     pub ragdoll_bones: Vec<crate::character::RagdollBoneTransform>,
+    /// Phase J: server-side tablet hold state. `is_holding_tablet`
+    /// gates the IK and tablet-spawn paths client-side;
+    /// `tablet_cursor_uv` drives the left-hand finger IK target
+    /// projection onto the tablet plane.
+    pub is_holding_tablet: bool,
+    pub tablet_cursor_uv: glam::Vec2,
 }
 
 /// Transform of a mechanical sub-grid body (rotor, piston, hinge, slider).
@@ -1580,6 +1610,9 @@ pub(crate) fn encode_observable_entities<'a>(
                     look_dy: e.look_target_delta.map(|d| d.y).unwrap_or(0.0),
                     look_dz: e.look_target_delta.map(|d| d.z).unwrap_or(0.0),
                     ragdoll_bones,
+                    is_holding_tablet: e.is_holding_tablet,
+                    tablet_cursor_u: e.tablet_cursor_uv.x,
+                    tablet_cursor_v: e.tablet_cursor_uv.y,
                 },
             )
         })
@@ -1633,6 +1666,8 @@ pub(crate) fn decode_observable_entities(
                         rotation: glam::Quat::from_xyzw(b.rot_x(), b.rot_y(), b.rot_z(), b.rot_w()),
                     }
                 }).collect()).unwrap_or_default(),
+                is_holding_tablet: e.is_holding_tablet(),
+                tablet_cursor_uv: glam::Vec2::new(e.tablet_cursor_u(), e.tablet_cursor_v()),
             }
         })
         .collect()
@@ -2081,6 +2116,46 @@ impl ClientMsg {
                 );
                 builder.finish(msg, None);
             }
+            ClientMsg::TabletInteract(data) => {
+                let (action, block_pos) = match data {
+                    TabletInteractData::Open { block_pos } => (1u8, *block_pos),
+                    TabletInteractData::Close => (2u8, glam::IVec3::ZERO),
+                };
+                let req = fb::TabletInteractRequest::create(
+                    &mut builder,
+                    &fb::TabletInteractRequestArgs {
+                        action,
+                        block_x: block_pos.x,
+                        block_y: block_pos.y,
+                        block_z: block_pos.z,
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::TabletInteractRequest,
+                        payload: Some(req.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
+            ClientMsg::TabletCursorUpdate(uv) => {
+                let upd = fb::TabletCursorUpdate::create(
+                    &mut builder,
+                    &fb::TabletCursorUpdateArgs {
+                        u: uv.x,
+                        v: uv.y,
+                    },
+                );
+                let msg = fb::ClientMessage::create(
+                    &mut builder,
+                    &fb::ClientMessageArgs {
+                        payload_type: fb::ClientPayload::TabletCursorUpdate,
+                        payload: Some(upd.as_union_value()),
+                    },
+                );
+                builder.finish(msg, None);
+            }
         }
 
         let result = builder.finished_data().to_vec();
@@ -2324,6 +2399,32 @@ impl ClientMsg {
                     text: tcs.text().unwrap_or("").to_string(),
                 }))
             }
+            fb::ClientPayload::TabletInteractRequest => {
+                let req = msg
+                    .payload_as_tablet_interact_request()
+                    .ok_or(MessageError::MissingField("TabletInteract payload"))?;
+                let block_pos = glam::IVec3::new(req.block_x(), req.block_y(), req.block_z());
+                let data = match req.action() {
+                    1 => TabletInteractData::Open { block_pos },
+                    2 => TabletInteractData::Close,
+                    _ => {
+                        // Unknown action — treat as close (defensive).
+                        // Avoids tearing down the connection over a
+                        // forward-compat ClientPayload extension.
+                        TabletInteractData::Close
+                    }
+                };
+                Ok(ClientMsg::TabletInteract(data))
+            }
+            fb::ClientPayload::TabletCursorUpdate => {
+                let upd = msg
+                    .payload_as_tablet_cursor_update()
+                    .ok_or(MessageError::MissingField("TabletCursorUpdate payload"))?;
+                Ok(ClientMsg::TabletCursorUpdate(glam::Vec2::new(
+                    upd.u().clamp(0.0, 1.0),
+                    upd.v().clamp(0.0, 1.0),
+                )))
+            }
             fb::ClientPayload::NONE => Err(MessageError::UnknownPayload(0)),
             other => Err(MessageError::UnknownPayload(other.0)),
         }
@@ -2449,6 +2550,9 @@ impl ServerMsg {
                         look_dy: p.look_target_delta.map(|d| d.y).unwrap_or(0.0),
                         look_dz: p.look_target_delta.map(|d| d.z).unwrap_or(0.0),
                         ragdoll_bones,
+                        is_holding_tablet: p.is_holding_tablet,
+                        tablet_cursor_u: p.tablet_cursor_uv.x,
+                        tablet_cursor_v: p.tablet_cursor_uv.y,
                     })
                 }).collect();
                 let players = builder.create_vector(&snapshots);
@@ -3104,6 +3208,8 @@ impl ServerMsg {
                                     rotation: glam::Quat::from_xyzw(b.rot_x(), b.rot_y(), b.rot_z(), b.rot_w()),
                                 }
                             }).collect()).unwrap_or_default(),
+                            is_holding_tablet: p.is_holding_tablet(),
+                            tablet_cursor_uv: glam::Vec2::new(p.tablet_cursor_u(), p.tablet_cursor_v()),
                         }
                     }).collect()
                 }).unwrap_or_default();
@@ -3686,6 +3792,8 @@ mod tests {
                 turn_t: 0.0,
                 look_target_delta: None,
                 ragdoll_bones: Vec::new(),
+                is_holding_tablet: false,
+                tablet_cursor_uv: glam::Vec2::ZERO,
             }],
             bodies: vec![CelestialBodyData {
                 body_id: 0, position: DVec3::ZERO, radius: 6.96e8, color: [1.0, 0.95, 0.8],
@@ -3740,6 +3848,8 @@ mod tests {
                 turn_t: 0.0,
                 look_target_delta: None,
                 ragdoll_bones: Vec::new(),
+                is_holding_tablet: false,
+                tablet_cursor_uv: glam::Vec2::ZERO,
             }],
         });
         let bytes = msg.serialize();

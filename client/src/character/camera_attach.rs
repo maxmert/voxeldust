@@ -148,6 +148,7 @@ impl Plugin for CharacterCameraPlugin {
         app.init_resource::<CameraMode>()
             .init_resource::<CameraModeBlend>()
             .init_resource::<TpDistanceSmoothed>()
+            .init_resource::<TabletCameraOverride>()
             // `camera_follow_head` runs AFTER `PlayerSyncSet` so it
             // sees the FP eye position `apply_worldstate_pose` just
             // wrote and ADDITIVELY adds the TP body-back offset on
@@ -157,16 +158,24 @@ impl Plugin for CharacterCameraPlugin {
             // In TP mode the offset is `body_back * tp_distance *
             // blend.current`, smoothly animating the camera out
             // behind the player as V toggles.
+            //
+            // `tablet_camera_override` runs BEFORE `toggle_camera_mode`
+            // so a V-press on the same frame the tablet opens still
+            // sees the freshly-saved previous mode (no flicker), and
+            // BEFORE `apply_fp_body_cull` so the cull observes the
+            // already-forced-FP `CameraMode` value.
             .add_systems(
                 Update,
                 (
                     promote_local_visual,
+                    tablet_camera_override,
                     toggle_camera_mode,
                     apply_fp_body_cull,
                     camera_follow_head
                         .after(crate::camera::PlayerSyncSet)
                         .before(ShardOriginSet),
                 )
+                    .chain()
                     .in_set(CharacterCameraSet),
             )
             // PostUpdate: head additive layer between animation pose
@@ -244,6 +253,54 @@ fn toggle_camera_mode(
         CameraMode::ThirdPerson { .. } => 1.0,
     };
     info!(?mode, "character camera: mode toggled");
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 2b. Tablet → first-person override
+// ────────────────────────────────────────────────────────────────────
+
+/// Phase J — when the held tablet appears, force the camera into
+/// first-person so the IK arm pose is visible from the player's POV.
+/// On close, restore whatever mode the user was in before. Stores the
+/// pre-tablet `CameraMode` rather than assuming `ThirdPerson` so a
+/// future "lean-out cinematic" mode round-trips correctly.
+#[derive(Resource, Default, Debug)]
+pub struct TabletCameraOverride {
+    /// The mode active when the tablet opened. `None` = no override
+    /// in flight (either no tablet, or the player was already in
+    /// FirstPerson when the tablet opened — nothing to restore).
+    saved: Option<CameraMode>,
+}
+
+fn tablet_camera_override(
+    tablet: Query<(), With<crate::hud::tablet::HeldTablet>>,
+    mut mode: ResMut<CameraMode>,
+    mut blend: ResMut<CameraModeBlend>,
+    mut override_state: ResMut<TabletCameraOverride>,
+) {
+    let holding = !tablet.is_empty();
+    match (holding, override_state.saved) {
+        // Tablet just opened from a non-FP mode → save + force FP.
+        (true, None) if !matches!(*mode, CameraMode::FirstPerson) => {
+            override_state.saved = Some(*mode);
+            *mode = CameraMode::FirstPerson;
+            blend.target = 0.0;
+            info!("character camera: tablet opened — forcing FirstPerson");
+        }
+        // Tablet just closed and we previously saved a mode → restore.
+        (false, Some(saved)) => {
+            *mode = saved;
+            blend.target = match saved {
+                CameraMode::FirstPerson => 0.0,
+                CameraMode::ThirdPerson { .. } => 1.0,
+            };
+            override_state.saved = None;
+            info!(?saved, "character camera: tablet closed — restoring previous mode");
+        }
+        // Tablet open + already in FP, or tablet open + saved mode
+        // (no-op — override is sticky), or no tablet + no saved mode.
+        _ => {}
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -569,6 +626,7 @@ fn apply_fp_body_cull(
     mut commands: Commands,
     mode: Res<CameraMode>,
     asset_registry: Res<CharacterAssetRegistry>,
+    tablet: Query<(), With<crate::hud::tablet::HeldTablet>>,
     mut local: Query<
         (Entity, &RemoteCharacterTag, &BoneRegistry, Option<&mut OriginalBoneScales>),
         With<LocalCharacterTag>,
@@ -615,12 +673,30 @@ fn apply_fp_body_cull(
     };
 
     let target_in_fp = matches!(*mode, CameraMode::FirstPerson);
+    // Phase J: while the local player holds the tablet, the WHOLE
+    // arm chain must stay visible — upper arm AND shoulder. Bevy's
+    // hierarchical scale cascades: if the shoulder is scaled to
+    // 1e-4, the upper arm bone (its child) inherits world scale =
+    // shoulder_world * upper_arm_local = ~0. The arm bones collapse
+    // to the shoulder position with sub-millimetre size, taking the
+    // parented tablet with them — invisible.
+    //
+    // Solution: the only bone we MUST cull in FP-with-tablet is the
+    // head (camera sits inside it). Shoulders + upper arms stay at
+    // original scale so the IK pose renders correctly. The visible
+    // shoulder geometry sits below the camera and doesn't block the
+    // view at typical pitch angles.
+    let holding_tablet = !tablet.is_empty();
     for &name in class.fp_cull_bones {
         let Some(bone) = bones.get(name) else { continue };
         let Ok(mut t) = transforms.get_mut(bone) else {
             continue;
         };
-        let want = if target_in_fp {
+        // Skip culling for any non-head bone while holding the
+        // tablet. With cascading scale, partial culls (e.g., cull
+        // shoulder but not upper arm) collapse the chain anyway.
+        let keep_for_tablet = holding_tablet && name != class.head_bone;
+        let want = if target_in_fp && !keep_for_tablet {
             FP_CULL_SCALE
         } else {
             cache

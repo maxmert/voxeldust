@@ -80,6 +80,18 @@ pub struct TcpMessageChannels {
         SessionToken,
         voxeldust_core::client_message::TerminalChatSendData,
     )>,
+    /// Phase J: tablet open / close requests. Server validates the
+    /// target block + range, then inserts/removes the
+    /// `IsHoldingTablet` component on the player's character.
+    pub tablet_interact_tx: mpsc::UnboundedSender<(
+        SessionToken,
+        voxeldust_core::client_message::TabletInteractData,
+    )>,
+    /// Phase J: per-tick (~20 Hz throttled) cursor position updates
+    /// during the tablet hold. Server clamps and stuffs into the
+    /// player's `TabletCursor` for broadcast — never used for
+    /// gameplay decisions.
+    pub tablet_cursor_update_tx: mpsc::UnboundedSender<(SessionToken, glam::Vec2)>,
 }
 
 /// Event emitted when a client connects via TCP.
@@ -563,6 +575,12 @@ async fn run_tcp_read_loop(
             }
             Ok(ClientMsg::TerminalChatSend(data)) => {
                 let _ = channels.terminal_chat_send_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::TabletInteract(data)) => {
+                let _ = channels.tablet_interact_tx.send((session_token, data));
+            }
+            Ok(ClientMsg::TabletCursorUpdate(uv)) => {
+                let _ = channels.tablet_cursor_update_tx.send((session_token, uv));
             }
             Err(e) => {
                 debug!(%peer_addr, %e, "failed to deserialize TCP client message");

@@ -428,6 +428,10 @@ table ObservableEntity {
     // path on the client gets ragdoll data without needing a
     // second per-tick lookup against `PlayerSnapshot`.
     ragdoll_bones: [RagdollBoneSnapshot];
+    // -- Tablet hold state (Phase J; player kinds only) -------------
+    is_holding_tablet: bool = false;
+    tablet_cursor_u: float = 0;
+    tablet_cursor_v: float = 0;
 }
 
 /// System shard → ship/planet shard: AOI entity set for a single observer.
@@ -1164,6 +1168,14 @@ table PlayerSnapshot {
     // ship full f32 to keep the codec simple while the system is
     // exercised.
     ragdoll_bones: [RagdollBoneSnapshot];
+    // -- Tablet hold state (Phase J) --------------------------------
+    // `is_holding_tablet = true` when the server has accepted a
+    // TabletInteractRequest from this character. Cursor UV is in
+    // tablet-screen space [0, 1]. Both fall back to defaults
+    // (false / 0) for old senders.
+    is_holding_tablet: bool = false;
+    tablet_cursor_u: float = 0;
+    tablet_cursor_v: float = 0;
 }
 
 /// Per-bone transform during ragdoll simulation. See
@@ -2117,6 +2129,38 @@ union ClientPayload {
     RemoteSignalPublish,
     /// Phase D: send a chat line typed on an engaged Terminal block.
     TerminalChatSendData,
+    /// Phase J: open or close a tablet on a functional block.
+    TabletInteractRequest,
+    /// Phase J: high-frequency cursor position update during the
+    /// tablet hold (server passes through to broadcast for remote
+    /// finger-IK replication; never read for gameplay decisions).
+    TabletCursorUpdate,
+}
+
+/// Phase J: client opens / closes a held tablet.
+///
+/// `Open` requires `block_x/y/z` to identify the functional block
+/// being interacted with — server validates the target exists, is
+/// interactive, and the player is within range before inserting
+/// `IsHoldingTablet` on the character. `Close` ignores those fields.
+table TabletInteractRequest {
+    /// 1 = open, 2 = close.
+    action: uint8;
+    /// Functional block coordinates in the player's authoritative
+    /// shard (ship-local or planet-local i32). Ignored when
+    /// `action == 2`.
+    block_x: int32 = 0;
+    block_y: int32 = 0;
+    block_z: int32 = 0;
+}
+
+/// Phase J: cursor position on the held tablet's screen, in UV
+/// space `[0, 1]`. Sent at ~20 Hz (throttled client-side); server
+/// clamps to range and broadcasts via `PlayerSnapshot.tablet_cursor_*`
+/// for remote finger-IK replication.
+table TabletCursorUpdate {
+    u: float;
+    v: float;
 }
 
 /// Root type for client → server messages.

@@ -73,6 +73,12 @@ pub struct RemoteEntity {
     /// are identified by name (Mixamo convention) so the wire
     /// format is robust to per-class skeleton spec changes.
     pub ragdoll_bones: Vec<voxeldust_core::character::RagdollBoneTransform>,
+    /// Phase J: server-side tablet hold gate. When `true`, the
+    /// client renders a held tablet visual + drives both arms via
+    /// IK. `tablet_cursor_uv` is the cursor position in
+    /// tablet-screen UV space [0, 1] for the left-hand finger IK.
+    pub is_holding_tablet: bool,
+    pub tablet_cursor_uv: glam::Vec2,
 }
 
 /// Remote players (EVA + grounded + seated, excluding the own player).
@@ -246,5 +252,7 @@ fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
         // source data stays intact for any other system reading
         // the WorldState the same tick.
         ragdoll_bones: e.ragdoll_bones.clone(),
+        is_holding_tablet: e.is_holding_tablet,
+        tablet_cursor_uv: e.tablet_cursor_uv,
     }
 }

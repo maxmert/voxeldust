@@ -371,15 +371,19 @@ fn paint_tablet_ui(
                     );
                 });
 
-            // In-world cursor overlay, painted LAST so it's always
-            // on top of the editor chrome. The driver system
-            // (drive_tablet_pointer) keeps `focus.cursor_uv` in sync
-            // with the mouse delta.
-            if focus.active {
-                let px = focus.cursor_uv.x * (TABLET_UI_RES as f32 - 1.0);
-                let py = focus.cursor_uv.y * (TABLET_UI_RES as f32 - 1.0);
-                paint_in_world_cursor(ui, egui::pos2(px, py));
-            }
+            // Crosshair painted at the focus cursor's UV position —
+            // visually anchors "where the click will land". The
+            // tablet IK targets this same UV with the LEFT index
+            // fingertip, so the crosshair sits exactly at the
+            // fingertip in screen space (modulo any rig
+            // index-length error, which is bounded by the
+            // `index_finger_length` class field).
+            let rect = ui.max_rect();
+            let cursor_pos = egui::pos2(
+                rect.left() + focus.cursor_uv.x * rect.width(),
+                rect.top() + focus.cursor_uv.y * rect.height(),
+            );
+            paint_in_world_cursor(ui, cursor_pos);
 
             // Apply is implicit — the auto-save system in
             // `config_panel::auto_save_block_config` ships any
@@ -552,14 +556,7 @@ fn paint_hud_panel_editor(
             );
                 }); // end ScrollArea
 
-            // Draw cursor last, OUTSIDE the scroll area so the
-            // reticle always sits at the true focus.cursor_uv on the
-            // tablet face regardless of scroll offset.
-            if focus.active {
-                let px = focus.cursor_uv.x * (TABLET_UI_RES as f32 - 1.0);
-                let py = focus.cursor_uv.y * (TABLET_UI_RES as f32 - 1.0);
-                paint_in_world_cursor(ui, egui::pos2(px, py));
-            }
+            // Phase J: no on-tablet crosshair — finger is the cursor.
 
             if apply {
                 panel_configs.set(state.key, state.settings.clone());
@@ -738,15 +735,7 @@ fn paint_lamp_editor(
                     });
                 });
 
-            // In-world cursor overlay, painted LAST so it always sits
-            // on top of the editor chrome. Without this the player
-            // sees no reticle and assumes the cursor isn't moving,
-            // even though `focus.cursor_uv` does update.
-            if focus.active {
-                let px = focus.cursor_uv.x * (TABLET_UI_RES as f32 - 1.0);
-                let py = focus.cursor_uv.y * (TABLET_UI_RES as f32 - 1.0);
-                paint_in_world_cursor(ui, egui::pos2(px, py));
-            }
+            // Phase J: no on-tablet crosshair — finger is the cursor.
 
             if reset {
                 state.config = voxeldust_core::block::sub_block::LampConfig::default_for(state.sub_type);

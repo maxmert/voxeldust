@@ -2577,6 +2577,94 @@ fn update_body_head_state(
     }
 }
 
+/// Phase J — drain tablet open/close requests from the network
+/// bridge, validate, and insert/remove `IsHoldingTablet` + the
+/// initial `TabletCursor` on the player's character entity.
+///
+/// Validation today is intentionally minimal: the player must exist
+/// in `PlayerEntityIndex` and be within `TABLET_INTERACT_RADIUS_M`
+/// of the requested block position. Functional-block-type checks
+/// will land alongside the proper `InteractionSchema` work (see
+/// `project_interaction_input_todo` memory).
+fn process_tablet_interact(
+    mut commands: Commands,
+    mut bridge: ResMut<NetworkBridge>,
+    player_index: Res<PlayerEntityIndex>,
+    players: Query<&PlayerPosition, With<Player>>,
+) {
+    /// 4 metres — generous enough to cover the seat/terminal cluster
+    /// inside a typical ship cockpit. Tightened later with a precise
+    /// raycast against the actual functional-block AABB.
+    const TABLET_INTERACT_RADIUS_M: f32 = 4.0;
+    // 64 = generous TCP message-pump budget per tick, matches the
+    // pattern in `drain_terminal_chat_send`.
+    for _ in 0..64 {
+        let Ok((session, data)) = bridge.tablet_interact_rx.try_recv() else {
+            break;
+        };
+        let Some(&entity) = player_index.0.get(&session) else {
+            continue;
+        };
+        match data {
+            voxeldust_core::client_message::TabletInteractData::Open { block_pos } => {
+                let Ok(player_pos) = players.get(entity) else {
+                    continue;
+                };
+                let block_centre = glam::Vec3::new(
+                    block_pos.x as f32 + 0.5,
+                    block_pos.y as f32 + 0.5,
+                    block_pos.z as f32 + 0.5,
+                );
+                if player_pos.0.distance(block_centre) > TABLET_INTERACT_RADIUS_M {
+                    tracing::info!(
+                        ?session,
+                        ?block_pos,
+                        player = ?player_pos.0,
+                        "TabletInteract: rejected — too far from target block"
+                    );
+                    continue;
+                }
+                commands.entity(entity).insert((
+                    voxeldust_core::character::IsHoldingTablet,
+                    // Start the cursor centred so the broadcast carries
+                    // a stable initial value until the client streams an
+                    // update.
+                    voxeldust_core::character::TabletCursor(glam::Vec2::new(0.5, 0.5)),
+                ));
+            }
+            voxeldust_core::client_message::TabletInteractData::Close => {
+                commands
+                    .entity(entity)
+                    .remove::<voxeldust_core::character::IsHoldingTablet>()
+                    .remove::<voxeldust_core::character::TabletCursor>();
+            }
+        }
+    }
+}
+
+/// Phase J — high-frequency cursor position update. Server clamps to
+/// `[0, 1]` (which `ClientMsg::deserialize` already does as a defence
+/// against bad clients) and stuffs into the player's `TabletCursor`
+/// for the next broadcast tick. No gameplay-affecting work happens
+/// here — purely a wire passthrough for remote finger-IK replication.
+fn process_tablet_cursor_updates(
+    mut bridge: ResMut<NetworkBridge>,
+    player_index: Res<PlayerEntityIndex>,
+    mut cursors: Query<&mut voxeldust_core::character::TabletCursor>,
+) {
+    for _ in 0..256 {
+        let Ok((session, uv)) = bridge.tablet_cursor_update_rx.try_recv() else {
+            break;
+        };
+        let Some(&entity) = player_index.0.get(&session) else {
+            continue;
+        };
+        if let Ok(mut cur) = cursors.get_mut(entity) {
+            cur.0 = uv;
+        }
+    }
+}
+
 /// Phase I — read each ragdoll body's pose from rapier and pack into
 /// the per-tick wire snapshot. Returns an empty vector when the
 /// character isn't ragdolling (no `RagdollHandles` component) so the
@@ -3210,6 +3298,12 @@ fn broadcast_world_state(
             // `rapier.rigid_body_set` and ships the per-bone
             // transforms in `PlayerSnapshotData.ragdoll_bones`.
             Option<&voxeldust_core::character::RagdollHandles>,
+            // Phase J: present only while the character is holding
+            // a tablet. `IsHoldingTablet` is the gate; `TabletCursor`
+            // carries the latest screen-cursor UV for remote
+            // finger-IK replication.
+            Option<&voxeldust_core::character::IsHoldingTablet>,
+            Option<&voxeldust_core::character::TabletCursor>,
         ),
         With<Player>,
     >,
@@ -3280,7 +3374,7 @@ fn broadcast_world_state(
     // avatar animation is wired up.
     let player_snapshots: Vec<PlayerSnapshotData> = players
         .iter()
-        .map(|(sid, _, pos, seated, body, head_y, head_p, vel, loco, turn, look, ragdoll)| {
+        .map(|(sid, _, pos, seated, body, head_y, head_p, vel, loco, turn, look, ragdoll, holding, cursor)| {
             let pos_d = DVec3::new(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64);
             PlayerSnapshotData {
                 player_id: sid.0.0,
@@ -3301,6 +3395,8 @@ fn broadcast_world_state(
                 turn_t: turn.map(|t| t.t).unwrap_or(0.0),
                 look_target_delta: look.0.map(|t| (t - pos_d).as_vec3()),
                 ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
+                is_holding_tablet: holding.is_some(),
+                tablet_cursor_uv: cursor.map(|c| c.0).unwrap_or(glam::Vec2::ZERO),
             }
         })
         .collect();
@@ -3356,6 +3452,9 @@ fn broadcast_world_state(
         look_target_delta: None,
         // Ships never ragdoll.
         ragdoll_bones: Vec::new(),
+        // Ships never open tablets either.
+        is_holding_tablet: false,
+        tablet_cursor_uv: glam::Vec2::ZERO,
     });
     for e in &external.entities {
         let mut entity = e.clone();
@@ -3368,7 +3467,7 @@ fn broadcast_world_state(
         }
         entities.push(entity);
     }
-    for (sid, name, pos, seated, body, head_y, head_p, vel, loco, turn, look, ragdoll) in players.iter() {
+    for (sid, name, pos, seated, body, head_y, head_p, vel, loco, turn, look, ragdoll, holding, cursor) in players.iter() {
         // Kind reflects the player's actual posture. Copy-paste bug here
         // previously emitted `Seated` in both branches, which permanently
         // stuck every client's pilot-mode detection on.
@@ -3409,6 +3508,8 @@ fn broadcast_world_state(
             // unified ObservableEntity ingestion path is the one the
             // client renders from.
             ragdoll_bones: collect_ragdoll_bones(ragdoll, &rapier),
+            is_holding_tablet: holding.is_some(),
+            tablet_cursor_uv: cursor.map(|c| c.0).unwrap_or(glam::Vec2::ZERO),
         });
     }
 
@@ -9053,9 +9154,17 @@ fn build_ship_interior(
     );
 
     // Interaction: hull exit detection (seat interaction moved to BlockEdit via raycast).
+    // Phase J: tablet open/close + per-tick cursor stream are server-validated
+    // here so the broadcast that follows in `ShipSet::Broadcast` always sees
+    // up-to-date `IsHoldingTablet` / `TabletCursor` components.
     app.add_systems(
         Update,
-        hull_exit_check.in_set(ShipSet::Interaction),
+        (
+            hull_exit_check,
+            process_tablet_interact,
+            process_tablet_cursor_updates,
+        )
+            .in_set(ShipSet::Interaction),
     );
 
     // Send: QUIC messages to host shard.
