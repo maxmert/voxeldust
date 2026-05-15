@@ -645,7 +645,20 @@ pub enum ClientMsg {
     /// Place or remove a sub-block element on a block face.
     SubBlockEdit(SubBlockEditData),
     /// Observer-only connection (no player entity, receives chunk data + WorldState).
-    ObserverConnect { observer_name: String },
+    ///
+    /// `session_token` is the player's authoritative session id (issued by
+    /// the source shard via `JoinResponse.session_token`). The destination
+    /// shard uses it to associate this observer connection with the
+    /// player's session, so a later `PlayerHandoff` arriving for the same
+    /// `session_token` can promote the existing observer TCP into the
+    /// player's primary connection in-place — no fresh TCP handshake.
+    /// Required for the seamless `ShardHandoff` (Phase T0) transition.
+    /// `SessionToken(0)` falls back to legacy non-promotable observer
+    /// behaviour (chunks-only, no session linkage).
+    ObserverConnect {
+        observer_name: String,
+        session_token: SessionToken,
+    },
     /// Publish a signal value to a channel. Server validates
     /// `publish_policy` + sender's player_id, then calls
     /// `push_pending` on the shard's `SignalChannelTable`.
@@ -1911,12 +1924,13 @@ impl ClientMsg {
                 });
                 builder.finish(msg, None);
             }
-            ClientMsg::ObserverConnect { observer_name } => {
+            ClientMsg::ObserverConnect { observer_name, session_token } => {
                 let name = builder.create_string(observer_name);
                 let oc = fb::ObserverConnect::create(
                     &mut builder,
                     &fb::ObserverConnectArgs {
                         observer_name: Some(name),
+                        session_token: session_token.0,
                     },
                 );
                 let msg = fb::ClientMessage::create(&mut builder, &fb::ClientMessageArgs {
@@ -2284,6 +2298,7 @@ impl ClientMsg {
                     .ok_or(MessageError::MissingField("ObserverConnect payload"))?;
                 Ok(ClientMsg::ObserverConnect {
                     observer_name: oc.observer_name().unwrap_or("").to_string(),
+                    session_token: SessionToken(oc.session_token()),
                 })
             }
             fb::ClientPayload::ClientSignalPublish => {

@@ -105,6 +105,17 @@ table HandoffAccepted {
     spawn_position: Vec3d;
     spawn_rotation: Quatd;
     spawn_velocity: Vec3d;
+    /// Phase T0 — `true` when the destination shard recognised this
+    /// player's session as one of its own pre-connected observers (via
+    /// `ObserverConnect.session_token` matching `PlayerHandoff.session_token`)
+    /// AND promoted the existing observer TCP into the player's primary
+    /// connection in-place. The source shard reads this flag to decide
+    /// between sending `ServerMsg::ShardHandoff` (true → seamless promote,
+    /// no client-side TCP handshake) and the legacy `ServerMsg::ShardRedirect`
+    /// (false → fresh TCP handshake on the destination). Defaults to
+    /// `false` so legacy senders / older shards continue to use the
+    /// safe `ShardRedirect` path without explicit opt-in.
+    observer_promoted: bool = false;
 }
 
 table GhostUpdate {
@@ -2028,8 +2039,20 @@ table ServerMessage {
 /// Client → server: open an observer-only connection (no player entity).
 /// Used for dual-shard compositing: the client receives chunk data and
 /// WorldState broadcasts but does not participate in gameplay.
+///
+/// `session_token` is the authoritative identifier the source shard
+/// (where the player currently lives) issued in `JoinResponse.session_token`.
+/// The destination shard uses it to associate this observer connection
+/// with the player's session so that, when a `PlayerHandoff` arrives
+/// later for the same `session_token`, the destination can promote
+/// the existing observer TCP into the player's primary connection
+/// in-place — no fresh TCP handshake, no UDP re-discovery, no chunk
+/// re-stream. Required for the seamless `ShardHandoff` (Phase T0)
+/// transition path. `0` falls back to legacy non-promotable observer
+/// behaviour (chunks-only, no session linkage).
 table ObserverConnect {
     observer_name: string;     // optional, for debugging/logging
+    session_token: uint64 = 0;
 }
 
 /// Client → server: publish a signal value to a channel. The server

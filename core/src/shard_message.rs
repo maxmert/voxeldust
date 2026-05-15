@@ -644,6 +644,7 @@ impl ShardMsg {
                         spawn_position: Some(&pose_pos),
                         spawn_rotation: Some(&pose_rot),
                         spawn_velocity: Some(&pose_vel),
+                        observer_promoted: a.observer_promoted,
                     },
                 );
                 let msg = fb::ShardMessage::create(
@@ -1588,6 +1589,7 @@ impl ShardMsg {
                     session_token: SessionToken(a.session_token()),
                     target_shard: ShardId(a.target_shard_id()),
                     spawn_pose,
+                    observer_promoted: a.observer_promoted(),
                 }))
             }
 
@@ -2317,6 +2319,7 @@ mod tests {
             session_token: SessionToken(111),
             target_shard: ShardId(222),
             spawn_pose: None,
+            observer_promoted: false,
         });
         let bytes = msg.serialize();
         let decoded = ShardMsg::deserialize(&bytes).unwrap();

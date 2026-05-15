@@ -1923,6 +1923,13 @@ fn process_handoffs(
                     rotation: h.rotation,
                     velocity: h.velocity,
                 }),
+                // Phase T0 — system-shard's EVA-exit path does not yet
+                // promote an observer (the EVA spawn is a fresh entity
+                // each time). Source shard falls back to ShardRedirect.
+                // Future phase can match the player's session against
+                // a system-shard session_observer (rare scenario:
+                // EVA-from-EVA-shard handoff) and flip this to true.
+                observer_promoted: false,
             });
             match bridge.peer_registry.try_read() {
                 Ok(reg) => match reg.quic_addr(source) {
@@ -2097,6 +2104,15 @@ fn process_handoff_accepted(
                         session_token: event.session_token,
                         target_shard: event.target_shard,
                         spawn_pose: None,
+                        // Phase T0 — relayed HandoffAccepted from
+                        // ship-shard during EVA-boarding. The relay
+                        // doesn't know whether the ship promoted an
+                        // observer, so it conservatively forwards
+                        // `false`. Future phase: thread the original
+                        // ship's `observer_promoted` flag through
+                        // this relay so the source shard sees the
+                        // true value.
+                        observer_promoted: false,
                     });
                     match bridge.quic_send_tx.try_send((source_shard, addr, msg)) {
                         Ok(()) => info!(

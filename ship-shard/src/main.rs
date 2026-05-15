@@ -749,6 +749,15 @@ struct ClientConnectedMsg {
     session_token: SessionToken,
     player_name: String,
     tcp_write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    /// Phase T0 — when this connection is an observer carrying the
+    /// player's authoritative `SessionToken` (via the new
+    /// `ObserverConnect.session_token` wire field), this is `Some(token)`.
+    /// `process_connects` registers it in
+    /// `ClientRegistry.session_observers` so a future `PlayerHandoff`
+    /// for the same token can promote the observer's TCP into the
+    /// player's primary connection in-place. `None` for real player-
+    /// bearing connections and for legacy chunks-only observers.
+    observed_session: Option<SessionToken>,
 }
 
 #[derive(Message)]
@@ -900,12 +909,37 @@ fn drain_connects(
         let conn = event.connection;
         if let Ok(mut reg) = bridge.client_registry.try_write() {
             reg.register(&conn);
+            // Phase T0 — if this is an observer connection carrying the
+            // player's authoritative SessionToken, ALSO register it in
+            // session_observers so a future PlayerHandoff for the same
+            // token can promote this exact TCP write half into the
+            // player's primary entry (no fresh handshake on the
+            // seamless ShardHandoff path). The synthetic observer
+            // ClientEntry above stays alive for the chunk-snapshot
+            // initial dump; promote_observer_to_client adds a SECOND
+            // entry under the player's session token. The observer's
+            // TCP-EOF path (run_observer_read_loop) will eventually
+            // unregister the synthetic entry; the promoted entry
+            // survives independently with its own lifecycle.
+            if let Some(observed) = conn.observed_session {
+                let observer_name = conn
+                    .player_name
+                    .strip_prefix("__observer__")
+                    .unwrap_or(&conn.player_name)
+                    .to_string();
+                reg.register_session_observer(
+                    observed,
+                    observer_name,
+                    conn.tcp_write.clone(),
+                );
+            }
         }
         info!(player = %conn.player_name, session = conn.session_token.0, "player entered ship");
         events.write(ClientConnectedMsg {
             session_token: conn.session_token,
             player_name: conn.player_name.clone(),
             tcp_write: conn.tcp_write.clone(),
+            observed_session: conn.observed_session,
         });
     }
 }
@@ -1180,18 +1214,61 @@ fn drain_quic(
                         velocity: exterior.velocity,
                     })
                 };
-                let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
-                    session_token: h.session_token,
-                    target_shard: config.shard_id,
-                    spawn_pose,
-                });
-                if let Some(host_id) = config.host_shard_id {
-                    if let Ok(reg) = bridge.peer_registry.try_read() {
-                        if let Some(addr) = reg.quic_addr(host_id) {
-                            let _ = bridge.quic_send_tx.try_send((host_id, addr, accepted_msg));
+                // Phase T0 — observer-promote check and `HandoffAccepted`
+                // send happen in a spawned tokio task so the
+                // RwLock<ClientRegistry>.write().await doesn't block
+                // this Bevy system tick. The existing QUIC-send pattern
+                // (e.g. `tokio::spawn` around `creg.send_tcp`) uses the
+                // same idiom — sync ECS system → spawn → async send.
+                //
+                // If the destination ship-shard has this player's
+                // session as a pre-connected observer (i.e. the client
+                // pre-warmed a SHIP secondary to this ship via
+                // `ObserverConnect.session_token`), promote the
+                // observer's TCP into the player's primary connection
+                // in-place — no fresh handshake on the seamless
+                // `ShardHandoff` path. The `observer_promoted` flag in
+                // `HandoffAccepted` tells the source shard to emit
+                // `ServerMsg::ShardHandoff` (true → seamless promote)
+                // vs `ServerMsg::ShardRedirect` (false → full reconnect).
+                let creg_for_promote = bridge.client_registry.clone();
+                let preg_for_send = bridge.peer_registry.clone();
+                let quic_tx_for_send = bridge.quic_send_tx.clone();
+                let session_for_promote = h.session_token;
+                let player_name_for_promote = h.player_name.clone();
+                let target_shard_for_send = config.shard_id;
+                let host_for_send = config.host_shard_id;
+                tokio::spawn(async move {
+                    let observer_promoted = {
+                        let mut reg = creg_for_promote.write().await;
+                        if reg.has_session_observer(session_for_promote) {
+                            reg.promote_observer_to_client(
+                                session_for_promote,
+                                player_name_for_promote.clone(),
+                            )
+                            .is_some()
+                        } else {
+                            false
+                        }
+                    };
+                    let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
+                        session_token: session_for_promote,
+                        target_shard: target_shard_for_send,
+                        spawn_pose,
+                        observer_promoted,
+                    });
+                    if let Some(host_id) = host_for_send {
+                        if let Ok(reg) = preg_for_send.try_read() {
+                            if let Some(addr) = reg.quic_addr(host_id) {
+                                let _ = quic_tx_for_send.try_send((
+                                    host_id,
+                                    addr,
+                                    accepted_msg,
+                                ));
+                            }
                         }
                     }
-                }
+                });
             }
             ShardMsg::HostSwitch(data) => {
                 if data.ship_id != config.ship_id {

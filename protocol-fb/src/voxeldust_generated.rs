@@ -2476,6 +2476,7 @@ impl<'a> HandoffAccepted<'a> {
   pub const VT_SPAWN_POSITION: ::flatbuffers::VOffsetT = 10;
   pub const VT_SPAWN_ROTATION: ::flatbuffers::VOffsetT = 12;
   pub const VT_SPAWN_VELOCITY: ::flatbuffers::VOffsetT = 14;
+  pub const VT_OBSERVER_PROMOTED: ::flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2492,6 +2493,7 @@ impl<'a> HandoffAccepted<'a> {
     if let Some(x) = args.spawn_velocity { builder.add_spawn_velocity(x); }
     if let Some(x) = args.spawn_rotation { builder.add_spawn_rotation(x); }
     if let Some(x) = args.spawn_position { builder.add_spawn_position(x); }
+    builder.add_observer_promoted(args.observer_promoted);
     builder.add_has_spawn_pose(args.has_spawn_pose);
     builder.finish()
   }
@@ -2544,6 +2546,23 @@ impl<'a> HandoffAccepted<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Vec3d>(HandoffAccepted::VT_SPAWN_VELOCITY, None)}
   }
+  /// Phase T0 — `true` when the destination shard recognised this
+  /// player's session as one of its own pre-connected observers (via
+  /// `ObserverConnect.session_token` matching `PlayerHandoff.session_token`)
+  /// AND promoted the existing observer TCP into the player's primary
+  /// connection in-place. The source shard reads this flag to decide
+  /// between sending `ServerMsg::ShardHandoff` (true → seamless promote,
+  /// no client-side TCP handshake) and the legacy `ServerMsg::ShardRedirect`
+  /// (false → fresh TCP handshake on the destination). Defaults to
+  /// `false` so legacy senders / older shards continue to use the
+  /// safe `ShardRedirect` path without explicit opt-in.
+  #[inline]
+  pub fn observer_promoted(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(HandoffAccepted::VT_OBSERVER_PROMOTED, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for HandoffAccepted<'_> {
@@ -2558,6 +2577,7 @@ impl ::flatbuffers::Verifiable for HandoffAccepted<'_> {
      .visit_field::<Vec3d>("spawn_position", Self::VT_SPAWN_POSITION, false)?
      .visit_field::<Quatd>("spawn_rotation", Self::VT_SPAWN_ROTATION, false)?
      .visit_field::<Vec3d>("spawn_velocity", Self::VT_SPAWN_VELOCITY, false)?
+     .visit_field::<bool>("observer_promoted", Self::VT_OBSERVER_PROMOTED, false)?
      .finish();
     Ok(())
   }
@@ -2569,6 +2589,7 @@ pub struct HandoffAcceptedArgs<'a> {
     pub spawn_position: Option<&'a Vec3d>,
     pub spawn_rotation: Option<&'a Quatd>,
     pub spawn_velocity: Option<&'a Vec3d>,
+    pub observer_promoted: bool,
 }
 impl<'a> Default for HandoffAcceptedArgs<'a> {
   #[inline]
@@ -2580,6 +2601,7 @@ impl<'a> Default for HandoffAcceptedArgs<'a> {
       spawn_position: None,
       spawn_rotation: None,
       spawn_velocity: None,
+      observer_promoted: false,
     }
   }
 }
@@ -2614,6 +2636,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HandoffAcceptedBuilder<'a, 'b
     self.fbb_.push_slot_always::<&Vec3d>(HandoffAccepted::VT_SPAWN_VELOCITY, spawn_velocity);
   }
   #[inline]
+  pub fn add_observer_promoted(&mut self, observer_promoted: bool) {
+    self.fbb_.push_slot::<bool>(HandoffAccepted::VT_OBSERVER_PROMOTED, observer_promoted, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HandoffAcceptedBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     HandoffAcceptedBuilder {
@@ -2637,6 +2663,7 @@ impl ::core::fmt::Debug for HandoffAccepted<'_> {
       ds.field("spawn_position", &self.spawn_position());
       ds.field("spawn_rotation", &self.spawn_rotation());
       ds.field("spawn_velocity", &self.spawn_velocity());
+      ds.field("observer_promoted", &self.observer_promoted());
       ds.finish()
   }
 }
@@ -24224,6 +24251,17 @@ pub enum ObserverConnectOffset {}
 /// Client → server: open an observer-only connection (no player entity).
 /// Used for dual-shard compositing: the client receives chunk data and
 /// WorldState broadcasts but does not participate in gameplay.
+///
+/// `session_token` is the authoritative identifier the source shard
+/// (where the player currently lives) issued in `JoinResponse.session_token`.
+/// The destination shard uses it to associate this observer connection
+/// with the player's session so that, when a `PlayerHandoff` arrives
+/// later for the same `session_token`, the destination can promote
+/// the existing observer TCP into the player's primary connection
+/// in-place — no fresh TCP handshake, no UDP re-discovery, no chunk
+/// re-stream. Required for the seamless `ShardHandoff` (Phase T0)
+/// transition path. `0` falls back to legacy non-promotable observer
+/// behaviour (chunks-only, no session linkage).
 pub struct ObserverConnect<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -24238,6 +24276,7 @@ impl<'a> ::flatbuffers::Follow<'a> for ObserverConnect<'a> {
 
 impl<'a> ObserverConnect<'a> {
   pub const VT_OBSERVER_NAME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SESSION_TOKEN: ::flatbuffers::VOffsetT = 6;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -24249,6 +24288,7 @@ impl<'a> ObserverConnect<'a> {
     args: &'args ObserverConnectArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ObserverConnect<'bldr>> {
     let mut builder = ObserverConnectBuilder::new(_fbb);
+    builder.add_session_token(args.session_token);
     if let Some(x) = args.observer_name { builder.add_observer_name(x); }
     builder.finish()
   }
@@ -24261,6 +24301,13 @@ impl<'a> ObserverConnect<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(ObserverConnect::VT_OBSERVER_NAME, None)}
   }
+  #[inline]
+  pub fn session_token(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ObserverConnect::VT_SESSION_TOKEN, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ObserverConnect<'_> {
@@ -24270,18 +24317,21 @@ impl ::flatbuffers::Verifiable for ObserverConnect<'_> {
   ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
     v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("observer_name", Self::VT_OBSERVER_NAME, false)?
+     .visit_field::<u64>("session_token", Self::VT_SESSION_TOKEN, false)?
      .finish();
     Ok(())
   }
 }
 pub struct ObserverConnectArgs<'a> {
     pub observer_name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub session_token: u64,
 }
 impl<'a> Default for ObserverConnectArgs<'a> {
   #[inline]
   fn default() -> Self {
     ObserverConnectArgs {
       observer_name: None,
+      session_token: 0,
     }
   }
 }
@@ -24294,6 +24344,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ObserverConnectBuilder<'a, 'b
   #[inline]
   pub fn add_observer_name(&mut self, observer_name: ::flatbuffers::WIPOffset<&'b  str>) {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ObserverConnect::VT_OBSERVER_NAME, observer_name);
+  }
+  #[inline]
+  pub fn add_session_token(&mut self, session_token: u64) {
+    self.fbb_.push_slot::<u64>(ObserverConnect::VT_SESSION_TOKEN, session_token, 0);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ObserverConnectBuilder<'a, 'b, A> {
@@ -24314,6 +24368,7 @@ impl ::core::fmt::Debug for ObserverConnect<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("ObserverConnect");
       ds.field("observer_name", &self.observer_name());
+      ds.field("session_token", &self.session_token());
       ds.finish()
   }
 }

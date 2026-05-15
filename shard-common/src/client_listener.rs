@@ -24,6 +24,17 @@ pub struct ClientConnection {
     pub peer_addr: SocketAddr,
     /// Client's UDP address (learned from first UDP packet — hole-punch pattern).
     pub udp_addr: Option<SocketAddr>,
+    /// Phase T0: when this connection is an observer (`player_name`
+    /// starts with `__observer__`), `observed_session` is the player's
+    /// authoritative `SessionToken` from their source shard's
+    /// `JoinResponse`. The shard registers this observer in
+    /// `ClientRegistry.observers_by_session` keyed by `observed_session`
+    /// so a future `PlayerHandoff` matching that token can promote the
+    /// existing observer TCP into the player's primary connection
+    /// in-place — no fresh TCP handshake on the seamless `ShardHandoff`
+    /// path. `None` indicates a non-promotable legacy observer
+    /// (chunks-only) or a real player-bearing connection.
+    pub observed_session: Option<SessionToken>,
 }
 
 /// Channels for forwarding client TCP messages to the ECS bridge.
@@ -119,12 +130,40 @@ pub struct ClientRegistry {
     observers: Vec<ObserverEntry>,
     /// UDP addresses seen before any client registered (for late-join matching).
     pending_udp: Vec<SocketAddr>,
+    /// Phase T0 — session-tagged observers (TCP + optional UDP) keyed
+    /// by the player's authoritative `SessionToken` from the source
+    /// shard's `JoinResponse`. Distinct from the `observers` Vec
+    /// above (which is a heuristic UDP-only catalogue with no
+    /// session linkage). When a `PlayerHandoff` arrives matching one
+    /// of these entries, [`Self::promote_observer_to_client`] moves
+    /// the entry's TCP write half into `clients` under the same
+    /// `SessionToken`, eliminating the TCP handshake on the seamless
+    /// `ShardHandoff` path.
+    session_observers: HashMap<SessionToken, SessionObserverEntry>,
 }
 
 struct ObserverEntry {
     addr: SocketAddr,
     registered_at: Instant,
     last_successful_send: Instant,
+}
+
+/// Phase T0 — observer connection tagged with the player's
+/// authoritative `SessionToken` so a future `PlayerHandoff` for the
+/// same token can promote this exact TCP stream into the player's
+/// primary connection without a fresh handshake.
+struct SessionObserverEntry {
+    tcp_write: Arc<Mutex<OwnedWriteHalf>>,
+    /// Last-known UDP addr used by the secondary's hello/WorldState
+    /// stream, if discovered. Promoted into `ClientEntry.udp_addr` on
+    /// `promote_observer_to_client` so `PlayerInput` arriving from
+    /// the secondary's UDP socket post-promote routes to the right
+    /// session without waiting for re-discovery.
+    udp_addr: Option<SocketAddr>,
+    registered_at: Instant,
+    /// Diagnostic tag — the `observer_name` field from
+    /// `ClientMsg::ObserverConnect` (typically `observer_<seed>`).
+    observer_name: String,
 }
 
 struct ClientEntry {
@@ -140,7 +179,106 @@ impl ClientRegistry {
             clients: HashMap::new(),
             observers: Vec::new(),
             pending_udp: Vec::new(),
+            session_observers: HashMap::new(),
         }
+    }
+
+    /// Phase T0 — register an observer TCP connection that carries the
+    /// player's authoritative `SessionToken` (from `ObserverConnect`
+    /// with the new `session_token` field). The destination shard
+    /// calls this when it sees an `__observer__` connection whose
+    /// `ClientConnection.observed_session` is `Some(token)`.
+    /// Replaces any prior observer for the same session (last-writer
+    /// wins, since the wire flow has the client open at most one
+    /// observer per shard per session).
+    pub fn register_session_observer(
+        &mut self,
+        session_token: SessionToken,
+        observer_name: String,
+        tcp_write: Arc<Mutex<OwnedWriteHalf>>,
+    ) {
+        let entry = SessionObserverEntry {
+            tcp_write,
+            udp_addr: None,
+            registered_at: Instant::now(),
+            observer_name,
+        };
+        if self.session_observers.insert(session_token, entry).is_some() {
+            info!(
+                session = session_token.0,
+                "session-observer replaced (existing entry overwritten)"
+            );
+        } else {
+            info!(session = session_token.0, "session-observer registered");
+        }
+    }
+
+    /// Phase T0 — record the secondary's UDP addr against an existing
+    /// session-observer. Called by `discover_udp` (see below) the
+    /// first time a packet from the secondary's UDP socket arrives,
+    /// so `promote_observer_to_client` can carry the addr into the
+    /// resulting `ClientEntry` and avoid a one-tick UDP-discovery
+    /// gap right after the seamless `ShardHandoff`.
+    fn record_session_observer_udp(&mut self, session: SessionToken, udp_addr: SocketAddr) {
+        if let Some(entry) = self.session_observers.get_mut(&session) {
+            entry.udp_addr = Some(udp_addr);
+        }
+    }
+
+    /// Phase T0 — promote a session-tagged observer to a full
+    /// player-bearing client. Returns `Some(tcp_write)` if a matching
+    /// observer existed and was moved into the `clients` map under
+    /// the same `SessionToken`; `None` if no observer was registered
+    /// for that token (caller should fall back to the legacy
+    /// fresh-TCP `JoinResponse` path).
+    ///
+    /// On promote, the observer's last-known UDP addr is carried into
+    /// the new `ClientEntry` so `PlayerInput` arriving from the
+    /// secondary's UDP socket immediately after promotion routes
+    /// directly to this session — no `discover_udp` race.
+    pub fn promote_observer_to_client(
+        &mut self,
+        session_token: SessionToken,
+        player_name: String,
+    ) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
+        let SessionObserverEntry {
+            tcp_write,
+            udp_addr,
+            observer_name,
+            ..
+        } = self.session_observers.remove(&session_token)?;
+        info!(
+            session = session_token.0,
+            %player_name,
+            %observer_name,
+            udp_known = udp_addr.is_some(),
+            "promoting session-observer to client (seamless ShardHandoff)"
+        );
+        self.clients.insert(
+            session_token,
+            ClientEntry {
+                tcp_write: tcp_write.clone(),
+                udp_addr,
+                player_name,
+            },
+        );
+        Some(tcp_write)
+    }
+
+    /// Phase T0 — drop a session-observer (e.g. the observer TCP
+    /// disconnected without ever being promoted). Idempotent.
+    pub fn unregister_session_observer(&mut self, session_token: SessionToken) {
+        if self.session_observers.remove(&session_token).is_some() {
+            info!(session = session_token.0, "session-observer unregistered");
+        }
+    }
+
+    /// Phase T0 — true if a session-observer is registered for this
+    /// `SessionToken`. Used by source shards to decide between the
+    /// seamless `ShardHandoff` path (when destination has confirmed
+    /// the observer) and the legacy `ShardRedirect` fallback.
+    pub fn has_session_observer(&self, session_token: SessionToken) -> bool {
+        self.session_observers.contains_key(&session_token)
     }
 
     pub fn register(&mut self, conn: &ClientConnection) {
@@ -396,6 +534,9 @@ async fn handle_client_connection(
                 tcp_write: Arc::new(Mutex::new(write_half)),
                 peer_addr,
                 udp_addr: None,
+                // Real player-bearing connection — observed_session is
+                // only populated for observer connections (Phase T0).
+                observed_session: None,
             };
 
             let _ = connect_tx.send(ClientConnectEvent { connection });
@@ -412,8 +553,13 @@ async fn handle_client_connection(
             reg.unregister(&token);
             return;
         }
-        ClientMsg::ObserverConnect { observer_name } => {
-            info!(%peer_addr, %observer_name, "observer TCP connected");
+        ClientMsg::ObserverConnect { observer_name, session_token: observed_session } => {
+            info!(
+                %peer_addr,
+                %observer_name,
+                observed_session = observed_session.0,
+                "observer TCP connected"
+            );
 
             // Observer connections: split stream, store write half for chunk sync,
             // but do NOT send a ClientConnectEvent (no player entity).
@@ -423,6 +569,16 @@ async fn handle_client_connection(
 
             // Store observer TCP write half in the connect channel with a special
             // sentinel name so the shard can distinguish observers from players.
+            //
+            // `observed_session` is the player's authoritative SessionToken
+            // from `JoinResponse` on their source shard (Phase T0). The shard
+            // will register this observer in
+            // `ClientRegistry.observers_by_session` keyed by `observed_session`
+            // (T0.C) so a future `PlayerHandoff` matching that token can
+            // promote this very TCP write half into the player's primary
+            // entry — no fresh handshake on the seamless `ShardHandoff`
+            // path. `SessionToken(0)` indicates a legacy non-promotable
+            // observer (chunks-only).
             let observer_token = SessionToken(rand_u64());
             let connection = ClientConnection {
                 session_token: observer_token,
@@ -430,6 +586,11 @@ async fn handle_client_connection(
                 tcp_write: write,
                 peer_addr,
                 udp_addr: None,
+                observed_session: if observed_session.0 != 0 {
+                    Some(observed_session)
+                } else {
+                    None
+                },
             };
             let _ = connect_tx.send(ClientConnectEvent { connection });
             info!(%peer_addr, %observer_name, "observer TCP setup complete");
@@ -445,6 +606,16 @@ async fn handle_client_connection(
 
             let mut reg = client_registry.write().await;
             reg.unregister(&observer_token);
+            // Phase T0 — also drop the session-observer entry if the
+            // observer disconnected before being promoted to a primary
+            // client. If `promote_observer_to_client` already moved it
+            // into `clients`, this is a no-op (the entry was removed
+            // by the promote and the corresponding `unregister(&token)`
+            // call above won't have triggered yet because the player
+            // path runs in a different code branch).
+            if observed_session.0 != 0 {
+                reg.unregister_session_observer(observed_session);
+            }
             return;
         }
         _ => {

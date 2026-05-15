@@ -119,6 +119,16 @@ pub struct HandoffAccepted {
     pub session_token: SessionToken,
     pub target_shard: ShardId,
     pub spawn_pose: Option<SpawnPose>,
+    /// Phase T0 — `true` when the destination shard recognised this
+    /// player's session as one of its own pre-connected observers and
+    /// promoted that observer's TCP into the player's primary connection
+    /// in-place (see [`ShardHandoff`]). The source shard reads this flag
+    /// to choose between emitting `ServerMsg::ShardHandoff` (seamless,
+    /// no client TCP handshake) and the legacy `ServerMsg::ShardRedirect`
+    /// (full reconnect). Defaults to `false` so legacy senders /
+    /// pre-T0 shards keep the safe `ShardRedirect` path without explicit
+    /// opt-in.
+    pub observer_promoted: bool,
 }
 
 /// Position update sent from source shard to target shard for 15 frames

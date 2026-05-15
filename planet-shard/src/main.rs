@@ -754,6 +754,12 @@ fn process_handoffs(
             session_token: h.session_token,
             target_shard: config.shard_id,
             spawn_pose: None,
+            // Phase T0: planet-shard does not yet support observer
+            // promotion (no PendingOwnership equivalent for surface
+            // players). Source shard will use ShardRedirect (full TCP
+            // handshake), which is fine for the planet path until a
+            // future phase plumbs observer-promote here too.
+            observer_promoted: false,
         });
         let relay_shard = event.relay_shard;
         if let Ok(reg) = bridge.peer_registry.try_read() {

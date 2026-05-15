@@ -124,6 +124,7 @@ async fn send_multiple_messages_on_same_connection() {
             session_token: SessionToken(42),
             target_shard: ShardId(3),
             spawn_pose: None,
+            observer_promoted: false,
         }),
         ShardMsg::GhostUpdate(GhostUpdate {
             session_token: SessionToken(42),

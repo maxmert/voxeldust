@@ -212,6 +212,13 @@ pub async fn run_network(
         };
 
         info!(shard_type = jr.shard_type, "joined shard");
+        // Capture the authoritative SessionToken for downstream secondary
+        // ObserverConnect messages — the destination shard uses this to
+        // associate observer TCP streams with the player's session, so a
+        // later `ShardHandoff` (Phase T0) can promote the existing observer
+        // TCP into the player's primary connection in-place rather than
+        // tearing down + handshaking a fresh one.
+        let session_token = jr.session_token;
         let _ = event_tx.send(NetEvent::Connected {
             shard_type: jr.shard_type,
             seed: jr.seed,
@@ -348,6 +355,12 @@ pub async fn run_network(
         // TCP listener — monitors for ShardRedirect or ShardPreConnect.
         let event_tx_tcp = event_tx.clone();
         let player_name_tcp = player_name.clone();
+        // Phase T0: thread the SessionToken into the TCP handler so each
+        // pre-connected secondary's observer-TCP carries it in the
+        // `ObserverConnect` message — letting the destination shard
+        // associate the observer with this player's session for
+        // future ShardHandoff promotion.
+        let session_token_for_tcp = session_token;
         // `primary_cancel_tx` kills only per-primary subordinate tasks (send/recv/tcp
         // and ship/planet secondaries). Scene-context secondaries bind to
         // `session_cancel_tx_for_tcp` which does NOT fire on `ShardRedirect`.
@@ -488,8 +501,23 @@ pub async fn run_network(
                                     let tcp_event_tx = event_tx_tcp.clone();
                                     let tcp_cancel = sec_cancel_tx.subscribe();
                                     let tcp_seed = pc.seed;
+                                    // Phase T0 — carry the player's
+                                    // SessionToken in ObserverConnect so the
+                                    // destination shard can associate this
+                                    // observer TCP with the player's
+                                    // session for future ShardHandoff
+                                    // promotion (no fresh handshake on
+                                    // promote).
+                                    let tcp_session = session_token_for_tcp;
                                     tokio::spawn(async move {
-                                        connect_observer_tcp(tcp_addr, tcp_seed, tcp_event_tx, tcp_cancel).await;
+                                        connect_observer_tcp(
+                                            tcp_addr,
+                                            tcp_seed,
+                                            tcp_session,
+                                            tcp_event_tx,
+                                            tcp_cancel,
+                                        )
+                                        .await;
                                     });
                                 }
 
@@ -782,6 +810,7 @@ async fn connect_to_shard_full(
 async fn connect_observer_tcp(
     addr: SocketAddr,
     seed: u64,
+    session_token: voxeldust_core::shard_types::SessionToken,
     event_tx: mpsc::UnboundedSender<NetEvent>,
     mut cancel_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
@@ -794,9 +823,13 @@ async fn connect_observer_tcp(
     };
     let _ = stream.set_nodelay(true);
 
-    // Send ObserverConnect instead of Connect.
+    // Send ObserverConnect with the player's authoritative SessionToken.
+    // The destination shard registers this observer in its ClientRegistry
+    // observers-by-session map, enabling later in-place promotion to a
+    // full primary connection on ShardHandoff.
     if let Err(e) = send_msg(&mut stream, &ClientMsg::ObserverConnect {
         observer_name: format!("observer_{}", seed),
+        session_token,
     }).await {
         warn!(%e, "failed to send ObserverConnect");
         return;
