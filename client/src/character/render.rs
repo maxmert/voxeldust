@@ -111,6 +111,17 @@ impl Plugin for CharacterRenderPlugin {
                 spawn_remote_character_visuals,
                 despawn_remote_character_visuals,
                 bevy::ecs::schedule::ApplyDeferred,
+                // Phase T1 (seamless transitions): a player whose
+                // shard changed (boarded a ship, EVA-exited, etc.) is
+                // still present in `RemotePlayers` but their
+                // `RemoteEntity.shard` flipped. Reparent the existing
+                // visual under the new ChunkSource INSTEAD of
+                // despawning + respawning, so AnimationPlayer,
+                // LocomotionAnimState, BoneRegistry, HandBindData,
+                // LocalCharacterTag, TabletIkBlendState all persist
+                // across the shard boundary — no T-pose blink, no
+                // bone-resolution stall, no camera-attachment severing.
+                reparent_visuals_on_shard_change,
                 resolve_bones_when_ready,
                 sync_remote_pose,
             )
@@ -210,29 +221,93 @@ fn spawn_one(
     );
 }
 
-/// Despawn visuals whose player is no longer present in the latest
-/// `RemotePlayers` snapshot (left AOI, disconnected, or migrated to a
-/// different shard with a different ChunkSource — in which case
-/// `spawn_remote_character_visuals` will spawn a fresh visual under
-/// the new parent next tick).
+/// Despawn visuals whose player is no longer present in
+/// `RemotePlayers` at all (left AOI, disconnected). Crucially, a
+/// player whose `RemoteEntity.shard` *flipped* (= shard migration:
+/// boarded a ship, EVA-exited, etc.) is STILL present in
+/// `RemotePlayers` and must NOT be despawned here —
+/// [`reparent_visuals_on_shard_change`] handles them by reparenting the
+/// existing visual under the new shard's `ChunkSource` so all
+/// per-visual state (animation, bones, IK, tablet, local tag) persists.
 fn despawn_remote_character_visuals(
     mut commands: Commands,
     remote_players: Res<RemotePlayers>,
     visuals: Query<(Entity, &RemoteCharacterTag)>,
 ) {
     for (entity, tag) in &visuals {
-        let still_present = remote_players
-            .by_id
-            .get(&tag.player_id)
-            .map(|r| r.shard == tag.source_shard)
-            .unwrap_or(false);
+        let still_present = remote_players.by_id.contains_key(&tag.player_id);
         if !still_present {
             commands.entity(entity).despawn();
             info!(
                 player_id = tag.player_id,
-                "character render: despawned visual (left AOI or shard-migrated)"
+                "character render: despawned visual (left AOI or disconnected)"
             );
         }
+    }
+}
+
+/// Phase T1 — reparent a visual under the new ChunkSource when the
+/// player's `RemoteEntity.shard` differs from the visual's
+/// `tag.source_shard`. Preserves every per-visual component
+/// (`AnimationPlayer`, `LocomotionAnimState`, `BoneRegistry`,
+/// `HandBindData`, `TabletIkBlendState`, `LocalCharacterTag`, etc.)
+/// across the shard boundary — the transition is invisible to the
+/// renderer.
+///
+/// `commands.entity(parent).add_child(visual)` automatically removes
+/// `visual` from any previous parent before attaching it to `parent`
+/// (Bevy 0.18 hierarchy semantics), so this is a single atomic
+/// reparent — no orphaned-frame.
+///
+/// `Transform.translation` is recomputed via [`local_transform_for`]
+/// using the destination shard's `RemoteEntity` snapshot so the visual
+/// renders in the correct world position on the very first frame
+/// after the reparent (otherwise it would be interpreted in the new
+/// parent's local frame with the *old* parent's coordinates and
+/// snap on the next [`sync_remote_pose`]).
+///
+/// Defers to next tick if the destination ChunkSource has not yet
+/// materialized (`SourceIndex.by_shard` miss): the visual stays under
+/// the old parent — which is in the grace window so still
+/// rendering — and reparents on the first tick after the new source
+/// appears.
+fn reparent_visuals_on_shard_change(
+    mut commands: Commands,
+    remote_players: Res<RemotePlayers>,
+    asset_registry: Res<CharacterAssetRegistry>,
+    sources: Res<SourceIndex>,
+    mut visuals: Query<(Entity, &mut RemoteCharacterTag, &mut Transform)>,
+) {
+    for (visual, mut tag, mut transform) in &mut visuals {
+        let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
+            continue;
+        };
+        if remote.shard == tag.source_shard {
+            continue;
+        }
+        let Some(&new_parent) = sources.by_shard.get(&remote.shard) else {
+            // Destination ChunkSource not yet spawned — the old parent
+            // lives in the grace window so the visual stays visible
+            // there. Try again next tick.
+            continue;
+        };
+        let class = asset_registry
+            .ready(tag.class_id)
+            .map(|a| a.class)
+            .or_else(|| voxeldust_core::character::class_by_id(tag.class_id));
+        let Some(class) = class else {
+            continue;
+        };
+        commands.entity(new_parent).add_child(visual);
+        *transform = local_transform_for(remote, class);
+        let old_shard = tag.source_shard;
+        tag.source_shard = remote.shard;
+        info!(
+            player_id = tag.player_id,
+            %old_shard,
+            new_shard = %remote.shard,
+            "character render: reparented visual on shard migration"
+        );
     }
 }
 

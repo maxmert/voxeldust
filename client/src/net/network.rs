@@ -56,8 +56,19 @@ pub enum NetEvent {
     /// client uses this to route the WS to the correct per-type slot
     /// so Transitioning's `ws.secondary.take()` picks the secondary
     /// matching the redirect target, not whichever sent last.
+    ///
+    /// `seed` is the secondary's authoritative wire seed (= the
+    /// `seed` carried by `NetEvent::SecondaryConnected` and used as
+    /// the `ShardKey.seed` in `Secondaries.runtimes` /
+    /// `SourceIndex.by_shard`). Without this, multiple secondaries
+    /// of the same type (e.g. several pre-connected SHIPs) collapse
+    /// into one slot in `SecondaryWorldStates.by_shard_type` and
+    /// downstream lookups have to guess the seed — leading to
+    /// player visuals being parented under the wrong ship's
+    /// `ChunkSource` (or, if the guess misses, never spawning).
     SecondaryWorldState {
         shard_type: u8,
+        seed: u64,
         ws: WorldStateData,
     },
     /// Galaxy world state from secondary UDP (warp travel position for star parallax).
@@ -554,6 +565,7 @@ pub async fn run_network(
                                                                 let _ = sec_event_tx.send(
                                                                     NetEvent::SecondaryWorldState {
                                                                         shard_type: sec_shard_type,
+                                                                        seed: sec_seed,
                                                                         ws,
                                                                     });
                                                             }

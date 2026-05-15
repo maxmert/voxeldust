@@ -138,17 +138,18 @@ fn track_remote_entities(
             ingest(ws, key, own_player_id, &mut players, &mut ships, &mut debris);
         }
     }
-    for (&shard_type, (ws, _)) in &secondary_ws.by_shard_type {
-        // We don't know the exact `seed` of the secondary from its
-        // WorldState (wire format collapses to shard_type). Use
-        // shard_type + 0 as a placeholder ShardKey; downstream
-        // consumers who need the authoritative shard id should cross-
-        // reference `Secondaries.runtimes`.
-        let placeholder = ShardKey {
-            shard_type,
-            seed: 0,
-        };
-        ingest(ws, placeholder, own_player_id, &mut players, &mut ships, &mut debris);
+    // Iterate the authoritative per-`ShardKey` secondary map (NOT
+    // `by_shard_type`). With `by_shard_type` (legacy lossy index),
+    // multiple SHIP secondaries collapse into one slot and downstream
+    // visual parenting can't tell which ship's `ChunkSource` to bind
+    // to — the practical symptom was an EVA observer not seeing
+    // in-ship players even though the SHIP secondary's WorldState
+    // was streaming and listed them. `by_shard_key` carries the real
+    // seed end-to-end (NetEvent → resource → ingest call), so
+    // `SourceIndex.by_shard.get(&observer)` always lands on the
+    // correct ChunkSource.
+    for (&observer, (ws, _)) in &secondary_ws.by_shard_key {
+        ingest(ws, observer, own_player_id, &mut players, &mut ships, &mut debris);
     }
 }
 
@@ -196,24 +197,32 @@ fn ingest(
 }
 
 fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
-    // Per-kind shard-key composition. Players are always observed by
-    // their authoritative shard's WorldState (a ground player on this
-    // ship is broadcast by THIS ship-shard; an EVA player by the
-    // system-shard; a planet surface player by their planet-shard) —
-    // so for them the `observer` ShardKey is the right entry into
-    // `SourceIndex.by_shard` for parenting visuals. Ships, on the
-    // other hand, may be cross-shard observable via the system-shard's
-    // AOI feed; for those we honour `e.shard_id` so the renderer can
-    // parent them under the secondary SHIP ChunkSource (matched by
-    // the same seed `find_secondary_pose` uses).
+    // Per-kind shard-key composition.
     //
-    // The asymmetry is load-bearing: ship-shard stamps
-    // `entities[].shard_id = config.shard_id.0` (the orchestrator-
-    // assigned id), which is *not* the wire seed used as
-    // `ShardKey.seed`. For players that mismatch silently broke
-    // SourceIndex lookups; for ships the secondary registration uses
-    // `find_secondary_pose`'s own match against `shard_id` so it
-    // doesn't go through SourceIndex.by_shard the same way.
+    // PLAYERS are always observed by the WorldState whose authoritative
+    // shard owns them: a ground player on this ship is broadcast by
+    // THIS ship-shard; an EVA player by the system-shard; a planet
+    // surface player by their planet-shard. So for players the
+    // `observer` ShardKey (= the WorldState's authoritative
+    // `ShardKey`, looked up via `Secondaries.runtimes` for secondaries
+    // and `PrimaryShard.current` for the primary) is the correct
+    // entry into `SourceIndex.by_shard` for parenting visuals.
+    //
+    // SHIPS are different: the system-shard's AOI feed exposes nearby
+    // ships in its primary `entities[]` even though each ship lives
+    // on its own SHIP shard. For those entries we honour `e.shard_id`
+    // so the renderer parents under the secondary SHIP `ChunkSource`
+    // (`find_secondary_pose` does the symmetric lookup using the
+    // same id).
+    //
+    // The shard_id-vs-seed asymmetry is load-bearing: ship-shard
+    // stamps `entities[].shard_id = config.shard_id.0` (the
+    // orchestrator-assigned id), which is *not* the wire `seed` used
+    // as `ShardKey.seed`. For PLAYERS that mismatch silently broke
+    // SourceIndex lookups in earlier code that tried to use
+    // `e.shard_id` for them; for SHIPS the secondary registration
+    // uses `find_secondary_pose`'s own match against `shard_id`,
+    // bypassing `SourceIndex.by_shard` entirely.
     let shard = match e.kind {
         EntityKind::EvaPlayer | EntityKind::GroundedPlayer | EntityKind::Seated => observer,
         EntityKind::Ship => {

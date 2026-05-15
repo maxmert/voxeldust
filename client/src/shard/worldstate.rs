@@ -13,6 +13,7 @@ use voxeldust_core::client_message::WorldStateData;
 
 use crate::net::{GameEvent, NetEvent};
 use crate::shard::registry::ShardRegistrySet;
+use crate::shard::runtime::ShardKey;
 
 #[derive(SystemSet, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct WorldStateIngestSet;
@@ -36,16 +37,25 @@ pub struct PrimaryWorldState {
     pub last_tick_real_time: Option<Instant>,
 }
 
-/// Latest WorldState per secondary shard-type plus the `Instant` it
-/// arrived. Keyed by shard_type (u8) because the `SecondaryWorldState`
-/// NetEvent carries shard_type but not seed — multiple secondaries of
-/// the same type are rare at tick granularity (typically system-wide AOI).
+/// Latest WorldState per secondary shard, keyed two ways:
 ///
-/// The `Instant` follows the same role as `PrimaryWorldState.last_tick_real_time`:
-/// per-frame consumers extrapolate `game_time_now` from `(ws, instant)`.
+///   * `by_shard_type` (legacy, lossy when multiple secondaries share
+///     a type) — many existing consumers (lighting, AR, atmosphere,
+///     eclipse, etc.) read this without needing per-secondary
+///     disambiguation. Kept for backward-compat.
+///   * `by_shard_key` (full `ShardKey` = `shard_type` + `seed`) —
+///     the authoritative map. Use this anywhere correctness depends
+///     on knowing exactly which secondary a WorldState came from
+///     (e.g. cross-shard player visual parenting in
+///     `client/src/remote/mod.rs`).
+///
+/// The `Instant` follows the same role as
+/// `PrimaryWorldState.last_tick_real_time`: per-frame consumers
+/// extrapolate `game_time_now` from `(ws, instant)`.
 #[derive(Resource, Default)]
 pub struct SecondaryWorldStates {
     pub by_shard_type: HashMap<u8, (WorldStateData, Instant)>,
+    pub by_shard_key: HashMap<ShardKey, (WorldStateData, Instant)>,
 }
 
 pub struct WorldStateIngestPlugin;
@@ -86,12 +96,17 @@ fn reset_on_shard_change(
                 primary.latest = None;
                 primary.last_tick_real_time = None;
             }
-            NetEvent::SecondaryDisconnected { .. } => {
+            NetEvent::SecondaryDisconnected { seed } => {
                 // We don't get the shard_type on SecondaryDisconnected;
                 // clear all secondaries so the next WS from any
                 // remaining secondary is accepted. Cheap — ingest will
-                // repopulate from the next packet.
+                // repopulate from the next packet. (Both maps are
+                // cleared for symmetry; per-key removal would require
+                // also tracking shard_type, which the event doesn't
+                // carry today.)
+                let _ = seed;
                 secondary.by_shard_type.clear();
+                secondary.by_shard_key.clear();
             }
             _ => {}
         }
@@ -133,23 +148,35 @@ fn ingest_secondary(
     mut secondary: ResMut<SecondaryWorldStates>,
 ) {
     for GameEvent(ev) in events.read() {
-        if let NetEvent::SecondaryWorldState { shard_type, ws } = ev {
+        if let NetEvent::SecondaryWorldState { shard_type, seed, ws } = ev {
+            let key = ShardKey::new(*shard_type, *seed);
             // Same monotonic-tick guard as `ingest_primary`. Stale UDP
             // packets on a secondary's stream would otherwise rotate /
             // translate that secondary's chunks (or its observable
             // entities used for cross-shard pose lookup) backward by
             // one frame, then snap forward on the next fresh tick.
+            // The guard runs per full `ShardKey` (the authoritative
+            // map) so a slow tick from ship A doesn't suppress a fresh
+            // tick from ship B with the same shard_type.
             let stale = secondary
-                .by_shard_type
-                .get(shard_type)
+                .by_shard_key
+                .get(&key)
                 .map(|prev| ws.tick <= prev.0.tick)
                 .unwrap_or(false);
             if stale {
                 continue;
             }
+            let now = Instant::now();
+            secondary
+                .by_shard_key
+                .insert(key, (ws.clone(), now));
+            // Backward-compat secondary index — last writer wins
+            // when multiple secondaries share a shard_type. Kept so
+            // existing read-sites (lighting, AR, atmosphere, etc.)
+            // don't need a refactor in this phase.
             secondary
                 .by_shard_type
-                .insert(*shard_type, (ws.clone(), Instant::now()));
+                .insert(*shard_type, (ws.clone(), now));
         }
     }
 }
