@@ -20,6 +20,7 @@ use voxeldust_core::shard_message::{
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{compute_lighting, compute_planet_position, SystemParams};
 use voxeldust_shard_common::client_listener;
+use voxeldust_shard_common::handoff_pipeline;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 use voxeldust_shard_common::signal_pipeline::SignalPipelinePlugin;
 use voxeldust_shard_common::hud_delta::{
@@ -351,6 +352,18 @@ struct ShipNearbyMsg(ShipNearbyInfoData);
 struct HandoffAcceptedMsg {
     session: SessionToken,
     target_shard: ShardId,
+    /// Phase T0.F — `true` when the destination ship-shard
+    /// recognised this player's session as one of its own pre-
+    /// connected observers and promoted that observer's TCP into
+    /// the player's primary connection in-place. Determines whether
+    /// the outgoing `ServerMsg` to the client is `ShardHandoff`
+    /// (seamless) or `ShardRedirect` (legacy fresh handshake) —
+    /// see `handoff_pipeline::build_post_handoff_redirect`.
+    observer_promoted: bool,
+    /// Forwarded from the wire `HandoffAccepted.spawn_pose`. Used
+    /// as the spawn pose unless the consumer can compute a more
+    /// authoritative pose locally.
+    spawn_pose: Option<handoff::SpawnPose>,
 }
 
 /// Ship collider shapes from ship shard (for physical collision).
@@ -467,6 +480,8 @@ fn drain_quic(
                 accepted_events.write(HandoffAcceptedMsg {
                     session: accepted.session_token,
                     target_shard: accepted.target_shard,
+                    observer_promoted: accepted.observer_promoted,
+                    spawn_pose: accepted.spawn_pose,
                 });
             }
             ShardMsg::ShipColliderSync(data) => {
@@ -1004,26 +1019,33 @@ fn process_handoff_accepted(
             "received HandoffAccepted for ship re-entry"
         );
 
-        // Send ShardRedirect to client.
+        // Send post-handoff redirect to client (ShardHandoff for the
+        // seamless promote path when the destination ship-shard
+        // acked observer-promote, otherwise legacy ShardRedirect).
         if let Ok(reg) = bridge.peer_registry.try_read() {
             if let Some(peer_info) = reg.get(target_shard) {
                 // TODO(phase-A-reentry): populate spawn_pose with the
                 // ship-local spawn position for planet→ship re-entry.
                 // Left None for now — client uses the ship shard's
-                // JoinResponse position.
-                let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
+                // JoinResponse position (legacy path) or the
+                // ShardHandoff handoff_position from the ship
+                // shard's own spawn-pose computation.
+                let synthetic_accepted = handoff::HandoffAccepted {
                     session_token: session,
-                    target_tcp_addr: peer_info.endpoint.tcp_addr.to_string(),
-                    target_udp_addr: peer_info.endpoint.udp_addr.to_string(),
-                    shard_id: target_shard,
-                    target_shard_type: peer_info.shard_type as u8,
-                    spawn_pose: None,
-                });
+                    target_shard,
+                    spawn_pose: event.spawn_pose.clone(),
+                    observer_promoted: event.observer_promoted,
+                };
+                let redirect = handoff_pipeline::build_post_handoff_redirect(
+                    &synthetic_accepted,
+                    peer_info,
+                    event.spawn_pose.clone(),
+                );
                 let cr = bridge.client_registry.clone();
                 tokio::spawn(async move {
                     if let Ok(reg) = cr.try_read() {
                         if let Err(e) = reg.send_tcp(session, &redirect).await {
-                            tracing::warn!(%e, "failed to send ShardRedirect for re-entry");
+                            tracing::warn!(%e, "failed to send post-handoff redirect for re-entry");
                         }
                     }
                     if let Ok(mut reg) = cr.try_write() {

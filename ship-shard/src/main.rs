@@ -41,6 +41,7 @@ use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{self, SystemParams};
 use voxeldust_shard_common::authorized_peers::AuthorizedPeers;
 use voxeldust_shard_common::client_listener;
+use voxeldust_shard_common::handoff_pipeline;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 use voxeldust_shard_common::media_pipeline::MediaPipelinePlugin;
 use voxeldust_shard_common::signal_pipeline::{SignalPipelinePlugin, SignalSet};
@@ -1147,20 +1148,23 @@ fn drain_quic(
                         // (from HandoffAccepted) over our own stale pose
                         // stored at handoff-creation time.
                         let _ = pending_handoffs.outgoing.remove(&session);
-                        let spawn_pose = authoritative_pose.clone();
-                        let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
-                            session_token: session,
-                            target_tcp_addr: peer_info.endpoint.tcp_addr.to_string(),
-                            target_udp_addr: peer_info.endpoint.udp_addr.to_string(),
-                            shard_id: target_shard,
-                            target_shard_type: peer_info.shard_type as u8,
-                            spawn_pose,
-                        });
+                        // Phase T0.F — single source of truth for the
+                        // ShardHandoff (seamless promote) vs ShardRedirect
+                        // (legacy fresh handshake) choice. Picks the
+                        // seamless path iff the destination shard
+                        // confirmed it had this player's session as a
+                        // pre-connected observer (`accepted.observer_promoted
+                        // == true`).
+                        let redirect = handoff_pipeline::build_post_handoff_redirect(
+                            &accepted,
+                            peer_info,
+                            authoritative_pose.clone(),
+                        );
                         let cr = bridge.client_registry.clone();
                         tokio::spawn(async move {
                             if let Ok(reg) = cr.try_read() {
                                 if let Err(e) = reg.send_tcp(session, &redirect).await {
-                                    tracing::warn!(%e, "failed to send ShardRedirect");
+                                    tracing::warn!(%e, "failed to send post-handoff redirect");
                                 }
                             }
                             if let Ok(mut reg) = cr.try_write() {

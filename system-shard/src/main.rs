@@ -32,6 +32,7 @@ use voxeldust_core::system::{
     compute_planet_position, compute_planet_velocity, compute_soi_radius, SystemParams,
 };
 use voxeldust_shard_common::client_listener;
+use voxeldust_shard_common::handoff_pipeline;
 use voxeldust_shard_common::harness::{
     celestial_time_from_epoch, NetworkBridge, ShardHarness, ShardHarnessConfig,
 };
@@ -435,6 +436,14 @@ struct HandoffAcceptedMsg {
     /// camera directly to where the target shard will render the
     /// player, eliminating inter-shard latency drift).
     spawn_pose: Option<handoff::SpawnPose>,
+    /// Phase T0.F — `true` when the destination shard recognised
+    /// this player's session as one of its own pre-connected
+    /// observers and promoted that observer's TCP into the player's
+    /// primary connection in-place. Determines whether the outgoing
+    /// `ServerMsg` to the client is `ShardHandoff` (seamless) or
+    /// `ShardRedirect` (legacy fresh handshake) — see
+    /// `handoff_pipeline::build_post_handoff_redirect`.
+    observer_promoted: bool,
 }
 
 /// Planet provisioning completed.
@@ -796,6 +805,7 @@ fn drain_quic(
                     session_token: a.session_token,
                     target_shard: a.target_shard,
                     spawn_pose: a.spawn_pose,
+                    observer_promoted: a.observer_promoted,
                 });
             }
             ShardMsg::ShipPropertiesUpdate(data) => {
@@ -2035,21 +2045,31 @@ fn process_handoff_accepted(
                         // exterior.position). Falls back to ship-shard's
                         // value if SYSTEM can't resolve the ship entity.
                         let spawn_pose = authoritative_spawn.or_else(|| event.spawn_pose.clone());
-                        let redirect = ServerMsg::ShardRedirect(handoff::ShardRedirect {
+                        // Phase T0.F — single source of truth for the
+                        // ShardHandoff (seamless promote) vs
+                        // ShardRedirect (legacy fresh handshake) choice.
+                        // Reconstructs the wire HandoffAccepted from the
+                        // local event so the helper sees the same view
+                        // every consumer in every shard sees.
+                        let synthetic_accepted = handoff::HandoffAccepted {
                             session_token: event.session_token,
-                            target_tcp_addr: tcp_addr.clone(),
-                            target_udp_addr: udp_addr.clone(),
-                            shard_id: event.target_shard,
-                            target_shard_type: shard_type,
+                            target_shard: event.target_shard,
+                            spawn_pose: spawn_pose.clone(),
+                            observer_promoted: event.observer_promoted,
+                        };
+                        let redirect = handoff_pipeline::build_post_handoff_redirect(
+                            &synthetic_accepted,
+                            peer_info,
                             spawn_pose,
-                        });
+                        );
                         info!(
                             session = event.session_token.0,
                             target = event.target_shard.0,
                             target_tcp = %tcp_addr,
                             target_udp = %udp_addr,
                             target_shard_type = shard_type,
-                            "EVA-boarding ShardRedirect prepared; sending to client"
+                            observer_promoted = event.observer_promoted,
+                            "EVA-boarding redirect prepared; sending to client"
                         );
                         let creg = bridge.client_registry.clone();
                         let token = event.session_token;
@@ -2063,7 +2083,7 @@ fn process_handoff_accepted(
                                 tracing::warn!(
                                     session = token.0,
                                     target = target,
-                                    "client session not in registry — ShardRedirect cannot be delivered"
+                                    "client session not in registry — post-handoff redirect cannot be delivered"
                                 );
                                 return;
                             }
@@ -2075,10 +2095,10 @@ fn process_handoff_accepted(
                                 Ok(()) => info!(
                                     session = token.0,
                                     target = target,
-                                    "sent ShardRedirect to EVA-boarding client"
+                                    "sent post-handoff redirect to EVA-boarding client"
                                 ),
                                 Err(e) => {
-                                    tracing::warn!(session = token.0, %e, "failed to send ShardRedirect")
+                                    tracing::warn!(session = token.0, %e, "failed to send post-handoff redirect")
                                 }
                             }
                             if let Ok(mut reg) = creg.try_write() {
