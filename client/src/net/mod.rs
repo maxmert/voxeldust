@@ -7,6 +7,7 @@ pub use bridge::{
     NetworkBridgeSet, NetworkPlugin, TcpSender,
 };
 pub use connection::{
-    ConnectionControl, ConnectionHandle, ConnectionMode, DEMOTE_TICK,
+    run_connection, ConnectionControl, ConnectionHandle, ConnectionMode, ControllerEvent,
+    DEMOTE_TICK,
 };
 pub use network::NetEvent;

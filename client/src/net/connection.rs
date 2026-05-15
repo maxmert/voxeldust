@@ -66,7 +66,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 use voxeldust_core::client_message::{ClientMsg, PlayerInputData, ServerMsg};
-use voxeldust_core::handoff::SpawnPose;
+use voxeldust_core::handoff::{ShardHandoff, ShardPreConnect, ShardRedirect, SpawnPose};
 use voxeldust_core::shard_types::SessionToken;
 
 use super::NetEvent;
@@ -103,6 +103,33 @@ pub enum ConnectionMode {
     /// to give the destination a few ticks to take over without a
     /// visible WorldState gap.
     Demoting { exit_after: Instant },
+}
+
+/// Events a Primary-mode [`run_connection`] forwards to the
+/// controller (`run_network` outer loop) when its TCP read sees a
+/// shard-lifecycle message that needs controller-level action.
+///
+/// `Secondary` mode never produces these events (server doesn't send
+/// these messages on observer TCPs); `Demoting` stops producing
+/// them after demote (the new primary takes over).
+#[derive(Debug)]
+pub enum ControllerEvent {
+    /// `ServerMsg::ShardRedirect` arrived. Controller should cancel
+    /// the current primary and reconnect with a fresh handshake to
+    /// the destination — the legacy non-seamless transition path.
+    ShardRedirect(ShardRedirect),
+    /// `ServerMsg::ShardHandoff` arrived. Controller should look up
+    /// the destination secondary by `(promote_shard_type,
+    /// promote_shard_id)`, send `Promote` to it, and `Demote` to
+    /// the current primary — the seamless T0 transition path.
+    ShardHandoff(ShardHandoff),
+    /// `ServerMsg::ShardPreConnect` arrived. Controller should
+    /// open a new secondary `run_connection` task to the
+    /// destination shard.
+    ShardPreConnect(ShardPreConnect),
+    /// `ServerMsg::ShardDisconnectNotify` arrived. Controller should
+    /// `Cancel` the matching secondary's task.
+    ShardDisconnect { shard_type: u8, seed: u64 },
 }
 
 /// Messages the controller sends to a [`run_connection`] task to
@@ -323,9 +350,16 @@ pub async fn run_connection(
     seed: u64,
     session_token: SessionToken,
     event_tx: mpsc::UnboundedSender<NetEvent>,
-    input_rx: Arc<Mutex<mpsc::Receiver<PlayerInputData>>>,
-    tcp_out_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    input_rx: Arc<Mutex<mpsc::UnboundedReceiver<PlayerInputData>>>,
+    tcp_out_rx: Arc<Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
     mut control_rx: mpsc::Receiver<ConnectionControl>,
+    // `controller_tx`: `Some(tx)` for Primary-eligible tasks (covers
+    // Secondary→Primary promote) — receives ShardRedirect /
+    // ShardHandoff / ShardPreConnect / ShardDisconnectNotify for the
+    // controller. `None` for tasks the controller never expects to
+    // handle primary lifecycle on (e.g. scene-context secondaries
+    // that never get promoted).
+    controller_tx: Option<mpsc::Sender<ControllerEvent>>,
 ) {
     let mut mode = initial_mode;
     let _ = tcp.set_nodelay(true);
@@ -360,22 +394,11 @@ pub async fn run_connection(
         warn!(%e, %udp_target, "UDP hole-punch send failed");
     }
 
-    if matches!(mode, ConnectionMode::Secondary) {
-        // Mirror the legacy network.rs flow that emits SecondaryConnected
-        // on entry so the client's shard registry can spawn a
-        // ChunkSource for this seed. The reference_position/_rotation
-        // are not known at this layer; the migrating caller will pass
-        // them via a different code path or extend the event. For the
-        // skeleton-target version we leave them at default; the
-        // controller layer will populate them when it calls into
-        // `run_connection`.
-        let _ = event_tx.send(NetEvent::SecondaryConnected {
-            shard_type,
-            seed,
-            reference_position: glam::DVec3::ZERO,
-            reference_rotation: glam::DQuat::IDENTITY,
-        });
-    }
+    // `NetEvent::SecondaryConnected` is emitted by the controller
+    // (handle_preconnect in network.rs) BEFORE this task is spawned,
+    // because only the controller has the authoritative
+    // reference_position / reference_rotation values from the
+    // originating `ShardPreConnect` message.
 
     let mut buf = vec![0u8; 65536];
     let mut input_interval = tokio::time::interval(INPUT_TICK);
@@ -431,25 +454,19 @@ pub async fn run_connection(
                                     %shard_type, %shard_id, %seed,
                                     "promoting Secondary → Primary"
                                 );
-                                // Emit Transitioning + synthetic Connected
-                                // so downstream client systems run their
-                                // existing primary-promotion code path
-                                // (camera-pose latch, shard registry
-                                // primary swap).
-                                let _ = event_tx.send(NetEvent::Transitioning {
-                                    target_shard_type,
-                                    spawn_pose: spawn_pose.clone(),
-                                });
-                                let _ = event_tx.send(NetEvent::Connected {
-                                    shard_type: target_shard_type,
-                                    seed,
-                                    reference_position: glam::DVec3::ZERO,
-                                    reference_rotation: glam::DQuat::IDENTITY,
-                                    game_time: 0.0,
-                                    system_seed: 0,
-                                    galaxy_seed: 0,
-                                    player_id: session_token.0,
-                                });
+                                // The controller emits both
+                                // `NetEvent::Transitioning` and
+                                // `NetEvent::Connected` because only it
+                                // holds the authoritative pre-connect
+                                // metadata (reference_position /
+                                // _rotation / game_time / system_seed /
+                                // galaxy_seed) for the destination
+                                // shard. This task only needs to flip
+                                // its mode flag so the next select
+                                // cycle starts running the Primary
+                                // I/O arms.
+                                let _ = spawn_pose;
+                                let _ = target_shard_type;
                                 mode = ConnectionMode::Primary;
                                 // Reset input cadence — first PlayerInput
                                 // goes out on the next interval tick.
@@ -538,7 +555,7 @@ pub async fn run_connection(
                 match msg_result {
                     Ok(msg) => {
                         if is_primary {
-                            forward_primary_tcp_msg(msg, &event_tx);
+                            forward_primary_tcp_msg(msg, &event_tx, &controller_tx);
                         } else {
                             forward_secondary_tcp_msg(msg, seed, &event_tx);
                         }
@@ -615,21 +632,54 @@ pub async fn run_connection(
 /// the appropriate `NetEvent`. The set is intentionally large — the
 /// legacy `network.rs::tcp_handle` enumerates the same variants and
 /// this stays in lockstep with that.
-fn forward_primary_tcp_msg(msg: ServerMsg, event_tx: &mpsc::UnboundedSender<NetEvent>) {
+///
+/// `ShardRedirect` / `ShardHandoff` / `ShardPreConnect` /
+/// `ShardDisconnectNotify` are routed to the controller via
+/// `controller_tx` instead of the regular `NetEvent` stream because
+/// they require controller-level lifecycle action (cancel primary,
+/// spawn secondary, send Promote/Demote across tasks). The
+/// controller is the only entity that can coordinate those
+/// transitions; forwarding them as plain `NetEvent`s would either
+/// race with the controller or require it to filter the same
+/// channel.
+fn forward_primary_tcp_msg(
+    msg: ServerMsg,
+    event_tx: &mpsc::UnboundedSender<NetEvent>,
+    controller_tx: &Option<mpsc::Sender<ControllerEvent>>,
+) {
     match msg {
-        // ShardRedirect / ShardHandoff / ShardPreConnect are intercepted
-        // by the controller layer (run_network) — when run_connection
-        // is the migration target, the controller will subscribe to
-        // a separate channel for them. For now we forward them via
-        // dedicated events (added in T0.G).
-        ServerMsg::ShardRedirect(_)
-        | ServerMsg::ShardHandoff(_)
-        | ServerMsg::ShardPreConnect(_) => {
-            // T0.G follow-up: route via a dedicated controller channel
-            // so the run_connection task doesn't need to know about
-            // primary lifecycle. For the skeleton-target we drop
-            // them; the migrating caller will rewrite this dispatch
-            // to forward via that channel.
+        ServerMsg::ShardRedirect(r) => {
+            if let Some(tx) = controller_tx {
+                if let Err(e) = tx.try_send(ControllerEvent::ShardRedirect(r)) {
+                    warn!(%e, "controller_tx full / closed on ShardRedirect");
+                }
+            } else {
+                warn!("ShardRedirect arrived but no controller_tx set");
+            }
+        }
+        ServerMsg::ShardHandoff(h) => {
+            if let Some(tx) = controller_tx {
+                if let Err(e) = tx.try_send(ControllerEvent::ShardHandoff(h)) {
+                    warn!(%e, "controller_tx full / closed on ShardHandoff");
+                }
+            } else {
+                warn!("ShardHandoff arrived but no controller_tx set");
+            }
+        }
+        ServerMsg::ShardPreConnect(pc) => {
+            if let Some(tx) = controller_tx {
+                if let Err(e) = tx.try_send(ControllerEvent::ShardPreConnect(pc)) {
+                    warn!(%e, "controller_tx full / closed on ShardPreConnect");
+                }
+            }
+        }
+        ServerMsg::ShardDisconnectNotify(dn) => {
+            if let Some(tx) = controller_tx {
+                let _ = tx.try_send(ControllerEvent::ShardDisconnect {
+                    shard_type: dn.shard_type,
+                    seed: dn.seed,
+                });
+            }
         }
         ServerMsg::BlockConfigState(d) => {
             let _ = event_tx.send(NetEvent::BlockConfigState(d));
@@ -660,10 +710,6 @@ fn forward_primary_tcp_msg(msg: ServerMsg, event_tx: &mpsc::UnboundedSender<NetE
         }
         ServerMsg::HudSignalDelta(d) => {
             let _ = event_tx.send(NetEvent::HudSignalDelta(d));
-        }
-        ServerMsg::ShardDisconnectNotify(_) => {
-            // Controller-only — the per-secondary handle is closed
-            // by the controller, which then drops control_tx.
         }
         // Other variants are unexpected on primary TCP; drop silently.
         _ => {}
