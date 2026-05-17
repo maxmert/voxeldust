@@ -17,6 +17,7 @@
 //!   * Thruster-signature detection mechanics later on.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use glam::{DQuat, DVec3};
@@ -27,6 +28,33 @@ use crate::net::NetConnection;
 use crate::shard::{
     PrimaryShard, PrimaryWorldState, SecondaryWorldStates, ShardKey, WorldStateIngestSet,
 };
+
+/// Phase T7 — render-time interpolation lag for remote players +
+/// ships. The renderer reads at `now - INTERPOLATION_DELAY` and
+/// lerps between the entity's previous server snapshot and the
+/// most recent one. With only two snapshots stored per entity,
+/// `INTERPOLATION_DELAY` must equal the server tick interval for
+/// the lerp boundary to land exactly on each shift; any larger
+/// value forces the lerp to reach `cur` BEFORE the next tick
+/// arrives, then snap back to the new `prev` (= old `cur`) when
+/// the shift happens — visible as a position bounce. Any smaller
+/// value leaves the lerp short of `cur` when the shift happens
+/// and snaps forward to the new `prev` (= old `cur`) — same
+/// bounce, opposite direction.
+///
+/// 50 ms = exactly one server tick @ 20 Hz: at steady state the
+/// lerp sweeps prev→cur over a full tick interval and the post-
+/// shift `alpha == 0` lands on the same data point the pre-shift
+/// `alpha == 1` lerp reached — zero jump.
+///
+/// Network jitter (ticks arriving early or late) still causes
+/// small bounces with a 2-snapshot buffer; a future polish phase
+/// can widen to 3+ snapshots + larger delay for Source-style
+/// jitter absorption. Local player is rendered at zero lag —
+/// server-authoritative pose applied directly, no smoothing —
+/// to match the no-client-prediction project policy and keep the
+/// user's own avatar feel snappy.
+pub const INTERPOLATION_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(SystemSet, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct RemoteEntitiesSet;
@@ -79,6 +107,33 @@ pub struct RemoteEntity {
     /// tablet-screen UV space [0, 1] for the left-hand finger IK.
     pub is_holding_tablet: bool,
     pub tablet_cursor_uv: glam::Vec2,
+    // ── Phase T7 interpolation state ────────────────────────────────
+    /// Spatial state at the prior server snapshot for this entity.
+    /// `sync_remote_pose` lerps `(prev_position → position)` and
+    /// slerps `(prev_rotation → rotation)` based on the time
+    /// fraction `(render_time − prev_update) / (last_update −
+    /// prev_update)`. Set to `position`/`rotation` on first sight
+    /// so the render lerp is a no-op until two snapshots exist.
+    pub prev_position: DVec3,
+    pub prev_rotation: DQuat,
+    /// Real-time when `position`/`rotation` were last updated (last
+    /// server snapshot for this entity).
+    pub last_update: Instant,
+    /// Real-time when `prev_position`/`prev_rotation` were captured
+    /// (the snapshot one server tick before `last_update`).
+    pub prev_update: Instant,
+    /// Server tick of the snapshot that produced the current pose.
+    /// Used by `ingest_entity_update` to detect when a new server
+    /// tick has arrived for this entity — only then is the current
+    /// pose shifted to prev. Multiple ingest calls in the same
+    /// frame (primary + secondary WorldStates) at the same server
+    /// tick produce identical writes that don't waste prev slots.
+    pub last_server_tick: u64,
+    /// Phase T2 — body/head decoupling carried alongside position
+    /// for interpolation continuity. Today body_yaw etc. are
+    /// applied directly (no interpolation); future polish phase
+    /// could interpolate body_yaw with wrap-aware lerp.
+    pub prev_body_yaw: f32,
 }
 
 /// Remote players (EVA + grounded + seated, excluding the own player).
@@ -119,23 +174,48 @@ fn track_remote_entities(
     primary: Res<PrimaryShard>,
     primary_ws: Res<PrimaryWorldState>,
     secondary_ws: Res<SecondaryWorldStates>,
+    secondaries: Res<crate::shard::Secondaries>,
     conn: Res<NetConnection>,
     mut players: ResMut<RemotePlayers>,
     mut ships: ResMut<RemoteShips>,
     mut debris: ResMut<RemoteDebris>,
 ) {
-    // Rebuild from scratch each tick — ObservableEntity broadcasts are
-    // authoritative full-snapshots at AOI scope, not deltas. Clearing
-    // + re-populating guarantees stale entries (entity left AOI) are
-    // evicted immediately.
-    players.by_id.clear();
-    ships.by_id.clear();
-    debris.by_id.clear();
+    // Phase T7 — preserve LAST frame's snapshots so we can do prev-
+    // tracking for render-time interpolation. ObservableEntity
+    // broadcasts are full snapshots (not deltas), so we still need
+    // to evict entries that left AOI; that happens at the bottom
+    // via "drop anything not seen this tick". The reconcile step
+    // inside `ingest` knows to copy `prev_*` forward when an
+    // entity's underlying server tick hasn't advanced, so a stable
+    // entity holds its lerp window across multiple frame ingests
+    // of the same server snapshot.
+    let prev_players: HashMap<u64, RemoteEntity> = std::mem::take(&mut players.by_id);
+    let prev_ships: HashMap<u64, RemoteEntity> = std::mem::take(&mut ships.by_id);
+    let prev_debris: HashMap<u64, RemoteEntity> = std::mem::take(&mut debris.by_id);
 
     let own_player_id = conn.player_id;
+    // Pre-compute which shard types we have a direct connection to.
+    // Used to filter out cross-shard PLAYER projections — an EVA
+    // player projected through a SHIP-shard's AOI would otherwise
+    // overwrite the same player's authoritative entry from the
+    // SYSTEM secondary's broadcast, parenting the visual under the
+    // wrong `ChunkSource`. See `is_authoritative_for_player`.
+    let mut connected_shard_types: u8 = 0;
+    if let Some(key) = primary.current {
+        connected_shard_types |= 1 << key.shard_type;
+    }
+    for k in secondaries.runtimes.keys() {
+        connected_shard_types |= 1 << k.shard_type;
+    }
+
+    let primary_key = primary.current;
     if let Some(ws) = primary_ws.latest.as_ref() {
-        if let Some(key) = primary.current {
-            ingest(ws, key, own_player_id, &mut players, &mut ships, &mut debris);
+        if let Some(key) = primary_key {
+            ingest(
+                ws, key, primary_key, own_player_id, connected_shard_types,
+                &prev_players, &prev_ships, &prev_debris,
+                &mut players, &mut ships, &mut debris,
+            );
         }
     }
     // Iterate the authoritative per-`ShardKey` secondary map (NOT
@@ -149,18 +229,71 @@ fn track_remote_entities(
     // `SourceIndex.by_shard.get(&observer)` always lands on the
     // correct ChunkSource.
     for (&observer, (ws, _)) in &secondary_ws.by_shard_key {
-        ingest(ws, observer, own_player_id, &mut players, &mut ships, &mut debris);
+        ingest(
+            ws, observer, primary_key, own_player_id, connected_shard_types,
+            &prev_players, &prev_ships, &prev_debris,
+            &mut players, &mut ships, &mut debris,
+        );
     }
+}
+
+/// Should this `ObservableEntity` be ingested when arriving via this
+/// `observer` shard's WorldState?
+///
+/// **Players** are authoritative on their owning shard. The system-
+/// shard's AOI broadcast projects EVA + surface players into ship-
+/// shards' WorldStates so distant observers can see them; if the
+/// client ALSO has a direct connection to the player's owning shard
+/// (the common case — the SYSTEM secondary is always pre-connected
+/// in scene-context mode), those projections are redundant AND
+/// dangerous: their `observer` ShardKey points to the projecting
+/// shard, not the owning one, so `make_remote`'s `shard = observer`
+/// rule would set the wrong `RemoteEntity.shard` and `reparent_
+/// visuals_on_shard_change` would yank the visual under the wrong
+/// `ChunkSource`. Skip the projection in that case — the
+/// authoritative shard's broadcast covers the player on the next
+/// tick with the correct shard binding.
+///
+/// **Ships** are independently authoritative — there's no AOI
+/// projection that shadows their direct broadcast — so this filter
+/// only applies to player kinds.
+fn should_skip_cross_shard_projection(
+    e: &voxeldust_core::client_message::ObservableEntityData,
+    observer: ShardKey,
+    connected_shard_types: u8,
+) -> bool {
+    let is_player = matches!(
+        e.kind,
+        EntityKind::EvaPlayer | EntityKind::GroundedPlayer | EntityKind::Seated
+    );
+    if !is_player {
+        return false;
+    }
+    // Same-shard direct broadcast — never skip.
+    if observer.shard_type == e.shard_type {
+        return false;
+    }
+    // Cross-shard projection. Skip iff we have a direct connection
+    // to the player's authoritative shard type — its broadcast is
+    // about to land with the correct shard binding.
+    (connected_shard_types & (1 << e.shard_type)) != 0
 }
 
 fn ingest(
     ws: &voxeldust_core::client_message::WorldStateData,
     observer: ShardKey,
-    _own_player_id: u64,
+    primary_key: Option<ShardKey>,
+    own_player_id: u64,
+    connected_shard_types: u8,
+    prev_players: &HashMap<u64, RemoteEntity>,
+    prev_ships: &HashMap<u64, RemoteEntity>,
+    prev_debris: &HashMap<u64, RemoteEntity>,
     players: &mut RemotePlayers,
     ships: &mut RemoteShips,
     debris: &mut RemoteDebris,
 ) {
+    let is_primary_observer = primary_key == Some(observer);
+    let now = Instant::now();
     for e in &ws.entities {
         // `is_own` filters out the OWN-SHIP entry (system-shard sets
         // it on the observer's own ship). Ship-shard hardcodes it to
@@ -177,14 +310,42 @@ fn ingest(
         if e.is_own {
             continue;
         }
-        let remote = make_remote(e, observer);
+        // The LOCAL player follows the PRIMARY shard authoritatively.
+        // During an in-flight transition the player can be present in
+        // both the soon-to-be-old primary's WorldState (still serving
+        // the player as a ground/seated entity) AND the soon-to-be-
+        // new primary's secondary broadcast (already serving them as
+        // an EVA player) — both legitimately on their authoritative
+        // shards, both with the same `entity_id == own_player_id`.
+        // Last-write-wins would flip `RemoteEntity.shard` between
+        // them and `reparent_visuals_on_shard_change` would yank the
+        // local visual + camera between two `ChunkSource` parents
+        // each tick. Anchoring the local player to the primary alone
+        // makes the visual stable for the duration of the transition
+        // — the actual swap happens atomically when `PrimaryShard`
+        // changes (via either seamless promote-in-place or full
+        // ShardRedirect), at which point the new primary's WorldState
+        // is the only stream still feeding the local player_id.
+        let is_player = matches!(
+            e.kind,
+            EntityKind::EvaPlayer | EntityKind::GroundedPlayer | EntityKind::Seated
+        );
+        if is_player && e.entity_id == own_player_id && !is_primary_observer {
+            continue;
+        }
+        if should_skip_cross_shard_projection(e, observer, connected_shard_types) {
+            continue;
+        }
+        let mut remote = make_remote(e, observer, now);
         match e.kind {
             EntityKind::Ship => {
+                reconcile_interpolation(&mut remote, prev_ships.get(&e.entity_id), ws.tick, now);
                 ships.by_id.insert(e.entity_id, remote);
             }
             EntityKind::EvaPlayer
             | EntityKind::GroundedPlayer
             | EntityKind::Seated => {
+                reconcile_interpolation(&mut remote, prev_players.get(&e.entity_id), ws.tick, now);
                 players.by_id.insert(e.entity_id, remote);
             }
             // Future DEBRIS kinds plug in here without a core change.
@@ -193,10 +354,127 @@ fn ingest(
         // currently; avoids `_` in match arms that would suppress
         // future variants from triggering a compile warning.
         let _ = debris;
+        let _ = prev_debris;
     }
 }
 
-fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
+/// Phase T7 — reconcile a freshly-built `RemoteEntity` against its
+/// previous-frame state for interpolation continuity.
+///
+///   * **Entity unchanged** (server tick same as previous frame's
+///     last-known tick): the entity is being ingested from a
+///     repeated WorldState. Copy the prev frame's
+///     `prev_position` / `prev_rotation` / `prev_update` /
+///     `last_update` forward so the lerp window stays anchored to
+///     the actual server-tick boundary, not the per-frame ingest
+///     time.
+///   * **Entity advanced** (server tick is higher than previously
+///     observed): shift the prev frame's current → this frame's
+///     prev. `last_update = now`, fresh anchor.
+///   * **Entity first sighting** (no prior frame state): leave
+///     `prev_* == current` so the lerp is a no-op until a second
+///     snapshot arrives next tick.
+fn reconcile_interpolation(
+    new: &mut RemoteEntity,
+    prior: Option<&RemoteEntity>,
+    server_tick: u64,
+    now: Instant,
+) {
+    let Some(prior) = prior else {
+        // First sighting — `make_remote` already set prev = current.
+        new.last_server_tick = server_tick;
+        return;
+    };
+    // Phase T7 — if the prior snapshot was sourced from a DIFFERENT
+    // authoritative shard than this one (e.g. P1 transitioning from
+    // ship-shard's GroundedPlayer broadcast to system-shard's EVA
+    // broadcast during a hull exit), the two snapshots are in
+    // INCOMPATIBLE coordinate frames (ship-local ≈ (5,1,0) vs.
+    // system-space ≈ (3.5e9, …)). Lerping between them produces a
+    // visual that flies across the world every frame — the
+    // "blinks to a position aside" symptom. Reset prev = current
+    // so the lerp is a no-op until two consecutive snapshots in
+    // the SAME shard arrive.
+    //
+    // Server-tick numbers are also not comparable across shards
+    // (each shard has its own tick counter), so the shift below
+    // would be triggered every frame even when no transition was
+    // happening, churning the lerp window pointlessly.
+    if prior.shard != new.shard {
+        new.last_server_tick = server_tick;
+        // prev_* stay at the make_remote defaults (= current),
+        // i.e. lerp is a no-op until the next same-shard tick.
+        new.last_update = now;
+        new.prev_update = now;
+        return;
+    }
+    if server_tick > prior.last_server_tick {
+        // New server tick — shift prior's current into new's prev.
+        new.prev_position = prior.position;
+        new.prev_rotation = prior.rotation;
+        new.prev_body_yaw = prior.body_yaw;
+        new.prev_update = prior.last_update;
+        new.last_update = now;
+        new.last_server_tick = server_tick;
+    } else {
+        // Same server tick re-ingested this frame. Carry prior's
+        // interpolation window forward verbatim so successive frames
+        // continue to lerp from the same anchor pair.
+        new.prev_position = prior.prev_position;
+        new.prev_rotation = prior.prev_rotation;
+        new.prev_body_yaw = prior.prev_body_yaw;
+        new.prev_update = prior.prev_update;
+        new.last_update = prior.last_update;
+        new.last_server_tick = prior.last_server_tick;
+    }
+}
+
+impl RemoteEntity {
+    /// Phase T7 — return the interpolated `(position, rotation)`
+    /// for rendering at `target_time`. Looks up the entity's
+    /// previous + current snapshots and lerps linearly between
+    /// them based on the time fraction.
+    ///
+    /// `target_time` is expected to be `now - INTERPOLATION_DELAY`
+    /// (= `now - 75 ms` for the standard 20 Hz server cadence).
+    ///
+    ///   * `target_time <= prev_update` — render at prev (we're
+    ///     behind both snapshots; happens immediately after
+    ///     respawn before any prev exists, or at the very first
+    ///     sight of a new entity).
+    ///   * `target_time >= last_update` — render at current
+    ///     (we're caught up to the latest snapshot; happens
+    ///     when network stalls past the next expected tick).
+    ///   * Between — lerp/slerp with `alpha = (target_time −
+    ///     prev_update) / (last_update − prev_update)`.
+    ///
+    /// Falls through to non-interpolated current pose when prev
+    /// and current have identical timestamps (the entity hasn't
+    /// received a second snapshot yet); the lerp ratio's
+    /// denominator would be zero in that case.
+    pub fn interpolated_pose(&self, target_time: Instant) -> (DVec3, DQuat) {
+        let span = self.last_update.saturating_duration_since(self.prev_update);
+        if span.is_zero() {
+            return (self.position, self.rotation);
+        }
+        if target_time >= self.last_update {
+            return (self.position, self.rotation);
+        }
+        if target_time <= self.prev_update {
+            return (self.prev_position, self.prev_rotation);
+        }
+        let elapsed = target_time.saturating_duration_since(self.prev_update);
+        let alpha = (elapsed.as_secs_f64() / span.as_secs_f64()).clamp(0.0, 1.0);
+        let pos = self.prev_position.lerp(self.position, alpha);
+        // slerp normalises the quaternion; safe even when prev_rotation
+        // and rotation have opposite hemisphere signs (slerp goes the
+        // short way).
+        let rot = self.prev_rotation.slerp(self.rotation, alpha);
+        (pos, rot)
+    }
+}
+
+fn make_remote(e: &ObservableEntityData, observer: ShardKey, now: Instant) -> RemoteEntity {
     // Per-kind shard-key composition.
     //
     // PLAYERS are always observed by the WorldState whose authoritative
@@ -207,6 +485,16 @@ fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
     // `ShardKey`, looked up via `Secondaries.runtimes` for secondaries
     // and `PrimaryShard.current` for the primary) is the correct
     // entry into `SourceIndex.by_shard` for parenting visuals.
+    //
+    // Cross-shard AOI projections (e.g. system-shard projecting an
+    // EVA player into a ship-shard's WorldState so distant ships
+    // can see EVA traffic without opening a system secondary) are
+    // filtered out upstream in `should_skip_cross_shard_projection`
+    // when we have a direct connection to the authoritative shard,
+    // so by the time we reach this function `observer` either IS
+    // the authoritative shard or is an acceptable fallback (e.g.
+    // viewer doesn't have a direct connection to the player's
+    // owning shard, so the projection IS the only available view).
     //
     // SHIPS are different: the system-shard's AOI feed exposes nearby
     // ships in its primary `entities[]` even though each ship lives
@@ -236,11 +524,13 @@ fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
             }
         }
     };
+    let position = DVec3::new(e.position.x, e.position.y, e.position.z);
+    let rotation = DQuat::from_xyzw(e.rotation.x, e.rotation.y, e.rotation.z, e.rotation.w);
     RemoteEntity {
         entity_id: e.entity_id,
         kind: e.kind,
-        position: DVec3::new(e.position.x, e.position.y, e.position.z),
-        rotation: DQuat::from_xyzw(e.rotation.x, e.rotation.y, e.rotation.z, e.rotation.w),
+        position,
+        rotation,
         velocity: DVec3::new(e.velocity.x, e.velocity.y, e.velocity.z),
         shard,
         name: e.name.clone(),
@@ -263,5 +553,15 @@ fn make_remote(e: &ObservableEntityData, observer: ShardKey) -> RemoteEntity {
         ragdoll_bones: e.ragdoll_bones.clone(),
         is_holding_tablet: e.is_holding_tablet,
         tablet_cursor_uv: e.tablet_cursor_uv,
+        // Phase T7 — first-sighting defaults. `reconcile_interpolation`
+        // overrides prev_* with the actual prior frame's snapshot
+        // (when one exists) so the lerp window aligns to the
+        // server-tick boundary, not the per-frame ingest.
+        prev_position: position,
+        prev_rotation: rotation,
+        prev_body_yaw: e.body_yaw,
+        last_update: now,
+        prev_update: now,
+        last_server_tick: 0,
     }
 }

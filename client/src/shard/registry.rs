@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use bevy::prelude::*;
-use glam::DQuat;
+use glam::{DQuat, DVec3};
 
 use crate::net::{GameEvent, NetEvent, NetworkBridgeSet};
 use crate::shard::origin::ShardOrigin;
@@ -106,6 +106,7 @@ impl Plugin for ShardRegistryPlugin {
             .init_resource::<PrimaryShard>()
             .init_resource::<Secondaries>()
             .init_resource::<SourceIndex>()
+            .init_resource::<PendingSecondaryConnects>()
             .configure_sets(Update, ShardRegistrySet.after(NetworkBridgeSet))
             // Chain order:
             // 1. `handle_disconnects` first — frees ShardKey slots for
@@ -195,6 +196,39 @@ fn handle_connected(
     }
 }
 
+/// Phase T0 — buffer for `SecondaryConnected` events whose key
+/// matches the CURRENT primary at arrival time. The seamless
+/// `ShardHandoff` flow causes the system-shard to emit a
+/// `ShardPreConnect` for the source ship (so it can become a
+/// secondary post-transition) AT THE SAME MOMENT it emits the
+/// `ShardHandoff`. The `ShardPreConnect` reaches the client first
+/// (direct TCP from system → client; the `ShardHandoff` has to
+/// transit ship-shard via QUIC), so at the moment the resulting
+/// `SecondaryConnected` event fires, `primary.current` is still
+/// the source ship. Without buffering, the old "if same as primary,
+/// drop silently" guard discards the event — then 60 ms later the
+/// `ShardHandoff` finally lands, `latch_transitions` graces the
+/// source ship, no second `SecondaryConnected` event will ever
+/// fire, grace expires after 1.5 s, the ship's chunks despawn.
+///
+/// With buffering: the event sits here; on every subsequent tick
+/// `drain_pending_secondaries` re-tries it. Once `primary.current`
+/// has changed away from the buffered key (i.e. the transition
+/// completed and grace was set), the event is processed via the
+/// normal grace-reuse path — the source ship's existing
+/// `ChunkSource` (with all its chunks) is migrated to a secondary
+/// runtime, no chunk re-stream, no visible disappearance.
+#[derive(Resource, Default)]
+pub struct PendingSecondaryConnects {
+    pub events: Vec<DeferredSecondaryConnected>,
+}
+
+pub struct DeferredSecondaryConnected {
+    pub key: ShardKey,
+    pub reference_position: DVec3,
+    pub reference_rotation: DQuat,
+}
+
 fn handle_secondary_connected(
     mut events: MessageReader<GameEvent>,
     registry: Res<ShardTypeRegistry>,
@@ -202,8 +236,11 @@ fn handle_secondary_connected(
     mut secondaries: ResMut<Secondaries>,
     mut source_index: ResMut<SourceIndex>,
     mut grace: ResMut<crate::shard::transition::GraceWindow>,
+    mut pending: ResMut<PendingSecondaryConnects>,
     mut commands: Commands,
 ) {
+    // Drain newly-arrived events into the pending buffer, processing
+    // anything whose key is already eligible inline.
     for GameEvent(ev) in events.read() {
         if let NetEvent::SecondaryConnected {
             shard_type,
@@ -212,29 +249,35 @@ fn handle_secondary_connected(
             reference_rotation,
         } = ev
         {
-            let key = ShardKey::new(*shard_type, *seed);
-            // Server broadcasts `ShardPreConnect` for every visible
-            // SHIP — including the player's own ship — to every
-            // connected player (`ship-shard/src/main.rs:1120-1142`).
-            // On the owning player's client that becomes a
-            // `SecondaryConnected` for a key that is **already** their
-            // primary. Without this guard, `spawn_new_shard_runtime`
-            // creates a duplicate `ChunkSource` and overwrites the
-            // primary's entry in `source_index.by_shard` — the
-            // primary's old entity (with every streamed chunk
-            // parented under it) is orphaned, its `ShardOrigin` stops
-            // updating, and `rebase_shard_transforms` keeps drawing
-            // it at its last-known pose. Visible as a "phantom ship"
-            // stuck at the player's pre-warp position while the live
-            // ship moves through galaxy space.
-            if primary.current == Some(key) {
-                tracing::debug!(%key, "SecondaryConnected for own primary — ignoring");
-                continue;
-            }
-            if secondaries.runtimes.contains_key(&key) {
-                tracing::warn!(%key, "SecondaryConnected for already-known shard");
-                continue;
-            }
+            pending.events.push(DeferredSecondaryConnected {
+                key: ShardKey::new(*shard_type, *seed),
+                reference_position: *reference_position,
+                reference_rotation: *reference_rotation,
+            });
+        }
+    }
+    // Try to process every buffered event; retain those still
+    // blocked by primary.current. Note: an event whose key WAS
+    // current primary at arrival is held until primary.current
+    // changes, then processed against the up-to-date grace state.
+    let mut still_pending: Vec<DeferredSecondaryConnected> = Vec::new();
+    for ev in pending.events.drain(..) {
+        let key = ev.key;
+        if primary.current == Some(key) {
+            tracing::debug!(
+                %key,
+                "SecondaryConnected for own primary — deferring until primary transitions away"
+            );
+            still_pending.push(ev);
+            continue;
+        }
+        if secondaries.runtimes.contains_key(&key) {
+            tracing::warn!(%key, "SecondaryConnected for already-known shard");
+            continue;
+        }
+        let reference_position = &ev.reference_position;
+        let reference_rotation = &ev.reference_rotation;
+        {
             // Reuse the graced ChunkSource if the same shard is
             // re-opening as a secondary. This happens after every
             // PRIMARY→PRIMARY transition where the old primary
@@ -272,6 +315,7 @@ fn handle_secondary_connected(
             secondaries.runtimes.insert(key, runtime);
         }
     }
+    pending.events = still_pending;
 }
 
 fn handle_disconnects(
@@ -280,6 +324,8 @@ fn handle_disconnects(
     mut primary: ResMut<PrimaryShard>,
     mut secondaries: ResMut<Secondaries>,
     mut source_index: ResMut<SourceIndex>,
+    mut grace: ResMut<crate::shard::transition::GraceWindow>,
+    origins: Query<&crate::shard::origin::ShardOrigin>,
     mut commands: Commands,
 ) {
     for GameEvent(ev) in events.read() {
@@ -293,13 +339,82 @@ fn handle_disconnects(
                     .find(|k| k.seed == *seed)
                     .copied();
                 if let Some(key) = key {
-                    despawn_shard(
-                        &mut commands,
-                        &mut source_index,
-                        &registry,
-                        &secondaries.runtimes[&key],
-                    );
-                    secondaries.runtimes.remove(&key);
+                    // Defensive: instead of despawning immediately (which
+                    // would wipe ALL chunk children + reparent every
+                    // remote player visual under this shard's
+                    // ChunkSource → invisible), move the ChunkSource
+                    // into the grace window with the plugin's
+                    // configured grace_duration. If a fresh
+                    // `SecondaryConnected` for the same key lands
+                    // within the grace window (e.g., the server is
+                    // recovering from a transient TCP / QUIC issue,
+                    // OR the player re-enters via airlock and the new
+                    // primary is the same key), the existing grace-
+                    // reuse path in `handle_secondary_connected`
+                    // (registry.rs handle_secondary_connected) picks
+                    // the entity back up and chunks remain visible.
+                    // If grace expires without reconnect, `expire_grace`
+                    // does the despawn — same end-state as the old
+                    // unconditional-despawn behaviour, just delayed
+                    // by `grace_duration`.
+                    //
+                    // Real-world failure this protects against
+                    // (observed in user log of 2026-05-16): ship-shard
+                    // accepts the new observer TCP post-handoff,
+                    // immediately closes it (root cause is server-side;
+                    // separately investigated). The
+                    // `SecondaryDisconnected` arrived ~30 ms after the
+                    // `SecondaryConnected` that reused the graced
+                    // ChunkSource. Under the old code path, all the
+                    // ship's chunks plus the in-ship players'
+                    // character visuals went invisible within one
+                    // frame. With grace re-insertion, the chunks
+                    // remain visible during the brief disconnect,
+                    // and if the player re-enters within the grace
+                    // window the ship is still there to be promoted
+                    // back to primary.
+                    let runtime = secondaries.runtimes.remove(&key).unwrap();
+                    let plugin = registry.get(key.shard_type);
+                    let wants_grace = plugin.map(|p| p.wants_grace()).unwrap_or(true);
+                    if wants_grace {
+                        let (origin, rotation) = origins
+                            .get(runtime.entity)
+                            .map(|o| (o.origin, o.rotation))
+                            .unwrap_or((runtime.origin, runtime.rotation));
+                        let dur = plugin
+                            .map(|p| p.grace_duration())
+                            .unwrap_or(std::time::Duration::from_millis(1500));
+                        source_index.by_shard.remove(&key);
+                        grace.retained.insert(
+                            key,
+                            crate::shard::transition::GracedSource {
+                                entity: runtime.entity,
+                                expiry: std::time::Instant::now() + dur,
+                                // Secondary disconnects don't carry
+                                // velocity info — the source shard's
+                                // last broadcasted velocity already
+                                // populated `ShardOrigin` via the
+                                // origin-rebase pipeline, so freezing
+                                // at zero is the safest default (the
+                                // chunks stay where they last were).
+                                velocity: DVec3::ZERO,
+                                origin_at_start: origin,
+                                rotation_at_start: rotation,
+                                started_at: std::time::Instant::now(),
+                            },
+                        );
+                        tracing::info!(
+                            %key, grace_ms = dur.as_millis() as u64,
+                            "secondary disconnected — ChunkSource moved to grace (chunks preserved during transient outage)"
+                        );
+                    } else {
+                        despawn_shard(
+                            &mut commands,
+                            &mut source_index,
+                            &registry,
+                            &runtime,
+                        );
+                    }
                 } else {
                     tracing::debug!(%seed, "SecondaryDisconnected for unknown secondary");
                 }

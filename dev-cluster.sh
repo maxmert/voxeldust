@@ -57,6 +57,7 @@ case "${1:-up}" in
     echo "  Logs:             kubectl -n $NAMESPACE logs -f deployment/orchestrator"
     echo ""
     echo "  Test provisioning: curl http://localhost:8080/system/42  (after port-forward)"
+    echo "  Launch client:     ./dev-cluster.sh client --name <player> --ship-join shared"
     echo "  Tear down:         ./dev-cluster.sh down"
     ;;
 
@@ -111,8 +112,30 @@ case "${1:-up}" in
     kubectl -n "$NAMESPACE" logs -f "deployment/$COMPONENT"
     ;;
 
+  client)
+    # Launch the local client against the running gateway.
+    #
+    # `--features fast` enables `bevy/dynamic_linking`, which lets the
+    # ~61 Bevy crates link into a shared dylib once and stay resolved
+    # across rebuilds. Without it, every rebuild re-links the full
+    # Bevy surface into the client binary — that link step alone is
+    # 10–30 s on a typical macOS box. The dylib is dev-only; never
+    # ship a release artifact with `--features fast`.
+    #
+    # Any extra args are forwarded verbatim to the client binary:
+    #   ./dev-cluster.sh client --name Maxim --ship-join shared
+    shift
+    exec cargo run -p client --features fast -- \
+      --gateway 127.0.0.1:7777 "$@"
+    ;;
+
   *)
-    echo "Usage: $0 {up|down|rebuild|status|logs [component]}"
+    echo "Usage: $0 {up|down|rebuild|status|logs [component]|client [client-args...]}"
+    echo ""
+    echo "  client  — launch the local Bevy client with --features fast"
+    echo "            (bevy/dynamic_linking enabled for fast incremental builds)."
+    echo "            Extra args pass through to the client binary."
+    echo "            Example: $0 client --name Maxim --ship-join shared"
     exit 1
     ;;
 esac

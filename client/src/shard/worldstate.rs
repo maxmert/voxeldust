@@ -97,16 +97,34 @@ fn reset_on_shard_change(
                 primary.last_tick_real_time = None;
             }
             NetEvent::SecondaryDisconnected { seed } => {
-                // We don't get the shard_type on SecondaryDisconnected;
-                // clear all secondaries so the next WS from any
-                // remaining secondary is accepted. Cheap — ingest will
-                // repopulate from the next packet. (Both maps are
-                // cleared for symmetry; per-key removal would require
-                // also tracking shard_type, which the event doesn't
-                // carry today.)
-                let _ = seed;
-                secondary.by_shard_type.clear();
-                secondary.by_shard_key.clear();
+                // Remove ONLY the disconnected secondary from the
+                // authoritative `by_shard_key` map. Wire seeds are
+                // unique per shard-instance across all shard_types
+                // (system_seed != ship_id != planet_seed), so a
+                // single-field match unambiguously identifies the
+                // dropped secondary's entry.
+                //
+                // The legacy `by_shard_type` index is keyed by type
+                // only (lossy when multiple secondaries share a
+                // type — only the last-write-wins entry survives),
+                // so without knowing which `shard_type` to clear
+                // there isn't a safe per-key removal. Leave it
+                // untouched: downstream consumers (lighting / AR /
+                // atmosphere) querying a dropped secondary's stale
+                // entry will see one tick of stale data at most,
+                // and the next live WS overwrites it. Reading from
+                // a dead secondary's last good WS is preferable to
+                // clearing ALL secondaries' entries (which used to
+                // happen here): clearing the system secondary's WS
+                // for ~50 ms — the gap between this disconnect and
+                // the next eva_broadcast packet — removed every EVA
+                // player from `RemotePlayers.by_id`, ageing their
+                // visuals into the 500 ms despawn grace; in the
+                // seamless-promote scenario `handle_preconnect`
+                // cancels-and-replaces secondaries routinely, so
+                // this fired several times during a single
+                // transition and the EVA player visibly blinked.
+                secondary.by_shard_key.retain(|k, _| k.seed != *seed);
             }
             _ => {}
         }

@@ -471,6 +471,28 @@ table PlanetPlayerDigestEntry {
     rotation: Quatd;
     /// Planet index within the system (for fast filtering).
     planet_index: uint32;
+    // -- Body / head decoupling (Phase T2: pose for remote MMO observers) -
+    // Same semantics as the matching fields on `ObservableEntity`. Carried
+    // through the digest so distant observers (other ships, EVA players,
+    // distant planets) see the surface player's BODY yaw, HEAD yaw/pitch,
+    // and current animation state on every tick — not just the abstract
+    // root rotation. Defaults preserve the pre-T2 behaviour for any
+    // sender that hasn't been upgraded yet.
+    body_yaw: float = 0;
+    head_yaw: float = 0;
+    head_pitch: float = 0;
+    locomotion: uint8 = 0;
+    locomotion_speed: float = 0;
+    is_turning: bool = false;
+    turn_target_yaw: float = 0;
+    turn_t: float = 0;
+    // -- Look-at attention target (Phase T2). Same encoding as
+    // `ObservableEntity.look_*`: world-space target as a delta from
+    // `position` so f32 is fine even far from origin.
+    look_target_set: bool = false;
+    look_dx: float = 0;
+    look_dy: float = 0;
+    look_dz: float = 0;
 }
 
 /// Planet shard → system shard: aggregate positions of all surface players.
@@ -1126,6 +1148,19 @@ table PlayerInput {
     /// Default 0 preserves legacy behaviour; old clients transmit nothing
     /// for this field and servers read 0 (no sprint/crouch).
     actions_bits: uint32 = 0;
+    /// Authoritative session identifier the client knows (from JoinResponse).
+    /// Server uses this to deterministically bind UDP source → session,
+    /// avoiding the IP-only heuristic in `ClientRegistry::discover_udp`
+    /// which breaks on localhost multi-client testing (all 127.0.0.1 share
+    /// IP, so the heuristic can mis-assign a session-observer's `udp_addr`
+    /// to the wrong client's UDP src — silently dropping every PlayerInput
+    /// from the affected session because `session_for_udp` returns None).
+    /// Carried on every UDP packet (including the initial empty-input
+    /// hole-punch hello) so the server can correct an earlier wrong
+    /// binding without waiting for a reconnect.
+    /// Default 0 preserves legacy behaviour; old clients / pre-T0 code
+    /// paths transmit nothing and the server falls back to the IP match.
+    session_token: uint64 = 0;
 }
 
 table PlayerSnapshot {

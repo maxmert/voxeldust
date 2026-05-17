@@ -41,6 +41,19 @@ use crate::shutdown;
 pub struct NetworkBridge {
     /// Incoming TCP client connections.
     pub connect_rx: mpsc::UnboundedReceiver<ClientConnectEvent>,
+    /// SENDER side of the connect channel, exposed so the seamless
+    /// `ShardHandoff` destination path can synthesise a
+    /// `ClientConnectEvent` after `promote_observer_to_client` — the
+    /// observer's TCP doesn't re-arrive at the TCP listener (it's
+    /// reused in-place), so without a synthetic enqueue here
+    /// `drain_connects` never emits `ClientConnectedMsg`,
+    /// `process_connects` never spawns the player ECS entity, the
+    /// player is absent from this shard's WorldState broadcast, and
+    /// the client's `apply_worldstate_pose` falls through with no
+    /// update — frozen camera, invisible ship. Verified end-to-end
+    /// against shard-1001 logs (no "player entered ship" log post-
+    /// handoff) and client logs (WS entities count drops by 1).
+    pub connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     /// Incoming player input from UDP.
     pub input_rx: mpsc::UnboundedReceiver<(SocketAddr, PlayerInputData)>,
     /// Incoming block edit requests with sender session (TCP or UDP).
@@ -94,8 +107,13 @@ pub struct NetworkBridge {
     pub quic_msg_rx: mpsc::UnboundedReceiver<QueuedShardMsg>,
     /// Send WorldState for UDP broadcast.
     pub broadcast_tx: mpsc::Sender<ServerMsg>,
-    /// Send QUIC messages to other shards.
-    pub quic_send_tx: mpsc::Sender<(ShardId, SocketAddr, ShardMsg)>,
+    /// Send QUIC messages to other shards. The dispatcher resolves
+    /// the destination QUIC address from the peer registry on every
+    /// message reception, with on-demand orchestrator refresh on
+    /// cache miss — callers do NOT pre-resolve addresses, so a peer
+    /// that registered after the last periodic refresh still
+    /// receives messages without a 10-second blackout window.
+    pub quic_send_tx: mpsc::Sender<(ShardId, ShardMsg)>,
     /// Client registry (TCP + UDP connections).
     pub client_registry: Arc<RwLock<ClientRegistry>>,
     /// Peer shard registry (discovery).
@@ -228,10 +246,12 @@ pub struct ShardHarness {
     /// Channel to send WorldState for UDP broadcast (bounded for backpressure).
     pub broadcast_tx: mpsc::Sender<ServerMsg>,
     /// Channel to send QUIC messages to other shards (bounded for backpressure).
-    /// Each message is (target_shard_id, target_quic_addr, message).
-    pub quic_send_tx: mpsc::Sender<(ShardId, std::net::SocketAddr, ShardMsg)>,
+    /// Each message is (target_shard_id, message). Address resolution
+    /// happens in the dispatcher with on-demand orchestrator refresh
+    /// on cache miss — see [`NetworkBridge::quic_send_tx`] for details.
+    pub quic_send_tx: mpsc::Sender<(ShardId, ShardMsg)>,
     broadcast_rx: Option<mpsc::Receiver<ServerMsg>>,
-    quic_send_rx: Option<mpsc::Receiver<(ShardId, std::net::SocketAddr, ShardMsg)>>,
+    quic_send_rx: Option<mpsc::Receiver<(ShardId, ShardMsg)>>,
     connect_tx: mpsc::UnboundedSender<ClientConnectEvent>,
     input_tx: mpsc::UnboundedSender<(SocketAddr, PlayerInputData)>,
     block_edit_tx: mpsc::UnboundedSender<(SessionToken, BlockEditData)>,
@@ -524,9 +544,22 @@ impl ShardHarness {
         // Each peer owns its QUIC connection directly — no shared mutex. A dead peer's
         // connection timeout only blocks its own task. The dispatcher routes messages
         // to the correct per-peer channel; no shared I/O state.
+        //
+        // Address resolution: callers send `(ShardId, ShardMsg)` — the
+        // dispatcher resolves the destination's `quic_addr` from
+        // `peer_registry` here. On cache miss (peer registered with
+        // orchestrator after our last periodic refresh — common when
+        // the orchestrator provisions ship/planet shards on demand)
+        // the dispatcher triggers an immediate orchestrator refresh
+        // and retries once before dropping. This eliminates the 10-
+        // second blackout window where any newly-provisioned peer's
+        // first cross-shard interaction (notably HandoffAccepted
+        // replies during EVA exit) was silently lost.
         let quic_send_cancel = cancel.clone();
         let mut quic_send_rx = self.quic_send_rx.take().expect("quic_send_rx already taken");
         let local_shard_id = self.config.shard_id;
+        let quic_peer_registry = self.peer_registry.clone();
+        let quic_orchestrator_url = self.config.orchestrator_url.clone();
         tokio::spawn(async move {
             // Shared QUIC endpoint — thread-safe, connect() takes &self.
             let send_transport = match QuicTransport::bind("0.0.0.0:0".parse().unwrap()).await {
@@ -547,7 +580,44 @@ impl ShardHarness {
                 tokio::select! {
                     _ = quic_send_cancel.cancelled() => return,
                     msg = quic_send_rx.recv() => {
-                        if let Some((peer_id, peer_addr, shard_msg)) = msg {
+                        if let Some((peer_id, shard_msg)) = msg {
+                            // Resolve QUIC address from peer registry. On
+                            // cache miss (peer registered after our last
+                            // periodic refresh), trigger an on-demand
+                            // refresh from the orchestrator and retry
+                            // once. This guarantees freshly-provisioned
+                            // shards are reachable immediately rather
+                            // than after a 10-second blackout.
+                            let peer_addr = match quic_peer_registry.read().await.quic_addr(peer_id) {
+                                Some(addr) => addr,
+                                None => {
+                                    if let Err(e) = refresh_peer_registry_once(
+                                        &quic_peer_registry, &quic_orchestrator_url,
+                                    ).await {
+                                        tracing::warn!(
+                                            target = peer_id.0, %e,
+                                            "QUIC dispatcher: on-demand peer refresh failed, message dropped"
+                                        );
+                                        continue;
+                                    }
+                                    match quic_peer_registry.read().await.quic_addr(peer_id) {
+                                        Some(addr) => {
+                                            tracing::info!(
+                                                target = peer_id.0,
+                                                "QUIC dispatcher: peer resolved via on-demand refresh"
+                                            );
+                                            addr
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                target = peer_id.0,
+                                                "QUIC dispatcher: peer not found in orchestrator after refresh, message dropped"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                            };
                             let tx = peer_senders.entry(peer_id).or_insert_with(|| {
                                 let (tx, mut rx) = mpsc::channel::<(SocketAddr, ShardMsg)>(32);
                                 let endpoint = send_transport.endpoint().clone();
@@ -707,6 +777,7 @@ impl ShardHarness {
         // which don't impl Clone — ownership transfers to the ECS world).
         let bridge = NetworkBridge {
             connect_rx: self.connect_rx,
+            connect_tx: self.connect_tx.clone(),
             input_rx: self.input_rx,
             block_edit_rx: self.block_edit_rx,
             config_update_rx: self.config_update_rx,
@@ -897,36 +968,57 @@ impl ShardHarness {
     }
 }
 
-/// Periodically refreshes the peer shard registry from the orchestrator.
+/// Single-shot peer registry refresh. Used by both the periodic
+/// refresh loop and the QUIC dispatcher's on-demand fallback when
+/// it sees a `ShardId` that isn't in the cache.
+///
+/// Returns the number of peers in the new snapshot on success.
+/// `Err` only on transport / deserialization failure — an empty
+/// shard list is still `Ok(0)`.
+pub(crate) async fn refresh_peer_registry_once(
+    registry: &Arc<RwLock<PeerShardRegistry>>,
+    orchestrator_url: &str,
+) -> Result<usize, String> {
+    let url = format!("{orchestrator_url}/shards");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    #[derive(serde::Deserialize)]
+    struct ShardsResponse {
+        shards: Vec<ShardInfo>,
+    }
+
+    let body = resp.json::<ShardsResponse>().await.map_err(|e| e.to_string())?;
+    let count = body.shards.len();
+    registry.write().await.update(body.shards);
+    Ok(count)
+}
+
+/// Periodically refreshes the peer shard registry from the
+/// orchestrator. The 2-second cadence is fast enough to keep
+/// the cache reasonably warm without spamming the orchestrator
+/// — for the rare case where an interaction fires within those
+/// 2 seconds of a peer registering, the QUIC send dispatcher
+/// falls back to an on-demand refresh in
+/// `refresh_peer_registry_once`.
 async fn refresh_peer_registry(
     registry: Arc<RwLock<PeerShardRegistry>>,
     orchestrator_url: &str,
     cancel: CancellationToken,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
-    let client = reqwest::Client::new();
-    let url = format!("{orchestrator_url}/shards");
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = interval.tick() => {
-                match client.get(&url).send().await {
-                    Ok(resp) => {
-                        #[derive(serde::Deserialize)]
-                        struct ShardsResponse {
-                            shards: Vec<ShardInfo>,
-                        }
-
-                        if let Ok(body) = resp.json::<ShardsResponse>().await {
-                            let mut reg = registry.write().await;
-                            reg.update(body.shards);
-                        }
-                    }
-                    Err(_) => {
-                        // Orchestrator might not be available yet — that's fine.
-                    }
-                }
+                // Errors here are non-fatal: orchestrator may not
+                // be available yet at startup, and the next tick
+                // (or an on-demand QUIC dispatch) will catch up.
+                let _ = refresh_peer_registry_once(&registry, orchestrator_url).await;
             }
         }
     }

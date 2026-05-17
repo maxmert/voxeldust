@@ -111,6 +111,29 @@ struct EvaPlayerName(String);
 #[derive(Component)]
 struct EvaPosition(DVec3);
 
+/// Boarding cooldown on a freshly-spawned EVA player. Prevents
+/// `eva_boarding_detection` from immediately re-boarding the player
+/// onto the ship they just exited from: the exit position is right
+/// at the door (`(5.06, 1.61, 0.14)` in starter-ship local coords),
+/// and at slow walking speed the player remains within one block
+/// of the interior_mask boundary for many ticks. Without a cooldown,
+/// each tick's boarding check fires a fresh ship→system→ship→…
+/// ping-pong handoff loop that the user perceives as "stuck between
+/// ship and system" — input can't drive movement because the EVA
+/// entity is despawned + respawned faster than `eva_physics` can
+/// integrate thrust.
+///
+/// Cleared by `tick_eva_exit_cooldown` when `until_tick` is reached.
+/// Filtered against in `eva_boarding_detection`.
+#[derive(Component)]
+struct EvaExitCooldown {
+    /// First tick at which boarding detection may fire for this
+    /// player again. Chosen to give a slow walker (0.5 m/s) enough
+    /// time to clear the 1-block-thick door volume — 100 ticks @
+    /// 20 Hz = 5 s ≈ 2.5 m of clearance even at standstill.
+    until_tick: u64,
+}
+
 /// EVA player velocity in system space (m/s).
 #[derive(Component)]
 struct EvaVelocity(DVec3);
@@ -292,8 +315,10 @@ impl Default for VisibilityConfig {
 }
 
 /// Surface-player aggregate record from a planet shard's `PlanetPlayerDigest`.
-/// Carries only what the system-shard AOI compute needs (position in system-space,
-/// rotation, name). Detailed state stays local to the owning planet shard.
+/// Carries everything the system-shard AOI projection needs to render a
+/// surface player at distance: position + the body/head decoupling
+/// fields so the avatar appears with the right facing direction +
+/// animation state, not a frozen T-pose root rotation.
 #[derive(Clone)]
 struct SurfacePlayerRecord {
     player_name: String,
@@ -301,6 +326,18 @@ struct SurfacePlayerRecord {
     planet_shard: ShardId,
     position: DVec3,
     rotation: DQuat,
+    // Phase T2 — body/head pose forwarded by planet-shard so distant
+    // observers (other ships, EVA players, distant planets) see this
+    // surface player with the correct facing/animation immediately.
+    body_yaw: f32,
+    head_yaw: f32,
+    head_pitch: f32,
+    locomotion: u8,
+    locomotion_speed: f32,
+    is_turning: bool,
+    turn_target_yaw: f32,
+    turn_t: f32,
+    look_target_delta: Option<glam::Vec3>,
     /// Last tick we saw a digest from this planet. Used for stale-entry eviction.
     last_tick: u64,
 }
@@ -538,14 +575,15 @@ fn broadcast_ship_neighborhoods(
         return;
     }
 
-    // Snapshot peer registry for hosted-ship endpoint info.
+    // Snapshot peer registry for hosted-ship lookup.
     let Ok(reg) = bridge.peer_registry.try_read() else {
         return;
     };
-    // Map: ship_id → (its host ship-shard's id, that shard's QUIC
-    // addr). Restricted to ships hosted by THIS system-shard so we
-    // don't attempt to push to a peer system's ships.
-    let mut hosted_ships: HashMap<u64, (ShardId, SocketAddr)> = HashMap::new();
+    // Map: ship_id → its host ship-shard's id. Restricted to ships
+    // hosted by THIS system-shard so we don't attempt to push to a
+    // peer system's ships. Address resolution happens in the QUIC
+    // dispatcher with on-demand orchestrator refresh.
+    let mut hosted_ships: HashMap<u64, ShardId> = HashMap::new();
     for info in reg.find_by_type(ShardType::Ship) {
         if info.host_shard_id != Some(shard_identity.0) {
             continue;
@@ -553,7 +591,7 @@ fn broadcast_ship_neighborhoods(
         let Some(ship_id) = info.ship_id else {
             continue;
         };
-        hosted_ships.insert(ship_id, (info.id, info.endpoint.quic_addr));
+        hosted_ships.insert(ship_id, info.id);
     }
     drop(reg);
 
@@ -568,7 +606,7 @@ fn broadcast_ship_neighborhoods(
     let mut ship_state: HashMap<u64, (DVec3, DVec3, ShardId)> =
         HashMap::with_capacity(hosted_ships.len());
     for (ship_id, pos, vel) in ships.iter() {
-        if let Some(&(host_shard, _)) = hosted_ships.get(&ship_id.0) {
+        if let Some(&host_shard) = hosted_ships.get(&ship_id.0) {
             grid.insert(ship_id.0, pos.0);
             ship_state.insert(ship_id.0, (pos.0, vel.0, host_shard));
         }
@@ -586,9 +624,6 @@ fn broadcast_ship_neighborhoods(
 
     for (ship_id, pos, _vel) in ships.iter() {
         let Some(&(_, _, target_shard)) = ship_state.get(&ship_id.0) else {
-            continue;
-        };
-        let Some(&(_, target_addr)) = hosted_ships.get(&ship_id.0) else {
             continue;
         };
         let nearby = grid.query_radius(pos.0, radius);
@@ -609,7 +644,7 @@ fn broadcast_ship_neighborhoods(
             issued_at_ms: now_ms,
             peers,
         });
-        let _ = bridge.quic_send_tx.try_send((target_shard, target_addr, msg));
+        let _ = bridge.quic_send_tx.try_send((target_shard, msg));
     }
 }
 
@@ -713,15 +748,15 @@ fn refresh_galaxy_radio_subscription(
     let quic_send_tx = bridge.quic_send_tx.clone();
     tokio::spawn(async move {
         let registry = peer_registry.read().await;
-        let galaxies: Vec<_> = registry
+        let galaxy_ids: Vec<ShardId> = registry
             .find_by_type(ShardType::Galaxy)
             .into_iter()
-            .map(|info| (info.id, info.endpoint.quic_addr))
+            .map(|info| info.id)
             .collect();
         drop(registry);
-        for (galaxy_id, addr) in galaxies {
+        for galaxy_id in galaxy_ids {
             let _ = quic_send_tx
-                .send((galaxy_id, addr, ShardMsg::RadioSubscribe(req.clone())))
+                .send((galaxy_id, ShardMsg::RadioSubscribe(req.clone())))
                 .await;
         }
     });
@@ -822,10 +857,8 @@ fn drain_quic(
                             if peer.id.0 == data.source_shard_id {
                                 continue;
                             }
-                            if let Some(addr) = reg.quic_addr(peer.id) {
-                                let relay_msg = ShardMsg::SignalBroadcast(data.clone());
-                                let _ = bridge.quic_send_tx.try_send((peer.id, addr, relay_msg));
-                            }
+                            let relay_msg = ShardMsg::SignalBroadcast(data.clone());
+                            let _ = bridge.quic_send_tx.try_send((peer.id, relay_msg));
                         }
                     }
                 }
@@ -864,11 +897,7 @@ fn drain_quic(
                             if peer.id.0 == batch.source_shard_id {
                                 continue;
                             }
-                            if let Some(addr) = reg.quic_addr(peer.id) {
-                                let _ = bridge.quic_send_tx.try_send((
-                                    peer.id, addr, lr_batch.clone(),
-                                ));
-                            }
+                            let _ = bridge.quic_send_tx.try_send((peer.id, lr_batch.clone()));
                         }
                     }
                     if !radio.is_empty() {
@@ -884,20 +913,12 @@ fn drain_quic(
                         let dec = reg.radio_fanout_decision(source, our_id);
                         if dec.to_galaxy {
                             for peer in reg.find_by_type(ShardType::Galaxy) {
-                                if let Some(addr) = reg.quic_addr(peer.id) {
-                                    let _ = bridge.quic_send_tx.try_send((
-                                        peer.id, addr, radio_batch.clone(),
-                                    ));
-                                }
+                                let _ = bridge.quic_send_tx.try_send((peer.id, radio_batch.clone()));
                             }
                         }
                         if dec.to_local_ships {
                             for peer in reg.local_ships(our_id, source) {
-                                if let Some(addr) = reg.quic_addr(peer.id) {
-                                    let _ = bridge.quic_send_tx.try_send((
-                                        peer.id, addr, radio_batch.clone(),
-                                    ));
-                                }
+                                let _ = bridge.quic_send_tx.try_send((peer.id, radio_batch.clone()));
                             }
                         }
                     }
@@ -958,9 +979,6 @@ fn drain_quic(
                             if peer.id.0 == source_shard_id {
                                 continue;
                             }
-                            let Some(addr) = reg.quic_addr(peer.id) else {
-                                continue;
-                            };
                             let v2_batch = encode_v2_batch(
                                 &mut registry,
                                 peer.id,
@@ -970,7 +988,6 @@ fn drain_quic(
                             );
                             let _ = bridge.quic_send_tx.try_send((
                                 peer.id,
-                                addr,
                                 ShardMsg::SignalBroadcastBatchV2(v2_batch),
                             ));
                         }
@@ -980,9 +997,6 @@ fn drain_quic(
                         let dec = reg.radio_fanout_decision(source_id, our_id);
                         if dec.to_galaxy {
                             for peer in reg.find_by_type(ShardType::Galaxy) {
-                                let Some(addr) = reg.quic_addr(peer.id) else {
-                                    continue;
-                                };
                                 let v2_batch = encode_v2_batch(
                                     &mut registry,
                                     peer.id,
@@ -992,7 +1006,6 @@ fn drain_quic(
                                 );
                                 let _ = bridge.quic_send_tx.try_send((
                                     peer.id,
-                                    addr,
                                     ShardMsg::SignalBroadcastBatchV2(v2_batch),
                                 ));
                             }
@@ -1004,9 +1017,9 @@ fn drain_quic(
                             // `reg` immutably.
                             let local_ship_targets: Vec<_> = reg
                                 .local_ships(our_id, source_id)
-                                .filter_map(|info| Some((info.id, info.endpoint.quic_addr)))
+                                .map(|info| info.id)
                                 .collect();
-                            for (peer_id, addr) in local_ship_targets {
+                            for peer_id in local_ship_targets {
                                 let v2_batch = encode_v2_batch(
                                     &mut registry,
                                     peer_id,
@@ -1016,7 +1029,6 @@ fn drain_quic(
                                 );
                                 let _ = bridge.quic_send_tx.try_send((
                                     peer_id,
-                                    addr,
                                     ShardMsg::SignalBroadcastBatchV2(v2_batch),
                                 ));
                             }
@@ -1150,37 +1162,10 @@ fn process_connects(
             // observe. Every shard the player can plausibly transition to
             // must already be streaming — no LOD substitution, no blank
             // frames during transitions.
-            let mut preconnects: Vec<handoff::ShardPreConnect> = Vec::new();
-            if let Ok(reg) = bridge.peer_registry.try_read() {
-                // Galaxy (scene context, stars, warp visuals).
-                if let Some(info) = reg.find_by_type(ShardType::Galaxy).first() {
-                    preconnects.push(handoff::ShardPreConnect {
-                        shard_type: ShardType::Galaxy as u8,
-                        tcp_addr: info.endpoint.tcp_addr.to_string(),
-                        udp_addr: info.endpoint.udp_addr.to_string(),
-                        seed: galaxy_seed,
-                        planet_index: 0,
-                        reference_position: DVec3::ZERO,
-                        reference_rotation: DQuat::IDENTITY,
-                        shard_id: info.id.0,
-                    });
-                }
-                // All ship shards in this system — boarding any ship should
-                // be instantaneous (chunks already on the client).
-                for info in reg.find_by_type(ShardType::Ship) {
-                    let Some(ship_id) = info.ship_id else { continue };
-                    preconnects.push(handoff::ShardPreConnect {
-                        shard_type: ShardType::Ship as u8,
-                        tcp_addr: info.endpoint.tcp_addr.to_string(),
-                        udp_addr: info.endpoint.udp_addr.to_string(),
-                        seed: ship_id,
-                        planet_index: 0,
-                        reference_position: DVec3::ZERO,
-                        reference_rotation: DQuat::IDENTITY,
-                        shard_id: info.id.0,
-                    });
-                }
-            }
+            let preconnects = build_eva_scene_preconnects_sync(
+                &bridge.peer_registry,
+                galaxy_seed,
+            );
 
             tokio::spawn(async move {
                 let jr = ServerMsg::JoinResponse(JoinResponseData {
@@ -1610,6 +1595,76 @@ fn process_warp_commands(
 }
 
 /// Process player handoff messages (ship→planet, planet→ship, galaxy→system warp arrival).
+/// Build the scene-context `ShardPreConnect` set for a fresh EVA
+/// client: GALAXY (for warp visuals + interstellar starfield) +
+/// every SHIP in this system (so boarding any ship is instant — no
+/// chunk re-stream). Returns the list ready to send over TCP.
+///
+/// Sync variant: uses `try_read()` and returns empty on contention,
+/// matching the pre-extraction inline logic in `process_connects`
+/// (which runs in a Bevy system tick where a `.read().await` would
+/// require restructuring). Use this in the fresh-handshake path
+/// where the worst case (one tick of missing preconnects) is
+/// recoverable on the next tick's process_connects.
+fn build_eva_scene_preconnects_sync(
+    peer_registry: &Arc<tokio::sync::RwLock<voxeldust_shard_common::peer_registry::PeerShardRegistry>>,
+    galaxy_seed: u64,
+) -> Vec<handoff::ShardPreConnect> {
+    let mut out = Vec::new();
+    let Ok(reg) = peer_registry.try_read() else {
+        return out;
+    };
+    fill_eva_scene_preconnects(&reg, galaxy_seed, &mut out);
+    out
+}
+
+/// Async variant of [`build_eva_scene_preconnects_sync`] for code
+/// paths already inside `tokio::spawn` (the seamless ShardHandoff
+/// promote path runs there, so it can `await` the read lock cleanly
+/// rather than retry-on-contention).
+async fn build_eva_scene_preconnects(
+    peer_registry: &Arc<tokio::sync::RwLock<voxeldust_shard_common::peer_registry::PeerShardRegistry>>,
+    galaxy_seed: u64,
+) -> Vec<handoff::ShardPreConnect> {
+    let reg = peer_registry.read().await;
+    let mut out = Vec::new();
+    fill_eva_scene_preconnects(&reg, galaxy_seed, &mut out);
+    out
+}
+
+/// Shared population body for the two variants above.
+fn fill_eva_scene_preconnects(
+    reg: &voxeldust_shard_common::peer_registry::PeerShardRegistry,
+    galaxy_seed: u64,
+    out: &mut Vec<handoff::ShardPreConnect>,
+) {
+    if let Some(info) = reg.find_by_type(ShardType::Galaxy).first() {
+        out.push(handoff::ShardPreConnect {
+            shard_type: ShardType::Galaxy as u8,
+            tcp_addr: info.endpoint.tcp_addr.to_string(),
+            udp_addr: info.endpoint.udp_addr.to_string(),
+            seed: galaxy_seed,
+            planet_index: 0,
+            reference_position: DVec3::ZERO,
+            reference_rotation: DQuat::IDENTITY,
+            shard_id: info.id.0,
+        });
+    }
+    for info in reg.find_by_type(ShardType::Ship) {
+        let Some(ship_id) = info.ship_id else { continue };
+        out.push(handoff::ShardPreConnect {
+            shard_type: ShardType::Ship as u8,
+            tcp_addr: info.endpoint.tcp_addr.to_string(),
+            udp_addr: info.endpoint.udp_addr.to_string(),
+            seed: ship_id,
+            planet_index: 0,
+            reference_position: DVec3::ZERO,
+            reference_rotation: DQuat::IDENTITY,
+            shard_id: info.id.0,
+        });
+    }
+}
+
 fn process_handoffs(
     mut commands: Commands,
     mut events: MessageReader<HandoffMsg>,
@@ -1629,6 +1684,7 @@ fn process_handoffs(
     physics_time: Res<ecs::PhysicsTime>,
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
+    galaxy_ctx: Res<GalaxyContext>,
 ) {
     for event in events.read() {
         let h = &event.handoff;
@@ -1639,29 +1695,19 @@ fn process_handoffs(
         if let Some(planet_seed) = h.target_planet_seed {
             // Ship→Planet handoff: forward to planet shard.
             if let Some(&planet_shard_id) = provisioned_planets.0.get(&planet_seed) {
-                if let Ok(reg) = bridge.peer_registry.try_read() {
-                    if let Some(addr) = reg.quic_addr(planet_shard_id) {
-                        let msg = ShardMsg::PlayerHandoff(h.clone());
-                        match bridge.quic_send_tx.try_send((planet_shard_id, addr, msg)) {
-                            Ok(()) => info!(
-                                planet_seed,
-                                target = planet_shard_id.0,
-                                "forwarded player handoff to planet shard"
-                            ),
-                            Err(e) => tracing::error!(
-                                planet_seed,
-                                target = planet_shard_id.0,
-                                %e,
-                                "failed to queue player handoff to planet shard"
-                            ),
-                        }
-                    } else {
-                        tracing::warn!(
-                            planet_seed,
-                            target = planet_shard_id.0,
-                            "no QUIC address for planet shard in peer registry"
-                        );
-                    }
+                let msg = ShardMsg::PlayerHandoff(h.clone());
+                match bridge.quic_send_tx.try_send((planet_shard_id, msg)) {
+                    Ok(()) => info!(
+                        planet_seed,
+                        target = planet_shard_id.0,
+                        "forwarded player handoff to planet shard"
+                    ),
+                    Err(e) => tracing::error!(
+                        planet_seed,
+                        target = planet_shard_id.0,
+                        %e,
+                        "failed to queue player handoff to planet shard"
+                    ),
                 }
             } else {
                 tracing::warn!(planet_seed, "no provisioned planet shard for handoff");
@@ -1675,10 +1721,10 @@ fn process_handoffs(
                     .find_by_type(ShardType::Ship)
                     .iter()
                     .find(|s| s.ship_id == Some(target_ship_id))
-                    .map(|s| (s.id, s.endpoint.quic_addr));
-                if let Some((sid, addr)) = ship_shard {
+                    .map(|s| s.id);
+                if let Some(sid) = ship_shard {
                     let msg = ShardMsg::PlayerHandoff(h.clone());
-                    match bridge.quic_send_tx.try_send((sid, addr, msg)) {
+                    match bridge.quic_send_tx.try_send((sid, msg)) {
                         Ok(()) => info!(
                             ship_id = target_ship_id,
                             target = sid.0,
@@ -1890,6 +1936,11 @@ fn process_handoffs(
             // `h.rotation` arrives from ship-shard as the body
             // (exterior.rotation), NOT the composed camera (per the
             // matching change in ship-shard hull_exit_check).
+            // 100-tick (5 s) re-boarding cooldown — see `EvaExitCooldown`
+            // for rationale. Boarding detection skips players that hold
+            // this component; `tick_eva_exit_cooldown` removes it at
+            // `until_tick`.
+            const EVA_EXIT_COOLDOWN_TICKS: u64 = 100;
             let eva_entity = commands
                 .spawn((
                     EvaPlayer,
@@ -1900,6 +1951,9 @@ fn process_handoffs(
                     EvaRotation(h.rotation),
                     EvaPhysics::default(),
                     EvaInputState::default(),
+                    EvaExitCooldown {
+                        until_tick: tick.0 + EVA_EXIT_COOLDOWN_TICKS,
+                    },
                 ))
                 .id();
 
@@ -1916,57 +1970,124 @@ fn process_handoffs(
                 "EVA player spawned from ship hull exit"
             );
 
-            // Send HandoffAccepted back to the source ship shard, carrying
-            // the target's AUTHORITATIVE spawn pose (`spawn_pos` computed
-            // with CURRENT ship pose, not the ~40-100 ms-stale
-            // `h.position` from handoff creation). The source shard
-            // forwards these in its `ShardRedirectMsg` to the client so
-            // the client's first post-transition frame matches where
-            // this shard broadcasts the player — eliminating the 5-15 km
-            // "camera far from ship" sweep caused by source-vs-target
-            // pose drift during inter-shard handoff latency.
-            let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
-                session_token: session,
-                target_shard: shard_identity.0,
-                spawn_pose: Some(handoff::SpawnPose {
-                    position: spawn_pos,
-                    rotation: h.rotation,
-                    velocity: h.velocity,
-                }),
-                // Phase T0 — system-shard's EVA-exit path does not yet
-                // promote an observer (the EVA spawn is a fresh entity
-                // each time). Source shard falls back to ShardRedirect.
-                // Future phase can match the player's session against
-                // a system-shard session_observer (rare scenario:
-                // EVA-from-EVA-shard handoff) and flip this to true.
-                observer_promoted: false,
-            });
-            match bridge.peer_registry.try_read() {
-                Ok(reg) => match reg.quic_addr(source) {
-                    Some(addr) => match bridge.quic_send_tx.try_send((source, addr, accepted)) {
-                        Ok(()) => info!(
-                            source = source.0,
-                            %addr,
-                            "sent HandoffAccepted to source ship shard (EVA)"
-                        ),
-                        Err(e) => tracing::error!(
-                            source = source.0,
-                            %addr,
-                            %e,
-                            "failed to queue HandoffAccepted (EVA)"
-                        ),
-                    },
-                    None => tracing::warn!(
-                        source = source.0,
-                        "no quic_addr for source shard in peer_registry — HandoffAccepted (EVA) dropped"
+            // Phase T0 — try to promote the player's pre-existing
+            // session-observer connection to the new EVA player's
+            // primary client entry. Most clients open a SYSTEM
+            // secondary as part of their scene-context warmup
+            // (`is_scene_context(System) == true`), so by the time
+            // the EVA hull-exit handoff arrives we usually already
+            // have a session-observer registered for this session.
+            // Promoting it lets the source ship-shard reply with
+            // `ServerMsg::ShardHandoff` (true zero-RTT seamless
+            // promote) instead of `ServerMsg::ShardRedirect`
+            // (legacy fresh handshake, ~5-50 ms gap + new player_id
+            // assignment + visual respawn churn).
+            //
+            // Spawned in a tokio task so the `RwLock<ClientRegistry>
+            // .write().await` doesn't block this Bevy system tick —
+            // same idiom as the ship-shard PlayerHandoff handler.
+            let creg_for_promote = bridge.client_registry.clone();
+            let preg_for_send = bridge.peer_registry.clone();
+            let quic_tx_for_send = bridge.quic_send_tx.clone();
+            let session_for_promote = session;
+            let player_name_for_promote = h.player_name.clone();
+            let target_shard_for_send = shard_identity.0;
+            let source_for_send = source;
+            let galaxy_seed_for_send = galaxy_ctx.seed;
+            let spawn_pose_for_send = handoff::SpawnPose {
+                position: spawn_pos,
+                rotation: h.rotation,
+                velocity: h.velocity,
+            };
+            tokio::spawn(async move {
+                // Promote (if observer pre-connected) returns the TCP
+                // write half — we keep it so we can ship ShardPreConnects
+                // over the same socket immediately after.
+                let promoted_tcp = {
+                    let mut reg = creg_for_promote.write().await;
+                    if reg.has_session_observer(session_for_promote) {
+                        reg.promote_observer_to_client(
+                            session_for_promote,
+                            player_name_for_promote.clone(),
+                        )
+                    } else {
+                        None
+                    }
+                };
+                let observer_promoted = promoted_tcp.is_some();
+                let accepted = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
+                    session_token: session_for_promote,
+                    target_shard: target_shard_for_send,
+                    spawn_pose: Some(spawn_pose_for_send),
+                    observer_promoted,
+                });
+                match quic_tx_for_send.try_send((source_for_send, accepted)) {
+                    Ok(()) => info!(
+                        source = source_for_send.0,
+                        observer_promoted,
+                        "sent HandoffAccepted to source ship shard (EVA)"
                     ),
-                },
-                Err(e) => tracing::warn!(
-                    source = source.0,
-                    %e,
-                    "peer_registry lock unavailable — HandoffAccepted (EVA) dropped"
-                ),
-            }
+                    Err(e) => tracing::error!(
+                        source = source_for_send.0,
+                        %e,
+                        "failed to queue HandoffAccepted (EVA)"
+                    ),
+                }
+
+                // Phase T0 — seamless promote path needs to send the
+                // EVA scene-context `ShardPreConnect` set itself: the
+                // fresh-handshake path gets these via `process_connects`
+                // when a new TCP `Connect` arrives, but the seamless
+                // path reuses the existing TCP and never enters that
+                // code path. Without these preconnects the client has
+                // no SHIP secondary to the ship just exited from —
+                // the graced source despawns after grace expires and
+                // the ship visually vanishes from EVA. Build the same
+                // set (galaxy + every ship in this system) and ship
+                // them over the now-primary TCP.
+                if let Some(tcp_write) = promoted_tcp {
+                    let preconnects = build_eva_scene_preconnects(
+                        &preg_for_send,
+                        galaxy_seed_for_send,
+                    )
+                    .await;
+                    let preconnect_count = preconnects.len();
+                    info!(
+                        session = session_for_promote.0,
+                        preconnect_count,
+                        "seamless promote: sending ShardPreConnect set over promoted TCP"
+                    );
+                    let mut writer = tcp_write.lock().await;
+                    let mut sent = 0usize;
+                    for pc in preconnects {
+                        if let Err(e) = client_listener::send_tcp_msg(
+                            &mut *writer,
+                            &ServerMsg::ShardPreConnect(pc),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                session = session_for_promote.0,
+                                %e,
+                                sent,
+                                "seamless promote: failed to send ShardPreConnect"
+                            );
+                            break;
+                        }
+                        sent += 1;
+                    }
+                    info!(
+                        session = session_for_promote.0,
+                        sent,
+                        "seamless promote: ShardPreConnect set sent"
+                    );
+                } else {
+                    info!(
+                        session = session_for_promote.0,
+                        "seamless promote: observer not promoted (fresh-handshake path) — no preconnects sent here"
+                    );
+                }
+            });
 
             // ShardRedirect to client is handled by the ship shard upon receiving
             // HandoffAccepted — it looks up this system shard's TCP/UDP from the
@@ -2115,37 +2236,34 @@ fn process_handoff_accepted(
                 continue;
             }
             // Cross-shard relay (e.g. planet→ship re-entry flow).
-            if let Ok(reg) = bridge.peer_registry.try_read() {
-                if let Some(addr) = reg.quic_addr(source_shard) {
-                    // TODO(phase-A-boarding): populate spawn_pose with the
-                    // authoritative ship-local spawn for EVA-boarding. For
-                    // now leave None — client falls back to JoinResponse.
-                    let msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
-                        session_token: event.session_token,
-                        target_shard: event.target_shard,
-                        spawn_pose: None,
-                        // Phase T0 — relayed HandoffAccepted from
-                        // ship-shard during EVA-boarding. The relay
-                        // doesn't know whether the ship promoted an
-                        // observer, so it conservatively forwards
-                        // `false`. Future phase: thread the original
-                        // ship's `observer_promoted` flag through
-                        // this relay so the source shard sees the
-                        // true value.
-                        observer_promoted: false,
-                    });
-                    match bridge.quic_send_tx.try_send((source_shard, addr, msg)) {
-                        Ok(()) => info!(
-                            target = source_shard.0,
-                            "relayed HandoffAccepted to source shard"
-                        ),
-                        Err(e) => tracing::error!(
-                            source = source_shard.0,
-                            %e,
-                            "failed to queue HandoffAccepted relay"
-                        ),
-                    }
-                }
+            // Address resolution + on-demand refresh handled by dispatcher.
+            // TODO(phase-A-boarding): populate spawn_pose with the
+            // authoritative ship-local spawn for EVA-boarding. For
+            // now leave None — client falls back to JoinResponse.
+            let msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
+                session_token: event.session_token,
+                target_shard: event.target_shard,
+                spawn_pose: None,
+                // Phase T0 — relayed HandoffAccepted from
+                // ship-shard during EVA-boarding. The relay
+                // doesn't know whether the ship promoted an
+                // observer, so it conservatively forwards
+                // `false`. Future phase: thread the original
+                // ship's `observer_promoted` flag through
+                // this relay so the source shard sees the
+                // true value.
+                observer_promoted: false,
+            });
+            match bridge.quic_send_tx.try_send((source_shard, msg)) {
+                Ok(()) => info!(
+                    target = source_shard.0,
+                    "relayed HandoffAccepted to source shard"
+                ),
+                Err(e) => tracing::error!(
+                    source = source_shard.0,
+                    %e,
+                    "failed to queue HandoffAccepted relay"
+                ),
             }
         }
     }
@@ -4133,14 +4251,14 @@ fn warp_boundary(
             schema_version: 1,
             character_state: Vec::new(),
         };
-        let _ = bridge.quic_send_tx.try_send((
-            galaxy_shard_id,
-            galaxy_quic_addr,
-            ShardMsg::PlayerHandoff(player_handoff),
-        ));
+        let _ = bridge
+            .quic_send_tx
+            .try_send((galaxy_shard_id, ShardMsg::PlayerHandoff(player_handoff)));
 
-        // Send HostSwitch to ship shard.
-        if let Some((ship_shard_id, ship_quic_addr, _)) = ship_shard_entry {
+        // Send HostSwitch to ship shard. The message itself still carries
+        // `new_host_quic_addr` as a wire string (ship needs it to talk
+        // to the new host); the channel send drops the dispatch addr.
+        if let Some((ship_shard_id, _ship_quic_addr, _)) = ship_shard_entry {
             let host_switch = ShardMsg::HostSwitch(voxeldust_core::shard_message::HostSwitchData {
                 ship_id: ship_id.0,
                 new_host_shard_id: galaxy_shard_id,
@@ -4152,7 +4270,7 @@ fn warp_boundary(
             });
             let _ = bridge
                 .quic_send_tx
-                .try_send((*ship_shard_id, *ship_quic_addr, host_switch));
+                .try_send((*ship_shard_id, host_switch));
             info!(
                 ship_id = ship_id.0,
                 new_host = galaxy_shard_id.0,
@@ -4824,8 +4942,29 @@ fn eva_broadcast(
         );
         let aoi_snapshot = AoiSnapshot::build(&candidates, &vis_cfg);
         let mut merged: HashMap<u64, ObservableEntityData> = HashMap::new();
-        for (session, _, pos, _, _, _) in eva_players.iter() {
-            let per = compute_aoi(pos.0, &aoi_snapshot, Some(session.0.0), &vis_cfg);
+        for (_session, _, pos, _, _, _) in eva_players.iter() {
+            // Phase T0 fix — pass `None` for self_entity_id here so
+            // the AOI INCLUDES the observing EVA player themselves.
+            //
+            // Why: `compute_aoi`'s self-exclude was designed for the
+            // cross-shard projection path (system → ship-shard's
+            // SystemEntitiesUpdate), where the receiving ship-shard's
+            // own broadcast already lists the ship with `is_own=true`,
+            // so duplicating it via AOI would shadow the
+            // authoritative copy. The EVA broadcast is the OPPOSITE
+            // shape: it goes to every UDP client (`broadcast_tx`
+            // fan-out), so every receiver must see every player —
+            // including themselves — for the client's
+            // `RemotePlayers.by_id` to contain their own avatar's
+            // pose so the visual stays alive. With a single EVA
+            // player, the prior `Some(session.0.0)` caused `merged`
+            // to contain ships only — no player — so the client's
+            // local visual aged out under the 500 ms despawn grace
+            // window every time a single client EVA-exited a ship.
+            // `is_own` on AOI-derived `ObservableEntity` entries is
+            // hardcoded `false` (see `compute_aoi`), so the
+            // client's `is_own` filter doesn't drop these entries.
+            let per = compute_aoi(pos.0, &aoi_snapshot, None, &vis_cfg);
             for e in per {
                 merged
                     .entry(e.entity_id)
@@ -4891,10 +5030,30 @@ fn eva_broadcast(
 /// on the ship shard — just walking (or flying) into the hatch is enough;
 /// no key press required. The same geometry test (ship-local AABB) ensures
 /// exit and re-entry are the same "crossing the hull boundary" event.
+/// Sweep `EvaExitCooldown` components off players whose cooldown has
+/// elapsed. Runs once per tick before `eva_boarding_detection` so the
+/// player becomes board-eligible on the exact tick `until_tick` was
+/// scheduled for, not one tick late. The component is dropped via
+/// `commands.entity(e).remove::<EvaExitCooldown>()`, which is applied
+/// at the next `ApplyDeferred` boundary — placed in the Detection set
+/// before `eva_boarding_detection`, so the boarding query already
+/// sees the updated state on this same tick.
+fn tick_eva_exit_cooldown(
+    mut commands: Commands,
+    tick: Res<ecs::TickCounter>,
+    cooldowns: Query<(Entity, &EvaExitCooldown), With<EvaPlayer>>,
+) {
+    for (entity, cd) in &cooldowns {
+        if tick.0 >= cd.until_tick {
+            commands.entity(entity).remove::<EvaExitCooldown>();
+        }
+    }
+}
+
 fn eva_boarding_detection(
     eva_players: Query<
         (Entity, &EvaSession, &EvaPlayerName, &EvaPosition, &EvaVelocity),
-        (With<EvaPlayer>, Without<HandoffPending>),
+        (With<EvaPlayer>, Without<HandoffPending>, Without<EvaExitCooldown>),
     >,
     ships: Query<(&ShipId, &Position, &Rotation, Option<&ShipColliderCache>)>,
     mut pending_handoffs: ResMut<PendingHandoffs>,
@@ -4949,15 +5108,15 @@ fn eva_boarding_detection(
         };
 
         // Find the ship shard for this ship.
-        let ship_shard = if let Ok(reg) = bridge.peer_registry.try_read() {
+        let ship_shard_id = if let Ok(reg) = bridge.peer_registry.try_read() {
             reg.find_by_type(ShardType::Ship)
                 .iter()
                 .find(|s| s.ship_id == Some(target_ship_id))
-                .map(|s| (s.id, s.endpoint.quic_addr))
+                .map(|s| s.id)
         } else {
             None
         };
-        let Some((ship_shard_id, ship_quic_addr)) = ship_shard else { continue };
+        let Some(ship_shard_id) = ship_shard_id else { continue };
 
         // Create boarding handoff. Inherits the EVA's current momentum —
         // boarding should preserve velocity across the handoff boundary,
@@ -4999,7 +5158,7 @@ fn eva_boarding_detection(
             character_state: Vec::new(),
         };
         let msg = ShardMsg::PlayerHandoff(h);
-        let _ = bridge.quic_send_tx.try_send((ship_shard_id, ship_quic_addr, msg));
+        let _ = bridge.quic_send_tx.try_send((ship_shard_id, msg));
 
         // Register self as the source so `process_handoff_accepted` knows this
         // is a locally-originated handoff and dispatches ShardRedirect straight
@@ -5090,12 +5249,8 @@ fn eva_soi_detection(
                     character_state: Vec::new(),
                 };
 
-                if let Ok(reg) = bridge.peer_registry.try_read() {
-                    if let Some(addr) = reg.quic_addr(planet_shard_id) {
-                        let msg = ShardMsg::PlayerHandoff(h);
-                        let _ = bridge.quic_send_tx.try_send((planet_shard_id, addr, msg));
-                    }
-                }
+                let msg = ShardMsg::PlayerHandoff(h);
+                let _ = bridge.quic_send_tx.try_send((planet_shard_id, msg));
 
                 // Despawn EVA entity.
                 eva_index.0.remove(&name.0);
@@ -5245,11 +5400,7 @@ fn compute_visibility(
 
         // Send to the ship shard that owns this ship.
         if let Some((_, shard_id, _, _)) = peer_info.iter().find(|(id, _, _, _)| *id == ship_id) {
-            if let Ok(reg) = bridge.peer_registry.try_read() {
-                if let Some(addr) = reg.quic_addr(*shard_id) {
-                    let _ = bridge.quic_send_tx.try_send((*shard_id, addr, directive));
-                }
-            }
+            let _ = bridge.quic_send_tx.try_send((*shard_id, directive));
         }
 
         // Log visibility changes.
@@ -5290,13 +5441,12 @@ struct AoiCandidate {
     health: f32,
     shield: f32,
     // -- Body/head decoupling forwarded from authoritative shards ----
-    // System-shard's AOI feed is a coarse aggregate. Ship-shard /
-    // planet-shard players get their body/head broadcast directly to
-    // the owning client via WorldState.players + ObservableEntity from
-    // their own shard's broadcast. System-shard candidates (EVA + ship
-    // hulls + cross-shard projections) keep these zero today; a future
-    // phase populates them when a third-party observer needs to see
-    // another shard's player avatars at distance.
+    // Phase T2 — body/head decoupling forwarded from the authoritative
+    // shard. Surface players get these from `PlanetPlayerDigest`; ships
+    // and EVA leave them zero (ships don't have body/head decoupling;
+    // EVA's whole-body orientation lives in `rotation`). Same-shard
+    // observers always render via the owning shard's own broadcast,
+    // which populates these from the player's ECS components directly.
     body_yaw: f32,
     head_yaw: f32,
     head_pitch: f32,
@@ -5583,19 +5733,38 @@ fn collect_aoi_candidates<EvaFilter: bevy_ecs::query::QueryFilter>(
             .copied()
             .unwrap_or(rec.planet_shard)
             .0;
-        out.push(AoiCandidate::new(
-            *token,
-            EntityKind::GroundedPlayer,
-            rec.position,
-            DVec3::ZERO,
-            rec.rotation,
-            PLAYER_BOUNDING_RADIUS_M,
-            rec.player_name.clone(),
+        // Phase T2 — populate body/head decoupling from the
+        // PlanetPlayerDigest so distant observers see the surface
+        // player's actual facing + animation, not a default-pose root.
+        out.push(AoiCandidate {
+            entity_id: *token,
+            kind: EntityKind::GroundedPlayer,
+            position: rec.position,
+            velocity: DVec3::ZERO,
+            rotation: rec.rotation,
+            bounding_radius: PLAYER_BOUNDING_RADIUS_M,
+            name: rec.player_name.clone(),
             shard_id,
-            ShardType::Planet as u8,
-            100.0,
-            100.0,
-        ));
+            shard_type: ShardType::Planet as u8,
+            health: 100.0,
+            shield: 100.0,
+            body_yaw: rec.body_yaw,
+            head_yaw: rec.head_yaw,
+            head_pitch: rec.head_pitch,
+            locomotion: rec.locomotion,
+            locomotion_speed: rec.locomotion_speed,
+            is_turning: rec.is_turning,
+            turn_target_yaw: rec.turn_target_yaw,
+            turn_t: rec.turn_t,
+            look_target_delta: rec.look_target_delta,
+            // Ragdoll + tablet are still upstream-only (planet-shard
+            // already broadcasts those to its primary observers via
+            // its own ObservableEntity stream — distant cross-shard
+            // observers don't yet need them).
+            ragdoll_bones: Vec::new(),
+            is_holding_tablet: false,
+            tablet_cursor_uv: glam::Vec2::ZERO,
+        });
     }
 
     out
@@ -5628,6 +5797,15 @@ fn ingest_planet_player_digest(
                     planet_shard: ev.data.planet_shard,
                     position: entry.position,
                     rotation: entry.rotation,
+                    body_yaw: entry.body_yaw,
+                    head_yaw: entry.head_yaw,
+                    head_pitch: entry.head_pitch,
+                    locomotion: entry.locomotion,
+                    locomotion_speed: entry.locomotion_speed,
+                    is_turning: entry.is_turning,
+                    turn_target_yaw: entry.turn_target_yaw,
+                    turn_t: entry.turn_t,
+                    look_target_delta: entry.look_target_delta,
                     last_tick: ev.data.tick,
                 },
             );
@@ -5719,9 +5897,6 @@ fn broadcast_system_entities(
         let Some(&shard_id) = ship_shards_by_id.get(&ship_id.0) else {
             continue;
         };
-        let Some(&quic_addr) = ship_quic_addrs.get(&shard_id) else {
-            continue;
-        };
         let aoi = compute_aoi(pos.0, &aoi_snapshot, Some(ship_id.0), &vis_cfg);
         let upd = ShardMsg::SystemEntitiesUpdate(SystemEntitiesUpdateData {
             target: AoiTarget::Ship(ship_id.0),
@@ -5729,7 +5904,7 @@ fn broadcast_system_entities(
             entities: aoi,
             tick: tick.0,
         });
-        let _ = bridge.quic_send_tx.try_send((shard_id, quic_addr, upd));
+        let _ = bridge.quic_send_tx.try_send((shard_id, upd));
     }
 
     // Planet observers → each planet shard (observer = planet's system-space position).
@@ -5738,9 +5913,6 @@ fn broadcast_system_entities(
         if idx_usize >= planet_pos.0.len() {
             continue;
         }
-        let Some(&quic_addr) = planet_quic_addrs.get(&shard_id) else {
-            continue;
-        };
         let observer = planet_pos.0[idx_usize];
         let aoi = compute_aoi(observer, &aoi_snapshot, None, &vis_cfg);
         let upd = ShardMsg::SystemEntitiesUpdate(SystemEntitiesUpdateData {
@@ -5749,7 +5921,7 @@ fn broadcast_system_entities(
             entities: aoi,
             tick: tick.0,
         });
-        let _ = bridge.quic_send_tx.try_send((shard_id, quic_addr, upd));
+        let _ = bridge.quic_send_tx.try_send((shard_id, upd));
     }
 }
 
@@ -5851,10 +6023,10 @@ fn broadcast_scene(
         };
         let scene_msg = ShardMsg::SystemSceneUpdate(scene);
 
-        for &(shard_id, quic_addr, _) in &hosted_ships {
+        for &(shard_id, _quic_addr, _) in &hosted_ships {
             let _ = bridge
                 .quic_send_tx
-                .try_send((shard_id, quic_addr, scene_msg.clone()));
+                .try_send((shard_id, scene_msg.clone()));
         }
 
         // Per-ship position updates.
@@ -5862,8 +6034,8 @@ fn broadcast_scene(
             let target = hosted_ships
                 .iter()
                 .find(|(_, _, sid)| *sid == Some(ship_id.0))
-                .map(|&(sid, addr, _)| (sid, addr));
-            if let Some((sid, addr)) = target {
+                .map(|&(sid, _, _)| sid);
+            if let Some(sid) = target {
                 let ap_snapshot = autopilot.and_then(|ap| {
                     Some(AutopilotSnapshotData {
                         phase: ap.phase.to_u8(),
@@ -5914,7 +6086,7 @@ fn broadcast_scene(
                         sys_config.0.planets[pi].atmosphere.density_at_altitude(alt)
                     }).unwrap_or(0.0),
                 });
-                let _ = bridge.quic_send_tx.try_send((sid, addr, pos_msg));
+                let _ = bridge.quic_send_tx.try_send((sid, pos_msg));
             }
         }
     }
@@ -5929,11 +6101,11 @@ fn broadcast_ship_nearby(
     celestial_time: Res<ecs::CelestialTime>,
     bridge: Res<NetworkBridge>,
 ) {
-    let planet_shards: Vec<(ShardId, SocketAddr, Option<u64>)> =
+    let planet_shards: Vec<(ShardId, Option<u64>)> =
         if let Ok(reg) = bridge.peer_registry.try_read() {
             reg.find_by_type(ShardType::Planet)
                 .iter()
-                .map(|info| (info.id, info.endpoint.quic_addr, info.planet_seed))
+                .map(|info| (info.id, info.planet_seed))
                 .collect()
         } else {
             return;
@@ -5951,12 +6123,12 @@ fn broadcast_ship_nearby(
 
     for (ship_id, pos, vel, rot, in_soi) in &ships {
         let planet_seed = sys_config.0.planets[in_soi.planet_index].planet_seed;
-        let planet_shard = planet_shards
+        let planet_shard_id = planet_shards
             .iter()
-            .find(|(_, _, ps)| *ps == Some(planet_seed))
-            .map(|&(sid, addr, _)| (sid, addr));
+            .find(|(_, ps)| *ps == Some(planet_seed))
+            .map(|&(sid, _)| sid);
 
-        if let Some((psid, paddr)) = planet_shard {
+        if let Some(psid) = planet_shard_id {
             let ship_shard_id = ship_shards
                 .iter()
                 .find(|(_, sid)| *sid == Some(ship_id.0))
@@ -5971,7 +6143,7 @@ fn broadcast_ship_nearby(
                 velocity: vel.0,
                 game_time: celestial_time.0,
             });
-            let _ = bridge.quic_send_tx.try_send((psid, paddr, nearby_msg));
+            let _ = bridge.quic_send_tx.try_send((psid, nearby_msg));
         }
     }
 }
@@ -6281,7 +6453,7 @@ fn build_app(
     app.add_systems(
         Update,
         (soi_detection, planet_provisioning, warp_boundary, warp_velocity_cap,
-         eva_boarding_detection, eva_soi_detection,
+         tick_eva_exit_cooldown, eva_boarding_detection, eva_soi_detection,
          init_visibility_set, compute_visibility,
          ingest_planet_player_digest)
             .chain()

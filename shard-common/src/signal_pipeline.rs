@@ -320,20 +320,11 @@ pub fn propagate_listener_frequency_interest(
         lease_until_ms,
     };
 
-    let peer_registry = bridge.peer_registry.clone();
+    let _ = bridge.peer_registry; // address resolution moved into dispatcher
     let quic_send_tx = bridge.quic_send_tx.clone();
     tokio::spawn(async move {
-        let registry = peer_registry.read().await;
-        let Some(addr) = registry.quic_addr(host_id) else {
-            tracing::debug!(
-                host = host_id.0,
-                "ShipFrequencyInterest: host not in peer registry yet"
-            );
-            return;
-        };
-        drop(registry);
         let _ = quic_send_tx
-            .send((host_id, addr, ShardMsg::ShipFrequencyInterest(payload)))
+            .send((host_id, ShardMsg::ShipFrequencyInterest(payload)))
             .await;
     });
 }
@@ -1022,29 +1013,16 @@ pub fn apply_remote_signal_publish(
         return;
     }
 
-    let peer_registry = bridge.peer_registry.clone();
+    let _ = bridge.peer_registry; // address resolution moved into dispatcher
     let wire_dicts = bridge.wire_dicts.clone();
     let quic_send_tx = bridge.quic_send_tx.clone();
     let source_shard_id = identity.shard_id;
     let v2_enabled = policy.v2_enabled;
     tokio::spawn(async move {
-        let registry = peer_registry.read().await;
-        // Per-call dispatch helper. Picks V1 or V2 wire format up
-        // front and uses one QUIC send per (target, entry) pair.
-        // Holding the wire-dict lock across the loop is fine — the
-        // receive-side decode lock is on the same RwLock and the
-        // QUIC drain task scheduling separates the two windows.
         if v2_enabled {
             let mut wd = wire_dicts.write().await;
             for (target_shard_id, entry) in to_send {
                 let target = ShardId(target_shard_id);
-                let Some(endpoint) = registry.endpoint(target) else {
-                    tracing::warn!(
-                        target = target_shard_id,
-                        "RemoteSignalPublish: target shard not in peer registry"
-                    );
-                    continue;
-                };
                 let v2_batch = crate::wire_dict_registry::encode_v2_batch(
                     &mut wd,
                     target,
@@ -1053,11 +1031,7 @@ pub fn apply_remote_signal_publish(
                     vec![entry],
                 );
                 if let Err(e) = quic_send_tx
-                    .send((
-                        target,
-                        endpoint.quic_addr,
-                        ShardMsg::SignalBroadcastBatchV2(v2_batch),
-                    ))
+                    .send((target, ShardMsg::SignalBroadcastBatchV2(v2_batch)))
                     .await
                 {
                     tracing::warn!(
@@ -1070,16 +1044,6 @@ pub fn apply_remote_signal_publish(
         } else {
             for (target_shard_id, entry) in to_send {
                 let target = ShardId(target_shard_id);
-                let endpoint = match registry.endpoint(target) {
-                    Some(ep) => ep,
-                    None => {
-                        tracing::warn!(
-                            target = target_shard_id,
-                            "RemoteSignalPublish: target shard not in peer registry"
-                        );
-                        continue;
-                    }
-                };
                 let batch = SignalBroadcastBatchData {
                     source_shard_id: source_shard_id.0,
                     // No spatial position attached: a tablet-driven publish
@@ -1091,7 +1055,7 @@ pub fn apply_remote_signal_publish(
                     entries: vec![entry],
                 };
                 if let Err(e) = quic_send_tx
-                    .send((target, endpoint.quic_addr, ShardMsg::SignalBroadcastBatch(batch)))
+                    .send((target, ShardMsg::SignalBroadcastBatch(batch)))
                     .await
                 {
                     tracing::warn!(target = target_shard_id, %e, "RemoteSignalPublish QUIC send failed");
@@ -1480,24 +1444,13 @@ pub fn listener_lease_renewal(
         return;
     }
 
-    let peer_registry = bridge.peer_registry.clone();
+    let _ = bridge.peer_registry; // address resolution moved into dispatcher
     let quic_send_tx = bridge.quic_send_tx.clone();
     tokio::spawn(async move {
-        let registry = peer_registry.read().await;
         for (target_shard_id, req) in to_dispatch {
             let target = ShardId(target_shard_id);
-            let endpoint = match registry.endpoint(target) {
-                Some(ep) => ep,
-                None => {
-                    tracing::warn!(
-                        target = target_shard_id,
-                        "listener lease renewal: target shard not in peer registry"
-                    );
-                    continue;
-                }
-            };
             if let Err(e) = quic_send_tx
-                .send((target, endpoint.quic_addr, ShardMsg::SignalSubscribe(req)))
+                .send((target, ShardMsg::SignalSubscribe(req)))
                 .await
             {
                 tracing::warn!(
@@ -1689,12 +1642,11 @@ pub fn antenna_publish(
         return;
     }
 
-    let peer_registry = bridge.peer_registry.clone();
+    let _ = bridge.peer_registry; // address resolution moved into dispatcher
     let wire_dicts = bridge.wire_dicts.clone();
     let quic_send_tx = bridge.quic_send_tx.clone();
     let v2_enabled = policy.v2_enabled;
     tokio::spawn(async move {
-        let registry = peer_registry.read().await;
         for (target_shard_id_opt, entry) in to_send {
             // Phase D: explicit target ⇒ direct delivery; None ⇒ post-
             // Phase-3F orchestrator-routed via the relay. For now, no
@@ -1707,13 +1659,6 @@ pub fn antenna_publish(
                 continue;
             };
             let target = ShardId(target_shard_id);
-            let Some(endpoint) = registry.endpoint(target) else {
-                tracing::warn!(
-                    target = target_shard_id,
-                    "antenna_publish: target shard not in peer registry"
-                );
-                continue;
-            };
             if v2_enabled {
                 let mut wd = wire_dicts.write().await;
                 let v2_batch = crate::wire_dict_registry::encode_v2_batch(
@@ -1724,11 +1669,7 @@ pub fn antenna_publish(
                     vec![entry],
                 );
                 if let Err(e) = quic_send_tx
-                    .send((
-                        target,
-                        endpoint.quic_addr,
-                        ShardMsg::SignalBroadcastBatchV2(v2_batch),
-                    ))
+                    .send((target, ShardMsg::SignalBroadcastBatchV2(v2_batch)))
                     .await
                 {
                     tracing::warn!(target = target_shard_id, %e, "antenna_publish QUIC send failed (V2)");
@@ -1740,7 +1681,7 @@ pub fn antenna_publish(
                     entries: vec![entry],
                 };
                 if let Err(e) = quic_send_tx
-                    .send((target, endpoint.quic_addr, ShardMsg::SignalBroadcastBatch(batch)))
+                    .send((target, ShardMsg::SignalBroadcastBatch(batch)))
                     .await
                 {
                     tracing::warn!(target = target_shard_id, %e, "antenna_publish QUIC send failed");

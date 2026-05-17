@@ -221,26 +221,18 @@ pub fn media_publish_remote(
     let quic_send_tx = bridge.quic_send_tx.clone();
     let source_shard_id = identity.shard_id;
     tokio::spawn(async move {
-        let registry = peer_registry.read().await;
+        // Address resolution moved into the dispatcher (with on-
+        // demand orchestrator refresh on cache miss); we just send
+        // (target_id, msg) here.
+        let _ = peer_registry; // retained for future short-range range gating
         for (target, frames) in by_target {
-            let endpoint = match registry.endpoint(target) {
-                Some(ep) => ep,
-                None => {
-                    tracing::warn!(
-                        target = target.0,
-                        frame_count = frames.len(),
-                        "MediaPublish: target shard not in peer registry; frames dropped"
-                    );
-                    continue;
-                }
-            };
             let batch = ShardMsg::MediaBroadcastBatch(MediaBroadcastBatchData {
                 source_shard_id: source_shard_id.0,
                 source_position: DVec3::ZERO, // ShortRange media path will fill this in.
                 frames,
             });
             if let Err(e) = quic_send_tx
-                .send((target, endpoint.quic_addr, batch))
+                .send((target, batch))
                 .await
             {
                 tracing::warn!(

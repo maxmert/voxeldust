@@ -940,6 +940,13 @@ pub struct PlayerInputData {
     /// See [`actions`] for flag bit layout. Zero preserves legacy behaviour;
     /// old clients transmit no value for this field and servers see `0`.
     pub actions_bits: u32,
+    /// Authoritative session identifier the client knows (from JoinResponse).
+    /// The server uses this to deterministically bind `udp_src → session`
+    /// in `ClientRegistry`, replacing the brittle peer-IP heuristic that
+    /// mis-assigns when multiple clients share an IP (localhost dev,
+    /// CG-NAT). Zero on legacy clients / pre-session frames; the server
+    /// then falls back to the heuristic.
+    pub session_token: u64,
 }
 
 /// Action-bit layout for [`PlayerInputData::actions_bits`].
@@ -1805,6 +1812,7 @@ impl ClientMsg {
                         atmo_comp: data.atmo_comp,
                         seat_values: sv,
                         actions_bits: data.actions_bits,
+                        session_token: data.session_token,
                     },
                 );
                 let msg = fb::ClientMessage::create(
@@ -2216,6 +2224,7 @@ impl ClientMsg {
                     atmo_comp: p.atmo_comp(),
                     seat_values: p.seat_values().map(|v| v.iter().collect()).unwrap_or_default(),
                     actions_bits: p.actions_bits(),
+                    session_token: p.session_token(),
                 }))
             }
             fb::ClientPayload::BlockEditRequest => {
@@ -3766,6 +3775,7 @@ mod tests {
             atmo_comp: false,
             seat_values: vec![0.5, 1.0, 0.0],
             actions_bits: input_action_bits::SPRINT,
+            session_token: 0xDEADBEEFCAFEBABE,
         });
         let bytes = msg.serialize();
         let decoded = ClientMsg::deserialize(&bytes).unwrap();
@@ -3778,6 +3788,7 @@ mod tests {
             assert_eq!(p.seat_values.len(), 3);
             assert!((p.seat_values[0] - 0.5).abs() < 1e-5);
             assert_eq!(p.actions_bits, input_action_bits::SPRINT);
+            assert_eq!(p.session_token, 0xDEADBEEFCAFEBABE);
         } else {
             panic!("expected PlayerInput");
         }

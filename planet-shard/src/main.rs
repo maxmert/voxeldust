@@ -777,22 +777,13 @@ fn process_handoffs(
             observer_promoted: false,
         });
         let relay_shard = event.relay_shard;
-        if let Ok(reg) = bridge.peer_registry.try_read() {
-            if let Some(addr) = reg.quic_addr(relay_shard) {
-                let _ = bridge
-                    .quic_send_tx
-                    .try_send((relay_shard, addr, accepted));
-                info!(
-                    target = relay_shard.0,
-                    "sent HandoffAccepted to relay system shard"
-                );
-            } else {
-                warn!(
-                    target = relay_shard.0,
-                    "relay system shard not in peer registry"
-                );
-            }
-        }
+        let _ = bridge
+            .quic_send_tx
+            .try_send((relay_shard, accepted));
+        info!(
+            target = relay_shard.0,
+            "sent HandoffAccepted to relay system shard"
+        );
     }
 }
 
@@ -1751,14 +1742,14 @@ fn ship_proximity(
 
             // Send to system shard for routing to ship shard.
             if let Ok(reg) = bridge.peer_registry.try_read() {
-                let system_shard = reg
+                let system_shard_id = reg
                     .find_by_type(ShardType::System)
                     .first()
-                    .map(|s| (s.id, s.endpoint.quic_addr));
-                if let Some((sid, addr)) = system_shard {
+                    .map(|s| s.id);
+                if let Some(sid) = system_shard_id {
                     let _ = bridge
                         .quic_send_tx
-                        .try_send((sid, addr, ShardMsg::PlayerHandoff(h)));
+                        .try_send((sid, ShardMsg::PlayerHandoff(h)));
                     info!(
                         session = session_id.0.0,
                         ship_id = ship_id.0,
@@ -2087,8 +2078,28 @@ fn broadcast_world_state(
 
 /// Emit a PlanetPlayerDigest at 1 Hz so the system shard can include surface
 /// players in its AOI for distant observers (ships, EVA).
+///
+/// Phase T2 — the digest now carries body/head decoupling and look-at
+/// fields so distant observers see the surface player's BODY yaw, HEAD
+/// yaw/pitch, animation state and look target on every tick (not just
+/// the abstract root rotation). System shard's `collect_aoi_candidates`
+/// forwards these into the `ObservableEntity` AOI projection.
 fn send_player_digest(
-    players: Query<(&SessionId, &Name, &PlanetPosition), With<PlanetPlayer>>,
+    players: Query<
+        (
+            &SessionId,
+            &Name,
+            &PlanetPosition,
+            &BodyYaw,
+            &HeadYaw,
+            &HeadPitch,
+            &CharacterVelocity,
+            &LocomotionState,
+            Option<&TurnInPlace>,
+            &voxeldust_core::character::LookTarget,
+        ),
+        With<PlanetPlayer>,
+    >,
     config: Res<PlanetConfig>,
     planet_pos: Res<PlanetPositionInSystem>,
     tick: Res<ecs::TickCounter>,
@@ -2104,13 +2115,31 @@ fn send_player_digest(
 
     let entries: Vec<PlanetPlayerDigestEntry> = players
         .iter()
-        .map(|(sid, name, pos)| PlanetPlayerDigestEntry {
-            session_token: sid.0,
-            player_name: name.0.clone(),
+        .map(|(sid, name, pos, body, head_y, head_p, vel, loco, turn, look)| {
             // Transform planet-local position to system-space (what system shard expects).
-            position: planet_pos.0 + pos.0,
-            rotation: DQuat::IDENTITY,
-            planet_index: config.planet_index,
+            let position = planet_pos.0 + pos.0;
+            let look_target_delta = look.0.map(|t| (t - position).as_vec3());
+            PlanetPlayerDigestEntry {
+                session_token: sid.0,
+                player_name: name.0.clone(),
+                position,
+                // Body rotation around the local-up axis. The renderer
+                // composes head yaw/pitch on top via the dedicated
+                // `head_yaw` / `head_pitch` fields below; sending only
+                // a yaw quaternion here preserves the existing wire
+                // contract (planet-shard never had body roll).
+                rotation: DQuat::from_axis_angle(DVec3::Y, body.0 as f64),
+                planet_index: config.planet_index,
+                body_yaw: body.0,
+                head_yaw: head_y.0,
+                head_pitch: head_p.0,
+                locomotion: loco.as_u8(),
+                locomotion_speed: vel.horizontal().length(),
+                is_turning: turn.is_some(),
+                turn_target_yaw: turn.map(|t| t.target_body_yaw).unwrap_or(0.0),
+                turn_t: turn.map(|t| t.t).unwrap_or(0.0),
+                look_target_delta,
+            }
         })
         .collect();
 
@@ -2122,10 +2151,11 @@ fn send_player_digest(
         tick: tick.0,
     });
 
-    // Find the system shard and send.
+    // Find the system shard and send. Address resolution happens in
+    // the QUIC dispatcher (with on-demand orchestrator refresh).
     if let Ok(reg) = bridge.peer_registry.try_read() {
         if let Some(info) = reg.find_by_type(ShardType::System).first() {
-            let _ = bridge.quic_send_tx.try_send((info.id, info.endpoint.quic_addr, digest));
+            let _ = bridge.quic_send_tx.try_send((info.id, digest));
         }
     }
 }

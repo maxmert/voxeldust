@@ -288,15 +288,11 @@ fn drain_quic(
                 if buckets.is_empty() {
                     continue;
                 }
-                let peer_registry = bridge.peer_registry.clone();
+                let _ = bridge.peer_registry; // address resolution moved into dispatcher
                 let quic_send_tx = bridge.quic_send_tx.clone();
                 let source_position = batch.source_position;
                 tokio::spawn(async move {
-                    let registry = peer_registry.read().await;
                     for (sub, entries) in buckets {
-                        let Some(addr) = registry.quic_addr(sub) else {
-                            continue;
-                        };
                         let relay = ShardMsg::SignalBroadcastBatch(
                             voxeldust_core::shard_message::SignalBroadcastBatchData {
                                 source_shard_id,
@@ -304,7 +300,7 @@ fn drain_quic(
                                 entries,
                             },
                         );
-                        let _ = quic_send_tx.send((sub, addr, relay)).await;
+                        let _ = quic_send_tx.send((sub, relay)).await;
                     }
                 });
             }
@@ -371,16 +367,12 @@ fn drain_quic(
                     to_dispatch.push((sub, v2));
                 }
                 drop(wd); // release before async dispatch
-                let peer_registry = bridge.peer_registry.clone();
+                let _ = bridge.peer_registry; // address resolution moved into dispatcher
                 let quic_send_tx = bridge.quic_send_tx.clone();
                 tokio::spawn(async move {
-                    let registry = peer_registry.read().await;
                     for (sub, v2) in to_dispatch {
-                        let Some(addr) = registry.quic_addr(sub) else {
-                            continue;
-                        };
                         let _ = quic_send_tx
-                            .send((sub, addr, ShardMsg::SignalBroadcastBatchV2(v2)))
+                            .send((sub, ShardMsg::SignalBroadcastBatchV2(v2)))
                             .await;
                     }
                 });
@@ -929,28 +921,19 @@ fn soi_detection(
             character_state: Vec::new(),
         };
 
-        // Send PlayerHandoff to destination system shard.
-        let handoff_sent = if let Ok(reg) = bridge.peer_registry.try_read() {
-            if let Some(peer_info) = reg.get(dest_shard_id) {
-                let _ = bridge.quic_send_tx.try_send((
-                    dest_shard_id,
-                    peer_info.endpoint.quic_addr,
-                    ShardMsg::PlayerHandoff(handoff_data),
-                ));
-                true
-            } else {
-                warn!(
-                    dest = dest_shard_id.0,
-                    "destination system shard not in peer registry — handoff dropped"
-                );
-                false
-            }
-        } else {
-            warn!("peer registry lock failed during warp arrival handoff");
-            false
-        };
+        // Send PlayerHandoff to destination system shard. Address
+        // resolution + on-demand orchestrator refresh handled by the
+        // QUIC dispatcher.
+        let handoff_sent = bridge
+            .quic_send_tx
+            .try_send((dest_shard_id, ShardMsg::PlayerHandoff(handoff_data)))
+            .is_ok();
 
         if !handoff_sent {
+            warn!(
+                dest = dest_shard_id.0,
+                "QUIC queue full during warp arrival handoff — retry next tick"
+            );
             continue; // Retry next detection tick.
         }
 
@@ -1022,15 +1005,16 @@ fn send_host_switch(
     galaxy_map: &GalaxyMap,
     bridge: &NetworkBridge,
 ) {
+    // We need the destination's endpoint to populate the wire message
+    // fields the ship-shard will use to talk to the new host. The QUIC
+    // dispatch itself only needs the shard id (resolution happens in
+    // the dispatcher with on-demand orchestrator refresh).
     let Ok(reg) = bridge.peer_registry.try_read() else {
         return;
     };
-
-    // Look up ship shard QUIC address.
-    let ship_quic = reg.get(ship_shard_id).map(|s| s.endpoint.quic_addr);
     let dest_ep = reg.get(dest_shard_id);
 
-    if let (Some(quic_addr), Some(dest_info)) = (ship_quic, dest_ep) {
+    if let Some(dest_info) = dest_ep {
         let dest_system_seed = galaxy_map
             .get_star(target_star_index)
             .map(|s| s.system_seed)
@@ -1046,7 +1030,7 @@ fn send_host_switch(
         });
         let _ = bridge
             .quic_send_tx
-            .try_send((ship_shard_id, quic_addr, host_switch));
+            .try_send((ship_shard_id, host_switch));
         info!(
             ship_id,
             new_host = dest_shard_id.0,
@@ -1141,8 +1125,8 @@ fn broadcast_scene_to_ship_shards(
     ship_dir: Res<ShipShardDirectory>,
 ) {
     for (ship_id, _pos, vel, rot, _warp) in &ships {
-        let (shard_id, quic_addr) = match ship_dir.0.get(&ship_id.0) {
-            Some(&(sid, addr)) if addr.port() != 0 => (sid, addr),
+        let shard_id = match ship_dir.0.get(&ship_id.0) {
+            Some(&(sid, addr)) if addr.port() != 0 => sid,
             _ => continue, // Ship shard not yet discovered
         };
 
@@ -1162,7 +1146,7 @@ fn broadcast_scene_to_ship_shards(
 
         let _ = bridge
             .quic_send_tx
-            .try_send((shard_id, quic_addr, ShardMsg::SystemSceneUpdate(scene)));
+            .try_send((shard_id, ShardMsg::SystemSceneUpdate(scene)));
 
         // Per-ship position update for the ship shard's WorldState.
         let pos_update = ShardMsg::ShipPositionUpdate(ShipPositionUpdate {
@@ -1179,7 +1163,7 @@ fn broadcast_scene_to_ship_shards(
         });
         let _ = bridge
             .quic_send_tx
-            .try_send((shard_id, quic_addr, pos_update));
+            .try_send((shard_id, pos_update));
     }
 }
 

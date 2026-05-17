@@ -6457,6 +6457,18 @@ impl<'a> PlanetPlayerDigestEntry<'a> {
   pub const VT_POSITION: ::flatbuffers::VOffsetT = 8;
   pub const VT_ROTATION: ::flatbuffers::VOffsetT = 10;
   pub const VT_PLANET_INDEX: ::flatbuffers::VOffsetT = 12;
+  pub const VT_BODY_YAW: ::flatbuffers::VOffsetT = 14;
+  pub const VT_HEAD_YAW: ::flatbuffers::VOffsetT = 16;
+  pub const VT_HEAD_PITCH: ::flatbuffers::VOffsetT = 18;
+  pub const VT_LOCOMOTION: ::flatbuffers::VOffsetT = 20;
+  pub const VT_LOCOMOTION_SPEED: ::flatbuffers::VOffsetT = 22;
+  pub const VT_IS_TURNING: ::flatbuffers::VOffsetT = 24;
+  pub const VT_TURN_TARGET_YAW: ::flatbuffers::VOffsetT = 26;
+  pub const VT_TURN_T: ::flatbuffers::VOffsetT = 28;
+  pub const VT_LOOK_TARGET_SET: ::flatbuffers::VOffsetT = 30;
+  pub const VT_LOOK_DX: ::flatbuffers::VOffsetT = 32;
+  pub const VT_LOOK_DY: ::flatbuffers::VOffsetT = 34;
+  pub const VT_LOOK_DZ: ::flatbuffers::VOffsetT = 36;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6469,10 +6481,22 @@ impl<'a> PlanetPlayerDigestEntry<'a> {
   ) -> ::flatbuffers::WIPOffset<PlanetPlayerDigestEntry<'bldr>> {
     let mut builder = PlanetPlayerDigestEntryBuilder::new(_fbb);
     builder.add_session_token(args.session_token);
+    builder.add_look_dz(args.look_dz);
+    builder.add_look_dy(args.look_dy);
+    builder.add_look_dx(args.look_dx);
+    builder.add_turn_t(args.turn_t);
+    builder.add_turn_target_yaw(args.turn_target_yaw);
+    builder.add_locomotion_speed(args.locomotion_speed);
+    builder.add_head_pitch(args.head_pitch);
+    builder.add_head_yaw(args.head_yaw);
+    builder.add_body_yaw(args.body_yaw);
     builder.add_planet_index(args.planet_index);
     if let Some(x) = args.rotation { builder.add_rotation(x); }
     if let Some(x) = args.position { builder.add_position(x); }
     if let Some(x) = args.player_name { builder.add_player_name(x); }
+    builder.add_look_target_set(args.look_target_set);
+    builder.add_is_turning(args.is_turning);
+    builder.add_locomotion(args.locomotion);
     builder.finish()
   }
 
@@ -6514,6 +6538,90 @@ impl<'a> PlanetPlayerDigestEntry<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(PlanetPlayerDigestEntry::VT_PLANET_INDEX, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn body_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_BODY_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn head_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_HEAD_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn head_pitch(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_HEAD_PITCH, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn locomotion(&self) -> u8 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u8>(PlanetPlayerDigestEntry::VT_LOCOMOTION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn locomotion_speed(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_LOCOMOTION_SPEED, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn is_turning(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlanetPlayerDigestEntry::VT_IS_TURNING, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn turn_target_yaw(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_TURN_TARGET_YAW, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn turn_t(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_TURN_T, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn look_target_set(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(PlanetPlayerDigestEntry::VT_LOOK_TARGET_SET, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dx(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_LOOK_DX, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dy(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_LOOK_DY, Some(0.0)).unwrap()}
+  }
+  #[inline]
+  pub fn look_dz(&self) -> f32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f32>(PlanetPlayerDigestEntry::VT_LOOK_DZ, Some(0.0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlanetPlayerDigestEntry<'_> {
@@ -6527,6 +6635,18 @@ impl ::flatbuffers::Verifiable for PlanetPlayerDigestEntry<'_> {
      .visit_field::<Vec3d>("position", Self::VT_POSITION, false)?
      .visit_field::<Quatd>("rotation", Self::VT_ROTATION, false)?
      .visit_field::<u32>("planet_index", Self::VT_PLANET_INDEX, false)?
+     .visit_field::<f32>("body_yaw", Self::VT_BODY_YAW, false)?
+     .visit_field::<f32>("head_yaw", Self::VT_HEAD_YAW, false)?
+     .visit_field::<f32>("head_pitch", Self::VT_HEAD_PITCH, false)?
+     .visit_field::<u8>("locomotion", Self::VT_LOCOMOTION, false)?
+     .visit_field::<f32>("locomotion_speed", Self::VT_LOCOMOTION_SPEED, false)?
+     .visit_field::<bool>("is_turning", Self::VT_IS_TURNING, false)?
+     .visit_field::<f32>("turn_target_yaw", Self::VT_TURN_TARGET_YAW, false)?
+     .visit_field::<f32>("turn_t", Self::VT_TURN_T, false)?
+     .visit_field::<bool>("look_target_set", Self::VT_LOOK_TARGET_SET, false)?
+     .visit_field::<f32>("look_dx", Self::VT_LOOK_DX, false)?
+     .visit_field::<f32>("look_dy", Self::VT_LOOK_DY, false)?
+     .visit_field::<f32>("look_dz", Self::VT_LOOK_DZ, false)?
      .finish();
     Ok(())
   }
@@ -6537,6 +6657,18 @@ pub struct PlanetPlayerDigestEntryArgs<'a> {
     pub position: Option<&'a Vec3d>,
     pub rotation: Option<&'a Quatd>,
     pub planet_index: u32,
+    pub body_yaw: f32,
+    pub head_yaw: f32,
+    pub head_pitch: f32,
+    pub locomotion: u8,
+    pub locomotion_speed: f32,
+    pub is_turning: bool,
+    pub turn_target_yaw: f32,
+    pub turn_t: f32,
+    pub look_target_set: bool,
+    pub look_dx: f32,
+    pub look_dy: f32,
+    pub look_dz: f32,
 }
 impl<'a> Default for PlanetPlayerDigestEntryArgs<'a> {
   #[inline]
@@ -6547,6 +6679,18 @@ impl<'a> Default for PlanetPlayerDigestEntryArgs<'a> {
       position: None,
       rotation: None,
       planet_index: 0,
+      body_yaw: 0.0,
+      head_yaw: 0.0,
+      head_pitch: 0.0,
+      locomotion: 0,
+      locomotion_speed: 0.0,
+      is_turning: false,
+      turn_target_yaw: 0.0,
+      turn_t: 0.0,
+      look_target_set: false,
+      look_dx: 0.0,
+      look_dy: 0.0,
+      look_dz: 0.0,
     }
   }
 }
@@ -6577,6 +6721,54 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlanetPlayerDigestEntryBuilde
     self.fbb_.push_slot::<u32>(PlanetPlayerDigestEntry::VT_PLANET_INDEX, planet_index, 0);
   }
   #[inline]
+  pub fn add_body_yaw(&mut self, body_yaw: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_BODY_YAW, body_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_head_yaw(&mut self, head_yaw: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_HEAD_YAW, head_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_head_pitch(&mut self, head_pitch: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_HEAD_PITCH, head_pitch, 0.0);
+  }
+  #[inline]
+  pub fn add_locomotion(&mut self, locomotion: u8) {
+    self.fbb_.push_slot::<u8>(PlanetPlayerDigestEntry::VT_LOCOMOTION, locomotion, 0);
+  }
+  #[inline]
+  pub fn add_locomotion_speed(&mut self, locomotion_speed: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_LOCOMOTION_SPEED, locomotion_speed, 0.0);
+  }
+  #[inline]
+  pub fn add_is_turning(&mut self, is_turning: bool) {
+    self.fbb_.push_slot::<bool>(PlanetPlayerDigestEntry::VT_IS_TURNING, is_turning, false);
+  }
+  #[inline]
+  pub fn add_turn_target_yaw(&mut self, turn_target_yaw: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_TURN_TARGET_YAW, turn_target_yaw, 0.0);
+  }
+  #[inline]
+  pub fn add_turn_t(&mut self, turn_t: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_TURN_T, turn_t, 0.0);
+  }
+  #[inline]
+  pub fn add_look_target_set(&mut self, look_target_set: bool) {
+    self.fbb_.push_slot::<bool>(PlanetPlayerDigestEntry::VT_LOOK_TARGET_SET, look_target_set, false);
+  }
+  #[inline]
+  pub fn add_look_dx(&mut self, look_dx: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_LOOK_DX, look_dx, 0.0);
+  }
+  #[inline]
+  pub fn add_look_dy(&mut self, look_dy: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_LOOK_DY, look_dy, 0.0);
+  }
+  #[inline]
+  pub fn add_look_dz(&mut self, look_dz: f32) {
+    self.fbb_.push_slot::<f32>(PlanetPlayerDigestEntry::VT_LOOK_DZ, look_dz, 0.0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlanetPlayerDigestEntryBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlanetPlayerDigestEntryBuilder {
@@ -6599,6 +6791,18 @@ impl ::core::fmt::Debug for PlanetPlayerDigestEntry<'_> {
       ds.field("position", &self.position());
       ds.field("rotation", &self.rotation());
       ds.field("planet_index", &self.planet_index());
+      ds.field("body_yaw", &self.body_yaw());
+      ds.field("head_yaw", &self.head_yaw());
+      ds.field("head_pitch", &self.head_pitch());
+      ds.field("locomotion", &self.locomotion());
+      ds.field("locomotion_speed", &self.locomotion_speed());
+      ds.field("is_turning", &self.is_turning());
+      ds.field("turn_target_yaw", &self.turn_target_yaw());
+      ds.field("turn_t", &self.turn_t());
+      ds.field("look_target_set", &self.look_target_set());
+      ds.field("look_dx", &self.look_dx());
+      ds.field("look_dy", &self.look_dy());
+      ds.field("look_dz", &self.look_dz());
       ds.finish()
   }
 }
@@ -12833,6 +13037,7 @@ impl<'a> PlayerInput<'a> {
   pub const VT_ATMO_COMP: ::flatbuffers::VOffsetT = 34;
   pub const VT_SEAT_VALUES: ::flatbuffers::VOffsetT = 36;
   pub const VT_ACTIONS_BITS: ::flatbuffers::VOffsetT = 38;
+  pub const VT_SESSION_TOKEN: ::flatbuffers::VOffsetT = 40;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -12844,6 +13049,7 @@ impl<'a> PlayerInput<'a> {
     args: &'args PlayerInputArgs<'args>
   ) -> ::flatbuffers::WIPOffset<PlayerInput<'bldr>> {
     let mut builder = PlayerInputBuilder::new(_fbb);
+    builder.add_session_token(args.session_token);
     builder.add_tick(args.tick);
     builder.add_actions_bits(args.actions_bits);
     if let Some(x) = args.seat_values { builder.add_seat_values(x); }
@@ -13004,6 +13210,25 @@ impl<'a> PlayerInput<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(PlayerInput::VT_ACTIONS_BITS, Some(0)).unwrap()}
   }
+  /// Authoritative session identifier the client knows (from JoinResponse).
+  /// Server uses this to deterministically bind UDP source → session,
+  /// avoiding the IP-only heuristic in `ClientRegistry::discover_udp`
+  /// which breaks on localhost multi-client testing (all 127.0.0.1 share
+  /// IP, so the heuristic can mis-assign a session-observer's `udp_addr`
+  /// to the wrong client's UDP src — silently dropping every PlayerInput
+  /// from the affected session because `session_for_udp` returns None).
+  /// Carried on every UDP packet (including the initial empty-input
+  /// hole-punch hello) so the server can correct an earlier wrong
+  /// binding without waiting for a reconnect.
+  /// Default 0 preserves legacy behaviour; old clients / pre-T0 code
+  /// paths transmit nothing and the server falls back to the IP match.
+  #[inline]
+  pub fn session_token(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(PlayerInput::VT_SESSION_TOKEN, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for PlayerInput<'_> {
@@ -13030,6 +13255,7 @@ impl ::flatbuffers::Verifiable for PlayerInput<'_> {
      .visit_field::<bool>("atmo_comp", Self::VT_ATMO_COMP, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, f32>>>("seat_values", Self::VT_SEAT_VALUES, false)?
      .visit_field::<u32>("actions_bits", Self::VT_ACTIONS_BITS, false)?
+     .visit_field::<u64>("session_token", Self::VT_SESSION_TOKEN, false)?
      .finish();
     Ok(())
   }
@@ -13053,6 +13279,7 @@ pub struct PlayerInputArgs<'a> {
     pub atmo_comp: bool,
     pub seat_values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, f32>>>,
     pub actions_bits: u32,
+    pub session_token: u64,
 }
 impl<'a> Default for PlayerInputArgs<'a> {
   #[inline]
@@ -13076,6 +13303,7 @@ impl<'a> Default for PlayerInputArgs<'a> {
       atmo_comp: false,
       seat_values: None,
       actions_bits: 0,
+      session_token: 0,
     }
   }
 }
@@ -13158,6 +13386,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerInputBuilder<'a, 'b, A>
     self.fbb_.push_slot::<u32>(PlayerInput::VT_ACTIONS_BITS, actions_bits, 0);
   }
   #[inline]
+  pub fn add_session_token(&mut self, session_token: u64) {
+    self.fbb_.push_slot::<u64>(PlayerInput::VT_SESSION_TOKEN, session_token, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> PlayerInputBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     PlayerInputBuilder {
@@ -13193,6 +13425,7 @@ impl ::core::fmt::Debug for PlayerInput<'_> {
       ds.field("atmo_comp", &self.atmo_comp());
       ds.field("seat_values", &self.seat_values());
       ds.field("actions_bits", &self.actions_bits());
+      ds.field("session_token", &self.session_token());
       ds.finish()
   }
 }

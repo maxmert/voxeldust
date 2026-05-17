@@ -270,6 +270,9 @@ fn empty_input() -> PlayerInputData {
         atmo_comp: false,
         seat_values: Vec::new(),
         actions_bits: 0,
+        // Populated by run_connection before send so the server can bind
+        // udp_src → session deterministically.
+        session_token: 0,
     }
 }
 
@@ -389,6 +392,22 @@ pub async fn run_connection(
     // legacy code did this in `connect_to_shard_full` after JoinResponse;
     // for the unified task we always do it here so callers don't
     // need to.
+    //
+    // CRITICAL: the hello does NOT carry `session_token`. An earlier
+    // attempt stamped session_token on the hello so the server could
+    // deterministically bind `udp_src → session`, but that conflated
+    // an OBSERVER-mode hello (whose UDP socket belongs to a
+    // *secondary-observer* connection) with the PLAYER session.
+    // Server-side `bind_udp_to_session` then overwrote
+    // `clients[player_session].udp_addr` with the observer's UDP
+    // src — destroying the player's still-active primary input
+    // route mid-handoff and dropping every subsequent PlayerInput
+    // packet for that session.
+    //
+    // session_token stamping is preserved on per-tick PlayerInput
+    // packets (Primary mode only — see the input arm below), so
+    // the deterministic binding still works for the legitimate
+    // player input stream without affecting observer hole-punches.
     let hello = build_input_packet(&empty_input());
     if let Err(e) = udp.send_to(&hello, udp_target).await {
         warn!(%e, %udp_target, "UDP hole-punch send failed");
@@ -550,14 +569,25 @@ pub async fn run_connection(
 
             // 3) TCP recv — server messages. Primary handles the
             //    full set; Secondary/Demoting only the chunk-streaming
-            //    subset.
+            //    subset. Controller-bound transient handoff messages
+            //    (ShardHandoff / ShardRedirect / ShardPreConnect /
+            //    ShardDisconnectNotify) are routed to the controller
+            //    REGARDLESS of mode — they arrive on whichever TCP
+            //    is alive at the moment the server emits them and
+            //    must not be lost to a brief mode-mismatch race
+            //    (the canonical race: server sends ShardPreConnect
+            //    over the just-promoted TCP at the SAME moment the
+            //    source ship-shard's ShardHandoff is racing toward
+            //    the client's controller, so the promoted secondary's
+            //    `Promote` control message might not have landed
+            //    yet when the ShardPreConnect bytes arrive).
             msg_result = recv_server_msg(&mut tcp_read) => {
                 match msg_result {
                     Ok(msg) => {
                         if is_primary {
                             forward_primary_tcp_msg(msg, &event_tx, &controller_tx);
                         } else {
-                            forward_secondary_tcp_msg(msg, seed, &event_tx);
+                            forward_secondary_tcp_msg(msg, seed, &event_tx, &controller_tx);
                         }
                     }
                     Err(e) => {
@@ -586,6 +616,11 @@ pub async fn run_connection(
                     let mut rx = input_rx.lock().await;
                     let mut latest = empty_input();
                     while let Ok(i) = rx.try_recv() { latest = i; }
+                    // Stamp session_token unconditionally so every UDP
+                    // input packet identifies its session — the server
+                    // uses it to (re)bind `udp_src → session` even after
+                    // a wrong IP-heuristic bind earlier in the session.
+                    latest.session_token = session_token.0;
                     latest
                 };
                 let changed = input != last_input_sent;
@@ -717,11 +752,26 @@ fn forward_primary_tcp_msg(
 }
 
 /// Dispatch a server message received over a Secondary/Demoting
-/// TCP. Restricted to the chunk-streaming + scene-context subset.
+/// TCP. Restricted to the chunk-streaming + scene-context subset
+/// PLUS the controller-bound transient handoff set.
+///
+/// Why route transient handoff messages here too: the server can
+/// send `ShardPreConnect` over the just-promoted TCP at the SAME
+/// moment the source ship-shard's `ShardHandoff` is racing toward
+/// the client's controller. The promoted secondary's connection
+/// task receives the `Promote` control message only AFTER the
+/// controller processes the ShardHandoff and sends it. Until that
+/// `Promote` lands the task's `mode` is still `Secondary`, so any
+/// `ShardPreConnect` bytes that arrive in the millisecond window
+/// between the two events would be silently dropped by the prior
+/// `_ => {}` arm. Forwarding them here unconditionally — the
+/// controller already knows how to handle them either way — closes
+/// that race without changing the steady-state behavior.
 fn forward_secondary_tcp_msg(
     msg: ServerMsg,
     seed: u64,
     event_tx: &mpsc::UnboundedSender<NetEvent>,
+    controller_tx: &Option<mpsc::Sender<ControllerEvent>>,
 ) {
     match msg {
         ServerMsg::ChunkSnapshot(cs) => {
@@ -738,6 +788,37 @@ fn forward_secondary_tcp_msg(
             // observer TCP — forward via the shared StarCatalog event
             // so the lighting / starfield systems see one path.
             let _ = event_tx.send(NetEvent::StarCatalog(d));
+        }
+        // Controller-bound transient handoff messages — see the
+        // function-level doc comment for the race they close.
+        ServerMsg::ShardRedirect(r) => {
+            if let Some(tx) = controller_tx {
+                if let Err(e) = tx.try_send(ControllerEvent::ShardRedirect(r)) {
+                    warn!(%e, "controller_tx full / closed on ShardRedirect (Secondary path)");
+                }
+            }
+        }
+        ServerMsg::ShardHandoff(h) => {
+            if let Some(tx) = controller_tx {
+                if let Err(e) = tx.try_send(ControllerEvent::ShardHandoff(h)) {
+                    warn!(%e, "controller_tx full / closed on ShardHandoff (Secondary path)");
+                }
+            }
+        }
+        ServerMsg::ShardPreConnect(pc) => {
+            if let Some(tx) = controller_tx {
+                if let Err(e) = tx.try_send(ControllerEvent::ShardPreConnect(pc)) {
+                    warn!(%e, "controller_tx full / closed on ShardPreConnect (Secondary path)");
+                }
+            }
+        }
+        ServerMsg::ShardDisconnectNotify(dn) => {
+            if let Some(tx) = controller_tx {
+                let _ = tx.try_send(ControllerEvent::ShardDisconnect {
+                    shard_type: dn.shard_type,
+                    seed: dn.seed,
+                });
+            }
         }
         // Anything else on a Secondary TCP is unexpected; drop.
         _ => {}

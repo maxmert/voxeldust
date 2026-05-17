@@ -931,6 +931,7 @@ fn drain_connects(
                 reg.register_session_observer(
                     observed,
                     observer_name,
+                    conn.peer_addr,
                     conn.tcp_write.clone(),
                 );
             }
@@ -1238,23 +1239,64 @@ fn drain_quic(
                 let creg_for_promote = bridge.client_registry.clone();
                 let preg_for_send = bridge.peer_registry.clone();
                 let quic_tx_for_send = bridge.quic_send_tx.clone();
+                let connect_tx_for_spawn = bridge.connect_tx.clone();
                 let session_for_promote = h.session_token;
                 let player_name_for_promote = h.player_name.clone();
                 let target_shard_for_send = config.shard_id;
                 let host_for_send = config.host_shard_id;
                 tokio::spawn(async move {
-                    let observer_promoted = {
+                    // Capture the returned tcp_write so we can synthesise
+                    // a ClientConnectEvent below — the seamless promote
+                    // path doesn't trigger handle_client_connection (the
+                    // observer TCP is reused in-place), so without manual
+                    // enqueue here drain_connects never emits
+                    // ClientConnectedMsg, process_connects never runs,
+                    // spawn_player is never called, and the player's ECS
+                    // entity never materializes on this shard. The
+                    // downstream consequence (verified against
+                    // shard-1001 logs + client logs on 2026-05-17):
+                    // ship-shard's broadcast WS lacks the local player
+                    // (entities count off by 1), the client's
+                    // apply_worldstate_pose falls through with no
+                    // update, CameraWorldPos freezes — visible as the
+                    // ship "disappearing" because the camera stays
+                    // anchored at the post-handoff snapshot position
+                    // while the ship orbits away at ~62 km/s.
+                    let promoted_tcp_write = {
                         let mut reg = creg_for_promote.write().await;
                         if reg.has_session_observer(session_for_promote) {
                             reg.promote_observer_to_client(
                                 session_for_promote,
                                 player_name_for_promote.clone(),
                             )
-                            .is_some()
                         } else {
-                            false
+                            None
                         }
                     };
+                    let observer_promoted = promoted_tcp_write.is_some();
+
+                    // Synthesise the spawn-trigger event. ClientRegistry::
+                    // register() preserves udp_addr when conn.udp_addr is
+                    // None, so this synthetic re-register doesn't clobber
+                    // the udp route that promote_observer_to_client just
+                    // populated. peer_addr is unused by process_connects;
+                    // we pass an unspecified placeholder.
+                    if let Some(tcp_write) = promoted_tcp_write {
+                        let conn = voxeldust_shard_common::client_listener::ClientConnection {
+                            session_token: session_for_promote,
+                            player_name: player_name_for_promote.clone(),
+                            tcp_write,
+                            peer_addr: "0.0.0.0:0".parse().unwrap(),
+                            udp_addr: None,
+                            observed_session: None,
+                        };
+                        let _ = connect_tx_for_spawn.send(
+                            voxeldust_shard_common::client_listener::ClientConnectEvent {
+                                connection: conn,
+                            },
+                        );
+                    }
+
                     let accepted_msg = ShardMsg::HandoffAccepted(handoff::HandoffAccepted {
                         session_token: session_for_promote,
                         target_shard: target_shard_for_send,
@@ -1262,15 +1304,8 @@ fn drain_quic(
                         observer_promoted,
                     });
                     if let Some(host_id) = host_for_send {
-                        if let Ok(reg) = preg_for_send.try_read() {
-                            if let Some(addr) = reg.quic_addr(host_id) {
-                                let _ = quic_tx_for_send.try_send((
-                                    host_id,
-                                    addr,
-                                    accepted_msg,
-                                ));
-                            }
-                        }
+                        let _ = preg_for_send; // address resolution moved into dispatcher
+                        let _ = quic_tx_for_send.try_send((host_id, accepted_msg));
                     }
                 });
             }
@@ -2501,30 +2536,16 @@ fn pilot_send(
         return;
     };
 
-    let Ok(reg) = bridge.peer_registry.try_read() else {
-        if tick.0 % 100 == 0 {
-            info!("peer_reg lock failed");
-        }
-        return;
-    };
-
-    let Some(addr) = reg.quic_addr(host_id) else {
-        if tick.0 % 100 == 0 {
-            let all_peers: Vec<_> = reg
-                .all()
-                .iter()
-                .map(|s| format!("{}({})", s.id, s.shard_type))
-                .collect();
-            info!(host = host_id.0, peers = ?all_peers, "host shard not found in peer registry");
-        }
-        return;
-    };
+    // Address resolution moved into the QUIC dispatcher (with on-
+    // demand orchestrator refresh on cache miss). We just need the
+    // host shard id; the dispatcher resolves the address itself.
+    let _ = &bridge.peer_registry;
 
     // Send all pending handoffs.
     for handoff_msg in pending.handoffs.drain(..) {
         let _ = bridge
             .quic_send_tx
-            .try_send((host_id, addr, handoff_msg));
+            .try_send((host_id, handoff_msg));
     }
 
     // Send pending autopilot commands from all autopilot entities.
@@ -2536,7 +2557,7 @@ fn pilot_send(
                 speed_tier: tier,
                 autopilot_mode: 0,
             });
-            let _ = bridge.quic_send_tx.try_send((host_id, addr, ap_msg));
+            let _ = bridge.quic_send_tx.try_send((host_id, ap_msg));
         }
     }
 
@@ -2548,7 +2569,7 @@ fn pilot_send(
                 target_star_index: target_star,
                 galaxy_seed: config.galaxy_seed,
             });
-            let _ = bridge.quic_send_tx.try_send((host_id, addr, warp_msg));
+            let _ = bridge.quic_send_tx.try_send((host_id, warp_msg));
         }
     }
 
@@ -2561,7 +2582,7 @@ fn pilot_send(
         braking: false,
         tick: tick.0,
     });
-    let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
+    let _ = bridge.quic_send_tx.try_send((host_id, msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -5186,19 +5207,12 @@ fn apply_config_updates(
                         if target_shard_id != 0 {
                             let target = ShardId(target_shard_id);
                             let msg = ShardMsg::SignalSubscribe(subscribe);
-                            if let Ok(reg) = antenna_listener.bridge.peer_registry.try_read() {
-                                if let Some(addr) = reg.quic_addr(target) {
-                                    let _ = antenna_listener
-                                        .bridge
-                                        .quic_send_tx
-                                        .try_send((target, addr, msg));
-                                } else {
-                                    warn!(
-                                        target = ?target,
-                                        "Antenna RX subscribe: source shard not in peer registry"
-                                    );
-                                }
-                            }
+                            // Address resolution + on-demand orchestrator
+                            // refresh handled by the QUIC dispatcher.
+                            let _ = antenna_listener
+                                .bridge
+                                .quic_send_tx
+                                .try_send((target, msg));
                         }
                     }
                     info!(
@@ -7053,11 +7067,7 @@ fn aggregate_ship_properties(
                 dimensions: new_props.dimensions,
             },
         );
-        if let Ok(reg) = bridge.peer_registry.try_read() {
-            if let Some(addr) = reg.quic_addr(host_id) {
-                let _ = bridge.quic_send_tx.try_send((host_id, addr, msg));
-            }
-        }
+        let _ = bridge.quic_send_tx.try_send((host_id, msg));
     }
 }
 
@@ -7167,35 +7177,31 @@ fn sync_colliders_to_host(
         hull_max,
     });
 
-    // Try to send to host. If peer_registry isn't ready yet (early startup),
-    // leave `dirty` set so we retry next tick; otherwise the first-tick
-    // race leaves system-shard without any collider data until the next
-    // block edit, which is why EVA could "pass through" ships on a fresh
-    // cluster spin-up.
+    // Try to send to host. The QUIC dispatcher resolves the host's
+    // address via peer_registry with on-demand orchestrator refresh
+    // on cache miss, so a freshly-provisioned host is reachable on
+    // the very first tick — no more EVA "pass through" on cluster
+    // spin-up due to the registry being stale by 10s.
     let mut sent = false;
     if let Some(host_id) = config.host_shard_id {
-        if let Ok(reg) = bridge.peer_registry.try_read() {
-            if let Some(addr) = reg.quic_addr(host_id) {
-                if bridge.quic_send_tx.try_send((host_id, addr, msg)).is_ok() {
-                    sent = true;
-                    info!(
-                        ship_id = config.ship_id,
-                        chunks = seqs.0.len(),
-                        shapes = total_shapes,
-                        interior_voxels,
-                        "synced collider shapes + interior mask to host shard"
-                    );
-                }
-            }
+        if bridge.quic_send_tx.try_send((host_id, msg)).is_ok() {
+            sent = true;
+            info!(
+                ship_id = config.ship_id,
+                chunks = seqs.0.len(),
+                shapes = total_shapes,
+                interior_voxels,
+                "synced collider shapes + interior mask to host shard"
+            );
         }
     }
     if sent {
         dirty.0 = false;
     } else {
-        // Peer registry or QUIC channel not ready — retry next tick.
+        // QUIC channel back-pressured — retry next tick.
         tracing::debug!(
             ship_id = config.ship_id,
-            "collider sync deferred: peer not ready; will retry"
+            "collider sync deferred: quic queue full; will retry"
         );
     }
 }
@@ -8591,10 +8597,7 @@ fn signal_broadcast_remote(
                         continue;
                     }
                 }
-                // Peer without known position → include conservatively.
-                if let Some(addr) = reg.quic_addr(peer.id) {
-                    let _ = bridge.quic_send_tx.try_send((peer.id, addr, batch_msg.clone()));
-                }
+                let _ = bridge.quic_send_tx.try_send((peer.id, batch_msg.clone()));
             }
         }
     }
@@ -8607,11 +8610,7 @@ fn signal_broadcast_remote(
                 source_position,
                 entries: host_entries,
             });
-            if let Ok(reg) = bridge.peer_registry.try_read() {
-                if let Some(addr) = reg.quic_addr(host_id) {
-                    let _ = bridge.quic_send_tx.try_send((host_id, addr, batch_msg));
-                }
-            }
+            let _ = bridge.quic_send_tx.try_send((host_id, batch_msg));
         }
     }
 
@@ -8694,17 +8693,7 @@ fn signal_broadcast_remote(
                 entries: vec![entry],
             };
             let msg = ShardMsg::SignalBroadcastBatch(batch);
-            if let Ok(reg) = bridge.peer_registry.try_read() {
-                if let Some(addr) = reg.quic_addr(*subscriber_shard) {
-                    let _ = bridge.quic_send_tx.try_send((*subscriber_shard, addr, msg));
-                } else {
-                    tracing::debug!(
-                        target_shard = subscriber_shard.0,
-                        channel = %name,
-                        "subscriber forward: target shard not in peer registry"
-                    );
-                }
-            }
+            let _ = bridge.quic_send_tx.try_send((*subscriber_shard, msg));
         }
     }
 }

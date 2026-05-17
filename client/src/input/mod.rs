@@ -445,6 +445,9 @@ fn build_and_send_input(
         atmo_comp: false,
         seat_values: seat_values.0.clone(),
         actions_bits,
+        // Stamped by the connection task right before UDP send (it
+        // knows the per-shard session_token); leave 0 here.
+        session_token: 0,
     };
 
     if sender.tx.send(input).is_err() {

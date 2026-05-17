@@ -48,7 +48,7 @@ use glam::{DVec3, Quat as GQuat};
 use voxeldust_core::character::{class_by_id, CharacterClass, HUMAN_DEFAULT};
 
 use crate::remote::{RemoteEntitiesSet, RemoteEntity, RemotePlayers};
-use crate::shard::{ShardKey, SourceIndex};
+use crate::shard::{CameraWorldPos, ShardKey, ShardOrigin, SourceIndex};
 
 use super::assets::{CharacterAssetRegistry, ClassAssets};
 
@@ -103,7 +103,23 @@ impl Plugin for CharacterRenderPlugin {
             Update,
             CharacterRenderSet
                 .after(RemoteEntitiesSet)
-                .after(super::CharacterAssetSet),
+                .after(super::CharacterAssetSet)
+                // CRITICAL: render after the camera-pose has been
+                // updated for this frame, otherwise on a SHIP→EVA
+                // transition `rebase_root_visuals` uses the previous
+                // frame's `CameraWorldPos` (still anchored to ship-
+                // local space) to compute the world delta for the
+                // newly-root-rebased local visual whose
+                // `RemoteEntity.position` just flipped to system-space.
+                // The mismatch yields a visual rendered tens of metres
+                // off from the camera for one frame — the "Ship→EVA
+                // player blinks" symptom. Ordering after both
+                // PlayerSyncSet (writes CameraWorldPos) and
+                // ShardOriginSet (writes ChunkSource Transforms from
+                // CameraWorldPos) guarantees the visual rebase sees a
+                // consistent camera state.
+                .after(crate::camera::PlayerSyncSet)
+                .after(crate::shard::ShardOriginSet),
         )
         .add_systems(
             Update,
@@ -122,8 +138,43 @@ impl Plugin for CharacterRenderPlugin {
                 // across the shard boundary — no T-pose blink, no
                 // bone-resolution stall, no camera-attachment severing.
                 reparent_visuals_on_shard_change,
+                // CRITICAL: ApplyDeferred BEFORE sync_remote_pose +
+                // rebase_root_visuals. Reparent issues Commands
+                // (insert/remove `RootRebaseVisual`, attach/detach
+                // `ChildOf`) which are buffered. Without flushing
+                // here, the next two systems see STALE component
+                // state for the just-reparented visual:
+                //   * `sync_remote_pose` writes the visual's
+                //     Transform from the NEW shard's
+                //     `RemoteEntity.position` (e.g. system-space
+                //     ~3.5e9 m) while the visual is still parented
+                //     under the OLD shard's ChunkSource — Bevy's
+                //     hierarchy multiplies parent.world × local =
+                //     garbage world position.
+                //   * `rebase_root_visuals` queries
+                //     `With<RootRebaseVisual>` to apply the f64 rebase
+                //     — the marker hasn't been inserted yet so the
+                //     just-detached visual is SKIPPED, leaving the
+                //     garbage Transform in place for the full frame.
+                // Result: a one-frame visible jump to wildly wrong
+                // world coordinates on every SHIP→EVA / EVA→SHIP /
+                // SHIP→SHIP transition. Flushing here ensures the
+                // marker/parent commands take effect before either
+                // downstream Transform writer runs.
+                bevy::ecs::schedule::ApplyDeferred,
                 resolve_bones_when_ready,
                 sync_remote_pose,
+                // Phase: AAA precision fix for SYSTEM-parented (root-
+                // rebased) visuals — see `RootRebaseVisual`. Runs
+                // after `sync_remote_pose` to overwrite the f32
+                // transform that `local_transform_for` would have
+                // written (large value, would cancel in Bevy hierarchy
+                // multiplication) with an f64-computed `world − cam`
+                // delta, then casts the SMALL result to f32. Visual
+                // sits at the right world position with sub-cm
+                // precision regardless of distance from the system
+                // origin.
+                rebase_root_visuals,
             )
                 .chain()
                 .in_set(CharacterRenderSet),
@@ -145,6 +196,7 @@ fn spawn_remote_character_visuals(
     remote_players: Res<RemotePlayers>,
     registry: Res<CharacterAssetRegistry>,
     sources: Res<SourceIndex>,
+    shard_origins: Query<&ShardOrigin>,
     existing: Query<&RemoteCharacterTag>,
 ) {
     if remote_players.by_id.is_empty() {
@@ -175,10 +227,36 @@ fn spawn_remote_character_visuals(
             // tick.
             continue;
         };
+        let parent_origin = shard_origins
+            .get(parent)
+            .map(|o| o.origin)
+            .unwrap_or(DVec3::ZERO);
 
-        spawn_one(&mut commands, parent, player_id, class, remote, assets);
+        spawn_one(&mut commands, parent, parent_origin, player_id, class, remote, assets);
     }
 }
+
+/// Marker for visuals whose authoritative shard sits at SYSTEM-space
+/// origin (i.e. `ShardOrigin::origin ≈ DVec3::ZERO`). Their server-
+/// sent `position` is full system-space (~1e9–1e10 m magnitude for a
+/// typical orbital location), so the Bevy hierarchy multiplication
+/// `parent.world + visual.local` cancels two large opposite-sign f32
+/// values → ~32 m precision quantization at that scale → the visual
+/// jitters in/out of the camera frustum every few client frames as
+/// the camera moves smoothly under orbital velocity. AAA visual
+/// quality requires sub-cm precision in the camera-near render
+/// window.
+///
+/// We avoid the cancellation by detaching these visuals from Bevy's
+/// hierarchy entirely (they live as root entities) and writing
+/// their `Transform` each tick via [`rebase_root_visuals`] — that
+/// computes `world_pos = remote.position − cam` in f64 ONCE, then
+/// casts to f32. Single subtraction at the order-of-magnitude of
+/// the result (small), not the order-of-magnitude of the inputs
+/// (huge) — so the precision is bounded by the SMALL output's f32
+/// representation (~1e-7 m at 10 m magnitude).
+#[derive(Component)]
+struct RootRebaseVisual;
 
 /// Spawn a single visual entity. Factored out so a future
 /// `spawn_local_character_visual` (Phase E) can reuse the same
@@ -186,43 +264,79 @@ fn spawn_remote_character_visuals(
 fn spawn_one(
     commands: &mut Commands,
     parent: Entity,
+    parent_origin: DVec3,
     player_id: u64,
     class: &CharacterClass,
     remote: &RemoteEntity,
     assets: &ClassAssets,
 ) {
+    // High-precision rebase decision — see [`RootRebaseVisual`] for
+    // why visuals whose authoritative shard has origin ≈ ZERO must
+    // bypass the Bevy hierarchy multiplication. ~1 m epsilon picks
+    // up SYSTEM (origin = DVec3::ZERO) but excludes any shard whose
+    // origin actually tracks a celestial body (planet centre =
+    // ~1e10 m, ship hull = ~1e9 m, etc.).
+    let needs_root_rebase = parent_origin.length() < 1.0;
     let initial_transform = local_transform_for(remote, class);
-    let visual = commands
-        .spawn((
-            SceneRoot(assets.scene.clone()),
-            initial_transform,
-            GlobalTransform::default(),
-            Visibility::default(),
-            AnimationPlayer::default(),
-            AnimationGraphHandle(assets.graph.clone()),
-            RemoteCharacterTag {
-                player_id,
-                class_id: class.id,
-                source_shard: remote.shard,
-            },
-            BoneRegistry::default(),
-            // `Name` makes the visual easy to find in `bevy-inspector-egui`
-            // and tracing logs; not load-bearing.
-            Name::new(format!("character/{}/{}", class.name, player_id)),
-        ))
-        .id();
-    commands.entity(parent).add_child(visual);
+    let mut entity_cmds = commands.spawn((
+        SceneRoot(assets.scene.clone()),
+        initial_transform,
+        GlobalTransform::default(),
+        Visibility::default(),
+        AnimationPlayer::default(),
+        AnimationGraphHandle(assets.graph.clone()),
+        RemoteCharacterTag {
+            player_id,
+            class_id: class.id,
+            source_shard: remote.shard,
+        },
+        BoneRegistry::default(),
+        // `Name` makes the visual easy to find in `bevy-inspector-egui`
+        // and tracing logs; not load-bearing.
+        Name::new(format!("character/{}/{}", class.name, player_id)),
+    ));
+    if needs_root_rebase {
+        entity_cmds.insert(RootRebaseVisual);
+    }
+    let visual = entity_cmds.id();
+    if !needs_root_rebase {
+        commands.entity(parent).add_child(visual);
+    }
 
     info!(
         player_id,
         class = class.name,
         shard = %remote.shard,
+        root_rebase = needs_root_rebase,
         "character render: spawned visual"
     );
 }
 
+/// Marker tracking the last frame a visual's player was seen in
+/// `RemotePlayers`. Inserted lazily on first absence; cleared when
+/// the player reappears. The despawn fires only after `DESPAWN_GRACE`
+/// of continuous absence — protects against the 1-tick gap between
+/// the OLD primary's last WorldState (which doesn't list the player
+/// post-transition) and the NEW primary's first WorldState (which
+/// does, but takes ~50 ms to arrive over UDP).
+///
+/// Without this grace, seamless ShardHandoff transitions despawned
+/// the player visual the same frame the old primary's TCP closed,
+/// then respawned it ~50 ms later when the new primary's first
+/// WorldState landed. The respawn waited for asset+bone resolve,
+/// producing a visible 1-3 frame blink + a fresh local-tag insertion
+/// race that broke camera bone-following.
+#[derive(Component)]
+struct AbsentSince(std::time::Instant);
+
+/// 500 ms is comfortably more than two server ticks (50 ms each) AND
+/// the longest measured network jitter on the LAN dev cluster
+/// (~80 ms p99). Past 500 ms we trust the absence is real
+/// (disconnect / left AOI for good) and despawn.
+const DESPAWN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Despawn visuals whose player is no longer present in
-/// `RemotePlayers` at all (left AOI, disconnected). Crucially, a
+/// `RemotePlayers` for longer than [`DESPAWN_GRACE`]. Crucially, a
 /// player whose `RemoteEntity.shard` *flipped* (= shard migration:
 /// boarded a ship, EVA-exited, etc.) is STILL present in
 /// `RemotePlayers` and must NOT be despawned here —
@@ -232,16 +346,35 @@ fn spawn_one(
 fn despawn_remote_character_visuals(
     mut commands: Commands,
     remote_players: Res<RemotePlayers>,
-    visuals: Query<(Entity, &RemoteCharacterTag)>,
+    visuals: Query<(Entity, &RemoteCharacterTag, Option<&AbsentSince>)>,
 ) {
-    for (entity, tag) in &visuals {
+    let now = std::time::Instant::now();
+    for (entity, tag, absent_since) in &visuals {
         let still_present = remote_players.by_id.contains_key(&tag.player_id);
-        if !still_present {
-            commands.entity(entity).despawn();
-            info!(
-                player_id = tag.player_id,
-                "character render: despawned visual (left AOI or disconnected)"
-            );
+        if still_present {
+            // Reappeared (e.g., new primary's first WorldState
+            // landed). Clear any pending absence marker so the
+            // grace window restarts on the NEXT absence.
+            if absent_since.is_some() {
+                commands.entity(entity).remove::<AbsentSince>();
+            }
+            continue;
+        }
+        match absent_since {
+            None => {
+                // First frame of absence — start the grace timer.
+                commands.entity(entity).insert(AbsentSince(now));
+            }
+            Some(start) => {
+                if now.saturating_duration_since(start.0) >= DESPAWN_GRACE {
+                    commands.entity(entity).despawn();
+                    info!(
+                        player_id = tag.player_id,
+                        absent_ms = now.saturating_duration_since(start.0).as_millis() as u64,
+                        "character render: despawned visual (left AOI or disconnected)"
+                    );
+                }
+            }
         }
     }
 }
@@ -276,9 +409,15 @@ fn reparent_visuals_on_shard_change(
     remote_players: Res<RemotePlayers>,
     asset_registry: Res<CharacterAssetRegistry>,
     sources: Res<SourceIndex>,
-    mut visuals: Query<(Entity, &mut RemoteCharacterTag, &mut Transform)>,
+    shard_origins: Query<&ShardOrigin>,
+    mut visuals: Query<(
+        Entity,
+        &mut RemoteCharacterTag,
+        &mut Transform,
+        Option<&RootRebaseVisual>,
+    )>,
 ) {
-    for (visual, mut tag, mut transform) in &mut visuals {
+    for (visual, mut tag, mut transform, root_rebase) in &mut visuals {
         let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
             continue;
         };
@@ -287,8 +426,8 @@ fn reparent_visuals_on_shard_change(
         }
         let Some(&new_parent) = sources.by_shard.get(&remote.shard) else {
             // Destination ChunkSource not yet spawned — the old parent
-            // lives in the grace window so the visual stays visible
-            // there. Try again next tick.
+            // (or the root-rebased visual) stays visible. Try again
+            // next tick.
             continue;
         };
         let class = asset_registry
@@ -298,14 +437,55 @@ fn reparent_visuals_on_shard_change(
         let Some(class) = class else {
             continue;
         };
-        commands.entity(new_parent).add_child(visual);
-        *transform = local_transform_for(remote, class);
+        // Pick the rendering mode for the NEW parent: root-rebased
+        // (no parent, explicit f64 world rebase per frame) when the
+        // new parent's shard sits at origin ≈ ZERO (SYSTEM); normal
+        // Bevy-hierarchy parenting otherwise. The transition between
+        // the two modes is what makes EVA→ship boarding (and the
+        // reverse) precision-correct in both directions.
+        let new_origin = shard_origins
+            .get(new_parent)
+            .map(|o| o.origin)
+            .unwrap_or(DVec3::ZERO);
+        let new_needs_root_rebase = new_origin.length() < 1.0;
+        match (root_rebase.is_some(), new_needs_root_rebase) {
+            (false, false) => {
+                // Parented → parented: standard reparent.
+                commands.entity(new_parent).add_child(visual);
+                *transform = local_transform_for(remote, class);
+            }
+            (true, false) => {
+                // Root-rebased → parented (e.g. EVA boards a ship).
+                // Remove the marker, add as child of the new parent,
+                // reset Transform to shard-local — `sync_remote_pose`
+                // will write the shard-local pose next tick.
+                commands.entity(visual).remove::<RootRebaseVisual>();
+                commands.entity(new_parent).add_child(visual);
+                *transform = local_transform_for(remote, class);
+            }
+            (false, true) => {
+                // Parented → root-rebased (e.g. ground player
+                // hull-exits into EVA). Detach from parent, add the
+                // marker — `rebase_root_visuals` will write the
+                // correct world-space transform next tick.
+                commands.entity(visual).remove::<ChildOf>();
+                commands.entity(visual).insert(RootRebaseVisual);
+            }
+            (true, true) => {
+                // Root-rebased → root-rebased (rare: SYSTEM →
+                // SYSTEM at different seed). No parent change; the
+                // marker stays; `rebase_root_visuals` will write the
+                // correct transform next tick from the new shard's
+                // `RemoteEntity` snapshot.
+            }
+        }
         let old_shard = tag.source_shard;
         tag.source_shard = remote.shard;
         info!(
             player_id = tag.player_id,
             %old_shard,
             new_shard = %remote.shard,
+            new_root_rebase = new_needs_root_rebase,
             "character render: reparented visual on shard migration"
         );
     }
@@ -478,9 +658,22 @@ fn resolve_bones_when_ready(
 fn sync_remote_pose(
     remote_players: Res<RemotePlayers>,
     asset_registry: Res<CharacterAssetRegistry>,
-    mut visuals: Query<(&RemoteCharacterTag, &mut Transform)>,
+    mut visuals: Query<(
+        &RemoteCharacterTag,
+        Option<&crate::character::camera_attach::LocalCharacterTag>,
+        &mut Transform,
+    )>,
 ) {
-    for (tag, mut transform) in &mut visuals {
+    // Phase T7 — render remote players at a fixed interpolation lag
+    // so the 20 Hz server tick step turns into continuous motion on
+    // a 60+ fps client. Local player skipped (no client-prediction
+    // policy means we render the latest server pose directly — the
+    // user's own avatar must feel snappy, even at the cost of one
+    // tick of "behind the world" feel that interpolation imposes).
+    let render_time = std::time::Instant::now()
+        .checked_sub(crate::remote::INTERPOLATION_DELAY)
+        .unwrap_or_else(std::time::Instant::now);
+    for (tag, local, mut transform) in &mut visuals {
         let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
             continue;
         };
@@ -493,7 +686,20 @@ fn sync_remote_pose(
             .map(|a| a.class)
             .or_else(|| voxeldust_core::character::class_by_id(tag.class_id));
         let Some(class) = class else { continue };
-        *transform = local_transform_for(remote, class);
+        if local.is_some() {
+            *transform = local_transform_for(remote, class);
+        } else {
+            let (pos, _rot) = remote.interpolated_pose(render_time);
+            // body_yaw is still applied via `local_transform_for`'s
+            // scalar formula; rotation interpolation isn't currently
+            // surfaced because the visual rotation is reconstructed
+            // from `body_yaw` + class offset rather than written
+            // from `remote.rotation`. Future polish phase can
+            // interpolate body_yaw scalar (with wrap-aware lerp)
+            // when ships start broadcasting rolled body frames for
+            // ground walkers.
+            *transform = local_transform_with_position(remote, class, pos);
+        }
     }
 }
 
@@ -523,6 +729,84 @@ fn sync_remote_pose(
 /// planet-local coords. The y-offset shifts to feet-on-floor; the
 /// shard-relative xy is passed through verbatim, with the parent
 /// ChunkSource's transform supplying the shard-to-world conversion.
+/// Phase T7 — same Transform formula as [`local_transform_for`] but
+/// with the translation overridden to `position_override`. Used by
+/// `sync_remote_pose` for remote players where the position comes
+/// from `RemoteEntity::interpolated_pose` instead of the most-recent
+/// snapshot's `position`. Body yaw and the per-class mesh-bind /
+/// y-offset constants are identical to the non-interpolated path.
+/// Phase: AAA precision rebase for [`RootRebaseVisual`] visuals
+/// (visuals whose authoritative shard has origin ≈ ZERO).
+///
+/// `sync_remote_pose` writes `Transform.translation = remote.position`
+/// for all visuals; for parented visuals that's the SHARD-LOCAL value
+/// and Bevy hierarchy composes it with the parent's f32 world
+/// transform correctly. For root-rebased visuals there is no parent,
+/// so we must produce the WORLD transform directly — and crucially,
+/// compute it from the f64 inputs (`remote.position`, `cam`) so the
+/// large-magnitude inputs cancel ONCE in f64 (precise to f64 epsilon
+/// at any magnitude), and only the small result is cast to f32
+/// (where it's precise to ~1e-7 m at 10 m magnitude).
+///
+/// Without this system, root-rebased visuals would inherit whatever
+/// `sync_remote_pose` wrote — `remote.position` in f32 — which at
+/// system-space scales (~3.5e9 m) has ~32 m granularity. The camera
+/// is also at that scale; their f32 difference jitters by tens of
+/// metres frame-to-frame as the camera moves under orbital velocity,
+/// strobing the visual in and out of the camera frustum.
+fn rebase_root_visuals(
+    remote_players: Res<RemotePlayers>,
+    asset_registry: Res<CharacterAssetRegistry>,
+    cam: Res<CameraWorldPos>,
+    mut visuals: Query<(&RemoteCharacterTag, &mut Transform), With<RootRebaseVisual>>,
+) {
+    let render_time = std::time::Instant::now()
+        .checked_sub(crate::remote::INTERPOLATION_DELAY)
+        .unwrap_or_else(std::time::Instant::now);
+    for (tag, mut transform) in &mut visuals {
+        let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
+            continue;
+        };
+        let class = asset_registry
+            .ready(tag.class_id)
+            .map(|a| a.class)
+            .or_else(|| voxeldust_core::character::class_by_id(tag.class_id));
+        let Some(class) = class else { continue };
+        let (pos_f64, _rot) = remote.interpolated_pose(render_time);
+        // Single f64 subtraction at the order of magnitude of the
+        // result (small) — not the magnitude of the operands (huge)
+        // — so the cast to f32 only loses precision at the small
+        // output's scale.
+        let delta = pos_f64 - cam.pos;
+        let mut translation = Vec3::new(delta.x as f32, delta.y as f32, delta.z as f32);
+        translation.y += class.visual_y_offset;
+        let rotation = Quat::from_rotation_y(
+            class.body_yaw_sign * remote.body_yaw + class.mesh_yaw_offset,
+        );
+        *transform = Transform {
+            translation,
+            rotation,
+            scale: Vec3::ONE,
+        };
+    }
+}
+
+fn local_transform_with_position(
+    remote: &RemoteEntity,
+    class: &voxeldust_core::character::CharacterClass,
+    position_override: DVec3,
+) -> Transform {
+    let mut translation = dvec3_to_bevy(position_override);
+    translation.y += class.visual_y_offset;
+    let rotation =
+        Quat::from_rotation_y(class.body_yaw_sign * remote.body_yaw + class.mesh_yaw_offset);
+    Transform {
+        translation,
+        rotation,
+        scale: Vec3::ONE,
+    }
+}
+
 fn local_transform_for(
     remote: &RemoteEntity,
     class: &voxeldust_core::character::CharacterClass,

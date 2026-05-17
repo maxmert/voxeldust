@@ -254,9 +254,21 @@ pub async fn run_network(
     let mut primary: Option<ActiveConn> = None;
     let mut secondaries: HashMap<(u8, u64), ActiveConn> = HashMap::new();
     /// Demoting connections (former primaries waiting for TTL self-
-    /// exit). Tracked via JoinHandle only — they self-exit so we
-    /// don't need to call cancel on them. Periodically pruned.
-    let mut demoting: Vec<JoinHandle<()>> = Vec::new();
+    /// exit, plus cancelled secondaries draining out). We must keep
+    /// the FULL `ActiveConn` here — NOT just the `JoinHandle` —
+    /// because `ConnectionHandle` owns the only `control_tx` for the
+    /// connection task; dropping the handle immediately closes the
+    /// channel, which makes the task's `control_rx.recv()` return
+    /// `None` on its NEXT poll, causing an immediate task exit
+    /// regardless of the demote TTL the task was supposed to honour.
+    /// That premature exit drops the TCP socket → server sees EOF →
+    /// `SecondaryDisconnected` may not propagate cleanly (the
+    /// `if !is_primary` check in connection.rs's TCP-error path
+    /// silently swallows the event when the task hasn't yet
+    /// processed the `Demote` control message). Net result: the
+    /// graced ChunkSource has no live feed and downstream visuals
+    /// age out.
+    let mut demoting: Vec<ActiveConn> = Vec::new();
     /// The player's authoritative SessionToken — captured on the
     /// FIRST primary handshake and reused for every subsequent
     /// secondary's `ObserverConnect` so the destination shard can
@@ -306,7 +318,7 @@ pub async fn run_network(
         }
 
         // Prune any demoting tasks that have completed.
-        demoting.retain(|j| !j.is_finished());
+        demoting.retain(|a| !a.join.is_finished());
 
         let primary_join: &mut JoinHandle<()> = &mut primary
             .as_mut()
@@ -363,9 +375,12 @@ pub async fn run_network(
                             if let Some(c) = secondaries.remove(&key) {
                                 let _ = c.handle.cancel().await;
                                 // Don't await — secondaries exit
-                                // promptly on cancel; track join for
-                                // GC (Vec pruned per loop).
-                                demoting.push(c.join);
+                                // promptly on cancel; track full
+                                // ActiveConn for GC (keeps the
+                                // handle's control_tx alive so the
+                                // Cancel control message can be
+                                // processed BEFORE the channel closes).
+                                demoting.push(c);
                             }
                         }
                         // Update next_addr; loop will re-handshake.
@@ -401,11 +416,18 @@ pub async fn run_network(
                                 spawn_pose: spawn_pose.clone(),
                             });
                             // Demote old primary; it will self-exit at
-                            // the configured TTL. Move its JoinHandle
-                            // to demoting Vec for tracking.
-                            if let Some(ActiveConn { handle, join, .. }) = primary.take() {
-                                let _ = handle.demote(h.source_demote_after_ticks).await;
-                                demoting.push(join);
+                            // the configured TTL. Move the FULL ActiveConn
+                            // into the demoting Vec — we MUST keep
+                            // `handle` alive so its `control_tx` stays
+                            // open, otherwise the task's
+                            // `control_rx.recv()` returns `None` on the
+                            // next poll and the task exits IMMEDIATELY
+                            // instead of honouring the TTL (the
+                            // documented "self-exit at TTL" only works
+                            // if the channel stays open).
+                            if let Some(active) = primary.take() {
+                                let _ = active.handle.demote(h.source_demote_after_ticks).await;
+                                demoting.push(active);
                             }
                             // Promote dest in place — sockets reused,
                             // no fresh TCP handshake.
@@ -493,7 +515,7 @@ pub async fn run_network(
                                 "controller: ShardDisconnect — cancelling secondary"
                             );
                             let _ = c.handle.cancel().await;
-                            demoting.push(c.join);
+                            demoting.push(c);
                         }
                     }
                 }
@@ -624,7 +646,7 @@ async fn handshake_and_spawn_primary(
 async fn handle_preconnect(
     pc: ShardPreConnect,
     secondaries: &mut HashMap<(u8, u64), ActiveConn>,
-    demoting: &mut Vec<JoinHandle<()>>,
+    demoting: &mut Vec<ActiveConn>,
     event_tx: &mpsc::UnboundedSender<NetEvent>,
     input_rx: Arc<Mutex<mpsc::UnboundedReceiver<PlayerInputData>>>,
     tcp_out_rx: Arc<Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
@@ -649,7 +671,7 @@ async fn handle_preconnect(
             "ShardPreConnect: replacing existing secondary at same key"
         );
         let _ = existing.handle.cancel().await;
-        demoting.push(existing.join);
+        demoting.push(existing);
     }
 
     // Evict oldest non-scene secondary if over MAX_SECONDARIES.
@@ -674,7 +696,7 @@ async fn handle_preconnect(
                     "evicting secondary — MAX_SECONDARIES reached"
                 );
                 let _ = c.handle.cancel().await;
-                demoting.push(c.join);
+                demoting.push(c);
             }
         }
     }

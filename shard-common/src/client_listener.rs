@@ -160,6 +160,19 @@ struct SessionObserverEntry {
     /// the secondary's UDP socket post-promote routes to the right
     /// session without waiting for re-discovery.
     udp_addr: Option<SocketAddr>,
+    /// TCP peer addr (= the secondary connection's source ip:port).
+    /// `discover_udp` matches UDP packets to this session-observer by
+    /// `peer_addr.ip() == udp_src.ip()` — a UDP socket on the client
+    /// shares the host IP with its TCP socket (but not the port), so
+    /// IP-match unambiguously associates a new UDP src with the
+    /// session-observer whose TCP came from the same host. Without
+    /// this association, `udp_addr` above stays `None` forever, the
+    /// seamless promote moves the entry to `ClientEntry` with no
+    /// `udp_addr`, and `session_for_udp` returns `None` for every
+    /// PlayerInput → input is silently dropped → the player can't
+    /// move post-EVA-exit while their CLIENT-side camera rotation
+    /// (mouse-driven, doesn't need server) still works.
+    peer_addr: SocketAddr,
     registered_at: Instant,
     /// Diagnostic tag — the `observer_name` field from
     /// `ClientMsg::ObserverConnect` (typically `observer_<seed>`).
@@ -195,11 +208,13 @@ impl ClientRegistry {
         &mut self,
         session_token: SessionToken,
         observer_name: String,
+        peer_addr: SocketAddr,
         tcp_write: Arc<Mutex<OwnedWriteHalf>>,
     ) {
         let entry = SessionObserverEntry {
             tcp_write,
             udp_addr: None,
+            peer_addr,
             registered_at: Instant::now(),
             observer_name,
         };
@@ -222,6 +237,90 @@ impl ClientRegistry {
     fn record_session_observer_udp(&mut self, session: SessionToken, udp_addr: SocketAddr) {
         if let Some(entry) = self.session_observers.get_mut(&session) {
             entry.udp_addr = Some(udp_addr);
+        }
+    }
+
+    /// Phase T0 — deterministic UDP↔session binding using the
+    /// `session_token` field every `PlayerInput` UDP packet now carries
+    /// (see `PlayerInputData::session_token`). The client knows its own
+    /// session_token from `JoinResponse` and stamps every UDP packet,
+    /// so the server can correctly assign `udp_src` even when:
+    ///
+    ///   * the TCP `ObserverConnect` registration lost the race against
+    ///     the UDP hello (so `discover_udp`'s IP heuristic ran against
+    ///     an empty `session_observers` and the addr landed in the
+    ///     anonymous `observers` Vec instead), OR
+    ///   * multiple clients share an IP (localhost dev / CGNAT) and
+    ///     `discover_udp`'s IP-only heuristic mis-assigned the addr to
+    ///     the wrong session-observer.
+    ///
+    /// Updates the canonical entry (clients OR session_observers) and
+    /// clears any contradicting wrong assignment elsewhere in the
+    /// registry so `session_for_udp(addr)` returns the correct token
+    /// immediately on the next call. Idempotent.
+    pub fn bind_udp_to_session(&mut self, session: SessionToken, udp_addr: SocketAddr) {
+        // 1) If session is an active client (promoted or fresh): correct
+        // its udp_addr and scrub the same addr from any other client
+        // (race-survivor leftover).
+        if self.clients.contains_key(&session) {
+            for (token, entry) in self.clients.iter_mut() {
+                if *token == session {
+                    if entry.udp_addr != Some(udp_addr) {
+                        info!(
+                            session = session.0,
+                            %udp_addr,
+                            prior = ?entry.udp_addr,
+                            "bind_udp_to_session: client udp_addr corrected"
+                        );
+                        entry.udp_addr = Some(udp_addr);
+                    }
+                } else if entry.udp_addr == Some(udp_addr) {
+                    info!(
+                        wrong_session = token.0,
+                        %udp_addr,
+                        "bind_udp_to_session: cleared udp_addr wrongly bound to other client"
+                    );
+                    entry.udp_addr = None;
+                }
+            }
+            // Also remove from anonymous observers Vec — promoted
+            // clients route their own broadcasts via clients HashMap.
+            self.observers.retain(|o| o.addr != udp_addr);
+            return;
+        }
+
+        // 2) Otherwise, this is a still-secondary session-observer.
+        // Correct it and scrub the same addr from any wrong
+        // session-observer or anonymous observer.
+        if self.session_observers.contains_key(&session) {
+            for (token, entry) in self.session_observers.iter_mut() {
+                if *token == session {
+                    if entry.udp_addr != Some(udp_addr) {
+                        info!(
+                            session = session.0,
+                            %udp_addr,
+                            prior = ?entry.udp_addr,
+                            "bind_udp_to_session: session-observer udp_addr corrected"
+                        );
+                        entry.udp_addr = Some(udp_addr);
+                    }
+                } else if entry.udp_addr == Some(udp_addr) {
+                    info!(
+                        wrong_session = token.0,
+                        %udp_addr,
+                        "bind_udp_to_session: cleared udp_addr wrongly bound to other session-observer"
+                    );
+                    entry.udp_addr = None;
+                }
+            }
+            // Anonymous observers Vec carries broadcasts only — when
+            // we have a session-observer match, the anonymous entry
+            // for the same addr is redundant. Leave it: the broadcast
+            // path uses both `clients.udp_addr` and `observers` Vec,
+            // and double-sending the same WorldState is harmless (UDP
+            // is unordered anyway). Removing here would force every
+            // session-observer ingest path to also re-add to the Vec
+            // for broadcast — more code, no gain.
         }
     }
 
@@ -254,6 +353,16 @@ impl ClientRegistry {
             udp_known = udp_addr.is_some(),
             "promoting session-observer to client (seamless ShardHandoff)"
         );
+        // The same UDP src that was tracked on the session-observer
+        // is also sitting in `observers` Vec (added by `discover_udp`
+        // before we knew which session it belonged to). After the
+        // promote it logically belongs to the new `ClientEntry`, so
+        // remove the now-stale observer entry — otherwise WorldState
+        // broadcast sends two packets per tick to the same addr (once
+        // via client.udp_addr, once via observer.addr).
+        if let Some(addr) = udp_addr {
+            self.observers.retain(|o| o.addr != addr);
+        }
         self.clients.insert(
             session_token,
             ClientEntry {
@@ -282,9 +391,22 @@ impl ClientRegistry {
     }
 
     pub fn register(&mut self, conn: &ClientConnection) {
+        // Preserve the existing entry's `udp_addr` when the incoming
+        // `conn.udp_addr` is `None`. This is required by the seamless
+        // ShardHandoff promote path: ship-shard's PlayerHandoff handler
+        // synthesises a `ClientConnectEvent` AFTER
+        // `promote_observer_to_client` populated `clients[token].udp_addr`
+        // from the session-observer's UDP binding. Without preservation,
+        // the synthetic register() call here would overwrite that
+        // udp_addr with None, breaking PlayerInput routing for the just-
+        // promoted player until `discover_udp` re-discovers the UDP src.
+        let preserved_udp = self
+            .clients
+            .get(&conn.session_token)
+            .and_then(|e| e.udp_addr);
         self.clients.insert(conn.session_token, ClientEntry {
             tcp_write: conn.tcp_write.clone(),
-            udp_addr: conn.udp_addr,
+            udp_addr: conn.udp_addr.or(preserved_udp),
             player_name: conn.player_name.clone(),
         });
 
@@ -316,6 +438,32 @@ impl ClientRegistry {
     /// First client without a UDP addr gets it. If no clients yet,
     /// store as pending for later matching on register().
     pub fn discover_udp(&mut self, udp_addr: SocketAddr) {
+        // Phase T0 — associate this UDP src with a session-observer
+        // by IP match BEFORE the early-return checks. A UDP socket
+        // on the client shares the host IP with its TCP socket (the
+        // ports differ), so peer-IP-match unambiguously links the
+        // UDP src to the session-observer's TCP. Without this,
+        // `SessionObserverEntry.udp_addr` stays `None` indefinitely;
+        // `promote_observer_to_client` then moves the observer to
+        // `clients` with `udp_addr = None`; `session_for_udp`
+        // returns `None` for every `PlayerInput` packet → input is
+        // silently dropped post-seamless-promote → the player
+        // can't move (only client-side camera rotation works since
+        // it doesn't depend on the server). Match runs every call
+        // but is idempotent (no-op once `udp_addr` is set).
+        for (session, entry) in self.session_observers.iter_mut() {
+            if entry.udp_addr.is_none() && entry.peer_addr.ip() == udp_addr.ip() {
+                entry.udp_addr = Some(udp_addr);
+                info!(
+                    session = session.0,
+                    %udp_addr,
+                    peer = %entry.peer_addr,
+                    "associated UDP src with session-observer (IP match)"
+                );
+                break;
+            }
+        }
+
         // Idempotent fast-path: if this UDP address is already known (either
         // assigned to a client or registered as an observer), bail out.
         // Without this, every incoming UDP packet (20 Hz) re-ran the
@@ -583,7 +731,7 @@ async fn handle_client_connection(
             let connection = ClientConnection {
                 session_token: observer_token,
                 player_name: format!("__observer__{}", observer_name),
-                tcp_write: write,
+                tcp_write: write.clone(),
                 peer_addr,
                 udp_addr: None,
                 observed_session: if observed_session.0 != 0 {
@@ -594,6 +742,28 @@ async fn handle_client_connection(
             };
             let _ = connect_tx.send(ClientConnectEvent { connection });
             info!(%peer_addr, %observer_name, "observer TCP setup complete");
+
+            // Phase T0 — register the observed-session entry in
+            // `ClientRegistry.session_observers` so a subsequent
+            // `PlayerHandoff` whose `session_token` matches can
+            // promote this very TCP write half into the player's
+            // primary `ClientEntry` (seamless ShardHandoff path
+            // instead of fresh ShardRedirect handshake). Without
+            // this call, `register_session_observer` was dead code:
+            // the `observed_session` arrived in `ObserverConnect`
+            // but was only kept on the `ClientConnection` struct,
+            // never propagated into the registry, so
+            // `has_session_observer` always returned `false` on
+            // hull-exit and the EVA spawn took the slow path.
+            if observed_session.0 != 0 {
+                let mut reg = client_registry.write().await;
+                reg.register_session_observer(
+                    observed_session,
+                    observer_name.clone(),
+                    peer_addr,
+                    write,
+                );
+            }
 
             // Observers send nothing meaningful, but we must still drive the
             // read half to detect EOF. Without this, the ClientEntry lingers
@@ -860,6 +1030,20 @@ pub async fn run_udp_receiver(
 
                         match ClientMsg::deserialize(&payload) {
                             Ok(ClientMsg::PlayerInput(input)) => {
+                                // Deterministic UDP↔session binding —
+                                // the client stamps every PlayerInput
+                                // packet with its known session_token,
+                                // so we don't need `discover_udp`'s
+                                // peer-IP heuristic (which mis-assigns
+                                // on shared-IP setups like localhost
+                                // multi-client). 0 = legacy/pre-T0,
+                                // fall back to heuristic that
+                                // `discover_udp` already ran above.
+                                if input.session_token != 0 {
+                                    let token = SessionToken(input.session_token);
+                                    let mut reg = registry.write().await;
+                                    reg.bind_udp_to_session(token, src);
+                                }
                                 let _ = input_tx.send((src, input));
                             }
                             Ok(ClientMsg::BlockEditRequest(edit)) => {

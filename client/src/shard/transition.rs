@@ -29,7 +29,9 @@ use crate::net::{GameEvent, NetEvent};
 use crate::shard::origin::ShardOrigin;
 use crate::shard::registry::{PrimaryShard, ShardRegistrySet, ShardTypeRegistry, SourceIndex};
 use crate::shard::runtime::{ChunkSource, ShardKey};
+use crate::shard::worldstate::PrimaryWorldState;
 
+use voxeldust_core::client_message::EntityKind;
 use voxeldust_core::handoff::SpawnPose;
 
 #[derive(SystemSet, Clone, Debug, Hash, Eq, PartialEq)]
@@ -121,6 +123,7 @@ fn latch_transitions(
     mut source_index: ResMut<SourceIndex>,
     registry: Res<ShardTypeRegistry>,
     origins: Query<&ShardOrigin>,
+    primary_ws: Res<PrimaryWorldState>,
 ) {
     for GameEvent(ev) in events.read() {
         if let NetEvent::Transitioning { target_shard_type, spawn_pose } = ev {
@@ -140,21 +143,24 @@ fn latch_transitions(
                         let dur = plugin
                             .map(|p| p.grace_duration())
                             .unwrap_or(Duration::from_millis(1500));
+                        // Phase T4 — capture the source's last-known
+                        // velocity so `drive_grace_transforms` can
+                        // extrapolate the graced chunks along the
+                        // source's trajectory. Without this an in-
+                        // flight ship→EVA / warp-arrival handoff
+                        // leaves the source ship's chunks frozen in
+                        // system-space while the ship itself orbits
+                        // away at ~110 km/s — visually the chunks
+                        // appear to teleport when grace expires.
+                        let velocity = source_velocity_for_grace(
+                            &old_key, primary_ws.latest.as_ref(),
+                        );
                         grace.retained.insert(
                             old_key,
                             GracedSource {
                                 entity,
                                 expiry: Instant::now() + dur,
-                                // Velocity will be populated by Phase 20's
-                                // RemoteEntities (or SystemEntitiesUpdate
-                                // ingest) when the source's last-known
-                                // velocity is tracked. MVP: zero → the
-                                // source stays fixed in system-space during
-                                // grace, which is correct for stationary
-                                // transitions (ship→planet on the ground)
-                                // and only visible as a brief discontinuity
-                                // on in-flight transitions.
-                                velocity: DVec3::ZERO,
+                                velocity,
                                 origin_at_start: origin,
                                 rotation_at_start: rotation,
                                 started_at: Instant::now(),
@@ -163,6 +169,7 @@ fn latch_transitions(
                         tracing::info!(
                             %old_key,
                             target_shard_type,
+                            vel = ?(velocity.x, velocity.y, velocity.z),
                             "transition: old primary graced",
                         );
                     } else {
@@ -177,6 +184,51 @@ fn latch_transitions(
             }
         }
     }
+}
+
+/// Recover a graced source's last-known velocity in system-space from
+/// the primary's most recent `WorldState`. The primary at this point
+/// is still the OLD primary (the transition latch runs before the
+/// new primary's `Connected` event lands), so its `entities[]`
+/// snapshot is exactly the right place to ask.
+///
+/// Per-shard-type wiring:
+///
+///   * **SHIP** — ship-shard's own broadcast includes the own-ship
+///     entity at `entity_id = config.ship_id` (= `ShardKey.seed` for
+///     SHIP shards on the wire) with `velocity = exterior.velocity`
+///     in system-space. Match by `entity_id` (canonical) or
+///     `shard_id` (defensive; some legacy paths stamped orchestrator
+///     id there). Returns the ship's orbital velocity.
+///   * **PLANET** — planet shard doesn't broadcast its own-planet
+///     entity. Returns `DVec3::ZERO`; a future refinement can compute
+///     orbital velocity from `(planet_seed, celestial_time)` on the
+///     client without a server round-trip.
+///   * **SYSTEM / GALAXY** — frame origins, stationary by design.
+///     Returns `DVec3::ZERO`.
+///
+/// Unknown shard types fall through to `DVec3::ZERO` (identical to
+/// pre-T4 behaviour — no regression possible).
+fn source_velocity_for_grace(
+    old_key: &ShardKey,
+    primary_ws: Option<&voxeldust_core::client_message::WorldStateData>,
+) -> DVec3 {
+    const SHIP_SHARD_TYPE: u8 = 2;
+    if old_key.shard_type != SHIP_SHARD_TYPE {
+        return DVec3::ZERO;
+    }
+    let Some(ws) = primary_ws else {
+        return DVec3::ZERO;
+    };
+    for e in &ws.entities {
+        if e.kind != EntityKind::Ship {
+            continue;
+        }
+        if e.entity_id == old_key.seed || e.shard_id == old_key.seed {
+            return e.velocity;
+        }
+    }
+    DVec3::ZERO
 }
 
 /// Extrapolate graced sources' `ShardOrigin` each frame. Phase 4's

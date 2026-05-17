@@ -501,6 +501,25 @@ pub struct PlanetPlayerDigestEntry {
     pub position: DVec3,
     pub rotation: DQuat,
     pub planet_index: u32,
+    // Phase T2 — body/head decoupling carried through the digest so
+    // distant observers (cross-shard AOI projections) see the surface
+    // player's BODY yaw, HEAD yaw/pitch, and animation state on every
+    // tick. Mirror of the matching `ObservableEntity` fields on the
+    // wire — system-shard `collect_aoi_candidates` forwards these
+    // verbatim into the AOI projection it ships to other shards.
+    pub body_yaw: f32,
+    pub head_yaw: f32,
+    pub head_pitch: f32,
+    pub locomotion: u8,
+    pub locomotion_speed: f32,
+    pub is_turning: bool,
+    pub turn_target_yaw: f32,
+    pub turn_t: f32,
+    /// World-space look-at target encoded as a delta from `position`
+    /// (so f32 precision is fine even for very far-from-origin shards).
+    /// `None` ⇒ no target — the renderer keeps the head in the
+    /// animation pose. Mirror of `ObservableEntity.look_target_delta`.
+    pub look_target_delta: Option<glam::Vec3>,
 }
 
 /// Planet shard → system shard: aggregate surface-player positions at 1 Hz.
@@ -1187,6 +1206,10 @@ impl ShardMsg {
                         let name = builder.create_string(&e.player_name);
                         let pos = to_fb_vec3d(&e.position);
                         let rot = to_fb_quatd(&e.rotation);
+                        let (look_set, look_dx, look_dy, look_dz) = match e.look_target_delta {
+                            Some(d) => (true, d.x, d.y, d.z),
+                            None => (false, 0.0, 0.0, 0.0),
+                        };
                         fb::PlanetPlayerDigestEntry::create(
                             &mut builder,
                             &fb::PlanetPlayerDigestEntryArgs {
@@ -1195,6 +1218,18 @@ impl ShardMsg {
                                 position: Some(&pos),
                                 rotation: Some(&rot),
                                 planet_index: e.planet_index,
+                                body_yaw: e.body_yaw,
+                                head_yaw: e.head_yaw,
+                                head_pitch: e.head_pitch,
+                                locomotion: e.locomotion,
+                                locomotion_speed: e.locomotion_speed,
+                                is_turning: e.is_turning,
+                                turn_target_yaw: e.turn_target_yaw,
+                                turn_t: e.turn_t,
+                                look_target_set: look_set,
+                                look_dx,
+                                look_dy,
+                                look_dz,
                             },
                         )
                     })
@@ -2053,6 +2088,15 @@ impl ShardMsg {
                                     .rotation()
                                     .map(from_fb_quatd)
                                     .unwrap_or(DQuat::IDENTITY);
+                                let look_target_delta = if e.look_target_set() {
+                                    Some(glam::Vec3::new(
+                                        e.look_dx(),
+                                        e.look_dy(),
+                                        e.look_dz(),
+                                    ))
+                                } else {
+                                    None
+                                };
                                 PlanetPlayerDigestEntry {
                                     session_token: SessionToken(e.session_token()),
                                     player_name: e
@@ -2062,6 +2106,15 @@ impl ShardMsg {
                                     position: pos,
                                     rotation: rot,
                                     planet_index: e.planet_index(),
+                                    body_yaw: e.body_yaw(),
+                                    head_yaw: e.head_yaw(),
+                                    head_pitch: e.head_pitch(),
+                                    locomotion: e.locomotion(),
+                                    locomotion_speed: e.locomotion_speed(),
+                                    is_turning: e.is_turning(),
+                                    turn_target_yaw: e.turn_target_yaw(),
+                                    turn_t: e.turn_t(),
+                                    look_target_delta,
                                 }
                             })
                             .collect()
