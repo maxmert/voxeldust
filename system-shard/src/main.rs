@@ -33,8 +33,11 @@ use voxeldust_core::system::{
 };
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::handoff_pipeline;
+use voxeldust_shard_common::celestial_clock::{
+    CelestialClockPlugin, CelestialClockSet, TimeScale, UniverseEpoch,
+};
 use voxeldust_shard_common::harness::{
-    celestial_time_from_epoch, NetworkBridge, ShardHarness, ShardHarnessConfig,
+    NetworkBridge, ShardHarness, ShardHarnessConfig,
 };
 use voxeldust_shard_common::wire_dict_registry::{decode_v2_batch, encode_v2_batch};
 use voxeldust_core::signal::ship_frequency_interests::ShipFrequencyInterests;
@@ -2426,15 +2429,15 @@ fn update_orbits(
     mut planet_pos: ResMut<PlanetPositions>,
     mut old_planet_pos: ResMut<OldPlanetPositions>,
     mut planet_vel: ResMut<PlanetVelocities>,
-    mut celestial_time: ResMut<ecs::CelestialTime>,
+    celestial_time: Res<ecs::CelestialTime>,
     mut physics_time: ResMut<ecs::PhysicsTime>,
-    bridge: Res<NetworkBridge>,
 ) {
     physics_time.0 += DT;
-    celestial_time.0 = celestial_time_from_epoch(
-        &bridge.universe_epoch_ms,
-        sys_config.0.scale.time_scale,
-    );
+    // `celestial_time` is now refreshed once per tick by
+    // `voxeldust_shard_common::celestial_clock::CelestialClockPlugin`
+    // (run-set `CelestialClockSet`, configured `.before` this system
+    // at plugin install). One canonical source-of-truth across every
+    // shard — no inline `celestial_time_from_epoch` calls anywhere.
 
     let ct = celestial_time.0;
     let time_scale = sys_config.0.scale.time_scale;
@@ -6262,6 +6265,7 @@ fn build_app(
     orchestrator_url: String,
     galaxy_seed: u64,
     star_index: u32,
+    universe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> App {
     let system_params = SystemParams::from_seed(system_seed);
 
@@ -6306,6 +6310,15 @@ fn build_app(
 
     let mut app = App::new();
 
+    // Shared celestial clock — single source of truth for
+    // `CelestialTime` across every shard. Plugin owns the per-tick
+    // `advance_celestial_time` system in `CelestialClockSet`; we
+    // supply the universe epoch (from the harness) and the
+    // system-specific time scale.
+    app.add_plugins(CelestialClockPlugin);
+    app.insert_resource(UniverseEpoch(universe_epoch));
+    app.insert_resource(TimeScale(system_params.scale.time_scale));
+
     // Resources.
     app.insert_resource(SystemConfig(system_params));
     app.insert_resource(ShardIdentity(shard_id));
@@ -6313,7 +6326,6 @@ fn build_app(
     app.insert_resource(PlanetPositions(planet_positions.clone()));
     app.insert_resource(OldPlanetPositions(planet_positions));
     app.insert_resource(PlanetVelocities(planet_velocities));
-    app.insert_resource(ecs::CelestialTime::default());
     app.insert_resource(ecs::PhysicsTime::default());
     app.insert_resource(ecs::TickCounter::default());
     app.insert_resource(ecs::ShipEntityIndex::default());
@@ -6365,6 +6377,10 @@ fn build_app(
     app.configure_sets(
         Update,
         (
+            // Shared clock first: every shard system that reads
+            // `Res<CelestialTime>` (physics, broadcasts, diagnostics)
+            // observes the fresh value for the current tick.
+            CelestialClockSet,
             SystemShardSet::Bridge,
             SystemShardSet::Spawn,
             SystemShardSet::Physics,
@@ -6544,12 +6560,14 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
         let harness = ShardHarness::new(config);
+        let universe_epoch = harness.epoch_arc();
         let app = build_app(
             args.seed,
             shard_id,
             args.orchestrator,
             args.galaxy_seed,
             args.star_index,
+            universe_epoch,
         );
 
         info!("system shard ECS app built, starting harness");

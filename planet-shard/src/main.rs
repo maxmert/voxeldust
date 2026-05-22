@@ -21,6 +21,9 @@ use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
 use voxeldust_core::system::{compute_lighting, compute_planet_position, SystemParams};
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::handoff_pipeline;
+use voxeldust_shard_common::celestial_clock::{
+    CelestialClockPlugin, CelestialClockSet, TimeScale, UniverseEpoch,
+};
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 use voxeldust_shard_common::signal_pipeline::SignalPipelinePlugin;
 use voxeldust_shard_common::hud_delta::{
@@ -269,17 +272,9 @@ struct PlanetPositionInSystem(DVec3);
 #[derive(Resource, Default)]
 struct CachedAllPlanetPositions(Vec<DVec3>);
 
-/// Celestial time derived from epoch (matches system shard).
-#[derive(Resource, Default)]
-struct CelestialTimeRes(f64);
-
 /// Physics simulation time.
 #[derive(Resource, Default)]
 struct PhysicsTimeRes(f64);
-
-/// Universe epoch for deterministic celestial time.
-#[derive(Resource)]
-struct UniverseEpoch(Arc<std::sync::atomic::AtomicU64>);
 
 /// Entity index: session_token → Entity for O(1) lookup.
 #[derive(Resource, Default)]
@@ -437,7 +432,7 @@ fn drain_quic(
     mut accepted_events: MessageWriter<HandoffAcceptedMsg>,
     mut collider_sync_events: MessageWriter<ShipColliderSyncMsg>,
     mut external_entities: ResMut<ExternalEntities>,
-    mut celestial_time: ResMut<CelestialTimeRes>,
+    mut celestial_time: ResMut<ecs::CelestialTime>,
     mut planet_pos: ResMut<PlanetPositionInSystem>,
     sys_params: Res<SystemParamsRes>,
     config: Res<PlanetConfig>,
@@ -509,7 +504,7 @@ fn update_planet_position(
 /// Separated from update_planet_position to avoid redundant Kepler solves in drain_quic.
 fn refresh_planet_position_cache(
     sys_params: Res<SystemParamsRes>,
-    celestial_time: Res<CelestialTimeRes>,
+    celestial_time: Res<ecs::CelestialTime>,
     mut cached: ResMut<CachedAllPlanetPositions>,
 ) {
     if let Some(ref sys) = sys_params.0 {
@@ -531,7 +526,7 @@ fn process_connects(
     mut rapier: ResMut<RapierContext>,
     config: Res<PlanetConfig>,
     planet_pos: Res<PlanetPositionInSystem>,
-    celestial_time: Res<CelestialTimeRes>,
+    celestial_time: Res<ecs::CelestialTime>,
     mut player_index: ResMut<PlayerEntityIndex>,
     mut pending: ResMut<PendingHandoffs>,
     bridge: Res<NetworkBridge>,
@@ -1508,17 +1503,16 @@ fn physics_step(
     mut rapier: ResMut<RapierContext>,
     config: Res<PlanetConfig>,
     mut physics_time: ResMut<PhysicsTimeRes>,
-    mut celestial_time: ResMut<CelestialTimeRes>,
+    celestial_time: Res<ecs::CelestialTime>,
     mut tick: ResMut<ecs::TickCounter>,
     sys_params: Res<SystemParamsRes>,
     mut planet_pos: ResMut<PlanetPositionInSystem>,
-    epoch: Res<UniverseEpoch>,
 ) {
     physics_time.0 += 0.05;
-    celestial_time.0 = voxeldust_shard_common::harness::celestial_time_from_epoch(
-        &epoch.0,
-        sys_params.0.as_ref().map(|s| s.scale.time_scale).unwrap_or(1.0),
-    );
+    // `celestial_time` is now refreshed once per tick by
+    // `voxeldust_shard_common::celestial_clock::CelestialClockPlugin`
+    // (run-set `CelestialClockSet`, ordered before this system at
+    // plugin install). Single source of truth across every shard.
     tick.0 += 1;
 
     // Update planet position from Keplerian orbit.
@@ -1640,7 +1634,7 @@ fn ship_proximity(
     tick: Res<ecs::TickCounter>,
     config: Res<PlanetConfig>,
     planet_pos: Res<PlanetPositionInSystem>,
-    celestial_time: Res<CelestialTimeRes>,
+    celestial_time: Res<ecs::CelestialTime>,
     players: Query<
         (
             Entity,
@@ -1899,7 +1893,7 @@ fn broadcast_world_state(
     sys_params: Res<SystemParamsRes>,
     planet_pos: Res<PlanetPositionInSystem>,
     cached_all_planets: Res<CachedAllPlanetPositions>,
-    celestial_time: Res<CelestialTimeRes>,
+    celestial_time: Res<ecs::CelestialTime>,
     tick: Res<ecs::TickCounter>,
     bridge: Res<NetworkBridge>,
     external: Res<ExternalEntities>,
@@ -2168,7 +2162,7 @@ fn log_state(
     players: Query<&PlanetPlayer>,
     config: Res<PlanetConfig>,
     physics_time: Res<PhysicsTimeRes>,
-    celestial_time: Res<CelestialTimeRes>,
+    celestial_time: Res<ecs::CelestialTime>,
     tick: Res<ecs::TickCounter>,
 ) {
     if tick.0 % 100 != 0 || tick.0 == 0 {
@@ -2262,13 +2256,23 @@ fn build_app(
         system_seed,
         planet_index,
     });
+    // Shared celestial clock — see `system-shard` for the same
+    // pattern. `TimeScale` falls back to `1.0` when no system_seed
+    // was provided at startup (planet-shard for standalone/test);
+    // production always has a system_seed and thus a derived scale.
+    app.add_plugins(CelestialClockPlugin);
+    app.insert_resource(UniverseEpoch(universe_epoch));
+    let planet_time_scale = system_params
+        .as_ref()
+        .map(|s| s.scale.time_scale)
+        .unwrap_or(1.0);
+    app.insert_resource(TimeScale(planet_time_scale));
+
     app.insert_resource(SystemParamsRes(system_params));
     app.insert_resource(PlanetPositionInSystem(planet_position_in_system));
     app.insert_resource(CachedAllPlanetPositions::default());
-    app.insert_resource(CelestialTimeRes::default());
     app.insert_resource(PhysicsTimeRes::default());
     app.insert_resource(ecs::TickCounter::default());
-    app.insert_resource(UniverseEpoch(universe_epoch));
     app.insert_resource(PlayerEntityIndex::default());
     app.insert_resource(ShipEntityIndex::default());
     app.insert_resource(PendingHandoffs::default());
@@ -2299,10 +2303,13 @@ fn build_app(
     app.add_message::<LandedEvent>();
     app.add_message::<CharacterCollisionEvent>();
 
-    // System ordering.
+    // System ordering. Shared `CelestialClockSet` runs first so every
+    // subsequent set (Physics in particular) observes the freshly
+    // refreshed `CelestialTime` for this tick.
     app.configure_sets(
         Update,
         (
+            CelestialClockSet,
             PlanetSet::Bridge,
             PlanetSet::Spawn,
             PlanetSet::Input,

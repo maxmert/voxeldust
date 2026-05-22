@@ -42,6 +42,9 @@ use voxeldust_core::system::{self, SystemParams};
 use voxeldust_shard_common::authorized_peers::AuthorizedPeers;
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::handoff_pipeline;
+use voxeldust_shard_common::celestial_clock::{
+    CelestialClockPlugin, CelestialClockSet, TimeScale, UniverseEpoch,
+};
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 use voxeldust_shard_common::media_pipeline::MediaPipelinePlugin;
 use voxeldust_shard_common::signal_pipeline::{SignalPipelinePlugin, SignalSet};
@@ -215,7 +218,10 @@ struct ShipExterior {
 struct SceneCache {
     bodies: Vec<CelestialBodySnapshotData>,
     lighting: Option<LightingInfoData>,
-    game_time: f64,
+    // `game_time` was previously cached here as a mirror of
+    // `SystemSceneUpdate.game_time`. Removed in favour of the shared
+    // `Res<ecs::CelestialTime>` driven by
+    // `voxeldust_shard_common::celestial_clock::CelestialClockPlugin`.
     last_update_tick: u64,
     host_switch_tick: u64,
     authorized_peers: AuthorizedPeers,
@@ -1081,7 +1087,13 @@ fn drain_quic(
                 }
                 scene.bodies = data.bodies;
                 scene.lighting = Some(data.lighting);
-                scene.game_time = data.game_time;
+                // `scene.game_time` is no longer mirrored here. Every
+                // consumer reads `Res<CelestialTime>` directly (set
+                // by `CelestialClockPlugin` from the shared
+                // wall-clock-from-epoch formula). The field on
+                // `SceneCache` is retained as `0.0` for backward
+                // ABI on the in-process resource layout; future
+                // cleanup can drop the field entirely.
                 scene.last_update_tick = tick.0;
             }
             ShardMsg::ShipPositionUpdate(data) => {
@@ -1772,6 +1784,7 @@ fn process_connects(
     exterior: Res<ShipExterior>,
     config: Res<ShipConfig>,
     scene: Res<SceneCache>,
+    celestial_time: Res<ecs::CelestialTime>,
     ship_grid: Res<ShipGridResource>,
     bridge: Res<NetworkBridge>,
 ) {
@@ -1891,7 +1904,7 @@ fn process_connects(
         let tcp_write = event.tcp_write.clone();
         let ship_pos = exterior.position;
         let ship_rot = exterior.rotation;
-        let game_time = scene.game_time;
+        let game_time = celestial_time.0;
         let ship_id = config.ship_id;
         let galaxy_seed = config.galaxy_seed;
         let system_seed = config.system_seed;
@@ -2148,6 +2161,7 @@ fn preconnect_check(
     config: Res<ShipConfig>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
+    celestial_time: Res<ecs::CelestialTime>,
     cached_sys: Res<CachedSystemParams>,
     bridge: Res<NetworkBridge>,
 ) {
@@ -2301,6 +2315,7 @@ fn hull_exit_check(
     hull_bounds: Res<ShipHullBounds>,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
+    celestial_time: Res<ecs::CelestialTime>,
     cached_sys: Res<CachedSystemParams>,
     config: Res<ShipConfig>,
     interior_mask: Res<ShipInteriorMask>,
@@ -2418,7 +2433,7 @@ fn hull_exit_check(
                             target_ship_shard_id: None,
                             ship_system_position: Some(exterior.position),
                             ship_rotation: Some(exterior.rotation),
-                            game_time: scene.game_time,
+                            game_time: celestial_time.0,
                             warp_target_star_index: None,
                             warp_velocity_gu: None,
                             target_system_eva: false,
@@ -2494,7 +2509,7 @@ fn hull_exit_check(
                 target_ship_shard_id: Some(config.shard_id),
                 ship_system_position: Some(exterior.position),
                 ship_rotation: Some(exterior.rotation),
-                game_time: scene.game_time,
+                game_time: celestial_time.0,
                 warp_target_star_index: None,
                 warp_velocity_gu: None,
                 target_system_eva: true,
@@ -3411,6 +3426,7 @@ fn broadcast_world_state(
     >,
     exterior: Res<ShipExterior>,
     scene: Res<SceneCache>,
+    celestial_time: Res<ecs::CelestialTime>,
     warp_query: Query<&WarpComputerState>,
     autopilot_cache: Res<AutopilotSnapshotCache>,
     tick: Res<ecs::TickCounter>,
@@ -3628,7 +3644,7 @@ fn broadcast_world_state(
         bodies,
         ships: vec![],
         lighting,
-        game_time: scene.game_time,
+        game_time: celestial_time.0,
         warp_target_star_index: warp_target,
         autopilot: autopilot_cache.snapshot.clone(),
         sub_grids: Vec::new(), // Populated below after WorldStateData construction.
@@ -8738,6 +8754,7 @@ fn build_ship_interior(
     host_shard_id: Option<ShardId>,
     system_seed: u64,
     galaxy_seed: u64,
+    universe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> App {
     let mut rigid_body_set = RigidBodySet::new();
     let mut collider_set = ColliderSet::new();
@@ -8942,6 +8959,27 @@ fn build_ship_interior(
 
     let mut app = App::new();
 
+    // Shared celestial clock — single source of truth for `game_time`
+    // across every shard. Replaces the previous mirror that read
+    // `scene.game_time = SystemSceneUpdate.game_time` (which lagged
+    // system-shard's source by ≥ 1 QUIC tick and broke cross-shard
+    // visual interpolation). Now ship-shard derives `game_time`
+    // independently from `(wall_clock − universe_epoch) × time_scale`
+    // — identical formula to every other shard.
+    //
+    // `TimeScale` uses the cached system params when available
+    // (production: system_seed > 0). When standalone / detached
+    // (system_seed == 0), defaults to 1.0 — game_time still advances
+    // monotonically with wall-clock for any per-tick consumer that
+    // needs it.
+    app.add_plugins(CelestialClockPlugin);
+    app.insert_resource(UniverseEpoch(universe_epoch));
+    let ship_time_scale = cached_system_params
+        .as_ref()
+        .map(|s| s.scale.time_scale)
+        .unwrap_or(1.0);
+    app.insert_resource(TimeScale(ship_time_scale));
+
     // Resources.
     const SHIP_TICK_DT: f32 = 0.05;
     app.insert_resource(ShipIntegrationDt(SHIP_TICK_DT));
@@ -8987,7 +9025,6 @@ fn build_ship_interior(
     app.insert_resource(SceneCache {
         bodies: scene_bodies,
         lighting: scene_lighting,
-        game_time: 0.0,
         last_update_tick: 0,
         host_switch_tick: 0,
         authorized_peers: AuthorizedPeers::default(),
@@ -9082,6 +9119,10 @@ fn build_ship_interior(
     app.configure_sets(
         Update,
         (
+            // Shared `CelestialClockSet` first: every downstream
+            // consumer (broadcasts, physics, diagnostics) sees the
+            // freshest `CelestialTime` for this tick.
+            CelestialClockSet,
             ShipSet::Bridge,
             ShipSet::Input,
             ShipSet::BlockEdit,
@@ -9318,12 +9359,14 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
         let harness = ShardHarness::new(config);
+        let universe_epoch = harness.epoch_arc();
         let app = build_ship_interior(
             ShardId(args.shard_id),
             ship_id,
             host_shard_id,
             args.system_seed,
             args.galaxy_seed,
+            universe_epoch,
         );
 
         info!("ship shard ECS app built, starting harness");

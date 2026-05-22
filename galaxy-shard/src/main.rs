@@ -21,6 +21,9 @@ use voxeldust_core::shard_message::{
 };
 use voxeldust_core::signal::radio_subscribers::RadioSubscribers;
 use voxeldust_core::shard_types::{SessionToken, ShardId, ShardType};
+use voxeldust_shard_common::celestial_clock::{
+    CelestialClockPlugin, CelestialClockSet, TimeScale, UniverseEpoch,
+};
 use voxeldust_shard_common::client_listener;
 use voxeldust_shard_common::harness::{NetworkBridge, ShardHarness, ShardHarnessConfig};
 use voxeldust_shard_common::wire_dict_registry::{decode_v2_batch, encode_v2_batch};
@@ -448,15 +451,17 @@ fn process_connect_events(
     mut events: MessageReader<ClientConnectedEvent>,
     galaxy_seed: Res<GalaxySeed>,
     galaxy_map: Res<GalaxyMapResource>,
-    tick: Res<ecs::TickCounter>,
+    celestial_time: Res<ecs::CelestialTime>,
 ) {
     for event in events.read() {
         let token = event.session_token;
         let gs = galaxy_seed.0;
         let tcp_write = event.tcp_write.clone();
-        // Compute game time from tick (approximation — the actual celestial_time
-        // would come from epoch, but for JoinResponse it only needs to be close).
-        let game_time = tick.0 as f64 * 0.05;
+        // Server-authoritative wall-clock game-time from the shared
+        // `CelestialClockPlugin`. Identical formula to every other
+        // shard, so cross-shard cross-references on game_time agree
+        // bit-for-bit.
+        let game_time = celestial_time.0;
 
         // Snapshot the full star catalogue once per connect so the
         // client can spawn the starfield immediately. The galaxy map
@@ -761,6 +766,7 @@ fn soi_detection(
     shard_identity: Res<ShardIdentity>,
     galaxy_seed: Res<GalaxySeed>,
     tick: Res<ecs::TickCounter>,
+    celestial_time: Res<ecs::CelestialTime>,
     bridge: Res<NetworkBridge>,
     provision_tx: Res<ProvisionSender>,
     orch_url: Res<OrchestratorUrl>,
@@ -913,7 +919,7 @@ fn soi_detection(
             target_ship_shard_id: None,
             ship_system_position: None,
             ship_rotation: None,
-            game_time: tick.0 as f64 * DT,
+            game_time: celestial_time.0,
             warp_target_star_index: None,
             warp_velocity_gu: None,
             target_system_eva: false,
@@ -1121,6 +1127,7 @@ fn broadcast_galaxy_world_state(
 fn broadcast_scene_to_ship_shards(
     ships: Query<(&ShipId, &Position, &Velocity, &Rotation, &WarpState)>,
     tick: Res<ecs::TickCounter>,
+    celestial_time: Res<ecs::CelestialTime>,
     bridge: Res<NetworkBridge>,
     ship_dir: Res<ShipShardDirectory>,
 ) {
@@ -1133,7 +1140,7 @@ fn broadcast_scene_to_ship_shards(
         // Scene update: empty bodies (client renders stars via StarField in galaxy mode).
         // Only lighting is sent for ambient interstellar illumination.
         let scene = SystemSceneUpdateData {
-            game_time: tick.0 as f64 * DT,
+            game_time: celestial_time.0,
             bodies: vec![],
             ships: vec![],
             lighting: LightingInfoData {
@@ -1214,6 +1221,7 @@ fn build_app(
     galaxy_seed: u64,
     shard_id: ShardId,
     orchestrator_url: String,
+    universe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> App {
     let galaxy_map = GalaxyMap::generate(galaxy_seed);
     info!(
@@ -1230,6 +1238,13 @@ fn build_app(
         .expect("failed to build HTTP client");
 
     let mut app = App::new();
+
+    // Shared celestial clock — same plugin every shard adopts. Galaxy
+    // has no in-transit celestial bodies, so the default
+    // `TimeScale(1.0)` is correct: `game_time` advances at wall-clock
+    // 1:1 rate and matches every other shard's reading exactly.
+    app.add_plugins(CelestialClockPlugin);
+    app.insert_resource(UniverseEpoch(universe_epoch));
 
     // Resources.
     app.insert_resource(GalaxyMapResource(galaxy_map));
@@ -1255,10 +1270,13 @@ fn build_app(
     app.add_message::<WarpAutopilotEvent>();
     app.add_message::<ProvisionCompletedEvent>();
 
-    // System ordering via SystemSets.
+    // System ordering via SystemSets. Shared `CelestialClockSet`
+    // runs first so every downstream set (incl. Broadcast) reads
+    // the freshest `CelestialTime` for this tick.
     app.configure_sets(
         Update,
         (
+            CelestialClockSet,
             GalaxySet::Bridge,
             GalaxySet::Spawn,
             GalaxySet::Physics,
@@ -1386,7 +1404,8 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
         let harness = ShardHarness::new(config);
-        let app = build_app(galaxy_seed, shard_id, args.orchestrator);
+        let universe_epoch = harness.epoch_arc();
+        let app = build_app(galaxy_seed, shard_id, args.orchestrator, universe_epoch);
 
         info!("galaxy shard ECS app built, starting harness");
         harness.run_ecs(app).await;

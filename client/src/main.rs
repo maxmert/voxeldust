@@ -360,7 +360,7 @@ fn log_network_events(mut reader: MessageReader<GameEvent>) {
                 static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let n = TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n % 100 == 0 {
-                    tracing::info!(
+                    tracing::debug!(
                         bodies = ws.bodies.len(),
                         entities = ws.entities.len(),
                         game_time = ws.game_time,
@@ -372,7 +372,7 @@ fn log_network_events(mut reader: MessageReader<GameEvent>) {
                 static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let n = TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n % 200 == 0 {
-                    tracing::info!(%shard_type, "net: secondary worldstate tick");
+                    tracing::debug!(%shard_type, "net: secondary worldstate tick");
                 }
             }
             NetEvent::ChunkSnapshot(cs) => {

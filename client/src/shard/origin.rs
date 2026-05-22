@@ -56,14 +56,76 @@ impl Default for ShardOrigin {
 /// The camera's f64 position in system-space (current primary's
 /// coordinate frame). Default `ZERO` until Phase 11 starts writing
 /// authoritative player pose each tick.
+///
+/// `pos` / `game_time` is the most recent snapshot from the primary
+/// WorldState; `prev_pos` / `prev_game_time` is the previous one.
+/// Both pairs are advanced together by
+/// [`crate::camera::pose::apply_worldstate_pose`] on each fresh
+/// primary WS tick (detected via
+/// `PrimaryWorldState.last_tick_real_time` changing).
+///
+/// The two-snapshot buffer exists so [`Self::pos_at_game_time`] can
+/// lerp to a target server-authoritative game-time. Combined with
+/// [`crate::remote::RemoteEntity::interpolated_pose_at_game_time`],
+/// cross-shard rendering evaluates both `cam.pos` and
+/// `remote.position` at the same simulation instant, eliminating the
+/// per-frame `velocity × tick_phase_offset` blink that direct
+/// `remote − cam` subtraction produces when the two operands are
+/// sourced from independent shard WS streams.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct CameraWorldPos {
     pub pos: DVec3,
+    /// `WorldStateData.game_time` from the WS that produced `pos`.
+    /// `f64::NEG_INFINITY` until first WS lands; the lerp window in
+    /// `pos_at_game_time` clamps to `pos` while that's the case.
+    pub game_time: f64,
+    /// Previous snapshot of `pos`. Equal to `pos` (with
+    /// `prev_game_time == game_time`) on first WS, then shifted in
+    /// from the prior snapshot on each subsequent fresh primary tick.
+    pub prev_pos: DVec3,
+    /// `WorldStateData.game_time` from the WS that produced
+    /// `prev_pos`.
+    pub prev_game_time: f64,
 }
 
 impl Default for CameraWorldPos {
     fn default() -> Self {
-        Self { pos: DVec3::ZERO }
+        Self {
+            pos: DVec3::ZERO,
+            game_time: f64::NEG_INFINITY,
+            prev_pos: DVec3::ZERO,
+            prev_game_time: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl CameraWorldPos {
+    /// Linearly interpolate `pos` at a **server-authoritative
+    /// game-time**. Mirror of
+    /// [`crate::remote::RemoteEntity::interpolated_pose_at_game_time`];
+    /// the two MUST be evaluated at the same `target` for the
+    /// cross-shard subtraction (`remote − cam`) to land on a single
+    /// simulation instant.
+    ///
+    /// Clamp semantics:
+    ///   * `target >= game_time` → return current `pos` (caught up).
+    ///   * `target <= prev_game_time` → return `prev_pos` (behind both).
+    ///   * Between — lerp.
+    ///
+    /// Falls through to current `pos` when `game_time ==
+    /// prev_game_time` (no usable lerp window yet — first frame, or
+    /// `game_time` never advanced because no fresh primary WS has
+    /// landed since the last one).
+    pub fn pos_at_game_time(&self, target: f64) -> DVec3 {
+        let span = self.game_time - self.prev_game_time;
+        if span <= 0.0 || target >= self.game_time {
+            return self.pos;
+        }
+        if target <= self.prev_game_time {
+            return self.prev_pos;
+        }
+        let alpha = ((target - self.prev_game_time) / span).clamp(0.0, 1.0);
+        self.prev_pos.lerp(self.pos, alpha)
     }
 }
 

@@ -375,7 +375,7 @@ fn update_solar_light(
                 (Vec3::ZERO, Quat::IDENTITY),
             ));
         if stellar.is_some() {
-            tracing::info!(
+            tracing::debug!(
                 primary_shard_type = ?primary_shard_type,
                 cam_world = ?(camera_world.pos.x, camera_world.pos.y, camera_world.pos.z),
                 star = ?(star_pos.x, star_pos.y, star_pos.z),

@@ -1,3 +1,4 @@
+pub mod celestial_clock;
 pub mod quic_transport;
 pub mod circuit_breaker;
 pub mod harness;

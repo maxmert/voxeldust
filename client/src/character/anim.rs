@@ -203,7 +203,7 @@ fn drive_animation_graph(
             }
         }
 
-        info!(
+        debug!(
             player_id = tag.player_id,
             class = class.name,
             from = ?state.current_clip,

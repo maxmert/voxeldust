@@ -39,8 +39,6 @@
 //! single authoritative computation), no rotation discontinuity ever
 //! occurs at primary swaps.
 
-use std::time::Instant;
-
 use bevy::prelude::*;
 
 use voxeldust_core::client_message::WorldStateData;
@@ -51,7 +49,7 @@ use crate::shard::origin::{
 };
 use crate::shard::registry::{PrimaryShard, Secondaries, SourceIndex};
 use crate::shard::runtime::ChunkSource;
-use crate::shard::worldstate::{PrimaryWorldState, SecondaryWorldStates};
+use crate::shard::worldstate::{resolve_game_time_now, PrimaryWorldState, SecondaryWorldStates};
 use crate::shard_types::planet::PLANET_SHARD_TYPE;
 
 pub struct PlanetRotationPlugin;
@@ -136,30 +134,6 @@ fn apply_planet_rotation(
             origin.rotation = q;
         }
     }
-}
-
-/// Compute `game_time_now` from whichever WorldState we have an
-/// arrival-instant for. Returns `None` if no WS has been received yet.
-///
-/// Extrapolation: `game_time_now = ws.game_time + (Instant::now() −
-/// last_tick_real_time).as_secs_f64()`. The 1:1 real-time scaling is
-/// what makes the rotation "live" between 20 Hz server ticks.
-fn resolve_game_time_now(
-    primary: &PrimaryWorldState,
-    secondary: &SecondaryWorldStates,
-) -> Option<f64> {
-    let now = Instant::now();
-    if let (Some(ws), Some(last_real)) = (primary.latest.as_ref(), primary.last_tick_real_time) {
-        let elapsed = now.saturating_duration_since(last_real).as_secs_f64();
-        return Some(ws.game_time + elapsed);
-    }
-    // Fallback: any secondary WS works because its `game_time` field is
-    // also server-authoritative (every shard echoes the same clock).
-    if let Some((ws, last_real)) = secondary.by_shard_type.values().next() {
-        let elapsed = now.saturating_duration_since(*last_real).as_secs_f64();
-        return Some(ws.game_time + elapsed);
-    }
-    None
 }
 
 /// Pull the home planet's broadcast `rotation_params` out of a PLANET

@@ -122,7 +122,20 @@ fn consume_spawn_pose_latch(
     let Some(pose) = latch.pose.take() else { return };
     latch.target_shard_type = None;
     let body_world = DVec3::new(pose.position.x, pose.position.y, pose.position.z);
-    camera_world.pos = body_world + DVec3::new(0.0, EYE_HEIGHT as f64, 0.0);
+    let eye_world = body_world + DVec3::new(0.0, EYE_HEIGHT as f64, 0.0);
+    camera_world.pos = eye_world;
+    // The latched pose has no `game_time` stamp (SpawnPose is server-
+    // authoritative for position/rotation/velocity only). Seed both
+    // snapshots with the latched position so
+    // `CameraWorldPos::pos_at_game_time` returns the latched `pos`
+    // for any target (lerp window is degenerate, clamps to current).
+    // `game_time = NEG_INFINITY` matches the `Default` and keeps
+    // downstream lerps disabled until the first real WS arrives via
+    // `apply_worldstate_pose`, which atomically writes both prev and
+    // current to the WS's game_time.
+    camera_world.prev_pos = eye_world;
+    camera_world.game_time = f64::NEG_INFINITY;
+    camera_world.prev_game_time = f64::NEG_INFINITY;
 
     extrapolation.velocity = DVec3::new(
         pose.velocity.x,
@@ -184,6 +197,15 @@ fn apply_worldstate_pose(
     conn: Res<NetConnection>,
     mut camera_world: ResMut<CameraWorldPos>,
     mut extrapolation: ResMut<SpawnExtrapolation>,
+    // Cached `last_tick_real_time` from the previous call. A change
+    // in this value vs `ws.last_tick_real_time` indicates a fresh
+    // primary WS tick has been ingested since we last ran — only
+    // then do we shift the snapshot pair on `CameraWorldPos`. This
+    // keeps the (prev, current) pair aligned to actual server-tick
+    // boundaries, not per-frame ingest. Same pattern as
+    // `RemoteEntity::reconcile_interpolation`'s same-tick-re-ingest
+    // guard.
+    mut last_seen_tick_instant: Local<Option<Instant>>,
 ) {
     // While the new primary's first WS hasn't arrived yet, keep the
     // camera moving along the spawn velocity captured at latch time.
@@ -191,12 +213,16 @@ fn apply_worldstate_pose(
     // co-located with the still-moving server-side player. When the
     // first WS lands, we clear the extrapolation and let the
     // authoritative position take over with no visible snap.
-    let Some(ws) = ws.latest.as_ref() else {
+    let Some(ws_data) = ws.latest.as_ref() else {
         if let Some(prev_step) = extrapolation.last_step {
             let now = Instant::now();
             let dt = now.saturating_duration_since(prev_step).as_secs_f64();
             if dt > 0.0 && extrapolation.velocity.length_squared() > 0.0 {
                 camera_world.pos += extrapolation.velocity * dt;
+                // No game_time during extrapolation — `pos_at_game_time`
+                // returns current `pos` (the extrapolated value), which
+                // is what we want for any consumer rendering during
+                // the pre-first-WS gap.
             }
             extrapolation.last_step = Some(now);
         }
@@ -211,6 +237,19 @@ fn apply_worldstate_pose(
     extrapolation.last_step = None;
     extrapolation.velocity = DVec3::ZERO;
 
+    // Fresh-tick detection. `ingest_primary` stamps
+    // `last_tick_real_time = Some(Instant::now())` exactly once per
+    // newly-arrived WS (gated by the monotonic-tick guard). When
+    // that instant differs from the one we cached on the previous
+    // frame, the current `ws_data` is fresh and we must shift the
+    // snapshot pair so `pos_at_game_time` has a non-degenerate lerp
+    // window. Same `ws.tick` re-ingest in subsequent frames produces
+    // identical `last_tick_real_time` → no shift, no double-write.
+    let fresh_tick = ws.last_tick_real_time != *last_seen_tick_instant;
+    if fresh_tick {
+        *last_seen_tick_instant = ws.last_tick_real_time;
+    }
+
     // Eye offset in shard-local frame — server's capsule uses Y-up,
     // so the eye sits `EYE_HEIGHT` above the player's capsule center
     // along local +Y. When composed with the ship's world rotation on
@@ -219,49 +258,72 @@ fn apply_worldstate_pose(
     // own offset, so both systems agree).
     let eye_offset_local = DVec3::new(0.0, EYE_HEIGHT as f64, 0.0);
 
-    // Prefer the entities[] path when the server populates it.
-    if let Some(own) = ws
+    // Compute the new `pos` from the WS using the same precedence as
+    // before (entities[] path first, players[] fallback). Then,
+    // depending on `fresh_tick`, EITHER advance the snapshot pair
+    // (prev ← old current; current ← new) OR overwrite current only
+    // (same tick re-ingested this frame).
+    let new_pos = if let Some(own) = ws_data
         .entities
         .iter()
         .find(|e| e.is_own && e.kind.is_player())
     {
-        let abs = DVec3::new(ws.origin.x, ws.origin.y, ws.origin.z)
+        DVec3::new(ws_data.origin.x, ws_data.origin.y, ws_data.origin.z)
             + DVec3::new(own.position.x, own.position.y, own.position.z)
-            + eye_offset_local;
-        camera_world.pos = abs;
-        return;
-    }
-
-    // Fallback: legacy players[] snapshot. On SHIP primary the player
-    // is reported in ship-local coords; compose with the ship's rotation
-    // from entities[] to produce world-pos.
-    let Some(own_player) = ws
-        .players
-        .iter()
-        .find(|p| p.player_id == conn.player_id)
-    else {
-        return;
+            + eye_offset_local
+    } else {
+        // Fallback: legacy players[] snapshot. On SHIP primary the
+        // player is reported in ship-local coords; compose with the
+        // ship's rotation from entities[] to produce world-pos.
+        let Some(own_player) = ws_data
+            .players
+            .iter()
+            .find(|p| p.player_id == conn.player_id)
+        else {
+            return;
+        };
+        let own_ship = ws_data
+            .entities
+            .iter()
+            .find(|e| e.is_own && e.kind == EntityKind::Ship);
+        let ship_rot = own_ship
+            .map(|s| DQuat::from_xyzw(s.rotation.x, s.rotation.y, s.rotation.z, s.rotation.w))
+            .unwrap_or(DQuat::IDENTITY);
+        let player_local = DVec3::new(
+            own_player.position.x,
+            own_player.position.y,
+            own_player.position.z,
+        );
+        let origin = DVec3::new(ws_data.origin.x, ws_data.origin.y, ws_data.origin.z);
+        // Eye offset is in SHIP-LOCAL frame (on SHIP primary) or world
+        // Y-up (on SYSTEM/PLANET/GALAXY primary). When there is no own
+        // ship (EVA), `ship_rot` is identity so eye_offset_local is
+        // applied as-is along world +Y.
+        origin + ship_rot * (player_local + eye_offset_local)
     };
 
-    let own_ship = ws
-        .entities
-        .iter()
-        .find(|e| e.is_own && e.kind == EntityKind::Ship);
-    let ship_rot = own_ship
-        .map(|s| DQuat::from_xyzw(s.rotation.x, s.rotation.y, s.rotation.z, s.rotation.w))
-        .unwrap_or(DQuat::IDENTITY);
-
-    let player_local = DVec3::new(
-        own_player.position.x,
-        own_player.position.y,
-        own_player.position.z,
-    );
-    let origin = DVec3::new(ws.origin.x, ws.origin.y, ws.origin.z);
-    // Eye offset is in SHIP-LOCAL frame (on SHIP primary) or world
-    // Y-up (on SYSTEM/PLANET/GALAXY primary). When there is no own
-    // ship (EVA), `ship_rot` is identity so eye_offset_local is
-    // applied as-is along world +Y.
-    camera_world.pos = origin + ship_rot * (player_local + eye_offset_local);
+    if fresh_tick {
+        // First-ever WS for this session OR after spawn-latch: the
+        // spawn-latch initialized `game_time = NEG_INFINITY`; shifting
+        // would seed prev_game_time at NEG_INFINITY too, leaving the
+        // lerp window degenerate (`span = ws.game_time + ∞ = NaN`)
+        // forever. Detect this special case and seed prev = current
+        // so the next fresh tick begins a proper lerp window. Mirror
+        // of `RemoteEntity::reconcile_interpolation` first-sighting.
+        if camera_world.game_time.is_finite() {
+            camera_world.prev_pos = camera_world.pos;
+            camera_world.prev_game_time = camera_world.game_time;
+        } else {
+            camera_world.prev_pos = new_pos;
+            camera_world.prev_game_time = ws_data.game_time;
+        }
+        camera_world.pos = new_pos;
+        camera_world.game_time = ws_data.game_time;
+    } else {
+        // Same-tick re-ingest: just refresh current `pos` (cheap, no
+        // shift). `game_time` is unchanged because it's the same WS.
+        camera_world.pos = new_pos;
+    }
 }
 
 fn dquat_to_bevy(q: DQuat) -> Quat {

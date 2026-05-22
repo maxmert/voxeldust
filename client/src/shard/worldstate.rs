@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use voxeldust_core::client_message::WorldStateData;
 
 use crate::net::{GameEvent, NetEvent};
-use crate::shard::registry::ShardRegistrySet;
+use crate::shard::registry::{PrimaryShard, ShardRegistrySet};
 use crate::shard::runtime::ShardKey;
 
 #[derive(SystemSet, Clone, Debug, Hash, Eq, PartialEq)]
@@ -81,6 +81,65 @@ impl Plugin for WorldStateIngestPlugin {
     }
 }
 
+/// Compute `game_time_now` from every WorldState we've received,
+/// returning the MAX of the wall-clock-extrapolated values. Returns
+/// `None` if no WS has been received yet.
+///
+/// Per-source extrapolation: `ws.game_time + (Instant::now() −
+/// last_tick_real_time).as_secs_f64()`. The 1:1 real-time scaling
+/// makes derived quantities (planet rotation, render-target
+/// game-time) "live" between 20 Hz server ticks.
+///
+/// **Why max, not primary-preferred**: `game_time` is
+/// deterministically derived per-shard from `(wall_clock − universe
+/// epoch) × time_scale` (`shard-common::harness::celestial_time_from_epoch`),
+/// so two shards on synchronised wall-clocks compute IDENTICAL
+/// `game_time` values at any instant. But not every shard derives
+/// fresh: ship-shard mirrors `game_time` from `SystemSceneUpdate.game_time`
+/// (see `ship-shard/src/main.rs::drain_quic`), so its broadcasts
+/// carry game_time values that lag system-shard's by ~1 QUIC
+/// round-trip + send cadence (≈ 50 ms). If a client picks the
+/// ship-mirror's anchor over the system-source's, the render-target
+/// `target = anchor − INTERPOLATION_DELAY` lands BELOW system-shard's
+/// per-entity lerp windows and every remote that came via the system
+/// secondary clamps to `prev_position` every frame — visible as a
+/// residual one-frame-per-tick blink.
+///
+/// Taking the max picks the freshest source (lowest end-to-end lag).
+/// Mirror sources naturally lose; direct sources win.
+///
+/// Single source of truth for "what time is it on the server right
+/// now". Used by:
+///   * `client/src/lighting/rotation.rs` for planet rotation
+///     (`rotation_at(params, game_time_now)`).
+///   * `client/src/character/render.rs::rebase_root_visuals` and
+///     `sync_remote_pose` to compute the cross-shard render target
+///     `target = game_time_now − INTERPOLATION_DELAY`. Cross-shard
+///     entity rendering MUST evaluate both `cam.pos` and
+///     `remote.position` at the same simulation instant; this
+///     function provides that instant.
+pub fn resolve_game_time_now(
+    primary: &PrimaryWorldState,
+    secondary: &SecondaryWorldStates,
+) -> Option<f64> {
+    let now = Instant::now();
+    let extrapolate = |ws_game_time: f64, last_real: Instant| -> f64 {
+        ws_game_time + now.saturating_duration_since(last_real).as_secs_f64()
+    };
+    let mut best: Option<f64> = None;
+    if let (Some(ws), Some(last_real)) = (primary.latest.as_ref(), primary.last_tick_real_time) {
+        best = Some(extrapolate(ws.game_time, last_real));
+    }
+    for (ws, last_real) in secondary.by_shard_key.values() {
+        let candidate = extrapolate(ws.game_time, *last_real);
+        best = Some(match best {
+            Some(prev) if prev >= candidate => prev,
+            _ => candidate,
+        });
+    }
+    best
+}
+
 /// On `Connected` (new primary) and `SecondaryDisconnected` (closed
 /// secondary), drop the buffered WS for the affected shard so the
 /// next WS we receive isn't rejected as "older than the previous
@@ -95,6 +154,11 @@ fn reset_on_shard_change(
             NetEvent::Connected { .. } => {
                 primary.latest = None;
                 primary.last_tick_real_time = None;
+                // We no longer remove the stale secondary WorldState here.
+                // Doing so immediately on connection causes a visual blink/disappearance
+                // for entities on that shard during the network handshake gap (before the
+                // first primary WorldState packet arrives). Instead, we defer this cleanup
+                // to `ingest_primary` when the first primary packet is actually ingested.
             }
             NetEvent::SecondaryDisconnected { seed } => {
                 // Remove ONLY the disconnected secondary from the
@@ -143,7 +207,9 @@ fn reset_on_shard_change(
 /// rest.
 fn ingest_primary(
     mut events: MessageReader<GameEvent>,
+    primary_shard: Res<PrimaryShard>,
     mut primary: ResMut<PrimaryWorldState>,
+    mut secondary: ResMut<SecondaryWorldStates>,
 ) {
     for GameEvent(ev) in events.read() {
         if let NetEvent::WorldState(ws) = ev {
@@ -157,6 +223,13 @@ fn ingest_primary(
             }
             primary.latest = Some(ws.clone());
             primary.last_tick_real_time = Some(Instant::now());
+
+            // Defer secondary WorldState cleanup of the promoted shard until
+            // the first primary WorldState packet actually arrives.
+            if let Some(key) = primary_shard.current {
+                secondary.by_shard_key.remove(&key);
+                secondary.by_shard_type.remove(&key.shard_type);
+            }
         }
     }
 }

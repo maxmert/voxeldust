@@ -227,10 +227,20 @@ fn spawn_remote_character_visuals(
             // tick.
             continue;
         };
-        let parent_origin = shard_origins
-            .get(parent)
-            .map(|o| o.origin)
-            .unwrap_or(DVec3::ZERO);
+        let Ok(parent_origin) = shard_origins.get(parent).map(|o| o.origin) else {
+            // `SourceIndex.by_shard` is populated synchronously when a
+            // shard connects, but the bundled `ShardOrigin` component
+            // on the ChunkSource entity is queued via `Commands` and
+            // only becomes visible to queries after the next
+            // `ApplyDeferred`. A fallback to `DVec3::ZERO` here would
+            // mis-classify a SHIP/PLANET parent (origin ~1e9–1e10 m)
+            // as root-rebased (because `0.length() < 1.0`), pinning
+            // the visual into `rebase_root_visuals`'s code path with
+            // the wrong arithmetic — visuals end up ~1e9 m off-screen
+            // until the player's `RemoteEntity.shard` changes. Defer
+            // one tick instead; the component lands deterministically.
+            continue;
+        };
 
         spawn_one(&mut commands, parent, parent_origin, player_id, class, remote, assets);
     }
@@ -443,10 +453,16 @@ fn reparent_visuals_on_shard_change(
         // Bevy-hierarchy parenting otherwise. The transition between
         // the two modes is what makes EVA→ship boarding (and the
         // reverse) precision-correct in both directions.
-        let new_origin = shard_origins
-            .get(new_parent)
-            .map(|o| o.origin)
-            .unwrap_or(DVec3::ZERO);
+        let Ok(new_origin) = shard_origins.get(new_parent).map(|o| o.origin) else {
+            // Same race as in `spawn_remote_character_visuals`:
+            // `SourceIndex.by_shard` for the destination is updated
+            // synchronously on shard connect, but the new ChunkSource
+            // entity's `ShardOrigin` lands only after `ApplyDeferred`.
+            // Defer the reparent one tick; a `DVec3::ZERO` fallback
+            // would mis-flag a SHIP/PLANET destination as root-rebased
+            // and detach the visual from its (correct) parent.
+            continue;
+        };
         let new_needs_root_rebase = new_origin.length() < 1.0;
         match (root_rebase.is_some(), new_needs_root_rebase) {
             (false, false) => {
@@ -468,7 +484,7 @@ fn reparent_visuals_on_shard_change(
                 // hull-exits into EVA). Detach from parent, add the
                 // marker — `rebase_root_visuals` will write the
                 // correct world-space transform next tick.
-                commands.entity(visual).remove::<ChildOf>();
+                commands.entity(visual).remove_parent_in_place();
                 commands.entity(visual).insert(RootRebaseVisual);
             }
             (true, true) => {
@@ -481,7 +497,7 @@ fn reparent_visuals_on_shard_change(
         }
         let old_shard = tag.source_shard;
         tag.source_shard = remote.shard;
-        info!(
+        debug!(
             player_id = tag.player_id,
             %old_shard,
             new_shard = %remote.shard,
@@ -658,25 +674,39 @@ fn resolve_bones_when_ready(
 fn sync_remote_pose(
     remote_players: Res<RemotePlayers>,
     asset_registry: Res<CharacterAssetRegistry>,
+    primary_ws: Res<crate::shard::worldstate::PrimaryWorldState>,
+    secondary_ws: Res<crate::shard::worldstate::SecondaryWorldStates>,
     mut visuals: Query<(
         &RemoteCharacterTag,
         Option<&crate::character::camera_attach::LocalCharacterTag>,
         &mut Transform,
     )>,
 ) {
-    // Phase T7 — render remote players at a fixed interpolation lag
-    // so the 20 Hz server tick step turns into continuous motion on
-    // a 60+ fps client. Local player skipped (no client-prediction
-    // policy means we render the latest server pose directly — the
-    // user's own avatar must feel snappy, even at the cost of one
-    // tick of "behind the world" feel that interpolation imposes).
-    let render_time = std::time::Instant::now()
-        .checked_sub(crate::remote::INTERPOLATION_DELAY)
-        .unwrap_or_else(std::time::Instant::now);
+    // Render remote players at a fixed interpolation lag — the 20 Hz
+    // server tick step turns into continuous motion on a 60+ fps
+    // client. Local player skipped (no client-prediction policy: own
+    // avatar feels snappy, even at the cost of one tick of "behind
+    // the world" feel).
+    //
+    // Indexed on server-authoritative `game_time` (not wall-clock).
+    // Same temporal reference as `CameraWorldPos::pos_at_game_time`
+    // used by `rebase_root_visuals` — keeping ONE temporal paradigm
+    // in the render pipeline. For parented visuals (same-shard) this
+    // is behaviour-neutral vs the previous wall-clock indexing
+    // (snapshots arrive together with `cam.pos` so the lerp window
+    // is consistent either way); for root-rebased cross-shard
+    // visuals the game-time indexing is load-bearing.
+    let target = render_target_game_time(&primary_ws, &secondary_ws);
     for (tag, local, mut transform) in &mut visuals {
         let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
             continue;
         };
+        // Skip pose sync if the visual's parenting / coordinate rebase is not yet
+        // aligned with the remote entity's active shard. This prevents coordinate
+        // frame leakage / wild teleporting before reparent_visuals_on_shard_change completes.
+        if remote.shard != tag.source_shard {
+            continue;
+        }
         // Class metadata: prefer the registry-resolved class (so
         // future per-class hot-reload can rebind), fall back to the
         // stable `class_by_id` lookup so a racing-load scenario
@@ -689,7 +719,12 @@ fn sync_remote_pose(
         if local.is_some() {
             *transform = local_transform_for(remote, class);
         } else {
-            let (pos, _rot) = remote.interpolated_pose(render_time);
+            let pos = match target {
+                Some(t) => remote.interpolated_pose_at_game_time(t).0,
+                // First-frame fallback before any WS has landed:
+                // current snapshot. Identical to a degenerate lerp.
+                None => remote.position,
+            };
             // body_yaw is still applied via `local_transform_for`'s
             // scalar formula; rotation interpolation isn't currently
             // surfaced because the visual rotation is reconstructed
@@ -701,6 +736,23 @@ fn sync_remote_pose(
             *transform = local_transform_with_position(remote, class, pos);
         }
     }
+}
+
+/// Shared render-target game-time used by both `sync_remote_pose`
+/// (parented visuals) and `rebase_root_visuals` (root-rebased
+/// cross-shard visuals): `resolve_game_time_now(...) −
+/// INTERPOLATION_DELAY`. The 50 ms (= one server tick @ 20 Hz)
+/// back-lag absorbs same-shard tick jitter and gives a
+/// secondary-shard's WS time to land before its entities are
+/// rendered against the primary's `cam.pos`. Returns `None` only
+/// when no WS — primary or secondary — has been received yet;
+/// callers should fall back to the current snapshot in that case.
+fn render_target_game_time(
+    primary_ws: &crate::shard::worldstate::PrimaryWorldState,
+    secondary_ws: &crate::shard::worldstate::SecondaryWorldStates,
+) -> Option<f64> {
+    crate::shard::worldstate::resolve_game_time_now(primary_ws, secondary_ws)
+        .map(|now| now - crate::remote::INTERPOLATION_DELAY.as_secs_f64())
 }
 
 /// Compute a visual's shard-local Transform from the latest
@@ -758,26 +810,54 @@ fn rebase_root_visuals(
     remote_players: Res<RemotePlayers>,
     asset_registry: Res<CharacterAssetRegistry>,
     cam: Res<CameraWorldPos>,
+    primary_ws: Res<crate::shard::worldstate::PrimaryWorldState>,
+    secondary_ws: Res<crate::shard::worldstate::SecondaryWorldStates>,
     mut visuals: Query<(&RemoteCharacterTag, &mut Transform), With<RootRebaseVisual>>,
 ) {
-    let render_time = std::time::Instant::now()
-        .checked_sub(crate::remote::INTERPOLATION_DELAY)
-        .unwrap_or_else(std::time::Instant::now);
+    // Cross-shard render: `cam.pos` is from PRIMARY WS, `remote.position`
+    // is from a SECONDARY WS — independent 20 Hz streams. Naive
+    // `remote − cam` reads operands from different simulation instants
+    // and oscillates by `velocity × tick_phase_offset` (≈ 1.5–4 km
+    // per frame at orbital scales). Game-time-indexed interpolation
+    // evaluates BOTH operands at the same `target` server-time so
+    // the subtraction lands on a single simulation instant.
+    //
+    // Additionally, even without cross-shard mismatch, the lagged
+    // `interpolated_pose` (50 ms back) vs un-lagged `cam.pos`
+    // produced a steady `velocity × 50 ms` offset. Both sides now
+    // use the same back-lag via `pos_at_game_time` / `interpolated_pose_at_game_time`.
+    let target = render_target_game_time(&primary_ws, &secondary_ws);
     for (tag, mut transform) in &mut visuals {
         let Some(remote) = remote_players.by_id.get(&tag.player_id) else {
             continue;
         };
+        // Skip rebase if the visual is in the middle of a shard migration and
+        // hasn't had its rebase marker or parent updated yet.
+        if remote.shard != tag.source_shard {
+            continue;
+        }
         let class = asset_registry
             .ready(tag.class_id)
             .map(|a| a.class)
             .or_else(|| voxeldust_core::character::class_by_id(tag.class_id));
         let Some(class) = class else { continue };
-        let (pos_f64, _rot) = remote.interpolated_pose(render_time);
+        let (pos_f64, cam_pos) = match target {
+            Some(t) => (
+                remote.interpolated_pose_at_game_time(t).0,
+                cam.pos_at_game_time(t),
+            ),
+            // First-frame fallback before any WS has landed: current
+            // snapshots on both sides. Equivalent to the pre-fix
+            // direct subtraction; degenerate cases (single-frame
+            // boot) where there's no temporal misalignment to begin
+            // with.
+            None => (remote.position, cam.pos),
+        };
         // Single f64 subtraction at the order of magnitude of the
         // result (small) — not the magnitude of the operands (huge)
         // — so the cast to f32 only loses precision at the small
         // output's scale.
-        let delta = pos_f64 - cam.pos;
+        let delta = pos_f64 - cam_pos;
         let mut translation = Vec3::new(delta.x as f32, delta.y as f32, delta.z as f32);
         translation.y += class.visual_y_offset;
         let rotation = Quat::from_rotation_y(
