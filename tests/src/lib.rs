@@ -44,6 +44,8 @@ pub fn stub_config() -> StubConfig {
         tick_dt_s: 0.05,
         orchestrator: ORCH,
         mint_seed: 11,
+        // Large window: the oracle must see a whole short test run.
+        input_log_capacity: 1_000_000,
     }
 }
 

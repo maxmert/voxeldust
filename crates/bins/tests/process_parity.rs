@@ -235,6 +235,7 @@ fn p1_parity_real_binaries_over_quic() {
                 ("VD_TICK_DT", "0.02".to_owned()),
                 ("VD_ORCH", ORCH.0.to_string()),
                 ("VD_MINT_SEED", "11".to_owned()),
+                ("VD_INPUT_LOG_CAP", "4096".to_owned()),
             ],
         ),
     ]);

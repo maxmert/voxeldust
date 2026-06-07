@@ -1,11 +1,20 @@
-# HR1/R5 enforcement (docs/design/test_harness.md §9): simulation code reaches
-# time / randomness / persistence / network ONLY through the injected sim::io traits.
+# HR1/HR5 SEAM ENFORCEMENT (docs/design/test_harness.md §9, sealed_shards.md §1).
+# Tier-A code reaches time / randomness / persistence / NETWORK only through the
+# injected sim::io traits — never directly. io-prod and the bin shells are the ONLY
+# crates exempt from these bans (they ARE the I/O implementation). Empirically
+# checked: injecting a banned call here produces a clippy diagnostic (SEAL-1).
 disallowed-methods = [
     { path = "std::time::SystemTime::now", reason = "use the injected sim::io::Clock (R6/R7: wall-clock-derived state caused km-scale drift and forgeable identity)" },
-    { path = "std::time::Instant::now", reason = "use the injected sim::io::Clock; prod ticks are disciplined in io-prod only" },
+    { path = "std::time::Instant::now", reason = "use the injected sim::io::Clock; prod tick pacing lives in io-prod only" },
     { path = "std::thread::sleep", reason = "the sim thread never sleeps; pacing belongs to the prod tick loop behind sim::io" },
 ]
 disallowed-types = [
     { path = "std::collections::HashMap", reason = "iteration order feeds observable state; use BTreeMap or vd_core::collections::DetHashMap (FixedSeedHasher)" },
     { path = "std::collections::HashSet", reason = "iteration order feeds observable state; use BTreeSet or vd_core::collections::DetHashSet (FixedSeedHasher)" },
+    # Network egress is the io-prod seam's job ONLY (sealed_shards §1 layer-3): no
+    # Tier-A crate opens a socket. The closed flow taxonomies + Transport::send are
+    # the sole byte producers; a raw socket here is an out-of-band leak.
+    { path = "std::net::UdpSocket", reason = "no out-of-band network egress in Tier-A; all bytes ride the sim::io::Transport seam (HR1)" },
+    { path = "std::net::TcpStream", reason = "no out-of-band network egress in Tier-A; use the sim::io::Transport seam (HR1)" },
+    { path = "std::net::TcpListener", reason = "no out-of-band network egress in Tier-A; use the sim::io::Transport seam (HR1)" },
 ]

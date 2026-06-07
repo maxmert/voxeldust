@@ -98,8 +98,8 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .collect();
     }
     if let Some(log) = world.get_resource::<vd_sim::stub::InputLog>() {
-        report.applied_inputs = log.applied.clone();
-        report.discarded_inputs = log.discarded.clone();
+        report.applied_inputs = log.applied();
+        report.discarded_inputs = log.discarded();
     }
     report
 }
@@ -696,6 +696,7 @@ mod tests {
                 tick_dt_s: 0.05,
                 orchestrator: A,
                 mint_seed: 3,
+                input_log_capacity: 1_000_000,
             },
         );
         topo.add_node(Box::new(shard));

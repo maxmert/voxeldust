@@ -15,7 +15,7 @@
 //! - Frames are emitted only while the shard HOLDS its realm authority (fence
 //!   granted via the Directory seam), stamped with that fence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::entity_kind::EntityKind;
@@ -45,6 +45,9 @@ pub struct StubConfig {
     pub orchestrator: NodeId,
     /// Seed for the entity-mint entropy tail (NEVER wall-clock — R7).
     pub mint_seed: u64,
+    /// Bounded window for the input-conservation log (SCALE-3): production sets a
+    /// small ring; the harness sets a large one so the oracle sees a whole run.
+    pub input_log_capacity: usize,
 }
 
 /// One connected avatar.
@@ -106,14 +109,66 @@ pub enum DiscardReason {
     MalformedInput,
 }
 
-/// The INPUT-CONSERVATION ground truth: every delivered input is in exactly one of
-/// these logs. The oracle audits this against fabric delivery accounting.
-#[derive(Resource, Debug, Default)]
+/// The INPUT-CONSERVATION ground truth: every delivered input lands here, applied or
+/// discarded-with-reason. BOUNDED (SCALE-3): a day-long shard run cannot grow this
+/// without limit — the windows hold the most recent `capacity` entries and the
+/// `*_total` counters are EXACT for metrics. The harness sets a large window so the
+/// oracle still sees a whole short run; production sets a small one.
+#[derive(Resource, Debug)]
 pub struct InputLog {
-    /// (session, seq) of every applied input, in application order.
-    pub applied: Vec<(SessionId, u64)>,
-    /// (session, seq-if-decodable, reason) of every discarded input.
-    pub discarded: Vec<(SessionId, Option<u64>, DiscardReason)>,
+    applied: VecDeque<(SessionId, u64)>,
+    discarded: VecDeque<(SessionId, Option<u64>, DiscardReason)>,
+    capacity: usize,
+    /// Exact lifetime totals (never lossy — the honest metric).
+    pub applied_total: u64,
+    pub discarded_total: u64,
+    /// Entries evicted from the windows because the consumer fell behind the
+    /// `capacity` window (in production nobody drains; counted, never an OOM).
+    pub window_evictions: u64,
+}
+
+impl InputLog {
+    #[must_use]
+    pub fn new(capacity: usize) -> InputLog {
+        InputLog {
+            applied: VecDeque::new(),
+            discarded: VecDeque::new(),
+            capacity: capacity.max(1),
+            applied_total: 0,
+            discarded_total: 0,
+            window_evictions: 0,
+        }
+    }
+
+    fn record_applied(&mut self, session: SessionId, seq: u64) {
+        self.applied_total += 1;
+        if self.applied.len() >= self.capacity {
+            self.applied.pop_front();
+            self.window_evictions += 1;
+        }
+        self.applied.push_back((session, seq));
+    }
+
+    fn record_discarded(&mut self, session: SessionId, seq: Option<u64>, reason: DiscardReason) {
+        self.discarded_total += 1;
+        if self.discarded.len() >= self.capacity {
+            self.discarded.pop_front();
+            self.window_evictions += 1;
+        }
+        self.discarded.push_back((session, seq, reason));
+    }
+
+    /// The applied window, oldest→newest (the oracle's ground truth).
+    #[must_use]
+    pub fn applied(&self) -> Vec<(SessionId, u64)> {
+        self.applied.iter().copied().collect()
+    }
+
+    /// The discarded window, oldest→newest.
+    #[must_use]
+    pub fn discarded(&self) -> Vec<(SessionId, Option<u64>, DiscardReason)> {
+        self.discarded.iter().copied().collect()
+    }
 }
 
 /// Per-shard monotonic snapshot frame counter.
@@ -138,7 +193,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
         seq: 0,
         rng: SplitMix64::new(config.mint_seed),
     });
-    world.insert_resource(InputLog::default());
+    world.insert_resource(InputLog::new(config.input_log_capacity));
     world.insert_resource(FrameCounter::default());
     world.insert_resource(StubStats::default());
     schedule.add_systems((request_pending_grants, process_inbound, emit_frames).chain());
@@ -355,8 +410,7 @@ fn on_gateway_msg(
         GatewayToShard::DetachSession { session, fence } => {
             match dots.0.get_mut(&session) {
                 Some(dot) if fence.is_stale_against(dot.session_fence) => {
-                    log.discarded
-                        .push((session, None, DiscardReason::StaleFence));
+                    log.record_discarded(session, None, DiscardReason::StaleFence);
                 }
                 Some(dot) if dot.granted => {
                     // Two-phase release: the dot stays HELD until the directory
@@ -408,23 +462,19 @@ fn apply_input(
     input_bytes: &[u8],
 ) {
     let Some(dot) = dots.0.get_mut(&session) else {
-        log.discarded
-            .push((session, None, DiscardReason::UnknownSession));
+        log.record_discarded(session, None, DiscardReason::UnknownSession);
         return;
     };
     if !dot.granted {
-        log.discarded
-            .push((session, None, DiscardReason::PendingAuthority));
+        log.record_discarded(session, None, DiscardReason::PendingAuthority);
         return;
     }
     if dot.departing {
-        log.discarded
-            .push((session, None, DiscardReason::Departing));
+        log.record_discarded(session, None, DiscardReason::Departing);
         return;
     }
     if fence.is_stale_against(dot.session_fence) {
-        log.discarded
-            .push((session, None, DiscardReason::StaleFence));
+        log.record_discarded(session, None, DiscardReason::StaleFence);
         return;
     }
     // A higher fence means the gateway re-granted (P3 adoption); track it.
@@ -432,18 +482,16 @@ fn apply_input(
         dot.session_fence = fence;
     }
     let Ok(input) = postcard::from_bytes::<InputDatagram>(input_bytes) else {
-        log.discarded
-            .push((session, None, DiscardReason::MalformedInput));
+        log.record_discarded(session, None, DiscardReason::MalformedInput);
         return;
     };
     if dot.last_applied_seq.is_some_and(|last| input.seq <= last) {
-        log.discarded
-            .push((session, Some(input.seq), DiscardReason::DuplicateSeq));
+        log.record_discarded(session, Some(input.seq), DiscardReason::DuplicateSeq);
         return;
     }
     dot.last_applied_seq = Some(input.seq);
     integrate(dot, &input, config, clock);
-    log.applied.push((session, input.seq));
+    log.record_applied(session, input.seq);
 }
 
 /// Kinematic point integration: axes are clamped to [-1, 1], displacement is
@@ -630,6 +678,7 @@ mod tests {
             tick_dt_s: 0.05,
             orchestrator: ORCH,
             mint_seed: 99,
+            input_log_capacity: 1024,
         }
     }
 
@@ -1005,7 +1054,7 @@ mod tests {
         assert!((dot.pose.pos.z + expected_step).abs() < 1e-12, "moved -Z");
         assert_eq!(dot.pose.pos.x, 0.0);
         assert_eq!(dot.last_applied_seq, Some(1));
-        assert_eq!(rig.world.resource::<InputLog>().applied, vec![(SESSION, 1)]);
+        assert_eq!(rig.world.resource::<InputLog>().applied(), vec![(SESSION, 1)]);
         // Velocity is displacement over dt.
         assert!((dot.pose.vel.z + 2.0).abs() < 1e-12);
     }
@@ -1085,9 +1134,9 @@ mod tests {
         let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Input, &pending)]);
 
         let log = rig.world.resource::<InputLog>();
-        assert_eq!(log.applied, vec![(SESSION, 5)]);
+        assert_eq!(log.applied(), vec![(SESSION, 5)]);
         assert_eq!(
-            log.discarded,
+            log.discarded(),
             vec![
                 (SESSION, Some(5), DiscardReason::DuplicateSeq),
                 (SESSION, None, DiscardReason::StaleFence),
@@ -1108,7 +1157,7 @@ mod tests {
             rig.world.resource::<Dots>().0[&SESSION].session_fence,
             Fence(4)
         );
-        assert_eq!(rig.world.resource::<InputLog>().applied, vec![(SESSION, 1)]);
+        assert_eq!(rig.world.resource::<InputLog>().applied(), vec![(SESSION, 1)]);
     }
 
     #[test]
@@ -1142,8 +1191,8 @@ mod tests {
         // Departing dots no longer consume input.
         let _ = rig.tick(vec![input_msg(9, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
         assert_eq!(
-            rig.world.resource::<InputLog>().discarded.last(),
-            Some(&(SESSION, None, DiscardReason::Departing))
+            rig.world.resource::<InputLog>().discarded().last().copied(),
+            Some((SESSION, None, DiscardReason::Departing))
         );
         // Phase 2: the headless entity head confirms the revoke — despawn + reply.
         let gone = DirectoryReply::Head {
@@ -1208,8 +1257,8 @@ mod tests {
         assert_eq!(rig.world.resource::<Dots>().0.len(), 1, "dot survives");
         let log = rig.world.resource::<InputLog>();
         assert_eq!(
-            log.discarded.last(),
-            Some(&(SESSION, None, DiscardReason::StaleFence))
+            log.discarded().last().copied(),
+            Some((SESSION, None, DiscardReason::StaleFence))
         );
     }
 
@@ -1264,5 +1313,34 @@ mod tests {
         assert_eq!(b.seq(), 1);
         assert_eq!(a.kind_tag(), EntityKind::Player as u8);
         assert_eq!(a.mint_shard(), 10);
+    }
+
+    #[test]
+    fn input_log_is_a_bounded_window_with_exact_totals() {
+        // SCALE-3: a small window holds only the NEWEST entries (no unbounded
+        // growth), while the totals are EXACT and evictions are counted.
+        let mut log = InputLog::new(3);
+        for seq in 0..10u64 {
+            log.record_applied(SessionId(1), seq);
+        }
+        for seq in 0..4u64 {
+            log.record_discarded(SessionId(2), Some(seq), DiscardReason::DuplicateSeq);
+        }
+        // Window holds the last 3 of each; totals count everything.
+        assert_eq!(log.applied().len(), 3);
+        assert_eq!(
+            log.applied(),
+            vec![(SessionId(1), 7), (SessionId(1), 8), (SessionId(1), 9)]
+        );
+        assert_eq!(log.discarded().len(), 3);
+        assert_eq!(log.applied_total, 10);
+        assert_eq!(log.discarded_total, 4);
+        // 7 applied + 1 discarded evicted from the windows.
+        assert_eq!(log.window_evictions, 8);
+        // Capacity floors at 1.
+        let mut tiny = InputLog::new(0);
+        tiny.record_applied(SessionId(9), 1);
+        tiny.record_applied(SessionId(9), 2);
+        assert_eq!(tiny.applied(), vec![(SessionId(9), 2)]);
     }
 }

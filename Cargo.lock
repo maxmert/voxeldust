@@ -2433,6 +2433,7 @@ dependencies = [
  "ed25519-dalek",
  "postcard",
  "proptest",
+ "serde_json",
  "vd-connection-plane",
  "vd-core",
  "vd-harness",

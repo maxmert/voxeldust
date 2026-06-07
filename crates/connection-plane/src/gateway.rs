@@ -1482,6 +1482,9 @@ mod tests {
     /// generous PROPERTY gate (catches contention collapse / accidental O(n²)),
     /// not a microbenchmark number.
     #[test]
+    // The seam ban targets PRODUCTION reaching for wall-clock; a latency microbench
+    // measuring elapsed time is exactly what Instant is for (justified exemption).
+    #[allow(clippy::disallowed_methods)]
     fn spike_2a_hot_path_volume_bound() {
         let hot = SessionHot {
             route: ArcSwap::from_pointee(RouteSnapshot {

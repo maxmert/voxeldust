@@ -51,6 +51,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tick_dt_s: env.parse("VD_TICK_DT")?,
             orchestrator: env.node_id("VD_ORCH")?,
             mint_seed: env.parse("VD_MINT_SEED")?,
+            // Bounded in production: the input-conservation log is a metrics ring,
+            // not an unbounded audit trail (SCALE-3).
+            input_log_capacity: env.parse("VD_INPUT_LOG_CAP")?,
         },
     );
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
