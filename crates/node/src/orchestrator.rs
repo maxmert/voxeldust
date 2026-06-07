@@ -178,6 +178,24 @@ fn apply_directory_op(
     }
 }
 
+/// Build the read-only admin snapshot from a (live or test) orchestrator world —
+/// the bin publishes this through `vd-io-prod`'s admin shell after each tick, so a
+/// 2am `curl` (and the process-tier parity test) sees the real directory.
+#[must_use]
+pub fn admin_snapshot(world: &mut bevy_ecs::prelude::World) -> vd_wire::admin::AdminSnapshot {
+    let clock = *world.resource::<ClockSample>();
+    let mut snapshot =
+        vd_wire::admin::AdminSnapshot::shaped_empty(clock.universe_tick, clock.epoch);
+    if let Some(dir) = world.get_resource::<DirectoryRes>() {
+        snapshot.directory = dir
+            .0
+            .entries()
+            .map(|(key, record)| vd_wire::admin::directory_entry_view(key, record))
+            .collect();
+    }
+    snapshot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +443,58 @@ mod tests {
             report.sent, 0,
             "garbage replied nothing, wrong class ignored"
         );
+    }
+
+    #[test]
+    fn admin_snapshot_reflects_the_live_directory() {
+        let hub = MemHub::new();
+        let mut orch = build_app(
+            NodeConfig {
+                node_id: ORCH,
+                kind: NodeKind::Orchestrator,
+            },
+            hub.register(ORCH, 64),
+        );
+        let (world, schedule) = orch.parts_mut();
+        register_orchestrator(
+            world,
+            schedule,
+            &OrchestratorConfig {
+                clock_peers: vec![],
+                ..cfg()
+            },
+        );
+        // Empty-but-shaped before any state exists (the P0 demo promise).
+        let _ = orch.step_tick();
+        let snap = admin_snapshot(orch.world_mut());
+        assert_eq!(snap.universe_tick, 1);
+        assert_eq!(snap.epoch, 7);
+        assert_eq!(snap.directory, vec![]);
+
+        // A granted lease appears in the dump.
+        let mut requester = hub.register(SHARD, 64);
+        requester
+            .send(
+                ORCH,
+                MsgClass::Saga,
+                flow_bytes(DirectoryOp::LeaseGrant {
+                    key: DirectoryKey::Realm(vd_core::pose::RealmId::System(5)),
+                    owner: AuthorityRef::Shard(SHARD),
+                    fence: Fence(1),
+                }),
+            )
+            .expect("sent");
+        hub.pump();
+        let _ = orch.step_tick();
+        let snap = admin_snapshot(orch.world_mut());
+        assert_eq!(snap.directory.len(), 1);
+        assert_eq!(snap.directory[0].authority, "shard:node-2");
+        assert_eq!(snap.directory[0].fence, Fence(1));
+
+        // A world without a directory (non-orchestrator) stays shaped-empty.
+        let mut bare = bevy_ecs::prelude::World::new();
+        bare.insert_resource(ClockSample::default());
+        assert_eq!(admin_snapshot(&mut bare).directory, vec![]);
     }
 
     #[test]

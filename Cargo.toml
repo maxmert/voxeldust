@@ -8,6 +8,7 @@ members = [
     "crates/connection-plane",
     "crates/harness",
     "crates/io-prod",
+    "crates/bins",
     "tests",
 ]
 

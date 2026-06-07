@@ -127,12 +127,10 @@ impl GatewaySessions {
     /// P2's transfer coordinator keys its sagas on this.
     #[must_use]
     pub fn entity_of(&self, session: SessionId) -> Option<EntityId> {
-        self.by_session
-            .get(&session)
-            .and_then(|s| match s.phase {
-                SessionPhase::Active { entity, .. } => Some(entity),
-                SessionPhase::AwaitingDirectory | SessionPhase::AwaitingAttach => None,
-            })
+        self.by_session.get(&session).and_then(|s| match s.phase {
+            SessionPhase::Active { entity, .. } => Some(entity),
+            SessionPhase::AwaitingDirectory | SessionPhase::AwaitingAttach => None,
+        })
     }
 }
 
@@ -882,7 +880,9 @@ mod tests {
             .expect("pending");
         // Pending phases expose no entity; unknown sessions expose none either.
         assert_eq!(
-            rig.world.resource::<GatewaySessions>().entity_of(session_id),
+            rig.world
+                .resource::<GatewaySessions>()
+                .entity_of(session_id),
             None
         );
         assert_eq!(
@@ -893,7 +893,9 @@ mod tests {
         );
         let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(session_id))]);
         assert_eq!(
-            rig.world.resource::<GatewaySessions>().entity_of(session_id),
+            rig.world
+                .resource::<GatewaySessions>()
+                .entity_of(session_id),
             None,
             "still awaiting attach"
         );
@@ -908,7 +910,9 @@ mod tests {
             },
         )]);
         assert_eq!(
-            rig.world.resource::<GatewaySessions>().entity_of(session_id),
+            rig.world
+                .resource::<GatewaySessions>()
+                .entity_of(session_id),
             Some(EntityId(77)),
             "active sessions expose their avatar (P2's saga key)"
         );

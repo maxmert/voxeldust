@@ -1,0 +1,39 @@
+[package]
+name = "vd-bins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The node binaries: thin shells over the libs (config -> mesh -> build_app -> register -> tick loop). ONE shard binary (HR3); shard types are ShardProfile configs. The process-tier parity tests live here (CARGO_BIN_EXE)."
+publish = false
+
+[[bin]]
+name = "vd-orchestrator"
+path = "src/bin/orchestrator.rs"
+
+[[bin]]
+name = "vd-gateway"
+path = "src/bin/gateway.rs"
+
+[[bin]]
+name = "vd-shard"
+path = "src/bin/shard.rs"
+
+[dependencies]
+vd-core = { workspace = true }
+vd-sim = { workspace = true }
+vd-node = { workspace = true }
+vd-connection-plane = { workspace = true }
+vd-io-prod = { path = "../io-prod" }
+vd-wire = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+arc-swap = { workspace = true }
+axum = { workspace = true }
+
+[dev-dependencies]
+postcard = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+[lints]
+workspace = true

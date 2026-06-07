@@ -30,6 +30,8 @@
 //! Coverage: Tier-B — exercised by the process tier; ratcheted floor, never 100% (HR5).
 
 pub mod admin;
+pub mod mesh;
+pub mod runtime;
 pub mod trust;
 
 use std::net::SocketAddr;
@@ -43,11 +45,11 @@ use crate::trust::{ClusterTrust, TrustError};
 
 /// Maximum frame size accepted on a stream. Operational constant: migrates into
 /// `TransportTuning` when that struct lands (connection-plane work, P1).
-const MAX_FRAME_BYTES: u32 = 1 << 20;
+pub(crate) const MAX_FRAME_BYTES: u32 = 1 << 20;
 
 /// The on-stream frame: 4-byte BE length prefix, then postcard of this struct.
 #[derive(Debug, Serialize, Deserialize)]
-struct WireFrame {
+pub(crate) struct WireFrame {
     from: NodeId,
     class: MsgClass,
     bytes: Bytes,
@@ -338,7 +340,7 @@ async fn write_frame(
     Ok(())
 }
 
-async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<Inbound>) {
+pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<Inbound>) {
     loop {
         let mut len_buf = [0u8; 4];
         if recv.read_exact(&mut len_buf).await.is_err() {

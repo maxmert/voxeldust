@@ -111,6 +111,31 @@ impl ClusterTrust {
         )
     }
 
+    /// Write the bundle into a directory as three DER files (`ca.der`,
+    /// `node.der`, `key.der`) — the dev/test cluster-secret distribution.
+    ///
+    /// # Errors
+    /// Filesystem failures.
+    pub fn write_der_dir(&self, dir: &std::path::Path) -> Result<(), std::io::Error> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("ca.der"), &self.ca_cert_der)?;
+        std::fs::write(dir.join("node.der"), &self.node_cert_der)?;
+        std::fs::write(dir.join("key.der"), &self.node_key_pkcs8)?;
+        Ok(())
+    }
+
+    /// Load a bundle written by [`ClusterTrust::write_der_dir`].
+    ///
+    /// # Errors
+    /// Filesystem failures (missing/unreadable files).
+    pub fn from_der_dir(dir: &std::path::Path) -> Result<ClusterTrust, std::io::Error> {
+        Ok(ClusterTrust {
+            ca_cert_der: std::fs::read(dir.join("ca.der"))?,
+            node_cert_der: std::fs::read(dir.join("node.der"))?,
+            node_key_pkcs8: std::fs::read(dir.join("key.der"))?,
+        })
+    }
+
     fn roots(&self) -> Result<rustls::RootCertStore, TrustError> {
         let mut roots = rustls::RootCertStore::empty();
         roots
@@ -245,6 +270,23 @@ mod tests {
         assert!(
             handshake(&trust, &reloaded),
             "a reloaded bundle is the same trust"
+        );
+    }
+
+    #[test]
+    fn der_dir_roundtrip_preserves_the_bundle() {
+        let trust = ClusterTrust::generate("vd-test-cluster").expect("generate");
+        let dir = std::env::temp_dir().join(format!("vd-trust-{}", std::process::id()));
+        trust.write_der_dir(&dir).expect("write");
+        let reloaded = ClusterTrust::from_der_dir(&dir).expect("read");
+        assert!(
+            handshake(&trust, &reloaded),
+            "same trust after the round trip"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(
+            ClusterTrust::from_der_dir(&dir).is_err(),
+            "missing dir is loud"
         );
     }
 
