@@ -41,13 +41,15 @@ pub enum MsgClass {
 }
 
 /// The only SYNCHRONOUS transport failure: the bounded outbound queue is saturated.
+/// The refused payload is RETURNED so the caller can requeue without cloning — a
+/// refusal is back-pressure, never a loss (the R9 drop-on-full is unrepresentable).
 ///
 /// Everything else (peer death, link partition, write failure) is asynchronous by
 /// nature and surfaces as [`Inbound::NodeUnreachable`] on a later drain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SendError {
-    #[error("outbound queue full (back-pressure)")]
-    QueueFull,
+    #[error("outbound queue full (back-pressure); payload returned")]
+    QueueFull(Bytes),
 }
 
 /// Everything a node can observe from the outside world on a tick.
@@ -68,6 +70,21 @@ pub enum Inbound {
         class: MsgClass,
         undelivered: MsgId,
     },
+}
+
+/// The time half of `ShardIo`: simulation code NEVER reads wall clocks (clippy-
+/// enforced); it sees time only through this trait. Production: an io-prod
+/// implementation disciplined toward the orchestrator's analytic clock (monotonic,
+/// never stepped backward). Test: [`mem::VirtualClock`], advanced explicitly by the
+/// topology driver — 12,000 ticks run in milliseconds with zero real sleeping.
+pub trait Clock {
+    /// This node's committed local simulation tick (NOT globally synchronized;
+    /// every cross-shard message carries the sender's `source_tick`).
+    fn local_tick(&self) -> vd_core::TickId;
+    /// This node's view of the analytic universe clock (synced, monotonic).
+    fn universe_tick(&self) -> vd_core::UniverseTick;
+    /// The persisted universe epoch this node is participating in.
+    fn epoch(&self) -> vd_core::EpochId;
 }
 
 /// The message-I/O half of `ShardIo`.

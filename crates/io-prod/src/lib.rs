@@ -89,8 +89,11 @@ impl Transport for ProdTransport {
             }
             // A full queue is back-pressure. A disconnected bridge (writer thread gone,
             // only during shutdown) behaves as permanently-full: the node is being torn
-            // down and no new sends can ever be accepted.
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => Err(SendError::QueueFull),
+            // down and no new sends can ever be accepted. The payload is returned in
+            // both cases (a refusal is never a loss).
+            Err(TrySendError::Full(frame) | TrySendError::Disconnected(frame)) => {
+                Err(SendError::QueueFull(frame.bytes))
+            }
         }
     }
 

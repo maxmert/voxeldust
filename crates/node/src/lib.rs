@@ -18,6 +18,8 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
+pub mod app;
 pub mod tracer;
+pub mod universe_clock;
 
-// Remaining modules land with task P0.6 (build_app, step_tick, universe clock).
+pub use app::{NodeConfig, ShardNode, TickReport, build_app};

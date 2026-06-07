@@ -12,11 +12,62 @@
 //!   order, or converting them into [`Inbound::NodeUnreachable`] if the peer is dead.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use vd_core::{MsgId, NodeId};
+use vd_core::{EpochId, MsgId, NodeId, TickId, UniverseTick};
 
-use super::{Bytes, Inbound, MsgClass, SendError, Transport};
+use super::{Bytes, Clock, Inbound, MsgClass, SendError, Transport};
+
+/// The deterministic test clock: the topology driver advances it explicitly; nodes
+/// only ever READ it through the [`Clock`] trait. Shared-handle semantics (clone =
+/// same clock) so a driver and its node see one timeline.
+#[derive(Clone, Debug)]
+pub struct VirtualClock {
+    inner: Arc<VirtualClockInner>,
+}
+
+#[derive(Debug)]
+struct VirtualClockInner {
+    local_tick: AtomicU64,
+    universe_tick: AtomicU64,
+    epoch: EpochId,
+}
+
+impl VirtualClock {
+    #[must_use]
+    pub fn new(epoch: EpochId) -> VirtualClock {
+        VirtualClock {
+            inner: Arc::new(VirtualClockInner {
+                local_tick: AtomicU64::new(0),
+                universe_tick: AtomicU64::new(0),
+                epoch,
+            }),
+        }
+    }
+
+    /// Advance this node's local tick by one (the topology's per-node step).
+    pub fn advance_local(&self) -> TickId {
+        TickId(self.inner.local_tick.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    /// Set the analytic clock view (the topology plays the orchestrator's role).
+    pub fn set_universe_tick(&self, tick: UniverseTick) {
+        self.inner.universe_tick.store(tick.0, Ordering::Relaxed);
+    }
+}
+
+impl Clock for VirtualClock {
+    fn local_tick(&self) -> TickId {
+        TickId(self.inner.local_tick.load(Ordering::Relaxed))
+    }
+    fn universe_tick(&self) -> UniverseTick {
+        UniverseTick(self.inner.universe_tick.load(Ordering::Relaxed))
+    }
+    fn epoch(&self) -> EpochId {
+        self.inner.epoch
+    }
+}
 
 #[derive(Debug)]
 struct OutboundFrame {
@@ -158,7 +209,7 @@ impl Transport for MemTransport {
             .get_mut(&self.local)
             .expect("registered node present in hub");
         if node.outbound.len() >= node.outbound_capacity {
-            return Err(SendError::QueueFull);
+            return Err(SendError::QueueFull(bytes));
         }
         let msg_id = MsgId(node.next_msg_id);
         node.next_msg_id += 1;
@@ -224,7 +275,7 @@ mod tests {
         let accepted = results.iter().filter(|r| r.is_ok()).count();
         let rejected = results.iter().filter(|r| r.is_err()).count();
         assert_eq!((accepted, rejected), (4, 2));
-        assert_eq!(results[4], Err(SendError::QueueFull));
+        assert_eq!(results[4], Err(SendError::QueueFull(vec![4])));
     }
 
     #[test]
@@ -303,6 +354,18 @@ mod tests {
         a.send(B, MsgClass::Control, vec![5]).expect("accepted");
         hub.pump();
         assert_eq!(b.drain_inbound().len(), 1, "traffic unaffected");
+    }
+
+    #[test]
+    fn virtual_clock_advances_and_shares_state_across_clones() {
+        let clock = VirtualClock::new(EpochId(7));
+        let view = clock.clone();
+        assert_eq!(clock.local_tick(), TickId(0));
+        assert_eq!(clock.advance_local(), TickId(1));
+        assert_eq!(view.local_tick(), TickId(1), "clones share one timeline");
+        clock.set_universe_tick(UniverseTick(40));
+        assert_eq!(view.universe_tick(), UniverseTick(40));
+        assert_eq!(view.epoch(), EpochId(7));
     }
 
     #[test]

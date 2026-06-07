@@ -108,7 +108,7 @@ impl<T: Transport> TracerNode<T> {
                 Ok(()) => {
                     self.pending_replies.pop_front();
                 }
-                Err(SendError::QueueFull) => break,
+                Err(SendError::QueueFull(_)) => break,
             }
         }
 
@@ -118,7 +118,7 @@ impl<T: Transport> TracerNode<T> {
         {
             match self.send_msg(TracerMsg::Ping(self.next_ping)) {
                 Ok(()) => self.next_ping += 1,
-                Err(SendError::QueueFull) => {
+                Err(SendError::QueueFull(_)) => {
                     self.trace.push(TraceEvent::Backpressured(self.next_ping));
                 }
             }

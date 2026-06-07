@@ -96,6 +96,18 @@ pub struct EpochId(pub u64);
 )]
 pub struct UniverseTick(pub u64);
 
+impl core::fmt::Display for UniverseTick {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "ut-{}", self.0)
+    }
+}
+
+impl core::fmt::Display for EpochId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "epoch-{}", self.0)
+    }
+}
+
 /// The globally unique, stable identity of a simulated thing (player avatar, ship,
 /// debris chunk, rocket). Packed `{kind: u8, mint_shard: u32, seq: u64, rand: u24}` —
 /// wait-free to mint shard-locally, never reused, never time-derived.
@@ -175,6 +187,8 @@ mod tests {
         assert_eq!(NodeId(7).to_string(), "node-7");
         assert_eq!(TickId(3).to_string(), "tick-3");
         assert_eq!(MsgId(9).to_string(), "msg-9");
+        assert_eq!(UniverseTick(11).to_string(), "ut-11");
+        assert_eq!(EpochId(2).to_string(), "epoch-2");
     }
 
     #[test]
