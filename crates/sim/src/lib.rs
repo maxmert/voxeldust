@@ -21,6 +21,12 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
+pub mod authority;
+pub mod capability;
+pub mod coupling;
 pub mod io;
+pub mod saga;
 
-// Remaining modules land with task P0.5 (saga, authority, capability, coupling).
+// The remaining ShardIo traits (Clock, Store, DetRng, Provisioner) land with their
+// first consumers: node's tick loop (P0.6) and the harness (P0.7) — grow on real
+// pressure, never freeze unconsumed shapes.

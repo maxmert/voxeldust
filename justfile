@@ -14,11 +14,19 @@ test:
     cargo test --workspace
 
 # Inner-loop coverage check: Tier-A only, 100% region + branch, fails the build under 100%.
+# (cargo-llvm-cov has no --fail-under-branches; the report step enforces it from the
+#  same profdata via the JSON summary.)
 coverage-fast:
     cargo +{{coverage_toolchain}} llvm-cov --branch {{tier_a}} \
         --ignore-filename-regex '(/bin/|/tests/)' \
         --fail-under-regions 100 --fail-under-functions 100 \
         -- --quiet
+    cargo +{{coverage_toolchain}} llvm-cov report --branch \
+        --ignore-filename-regex '(/bin/|/tests/)' \
+        --json --summary-only | python3 -c "import json,sys; \
+        t=json.load(sys.stdin)['data'][0]['totals']['branches']; \
+        missed=t['count']-t['covered']; \
+        sys.exit(0 if missed==0 else print(f'BRANCH GATE: {missed} missed branches ({t[\"percent\"]:.2f}%)') or 1)"
 
 # Pre-merge: full coverage incl. (once io-prod exists) the process-tier merge via
 # `show-env` + LLVM_PROFILE_FILE %p-%m%c (continuous mode is MANDATORY: the harness
