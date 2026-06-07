@@ -81,7 +81,10 @@ fn advance_and_broadcast_clock(
         universe_tick: now,
         epoch: clock.0.epoch(),
     });
-    let bytes = postcard::to_allocvec(&flow).expect("closed wire enums serialize infallibly");
+    // ONE shared body, refcount-bumped to every clock peer.
+    let bytes = vd_sim::io::bytes(
+        postcard::to_allocvec(&flow).expect("closed wire enums serialize infallibly"),
+    );
     for peer in &peers.0 {
         outbox.0.push((*peer, MsgClass::Membership, bytes.clone()));
     }
@@ -109,8 +112,9 @@ fn serve_directory(
             continue;
         };
         if let Some(reply) = apply_directory_op(&mut dir.0, op, &clock) {
-            let bytes =
-                postcard::to_allocvec(&reply).expect("closed wire enums serialize infallibly");
+            let bytes = vd_sim::io::bytes(
+                postcard::to_allocvec(&reply).expect("closed wire enums serialize infallibly"),
+            );
             outbox.0.push((*from, MsgClass::Saga, bytes));
         }
     }
@@ -222,8 +226,8 @@ mod tests {
         }
     }
 
-    fn flow_bytes(op: DirectoryOp) -> Vec<u8> {
-        postcard::to_allocvec(&InterShardFlow::Directory(op)).expect("encode")
+    fn flow_bytes(op: DirectoryOp) -> vd_sim::io::Bytes {
+        vd_sim::io::bytes(postcard::to_allocvec(&InterShardFlow::Directory(op)).expect("encode"))
     }
 
     #[test]
@@ -251,7 +255,8 @@ mod tests {
                 universe_tick: UniverseTick(1),
                 epoch: EpochId(7),
             }))
-            .expect("encode"),
+            .expect("encode")
+            .into(),
         };
         for t in [&mut shard_t, &mut gateway_t] {
             assert_eq!(t.drain_inbound(), vec![expected_sync.clone()]);
@@ -308,7 +313,7 @@ mod tests {
         Inbound::Wire {
             from: ORCH,
             class: MsgClass::Saga,
-            bytes: postcard::to_allocvec(reply).expect("encode"),
+            bytes: postcard::to_allocvec(reply).expect("encode").into(),
         }
     }
 
@@ -425,7 +430,7 @@ mod tests {
         );
         let mut requester = hub.register(SHARD, 64);
         requester
-            .send(ORCH, MsgClass::Saga, vec![0xFF, 0x01])
+            .send(ORCH, MsgClass::Saga, vec![0xFF, 0x01].into())
             .expect("sent");
         requester
             .send(

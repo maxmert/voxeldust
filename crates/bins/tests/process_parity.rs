@@ -91,7 +91,7 @@ impl ProcessClient {
             ),
         };
         let bytes = postcard::to_allocvec(&hello).expect("encode");
-        let _ = self.transport.send(GATEWAY, MsgClass::Control, bytes);
+        let _ = self.transport.send(GATEWAY, MsgClass::Control, bytes.into());
     }
 
     /// One client tick: drain, decode (asserting the single-peer invariant),
@@ -124,7 +124,7 @@ impl ProcessClient {
                 action_bits: 0,
             };
             let bytes = postcard::to_allocvec(&input).expect("encode");
-            let _ = self.transport.send(GATEWAY, MsgClass::Input, bytes);
+            let _ = self.transport.send(GATEWAY, MsgClass::Input, bytes.into());
         }
     }
 
@@ -252,12 +252,7 @@ fn p1_parity_real_binaries_over_quic() {
         let (t, _c) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig {
-                local: id,
-                bind,
-                peers: client_book.clone(),
-                outbound_capacity: 64,
-            },
+            &MeshConfig::new(id, bind, client_book.clone(), 64),
         )
         .expect("client mesh");
         std::mem::forget(_c); // keep the endpoint alive for the test's duration

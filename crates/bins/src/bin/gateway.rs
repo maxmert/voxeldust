@@ -21,12 +21,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (transport, _control) = spawn_mesh(
         runtime.handle(),
         &trust,
-        &MeshConfig {
+        &MeshConfig::new(
             local,
-            bind: env.parse("VD_BIND")?,
-            peers: env.peer_book("VD_PEERS")?,
-            outbound_capacity: env.parse("VD_OUTBOUND_CAP")?,
-        },
+            env.parse("VD_BIND")?,
+            env.peer_book("VD_PEERS")?,
+            env.parse("VD_OUTBOUND_CAP")?,
+        ),
     )?;
     let mut node = build_app(
         NodeConfig {

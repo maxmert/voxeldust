@@ -52,7 +52,9 @@ pub(crate) const MAX_FRAME_BYTES: u32 = 1 << 20;
 pub(crate) struct WireFrame {
     from: NodeId,
     class: MsgClass,
-    bytes: Bytes,
+    /// The on-wire payload is a plain `Vec<u8>` (the seam's `Bytes = Arc<[u8]>` is
+    /// an in-process sharing optimization; it converts at the serialize boundary).
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -328,7 +330,7 @@ async fn write_frame(
     let payload = postcard::to_allocvec(&WireFrame {
         from: local,
         class: frame.class,
-        bytes: frame.bytes.clone(),
+        bytes: frame.bytes.to_vec(),
     })
     .map_err(|_| ())?;
     let len = u32::try_from(payload.len()).map_err(|_| ())?;
@@ -360,12 +362,48 @@ pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<
                     .send(Inbound::Wire {
                         from: frame.from,
                         class: frame.class,
-                        bytes: frame.bytes,
+                        bytes: vd_sim::io::bytes(frame.bytes),
                     })
                     .is_err()
                 {
                     return;
                 }
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// Read length-prefixed reliable frames off a uni stream into a shared bounded
+/// inbox (the mesh transport's receive path; bounding makes a slow consumer drop
+/// stale frames rather than OOM).
+pub(crate) async fn read_frames_into(
+    mut recv: quinn::RecvStream,
+    inbox: &std::sync::Arc<std::sync::Mutex<vd_sim::io::BoundedInbox>>,
+) {
+    loop {
+        let mut len_buf = [0u8; 4];
+        if recv.read_exact(&mut len_buf).await.is_err() {
+            return;
+        }
+        let len = u32::from_be_bytes(len_buf);
+        if len > MAX_FRAME_BYTES {
+            return;
+        }
+        let mut buf = vec![0u8; len as usize];
+        if recv.read_exact(&mut buf).await.is_err() {
+            return;
+        }
+        match postcard::from_bytes::<WireFrame>(&buf) {
+            Ok(frame) => {
+                inbox
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Inbound::Wire {
+                        from: frame.from,
+                        class: frame.class,
+                        bytes: vd_sim::io::bytes(frame.bytes),
+                    });
             }
             Err(_) => return,
         }

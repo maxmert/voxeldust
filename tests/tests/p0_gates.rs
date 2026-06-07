@@ -48,7 +48,7 @@ fn twelve_thousand_virtual_ticks_run_in_milliseconds() {
     }
     let mut seeder = fabric.register(NodeId(99));
     seeder
-        .send(NodeId(1), MsgClass::Control, vec![1])
+        .send(NodeId(1), MsgClass::Control, vec![1].into())
         .expect("seed accepted");
 
     let started = Instant::now();

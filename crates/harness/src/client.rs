@@ -135,7 +135,9 @@ impl ScriptedClient {
     pub fn send_bye(&mut self) {
         let bytes =
             postcard::to_allocvec(&ClientControlMsg::Bye).expect("closed wire enums serialize");
-        let _ = self.transport.send(self.gateway, MsgClass::Control, bytes);
+        let _ = self
+            .transport
+            .send(self.gateway, MsgClass::Control, vd_sim::io::bytes(bytes));
         self.phase = ClientPhase::Closed;
     }
 
@@ -204,7 +206,7 @@ impl ScriptedClient {
         let bytes = postcard::to_allocvec(&input).expect("closed wire enums serialize");
         if self
             .transport
-            .send(self.gateway, MsgClass::Input, bytes)
+            .send(self.gateway, MsgClass::Input, vd_sim::io::bytes(bytes))
             .is_ok()
         {
             self.sent_inputs.push((session, seq));
@@ -253,7 +255,7 @@ impl SteppableNode for ScriptedClient {
                 let bytes = postcard::to_allocvec(&hello).expect("closed wire enums serialize");
                 if self
                     .transport
-                    .send(self.gateway, MsgClass::Control, bytes)
+                    .send(self.gateway, MsgClass::Control, vd_sim::io::bytes(bytes))
                     .is_ok()
                 {
                     self.phase = ClientPhase::AwaitingWelcome;
@@ -326,7 +328,7 @@ mod tests {
 
     fn send_control(gw: &mut crate::fabric::FabricTransport, msg: &ServerControlMsg) {
         let bytes = postcard::to_allocvec(msg).expect("encode");
-        gw.send(CLIENT, MsgClass::Control, bytes).expect("sent");
+        gw.send(CLIENT, MsgClass::Control, bytes.into()).expect("sent");
     }
 
     fn snapshot(sub: SubId, frame_id: u64, x: f64) -> SnapshotDatagram {
@@ -348,7 +350,7 @@ mod tests {
 
     fn send_snapshot(gw: &mut crate::fabric::FabricTransport, snap: &SnapshotDatagram) {
         let bytes = postcard::to_allocvec(snap).expect("encode");
-        gw.send(CLIENT, MsgClass::Snapshot, bytes).expect("sent");
+        gw.send(CLIENT, MsgClass::Snapshot, bytes.into()).expect("sent");
     }
 
     /// Drive the full lifecycle to Active.
@@ -562,7 +564,7 @@ mod tests {
         let (fabric, _gw, mut client) = rig(|_| None);
         let mut intruder = fabric.register(NodeId(66));
         intruder
-            .send(CLIENT, MsgClass::Control, vec![1])
+            .send(CLIENT, MsgClass::Control, vec![1].into())
             .expect("sent");
         fabric.pump(TickId(1));
         let _ = client.step();
@@ -572,7 +574,7 @@ mod tests {
     #[should_panic(expected = "undecodable control bytes")]
     fn garbage_control_bytes_panic_loudly() {
         let (fabric, mut gw, mut client) = rig(|_| None);
-        gw.send(CLIENT, MsgClass::Control, vec![0xFF])
+        gw.send(CLIENT, MsgClass::Control, vec![0xFF].into())
             .expect("sent");
         fabric.pump(TickId(1));
         let _ = client.step();
@@ -582,7 +584,7 @@ mod tests {
     #[should_panic(expected = "undecodable snapshot bytes")]
     fn garbage_snapshot_bytes_panic_loudly() {
         let (fabric, mut gw, mut client) = rig(|_| None);
-        gw.send(CLIENT, MsgClass::Snapshot, vec![0xFF])
+        gw.send(CLIENT, MsgClass::Snapshot, vec![0xFF].into())
             .expect("sent");
         fabric.pump(TickId(1));
         let _ = client.step();
@@ -601,7 +603,7 @@ mod tests {
     #[should_panic(expected = "unexpected class toward a client")]
     fn wrong_message_classes_panic_loudly() {
         let (fabric, mut gw, mut client) = rig(|_| None);
-        gw.send(CLIENT, MsgClass::Saga, vec![1]).expect("sent");
+        gw.send(CLIENT, MsgClass::Saga, vec![1].into()).expect("sent");
         fabric.pump(TickId(1));
         let _ = client.step();
     }

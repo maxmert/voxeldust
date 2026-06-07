@@ -411,7 +411,7 @@ mod tests {
         topo.add_node(build_relay_node(fabric, B, A));
         let mut seeder = fabric.register(NodeId(99));
         seeder
-            .send(B, MsgClass::Control, vec![1])
+            .send(B, MsgClass::Control, vec![1].into())
             .expect("seed message accepted");
         topo
     }
@@ -626,7 +626,7 @@ mod tests {
         topo.add_node(build_relay_node(&fabric, B, A));
         let mut seeder = fabric.register(NodeId(99));
         seeder
-            .send(B, MsgClass::Control, vec![1])
+            .send(B, MsgClass::Control, vec![1].into())
             .expect("seed message accepted");
         for _ in 0..5 {
             topo.step();
@@ -734,7 +734,7 @@ mod tests {
             .send(
                 B,
                 vd_sim::io::MsgClass::Control,
-                postcard::to_allocvec(&attach).expect("encode"),
+                vd_sim::io::bytes(postcard::to_allocvec(&attach).expect("encode")),
             )
             .expect("sent");
         for _ in 0..6 {

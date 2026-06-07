@@ -19,10 +19,12 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
 use vd_core::{MsgId, NodeId};
-use vd_sim::io::{Bytes, Inbound, MsgClass, SendError, Transport};
+use vd_sim::io::{BoundedInbox, Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
 
 use crate::trust::ClusterTrust;
 use crate::{MAX_FRAME_BYTES, ProdIoError, WireFrame};
@@ -37,6 +39,50 @@ pub struct MeshConfig {
     pub peers: BTreeMap<NodeId, SocketAddr>,
     /// Per-peer outbound queue depth (the back-pressure point).
     pub outbound_capacity: usize,
+    /// Receiver inbound bound: a fast sender cannot OOM a slow node — overflow drops
+    /// stale UNRELIABLE frames first (latest-wins), reliable traffic last.
+    pub inbound_capacity: usize,
+    /// Max concurrent ACCEPTED inbound connections — a connection flood cannot
+    /// task-flood the node (TRANSPORT-4). Excess incoming connections wait.
+    pub max_inbound_connections: usize,
+    /// Re-dial backoff bounds for a failed peer lane (no 20 Hz connect-storm against
+    /// a dead host — TRANSPORT-3). Backoff doubles from `min` up to `max`.
+    pub redial_backoff_min: Duration,
+    pub redial_backoff_max: Duration,
+}
+
+impl MeshConfig {
+    /// Sane defaults for the operational fields (capacities/timeouts); the caller
+    /// supplies topology (`local`/`bind`/`peers`).
+    #[must_use]
+    pub fn new(
+        local: NodeId,
+        bind: SocketAddr,
+        peers: BTreeMap<NodeId, SocketAddr>,
+        outbound_capacity: usize,
+    ) -> MeshConfig {
+        MeshConfig {
+            local,
+            bind,
+            peers,
+            outbound_capacity,
+            inbound_capacity: outbound_capacity.saturating_mul(8).max(256),
+            max_inbound_connections: 256,
+            redial_backoff_min: Duration::from_millis(50),
+            redial_backoff_max: Duration::from_secs(5),
+        }
+    }
+}
+
+/// The shared bounded inbox: reader/writer tasks push, the sim thread drains. The
+/// Mutex is only ever held for a queue push/drain — never across an await.
+type SharedInbox = Arc<Mutex<BoundedInbox>>;
+
+fn push_inbox(inbox: &SharedInbox, event: Inbound) {
+    inbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(event);
 }
 
 struct PeerLane {
@@ -54,7 +100,7 @@ struct OutFrame {
 pub struct MeshTransport {
     local: NodeId,
     lanes: BTreeMap<NodeId, PeerLane>,
-    inbound_rx: Receiver<Inbound>,
+    inbox: SharedInbox,
     next_msg_id: u64,
 }
 
@@ -89,8 +135,22 @@ pub fn spawn_mesh(
     trust: &ClusterTrust,
     cfg: &MeshConfig,
 ) -> Result<(MeshTransport, MeshControl), ProdIoError> {
-    let server_config = trust.quinn_server_config()?;
-    let client_config = trust.quinn_client_config()?;
+    // Shared transport tuning: keepalive holds connections open across idle ticks,
+    // a bounded idle timeout reaps a truly-dead half-open connection, and a uni-stream
+    // cap bounds per-connection reader tasks (TRANSPORT-3/4/8).
+    let transport = {
+        let mut t = quinn::TransportConfig::default();
+        t.keep_alive_interval(Some(Duration::from_secs(5)));
+        t.max_idle_timeout(Some(
+            quinn::IdleTimeout::try_from(Duration::from_secs(20)).expect("20s is a valid idle"),
+        ));
+        t.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
+        Arc::new(t)
+    };
+    let mut server_config = trust.quinn_server_config()?;
+    server_config.transport_config(Arc::clone(&transport));
+    let mut client_config = trust.quinn_client_config()?;
+    client_config.transport_config(Arc::clone(&transport));
 
     let endpoint = {
         let _guard = handle.enter();
@@ -99,24 +159,26 @@ pub fn spawn_mesh(
         endpoint
     };
 
-    let (inbound_tx, inbound_rx) = unbounded::<Inbound>();
+    let inbox: SharedInbox = Arc::new(Mutex::new(BoundedInbox::new(cfg.inbound_capacity)));
 
-    // Accept loop: every inbound connection gets a reader task per uni stream.
+    // Accept loop: a Semaphore caps concurrently-served connections so a connection
+    // flood cannot task-flood the node (TRANSPORT-4). Each connection serves BOTH
+    // reliable uni streams and unreliable datagrams.
     let accept_endpoint = endpoint.clone();
-    let accept_inbound = inbound_tx.clone();
+    let accept_inbox = Arc::clone(&inbox);
+    let permits = Arc::new(tokio::sync::Semaphore::new(cfg.max_inbound_connections.max(1)));
     handle.spawn(async move {
         while let Some(incoming) = accept_endpoint.accept().await {
-            let Ok(connection) = incoming.await else {
-                continue; // handshake failed (foreign trust): drop, never serve
+            let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+                break; // semaphore closed: endpoint shutting down
             };
-            let inbound = accept_inbound.clone();
+            let inbox = Arc::clone(&accept_inbox);
             tokio::spawn(async move {
-                while let Ok(recv) = connection.accept_uni().await {
-                    let inbound = inbound.clone();
-                    tokio::spawn(async move {
-                        crate::read_frames(recv, inbound).await;
-                    });
-                }
+                let _permit = permit; // held for the connection's lifetime
+                let Ok(connection) = incoming.await else {
+                    return; // handshake failed (foreign trust): drop, never serve
+                };
+                serve_connection(connection, inbox).await;
             });
         }
     });
@@ -128,13 +190,15 @@ pub fn spawn_mesh(
             continue; // no self-lane: a node never dials itself
         }
         let (tx, rx) = tokio::sync::mpsc::channel::<OutFrame>(cfg.outbound_capacity);
-        handle.spawn(peer_writer(
-            endpoint.clone(),
-            cfg.local,
+        handle.spawn(peer_writer(PeerWriter {
+            endpoint: endpoint.clone(),
+            local: cfg.local,
             addr,
             rx,
-            inbound_tx.clone(),
-        ));
+            inbox: Arc::clone(&inbox),
+            backoff_min: cfg.redial_backoff_min,
+            backoff_max: cfg.redial_backoff_max,
+        }));
         lanes.insert(peer, PeerLane { tx });
     }
 
@@ -142,68 +206,158 @@ pub fn spawn_mesh(
         MeshTransport {
             local: cfg.local,
             lanes,
-            inbound_rx,
+            inbox,
             next_msg_id: 0,
         },
         MeshControl { endpoint },
     ))
 }
 
-/// One peer's writer: drains its lane in FIFO order, dialing on demand. A hard
-/// failure bounces the frame as `NodeUnreachable` and drops the cached connection
-/// so the next frame re-dials (fail fast while down, recover automatically).
-async fn peer_writer(
+/// Serve one accepted connection: reliable uni streams AND unreliable datagrams,
+/// both feeding the shared bounded inbox.
+async fn serve_connection(connection: quinn::Connection, inbox: SharedInbox) {
+    let stream_conn = connection.clone();
+    let stream_inbox = Arc::clone(&inbox);
+    // Reliable streams.
+    let streams = tokio::spawn(async move {
+        while let Ok(recv) = stream_conn.accept_uni().await {
+            let inbox = Arc::clone(&stream_inbox);
+            tokio::spawn(async move {
+                crate::read_frames_into(recv, &inbox).await;
+            });
+        }
+    });
+    // Unreliable datagrams on the same connection.
+    while let Ok(datagram) = connection.read_datagram().await {
+        if let Ok(frame) = postcard::from_bytes::<WireFrame>(&datagram) {
+            push_inbox(
+                &inbox,
+                Inbound::Wire {
+                    from: frame.from,
+                    class: frame.class,
+                    bytes: vd_sim::io::bytes(frame.bytes),
+                },
+            );
+        }
+        // A malformed datagram is silently dropped: unreliable carriers tolerate it.
+    }
+    streams.abort();
+}
+
+struct PeerWriter {
     endpoint: quinn::Endpoint,
     local: NodeId,
     addr: SocketAddr,
-    mut rx: tokio::sync::mpsc::Receiver<OutFrame>,
-    inbound: Sender<Inbound>,
-) {
-    let mut stream: Option<quinn::SendStream> = None;
-    while let Some(frame) = rx.recv().await {
-        let wrote = write_to_peer(&endpoint, addr, &mut stream, local, &frame).await;
-        if wrote.is_err() {
-            stream = None;
-            let _ = inbound.send(Inbound::NodeUnreachable {
-                to: frame.to,
-                class: frame.class,
-                undelivered: frame.msg_id,
-            });
+    rx: tokio::sync::mpsc::Receiver<OutFrame>,
+    inbox: SharedInbox,
+    backoff_min: Duration,
+    backoff_max: Duration,
+}
+
+/// One peer's writer: drains its lane in FIFO order, dialing on demand, with
+/// exponential re-dial backoff so a dead host is NOT hammered at the tick rate
+/// (TRANSPORT-3). Reliable frames ride a persistent uni stream and bounce
+/// `NodeUnreachable` on hard failure; unreliable frames ride datagrams (latest-wins:
+/// loss is correct, no bounce).
+async fn peer_writer(mut w: PeerWriter) {
+    let mut connection: Option<quinn::Connection> = None;
+    let mut reliable_stream: Option<quinn::SendStream> = None;
+    let mut backoff = w.backoff_min;
+    while let Some(frame) = w.rx.recv().await {
+        let sent = write_frame(
+            &w.endpoint,
+            w.addr,
+            &mut connection,
+            &mut reliable_stream,
+            w.local,
+            &frame,
+        )
+        .await;
+        match sent {
+            Ok(()) => backoff = w.backoff_min,
+            Err(()) => {
+                connection = None;
+                reliable_stream = None;
+                // Reliable senders are waiting on an ack path; tell them the peer is
+                // unreachable. Unreliable (datagram) loss is silent by design.
+                if frame.class.reliability() == Reliability::Reliable {
+                    push_inbox(
+                        &w.inbox,
+                        Inbound::NodeUnreachable {
+                            to: frame.to,
+                            class: frame.class,
+                            undelivered: frame.msg_id,
+                        },
+                    );
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(w.backoff_max);
+            }
         }
     }
 }
 
-/// Ensure a stream to the peer and write one frame (dial + open on demand).
-async fn write_to_peer(
+/// Ensure a connection (dial on demand) and write one frame on the carrier its
+/// class mandates.
+async fn write_frame(
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
-    stream: &mut Option<quinn::SendStream>,
+    connection: &mut Option<quinn::Connection>,
+    reliable_stream: &mut Option<quinn::SendStream>,
     local: NodeId,
     frame: &OutFrame,
 ) -> Result<(), ()> {
-    if stream.is_none() {
+    if connection.is_none() {
         // SNI is pinned to the cluster-trust SAN; identity comes from mTLS, not DNS.
-        let connection = endpoint
+        let conn = endpoint
             .connect(addr, "localhost")
             .map_err(|_| ())?
             .await
             .map_err(|_| ())?;
-        *stream = Some(connection.open_uni().await.map_err(|_| ())?);
+        *connection = Some(conn);
+        *reliable_stream = None;
     }
-    let send = stream.as_mut().ok_or(())?;
+    let conn = connection.as_ref().ok_or(())?;
     let payload = postcard::to_allocvec(&WireFrame {
         from: local,
         class: frame.class,
-        bytes: frame.bytes.clone(),
+        bytes: frame.bytes.to_vec(),
     })
     .map_err(|_| ())?;
-    let len = u32::try_from(payload.len()).map_err(|_| ())?;
-    if len > MAX_FRAME_BYTES {
-        return Err(());
+
+    match frame.class.reliability() {
+        Reliability::Reliable => {
+            if reliable_stream.is_none() {
+                *reliable_stream = Some(conn.open_uni().await.map_err(|_| ())?);
+            }
+            let send = reliable_stream.as_mut().ok_or(())?;
+            let len = u32::try_from(payload.len()).map_err(|_| ())?;
+            if len > MAX_FRAME_BYTES {
+                return Err(());
+            }
+            send.write_all(&len.to_be_bytes()).await.map_err(|_| ())?;
+            send.write_all(&payload).await.map_err(|_| ())?;
+            Ok(())
+        }
+        Reliability::Unreliable => {
+            // Datagrams are message-bounded (no length prefix). TooLarge is a loud
+            // failure of the caller's framing, not a transport error to bounce.
+            if conn.max_datagram_size().is_none_or(|max| payload.len() > max) {
+                tracing::warn!(
+                    "datagram payload {} exceeds the path MTU budget; dropped",
+                    payload.len()
+                );
+                return Ok(()); // dropped, but the connection is healthy
+            }
+            // A full send queue drops the datagram (latest-wins); only a dead
+            // connection is an Err that triggers re-dial.
+            match conn.send_datagram(payload.into()) {
+                Ok(()) => Ok(()),
+                Err(quinn::SendDatagramError::ConnectionLost(_)) => Err(()),
+                Err(_) => Ok(()), // unsupported/too-large/disabled: drop, stay up
+            }
+        }
     }
-    send.write_all(&len.to_be_bytes()).await.map_err(|_| ())?;
-    send.write_all(&payload).await.map_err(|_| ())?;
-    Ok(())
 }
 
 impl Transport for MeshTransport {
@@ -233,7 +387,10 @@ impl Transport for MeshTransport {
     }
 
     fn drain_inbound(&mut self) -> Vec<Inbound> {
-        self.inbound_rx.try_iter().collect()
+        self.inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
     }
 
     fn local_id(&self) -> NodeId {
@@ -284,12 +441,7 @@ mod tests {
             let (t, c) = spawn_mesh(
                 handle,
                 trust,
-                &MeshConfig {
-                    local: id,
-                    bind: addr,
-                    peers: book.clone(),
-                    outbound_capacity: capacity,
-                },
+                &MeshConfig::new(id, addr, book.clone(), capacity),
             )
             .expect("mesh node");
             transports.push(t);
@@ -326,7 +478,7 @@ mod tests {
                     continue;
                 }
                 let tag = vec![from.0 as u8, to.0 as u8];
-                sender.send(to, MsgClass::Control, tag).expect("accepted");
+                sender.send(to, MsgClass::Control, vd_sim::io::bytes(tag)).expect("accepted");
             }
         }
         for node in &mut nodes {
@@ -338,7 +490,7 @@ mod tests {
                     panic!("wire expected, got {msg:?}");
                 };
                 assert_eq!(
-                    bytes,
+                    bytes.to_vec(),
                     vec![from.0 as u8, me.0 as u8],
                     "the in-frame sender identity matches the actual sender"
                 );
@@ -357,18 +509,18 @@ mod tests {
         let dead = NodeId(3);
         let live = NodeId(2);
         for n in 0..16u8 {
-            // Beyond the lane capacity these back-pressure — per-peer, loudly.
-            let _ = nodes[0].send(dead, MsgClass::Input, vec![n]);
+            // RELIABLE sends to the dead peer bounce as NodeUnreachable.
+            let _ = nodes[0].send(dead, MsgClass::Saga, vec![n].into());
         }
         nodes[0]
-            .send(live, MsgClass::Control, vec![42])
+            .send(live, MsgClass::Control, vec![42].into())
             .expect("the live lane is unaffected by the dead one");
         let got = wait_for(&mut nodes[1], |g| !g.is_empty());
         let Inbound::Wire { from, bytes, .. } = &got[0] else {
             panic!("wire expected");
         };
-        assert_eq!((*from, bytes.clone()), (NodeId(1), vec![42]));
-        // And the dead lane surfaces unreachable notices (accepted sends only).
+        assert_eq!((*from, bytes.to_vec()), (NodeId(1), vec![42]));
+        // And the dead lane surfaces unreachable notices for RELIABLE sends.
         let notices = wait_for(&mut nodes[0], |g| {
             g.iter()
                 .filter(|m| matches!(m, Inbound::NodeUnreachable { .. }))
@@ -386,6 +538,28 @@ mod tests {
     }
 
     #[test]
+    fn unreliable_sends_to_a_dead_peer_are_dropped_silently_no_bounce() {
+        // Datagrams are latest-wins: their loss is correct, never a NodeUnreachable.
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let (mut nodes, controls) = cluster(rt.handle(), &trust, 2, 8);
+        controls[1].kill();
+        std::thread::sleep(Duration::from_millis(50));
+        for n in 0..8u8 {
+            let _ = nodes[0].send(NodeId(2), MsgClass::Snapshot, vec![n].into());
+        }
+        // Give the writer time to attempt + fail + back off, then confirm NO bounce.
+        std::thread::sleep(Duration::from_millis(300));
+        let drained = nodes[0].drain_inbound();
+        assert!(
+            !drained
+                .iter()
+                .any(|m| matches!(m, Inbound::NodeUnreachable { .. })),
+            "unreliable loss must not bounce: {drained:?}"
+        );
+    }
+
+    #[test]
     fn per_peer_backpressure_returns_the_payload() {
         let rt = runtime();
         let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
@@ -397,7 +571,7 @@ mod tests {
         // queue itself holds `capacity`. Flood until refusal and check the refusal.
         let mut refused = None;
         for n in 0..64u8 {
-            match nodes[0].send(NodeId(2), MsgClass::Input, vec![n]) {
+            match nodes[0].send(NodeId(2), MsgClass::Input, vec![n].into()) {
                 Ok(_) => {}
                 Err(SendError::QueueFull(bytes)) => {
                     refused = Some((n, bytes));
@@ -406,7 +580,7 @@ mod tests {
             }
         }
         let (n, bytes) = refused.expect("the bounded lane eventually refuses");
-        assert_eq!(bytes, vec![n], "the refused payload is returned intact");
+        assert_eq!(bytes.to_vec(), vec![n], "the refused payload is returned intact");
     }
 
     #[test]
@@ -415,9 +589,9 @@ mod tests {
         let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
         let (mut nodes, _controls) = cluster(rt.handle(), &trust, 2, 4);
         let err = nodes[0]
-            .send(NodeId(99), MsgClass::Control, vec![7])
+            .send(NodeId(99), MsgClass::Control, vec![7].into())
             .expect_err("not in the address book");
-        assert_eq!(err, SendError::QueueFull(vec![7]));
+        assert_eq!(err, SendError::QueueFull(vec![7].into()));
     }
 
     #[test]
@@ -427,14 +601,14 @@ mod tests {
         let (mut nodes, _controls) = cluster(rt.handle(), &trust, 2, 4);
         let me = nodes[0].local_id();
         let err = nodes[0]
-            .send(me, MsgClass::Control, vec![1])
+            .send(me, MsgClass::Control, vec![1].into())
             .expect_err("a node never dials itself");
-        assert_eq!(err, SendError::QueueFull(vec![1]));
+        assert_eq!(err, SendError::QueueFull(vec![1].into()));
     }
 
     /// The scalability volume bound: 4 nodes, every pair exchanging a sustained
     /// burst concurrently. Catches serialization collapse across lanes (the
-    /// property), not raw throughput.
+    /// property), not raw throughput. RELIABLE class so no-loss is a valid assertion.
     #[test]
     fn mesh_volume_all_pairs_burst() {
         const BURST: usize = 200;
@@ -451,9 +625,9 @@ mod tests {
                         continue;
                     }
                     // Sustained send with per-peer back-pressure tolerated (retry).
-                    let mut payload = vec![(round % 251) as u8];
+                    let mut payload = vd_sim::io::bytes(vec![(round % 251) as u8]);
                     loop {
-                        match sender.send(to, MsgClass::Snapshot, payload) {
+                        match sender.send(to, MsgClass::Saga, payload) {
                             Ok(_) => break,
                             Err(SendError::QueueFull(returned)) => {
                                 payload = returned;
@@ -464,7 +638,7 @@ mod tests {
                 }
             }
         }
-        // Every node receives 3 peers * BURST messages.
+        // Every node receives 3 peers * BURST messages (reliable: no loss).
         for node in &mut nodes {
             let got = wait_for(node, |g| {
                 g.iter()
@@ -479,5 +653,36 @@ mod tests {
             "all-pairs burst collapsed: {:?}",
             started.elapsed()
         );
+    }
+
+    /// Unreliable datagrams deliver best-effort: on localhost a steady (non-flooding)
+    /// snapshot stream arrives, exercising the end-to-end send_datagram/read_datagram
+    /// path with newest-wins semantics.
+    #[test]
+    fn unreliable_datagrams_deliver_best_effort() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let (mut nodes, _controls) = cluster(rt.handle(), &trust, 2, 64);
+        // Pace the sends so the datagram send-queue never saturates: every one lands.
+        for n in 0..20u8 {
+            nodes[0]
+                .send(NodeId(2), MsgClass::Snapshot, vec![n].into())
+                .expect("enqueued");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let got = wait_for(&mut nodes[1], |g| {
+            g.iter()
+                .filter(|m| matches!(m, Inbound::Wire { .. }))
+                .count()
+                >= 10
+        });
+        // At least half arrived (best-effort, no flooding) and all are snapshots.
+        assert!(got.len() >= 10, "datagrams delivered: {}", got.len());
+        for msg in &got {
+            assert!(
+                matches!(msg, Inbound::Wire { class: MsgClass::Snapshot, .. }),
+                "snapshot datagram: {msg:?}"
+            );
+        }
     }
 }

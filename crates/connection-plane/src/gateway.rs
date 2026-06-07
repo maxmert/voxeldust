@@ -194,9 +194,17 @@ pub enum InputRouting {
     Malformed,
 }
 
-/// Forward one shard frame to one session: fence-compare against the route's
-/// accepted fence, then byte-level sub re-tag. Returns the client-bound bytes,
-/// or `None` if the frame is stale (counted by the caller).
+/// Does this session ACCEPT a frame at `frame_fence`? (Stale-fence frames from a
+/// demoted old owner are dropped — fence rule 5.) The cheap per-session half of
+/// the fan-out; the expensive re-tag is shared per sub-id (SCALE-1).
+#[must_use]
+pub fn frame_passes_fence(hot: &SessionHot, frame_fence: Fence) -> bool {
+    !frame_fence.is_stale_against(hot.route.load().fence)
+}
+
+/// Forward one shard frame to one session: fence-compare then byte-level sub re-tag.
+/// Returns the client-bound bytes, or `None` if the frame is stale (counted by the
+/// caller). Retained for the SPIKE-2a microbench (single-session hot path).
 #[must_use]
 pub fn forward_frame(
     hot: &SessionHot,
@@ -204,8 +212,7 @@ pub fn forward_frame(
     frame_fence: Fence,
     snapshot_bytes: &[u8],
 ) -> Option<Vec<u8>> {
-    let route = hot.route.load();
-    if frame_fence.is_stale_against(route.fence) {
+    if !frame_passes_fence(hot, frame_fence) {
         return None;
     }
     retag_snapshot_sub(snapshot_bytes, sub).ok()
@@ -279,18 +286,18 @@ fn process_gateway_inbound(
 
 fn push_control(outbox: &mut OutboundBox, to: NodeId, msg: &ServerControlMsg) {
     let bytes = postcard::to_allocvec(msg).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Control, bytes));
+    outbox.0.push((to, MsgClass::Control, vd_sim::io::bytes(bytes)));
 }
 
 fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &GatewayToShard) {
     let bytes = postcard::to_allocvec(msg).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, class, bytes));
+    outbox.0.push((to, class, vd_sim::io::bytes(bytes)));
 }
 
 fn push_directory(outbox: &mut OutboundBox, to: NodeId, op: DirectoryOp) {
     let bytes = postcard::to_allocvec(&InterShardFlow::Directory(op))
         .expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Saga, bytes));
+    outbox.0.push((to, MsgClass::Saga, vd_sim::io::bytes(bytes)));
 }
 
 /// Handle one client control message. The gateway is the SOLE ticket validator;
@@ -537,18 +544,36 @@ fn on_shard_frame(
         stats.undecodable += 1;
         return;
     };
+    // SCALE-1: re-tag the snapshot body ONCE per distinct sub-id into a SHARED
+    // `Arc`; the per-session fan-out is then a cheap fence check + refcount bump,
+    // never an O(entities) re-allocation per subscriber. The gateway therefore
+    // holds ONE body per sub-id regardless of how many sessions subscribe to it.
+    let mut retagged: BTreeMap<SubId, vd_sim::io::Bytes> = BTreeMap::new();
     for session in sessions.by_session.values() {
         let SessionPhase::Active { sub, .. } = session.phase else {
             continue;
         };
-        match forward_frame(&session.hot, sub, realm_fence, &snapshot_bytes) {
-            Some(client_bytes) => {
-                outbox
-                    .0
-                    .push((session.client, MsgClass::Snapshot, client_bytes));
-            }
-            None => stats.stale_frames_dropped += 1,
+        if !frame_passes_fence(&session.hot, realm_fence) {
+            stats.stale_frames_dropped += 1;
+            continue;
         }
+        let body = match retagged.entry(sub) {
+            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::btree_map::Entry::Vacant(e) => {
+                match retag_snapshot_sub(&snapshot_bytes, sub) {
+                    Ok(b) => e.insert(vd_sim::io::bytes(b)),
+                    Err(_) => {
+                        // A corrupt snapshot body re-tags for no sub: count once and
+                        // abandon the whole frame (every sub would fail identically).
+                        stats.undecodable += 1;
+                        return;
+                    }
+                }
+            }
+        };
+        outbox
+            .0
+            .push((session.client, MsgClass::Snapshot, body.clone()));
     }
 }
 
@@ -720,6 +745,9 @@ mod tests {
             self.world.resource_mut::<InboundBox>().0 = inbound;
             self.schedule.run(&mut self.world);
             std::mem::take(&mut self.world.resource_mut::<OutboundBox>().0)
+                .into_iter()
+                .map(|(to, class, bytes)| (to, class, bytes.to_vec()))
+                .collect()
         }
 
         fn stats(&self) -> GatewayStats {
@@ -756,7 +784,7 @@ mod tests {
         Inbound::Wire {
             from,
             class,
-            bytes: postcard::to_allocvec(msg).expect("encode"),
+            bytes: postcard::to_allocvec(msg).expect("encode").into(),
         }
     }
 
@@ -1043,7 +1071,7 @@ mod tests {
         let sent = rig.tick(vec![Inbound::Wire {
             from: CLIENT,
             class: MsgClass::Input,
-            bytes: input_bytes(1),
+            bytes: input_bytes(1).into(),
         }]);
         let inputs: Vec<&(NodeId, MsgClass, Vec<u8>)> = sent
             .iter()
@@ -1065,17 +1093,17 @@ mod tests {
             Inbound::Wire {
                 from: CLIENT,
                 class: MsgClass::Input,
-                bytes: input_bytes(1),
+                bytes: input_bytes(1).into(),
             },
             Inbound::Wire {
                 from: CLIENT,
                 class: MsgClass::Input,
-                bytes: vec![0x80],
+                bytes: vec![0x80].into(),
             },
             Inbound::Wire {
                 from: NodeId(177),
                 class: MsgClass::Input,
-                bytes: input_bytes(2),
+                bytes: input_bytes(2).into(),
             },
         ]);
         let stats = rig.stats();
@@ -1107,7 +1135,7 @@ mod tests {
         let _ = rig.tick(vec![Inbound::Wire {
             from: CLIENT,
             class: MsgClass::Input,
-            bytes: input_bytes(1),
+            bytes: input_bytes(1).into(),
         }]);
         assert_eq!(rig.stats().inputs_unroutable, 1);
     }
@@ -1148,6 +1176,72 @@ mod tests {
         )]);
         assert_eq!(sent.len(), 0);
         assert_eq!(rig.stats().stale_frames_dropped, 1);
+    }
+
+    #[test]
+    fn two_active_sessions_share_one_retagged_body() {
+        // SCALE-1: a second session with the SAME sub re-uses the ONE retagged body
+        // (the Occupied map arm) — the gateway never re-encodes per subscriber.
+        let mut rig = Rig::new();
+        let (_, _) = rig.login();
+        // A second client logs in fully (distinct session, same sub 0).
+        let before: std::collections::BTreeSet<SessionId> =
+            rig.world.resource::<GatewaySessions>().sessions().collect();
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: NodeId(101),
+            class: MsgClass::Control,
+            bytes: postcard::to_allocvec(&hello_msg()).expect("encode").into(),
+        }]);
+        let session2 = rig
+            .world
+            .resource::<GatewaySessions>()
+            .sessions()
+            .find(|s| !before.contains(s))
+            .expect("second session pending");
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(session2))]);
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: session2,
+                entity: EntityId(88),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+
+        // One frame: BOTH clients receive a sub-0 snapshot from the shared body.
+        let sent = rig.tick(vec![wire(SHARD, MsgClass::Snapshot, &frame_msg(Fence(1), 9))]);
+        let mut recipients: Vec<NodeId> = sent
+            .iter()
+            .filter(|(_, class, _)| *class == MsgClass::Snapshot)
+            .map(|(to, _, _)| *to)
+            .collect();
+        recipients.sort_unstable();
+        assert_eq!(recipients, vec![CLIENT, NodeId(101)], "both subscribers fed");
+        for (_, _, bytes) in sent.iter().filter(|(_, c, _)| *c == MsgClass::Snapshot) {
+            let snap: SnapshotDatagram = postcard::from_bytes(bytes).expect("decode");
+            assert_eq!(snap.sub, SubId(0));
+        }
+        assert_eq!(rig.stats().undecodable, 0);
+    }
+
+    #[test]
+    fn a_corrupt_snapshot_body_is_counted_once_and_abandons_the_frame() {
+        // The Err arm of the per-sub retag: a body that can't re-tag (bad varint)
+        // would fail identically for every sub, so the whole frame is abandoned.
+        let mut rig = Rig::new();
+        let (_, _) = rig.login();
+        let corrupt = ShardToGateway::Frame {
+            realm_fence: Fence(1),
+            source_tick: TickId(5),
+            snapshot_bytes: vec![0x80], // truncated varint: retag fails
+        };
+        let sent = rig.tick(vec![wire(SHARD, MsgClass::Snapshot, &corrupt)]);
+        // The corrupt body re-tags for no sub, so the whole frame is abandoned: the
+        // active session receives NOTHING and the failure is counted exactly once.
+        assert_eq!(sent.len(), 0, "no output from a corrupt body");
+        assert_eq!(rig.stats().undecodable, 1, "counted exactly once");
     }
 
     #[test]
@@ -1300,44 +1394,44 @@ mod tests {
             Inbound::Wire {
                 from: CLIENT,
                 class: MsgClass::Control,
-                bytes: vec![0xFF],
+                bytes: vec![0xFF].into(),
             },
             Inbound::Wire {
                 from: SHARD,
                 class: MsgClass::Control,
-                bytes: vec![0xFF],
+                bytes: vec![0xFF].into(),
             },
             Inbound::Wire {
                 from: SHARD,
                 class: MsgClass::Snapshot,
-                bytes: vec![0xFF],
+                bytes: vec![0xFF].into(),
             },
             Inbound::Wire {
                 from: ORCH,
                 class: MsgClass::Saga,
-                bytes: vec![0xFF],
+                bytes: vec![0xFF].into(),
             },
             // Wrong classes.
             Inbound::Wire {
                 from: SHARD,
                 class: MsgClass::Saga,
-                bytes: vec![1],
+                bytes: vec![1].into(),
             },
             Inbound::Wire {
                 from: ORCH,
                 class: MsgClass::Control,
-                bytes: vec![1],
+                bytes: vec![1].into(),
             },
             Inbound::Wire {
                 from: CLIENT,
                 class: MsgClass::Snapshot,
-                bytes: vec![1],
+                bytes: vec![1].into(),
             },
             // Clock sync is the follower system's business: skipped here.
             Inbound::Wire {
                 from: ORCH,
                 class: MsgClass::Membership,
-                bytes: vec![1],
+                bytes: vec![1].into(),
             },
             // Transport notices are skipped by the dispatcher.
             Inbound::NodeUnreachable {

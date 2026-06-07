@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use vd_core::{EpochId, MsgId, NodeId, TickId, UniverseTick};
 
-use super::{Bytes, Clock, Inbound, MsgClass, SendError, Transport};
+use super::{BoundedInbox, Bytes, Clock, Inbound, MsgClass, SendError, Transport};
 
 /// The deterministic test clock: the topology driver advances it explicitly; nodes
 /// only ever READ it through the [`Clock`] trait. Shared-handle semantics (clone =
@@ -82,8 +82,9 @@ struct NodeQueues {
     /// Bounded by `outbound_capacity`; drained by `pump`.
     outbound: VecDeque<OutboundFrame>,
     outbound_capacity: usize,
-    /// Delivered messages awaiting `drain_inbound`.
-    inbound: VecDeque<Inbound>,
+    /// Delivered messages awaiting `drain_inbound` — BOUNDED with the seam's
+    /// reliability-aware overflow policy (a fast sender cannot OOM a slow node).
+    inbound: BoundedInbox,
     /// Next FIFO send sequence.
     next_msg_id: u64,
     /// Dead nodes stop receiving; sends toward them become `NodeUnreachable`.
@@ -119,6 +120,23 @@ impl MemHub {
     /// condition.
     #[must_use]
     pub fn register(&self, id: NodeId, outbound_capacity: usize) -> MemTransport {
+        // The inbound bound is generous relative to outbound: it exists to make
+        // overflow REPRODUCIBLE, not to throttle normal traffic. `register_bounded`
+        // sets it explicitly for overflow scenarios.
+        self.register_bounded(id, outbound_capacity, outbound_capacity.saturating_mul(8).max(64))
+    }
+
+    /// Register with an explicit inbound capacity (overflow-scenario tests).
+    ///
+    /// # Panics
+    /// On duplicate registration.
+    #[must_use]
+    pub fn register_bounded(
+        &self,
+        id: NodeId,
+        outbound_capacity: usize,
+        inbound_capacity: usize,
+    ) -> MemTransport {
         let mut inner = self.lock();
         assert!(
             !inner.nodes.contains_key(&id),
@@ -129,7 +147,7 @@ impl MemHub {
             NodeQueues {
                 outbound: VecDeque::new(),
                 outbound_capacity,
-                inbound: VecDeque::new(),
+                inbound: BoundedInbox::new(inbound_capacity),
                 next_msg_id: 0,
                 alive: true,
             },
@@ -188,7 +206,7 @@ impl MemHub {
                     .get_mut(&target)
                     .expect("pump target exists: receiver checked alive, or sender owns the frame")
                     .inbound
-                    .push_back(event);
+                    .push(event);
             }
         }
     }
@@ -225,7 +243,7 @@ impl Transport for MemTransport {
     fn drain_inbound(&mut self) -> Vec<Inbound> {
         let mut inner = self.hub.lock();
         match inner.nodes.get_mut(&self.local) {
-            Some(node) => node.inbound.drain(..).collect(),
+            Some(node) => node.inbound.drain(),
             None => Vec::new(),
         }
     }
@@ -248,7 +266,7 @@ mod tests {
         let mut a = hub.register(A, 8);
         let mut b = hub.register(B, 8);
 
-        a.send(B, MsgClass::Control, vec![1]).expect("accepted");
+        a.send(B, MsgClass::Control, vec![1].into()).expect("accepted");
         assert!(b.drain_inbound().is_empty(), "no delivery before pump");
 
         hub.pump();
@@ -258,7 +276,7 @@ mod tests {
             vec![Inbound::Wire {
                 from: A,
                 class: MsgClass::Control,
-                bytes: vec![1],
+                bytes: vec![1].into(),
             }]
         );
     }
@@ -270,12 +288,12 @@ mod tests {
         let _b = hub.register(B, 4);
 
         let results: Vec<Result<MsgId, SendError>> = (0..6)
-            .map(|n| a.send(B, MsgClass::Input, vec![n]))
+            .map(|n| a.send(B, MsgClass::Input, vec![n].into()))
             .collect();
         let accepted = results.iter().filter(|r| r.is_ok()).count();
         let rejected = results.iter().filter(|r| r.is_err()).count();
         assert_eq!((accepted, rejected), (4, 2));
-        assert_eq!(results[4], Err(SendError::QueueFull(vec![4])));
+        assert_eq!(results[4], Err(SendError::QueueFull(vec![4].into())));
     }
 
     #[test]
@@ -285,8 +303,8 @@ mod tests {
         let mut b = hub.register(B, 8);
         assert_eq!((a.local_id(), b.local_id()), (A, B));
 
-        let id0 = a.send(B, MsgClass::Control, vec![0]).expect("accepted");
-        let id1 = a.send(B, MsgClass::Control, vec![1]).expect("accepted");
+        let id0 = a.send(B, MsgClass::Control, vec![0].into()).expect("accepted");
+        let id1 = a.send(B, MsgClass::Control, vec![1].into()).expect("accepted");
         assert_eq!((id0, id1), (MsgId(0), MsgId(1)));
 
         hub.pump();
@@ -296,12 +314,12 @@ mod tests {
                 Inbound::Wire {
                     from: A,
                     class: MsgClass::Control,
-                    bytes: vec![0],
+                    bytes: vec![0].into(),
                 },
                 Inbound::Wire {
                     from: A,
                     class: MsgClass::Control,
-                    bytes: vec![1],
+                    bytes: vec![1].into(),
                 },
             ]
         );
@@ -313,7 +331,7 @@ mod tests {
         let mut a = hub.register(A, 8);
         let _b = hub.register(B, 8);
 
-        let sent = a.send(B, MsgClass::Saga, vec![7]).expect("accepted");
+        let sent = a.send(B, MsgClass::Saga, vec![7].into()).expect("accepted");
         hub.kill(B);
         hub.pump();
 
@@ -346,12 +364,36 @@ mod tests {
     }
 
     #[test]
+    fn bounded_inbound_drops_stale_snapshots_under_a_flood() {
+        // A slow consumer with a tiny inbound: a snapshot flood is bounded to the
+        // newest frames (latest-wins), never an unbounded OOM.
+        let hub = MemHub::new();
+        let mut a = hub.register(A, 64);
+        let mut b = hub.register_bounded(B, 64, 4);
+        for n in 0..32u8 {
+            a.send(B, MsgClass::Snapshot, vec![n].into()).expect("accepted");
+            hub.pump();
+        }
+        let got = b.drain_inbound();
+        assert!(got.len() <= 4);
+        assert_eq!(
+            *got.last().expect("some survived"),
+            Inbound::Wire {
+                from: A,
+                class: MsgClass::Snapshot,
+                bytes: vec![31].into(),
+            },
+            "the newest snapshot always survives"
+        );
+    }
+
+    #[test]
     fn killing_an_unknown_node_is_a_no_op() {
         let hub = MemHub::new();
         let mut a = hub.register(A, 8);
         let mut b = hub.register(B, 8);
         hub.kill(NodeId(999));
-        a.send(B, MsgClass::Control, vec![5]).expect("accepted");
+        a.send(B, MsgClass::Control, vec![5].into()).expect("accepted");
         hub.pump();
         assert_eq!(b.drain_inbound().len(), 1, "traffic unaffected");
     }
@@ -383,7 +425,7 @@ mod tests {
         });
         assert!(poisoner.join().is_err(), "poisoner thread must panic");
 
-        a.send(B, MsgClass::Control, vec![1])
+        a.send(B, MsgClass::Control, vec![1].into())
             .expect("post-poison send works");
         hub.pump();
         assert_eq!(b.drain_inbound().len(), 1, "post-poison delivery works");

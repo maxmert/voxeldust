@@ -82,7 +82,7 @@ impl<T: Transport> TracerNode<T> {
     fn send_msg(&mut self, msg: TracerMsg) -> Result<(), SendError> {
         let bytes = postcard::to_allocvec(&msg).expect("tracer messages always encode");
         self.transport
-            .send(self.peer, MsgClass::Control, bytes)
+            .send(self.peer, MsgClass::Control, vd_sim::io::bytes(bytes))
             .map(|_| ())
     }
 
@@ -141,7 +141,7 @@ mod tests {
         let pinger_t = hub.register(PINGER, 8);
         // Send garbage bytes that cannot decode as TracerMsg (postcard enum tag 250).
         echo_t
-            .send(PINGER, MsgClass::Control, vec![250, 0, 0])
+            .send(PINGER, MsgClass::Control, vec![250, 0, 0].into())
             .expect("accepted");
         hub.pump();
 
@@ -161,7 +161,7 @@ mod tests {
         // Three pings arrive at once.
         for n in 0..3u64 {
             let bytes = postcard::to_allocvec(&TracerMsg::Ping(n)).expect("encode");
-            pinger_t.send(ECHO, MsgClass::Control, bytes).expect("ok");
+            pinger_t.send(ECHO, MsgClass::Control, bytes.into()).expect("ok");
         }
         hub.pump();
 

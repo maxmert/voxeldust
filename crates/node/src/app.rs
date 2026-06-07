@@ -206,7 +206,7 @@ mod tests {
         a.world_mut()
             .resource_mut::<OutboundBox>()
             .0
-            .push((B, MsgClass::Control, vec![42]));
+            .push((B, MsgClass::Control, vec![42].into()));
         let report_a = a.step_tick();
         assert_eq!(report_a.tick, TickId(1));
         assert_eq!((report_a.sent, report_a.backpressured), (1, 0));
@@ -233,7 +233,7 @@ mod tests {
         {
             let mut outbox = a.world_mut().resource_mut::<OutboundBox>();
             for n in 0..4u8 {
-                outbox.0.push((B, MsgClass::Input, vec![n]));
+                outbox.0.push((B, MsgClass::Input, vec![n].into()));
             }
         }
         let report = a.step_tick();
@@ -241,7 +241,7 @@ mod tests {
         // The refused payloads are intact and ordered (returned, not lost).
         assert_eq!(
             a.world_mut().resource::<OutboundBox>().0,
-            vec![(B, MsgClass::Input, vec![2]), (B, MsgClass::Input, vec![3])]
+            vec![(B, MsgClass::Input, vec![2].into()), (B, MsgClass::Input, vec![3].into())]
         );
 
         // Drain the hub; the next tick sends the remainder in order.
@@ -261,7 +261,7 @@ mod tests {
         a.world_mut()
             .resource_mut::<OutboundBox>()
             .0
-            .push((B, MsgClass::Saga, vec![1]));
+            .push((B, MsgClass::Saga, vec![1].into()));
         let r1 = a.step_tick();
         assert_eq!(r1.sent, 1, "enqueue succeeded; failure is async");
         hub.pump();

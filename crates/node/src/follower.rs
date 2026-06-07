@@ -101,7 +101,7 @@ mod tests {
         Inbound::Wire {
             from: NodeId(1),
             class,
-            bytes,
+            bytes: bytes.into(),
         }
     }
 

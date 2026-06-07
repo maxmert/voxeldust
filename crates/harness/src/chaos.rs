@@ -152,7 +152,7 @@ pub fn run_chaos(seed: u64, config: &ChaosConfig) -> Result<Vec<u8>, WireTruthVi
     for k in 0..3u8 {
         let target = NodeId(rng.range_u64(0, n) + 1);
         seeder
-            .send(target, MsgClass::Control, vec![k])
+            .send(target, MsgClass::Control, vd_sim::io::bytes(vec![k]))
             .expect("seed message accepted");
     }
 

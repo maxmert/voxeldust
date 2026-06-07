@@ -196,7 +196,7 @@ fn request_pending_grants(
 /// SOLE producer of shard-bound bytes — HR1).
 fn push_flow(outbox: &mut OutboundBox, to: NodeId, flow: &InterShardFlow) {
     let bytes = postcard::to_allocvec(flow).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Saga, bytes));
+    outbox.0.push((to, MsgClass::Saga, crate::io::bytes(bytes)));
 }
 
 /// Drain and dispatch everything delivered this tick.
@@ -393,7 +393,7 @@ fn mint_entity(mint: &mut EntityMint, node: NodeId) -> EntityId {
 
 fn push_session_reply(outbox: &mut OutboundBox, to: NodeId, reply: &ShardToGateway) {
     let bytes = postcard::to_allocvec(reply).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Control, bytes));
+    outbox.0.push((to, MsgClass::Control, crate::io::bytes(bytes)));
 }
 
 /// The input path: fence gate → decode → seq gate → integrate. Every outcome lands
@@ -601,7 +601,11 @@ fn emit_frames(
         source_tick: clock.local_tick,
         snapshot_bytes,
     };
-    let bytes = postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly");
+    // ONE shared body, cloned (refcount bump) to every subscribing gateway — never
+    // an O(entities) copy per gateway (SCALE-1).
+    let bytes = crate::io::bytes(
+        postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
+    );
     for gateway in gateways {
         outbox.0.push((gateway, MsgClass::Snapshot, bytes.clone()));
     }
@@ -658,6 +662,9 @@ mod tests {
             self.world.resource_mut::<InboundBox>().0 = inbound;
             self.schedule.run(&mut self.world);
             std::mem::take(&mut self.world.resource_mut::<OutboundBox>().0)
+                .into_iter()
+                .map(|(to, class, bytes)| (to, class, bytes.to_vec()))
+                .collect()
         }
 
         fn grant_realm(&mut self) {
@@ -670,7 +677,7 @@ mod tests {
                     in_transfer: None,
                 }),
             };
-            let bytes = postcard::to_allocvec(&reply).expect("encode");
+            let bytes = crate::io::bytes(postcard::to_allocvec(&reply).expect("encode"));
             let _ = self.tick(vec![Inbound::Wire {
                 from: ORCH,
                 class: MsgClass::Saga,
@@ -718,7 +725,7 @@ mod tests {
         Inbound::Wire {
             from,
             class,
-            bytes: postcard::to_allocvec(msg).expect("encode"),
+            bytes: postcard::to_allocvec(msg).expect("encode").into(),
         }
     }
 
@@ -816,12 +823,12 @@ mod tests {
             Inbound::Wire {
                 from: ORCH,
                 class: MsgClass::Saga,
-                bytes: garbage.clone(),
+                bytes: garbage.clone().into(),
             },
             Inbound::Wire {
                 from: GATEWAY,
                 class: MsgClass::Control,
-                bytes: garbage,
+                bytes: garbage.into(),
             },
             // Non-wire inbound is skipped by the dispatcher.
             Inbound::NodeUnreachable {
@@ -833,12 +840,12 @@ mod tests {
             Inbound::Wire {
                 from: GATEWAY,
                 class: MsgClass::Snapshot,
-                bytes: vec![1],
+                bytes: vec![1].into(),
             },
             Inbound::Wire {
                 from: ORCH,
                 class: MsgClass::Membership,
-                bytes: vec![2],
+                bytes: vec![2].into(),
             },
         ]);
         assert_eq!(rig.world.resource::<Dots>().0.len(), 0);

@@ -92,6 +92,11 @@ enum TrackedKind {
 struct NodeEndpoint {
     /// Released deliveries awaiting drain (and then ack-on-survival).
     inbound: VecDeque<Tracked>,
+    /// Receiver buffer bound: a delivery that would overflow it is held in the
+    /// unacked ledger and redelivered later (receiver back-pressure — the
+    /// deterministic analog of a full OS socket buffer; 0 = unbounded). This
+    /// NEVER drops a message (conservation holds): it just defers delivery.
+    inbound_capacity: usize,
     /// Drained this step; acked when the node survives the step.
     drained_pending_ack: Vec<u64>,
     next_msg_id: u64,
@@ -129,6 +134,9 @@ pub struct FabricStats {
     /// Unreachable notices that could not be returned because the SENDER was
     /// crashed at bounce time (counted, never silent).
     pub notices_missed_by_crashed_sender: u64,
+    /// Delivery attempts deferred because the receiver buffer was full (receiver
+    /// back-pressure — held in the unacked ledger, redelivered later, never lost).
+    pub receiver_buffer_full: u64,
 }
 
 #[derive(Debug)]
@@ -185,12 +193,29 @@ impl FaultFabric {
     /// On duplicate registration (a harness bug, not a runtime condition).
     #[must_use]
     pub fn register(&self, id: NodeId) -> FabricTransport {
+        self.register_bounded(id, 0)
+    }
+
+    /// Register with a receiver inbound bound (0 = unbounded). A bounded receiver
+    /// applies back-pressure: deliveries that would overflow are deferred and
+    /// redelivered, never dropped — the deterministic inbound-overflow scenario.
+    ///
+    /// # Panics
+    /// On duplicate registration (a harness bug, not a runtime condition).
+    #[must_use]
+    pub fn register_bounded(&self, id: NodeId, inbound_capacity: usize) -> FabricTransport {
         let mut inner = self.lock();
         assert!(
             !inner.endpoints.contains_key(&id),
             "duplicate fabric registration: {id}"
         );
-        inner.endpoints.insert(id, NodeEndpoint::default());
+        inner.endpoints.insert(
+            id,
+            NodeEndpoint {
+                inbound_capacity,
+                ..NodeEndpoint::default()
+            },
+        );
         FabricTransport {
             local: id,
             fabric: self.clone(),
@@ -333,7 +358,7 @@ impl FabricInner {
                     from: msg.to,
                     to: msg.from,
                     class: msg.class,
-                    bytes: Bytes::new(),
+                    bytes: vd_sim::io::bytes(Vec::new()),
                     msg_id: msg.msg_id,
                     global_seq: seq,
                     kind: TrackedKind::Notice {
@@ -355,6 +380,21 @@ impl FabricInner {
                 self.stats.attempts_dropped += 1;
             }
             // Not delivered: leave in the unacked ledger; retry later.
+            self.redeliver_at
+                .insert(seq, TickId(now.0 + self.retry_delay_ticks));
+            return 0;
+        }
+
+        // Receiver back-pressure: a full inbound buffer defers the delivery (held in
+        // the unacked ledger, redelivered later) — the deterministic analog of a
+        // full OS socket buffer. Never drops: conservation/wire-truth hold.
+        let receiver_cap = self
+            .endpoints
+            .get(&msg.to)
+            .map_or(0, |e| e.inbound_capacity);
+        let receiver_len = self.endpoints.get(&msg.to).map_or(0, |e| e.inbound.len());
+        if receiver_cap > 0 && receiver_len >= receiver_cap {
+            self.stats.receiver_buffer_full += 1;
             self.redeliver_at
                 .insert(seq, TickId(now.0 + self.retry_delay_ticks));
             return 0;
@@ -529,7 +569,7 @@ mod tests {
     #[test]
     fn perfect_link_delivers_next_tick_and_acks_on_survival() {
         let (fabric, mut a, mut b) = perfect_pair();
-        a.send(B, MsgClass::Control, vec![7]).expect("accepted");
+        a.send(B, MsgClass::Control, vec![7].into()).expect("accepted");
         assert_eq!(fabric.pump(TickId(1)), 1);
         let got = b.drain_inbound();
         assert_eq!(
@@ -537,7 +577,7 @@ mod tests {
             vec![Inbound::Wire {
                 from: A,
                 class: MsgClass::Control,
-                bytes: vec![7]
+                bytes: vec![7].into()
             }]
         );
         fabric.ack_survivor(B);
@@ -554,7 +594,7 @@ mod tests {
         // B is permanently dead AND A is crashed when the bounce fires: the notice
         // has nowhere to go — it is counted, and conservation still holds.
         let (fabric, mut a, _b) = perfect_pair();
-        a.send(B, MsgClass::Saga, vec![1]).expect("accepted");
+        a.send(B, MsgClass::Saga, vec![1].into()).expect("accepted");
         fabric.kill(B);
         fabric.crash(A);
         fabric.pump(TickId(1));
@@ -570,7 +610,7 @@ mod tests {
         // THE at-least-once guarantee: B crashes WITH the message in its inbound
         // (PostInject); after resurrection the message arrives again.
         let (fabric, mut a, mut b) = perfect_pair();
-        a.send(B, MsgClass::Saga, vec![9]).expect("accepted");
+        a.send(B, MsgClass::Saga, vec![9].into()).expect("accepted");
         fabric.pump(TickId(1));
         // Delivered into B's inbound, but B crashes before stepping/acking.
         fabric.crash(B);
@@ -591,7 +631,7 @@ mod tests {
             vec![Inbound::Wire {
                 from: A,
                 class: MsgClass::Saga,
-                bytes: vec![9]
+                bytes: vec![9].into()
             }]
         );
         fabric.ack_survivor(B);
@@ -601,7 +641,7 @@ mod tests {
     #[test]
     fn killed_receiver_bounces_unreachable_to_the_sender() {
         let (fabric, mut a, _b) = perfect_pair();
-        let sent = a.send(B, MsgClass::Saga, vec![1]).expect("accepted");
+        let sent = a.send(B, MsgClass::Saga, vec![1].into()).expect("accepted");
         fabric.kill(B);
         fabric.pump(TickId(1));
         let notices = a.drain_inbound();
@@ -629,7 +669,7 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Control, vec![3]).expect("accepted");
+        a.send(B, MsgClass::Control, vec![3].into()).expect("accepted");
         for t in 1..6 {
             fabric.pump(TickId(t));
             assert!(b.drain_inbound().is_empty(), "partitioned at tick {t}");
@@ -659,7 +699,7 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Input, vec![5]).expect("accepted");
+        a.send(B, MsgClass::Input, vec![5].into()).expect("accepted");
         let mut got = Vec::new();
         for t in 1..64 {
             fabric.pump(TickId(t));
@@ -687,7 +727,7 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Control, vec![8]).expect("accepted");
+        a.send(B, MsgClass::Control, vec![8].into()).expect("accepted");
         fabric.pump(TickId(1));
         assert_eq!(b.drain_inbound().len(), 2, "dup_p=1.0 doubles the attempt");
         assert_eq!(fabric.stats().attempts_duplicated, 1);
@@ -704,8 +744,8 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        let err = a.send(B, MsgClass::Input, vec![4]).expect_err("rejected");
-        assert_eq!(err, SendError::QueueFull(vec![4]), "payload returned");
+        let err = a.send(B, MsgClass::Input, vec![4].into()).expect_err("rejected");
+        assert_eq!(err, SendError::QueueFull(vec![4].into()), "payload returned");
         assert_eq!(fabric.stats().send_rejected, 1);
         assert!(
             fabric.conservation_holds(),
@@ -724,7 +764,7 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Control, vec![6]).expect("accepted");
+        a.send(B, MsgClass::Control, vec![6].into()).expect("accepted");
         let mut arrival = None;
         for t in 1..10 {
             fabric.pump(TickId(t));
@@ -754,7 +794,7 @@ mod tests {
                 },
             );
             for n in 0..16u8 {
-                let _ = a.send(B, MsgClass::Input, vec![n]);
+                let _ = a.send(B, MsgClass::Input, vec![n].into());
             }
             let mut delivered = 0u64;
             for t in 1..32 {
@@ -765,6 +805,38 @@ mod tests {
             (delivered, fabric.stats().attempts_dropped)
         };
         assert_eq!(run(99), run(99), "identical fault tape from one seed");
+    }
+
+    #[test]
+    fn a_bounded_receiver_defers_delivery_without_loss() {
+        // B's inbound holds at most 2; A floods 5 — the overflow is held in the
+        // unacked ledger and redelivered, NEVER dropped (conservation holds).
+        let fabric = FaultFabric::new(7, 1);
+        let mut a = fabric.register(A);
+        let mut b = fabric.register_bounded(B, 2);
+        for n in 0..5u8 {
+            a.send(B, MsgClass::Snapshot, vec![n].into()).expect("accepted");
+        }
+        // First pump delivers up to the buffer cap; the rest defer.
+        fabric.pump(TickId(1));
+        let first = b.drain_inbound();
+        assert!(first.len() <= 2);
+        assert!(
+            fabric.stats().receiver_buffer_full > 0,
+            "back-pressure was exercised"
+        );
+        fabric.ack_survivor(B);
+        // Drain over many ticks: every one of the 5 eventually arrives (no loss).
+        let mut all = first;
+        for t in 2..40 {
+            fabric.pump(TickId(t));
+            all.extend(b.drain_inbound());
+            fabric.ack_survivor(B);
+        }
+        // No faults, no dup, no loss: exactly the 5 sent messages arrive (the
+        // deferred ones via redelivery). All are Wire (this link never kills).
+        assert_eq!(all.len(), 5, "all delivered, none lost, none duplicated");
+        assert!(fabric.conservation_holds());
     }
 
     #[test]

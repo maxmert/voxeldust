@@ -83,7 +83,7 @@ fn garbage_frames_trace_decode_errors_without_breaking_the_node() {
     let pinger_t = hub.register(PINGER, 8);
     let mut sender = hub.register(ECHO, 8);
     sender
-        .send(PINGER, vd_sim::io::MsgClass::Control, vec![250, 0, 0])
+        .send(PINGER, vd_sim::io::MsgClass::Control, vec![250, 0, 0].into())
         .expect("accepted");
     hub.pump();
 
