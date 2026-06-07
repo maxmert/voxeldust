@@ -24,8 +24,11 @@
 pub mod authority;
 pub mod capability;
 pub mod coupling;
+pub mod directory;
 pub mod io;
+pub mod runtime;
 pub mod saga;
+pub mod stub;
 
 // The remaining ShardIo traits (Clock, Store, DetRng, Provisioner) land with their
 // first consumers: node's tick loop (P0.6) and the harness (P0.7) — grow on real

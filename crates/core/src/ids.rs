@@ -96,8 +96,10 @@ impl core::fmt::Display for TransferId {
 
 /// Identifies one universe epoch (genesis). Every persisted record carries it;
 /// a mismatch on recovery means the record belongs to a wiped/rolled universe and is
-/// discarded fail-safe rather than resumed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// discarded fail-safe rather than resumed. `Default` is epoch 0: "not yet synced".
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct EpochId(pub u64);
 
 /// The analytic universe clock value (glossary: `universe_tick`). Owned by the

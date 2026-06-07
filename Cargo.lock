@@ -2224,6 +2224,7 @@ name = "vd-connection-plane"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "bevy_ecs",
  "ed25519-dalek",
  "hmac",
  "postcard",
@@ -2311,6 +2312,7 @@ dependencies = [
  "proptest",
  "serde",
  "thiserror 2.0.18",
+ "tracing",
  "vd-core",
  "vd-wire",
 ]
@@ -2320,6 +2322,8 @@ name = "vd-tests"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "ed25519-dalek",
+ "postcard",
  "proptest",
  "vd-connection-plane",
  "vd-core",

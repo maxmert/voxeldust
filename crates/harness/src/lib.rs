@@ -25,5 +25,7 @@
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
 pub mod chaos;
+pub mod client;
 pub mod fabric;
+pub mod oracle;
 pub mod topology;

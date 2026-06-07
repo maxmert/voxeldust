@@ -18,11 +18,14 @@
 //! COVERAGE NOTE: `ShardNode<T>` is generic; per the branchless-shim discipline all
 //! branching lives in monomorphic helpers over `&mut dyn Transport`.
 
-use bevy_ecs::prelude::{Resource, Schedule, World};
+use bevy_ecs::prelude::{Schedule, World};
 use bevy_ecs::schedule::ExecutorKind;
 use vd_core::{NodeId, TickId};
 use vd_sim::capability::NodeKind;
 use vd_sim::io::{Bytes, Inbound, MsgClass, SendError, Transport};
+// The per-tick runtime resources live in vd-sim (shared with feature systems and
+// the connection plane); re-exported here so node-level callers keep one path.
+pub use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 
 /// Static node configuration (operational values arrive via config structs, never
 /// inline literals).
@@ -48,22 +51,6 @@ pub struct TickReport {
     pub unreachable: usize,
 }
 
-/// Messages drained from the transport this tick, readable by systems.
-#[derive(Resource, Debug, Default)]
-pub struct InboundBox(pub Vec<Inbound>);
-
-/// Messages systems want sent; flushed to the transport at tick end. Refusals stay
-/// queued for the next tick (bounded by the transport's own capacity discipline).
-#[derive(Resource, Debug, Default)]
-pub struct OutboundBox(pub Vec<(NodeId, MsgClass, Bytes)>);
-
-/// This node's identity + kind, readable by systems.
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NodeIdentity {
-    pub node_id: NodeId,
-    pub kind: NodeKind,
-}
-
 /// A node: private world, single-threaded schedule, injected transport.
 pub struct ShardNode<T: Transport> {
     world: World,
@@ -78,6 +65,7 @@ pub fn build_app<T: Transport>(cfg: NodeConfig, transport: T) -> ShardNode<T> {
     let mut world = World::new();
     world.insert_resource(InboundBox::default());
     world.insert_resource(OutboundBox::default());
+    world.insert_resource(ClockSample::default());
     world.insert_resource(NodeIdentity {
         node_id: cfg.node_id,
         kind: cfg.kind,
@@ -98,6 +86,7 @@ impl<T: Transport> ShardNode<T> {
     /// THE deterministic unit of progress. Synchronous by construction.
     pub fn step_tick(&mut self) -> TickReport {
         self.tick = self.tick.next();
+        set_local_tick(&mut self.world, self.tick);
         let (drained, unreachable) = drain_phase(&mut self.transport, &mut self.world);
         self.schedule.run(&mut self.world);
         let (sent, backpressured) = flush_phase(&mut self.transport, &mut self.world);
@@ -131,6 +120,16 @@ impl<T: Transport> ShardNode<T> {
     pub fn schedule_mut(&mut self) -> &mut Schedule {
         &mut self.schedule
     }
+
+    /// Split borrow for registration helpers that install resources AND systems.
+    pub fn parts_mut(&mut self) -> (&mut World, &mut Schedule) {
+        (&mut self.world, &mut self.schedule)
+    }
+}
+
+/// Monomorphic per-tick clock refresh: systems read time only via `ClockSample`.
+fn set_local_tick(world: &mut World, tick: TickId) {
+    world.resource_mut::<ClockSample>().local_tick = tick;
 }
 
 /// Monomorphic drain: pull everything delivered since last tick into the world.

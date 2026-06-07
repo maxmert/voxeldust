@@ -292,6 +292,7 @@ mod tests {
             key: crate::seams::directory::DirectoryKey::Realm(RealmId::System(1)),
             expected: Fence(5),
             transfer: TransferId(6),
+            new_owner: crate::seams::directory::AuthorityRef::Shard(vd_core::NodeId(2)),
         });
         assert_eq!(
             directory.effect_class(),

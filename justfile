@@ -6,7 +6,9 @@
 # Re-pin deliberately via VD_COVERAGE_TOOLCHAIN or `just coverage-setup`.
 coverage_toolchain := env_var_or_default("VD_COVERAGE_TOOLCHAIN", "nightly-2026-06-06")
 
-# Tier-A: the 100%-region+branch domain (HR5).
+# Tier-A: the 100%-region+branch domain (HR5). Each crate's OWN tests must cover
+# its full surface (llvm counts regions per compiled instance, so leaning on the
+# vd-tests binary would double-instance every crate — learned in P1.7).
 tier_a := "-p vd-core -p vd-wire -p vd-sim -p vd-node -p vd-connection-plane -p vd-harness"
 
 # Inner loop: full deterministic suite (in-process tiers, fast).

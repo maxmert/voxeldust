@@ -9,16 +9,51 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use vd_core::{NodeId, TickId};
+use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_node::TickReport;
+use vd_sim::stub::DiscardReason;
+use vd_wire::seams::directory::{DirectoryKey, OwnerRecord};
 
 use crate::fabric::{CrashWhen, FaultFabric};
+
+/// What one node EXPOSES to the oracles, on request: the orchestrator's directory
+/// view, a shard's held-set + input logs, a client's sent log. Ground truth for
+/// AUTHORITY-UNIQUE / INPUT-CONSERVATION — nodes report, oracles audit.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InspectReport {
+    /// Directory records (only the orchestrator fills this).
+    pub directory: Vec<(DirectoryKey, OwnerRecord)>,
+    /// Entities this node holds authoritatively (shards fill this).
+    pub held_entities: Vec<EntityId>,
+    /// Entities this node has REQUESTED authority for but not yet seen the
+    /// directory confirm (the legal commit-to-knowledge window; a pending entry
+    /// excuses a directory record with no holder — an orphan does not).
+    pub pending_entities: Vec<EntityId>,
+    /// Entities this node is RELEASING (revoke in flight): still held, possibly
+    /// already cleared from the directory — the legal release window.
+    pub departing_entities: Vec<EntityId>,
+    /// Inputs this node APPLIED, in order (shards fill this).
+    pub applied_inputs: Vec<(SessionId, u64)>,
+    /// Inputs this node DISCARDED, with the typed reason (shards fill this).
+    pub discarded_inputs: Vec<(SessionId, Option<u64>, DiscardReason)>,
+    /// Inputs this node SENT (scripted clients fill this).
+    pub sent_inputs: Vec<(SessionId, u64)>,
+}
 
 /// Anything the topology can drive. `ShardNode<FabricTransport>` is the canonical
 /// implementation; scripted clients implement it too.
 pub trait SteppableNode {
     fn node_id(&self) -> NodeId;
     fn step(&mut self) -> TickReport;
+    /// Expose oracle ground truth (default: nothing to report).
+    fn inspect(&mut self) -> InspectReport {
+        InspectReport::default()
+    }
+    /// Opt-in downcast hook for scenario code that drives a concrete node type
+    /// (scripted clients override this; infrastructure nodes need not).
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 impl<T: vd_sim::io::Transport> SteppableNode for vd_node::ShardNode<T> {
@@ -28,6 +63,45 @@ impl<T: vd_sim::io::Transport> SteppableNode for vd_node::ShardNode<T> {
     fn step(&mut self) -> TickReport {
         self.step_tick()
     }
+    fn inspect(&mut self) -> InspectReport {
+        inspect_world(self.world_mut())
+    }
+}
+
+/// Monomorphic resource scrape: every node kind reports whatever oracle-relevant
+/// resources its registered systems maintain.
+fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
+    let mut report = InspectReport::default();
+    if let Some(dir) = world.get_resource::<vd_node::orchestrator::DirectoryRes>() {
+        report.directory = dir.0.entries().map(|(k, r)| (*k, *r)).collect();
+    }
+    if let Some(dots) = world.get_resource::<vd_sim::stub::Dots>() {
+        // A dot is HELD only once its directory grant is recorded (fence rule 2);
+        // provisional dots are reported separately as pending.
+        report.held_entities = dots
+            .0
+            .values()
+            .filter(|d| d.granted)
+            .map(|d| d.entity)
+            .collect();
+        report.pending_entities = dots
+            .0
+            .values()
+            .filter(|d| !d.granted)
+            .map(|d| d.entity)
+            .collect();
+        report.departing_entities = dots
+            .0
+            .values()
+            .filter(|d| d.granted & d.departing)
+            .map(|d| d.entity)
+            .collect();
+    }
+    if let Some(log) = world.get_resource::<vd_sim::stub::InputLog>() {
+        report.applied_inputs = log.applied.clone();
+        report.discarded_inputs = log.discarded.clone();
+    }
+    report
 }
 
 /// Per-node tick offset: node N fires only on topology ticks > its offset, so its
@@ -244,6 +318,20 @@ impl Topology {
     #[must_use]
     pub fn trace(&self) -> &[TraceEvent] {
         &self.trace
+    }
+
+    /// Borrow one node by id (scenario code drives concrete types through
+    /// `SteppableNode::as_any_mut`).
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut (dyn SteppableNode + 'static)> {
+        self.nodes.get_mut(&id).map(|n| n.as_mut())
+    }
+
+    /// Collect every node's oracle report (deterministic NodeId order).
+    pub fn inspect_all(&mut self) -> Vec<(NodeId, InspectReport)> {
+        self.nodes
+            .iter_mut()
+            .map(|(id, n)| (*id, n.inspect()))
+            .collect()
     }
 
     /// THE WIRE-TRUTH CHECK (the P0 WireMonitor): a node's CLAIMED drain counts (its
@@ -548,6 +636,116 @@ mod tests {
             .expect_err("the liar must be caught");
         assert_eq!(violation.node, A);
         assert!(violation.claimed > violation.delivered);
+        // The Liar uses the trait DEFAULTS: nothing to report, no downcast hook.
+        let liar = topo.node_mut(A).expect("liar present");
+        assert!(liar.as_any_mut().is_none(), "no downcast for infra nodes");
+        assert_eq!(liar.inspect(), InspectReport::default());
+        assert_eq!(topo.node_mut(NodeId(77)).map(|_| ()), None, "unknown id");
+    }
+
+    /// `inspect_world` scrapes whatever oracle-relevant resources a node's
+    /// registered systems maintain — proven here on a mini orchestrator + stub
+    /// cluster composed entirely from harness-visible crates.
+    #[test]
+    fn inspect_reports_directory_and_shard_ground_truth() {
+        use vd_node::orchestrator::{OrchestratorConfig, register_orchestrator};
+        use vd_sim::directory::DirectoryTuning;
+        use vd_sim::stub::{StubConfig, register_stub_shard};
+
+        let fabric = FaultFabric::new(33, 2);
+        let mut topo = Topology::new(fabric.clone(), StaggerPlan::lockstep());
+
+        let mut orch = vd_node::build_app(
+            NodeConfig {
+                node_id: A,
+                kind: NodeKind::Orchestrator,
+            },
+            fabric.register(A),
+        );
+        let (world, schedule) = orch.parts_mut();
+        register_orchestrator(
+            world,
+            schedule,
+            &OrchestratorConfig {
+                epoch: vd_core::EpochId(1),
+                reserve_chunk: 64,
+                clock_peers: vec![B],
+                directory: DirectoryTuning {
+                    lease_ttl_ticks: 100,
+                },
+            },
+        );
+        topo.add_node(Box::new(orch));
+
+        let mut shard = vd_node::build_app(
+            NodeConfig {
+                node_id: B,
+                kind: NodeKind::StubShard,
+            },
+            fabric.register(B),
+        );
+        let (world, schedule) = shard.parts_mut();
+        vd_node::follower::register_clock_follower(world, schedule);
+        register_stub_shard(
+            world,
+            schedule,
+            StubConfig {
+                realm: vd_core::pose::RealmId::System(5),
+                frame: vd_core::pose::FrameRef::SystemSpace { system_seed: 5 },
+                move_speed_mps: 1.0,
+                tick_dt_s: 0.05,
+                orchestrator: A,
+                mint_seed: 3,
+            },
+        );
+        topo.add_node(Box::new(shard));
+
+        // A few ticks: the shard wins its realm lease through the directory.
+        for _ in 0..6 {
+            topo.step();
+        }
+        let reports = topo.inspect_all();
+        assert_eq!(reports.len(), 2);
+        let (orch_id, orch_report) = &reports[0];
+        assert_eq!(*orch_id, A);
+        assert_eq!(
+            orch_report.directory.len(),
+            1,
+            "the realm lease is recorded"
+        );
+        assert_eq!(orch_report.held_entities, Vec::new());
+        let (shard_id, shard_report) = &reports[1];
+        assert_eq!(*shard_id, B);
+        assert_eq!(shard_report.directory, Vec::new());
+        assert_eq!(shard_report.held_entities, Vec::new(), "no dots attached");
+        assert_eq!(shard_report.applied_inputs, Vec::new());
+        assert_eq!(shard_report.pending_entities, Vec::new());
+
+        // Attach one session through a bare gateway endpoint: the dot transits
+        // provisional → granted through the REAL directory, and the inspect
+        // filters report each state.
+        let mut gateway_endpoint = fabric.register(NodeId(50));
+        let attach = vd_wire::session_flow::GatewayToShard::AttachSession {
+            session: vd_core::SessionId(7),
+            fence: vd_core::Fence(1),
+            account: vd_core::AccountId(1),
+        };
+        gateway_endpoint
+            .send(
+                B,
+                vd_sim::io::MsgClass::Control,
+                postcard::to_allocvec(&attach).expect("encode"),
+            )
+            .expect("sent");
+        for _ in 0..6 {
+            topo.step();
+            fabric.ack_survivor(NodeId(50));
+        }
+        let reports = topo.inspect_all();
+        let (_, shard_report) = &reports[1];
+        assert_eq!(shard_report.held_entities.len(), 1, "granted and held");
+        assert_eq!(shard_report.pending_entities, Vec::new());
+        assert_eq!(shard_report.departing_entities, Vec::new());
     }
 
     #[test]

@@ -13,6 +13,7 @@ serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
 arc-swap = { workspace = true }
+bevy_ecs = { workspace = true }
 tracing = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }

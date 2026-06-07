@@ -19,6 +19,8 @@
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
 pub mod app;
+pub mod follower;
+pub mod orchestrator;
 pub mod tracer;
 pub mod universe_clock;
 

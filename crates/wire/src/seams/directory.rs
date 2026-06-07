@@ -57,11 +57,14 @@ pub enum DirectoryOp {
     LeaseRenew { key: DirectoryKey, fence: Fence },
     /// Revoke before reassignment (the holder must self-fence on receipt).
     LeaseRevoke { key: DirectoryKey, fence: Fence },
-    /// THE commit point: CAS the fence as part of saga `transfer`.
+    /// THE commit point: CAS the fence as part of saga `transfer`; the winner
+    /// flips authority to `new_owner` (a commit that cannot name the destination
+    /// is unusable — the dest shard wins authority AT the CAS, nowhere else).
     CommitCas {
         key: DirectoryKey,
         expected: Fence,
         transfer: TransferId,
+        new_owner: AuthorityRef,
     },
     /// The abort CAS — mutually exclusive with commit by construction (fence rule 3).
     AbortCas {
@@ -197,6 +200,7 @@ mod tests {
                     key,
                     expected: Fence(1),
                     transfer: TransferId(2),
+                    new_owner: AuthorityRef::Shard(NodeId(8)),
                 },
                 cased,
             ),
@@ -232,6 +236,7 @@ mod tests {
     #[test]
     fn cas_idempotency_carries_expected_fence_and_transfer() {
         let op = DirectoryOp::CommitCas {
+            new_owner: AuthorityRef::Shard(NodeId(8)),
             key: DirectoryKey::Session(SessionId(3)),
             expected: Fence(7),
             transfer: TransferId(8),

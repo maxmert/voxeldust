@@ -21,7 +21,7 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
-// Route table / multiplexing / pacing modules land with P1 (gateway M0 walking
-// skeleton) per the staged build plan; ticket crypto is P0.8 (day-1 trust).
+// BULK pacing / multi-sub interest land with P2 per the staged build plan.
 
+pub mod gateway;
 pub mod tickets;
