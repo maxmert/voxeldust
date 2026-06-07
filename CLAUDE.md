@@ -26,11 +26,17 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
    passes the identical fixture on ≥2 shard kinds (G-IDENTICAL) or it doesn't land.
 5. **HR5 100% coverage** — Tier-A crates at 100% region+branch (`just coverage-fast`);
    exemptions only via `#[cfg_attr(coverage_nightly, coverage(off))]` or `coverage-exemptions.toml`.
-   Generic-code gotcha (learned in SPIKE-0a): every TEST BINARY gets its own monomorphized
-   copies, each counted separately — a generic fn's branches must be fully exercised in
-   EVERY binary that instantiates it. Discipline: cover a crate's generics completely in
-   its own unit tests; integration tests that instantiate them must exercise the full
-   surface too (or not instantiate them at all).
+   Generic-code gotcha (learned in SPIKE-0a/P0.3): llvm counts regions PER
+   MONOMORPHIZATION — a branch inside a generic fn must be exercised for every
+   instantiated type AND in every test binary that instantiates it. Discipline:
+   (a) **generic fns are branchless shims** — serialize/lookup as straight-line
+   expressions, ALL branching (`?`, `if`, `match`, error closures) in monomorphic
+   helpers (see `core/src/tlv.rs` for the canonical shape; `field_decode_err` for
+   hoisting closures out of generic bodies); (b) cover a crate's generics completely
+   in its own unit tests; (c) integration tests exercise the full surface or none;
+   (d) in tests prefer `assert_eq!`/`expect_err` equality over `assert!(matches!(…))`
+   (the false arm is an uncoverable region) and split `assert!(a && b)` (short-circuit
+   branches).
 6. **HR6 agent-operable E2E** — client ships the `dev-control` harness (`vdctl`): input
    injection at the input-resource seam, wgpu readback screenshots/video, `runs/` manifests.
 

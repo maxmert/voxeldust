@@ -16,8 +16,16 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
+pub mod celestial;
+pub mod collections;
+pub mod entity_kind;
+pub mod fence;
+pub mod geometry;
 pub mod ids;
+pub mod pose;
+pub mod tlv;
 
-pub use ids::{MsgId, NodeId, TickId};
-
-// Remaining modules land with task P0.3 (fence, entity_kind, tlv, pose, celestial, geometry).
+pub use fence::Fence;
+pub use ids::{
+    AccountId, EntityId, EpochId, MsgId, NodeId, SessionId, TickId, TransferId, UniverseTick,
+};
