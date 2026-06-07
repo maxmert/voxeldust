@@ -1,0 +1,25 @@
+[package]
+name = "vd-io-prod"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Production ShardIo implementations: quinn QUIC transport bridged to the synchronous step_tick via crossbeam queues (reader/writer tasks). Tier-B coverage (process-tier, ratcheted floor)."
+
+[dependencies]
+vd-core = { workspace = true }
+vd-sim = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[dev-dependencies]
+vd-node = { workspace = true }
+
+[lints]
+workspace = true

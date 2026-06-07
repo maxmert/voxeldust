@@ -1,0 +1,35 @@
+# HR5 (100% coverage) + HR6 (Claude-operable E2E client harness) — hardened design
+
+(Produced by a Plan agent with web-verified tooling facts, June 2026. Companion to the six /tmp/design/*.md docs.)
+
+## HR5 — Coverage
+
+- Tool: cargo-llvm-cov (region+branch via LLVM source-based instrumentation). Tarpaulin rejected: line-only default engine, Linux-x86-only ptrace (cannot run on the macOS dev machine), no cross-binary merge story.
+- Coverage gate runs on a PINNED NIGHTLY toolchain (branch coverage --branch and #[coverage(off)] are still nightly-only in 2026; verified). Product builds stay on stable.
+- Domain: Tier-A (sim, core/wire, connection-plane, node lib, harness) = 100% region + 100% branch, hard gate (--fail-under-regions 100 --fail-under-functions 100). Tier-B (io-prod, bin shells) = covered via process-tier real-binary runs, RATCHETED floor (never 100% — SIGKILL crash-injection loses profile counters even with %c continuous mode). WGSL/egui/winit-glue = excluded, substitute is the HR6 visual harness. Derive/generated = ignore-filename-regex. 4-line bins = #[coverage(off)] by construction.
+- Cross-process merge mechanics (verified): source <(cargo +nightly llvm-cov show-env --export-prefix) → llvm-cov clean → cargo build (instrumented bins) → run process-tier tests (children inherit LLVM_PROFILE_FILE with %p-%m%c patterns → own .profraw, crash-surviving) → cargo llvm-cov report merges all. %c is MANDATORY for the crash-injection tier.
+- Exemptions: #[cfg_attr(coverage_nightly, coverage(off))] on provably-unreachable/defensive code only (greppable, moves with refactors), + coverage-exemptions.toml (ignore-filename-regex entries each with mandatory justification). Exemption count is a tracked metric; growth requires sign-off; exemption on reachable logic is review-rejectable.
+- No CI yet: `just coverage` (full, pre-merge) / `just coverage-fast` (Tier-A only, inner loop, tens of seconds) / `just coverage-html`. --no-report accumulation merges Tier-A + process tiers. Honest caveat: local gate is bypassable until CI exists.
+- POLICY TEXT: "100% coverage" = 100% LLVM region AND branch coverage on Tier-A crates, enforced by `just coverage` pre-merge; Tier-B ratcheted floor; WGSL/egui/glue covered by the HR6 visual harness; exemptions only via the two reviewed mechanisms. A subsystem is done only at 100% region+branch with zero unjustified exemptions.
+
+## HR6 — Claude-operable E2E client harness
+
+- DEV CONTROL CHANNEL: line-delimited JSON over localhost TCP (port 9100+slot, reusing vd-slot.sh slot math), fronted by a `vdctl` CLI (agent drives via Bash). Rejected: stdin (fights logging, awkward for 2 clients), WebSocket (needless deps for v1).
+- Surface: press/move/look/action/input-raw (injection); walk-to/look-at/wait-ticks/wait-until '<predicate>' (closed-loop nav); state / state --field / entities (structured JSON from the client's DECODED DELIVERED world view — same honesty rule as WireMonitor); screenshot <path> [--at-tick T] / record <dir> --fps N --secs D; board-ship/warp-to (real gameplay actions) + dev-teleport (explicitly-named dev-only setup shortcut).
+- INJECTION SEAM (the correctness point): dev commands write the SAME input-state resource the keyboard/mouse systems write, upstream of the InputDatagram assembler — agent input is byte-identical to a held key. NEVER synthetic OS events. (Old-repo seam shape: client/src/input/mod.rs build_and_send_input.)
+- Security: listener exists only under #[cfg(feature = "dev-control")] (absent from release builds, not merely disabled); binds 127.0.0.1 only; mutating shortcuts additionally gated by --allow-dev-control.
+- CAPTURE: in-engine wgpu readback, NOT OS capture (macOS screencapture needs TCC permission an agent can't click; not portable). Render to offscreen target with RENDER_ATTACHMENT|COPY_SRC; capture AFTER egui composite (HUD included); copy_texture_to_buffer with 256-byte row padding (COPY_BYTES_PER_ROW_ALIGNMENT — the #1 readback bug); map_async THEN device.poll() (callback never fires on native otherwise); async off the present path. 4K full-res ≈ tens of ms → screenshots on demand; video = reduced-rate (10–15fps, optionally 1080p) frame sequence → ffmpeg if present else PNG sequence/APNG. --at-tick T defers capture to logical tick T (deterministic captured STATE; pixels only structurally reproducible). Verify early on Apple Silicon (gfx-rs/wgpu#6827 copy-offset bug; use zero-origin full-texture copies).
+- runs/ layout: runs/<UTC>__<scenario>/{manifest.json, frames/, shots/, state/, client.log}; manifest aligns every capture to its tick AND its vdctl state dump — agent diagnosis is reproducible, not vibes.
+- AGENT LOOP: dev-cluster.sh up → client.sh --dev-control [--name agentN] (N clients = N ports/windows) → bash scenario of vdctl commands → Claude reads PNGs + manifests + state dumps → diagnose → fix → rebuild → rerun. Multi-client scenario: client2 screenshots client1's ship crossing a shard boundary = visual proof of cross-shard compositing.
+- DIVISION OF LABOR: WireMonitor proves delivered bytes; HR6 proves RENDERING (shaders, z-fighting, lighting, transitions, HUD) — the only coverage for WGSL/egui, which is exactly what HR5 excludes. Duals, not overlap.
+- VISUAL REGRESSION: golden-pixel diffs REJECTED for gameplay scenes (GPU nondeterminism). Automated structural assertions on the readback = the gate: no-magenta/no-NaN sentinel, content-present (% non-clear pixels with planet in frustum), luminance-histogram bounds, HUD-anchor non-empty, frame-to-frame stability in static scenes (z-fight flicker). Agent semantic review = the exploratory layer (graduates findings into new structural assertions). Goldens only for AA-off synthetic test-pattern scenes.
+
+## Roadmap amendments
+- P0: coverage scaffolding from the first slice — pin coverage nightly, exemptions convention, `just coverage-fast` Tier-A 100% gate. Permanent gate G-COVERAGE.
+- P1.5: HR6 harness born here, in order: (a) cfg-gated dev-control + injection seam, (b) readback + vdctl screenshot, (c) walk-to/wait-until closed loop, (d) runs/ manifest + record. Permanent gate G-RENDER-SMOKE (client → walk-to → screenshot → no-magenta + content-present).
+- Each transition phase: paired HR6 visual scenario next to its deterministic scenario (deterministic proves bytes; visual captures the transition + structural assertions). Multi-client visual scenario when 2-sub compositing lands.
+- io-prod phase: show-env + %p-%m%c cross-process merge; Tier-B ratcheted floor gate.
+- New permanent gates: G-COVERAGE (Tier-A 100% region+branch), Tier-B ratchet, exemption-count tracking, G-RENDER-SMOKE, per-transition structural render assertions.
+
+## Risks (honest)
+local gate bypassable until CI; %c mandatory or crash-tier coverage silently under-reports; nightly dependency (fallback = region-only stable + allowlist, strictly weaker); readback perf caps video fps; Apple-Silicon wgpu bug; structural assertions are coarse (agent review is permanent, not temporary); pixels are not bit-reproducible (only captured logical state is).

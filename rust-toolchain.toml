@@ -1,0 +1,6 @@
+# Product toolchain: stable, pinned (matches the reference repo).
+# The HR5 coverage gate runs on a separately pinned NIGHTLY (see justfile):
+# branch coverage (--branch) and #[coverage(off)] are nightly-only as of 2026.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy", "rust-src"]

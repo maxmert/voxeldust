@@ -1,0 +1,22 @@
+[package]
+name = "vd-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Deterministic multi-node test harness: Topology, FaultFabric (at-least-once, CrashWhen), VirtualClock, StaggerPlan, ScriptedClient, ControlOracle + WireMonitor, ChaosRunner. Built FIRST; every later phase adds scenarios."
+
+[dependencies]
+vd-core = { workspace = true }
+vd-wire = { workspace = true }
+vd-sim = { workspace = true }
+vd-node = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,111 @@
+{
+ "summary": "Web research (June 2026) on orchestration + transport for a rebuilt voxeldust. CRITICAL CODE FINDING that reshapes the verdicts: voxeldust's \"gateway\" is NOT a connection-owning proxy. gateway/src/main.rs is a TCP server that reads one Connect, calls the orchestrator over HTTP (gateway/src/router.rs), and replies ShardRedirect \u2014 the client then connects DIRECTLY to shards. Inter-shard handoff already runs over a DIRECT QUIC MESH (shard-common/src/handoff_pipeline.rs over quic_transport.rs), with peers resolved from a custom redb registry (orchestrator/src/registry.rs) cached in peer_registry.rs. So the user's framing \"gateway-owns-connection routing/handoff (Quilkin-style)\" describes a design they did NOT build; the real fragility is in the redirect+observer-promotion dance and the custom registry that drives QUIC peer addressing (the eviction landmine lives in registry/peer_registry, not in transport).\n\nFindings: (1) Agones is the single highest-value adopt. Its FAQ explicitly supports persistent/long-lived worlds (\"un-opinionated about lifecycle\"), Allocate() PROTECTS a server from scale-down (directly fixes the eviction landmine class), it has a maintained Rust SDK (tonic/tokio), and Counters/Lists give capacity-aware allocation for high-density shard packing. It replaces orchestrator's k8s_provisioner + lifecycle + heartbeat wholesale. (2) Open Match: reject \u2014 pure matchmaking, irrelevant to spatial shards (confirmed active, not deprecated, but wrong tool). (3) Quilkin (v0.10.1, 2026-05-26, beta, active): study-patterns-only / adopt-partially. It is a non-transparent UDP forwarder with a TokenRouter (token\u2192address map) and xDS plane \u2014 but it does NOT terminate QUIC and forwarding raw QUIC through it breaks connection migration/address validation. Its token-routing is the canonical pattern for the redirect handoff voxeldust already hand-rolls. (4) Inter-shard control plane: handoff negotiation needs ordered/once delivery \u2014 NATS JetStream fits (ordered per-stream, at-least/exactly-once, k8s-native, one binary) and beats Redis Streams for control semantics; but the existing direct-QUIC mesh is fine if hardened \u2014 don't add a broker for a solo dev unless handoff stays flaky. (5) Service discovery: a k8s headless Service + DNS SRV (or Agones GameServer status) can replace the bespoke redb registry that is the source of the eviction bug. (6) Single client-facing edge: industry-standard (WoW realmd, FPS relays, Quilkin) \u2014 keep it, but make it a thin stateless router/relay, not a stateful session owner.",
+ "options": [
+  {
+   "name": "Agones",
+   "verdict": "adopt",
+   "fit": "Replaces orchestrator/src/{k8s_provisioner,lifecycle,heartbeat,provisioner}.rs. FAQ confirms persistent/long-lived worlds are supported (lifecycle-agnostic). SDK.Allocate() PROTECTS a GameServer from scale-down \u2014 this is the direct, infra-level fix for the 'eviction landmine' (FIX-1) where hub/observer shards got evicted and broke cross-shard visibility. Counters/Lists (Rust SDK beta, 2026) give capacity-aware/high-density allocation so multiple ship-shards can pack onto one pod. Pure k3d-native, fits dev-cluster.sh slot model. Agones does NOT do game logic, state transfer, or cross-shard messaging \u2014 voxeldust still owns the handoff protocol, which is correct separation.",
+   "maturity": "Mature, CNCF, production at scale (Google/Embark/Ubisoft). Active 2026 releases; Rust SDK beta with Counters/Lists landed 2026. tonic/tokio based \u2014 matches voxeldust stack.",
+   "license": "Apache-2.0",
+   "url": "https://agones.dev/site/docs/faq/",
+   "reason": "Highest ROI for a solo dev: deletes the most fragile custom orchestration code AND its Allocate() protection eliminates an entire class of the eviction bug. The GameServer state machine (Ready->Allocated->Reserved) is a battle-tested substitute for the custom registry state that currently drives flaky QUIC peer addressing."
+  },
+  {
+   "name": "Open Match",
+   "verdict": "reject",
+   "fit": "Matchmaking framework (pool players into matches by MMR/latency). Voxeldust has no matchmaking concept \u2014 players join a deterministic seeded universe and route by ship_id/system_seed hash (gateway/src/router.rs hash_routing_key). Nothing to match.",
+   "maturity": "Active (not deprecated as of 2026, contrary to rumor); 1.x on k8s. But irrelevant here.",
+   "license": "Apache-2.0",
+   "url": "https://open-match.dev/site/docs/",
+   "reason": "Confirmed irrelevant. Adopting it would add a k8s service that does nothing voxeldust needs and burns solo-dev budget. Only revisit if a future 'find me a populated shard / instance' feature appears, and even then a simple orchestrator query suffices."
+  },
+  {
+   "name": "Quilkin (Embark UDP proxy)",
+   "verdict": "study-patterns-only",
+   "fit": "v0.10.1 (2026-05-26), beta, actively maintained. It is a NON-TRANSPARENT UDP FORWARDER \u2014 it does NOT terminate QUIC. Forwarding raw QUIC through it is risky: QUIC connection migration + address validation assume the path Quilkin rewrites, so seamless ship<->planet QUIC sessions can break. Its TokenRouter (single token->address map) + xDS control plane is EXACTLY the routing-by-token pattern voxeldust hand-rolls in the gateway redirect + session_token flow. Quilkin assumes UDP game payloads, not gateway-terminated TCP+QUIC like voxeldust's client_listener.",
+   "maturity": "Beta (project self-declared beta at v0.9.0), v0.10.1 May 2026, active commits (XDP fast path, Corrosion backend). Production use at Embark, but smaller blast radius than Agones.",
+   "license": "Apache-2.0",
+   "url": "https://github.com/EmbarkStudios/quilkin/blob/main/CHANGELOG.md",
+   "reason": "Adopting Quilkin to wrap voxeldust's QUIC would fight the protocol (no QUIC termination; migration breakage) and add an undocumented-for-QUIC dependency for a solo dev. BUT its token-routing model is the reference design: a stateless edge maps an opaque token to a backend address with no per-flow state. Steal the pattern (token in ShardRedirect -> client dials shard directly, which voxeldust already does) rather than the binary. Reconsider to 'adopt-partially' only if voxeldust ever needs DDoS-grade UDP ingress filtering / NAT relay for real clients."
+  },
+  {
+   "name": "Envoy (QUIC/HTTP3 proxy)",
+   "verdict": "reject",
+   "fit": "Envoy terminates QUIC/HTTP3 and is the heavyweight L7 proxy. Voxeldust's wire protocol is custom FlatBuffers over raw QUIC streams (shard-common/quic_transport.rs), not HTTP/3 \u2014 Envoy's value (HTTP routing, gRPC, retries) does not apply. Operationally heavy for k3d + solo dev.",
+   "maturity": "Mature, ubiquitous, but general-purpose service-mesh edge, not game-shard oriented.",
+   "license": "Apache-2.0",
+   "url": "https://www.envoyproxy.io/",
+   "reason": "Massive operational surface for zero protocol fit (no HTTP/3 framing in voxeldust). A solo dev should not run Envoy to route custom QUIC. If TLS termination/SNI routing is ever needed for the public edge, a tiny custom quinn router (what voxeldust already has the pieces for) is cheaper to own."
+  },
+  {
+   "name": "k8s StatefulSet + headless Service + DNS SRV",
+   "verdict": "adopt-partially",
+   "fit": "Replaces the custom redb ShardRegistry (orchestrator/src/registry.rs) + the planet/system/ship index maps that the gateway queries over HTTP and that peer_registry.rs caches for QUIC addressing. Headless Service (clusterIP:None) + SRV gives stable pod DNS, so shards resolve peers via DNS instead of polling the orchestrator. Pod-per-shard with stable identity matches one-shard-per-pod. CAVEAT: StatefulSets can't delete from the middle and have slow rolling semantics; Agones GameServer (a CRD/operator) is the better primitive for dynamic ship-shard churn \u2014 use Agones for lifecycle and headless Service/Agones status for discovery, NOT raw StatefulSets for the dynamic tier.",
+   "maturity": "Core k8s, fully mature; SRV-based discovery is standard 2026 practice.",
+   "license": "Apache-2.0 (k8s)",
+   "url": "https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/",
+   "reason": "The custom redb registry is the data structure whose eviction/staleness produces the eviction landmine and the dead-QUIC-peer bug (peer_registry.update() filters Stopped/Draining but is only as fresh as the last orchestrator poll). Moving authoritative shard liveness to k8s/Agones (which already track pod readiness) removes a hand-maintained source of truth. Keep StatefulSets only for the singleton galaxy/system tier; use Agones for the churny ship/planet tier."
+  },
+  {
+   "name": "Custom Kubernetes Operator (CRD) for shards",
+   "verdict": "study-patterns-only",
+   "fit": "An operator encoding shard topology (galaxy->system->planet->ship hosting) as a CRD is the 'right' long-term shape and what Agones itself is. But writing+maintaining a bespoke operator (reconcile loops, finalizers, leader election) is a large solo-dev cost.",
+   "maturity": "Operator pattern is mature; kube-rs (Rust) is viable. But bespoke operators are 'harder to predict, must read the code' per sources.",
+   "license": "n/a (pattern)",
+   "url": "https://kubernetes.io/docs/concepts/extend-kubernetes/operator/",
+   "reason": "Don't build your own operator now \u2014 adopt Agones (a proven game-server operator) and express voxeldust topology as GameServer labels/annotations + a thin allocator service. Revisit a custom CRD only if Agones's model genuinely can't express parent/host shard relationships."
+  },
+  {
+   "name": "NATS + JetStream (inter-shard control plane)",
+   "verdict": "adopt-partially",
+   "fit": "Handoff negotiation (PlayerHandoff -> HandoffAccepted, T0/T1/T2/T4 series) needs ORDERED + at-least/exactly-once delivery so a handoff can't be silently dropped or reordered \u2014 exactly JetStream's strength (per-stream strict ordering, exactly-once within window, k8s-native single binary, ~750k msg/s). Today this rides the direct QUIC mesh (handoff_pipeline.rs) with a 2s timeout and circuit breaker but NO persistence/redelivery \u2014 a dropped HandoffAccepted just wedges the player (matches 'transfers chronically broken'). JetStream subjects per shard-pair would give durable, replayable handoff with acks.",
+   "maturity": "NATS/JetStream mature, CNCF, 2026 benchmarks strong; async-nats Rust client is solid.",
+   "license": "Apache-2.0",
+   "url": "https://docs.nats.io/nats-concepts/jetstream",
+   "reason": "For a transfer-FIRST rebuild this is the most impactful messaging change: make handoff a durable, acked, ordered saga instead of best-effort QUIC datagrams. BUT it adds a stateful dependency in k3d. Decision rule: if hardening the existing QUIC mesh with explicit acks+retries+idempotency keys fixes the stuck-handoff bug, skip the broker; if handoff state needs to survive a shard crash mid-transfer, adopt JetStream. Lean adopt-partially: model handoff as a saga regardless, choose transport second."
+  },
+  {
+   "name": "Redis Streams (inter-shard control plane)",
+   "verdict": "reject",
+   "fit": "Lower p99 latency than JetStream but weaker fit for control-plane ordering/once-delivery; consumer-group semantics are clumsier for request/response handoff sagas, and it adds a second stateful store (voxeldust already uses redb for persistence). No k8s-game ecosystem advantage.",
+   "maturity": "Mature, but positioned for high-volume low-latency data fan-out, not control sagas.",
+   "license": "BSD/RSAL (Redis licensing churn is itself a solo-dev risk)",
+   "url": "https://dev.to/young_gao/real-time-event-streaming-kafka-vs-redis-streams-vs-nats-in-2026-34o1",
+   "reason": "If a broker is added at all, JetStream is the better control-plane fit (ordering + exactly-once + single binary). Redis Streams would be the choice only for high-rate state replication (e.g. block-edit delta fan-out), which is NOT where voxeldust's pain is. Reject for handoff negotiation."
+  },
+  {
+   "name": "Direct QUIC mesh (status quo, hardened)",
+   "verdict": "adopt-partially",
+   "fit": "quic_transport.rs already does persistent connections, per-peer circuit breakers, reused unidirectional streams, 4MB max msg. This is a sound transport. Gaps that cause fragility: (a) peer addresses come from the custom registry poll (staleness -> 'no QUIC address for shard' in handoff_pipeline.send_handoff), (b) handoff messages are fire-and-forget with a 2s timeout and no application-level ack/redelivery/idempotency, (c) no saga state for in-flight transfers (crash mid-handoff = wedged player, ship-exit hull trap).",
+   "maturity": "quinn 0.11 mature; the voxeldust wrapper is reasonable but under-hardened for transfer correctness.",
+   "license": "Apache-2.0/MIT (quinn)",
+   "url": "https://github.com/quinn-rs/quinn",
+   "reason": "KEEP the QUIC mesh as the data path; the transport is not the root cause. The root cause is no durable, ordered, idempotent HANDOFF PROTOCOL on top of it plus a stale custom registry feeding peer addresses. Transfer-first rebuild = define handoff as an explicit acked saga (idempotency key per session-token+target), source peer addresses from Agones/k8s instead of redb polling, and only THEN decide if JetStream is needed for durability."
+  },
+  {
+   "name": "Single client-facing gateway/edge",
+   "verdict": "adopt-partially",
+   "fit": "A single edge that authenticates and routes the first connection is the INDUSTRY STANDARD (WoW realmd/world split, FPS relays, Quilkin deployments) \u2014 sources confirm gateways reduce world-server load and harden against exploits. Voxeldust's gateway is already thin and stateless-ish (one Connect -> ShardRedirect). The anti-pattern to avoid: making the edge a stateful session OWNER or per-packet proxy (that IS a bottleneck/SPOF). Voxeldust's SessionStore is in-memory and keyed by player_name \u2014 fine as a routing cache, dangerous as source of truth.",
+   "maturity": "Canonical MMO/FPS pattern, well understood.",
+   "license": "n/a (pattern)",
+   "url": "https://news.ycombinator.com/item?id=37702632",
+   "reason": "Keep ONE logical gateway role but make it (1) stateless or backed by shared session state (redb/Agones), (2) horizontally replicable behind a k8s Service if it ever saturates, (3) a router/relay NOT a connection terminator for gameplay traffic \u2014 clients should keep dialing shards directly (as today). It is not a scalability bottleneck at voxeldust's scale precisely because it only handles connect/redirect, not per-tick traffic. Harden it; don't multiply it prematurely."
+  }
+ ],
+ "patterns": [
+  "Allocate-protects-from-eviction (Agones): the fix for the FIX-1 eviction landmine is infrastructural \u2014 a shard hosting players/observers must be in a state the orchestrator REFUSES to scale down. Agones SDK.Allocate() gives this for free; the custom registry has no equivalent guard, so hub/observer shards get reaped. Source: agones.dev FAQ.",
+  "Token routing at a stateless edge (Quilkin TokenRouter): edge maps opaque token -> backend address with zero per-flow state; backend churn is invisible to the edge. Voxeldust already half-implements this (session_token + ShardRedirect) \u2014 formalize it and remove the in-memory SessionStore as source of truth. Source: Quilkin CHANGELOG/xDS.",
+  "Handoff-as-durable-saga, not fire-and-forget message: PlayerHandoff/HandoffAccepted should be an ordered, acked, idempotent two-phase exchange keyed by (session_token,target_shard) so a dropped/duplicated message can't wedge a player or trap them in a ship hull. JetStream gives ordering+once-delivery if durability across shard crashes is required; otherwise app-level acks+retries+idempotency on the existing QUIC mesh. Source: NATS JetStream docs + handoff_pipeline.rs gap analysis.",
+  "k8s/Agones as the single source of truth for shard liveness+address, replacing a hand-maintained redb registry that goes stale and feeds dead QUIC peer addresses. Use headless Service + DNS SRV or Agones GameServer status; peer_registry.rs then reflects cluster reality instead of an orchestrator poll. Source: k8s DNS-SRV docs + registry.rs/peer_registry.rs.",
+  "Operator/CRD for game servers is a solved problem \u2014 adopt Agones rather than writing a bespoke operator; encode voxeldust's galaxy/system/planet/ship hosting topology as GameServer labels + a thin allocator. Source: k8s operator pattern docs + Agones high-density pattern.",
+  "Thin edge + direct client-to-shard data path is the FPS-relay/WoW-realm pattern: gateway handles auth+routing only; gameplay packets bypass it. This is why a single gateway is NOT a bottleneck here \u2014 it never sees per-tick traffic. Make it stateless/replicable, not a proxy. Source: MMO architecture discussions (ithare, HN).",
+  "Capacity-aware high-density packing (Agones Counters/Lists): instead of pod-per-ship always, track per-pod session slots and pack ship-shards, decrementing on session end \u2014 relevant to voxeldust's many-small-ship-shards model. Source: agones high-density-gameservers."
+ ],
+ "open_questions": [
+  "Does voxeldust's handoff genuinely need to survive a shard-process crash mid-transfer (durable saga -> JetStream), or is in-process crash = player reconnect acceptable (then harden QUIC mesh with acks, no broker)? This single answer decides NATS adopt vs reject.",
+  "Can Agones's GameServer model express voxeldust's HOST relationship (ship-shard hosted_by system-shard; host_shard_id in router.rs/k8s_provisioner.rs)? If parent/child topology can't be represented via labels+allocator, a thin custom CRD layer on top of Agones may still be needed.",
+  "Are real game clients connecting over QUIC needing a public UDP edge (DDoS/NAT) \u2014 the only scenario where Quilkin moves from study-patterns to adopt-partially? Current client_listener appears to terminate connections directly at shards/gateway, implying no such edge yet.",
+  "Is the eviction landmine purely a scale-down problem (Agones Allocate fixes it) or also a registry-staleness problem (peer_registry showing evicted shards as live, or dropping live ones)? Need to confirm whether peer_registry.update()'s Stopped/Draining filter + poll cadence is the bug locus vs the orchestrator's own eviction policy in lifecycle.rs.",
+  "What is the actual per-tick fan-out volume for block-edit deltas and WorldState compositing \u2014 if it ever needs broker-grade fan-out, Redis Streams/JetStream data-plane re-enters scope (currently out of scope for control-plane-only verdict)."
+ ]
+}

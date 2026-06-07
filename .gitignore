@@ -15,6 +15,13 @@ Thumbs.db
 # Database files (runtime-generated)
 *.redb
 
+# HR6 agent E2E runs (screenshots, video frames, state dumps)
+/runs/
+
+# Coverage profiles (HR5)
+*.profraw
+*.profdata
+
 # Docker/K8s runtime
 *.tar
 

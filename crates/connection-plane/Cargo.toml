@@ -1,0 +1,22 @@
+[package]
+name = "vd-connection-plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Gateway internals as a LIBRARY: lock-free route table (ArcSwap), per-session multiplexing, BULK pacing, datagram partitioning, ResumeTicket handling. The gateway bin is a thin shell."
+
+[dependencies]
+vd-core = { workspace = true }
+vd-wire = { workspace = true }
+vd-sim = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+arc-swap = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

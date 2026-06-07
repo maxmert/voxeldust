@@ -1,0 +1,23 @@
+[package]
+name = "vd-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "build_app(NodeKind, cfg, io) for ALL node kinds; step_tick() is THE deterministic unit of progress. Bins are 4-line wrappers elsewhere; nothing depends on a bin."
+
+[dependencies]
+vd-core = { workspace = true }
+vd-wire = { workspace = true }
+vd-sim = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+glam = { workspace = true }
+bevy_ecs = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

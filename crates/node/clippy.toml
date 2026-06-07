@@ -1,0 +1,11 @@
+# Same seam enforcement as vd-sim (docs/design/test_harness.md §9): node code reaches
+# time / randomness / persistence / network ONLY through the injected ShardIo traits.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "use the injected sim::io::Clock (R6/R7)" },
+    { path = "std::time::Instant::now", reason = "use the injected sim::io::Clock; prod tick pacing lives in io-prod" },
+    { path = "std::thread::sleep", reason = "the sim thread never sleeps" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order feeds observable state; use BTreeMap or vd_core::collections::DetHashMap" },
+    { path = "std::collections::HashSet", reason = "iteration order feeds observable state; use BTreeSet or vd_core::collections::DetHashSet" },
+]

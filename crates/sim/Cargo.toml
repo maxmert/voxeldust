@@ -1,0 +1,21 @@
+[package]
+name = "vd-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Pure simulation: ECS systems, saga/authority FSMs (pure fn step), capability DAG (ShardProfile), and the sim::io ShardIo trait seam + in-memory test impls. No direct I/O ever (clippy-enforced)."
+
+[dependencies]
+vd-core = { workspace = true }
+vd-wire = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+glam = { workspace = true }
+bevy_ecs = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

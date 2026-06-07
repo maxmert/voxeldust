@@ -1,0 +1,103 @@
+{
+ "summary": "Every production system that achieves seamless cross-server player movement converges on ONE invariant: the client's transport connection NEVER changes during a transfer. A persistent edge/gateway/proxy node owns the client socket; only server-side authority over entities migrates behind it. Voxeldust's current \"client holds observer connections to nearby shards, promoted on PlayerHandoff\" model (commits 5275692, 311e66f, 5b78136) is the inverse \u2014 the client participates in the transfer and effectively re-homes its connection \u2014 which is exactly the fragile, hard-to-recover design that SpatialOS shipped and that contributed to its commercial failure, and the opposite of what Star Citizen (Gateway), EVE (Proxy), MultiPaper (Master+game servers), and the Improbable handover patent itself ultimately do.\n\nTOP TRANSFERABLE PATTERNS, ranked for a solo Rust dev (transfer-first rebuild):\n1. GATEWAY OWNS THE CONNECTION (highest ROI). SC: clients connect to a Gateway node, never to Replicants/DGS directly; transfers are server-side only. EVE: Proxy blade holds the socket, SOL node behind it changes on a \"session change\". This makes a transfer a routing change, not a reconnect. Proven, moderate complexity, the single biggest fix for voxeldust.\n2. REPLICATION LAYER between sim and clients (SC). A separate in-memory entity-state cache + EntityGraph persistence sits between DGS and clients so a crashed sim node is replaced and state recovered WITHOUT client reconnect. High complexity; adopt the *separation principle* (sim authority \u2260 connection \u2260 persistence), not the full build.\n3. AUTHORITY BIT + GHOST/PROXY ENTITIES with an OVERLAP zone (SC, SpatialOS, DVE academic, Folia). Exactly one node has write authority per entity; neighbors hold read-only ghosts. Transfer = move the authority bit while ghosts already exist on the target. Eliminates spawn-on-promote races (voxeldust's \"eviction landmine\").\n4. TWO-PHASE / DOUBLE-HANDSHAKE HANDOVER with shadow authority (Improbable patent US10878146B2; DVE pull-based double-handshake). Target gets secondary authority + buffers commands BEFORE source releases primary; source flushes final state; forced timeout bounds stalls. This is the protocol voxeldust lacks.\n5. SEAMLESS vs PORTAL transfers \u2014 pick deliberately. Loading-screen/portal model (WoW/TrinityCore map change, EVE 10s session-change timer) is vastly simpler and recovers trivially; reserve true seamless handoff only for ship<->planet boundaries.",
+ "options": [
+  {
+   "name": "Gateway-owns-the-connection (edge/proxy single logical connection)",
+   "verdict": "adopt",
+   "url": "https://starcitizen.tools/Replication_layer",
+   "license": "N/A (architecture pattern)",
+   "maturity": "Production: EVE Online 20+ yrs (Proxy blades); Star Citizen 4.x Gateway layer live in tech-preview/PTU as of 2026; MultiPaper via BungeeCord/Velocity proxy",
+   "fit": "DIRECT FIX for voxeldust. SC: 'Clients won't connect directly to Replicants but instead to a gateway node'; Gateway just 'directs packets between clients and the various Replicants'. EVE: on stargate jump a 'session change' is initiated and the new location is delivered 'from the relevant cluster node through the proxy server the player is connected through' \u2014 socket persists. Replaces voxeldust's client-reconnects-via-observer model: the QUIC connection terminates at one gateway, shard handoff becomes a server-side route swap the client never sees. In Rust: quinn-terminating gateway that multiplexes to shard processes. Removes the entire class of client-side transfer bugs (observer promotion races, session_token re-auth).",
+   "reason": "The one pattern that, alone, would have prevented most of voxeldust's chronic transfer breakage."
+  },
+  {
+   "name": "Replication Layer separating simulation / replication / persistence (Star Citizen)",
+   "verdict": "adopt-partially",
+   "url": "https://star-citizen.wiki/Comm-Link:18397/en",
+   "license": "N/A",
+   "maturity": "SC dynamic server meshing in tech-preview/PTU 2025-2026; RMQ (Replication Message Queue) rollout targeted Q2 2026; not yet fully production-stable",
+   "fit": "Principle is gold; full build is too heavy for solo dev. SC model: DGS node 'connects to the replication layer, very similar to a client, and only a subset of entities are replicated to it'; sim result is 'written back from the server node to the replication layer, and from there replicated to all clients and other server nodes'. EntityGraph is 'a highly scalable in-memory cache of the current state of all entities' + graph-DB persistence ('Persistent Streaming'). On DGS crash, replication layer spins a replacement and 'recovers the lost entity state from persistence' \u2014 clients stay connected, sim 'temporarily freezes' <1min. ADOPT the three-way separation (connection vs authority vs persistence) and recover-from-persistence-on-crash; voxeldust already has redb \u2014 make it the EntityGraph. REJECT building a full separate replication process initially.",
+   "reason": "Decouples the three concerns voxeldust currently conflates inside shard processes; persistence-backed recovery removes crash = player-loss."
+  },
+  {
+   "name": "Authority bit + ghost/proxy entities with boundary overlap zone",
+   "verdict": "adopt",
+   "url": "https://dl.acm.org/doi/10.1145/2535417",
+   "license": "N/A (DVE academic + SC/Folia practice)",
+   "maturity": "Production: SC ('one server node controls the entity, multiple others have a client view'), SpatialOS (per-component single write-authority), Folia (region owns entities); DVE zoning-with-overlap is 20yr-established",
+   "fit": "Strong fit, directly attacks the 'eviction landmine'. Pattern: exactly one node authoritative per entity; neighbors hold read-only ghosts within an OVERLAP/hysteresis band so the entity is ALREADY present on the target before authority moves. Folia: 'only the thread currently ticking a region may access data owned by that region', cross-region needs teleportAsync. Voxeldust's bug is spawn-on-promote (entity created at promotion time \u2192 races, hub/observer eviction). Fix: pre-instantiate ghosts in the overlap band, transfer is a bit-flip not a spawn. The eviction-FIX-1 issue is a symptom of missing ghost-lifetime tied to overlap geometry, not to ad-hoc observer entries.",
+   "reason": "Converts handoff from 'create + hope' to 'flip a bit on an entity that already exists everywhere it needs to'."
+  },
+  {
+   "name": "Two-phase / double-handshake authority handover with shadow authority + command buffering",
+   "verdict": "adopt",
+   "url": "https://patents.google.com/patent/US10878146B2/en",
+   "license": "Patent (Improbable) \u2014 pattern/protocol is studyable; verify before commercial copy of specifics",
+   "maturity": "Shipped in SpatialOS runtime; double-handshake variant standard in DVE literature",
+   "fit": "This IS the transfer protocol voxeldust is missing. Patent states a 3-state machine AUTHORITATIVE -> AUTHORITY_LOST_IMMINENT -> NOT_AUTHORITATIVE: runtime warns incumbent 'will lose authority over the component at a future time'; new worker enters interest region and receives state BEFORE incumbent relinquishes; incumbent 'may buffer the commands' and flushes final state; if incumbent unresponsive 'the runtime may force an authority change within a constant-bounded time'. DVE pull-based variant: receiving area requests entity through a coordinating parent, 'secondary control added before entry, prior control removed only once fully transitioned'. For solo Rust dev: implement as prepare(target acks ghost ready) -> freeze+flush(source) -> commit(target authoritative) -> source demotes to ghost, with a bounded timeout forcing resolution. NOTE: patent has NO rollback \u2014 it uses optimistic irreversible commit + forced timeout; acceptable, but voxeldust should add an abort path for the ship-exit-hull-trap class of spatial preconditions.",
+   "reason": "Gives a deterministic, recoverable transfer state machine with a bounded-time guarantee \u2014 the opposite of voxeldust's best-effort PlayerHandoff."
+  },
+  {
+   "name": "Portal / loading-screen transfer (WoW/TrinityCore + EVE session-change timer)",
+   "verdict": "adopt-partially",
+   "url": "https://support.eveonline.com/hc/en-us/articles/205294121-Session-Change",
+   "license": "N/A",
+   "maturity": "Production decades: TrinityCore worldserver map change; EVE session change on jump/dock/wormhole with a hard 10s minimum timer",
+   "fit": "The cheap, robust escape hatch \u2014 use where seamlessness isn't required. EVE enforces a 'session change timer ... minimum 10 seconds' explicitly because 'without such a timer player characters could become stuck' \u2014 a direct mitigation for voxeldust's stuck/hull-trap failures. WoW model = save player, unload, loading screen, load on new map: trivially recoverable, no ghost/overlap machinery. RECOMMENDATION: make galaxy/system/planet-shard boundaries PORTAL transfers (brief transition allowed); reserve true SEAMLESS handoff (pattern 3+4) only for the ship<->planet walk-aboard case where dual-WorldState compositing is genuinely needed. This slashes the surface area of hard transfers by ~80%.",
+   "reason": "Most voxeldust 'transfers' don't need to be seamless; portal model is solo-dev-tractable and self-recovers."
+  },
+  {
+   "name": "MultiPaper Master-coordinated chunk-ownership + subscription sync",
+   "verdict": "study-patterns-only",
+   "url": "https://deepwiki.com/MultiPaper/MultiPaper/1.2-key-features-and-capabilities",
+   "license": "GPL/MIT (Java; not reusable in Rust)",
+   "maturity": "Active community project; production on hobby/mid networks, not AAA-scale",
+   "fit": "Transferable PROTOCOL ideas, not code (Java/Bukkit). Master = coordination hub assigning chunk ownership first-come-first-served; 'when a server reads a chunk it requests it from the Master; if another server owns it, the Master redirects'; servers 'subscribe to chunks in their view distance' and 'when a server modifies a chunk, all subscribed servers receive the update'; player entity-ID persists for 'seamless teleportation', and Bukkit.getAllOnlinePlayers() gives global awareness. MAPS ONESELF onto voxeldust: chunk-ownership-by-Master ~= authority registry in shard-common/peer_registry; subscription sync ~= block-edit delta networking voxeldust already does. Lesson: a thin central authority/ownership directory beats peer-to-peer observer negotiation. CAUTION: MultiPaper's per-block cross-server sync is chatty and a known scaling limit.",
+   "reason": "Validates a central ownership directory + subscription deltas; voxeldust's orchestrator/registry should be that directory rather than clients brokering observers."
+  },
+  {
+   "name": "Folia regionised single-process threading (region owns entities, teleportAsync across regions)",
+   "verdict": "study-patterns-only",
+   "url": "https://deepwiki.com/PaperMC/Folia/2-region-threading-system",
+   "license": "GPL (Java)",
+   "maturity": "Production-used Paper fork; mature region threading; SINGLE process only (no cross-machine)",
+   "fit": "Useful as a CORRECTNESS MODEL for in-process authority, not for distribution. Strict rule: 'only the thread currently ticking a region may access data owned by that region'; entities belong to exactly one region; cross-region movement MUST use teleportAsync (no sync teleport); regions auto split/merge as players converge/diverge with tick-offset adjustment on merge. For voxeldust this maps to bevy_ecs world-per-shard ownership discipline and informs the in-process side of authority transfer, but Folia has 'no distributed consensus mechanism' \u2014 so it does NOT solve cross-process shard handoff. Borrow the ownership-discipline + async-transfer API shape, not the architecture.",
+   "reason": "Clean mental model for entity-owned-by-exactly-one-executor and merge/split, directly applicable to bevy_ecs shard internals."
+  },
+  {
+   "name": "Hadean Aether Engine spatial-cell distributed simulation (EVE: Aether Wars)",
+   "verdict": "study-patterns-only",
+   "url": "https://developer.microsoft.com/en-us/games/articles/2020/08/hadean-helps-ccp-games-realize-its-vision-with-azure/",
+   "license": "Proprietary (defunct/pivoted; Hadean exited games ~2023)",
+   "maturity": "Tech-demo only (14,274 entities, 2019 GDC); never shipped a game; company pivoted to defense/enterprise",
+   "fit": "Aspirational, not adoptable. Each core 'manages a chunk of data, with each chunk communicating with others so players can move between them without interruption'; dynamic Azure allocation '~50ms'. Proves dynamic cell split/merge + seamless inter-cell movement at scale BUT only in a controlled demo, with no public protocol detail and no shipped product \u2014 same fate-shape as SpatialOS. Lesson for voxeldust: dynamic split/merge is a research-grade endeavour; do NOT build it transfer-first. Fix fixed-topology shard handoff first; treat dynamic meshing as a far-future optional.",
+   "reason": "Cautionary: spectacular demos of dynamic meshing repeatedly fail to become shippable products; not where a solo dev should spend effort."
+  },
+  {
+   "name": "SpatialOS worker/bridge + dynamic interest management (FAILED \u2014 anti-pattern reference)",
+   "verdict": "reject",
+   "url": "https://www.improbable.io/blog/improbable-a-final-statement-on-spatialos-and-unity/",
+   "license": "Defunct platform",
+   "maturity": "Discontinued; every flagship (Worlds Adrift, Mavericks) cancelled/failed; ~$81M operating loss FY2019; Unity ToS dispute",
+   "fit": "REJECT as architecture; MINE for failure lessons. Root failure modes directly relevant to voxeldust: (a) authority handover across worker boundaries caused 'lost updates' and timeout edge-cases at borders \u2014 the exact fragility voxeldust feels; (b) per-client interest 'tied tightly to a square grid', inflexible; (c) bridge/runtime did heavy memory-copying that 'wouldn't scale', physics/collision 'finicky' at boundaries; (d) cloud-only, 10-15min deploys, no shareable local instance killed iteration. The cross-worker BOUNDARY is where SpatialOS broke \u2014 same place voxeldust breaks. Takeaway: generic engine-agnostic authority-migration middleware is a graveyard; build a NARROW transfer protocol specific to voxeldust's ship<->planet topology instead of a general one.",
+   "reason": "The definitive proof that getting authority handover at boundaries 'mostly right' is not enough \u2014 it must be exactly right and bounded, or it sinks the whole product."
+  }
+ ],
+ "patterns": [
+  "GATEWAY-OWNS-THE-CONNECTION (single logical connection): the client socket terminates at a persistent edge node; transfers are server-side route swaps the client never observes. Source: Star Citizen Gateway layer ('clients won't connect directly to Replicants but to a gateway node'); EVE Online Proxy blade + 'session change' delivered through the proxy; MultiPaper via Velocity/BungeeCord. This is the single highest-value change for voxeldust and is the direct inverse of its current client-reconnects-via-observer model (commits 5275692/311e66f/5b78136).",
+  "SEPARATE SIM AUTHORITY / REPLICATION / PERSISTENCE into three planes (Star Citizen Replication Layer + EntityGraph). Sim node writes results to a replication plane that is the client-facing cache; persistence (graph DB) recovers a crashed sim node WITHOUT client reconnect. Voxeldust's redb can serve as the EntityGraph; adopt the separation principle, not a whole new process.",
+  "AUTHORITY BIT + GHOST/PROXY ENTITIES IN AN OVERLAP/HYSTERESIS BAND: exactly one node has write authority per entity, neighbors hold read-only ghosts that ALREADY EXIST before transfer, so handoff is a bit-flip not a spawn. Source: SC ('one node controls the entity, multiple have a client view'), SpatialOS per-component write authority, Folia region ownership, DVE zoning-with-overlap literature. Directly fixes voxeldust's spawn-on-promote race / 'eviction landmine'.",
+  "TWO-PHASE / DOUBLE-HANDSHAKE HANDOVER WITH SHADOW AUTHORITY + COMMAND BUFFERING + BOUNDED-TIME FORCED COMMIT: target acquires secondary authority and buffers commands before source releases primary; source flushes final state; a forced timeout guarantees the transfer resolves. Source: Improbable patent US10878146B2 (AUTHORITATIVE -> AUTHORITY_LOST_IMMINENT -> NOT_AUTHORITATIVE) and DVE pull-based double-handshake. Add an explicit ABORT path (patent has none) to handle spatial preconditions like the ship-exit-hull-trap.",
+  "SEAMLESS vs PORTAL is a per-boundary decision, not a global one. Portal/loading-screen transfers (WoW/TrinityCore map change; EVE's hard 10s session-change timer that exists precisely so players 'don't become stuck') are trivially recoverable \u2014 use them for galaxy/system/planet boundaries. Reserve true seamless handoff (ghost+overlap+two-phase) ONLY for ship<->planet walk-aboard where dual-WorldState compositing is genuinely required. Cuts hard-transfer surface area dramatically.",
+  "CENTRAL OWNERSHIP DIRECTORY over peer-to-peer negotiation: a thin coordinator assigns entity/chunk authority first-come-first-served and redirects requests, rather than clients brokering observer connections. Source: MultiPaper Master, SC first-come-first-served authority allocation, EVE node-to-solar-system mapping at downtime. Voxeldust's orchestrator/peer_registry should BE this directory.",
+  "BOUNDARIES ARE WHERE IT BREAKS \u2014 make them few, fixed, and narrow. SpatialOS and Hadean both proved that generic, dynamic, cross-worker authority migration at arbitrary boundaries is a product-killing graveyard. Ship fixed-topology shard handoff with a voxeldust-specific protocol first; treat dynamic split/merge meshing as far-future and optional."
+ ],
+ "open_questions": [
+  "Does voxeldust's QUIC/quinn design allow a single gateway to terminate the client connection and multiplex to shard processes, or is quinn currently terminated per-shard? (Determines feasibility of the gateway-owns-connection retrofit vs rebuild.) Audit gateway/ and shard-common/client_listener.",
+  "For the ship<->planet seamless case specifically: is dual-shard WorldState compositing on the client actually required, or can a portal transfer with a sub-second freeze (EVE-style) be made acceptable, eliminating the hardest code path entirely?",
+  "Can voxeldust tolerate the two-phase handover's bounded-time FORCED commit (optimistic, no rollback per the patent), or do spatial preconditions (hull-clearance, surface re-anchor in commit 710e3e4) require a true ABORT/rollback path \u2014 and if so, what is the safe fallback location for an aborted transfer?",
+  "What is the authoritative source of truth for entity state at the instant of handoff \u2014 redb persistence (EntityGraph-style) or the source shard's in-memory bevy world? Mixing the two is a likely root cause of current fragility.",
+  "Latency budget: what is the real RTT between shard processes (same node vs cross-node k3d/k8s) for the prepare/flush/commit round-trips? This determines whether ghost overlap bands need to be wide enough to hide the handshake latency.",
+  "Should the multi-shard CONCEPT be kept with a transfer-first REWRITE of the handoff layer (gateway + two-phase + ghosts) while preserving core (terrain/meshing) and orchestrator, rather than a full ground-up rebuild? Evidence strongly favors keep-core / rebuild-transfer-layer over keep-and-harden the current observer model."
+ ]
+}

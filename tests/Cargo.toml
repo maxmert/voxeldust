@@ -1,0 +1,21 @@
+[package]
+name = "vd-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "In-process scenario suites. Every phase ADDS scenarios here; nothing is ever deleted — accumulated scenarios are the permanent release gate."
+publish = false
+
+[dependencies]
+vd-core = { workspace = true }
+vd-wire = { workspace = true }
+vd-sim = { workspace = true }
+vd-node = { workspace = true }
+vd-harness = { workspace = true }
+vd-connection-plane = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

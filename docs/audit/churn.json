@@ -1,0 +1,77 @@
+{
+ "findings": [
+  {
+   "title": "Transfer machinery is the bug epicenter",
+   "detail": "Of 77 commits past main, 25 (32 percent) are fix/WIP/debug/diagnostic and 20 (26 percent) are transfer-specific, overlapping on the T0 to T4 handoff series. Feature commits land once and rarely return.",
+   "evidence": "git log main..ecs-system 77 total, 25 fix, 20 transfer",
+   "severity": "critical"
+  },
+  {
+   "title": "Three shard god-files re-fixed 11 to 15 times each",
+   "detail": "Fix commits touch system-shard main.rs 15 times, ship-shard 13, planet-shard 11. All history 36, 50, 27 touches. Shotgun surgery across monolithic loops.",
+   "evidence": "ship-shard 49 commits, system-shard 35, planet-shard 27",
+   "severity": "critical"
+  },
+  {
+   "title": "Handoff logic inlined into giant functions",
+   "detail": "ship-shard main.rs 9657 LOC, drain_quic 641 lines, system-shard process_handoffs 434, planet-shard process_connects 279. Shared handoff_pipeline.rs only 145 LOC, used only for redirect building, so logic is untestable and duplicated.",
+   "evidence": "awk fn-span",
+   "severity": "critical"
+  },
+  {
+   "title": "Eviction landmine with 108 evict references",
+   "detail": "system-shard rejected immediate eviction to avoid despawn-respawn flicker, 3s wall-clock backstop. planet-shard has a 15-line liveness guard about despawning a live player. Correctness hinges on timing heuristics.",
+   "evidence": "system-shard 6267, planet-shard 855, 108 refs",
+   "severity": "critical"
+  },
+  {
+   "title": "No test harness for the handoff path",
+   "detail": "core 383, signal 172, shard-common 87 tests but system-shard 13, planet-shard 5, ship-shard 2, galaxy 0, gateway 0. e2e-tests 3 functions, none crossing shards.",
+   "evidence": "test grep per crate",
+   "severity": "critical"
+  },
+  {
+   "title": "Diagnostic-only commits used to chase bugs",
+   "detail": "ecaa886 adds 37 logging lines zero deletions, 5ccf328 45, 642aba6 30, then 3f80fba strips them. Symptom of missing tests.",
+   "evidence": "git show stat ecaa886, 5ccf328, 642aba6, 3f80fba",
+   "severity": "major"
+  },
+  {
+   "title": "Five commit subjects admit non-working feature",
+   "detail": "Not fully working shard transfers, partially working transfers, WIP UNVALIDATED collision, death trigger pending, known issues. Four are transfer related.",
+   "evidence": "5b78136, 24a5cd8, 3d1967d, 4e0fcc2",
+   "severity": "major"
+  },
+  {
+   "title": "Ship-exit hull trap is active",
+   "detail": "710e3e4 adds hull clearance, cc61c42 makes the ship rest flush. 2026-06 fixes for disembark into hull.",
+   "evidence": "710e3e4, cc61c42, c720010",
+   "severity": "major"
+  },
+  {
+   "title": "19k LOC orphaned client code not in workspace",
+   "detail": "Only client (31830 LOC) is a member. voxydust (13022) and voxydust-next (6148) still committed to, inflating churn.",
+   "evidence": "Cargo.toml members; wc -l",
+   "severity": "major"
+  },
+  {
+   "title": "Critical TODOs on re-entry and cross-shard path",
+   "detail": "planet-shard 1829 leaves re-entry spawn_pose unset. dispatch 544 and 593 route cross-shard edits via primary TCP because observer-write is unimplemented.",
+   "evidence": "planet-shard 1829, dispatch 544 and 593",
+   "severity": "major"
+  },
+  {
+   "title": "process_handoffs duplicated across shards",
+   "detail": "434 lines in system-shard, 172 in planet-shard, no shared state machine. A fix in one does not fix the others.",
+   "evidence": "fn-span system-shard 434, planet-shard 172",
+   "severity": "major"
+  },
+  {
+   "title": "Salvageable lower layers and protocol primitives",
+   "detail": "core 383, signal 172, shard-common 87 tests. core handoff.rs, handoff_blob.rs, peer_registry, circuit_breaker, quic_transport, FlatBuffers types are sound. Orchestration is the problem.",
+   "evidence": "core handoff.rs, shard-common pipelines",
+   "severity": "strength"
+  }
+ ],
+ "summary": "Bugs cluster in transfer machinery, not features. Of 77 commits past main, 25 (32 percent) are fix/WIP/debug/diagnostic and 20 (26 percent) transfer-specific. Three shard god-files churn most: system-shard main.rs (7328 LOC, 35 commits), ship-shard (9657 LOC, 49 commits), planet-shard (3714 LOC, 27 commits). Handoff logic is inlined into 172 to 434 line functions duplicated across shards rather than the shared 145 LOC handoff_pipeline.rs. Eviction relies on timing heuristics (108 evict refs, the FIX-1 landmine). Root enabler is a missing test harness: high-churn crates have near-zero tests (system 13, ship 2, planet 5, galaxy 0, gateway 0) vs core 383, signal 172, shard-common 87; e2e-tests has 3 functions, none crossing shards. Diagnostic-only commits later stripped confirm runtime debugging. Ship-exit hull trap is active. About 19k LOC orphaned client code is not in the workspace. Salvageable: protocol primitives in core and shard-common. Verdict: rebuild the transfer orchestration layer, keep and harden the primitives.</summary>\n<rebuild_implications>Rebuild transfer-first for the orchestration layer only; keep and harden the primitives. All fix churn and admitted-broken commits land in the three shard main.rs god-files (35, 49, 27 touches) which inline a duplicated, untestable handoff state machine and rely on timing-heuristic eviction. The lower layers are clean and carry most of the 700-plus tests. A transfer-first foundation requires a single shared deterministic handoff and observer-promotion state machine in shard-common, session-token identity to kill the eviction landmine, a two-real-process e2e harness asserting visibility and walk and edit invariants, and tested frame-transition contracts for ship-planet and EVA. Do not rewrite core or signal. Quarantine voxydust and voxydust-next.</rebuild_implications>\n<salvageable>[\"core/src/handoff.rs types\",\"core/src/character/handoff_blob.rs\",\"shard-common/src/handoff_pipeline.rs\",\"shard-common/src/peer_registry.rs and circuit_breaker.rs\",\"shard-common/src/quic_transport.rs\",\"protocol/voxeldust.fbs\",\"core (383 tests) and signal (172 tests)\",\"shard-common/tests/quic_integration.rs as e2e seed\"]</salvageable>\n<open_questions>[\"Does observer-promotion deliver authoritative state before the source demotes, or is the flicker masked by client grace timers?\",\"Are cross-shard block edits silently degraded via primary TCP fallback because observer-write is a TODO?\",\"Is voxydust-next a planned replacement for client, or abandoned?\",\"Does planet-shard re-entry populate spawn_pose, or spawn at a default pose?\",\"How is player identity keyed across shards given eviction keys on name plus session?\"]</open_questions>\n</invoke>\n"
+}

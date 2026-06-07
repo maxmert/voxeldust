@@ -1,106 +1,84 @@
-# Voxeldust-Mini
+# Voxeldust — Greenfield Rebuild (transfer-first)
 
-## Project Overview
-Multiplayer voxel planet game — "Star Citizen meets Minecraft". Procedurally generated
-universe with spherical voxel planets, player-built ships, and Newtonian space physics.
+Multiplayer voxel planet MMO — "Star Citizen meets Minecraft". Spherical voxel planets,
+player-built ships you walk inside while flying, Newtonian physics, distributed shard
+architecture. **This worktree is the approved total-greenfield rebuild** (June 2026);
+the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 
-## Architecture
+## THE binding specs — read before designing anything
 
-### Three-Crate Structure
-- **Core** (`core/`): Rust library — terrain gen, meshing, coordinate math. Shared by server and client as a direct Rust dependency.
-- **Server** (`server/`): Rust — Tokio async networking, Rapier3D physics, game loop at 20Hz.
-- **Client** (`voxydust/`): Rust — wgpu renderer, winit windowing, egui UI. Generates terrain/meshes locally, connects to server for multiplayer.
+- `docs/design/PLAN.md` — the approved plan: context, 6 hard rules, unified architecture, P0–P11 roadmap.
+- `docs/design/*.md` — the hardened subsystem designs (connection_plane, transfer_protocol,
+  test_harness, identity_persistence, generic_transfer, sealed_shards, coverage_e2e).
+- `docs/design/integration.json` — 19 binding cross-design conflict resolutions + glossary.
+- `docs/audit/` — evidence for why the old architecture was unfixable (root causes R1–R10).
 
-### Key Principles
-- **No magic numbers**: All world parameters derived deterministically from seeds (planet size, gravity, terrain, biomes).
-- **Deterministic generation**: Same seed = same world on client and server. Only deltas (block edits) are networked.
-- **Server-authoritative**: Server owns physics and game state. Client predicts and renders.
-- **Seed hierarchy**: `universe_seed → system_seed → planet_seed` (each derived via hash).
+## Hard rules (user-mandated; violations are defects)
 
-### Coordinate System
-- **Cubic sphere**: 6 cube faces projected to sphere via Nowell mapping.
-- **Chunk**: 62³ blocks (binary-greedy-meshing crate requirement).
-- **Address**: `(sector: u8, shell: u16, cx: u16, cy: u16, cz: u16)` + block `(bx: u8, by: u8, bz: u8)`.
-- **Meshing**: Binary greedy meshing in flat chunk-local space [0,62]. Client sphere-projects vertices on CPU before upload. Server sphere-projects collision vertices for Rapier trimesh.
+1. **HR1 sealed shards** — a shard's World/rapier/redb is private; inter-shard bytes exist
+   only as `InterShardFlow` arms (one reviewed file in `vd-wire`); sim cross-feeds are
+   `EffectFree` `CouplingPort`s; gameplay cross-shard data rides the Signal system.
+2. **HR2 generic transfer** — ANY entity kind crosses shards via the `TransferableKind`
+   registry; Durable vs Transient is policy fan-out on ONE machinery (batched `TransientGo`).
+3. **HR3 one tooling** — ONE transfer FSM/envelope/Fence/registry; ONE `shard` binary;
+   shard types are `ShardProfile` capability configs. Never `match` on a shard kind in features.
+4. **HR4 features once, run anywhere** — capability DAG + `FrameSpace` seam; every feature
+   passes the identical fixture on ≥2 shard kinds (G-IDENTICAL) or it doesn't land.
+5. **HR5 100% coverage** — Tier-A crates at 100% region+branch (`just coverage-fast`);
+   exemptions only via `#[cfg_attr(coverage_nightly, coverage(off))]` or `coverage-exemptions.toml`.
+   Generic-code gotcha (learned in SPIKE-0a): every TEST BINARY gets its own monomorphized
+   copies, each counted separately — a generic fn's branches must be fully exercised in
+   EVERY binary that instantiates it. Discipline: cover a crate's generics completely in
+   its own unit tests; integration tests that instantiate them must exercise the full
+   surface too (or not instantiate them at all).
+6. **HR6 agent-operable E2E** — client ships the `dev-control` harness (`vdctl`): input
+   injection at the input-resource seam, wgpu readback screenshots/video, `runs/` manifests.
 
-### Block System
-- Block IDs are `u16` (supports up to 65535 block types).
-- Current types: Air(0), Stone(1), Dirt(2), Grass(3), Sand(4), Water(5), plus 45+ more (ores, vegetation, ice, volcanic).
-- Future: functional blocks (thrusters, cockpit, power generators, gravity generators, etc.).
+## Workspace
 
-### Physics (Rapier3D, server-only)
-- `KinematicCharacterController` for player movement with per-player `up` vector.
-- Terrain: static trimesh colliders per loaded chunk (sphere-projected vertices).
-- Spherical gravity: computed per-player toward planet center, g = G*M/r².
-
-### Networking
-- TCP (port 7777): reliable — join response, block deltas.
-- UDP (port 7778): fast — player input (client→server), world state (server→client).
-- FlatBuffers serialization (`protocol/voxeldust.fbs`).
-- No chunk streaming — both sides generate deterministically from seed.
-
-### Shard Architecture (future)
 ```
-System Shard (1 per star system)
-├── Planet Shard (1-N per planet, by player density)
-│   └── Rapier world, terrain chunks, surface players
-├── Ship Shard (1 per active ship)
-│   └── Ship's Rapier world, interior KCC, block systems simulation
-└── Space players / ships in transit
+crates/core              vd-core   pure domain (ids, Fence, kind registry, TLV, celestial math, bands)
+crates/wire              vd-wire   frozen wire contract + InterShardFlow + seam contracts
+crates/sim               vd-sim    pure ECS/FSMs + sim::io ShardIo traits + io::mem test impls
+crates/node              vd-node   build_app(NodeKind, cfg, io); step_tick(); universe clock
+crates/connection-plane  vd-connection-plane  gateway internals (lib; gateway bin is a shell)
+crates/harness           vd-harness  Topology, FaultFabric, ControlOracle, WireMonitor, ChaosRunner
+tests                    vd-tests  accumulated scenario suites — never delete a scenario
 ```
+Dependency rule: bins → node → sim → wire → core; harness → node + sim::io::mem; nothing
+depends on a bin. Every node is lib + 4-line bin. `io-prod` / `tests-process` appear later.
 
-### Future Architecture Notes
-- **Ships**: Player-built from blocks, same 62³ chunk grid. Functional block systems (power grid, thrust vectoring). Dual physics: exterior rigid body (Newtonian thrust) + interior walkable space (KCC). Ship inertia configurable via gravity generator blocks.
-- **Planets**: Type, biomes, weather, flora, fauna all derived from planet seed. Weather is deterministic simulation (seed + time).
-- **Scale**: Earth-sized planets (~6.4M block radius). Requires floating origin (f32 precision), LOD, sparse shells.
+## Non-negotiable conventions
 
-## Build & Run
+- **No I/O outside the seam**: sim/node code gets time/rng/persistence/transport ONLY through
+  `sim::io` traits (clippy `disallowed-methods`/`disallowed-types` enforce; `HashMap` with the
+  default hasher is banned in sim/node — use `BTreeMap` or `DetHashMap`).
+- **No magic numbers**: world/sim params seed-derived; entity props per-entity; operational
+  params in ONE config struct (`TransportTuning`/`TransferTuning`), never inline literals.
+- **NO client-side prediction** (interpolation on a 100–150 ms buffer). Players physically collide.
+- **Fence discipline**: every authoritative action carries its `Fence`; receivers reject stale;
+  the directory CAS is the only commit point. Source authority retained until dest Committed.
+- **postcard v1 everywhere** (codec flag bit reserved); entity blobs are TLV-framed;
+  decode-to-Default is BANNED for Durable kinds.
+- **Determinism**: closed-form `f(seed, universe_tick)` for celestial math (Category A);
+  rapier state is checkpoint-carried, never re-simulated cross-host (Category C); every
+  physics→control boundary quantized to integer grids.
+- **No `git commit` / `git push` without an explicit user request for that exact action.**
+
+## Build & gates
+
 ```bash
-cargo test -p voxeldust-core          # Core tests (124 tests)
-cargo run -p voxydust                 # Run client (connects to localhost:7777 by default)
-cargo run -p voxydust -- --gateway 127.0.0.1:7777 --name Player  # Explicit options
-./dev-cluster.sh up                   # Build images & deploy to k3d
-./dev-cluster.sh rebuild              # Rebuild images & redeploy
-./dev-cluster.sh down                 # Tear down cluster
-./dev-cluster.sh status               # Check pod status
-./dev-cluster.sh logs [component]     # Tail logs (default: orchestrator)
-./build_protocol.sh                   # Regenerate FlatBuffers (Rust)
+cargo test --workspace      # full deterministic suite (fast: virtual clock, no sockets)
+just gate                   # fmt + clippy(-D warnings) + tests + coverage — the pre-merge gate
+just coverage-fast          # Tier-A 100% region+branch (HR5 inner loop)
+just coverage-html          # see the uncovered region
 ```
+Coverage runs on a pinned nightly (`VD_COVERAGE_TOOLCHAIN`); product builds on stable 1.94.1.
 
-## Dependencies
-- `binary-greedy-meshing`: 62³ binary greedy meshing (~65μs/chunk)
-- `rapier3d`: Server-side physics (KCC, trimesh collision)
-- `glam`: SIMD math (Vec3, Quat)
-- `noise`: OpenSimplex procedural noise (pin exact version for determinism)
-- `tokio`: Async TCP/UDP networking
-- `flatbuffers`: Binary protocol serialization
-- `wgpu`: GPU rendering (client)
-- `winit`: Windowing and input (client)
-- `egui`: Immediate-mode UI (client)
+## Roadmap position
 
-## Conventions
-- Chunk size is always 62 (dictated by binary-greedy-meshing crate).
-- All world parameters must be derivable from seeds — never hardcode planet-specific values.
-- Pin noise crate to exact version (`noise = "=0.9.0"`) for cross-platform determinism.
-- Block coordinates 0-61 stored as u8. Block type IDs as u16.
-- When adding new player components or game state, always update the handoff system in lockstep:
-  PlayerHandoff FlatBuffers table → Rust struct → serialize/deserialize → spawn system → boundary detection.
-  Networking (WorldState broadcast, JoinResponse) must also be updated if the state is client-visible.
-
-### ECS Patterns (bevy_ecs)
-- **Events over manual queues**: Use `bevy_ecs::event::Events<T>` for producer-consumer data flow
-  between systems. Never use `Vec<T>` drained with `mem::take`. For async→sync bridges (tokio → ECS),
-  use a dedicated bridge system that drains mpsc into `EventWriter<T>` early in the schedule.
-- **Entity-scoped state as components**: State belonging to a specific entity (handoff progress,
-  cooldowns, pending actions) must be a Component on that entity, not an entry in a Vec/HashMap
-  inside a Resource. This enables query-based lookup and automatic lifecycle management.
-- **Split resources by access pattern**: If different systems touch disjoint subsets of a resource's
-  fields, split into separate resources. This makes system signatures self-documenting and enables
-  finer-grained borrow checking.
-- **Automatic index sync**: For index resources (like ClientMap) that mirror component data, use a
-  dedicated sync system with `Added<T>` / `RemovedComponents<T>` change detection instead of manual
-  insert/remove scattered across systems.
-- **Per-system schedules for profiling**: The one-schedule-per-system pattern in shard binaries is
-  intentional for per-system timing at 20Hz. Do not consolidate without replacing the profiling.
-- **apply_deferred placement**: Always place explicit `apply_deferred` between systems that spawn/despawn
-  entities (Commands) and systems that query those entities.
+P0 (foundation: harness + frozen wire + FSMs + clock) → P1 stub shards → P1.5 client+HR6
+harness → P2 THE transfer (one class, ghosts, CUT_MARKER, fence CAS) → P3 all classes +
+kill-9 crash/chaos matrix → only THEN voxels (P4 terrain, P5 physics, P6 blocks, P7
+checkpoints, P8 ships, P9 signals, P10 warp, P11 combat). Transfers are proven robust
+before features pile on — the structural inversion of the old project's failure.

@@ -1,56 +1,62 @@
 [workspace]
 resolver = "2"
 members = [
-    "core",
-    "shard-common",
-    "orchestrator",
-    "gateway",
-    "stub-shard",
-    "e2e-tests",
-    "system-shard",
-    "ship-shard",
-    "planet-shard",
-    "galaxy-shard",
-    "voxydust",
+    "crates/core",
+    "crates/wire",
+    "crates/sim",
+    "crates/node",
+    "crates/connection-plane",
+    "crates/harness",
+    "crates/io-prod",
+    "tests",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.94"
 
 [workspace.dependencies]
-voxeldust-core = { path = "core" }
-voxeldust-shard-common = { path = "shard-common" }
-glam = { version = "0.29", features = ["serde"] }
+# Workspace crates (dependency rule: bins -> node -> sim -> wire -> core; harness -> node + sim; nothing depends on a bin)
+vd-core = { path = "crates/core" }
+vd-wire = { path = "crates/wire" }
+vd-sim = { path = "crates/sim" }
+vd-node = { path = "crates/node" }
+vd-connection-plane = { path = "crates/connection-plane" }
+vd-harness = { path = "crates/harness" }
+
+# Pure-logic dependencies (Tier-A safe: no I/O)
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+postcard = { version = "1", features = ["alloc", "use-std"] }
+thiserror = "2"
+glam = { version = "0.29", features = ["serde"] }
+bevy_ecs = "0.18"
+arc-swap = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Test-only
+proptest = "1"
+
+# Prod I/O (reachable ONLY behind the sim::io seam; later moves to io-prod)
+tokio = { version = "1", features = ["full"] }
+crossbeam-channel = "0.5"
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.13"
-thiserror = "2"
-flatbuffers = "24.12.23"
-axum = "0.8"
 redb = "2"
-clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Deterministic world generation (pin exact noise version: cross-platform determinism)
+noise = "=0.9.0"
 brahe = "1.2"
-gooding-lambert = "0.2"
-nalgebra = "0.34"
-rapier3d = "0.22"
-wgpu = "23"
-winit = "0.30"
-egui = "0.30"
-egui-wgpu = "0.30"
-egui-winit = "0.30"
-bytemuck = { version = "1", features = ["derive"] }
-lz4_flex = "0.11"
 
-[profile.dev.package.noise]
-opt-level = 3
+# Identity
+hmac = "0.12"
+sha2 = "0.10"
 
-[profile.dev.package.voxeldust-core]
-opt-level = 2
+[workspace.lints.clippy]
+# The disallowed-methods/types config lives in clippy.toml (sim/node scoped).
+unwrap_used = "warn"
+
+# NOTE: re-add `[profile.dev.package.noise] opt-level = 3` when terrain generation
+# lands (P4) — debug-profile noise is ~40x slower and unusable for terrain gen.

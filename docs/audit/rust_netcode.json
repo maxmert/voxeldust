@@ -1,0 +1,117 @@
+{
+ "summary": "Central finding (high confidence): As of June 2026, NO open-source Rust library implements cross-process / server-to-server authority handoff \u2014 the exact thing voxeldust needs. Every Rust netcode/replication crate is built around a single authoritative server with many clients. \"Authority transfer\" in lightyear and \"ownership\" in bevy_replicon means client<->server within ONE server's world, never server<->server entity migration across processes. The distributed/sharded MMO pattern voxeldust is chasing (SpatialOS-style seamless zone handoff with authority migration) has no off-the-shelf Rust implementation; SpatialOS itself is the closest reference and is dead/proprietary. The two relevant 10k-player Rust projects (Hyperion, Valence) both DELIBERATELY avoid sharding game logic: they keep ONE game-logic process and scale only a stateless proxy layer horizontally (BVH-based regional multicast). That is strong evidence the hard part voxeldust hand-rolled is genuinely unsolved in OSS \u2014 so the multi-shard CONCEPT is novel/risky, but the transport/replication/interest-mgmt PLUMBING around it is well-solved and worth borrowing patterns from. Adopt-piecemeal recommendation: keep quinn (it is the right QUIC layer; lightyear/bevy_quinnet/aeronet all wrap it or similar); study lightyear's authority-transfer state machine, interest-management Rooms, and snapshot interpolation as DESIGN references rather than dependencies (it is single-server and bevy_ecs-coupled, would not slot into a shard mesh). For serialization, the 2273-line/117-table FlatBuffers schema is NOT pulling its weight for snapshot deltas: FlatBuffers' zero-copy benefit is wasted when you re-pack every tick, it is verbose/un-Rust-y, and bitcode/postcard are smaller+faster for the delta hot path. Recommend bitcode (smallest, lightyear's own choice) or postcard (stable wire format) for high-frequency snapshots; FlatBuffers can stay only for schema-evolution-sensitive control/handoff messages if cross-language matters. No Rust crate solves the handoff \u2014 voxeldust must own that layer; the question is only whether to keep its current bespoke one or rebuild transfer-first.",
+ "options": [
+  {
+   "name": "lightyear",
+   "verdict": "study-patterns-only",
+   "url": "https://github.com/cBournhonesque/lightyear",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Very active; v0.26.x released Jan 2026, frequent releases, the de-facto serious Bevy netcode lib. Single maintainer (cBournhonesque) but large user base.",
+   "fit": "FIT as a reference design, MISFIT as a dependency. Has the richest feature set in Rust: client-side prediction+rollback, snapshot interpolation, interest-management via Rooms, input buffering, lag compensation, entity mapping, bandwidth mgmt. CRITICALLY: its 'authority transfer' is client<->server only; the distributed_authority example is explicitly outdated/in-flux and there is NO server-to-server or host-migration topology. Tightly coupled to bevy_ecs 0.18 replication internals \u2014 would fight voxeldust's shard-mesh model rather than enable it. Transports: UDP/WebTransport(QUIC)/WebSocket/Steam (not raw quinn). REJECT as dep for the handoff problem; MINE its authority-FSM, Rooms interest model, and interpolation buffer as proven patterns. It also uses bitcode internally \u2014 data point for the serialization decision."
+  },
+  {
+   "name": "bevy_replicon",
+   "verdict": "study-patterns-only",
+   "url": "https://github.com/projectharmonia/bevy_replicon",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Very active; v0.40.3 released June 2 2026, supports Bevy 0.18. Healthy ecosystem (replicon_renet, replicon_quinnet, replicon_snap).",
+   "fit": "MISFIT for handoff. Explicitly 'server-authoritative', single-server, replication is server->client only. No authority transfer between servers, no multi-authoritative-server support, no entity migration across processes. Its 'visibility'/interest API (per-client entity/component visibility, ECS-relationship-driven replication groups) and its 'no builtin I/O' transport-agnostic design are good patterns to study, and replicon_snap shows snapshot-interpolation-without-prediction. But adopting it would DUPLICATE voxeldust's custom replication while adding nothing for the cross-shard problem and forcing bevy_replicon's world-replication model onto every shard."
+  },
+  {
+   "name": "quinn",
+   "verdict": "adopt",
+   "url": "https://github.com/quinn-rs/quinn",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Mature, widely used, the standard Rust QUIC impl; underpins bevy_quinnet, aeronet_webtransport, web-transport, etc.",
+   "fit": "STRONG FIT \u2014 already in use and correctly chosen. QUIC gives multiplexed reliable+unreliable streams, encryption, connection migration (useful for client roaming between shards' addresses), and 0-RTT. Keep it. Nothing in the ecosystem is a reason to replace it; the higher-level libs just wrap this or equivalents. For shard<->shard links and gateway routing quinn is appropriate. No change."
+  },
+  {
+   "name": "bevy_quinnet",
+   "verdict": "reject",
+   "url": "https://github.com/Henauxg/bevy_quinnet",
+   "license": "Apache-2.0/MIT",
+   "maturity": "Active; v0.17 (~early 2026). Thin client/server plugin over quinn.",
+   "fit": "DUPLICATE. It is a thin Bevy-plugin wrapper over quinn providing client/server channels + user-defined message enums. voxeldust already has quinn + a custom transport (shard-common: client_listener, peer_registry, tick_loop). Adopting it would replace working bespoke transport glue with an opinionated Bevy-coupled one and still gives zero help on handoff. No reason to switch."
+  },
+  {
+   "name": "aeronet",
+   "verdict": "study-patterns-only",
+   "url": "https://docs.rs/aeronet",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Active, v0.14.x; smaller user base than lightyear/replicon.",
+   "fit": "Transport/session abstraction layer (message<->packet framing, multiple simultaneous IO layers: WebTransport/QUIC, WebSocket, Steam, in-process channels), no_std-capable, with a nice egui session visualizer (RTT/packet-loss). Solves only transport/session, NOT replication or handoff. Its multi-IO-layer + in-process-channel design is a useful pattern if voxeldust ever colocates shards in one process for tests, and the visualizer is worth copying for debugging the flaky transfers. Not worth adopting over the existing quinn stack."
+  },
+  {
+   "name": "renet / bevy_renet / renet2",
+   "verdict": "reject",
+   "url": "https://github.com/lucaspoffo/renet",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Mature, widely used; bevy_renet v4.x. renet2 fork (UkoeHB) adds WebTransport/WebSocket/in-memory transports and is the more actively extended variant.",
+   "fit": "DUPLICATE of the transport layer voxeldust already owns. renet is a netcode.io-style reliable-UDP channel lib (single server, many clients) with auth/connection mgmt. No QUIC by default (renet2 adds WebTransport), no replication, no interest mgmt, definitely no server-to-server handoff. Choosing QUIC/quinn over renet's UDP-reliability layer was already the right call. Mention only as the netcode.io-port answer: renet IS the practical netcode.io-in-Rust; nothing there helps handoff."
+  },
+  {
+   "name": "naia",
+   "verdict": "reject",
+   "url": "https://github.com/naia-lib/naia",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Maintenance has slowed markedly; was influential (Tribes-2 model, Colyseus/nengi-inspired) but momentum moved to lightyear/replicon. Treat as low-velocity.",
+   "fit": "Cross-platform (incl WASM/WebRTC) entity-scope replication with per-client 'in-scope' interest sets \u2014 conceptually the closest to what voxeldust needs for interest management, and worth reading for its scope/room model. But single-server-authoritative, no server-to-server migration, slowing maintenance, and its own protocol/serialization. REJECT as dep; its 'entities in scope per client' design is a study reference for interest management only."
+  },
+  {
+   "name": "hyperion",
+   "verdict": "study-patterns-only",
+   "url": "https://github.com/hyperion-mc/hyperion",
+   "license": "check repo (Apache/MIT family typical)",
+   "maturity": "Active, high-profile (10k+ player Minecraft event engine, ~1.4ms tick at 5k players). Bevy multithreaded ECS, rkyv between game server and proxies.",
+   "fit": "MOST RELEVANT ARCHITECTURE REFERENCE. Proves the opposite of voxeldust's bet: to hit 10k players they kept ONE game-logic process and scaled a STATELESS PROXY layer horizontally (regional multicast via BVH: local/channel/global/unicast broadcast classes), I/O offloaded to proxies, rkyv on the server<->proxy link. No cross-process game-logic handoff at all. Takeaway for the audit: if voxeldust's player counts can fit one process, the proxy-fan-out model sidesteps the entire fragile-handoff problem. Their broadcast-class taxonomy and rkyv-on-internal-link choice are directly transferable. Study, do not depend."
+  },
+  {
+   "name": "valence",
+   "verdict": "study-patterns-only",
+   "url": "https://github.com/valence-rs/valence",
+   "license": "MIT",
+   "maturity": "Active framework but still early/incomplete with breaking changes; Bevy ECS based. Feather (feather-rs) is DEAD \u2014 its README now redirects users to Valence.",
+   "fit": "Reference only. Minecraft-server framework on Bevy ECS; 'thousands of players' single-process, no first-class sharding/multi-server story in core. Confirms the pattern: serious Rust voxel/MC servers do not shard game logic across processes in OSS. Useful for chunk/entity-tick patterns, not for handoff. Note for the audit: feather is dead (do not consider); valence is the living MC-in-Rust but does not solve voxeldust's distributed problem."
+  },
+  {
+   "name": "FlatBuffers (current choice)",
+   "verdict": "adopt-partially",
+   "url": "https://github.com/google/flatbuffers",
+   "license": "Apache-2.0",
+   "maturity": "Mature, cross-language, stable; Rust crate v24.x. But ecosystem sentiment: verbose, un-Rust-y, larger-than-ideal payloads.",
+   "fit": "MISFIT for the snapshot-delta hot path; OK for control/handoff messages. voxeldust's protocol is a 2273-line, 117-table .fbs (PlayerHandoff, HandoffAccepted, GalaxyHandoffContext, HostSwitch, WorldState, PlayerSnapshot, GhostUpdate, dual-shard compositing tables) PLUS a separate bincode handoff_blob for character migration \u2014 so it is ALREADY mixing formats. FlatBuffers' zero-copy/random-access win is largely wasted when every tick re-packs full snapshots; it costs bytes-on-wire and schema friction on exactly the high-frequency path. KEEP FlatBuffers only where schema-evolution + cross-language (client/server/tools) matters (handoff & control envelopes). MOVE per-tick snapshot deltas to a compact binary format."
+  },
+  {
+   "name": "bitcode",
+   "verdict": "adopt-partially",
+   "url": "https://github.com/SoftbearStudios/bitcode",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Active (Softbear Studios, used in production browser .io games); tops most size benchmarks. CAVEAT: explicitly NOT a stable wire format (free to change between versions) \u2014 pin the version.",
+   "fit": "STRONG FIT for snapshot deltas. Smallest output and competitive speed in rust_serialization_benchmark; bit-packing suits voxel/quantized fields (positions, block ids, bone transforms). It is what lightyear uses internally \u2014 convergent evidence. Use for high-frequency replication where both ends are the same Rust binary version (shards + Rust client). Do NOT use across long-lived persisted blobs or where wire stability across deploys matters, because the format is unstable \u2014 for handoff payloads that may straddle a rolling upgrade, prefer postcard or keep FlatBuffers."
+  },
+  {
+   "name": "postcard",
+   "verdict": "adopt-partially",
+   "url": "https://github.com/jamesmunns/postcard",
+   "license": "MIT OR Apache-2.0",
+   "maturity": "Mature, stable wire format, serde-based, embedded-grade; widely trusted.",
+   "fit": "GOOD FIT as the safe default for messages that need a STABLE wire format across rolling shard upgrades and during handoff (where sender and receiver shards may briefly run different versions). ~70% of bincode size, serde-native so it drops onto existing structs with no schema file. Recommendation: postcard for handoff/migration payloads and any cross-version internal message (replacing the ad-hoc bincode handoff_blob with something size-conscious and explicitly versioned); bitcode for the same-version snapshot hot path. This pair likely replaces most FlatBuffers usage and the bincode blob with two coherent, smaller, more Rust-native formats."
+  }
+ ],
+ "patterns": [
+  "CROSS-PROCESS AUTHORITY HANDOFF IS UNSOLVED IN OSS RUST (high confidence): lightyear authority = client<->server only (distributed_authority example outdated/in-flux); bevy_replicon = server->client only, no authority concept across servers; naia = per-client scope, single server; renet = transport only. voxeldust MUST own the handoff layer \u2014 there is nothing to adopt for it. Source: lightyear README/book, bevy_replicon README, naia docs (June 2026).",
+  "THE 10K-PLAYER RUST PROJECTS DELIBERATELY DO NOT SHARD GAME LOGIC. Hyperion (10k players, 1.4ms tick@5k) and Valence both run ONE game-logic process and horizontally scale only a STATELESS PROXY doing regional multicast (Hyperion uses a BVH with local/channel/global/unicast broadcast classes; rkyv on the server<->proxy link). Implication for the audit: a proxy-fan-out architecture sidesteps the entire fragile handoff problem if concurrent players in one region fit a single process. This is the strongest external signal that voxeldust's per-shard-process model is the source of its pain. Source: hyperion.rs architecture docs, Hyperion README, Valence README.",
+  "SpatialOS is the only mainstream design that did true seamless zone handoff + dynamic authority migration + dynamic repartitioning (20k players, single-shard world) \u2014 and it is proprietary and effectively dead. There is no Rust (or open) reuse, only the design pattern: world divided into zones, each owned by a worker, zoning made transparent, dynamic load-driven repartitioning. If voxeldust keeps the multi-shard concept, this is the reference architecture to copy \u2014 particularly making the boundary/overlap (interest-overlap region where two shards both replicate an entity) a first-class, tested primitive rather than an emergent behavior. voxeldust's existing 'observer-promotion' + 'dual-shard WorldState compositing' is a hand-rolled approximation of SpatialOS overlap zones; the eviction-landmine bug is precisely the failure mode SpatialOS handles via persistent overlap. Source: SpatialOS articles (80.lv, Massively OP).",
+  "INTEREST MANAGEMENT IS A SOLVED PATTERN WORTH STANDARDIZING ON: lightyear 'Rooms', bevy_replicon per-client visibility + ECS-relationship replication groups, naia per-client entity scope, Hyperion BVH broadcast classes all converge on 'maintain a per-observer set of in-scope entities and diff it each tick'. voxeldust already has visibility tables (VisibilityDirective, VisibleShipEntry, ObservableEntity, GhostUpdate) \u2014 these should be unified into one explicit per-observer interest set with add/remove events, which also makes handoff = 'transfer the interest set + authoritative state', testable in isolation.",
+  "SERIALIZATION: separate the wire into two regimes. (1) Same-version, high-frequency snapshot deltas -> bitcode (smallest, fastest bit-packing; lightyear's own choice). (2) Cross-version / persisted / handoff payloads -> postcard (stable serde wire format) or keep FlatBuffers where cross-language schema evolution matters. The current single-format FlatBuffers-for-everything (2273-line/117-table schema) plus an ad-hoc bincode handoff_blob is the worst of both: FlatBuffers' zero-copy is wasted on re-packed-every-tick snapshots while bincode handoff blobs have no version discipline. Source: rust_serialization_benchmark (David Koloski, 2026 runs), bitcode/postcard docs, LogRocket Rust serialization 2026.",
+  "DESIGN THE HANDOFF AS AN EXPLICIT STATE MACHINE WITH AN OVERLAP/HANDSHAKE WINDOW, NOT A ONE-SHOT MESSAGE. lightyear's authority transfer and SpatialOS zoning both model authority as a tracked, transferable token with a defined in-between state. voxeldust's known bugs (eviction landmine, ship-exit hull trap, 'not fully working transfers') are classic symptoms of treating handoff as a fire-and-forget PlayerHandoff/HandoffAccepted exchange without a durable two-shard overlap period and idempotent ret/rollback. A transfer-first rebuild should make the dual-ownership window first-class and test it with deterministic harnesses before layering features.",
+  "TEST/HARNESS GAP: none of the OSS libs will give voxeldust handoff correctness \u2014 but aeronet's in-process channel IO layer and session visualizer (RTT/packet-loss egui plots) and the general pattern of colocating multiple shards in one test process (deterministic, no real network) are the right way to make the currently-flaky transfers reproducible. Deterministic terrain (seed-based) is an asset here: handoff tests can assert byte-identical world reconstruction on the receiving shard."
+ ],
+ "open_questions": [
+  "What is the realistic peak concurrent-player density per region/planet/system? If it fits a single game-logic process, the Hyperion/Valence proxy-fan-out model could eliminate cross-process handoff entirely (replace shard processes with one authoritative process per world-region + stateless edge proxies), which would be a far smaller/safer rebuild than hardening N-way process handoff.",
+  "Is the multi-PROCESS shard boundary a hard requirement (k8s autoscaling, fault isolation, Rapier physics cost per shard) or an incidental early decision? The answer decides keep-and-harden-handoff vs collapse-to-single-process-per-region. The audit's keep-vs-rebuild verdict hinges on this more than on any crate choice.",
+  "Does the FlatBuffers schema serve any non-Rust consumer (tooling, a future non-Rust client, external services)? If everything on the wire is Rust<->Rust, FlatBuffers' cross-language justification disappears and bitcode/postcard win outright. The 117-table schema's maintenance cost is only justified by a cross-language or strict-schema-evolution need.",
+  "Does voxeldust need a persistent overlap/dual-authority window (SpatialOS-style) where TWO shards transiently co-own an entity, or is a strict single-owner-at-a-time handoff acceptable? The eviction-landmine and dual-shard WorldState compositing suggest overlap is already implicitly required \u2014 making it explicit is likely the core of a transfer-first foundation.",
+  "Could lightyear be used as the CLIENT<->edge-shard replication layer (where it is strong: prediction-optional, interpolation, interest Rooms) while voxeldust keeps a fully custom shard<->shard handoff mesh? This hybrid would adopt the solved half and own only the unsolved half \u2014 but requires committing the shard+client to bevy_ecs replication coupling. Worth a spike before deciding."
+ ]
+}

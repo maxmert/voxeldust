@@ -1,0 +1,65 @@
+{
+ "summary": "No 2026 framework does seamless cross-server entity handoff for Rust+Rapier+voxel+QUIC. Build in-house; reuse patterns only. See options for the full 12-platform verdict matrix.",
+ "options": [
+  {
+   "name": "SpacetimeDB",
+   "verdict": "study-patterns-only",
+   "fit": "Sandboxed WASM reducers cannot host native Rapier; one DB=one node; cross-shard handoff DIY. Best language/license fit (Rust/BSL/self-host); study deterministic replay."
+  },
+  {
+   "name": "Nakama",
+   "verdict": "study-patterns-only",
+   "fit": "Go not Rust; match on one node; matchSignal handoff is a rare exception; presence-replication pattern useful for peer_registry/observer."
+  },
+  {
+   "name": "Rivet",
+   "verdict": "adopt-partially",
+   "fit": "Apache-2 Rust self-host durable actors; good orchestrator/lifecycle substrate but no live entity migration; you still own handoff."
+  },
+  {
+   "name": "Edgegap",
+   "verdict": "adopt-partially",
+   "fit": "Fleet/placement orchestration only; runs your Rust shard binary; no handoff; use if you outgrow k3d."
+  },
+  {
+   "name": "Improbable SpatialOS",
+   "verdict": "reject",
+   "fit": "Dead (sold to Yuga 2026); was THE entity-handoff product; study chunk-boundary authority lessons + failure modes only."
+  },
+  {
+   "name": "Hadean Aether Engine",
+   "verdict": "reject",
+   "fit": "Pivoted to defense; unavailable, not Rust/self-hostable for games; load-balancing lessons only."
+  },
+  {
+   "name": "Hathora",
+   "verdict": "reject",
+   "fit": "Defunct May 2026 (pivot to voice AI); was fleet orchestration only."
+  },
+  {
+   "name": "Colyseus",
+   "verdict": "reject",
+   "fit": "Node.js only, no Rust/Rapier; room-based, no seamless cross-room handoff; no QUIC."
+  },
+  {
+   "name": "Croquet/Multisynq",
+   "verdict": "reject",
+   "fit": "Client-side deterministic VMs, no server-authoritative sim; cannot host trusted Rapier; DePIN/crypto."
+  },
+  {
+   "name": "Ambient",
+   "verdict": "reject",
+   "fit": "Closest Rust+WASM match but runtime paused indefinitely; not a handoff engine; unacceptable dependency."
+  },
+  {
+   "name": "Dojo/MUD (onchain)",
+   "verdict": "reject",
+   "fit": "Blockchain; latency/cost incompatible with real-time physics."
+  },
+  {
+   "name": "PlayFab/EOS + lightyear",
+   "verdict": "study-patterns-only",
+   "fit": "PlayFab/EOS = matchmaking/fleet only, no handoff. lightyear (Rust/Bevy) Rooms+visibility interest management transferable to dual-shard compositing/observer; you build handoff."
+  }
+ ]
+}

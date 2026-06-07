@@ -1,0 +1,15 @@
+# HR5 coverage exemptions registry (docs/design/coverage_e2e.md).
+#
+# RULES:
+# - Preferred mechanism is in-source `#[cfg_attr(coverage_nightly, coverage(off))]` on
+#   provably-unreachable / pure-wiring code. This file exists ONLY for cases an attribute
+#   cannot reach (whole generated files, third-party macro bodies).
+# - Every entry MUST carry a one-line justification. Any diff to this file requires
+#   explicit reviewer sign-off.
+# - An exemption on reachable logic is a review-rejectable defect.
+# - Exemption COUNT is a tracked metric: growth without a justification entry fails review.
+#
+# Entries are `ignore-filename-regex` fragments consumed by the justfile coverage recipes.
+
+[exemptions]
+# (none yet)
