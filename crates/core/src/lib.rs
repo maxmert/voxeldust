@@ -23,6 +23,7 @@ pub mod fence;
 pub mod geometry;
 pub mod ids;
 pub mod pose;
+pub mod rng;
 pub mod tlv;
 
 /// Re-exported so consumers use ONE glam version (pose types expose its vectors).

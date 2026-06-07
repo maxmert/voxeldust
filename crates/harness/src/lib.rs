@@ -24,4 +24,6 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
-// Modules land with task P0.7 (topology, fabric, clock, scripted_client, oracle, wire_monitor, chaos).
+pub mod chaos;
+pub mod fabric;
+pub mod topology;

@@ -58,5 +58,21 @@ sha2 = "0.10"
 # The disallowed-methods/types config lives in clippy.toml (sim/node scoped).
 unwrap_used = "warn"
 
+# Hot dependencies get optimized even in dev builds: debug-profile bevy_ecs makes a
+# Schedule::run ~ms instead of ~µs, turning the 12k-tick harness gate from tens of
+# milliseconds into a minute-plus. (Same lesson the old repo learned for noise/rapier.)
+[profile.dev.package.bevy_ecs]
+opt-level = 2
+[profile.dev.package.bevy_tasks]
+opt-level = 2
+[profile.dev.package.bevy_utils]
+opt-level = 2
+[profile.dev.package.bevy_platform]
+opt-level = 2
+[profile.dev.package.bevy_reflect]
+opt-level = 2
+[profile.dev.package.fixedbitset]
+opt-level = 2
+
 # NOTE: re-add `[profile.dev.package.noise] opt-level = 3` when terrain generation
 # lands (P4) — debug-profile noise is ~40x slower and unusable for terrain gen.

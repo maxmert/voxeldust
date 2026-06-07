@@ -14,6 +14,7 @@ serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+bevy_ecs = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
