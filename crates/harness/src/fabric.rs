@@ -82,7 +82,10 @@ struct Tracked {
 enum TrackedKind {
     Wire,
     /// An unreachable notice bounced to the sender: `to` here is the DEAD node.
-    Notice { dead: NodeId, undelivered: MsgId },
+    Notice {
+        dead: NodeId,
+        undelivered: MsgId,
+    },
 }
 
 #[derive(Debug, Default)]

@@ -19,22 +19,27 @@
 //!   `Err(QueueFull)` is the only synchronous failure (back-pressure).
 //! - A hard write failure surfaces on a later drain as `Inbound::NodeUnreachable`,
 //!   carrying the FIFO `MsgId` of the failed send.
-//! - TLS: a self-signed certificate trusted explicitly by the peer (the day-1
-//!   single-cluster-cert PSK model — NEVER certificate-verification skipping, which was
-//!   audit finding R7's enabler). The full cluster-cert plumbing lands at P3.
-//! - Peer identity in `WireFrame::from` is sender-asserted for the SPIKE; it becomes
-//!   trustworthy only because the channel is mutually authenticated (P3 mTLS) — the
-//!   design forbids ever deriving identity from source addresses (R2).
+//! - TLS: the [`trust::ClusterTrust`] day-1 PSK model — one cluster bundle, MUTUAL
+//!   TLS in both directions, NEVER certificate-verification skipping (which was
+//!   audit finding R7's enabler). Per-node certificates from a real CA land at P3+
+//!   behind the same seam.
+//! - Peer identity in `WireFrame::from` is sender-asserted; it is trustworthy only
+//!   because the channel is mutually authenticated — the design forbids ever
+//!   deriving identity from source addresses (R2).
 //!
 //! Coverage: Tier-B — exercised by the process tier; ratcheted floor, never 100% (HR5).
 
+pub mod admin;
+pub mod trust;
+
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 use serde::{Deserialize, Serialize};
 use vd_core::{MsgId, NodeId};
 use vd_sim::io::{Bytes, Inbound, MsgClass, SendError, Transport};
+
+use crate::trust::{ClusterTrust, TrustError};
 
 /// Maximum frame size accepted on a stream. Operational constant: migrates into
 /// `TransportTuning` when that struct lands (connection-plane work, P1).
@@ -58,8 +63,8 @@ struct OutboundFrame {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProdIoError {
-    #[error("tls setup: {0}")]
-    Tls(String),
+    #[error("trust: {0}")]
+    Trust(#[from] TrustError),
     #[error("quinn connect: {0}")]
     Connect(String),
     #[error("io: {0}")]
@@ -140,12 +145,14 @@ pub struct LoopbackPair {
     _runtime: tokio::runtime::Runtime,
 }
 
-/// Build two nodes connected over real QUIC on 127.0.0.1.
+/// Build two nodes connected over real QUIC on 127.0.0.1, under the cluster's
+/// mutual-TLS trust bundle.
 ///
 /// `outbound_capacity` bounds each node's outbound queue (the back-pressure point).
 /// `paused_writers` starts both writer threads gated, so a test can flood the queue
 /// deterministically before any drain happens.
 pub fn loopback_pair(
+    trust: &ClusterTrust,
     a_id: NodeId,
     b_id: NodeId,
     outbound_capacity: usize,
@@ -157,26 +164,12 @@ pub fn loopback_pair(
         .build()?;
     let handle = runtime.handle().clone();
 
-    // Day-1 trust model: one self-signed cert, explicitly trusted by the peer.
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
-        .map_err(|e| ProdIoError::Tls(e.to_string()))?;
-    let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
-    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()),
-    );
-
-    let server_config = quinn::ServerConfig::with_single_cert(vec![cert_der.clone()], key_der)
-        .map_err(|e| ProdIoError::Tls(e.to_string()))?;
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(cert_der)
-        .map_err(|e| ProdIoError::Tls(e.to_string()))?;
-    let client_config = quinn::ClientConfig::with_root_certificates(Arc::new(roots))
-        .map_err(|e| ProdIoError::Tls(e.to_string()))?;
+    let server_config = trust.quinn_server_config()?;
+    let client_config = trust.quinn_client_config()?;
 
     let bind: SocketAddr = "127.0.0.1:0"
         .parse()
-        .map_err(|_| ProdIoError::Tls("bad bind addr".into()))?;
+        .map_err(|_| ProdIoError::Connect("bad bind addr".into()))?;
 
     let (conn_a, conn_b, ep_a, ep_b) = handle.block_on(async move {
         let mut ep_b = quinn::Endpoint::server(server_config, bind)?;

@@ -65,10 +65,22 @@ impl core::fmt::Display for MsgId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AccountId(pub u128);
 
+impl core::fmt::Display for AccountId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "acct-{:032x}", self.0)
+    }
+}
+
 /// The connection-session principal: the cross-shard identity a gateway attests for a
 /// connected client. 128-bit random — never time-derived (R7), never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub u128);
+
+impl core::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "sess-{:032x}", self.0)
+    }
+}
 
 /// THE transfer correlation id: minted by the orchestrator at saga creation, carried
 /// on every message/span/frame touching the transfer; `(TransferId, step_id)` is the
@@ -189,6 +201,14 @@ mod tests {
         assert_eq!(MsgId(9).to_string(), "msg-9");
         assert_eq!(UniverseTick(11).to_string(), "ut-11");
         assert_eq!(EpochId(2).to_string(), "epoch-2");
+        assert_eq!(
+            AccountId(0xAB).to_string(),
+            "acct-000000000000000000000000000000ab"
+        );
+        assert_eq!(
+            SessionId(0xCD).to_string(),
+            "sess-000000000000000000000000000000cd"
+        );
     }
 
     #[test]

@@ -577,6 +577,35 @@ mod tests {
     }
 
     #[test]
+    fn cancel_during_freeze_thaws_the_source() {
+        // The deterministic twin of the (Freezing, Cancel) arm — the proptests only
+        // hit it probabilistically, and coverage must never depend on random draws.
+        let c = ctx(false);
+        let (state, _) = drive(
+            &c,
+            start(&c).0,
+            &[
+                SagaEvent::Prepared(PrepareResult::Ready),
+                SagaEvent::CutConfirmed { marker_seq: 5 },
+            ],
+        );
+        let (state, actions) = step(&c, state, SagaEvent::Cancel);
+        let thaw = SagaAction::Send(TransferControl::ThawSource {
+            transfer: c.transfer,
+            session: c.session,
+        });
+        assert!(actions.contains(&thaw), "the compensator MUST fire");
+        let (state, _) = step(&c, state, SagaEvent::DestAborted);
+        let (state, _) = step(&c, state, SagaEvent::SourceThawed);
+        assert_eq!(
+            state,
+            SagaState::Aborted {
+                reason: AbortReason::Cancelled
+            }
+        );
+    }
+
+    #[test]
     fn cas_loser_unwinds_with_thaw() {
         let c = ctx(false);
         let (state, _) = drive(

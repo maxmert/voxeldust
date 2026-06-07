@@ -23,6 +23,7 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
+pub mod admin;
 pub mod channels;
 pub mod framing;
 pub mod intershard;

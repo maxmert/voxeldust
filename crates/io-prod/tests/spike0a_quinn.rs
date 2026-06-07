@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use vd_core::{MsgId, NodeId};
 use vd_io_prod::loopback_pair;
+use vd_io_prod::trust::ClusterTrust;
 use vd_node::tracer::{TraceEvent, TracerNode, TracerRole};
 use vd_sim::io::mem::MemHub;
 use vd_sim::io::{Inbound, MsgClass, SendError, Transport};
@@ -42,7 +43,14 @@ fn identical_logical_output_mem_vs_quinn() {
     let (mem_trace, mem_echo_trace) = run_scenario(mem_pinger, mem_echo, N, || hub.pump());
 
     // Real-QUIC run: same nodes, same roles, same protocol bytes.
-    let pair = loopback_pair(A, B, 64, false).expect("loopback pair");
+    let pair = loopback_pair(
+        &ClusterTrust::generate("vd-spike").expect("trust"),
+        A,
+        B,
+        64,
+        false,
+    )
+    .expect("loopback pair");
     let quinn_pinger = TracerNode::new(pair.a, B, TracerRole::Pinger { total: N });
     let quinn_echo = TracerNode::new(pair.b, A, TracerRole::Echo);
     let (quinn_trace, quinn_echo_trace) = run_scenario(quinn_pinger, quinn_echo, N, || {
@@ -74,7 +82,14 @@ fn backpressure_parity_mem_vs_quinn() {
     let mem_results = flood(&mut mem_a);
 
     // Quinn: writer started PAUSED -> deterministically saturates at CAPACITY.
-    let mut pair = loopback_pair(A, B, CAPACITY, true).expect("loopback pair");
+    let mut pair = loopback_pair(
+        &ClusterTrust::generate("vd-spike").expect("trust"),
+        A,
+        B,
+        CAPACITY,
+        true,
+    )
+    .expect("loopback pair");
     let quinn_results = flood(&mut pair.a);
 
     let pattern = |results: &[Result<MsgId, SendError>]| -> Vec<bool> {
@@ -126,7 +141,14 @@ fn unreachable_parity_mem_vs_quinn() {
     );
 
     // Quinn: kill B's endpoint, send once, the writer's failure re-enters inbound.
-    let mut pair = loopback_pair(A, B, 8, false).expect("loopback pair");
+    let mut pair = loopback_pair(
+        &ClusterTrust::generate("vd-spike").expect("trust"),
+        A,
+        B,
+        8,
+        false,
+    )
+    .expect("loopback pair");
     pair.b_ctl.kill();
     std::thread::sleep(Duration::from_millis(100)); // let CONNECTION_CLOSE propagate
     let quinn_sent = pair.a.send(B, MsgClass::Saga, vec![9]).expect("enqueued");

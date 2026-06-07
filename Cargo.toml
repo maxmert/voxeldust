@@ -53,6 +53,11 @@ brahe = "1.2"
 # Identity
 hmac = "0.12"
 sha2 = "0.10"
+ed25519-dalek = "2"
+
+# Admin endpoint (io-prod only — Tier-B)
+serde_json = "1"
+axum = "0.8"
 
 [workspace.lints.clippy]
 # The disallowed-methods/types config lives in clippy.toml (sim/node scoped).
