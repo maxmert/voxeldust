@@ -23,4 +23,8 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
-// Modules land with task P0.4 (channels, framing, intershard, seams::{transfer_control, directory, tickets}).
+pub mod channels;
+pub mod framing;
+pub mod intershard;
+pub mod seams;
+pub mod version;

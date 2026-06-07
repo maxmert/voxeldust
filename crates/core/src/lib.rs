@@ -25,6 +25,9 @@ pub mod ids;
 pub mod pose;
 pub mod tlv;
 
+/// Re-exported so consumers use ONE glam version (pose types expose its vectors).
+pub use glam;
+
 pub use fence::Fence;
 pub use ids::{
     AccountId, EntityId, EpochId, MsgId, NodeId, SessionId, TickId, TransferId, UniverseTick,
