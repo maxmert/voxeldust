@@ -13,7 +13,9 @@
 //!   (persist-intent-before-spawn) — plus `io::mem`, the in-memory deterministic impls.
 //! - `saga`: the Transfer Saga as a PURE `fn step(State, Event) -> (State, Vec<Action>)`
 //!   (PREPARE → FLUSH → FENCE_DEMOTE → PROMOTE → CLEANUP, AWAIT_PROVISION, aborts,
-//!   compensators, DurabilityClass fan-out incl. the batched TransientGo path). Proptested.
+//!   compensators). The DurabilityClass fan-out branches the commit point on ONE
+//!   FSM (Durable -> directory CAS; Transient -> batched TransientGo go-token);
+//!   the batched transient flow itself is driven at P3. Proptested.
 //! - `authority`: the per-entity authority FSM (Owned / Ghost / Frozen).
 //! - `capability`: `NodeKind` + `ShardProfile::build()` — the validated capability DAG (HR4);
 //!   incoherent profiles fail loud at config load, never at runtime.

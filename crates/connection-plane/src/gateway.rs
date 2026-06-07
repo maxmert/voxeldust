@@ -286,7 +286,9 @@ fn process_gateway_inbound(
 
 fn push_control(outbox: &mut OutboundBox, to: NodeId, msg: &ServerControlMsg) {
     let bytes = postcard::to_allocvec(msg).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Control, vd_sim::io::bytes(bytes)));
+    outbox
+        .0
+        .push((to, MsgClass::Control, vd_sim::io::bytes(bytes)));
 }
 
 fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &GatewayToShard) {
@@ -297,7 +299,9 @@ fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &Ga
 fn push_directory(outbox: &mut OutboundBox, to: NodeId, op: DirectoryOp) {
     let bytes = postcard::to_allocvec(&InterShardFlow::Directory(op))
         .expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Saga, vd_sim::io::bytes(bytes)));
+    outbox
+        .0
+        .push((to, MsgClass::Saga, vd_sim::io::bytes(bytes)));
 }
 
 /// Handle one client control message. The gateway is the SOLE ticket validator;
@@ -1211,14 +1215,22 @@ mod tests {
         )]);
 
         // One frame: BOTH clients receive a sub-0 snapshot from the shared body.
-        let sent = rig.tick(vec![wire(SHARD, MsgClass::Snapshot, &frame_msg(Fence(1), 9))]);
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Snapshot,
+            &frame_msg(Fence(1), 9),
+        )]);
         let mut recipients: Vec<NodeId> = sent
             .iter()
             .filter(|(_, class, _)| *class == MsgClass::Snapshot)
             .map(|(to, _, _)| *to)
             .collect();
         recipients.sort_unstable();
-        assert_eq!(recipients, vec![CLIENT, NodeId(101)], "both subscribers fed");
+        assert_eq!(
+            recipients,
+            vec![CLIENT, NodeId(101)],
+            "both subscribers fed"
+        );
         for (_, _, bytes) in sent.iter().filter(|(_, c, _)| *c == MsgClass::Snapshot) {
             let snap: SnapshotDatagram = postcard::from_bytes(bytes).expect("decode");
             assert_eq!(snap.sub, SubId(0));

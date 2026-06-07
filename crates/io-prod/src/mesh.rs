@@ -166,7 +166,9 @@ pub fn spawn_mesh(
     // reliable uni streams and unreliable datagrams.
     let accept_endpoint = endpoint.clone();
     let accept_inbox = Arc::clone(&inbox);
-    let permits = Arc::new(tokio::sync::Semaphore::new(cfg.max_inbound_connections.max(1)));
+    let permits = Arc::new(tokio::sync::Semaphore::new(
+        cfg.max_inbound_connections.max(1),
+    ));
     handle.spawn(async move {
         while let Some(incoming) = accept_endpoint.accept().await {
             let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
@@ -342,7 +344,10 @@ async fn write_frame(
         Reliability::Unreliable => {
             // Datagrams are message-bounded (no length prefix). TooLarge is a loud
             // failure of the caller's framing, not a transport error to bounce.
-            if conn.max_datagram_size().is_none_or(|max| payload.len() > max) {
+            if conn
+                .max_datagram_size()
+                .is_none_or(|max| payload.len() > max)
+            {
                 tracing::warn!(
                     "datagram payload {} exceeds the path MTU budget; dropped",
                     payload.len()
@@ -478,7 +483,9 @@ mod tests {
                     continue;
                 }
                 let tag = vec![from.0 as u8, to.0 as u8];
-                sender.send(to, MsgClass::Control, vd_sim::io::bytes(tag)).expect("accepted");
+                sender
+                    .send(to, MsgClass::Control, vd_sim::io::bytes(tag))
+                    .expect("accepted");
             }
         }
         for node in &mut nodes {
@@ -580,7 +587,11 @@ mod tests {
             }
         }
         let (n, bytes) = refused.expect("the bounded lane eventually refuses");
-        assert_eq!(bytes.to_vec(), vec![n], "the refused payload is returned intact");
+        assert_eq!(
+            bytes.to_vec(),
+            vec![n],
+            "the refused payload is returned intact"
+        );
     }
 
     #[test]
@@ -680,7 +691,13 @@ mod tests {
         assert!(got.len() >= 10, "datagrams delivered: {}", got.len());
         for msg in &got {
             assert!(
-                matches!(msg, Inbound::Wire { class: MsgClass::Snapshot, .. }),
+                matches!(
+                    msg,
+                    Inbound::Wire {
+                        class: MsgClass::Snapshot,
+                        ..
+                    }
+                ),
                 "snapshot datagram: {msg:?}"
             );
         }

@@ -161,7 +161,9 @@ mod tests {
         // Three pings arrive at once.
         for n in 0..3u64 {
             let bytes = postcard::to_allocvec(&TracerMsg::Ping(n)).expect("encode");
-            pinger_t.send(ECHO, MsgClass::Control, bytes.into()).expect("ok");
+            pinger_t
+                .send(ECHO, MsgClass::Control, bytes.into())
+                .expect("ok");
         }
         hub.pump();
 

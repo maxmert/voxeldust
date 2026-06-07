@@ -71,7 +71,13 @@ fn backpressure_parity_mem_vs_quinn() {
 
     let flood = |t: &mut dyn Transport| -> Vec<Result<MsgId, SendError>> {
         (0..FLOOD)
-            .map(|n| t.send(B, MsgClass::Input, vec![u8::try_from(n).unwrap_or(0)].into()))
+            .map(|n| {
+                t.send(
+                    B,
+                    MsgClass::Input,
+                    vec![u8::try_from(n).unwrap_or(0)].into(),
+                )
+            })
             .collect()
     };
 
@@ -128,7 +134,9 @@ fn unreachable_parity_mem_vs_quinn() {
     let mut mem_a = hub.register(A, 8);
     let _mem_b = hub.register(B, 8);
     hub.kill(B);
-    let mem_sent = mem_a.send(B, MsgClass::Saga, vec![9].into()).expect("enqueued");
+    let mem_sent = mem_a
+        .send(B, MsgClass::Saga, vec![9].into())
+        .expect("enqueued");
     hub.pump();
     let mem_events = mem_a.drain_inbound();
     assert_eq!(
@@ -151,7 +159,10 @@ fn unreachable_parity_mem_vs_quinn() {
     .expect("loopback pair");
     pair.b_ctl.kill();
     std::thread::sleep(Duration::from_millis(100)); // let CONNECTION_CLOSE propagate
-    let quinn_sent = pair.a.send(B, MsgClass::Saga, vec![9].into()).expect("enqueued");
+    let quinn_sent = pair
+        .a
+        .send(B, MsgClass::Saga, vec![9].into())
+        .expect("enqueued");
 
     let started = Instant::now();
     let mut quinn_events: Vec<Inbound> = Vec::new();

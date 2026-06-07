@@ -569,7 +569,8 @@ mod tests {
     #[test]
     fn perfect_link_delivers_next_tick_and_acks_on_survival() {
         let (fabric, mut a, mut b) = perfect_pair();
-        a.send(B, MsgClass::Control, vec![7].into()).expect("accepted");
+        a.send(B, MsgClass::Control, vec![7].into())
+            .expect("accepted");
         assert_eq!(fabric.pump(TickId(1)), 1);
         let got = b.drain_inbound();
         assert_eq!(
@@ -669,7 +670,8 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Control, vec![3].into()).expect("accepted");
+        a.send(B, MsgClass::Control, vec![3].into())
+            .expect("accepted");
         for t in 1..6 {
             fabric.pump(TickId(t));
             assert!(b.drain_inbound().is_empty(), "partitioned at tick {t}");
@@ -699,7 +701,8 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Input, vec![5].into()).expect("accepted");
+        a.send(B, MsgClass::Input, vec![5].into())
+            .expect("accepted");
         let mut got = Vec::new();
         for t in 1..64 {
             fabric.pump(TickId(t));
@@ -727,7 +730,8 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Control, vec![8].into()).expect("accepted");
+        a.send(B, MsgClass::Control, vec![8].into())
+            .expect("accepted");
         fabric.pump(TickId(1));
         assert_eq!(b.drain_inbound().len(), 2, "dup_p=1.0 doubles the attempt");
         assert_eq!(fabric.stats().attempts_duplicated, 1);
@@ -744,8 +748,14 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        let err = a.send(B, MsgClass::Input, vec![4].into()).expect_err("rejected");
-        assert_eq!(err, SendError::QueueFull(vec![4].into()), "payload returned");
+        let err = a
+            .send(B, MsgClass::Input, vec![4].into())
+            .expect_err("rejected");
+        assert_eq!(
+            err,
+            SendError::QueueFull(vec![4].into()),
+            "payload returned"
+        );
         assert_eq!(fabric.stats().send_rejected, 1);
         assert!(
             fabric.conservation_holds(),
@@ -764,7 +774,8 @@ mod tests {
                 ..LinkPolicy::default()
             },
         );
-        a.send(B, MsgClass::Control, vec![6].into()).expect("accepted");
+        a.send(B, MsgClass::Control, vec![6].into())
+            .expect("accepted");
         let mut arrival = None;
         for t in 1..10 {
             fabric.pump(TickId(t));
@@ -815,7 +826,8 @@ mod tests {
         let mut a = fabric.register(A);
         let mut b = fabric.register_bounded(B, 2);
         for n in 0..5u8 {
-            a.send(B, MsgClass::Snapshot, vec![n].into()).expect("accepted");
+            a.send(B, MsgClass::Snapshot, vec![n].into())
+                .expect("accepted");
         }
         // First pump delivers up to the buffer cap; the rest defer.
         fabric.pump(TickId(1));

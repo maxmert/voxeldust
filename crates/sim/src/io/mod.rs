@@ -290,7 +290,10 @@ mod tests {
             .reliability(),
             Reliability::Reliable
         );
-        assert_eq!(wire(MsgClass::Snapshot).reliability(), Reliability::Unreliable);
+        assert_eq!(
+            wire(MsgClass::Snapshot).reliability(),
+            Reliability::Unreliable
+        );
     }
 
     #[test]
@@ -315,7 +318,10 @@ mod tests {
         inbox.push(wire(MsgClass::Snapshot));
         inbox.push(wire(MsgClass::Control));
         inbox.push(wire(MsgClass::Input));
-        assert_eq!(inbox.push(wire(MsgClass::Saga)), Some(InboxDrop::Unreliable));
+        assert_eq!(
+            inbox.push(wire(MsgClass::Saga)),
+            Some(InboxDrop::Unreliable)
+        );
         assert_eq!(inbox.dropped_unreliable(), 1);
         let drained = inbox.drain();
         // The first snapshot is gone; order is [control, input, saga].
@@ -361,6 +367,9 @@ mod tests {
         // Capacity floors at 1 even if constructed with 0.
         let mut tiny = BoundedInbox::new(0);
         assert_eq!(tiny.push(wire(MsgClass::Control)), None);
-        assert_eq!(tiny.push(wire(MsgClass::Control)), Some(InboxDrop::Reliable));
+        assert_eq!(
+            tiny.push(wire(MsgClass::Control)),
+            Some(InboxDrop::Reliable)
+        );
     }
 }

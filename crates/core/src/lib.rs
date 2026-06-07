@@ -20,6 +20,7 @@ pub mod celestial;
 pub mod collections;
 pub mod entity_kind;
 pub mod fence;
+pub mod frame;
 pub mod geometry;
 pub mod ids;
 pub mod pose;

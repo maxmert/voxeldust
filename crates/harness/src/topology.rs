@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use vd_core::{EntityId, NodeId, SessionId, TickId};
+use vd_core::pose::RealmId;
+use vd_core::{EntityId, Fence, NodeId, SessionId, TickId};
 use vd_node::TickReport;
 use vd_sim::stub::DiscardReason;
 use vd_wire::seams::directory::{DirectoryKey, OwnerRecord};
@@ -23,8 +24,15 @@ use crate::fabric::{CrashWhen, FaultFabric};
 pub struct InspectReport {
     /// Directory records (only the orchestrator fills this).
     pub directory: Vec<(DirectoryKey, OwnerRecord)>,
-    /// Entities this node holds authoritatively (shards fill this).
-    pub held_entities: Vec<EntityId>,
+    /// Entities this node holds authoritatively, with the directory-recorded fence
+    /// it holds them at (shards fill this; FENCE-9 asserts the fence matches).
+    pub held_entities: Vec<(EntityId, Fence)>,
+    /// Realms this node holds authoritatively, with their fence (shards fill this;
+    /// extends AUTHORITY-UNIQUE to realm keys — FENCE-3).
+    pub held_realms: Vec<(RealmId, Fence)>,
+    /// Realms this node has REQUESTED but not yet confirmed (the legal
+    /// commit-to-knowledge window — excuses a recorded realm not yet held).
+    pub pending_realms: Vec<RealmId>,
     /// Entities this node has REQUESTED authority for but not yet seen the
     /// directory confirm (the legal commit-to-knowledge window; a pending entry
     /// excuses a directory record with no holder — an orphan does not).
@@ -82,7 +90,7 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .0
             .values()
             .filter(|d| d.granted)
-            .map(|d| d.entity)
+            .map(|d| (d.entity, d.entity_fence))
             .collect();
         report.pending_entities = dots
             .0
@@ -96,6 +104,17 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .filter(|d| d.granted & d.departing)
             .map(|d| d.entity)
             .collect();
+    }
+    if let (Some(config), Some(authority)) = (
+        world.get_resource::<vd_sim::stub::StubConfig>(),
+        world.get_resource::<vd_sim::stub::RealmAuthority>(),
+    ) {
+        // A shard reports its realm authority (and fence) only while it holds the
+        // lease — a self-fenced shard reports nothing (FENCE-3).
+        match authority.0 {
+            Some(fence) => report.held_realms = vec![(config.realm, fence)],
+            None => report.pending_realms = vec![config.realm],
+        }
     }
     if let Some(log) = world.get_resource::<vd_sim::stub::InputLog>() {
         report.applied_inputs = log.applied();
@@ -697,9 +716,20 @@ mod tests {
                 orchestrator: A,
                 mint_seed: 3,
                 input_log_capacity: 1_000_000,
+                realm_recheck_interval: 0,
             },
         );
         topo.add_node(Box::new(shard));
+
+        // Before any step the shard has no realm authority yet: it reports the realm
+        // as PENDING (the commit-to-knowledge window), not held.
+        let early = topo.inspect_all();
+        assert_eq!(early[1].1.held_realms, Vec::new());
+        assert_eq!(
+            early[1].1.pending_realms,
+            vec![vd_core::pose::RealmId::System(5)],
+            "an ungranted shard reports its realm pending"
+        );
 
         // A few ticks: the shard wins its realm lease through the directory.
         for _ in 0..6 {

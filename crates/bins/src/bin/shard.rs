@@ -54,6 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Bounded in production: the input-conservation log is a metrics ring,
             // not an unbounded audit trail (SCALE-3).
             input_log_capacity: env.parse("VD_INPUT_LOG_CAP")?,
+            // How often to re-read the realm head to observe a lost lease (FENCE-1/5/8).
+            realm_recheck_interval: env.parse("VD_REALM_RECHECK")?,
         },
     );
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);

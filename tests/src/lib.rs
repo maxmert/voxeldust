@@ -46,6 +46,7 @@ pub fn stub_config() -> StubConfig {
         mint_seed: 11,
         // Large window: the oracle must see a whole short test run.
         input_log_capacity: 1_000_000,
+        realm_recheck_interval: 0,
     }
 }
 

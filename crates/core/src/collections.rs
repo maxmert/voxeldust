@@ -11,6 +11,10 @@
 //! `DefaultHasher::new()`). The chaos-replay gate runs twice in separate processes and
 //! would catch any regression of this property.
 
+// This module IS the sanctioned replacement for the banned default-hasher maps:
+// it pins a FixedSeedHasher, so the raw `HashMap`/`HashSet` here are the one
+// legitimate use (the seam clippy ban points callers AT this module).
+#[allow(clippy::disallowed_types)]
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 
@@ -18,9 +22,11 @@ use std::hash::BuildHasherDefault;
 pub type FixedSeedHasher = BuildHasherDefault<std::hash::DefaultHasher>;
 
 /// Deterministic `HashMap`: use when O(1) lookup matters; `BTreeMap` otherwise.
+#[allow(clippy::disallowed_types)]
 pub type DetHashMap<K, V> = HashMap<K, V, FixedSeedHasher>;
 
 /// Deterministic `HashSet`.
+#[allow(clippy::disallowed_types)]
 pub type DetHashSet<T> = HashSet<T, FixedSeedHasher>;
 
 #[cfg(test)]

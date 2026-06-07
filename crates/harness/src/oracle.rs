@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use vd_core::{EntityId, NodeId, SessionId};
+use vd_core::{EntityId, Fence, NodeId, SessionId};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 
 use crate::topology::InspectReport;
@@ -31,6 +31,22 @@ pub enum AuthorityViolation {
     HeldNowhere { entity: EntityId, recorded: String },
     #[error("entity {entity} is still pending at {node} after the run settled")]
     UnsettledPending { entity: EntityId, node: NodeId },
+    #[error("entity {entity} held at {held} but the directory records {recorded} (FENCE-9)")]
+    FenceMismatch {
+        entity: EntityId,
+        held: Fence,
+        recorded: Fence,
+    },
+    #[error("realm {realm} is held by {holders:?} — exactly one holder required")]
+    RealmWrongHolderCount { realm: String, holders: Vec<NodeId> },
+    #[error("realm {realm} held by {holder} at {held} disagrees with the directory")]
+    RealmDisagrees {
+        realm: String,
+        holder: NodeId,
+        held: Fence,
+    },
+    #[error("directory realm {realm} (owner {recorded}) is held by no live shard")]
+    RealmHeldNowhere { realm: String, recorded: String },
 }
 
 /// AUTHORITY-UNIQUE (binding P1, checked every committed tick): every entity in
@@ -46,16 +62,18 @@ pub enum AuthorityViolation {
 pub fn verify_authority_unique(
     reports: &[(NodeId, InspectReport)],
 ) -> Result<(), AuthorityViolation> {
-    // Who CLAIMS to hold each entity.
+    // Who CLAIMS to hold each entity, and at what fence.
     let mut holders: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
+    let mut held_fence: BTreeMap<EntityId, Fence> = BTreeMap::new();
     // Who awaits a grant confirmation for each entity (the legal in-flight window).
     let mut pending: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
-    // What the directory RECORDS for each entity key.
-    let mut recorded: BTreeMap<EntityId, AuthorityRef> = BTreeMap::new();
+    // What the directory RECORDS for each entity key (authority + fence).
+    let mut recorded: BTreeMap<EntityId, vd_wire::seams::directory::OwnerRecord> = BTreeMap::new();
     let mut departing: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
     for (node, report) in reports {
-        for entity in &report.held_entities {
+        for (entity, fence) in &report.held_entities {
             holders.entry(*entity).or_default().push(*node);
+            held_fence.insert(*entity, *fence);
         }
         for entity in &report.pending_entities {
             pending.entry(*entity).or_default().push(*node);
@@ -65,12 +83,13 @@ pub fn verify_authority_unique(
         }
         for (key, record) in &report.directory {
             if let DirectoryKey::Entity(entity) = key {
-                recorded.insert(*entity, record.authority);
+                recorded.insert(*entity, *record);
             }
         }
     }
 
-    // Every held entity: exactly one holder, and the directory names it.
+    // Every held entity: exactly one holder, the directory names it, AND the holder's
+    // fence matches the directory's (FENCE-9 — a stale-fence holder is split-brain).
     for (entity, holding_nodes) in &holders {
         if holding_nodes.len() != 1 {
             return Err(AuthorityViolation::WrongHolderCount {
@@ -93,12 +112,21 @@ pub fn verify_authority_unique(
                     });
                 }
             }
-            Some(AuthorityRef::Shard(node)) if *node == holder => {}
-            Some(other) => {
+            Some(record) if record.authority == AuthorityRef::Shard(holder) => {
+                let held = held_fence[entity];
+                if held != record.fence {
+                    return Err(AuthorityViolation::FenceMismatch {
+                        entity: *entity,
+                        held,
+                        recorded: record.fence,
+                    });
+                }
+            }
+            Some(record) => {
                 return Err(AuthorityViolation::DirectoryDisagrees {
                     entity: *entity,
                     holder,
-                    recorded: format!("{other:?}"),
+                    recorded: format!("{:?}", record.authority),
                 });
             }
         }
@@ -108,19 +136,84 @@ pub fn verify_authority_unique(
     // confirmation is still in flight TOWARD THE RECORDED OWNER (the directory
     // commit precedes the owner's knowledge by one delivery; an entity pending
     // anywhere else is NOT excused).
-    for (entity, authority) in &recorded {
+    for (entity, record) in &recorded {
         if holders.contains_key(entity) {
             continue;
         }
         let in_flight_to_owner = pending.get(entity).is_some_and(|nodes| {
             nodes
                 .iter()
-                .any(|node| *authority == AuthorityRef::Shard(*node))
+                .any(|node| record.authority == AuthorityRef::Shard(*node))
         });
         if !in_flight_to_owner {
             return Err(AuthorityViolation::HeldNowhere {
                 entity: *entity,
-                recorded: format!("{authority:?}"),
+                recorded: format!("{:?}", record.authority),
+            });
+        }
+    }
+
+    // REALM authority is checked the same way (FENCE-3): a realm transfer that
+    // double-grants must not pass green just because the oracle only looked at
+    // entity keys. (Ship keys extend identically at P8.)
+    verify_realm_authority(reports)
+}
+
+/// The realm-key half of AUTHORITY-UNIQUE: every realm record has exactly one
+/// holding shard at the matching fence, and every held realm is recorded.
+fn verify_realm_authority(reports: &[(NodeId, InspectReport)]) -> Result<(), AuthorityViolation> {
+    use vd_core::pose::RealmId;
+    let mut holders: BTreeMap<RealmId, Vec<(NodeId, Fence)>> = BTreeMap::new();
+    let mut pending: BTreeMap<RealmId, Vec<NodeId>> = BTreeMap::new();
+    let mut recorded: BTreeMap<RealmId, vd_wire::seams::directory::OwnerRecord> = BTreeMap::new();
+    for (node, report) in reports {
+        for (realm, fence) in &report.held_realms {
+            holders.entry(*realm).or_default().push((*node, *fence));
+        }
+        for realm in &report.pending_realms {
+            pending.entry(*realm).or_default().push(*node);
+        }
+        for (key, record) in &report.directory {
+            if let DirectoryKey::Realm(realm) = key {
+                recorded.insert(*realm, *record);
+            }
+        }
+    }
+    for (realm, held) in &holders {
+        if held.len() != 1 {
+            return Err(AuthorityViolation::RealmWrongHolderCount {
+                realm: realm.to_string(),
+                holders: held.iter().map(|(n, _)| *n).collect(),
+            });
+        }
+        let (holder, fence) = held[0];
+        match recorded.get(realm) {
+            Some(record)
+                if record.authority == AuthorityRef::Shard(holder) && record.fence == fence => {}
+            _ => {
+                return Err(AuthorityViolation::RealmDisagrees {
+                    realm: realm.to_string(),
+                    holder,
+                    held: fence,
+                });
+            }
+        }
+    }
+    for (realm, record) in &recorded {
+        if holders.contains_key(realm) {
+            continue;
+        }
+        // Excused while the grant confirmation is in flight TO the recorded owner
+        // (the directory commit precedes the shard's knowledge by one delivery).
+        let in_flight_to_owner = pending.get(realm).is_some_and(|nodes| {
+            nodes
+                .iter()
+                .any(|node| record.authority == AuthorityRef::Shard(*node))
+        });
+        if !in_flight_to_owner {
+            return Err(AuthorityViolation::RealmHeldNowhere {
+                realm: realm.to_string(),
+                recorded: format!("{:?}", record.authority),
             });
         }
     }
@@ -260,12 +353,129 @@ mod tests {
     }
 
     fn record(node: NodeId) -> OwnerRecord {
+        record_at(node, Fence(1))
+    }
+
+    fn record_at(node: NodeId, fence: Fence) -> OwnerRecord {
         OwnerRecord {
             authority: AuthorityRef::Shard(node),
-            fence: Fence(1),
+            fence,
             lease_expires: UniverseTick(100),
             in_transfer: None,
         }
+    }
+
+    fn realm() -> vd_core::pose::RealmId {
+        vd_core::pose::RealmId::System(7)
+    }
+
+    /// An orchestrator + shard agreeing on one realm at fence 3.
+    fn realm_healthy() -> Vec<(NodeId, InspectReport)> {
+        vec![
+            (
+                ORCH,
+                InspectReport {
+                    directory: vec![(DirectoryKey::Realm(realm()), record_at(SHARD, Fence(3)))],
+                    ..InspectReport::default()
+                },
+            ),
+            (
+                SHARD,
+                InspectReport {
+                    held_realms: vec![(realm(), Fence(3))],
+                    ..InspectReport::default()
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn realm_authority_unique_passes_and_catches_split_brain() {
+        assert_eq!(verify_authority_unique(&realm_healthy()), Ok(()));
+        // Two shards claiming the same realm.
+        let mut reports = realm_healthy();
+        reports.push((
+            NodeId(9),
+            InspectReport {
+                held_realms: vec![(realm(), Fence(3))],
+                ..InspectReport::default()
+            },
+        ));
+        assert_eq!(
+            verify_authority_unique(&reports),
+            Err(AuthorityViolation::RealmWrongHolderCount {
+                realm: realm().to_string(),
+                holders: vec![SHARD, NodeId(9)],
+            })
+        );
+    }
+
+    #[test]
+    fn realm_fence_or_owner_disagreement_is_caught() {
+        // Shard holds at a STALE fence (directory moved to 4).
+        let mut reports = realm_healthy();
+        reports[0].1.directory = vec![(DirectoryKey::Realm(realm()), record_at(SHARD, Fence(4)))];
+        assert_eq!(
+            verify_authority_unique(&reports),
+            Err(AuthorityViolation::RealmDisagrees {
+                realm: realm().to_string(),
+                holder: SHARD,
+                held: Fence(3),
+            })
+        );
+        // Shard holds a realm the directory records to a DIFFERENT owner.
+        let mut reports = realm_healthy();
+        reports[0].1.directory =
+            vec![(DirectoryKey::Realm(realm()), record_at(NodeId(9), Fence(3)))];
+        assert_eq!(
+            verify_authority_unique(&reports),
+            Err(AuthorityViolation::RealmDisagrees {
+                realm: realm().to_string(),
+                holder: SHARD,
+                held: Fence(3),
+            })
+        );
+    }
+
+    #[test]
+    fn realm_in_flight_grant_is_excused_but_an_orphan_is_caught() {
+        // Recorded for SHARD, pending at SHARD (grant confirmation in flight): legal.
+        let mut reports = realm_healthy();
+        reports[1].1.held_realms.clear();
+        reports[1].1.pending_realms = vec![realm()];
+        assert_eq!(verify_authority_unique(&reports), Ok(()));
+        // Pending at a DIFFERENT node excuses nothing: genuine orphan.
+        let mut reports = realm_healthy();
+        reports[1].1.held_realms.clear();
+        reports.push((
+            NodeId(9),
+            InspectReport {
+                pending_realms: vec![realm()],
+                ..InspectReport::default()
+            },
+        ));
+        assert_eq!(
+            verify_authority_unique(&reports),
+            Err(AuthorityViolation::RealmHeldNowhere {
+                realm: realm().to_string(),
+                recorded: format!("{:?}", AuthorityRef::Shard(SHARD)),
+            })
+        );
+    }
+
+    #[test]
+    fn an_entity_held_at_a_stale_fence_is_a_split_brain() {
+        // The directory moved the entity to fence 2 but the holder still claims 1.
+        let mut reports = healthy();
+        reports[0].1.directory = vec![(DirectoryKey::Entity(entity()), record_at(SHARD, Fence(2)))];
+        assert_eq!(
+            verify_authority_unique(&reports),
+            Err(AuthorityViolation::FenceMismatch {
+                entity: entity(),
+                held: Fence(1),
+                recorded: Fence(2),
+            })
+        );
     }
 
     fn healthy() -> Vec<(NodeId, InspectReport)> {
@@ -280,7 +490,7 @@ mod tests {
             (
                 SHARD,
                 InspectReport {
-                    held_entities: vec![entity()],
+                    held_entities: vec![(entity(), Fence(1))],
                     applied_inputs: vec![(SESSION, 1), (SESSION, 2)],
                     discarded_inputs: vec![
                         (SESSION, Some(3), DiscardReason::DuplicateSeq),
@@ -313,7 +523,7 @@ mod tests {
         reports.push((
             NodeId(9),
             InspectReport {
-                held_entities: vec![entity()],
+                held_entities: vec![(entity(), Fence(1))],
                 ..InspectReport::default()
             },
         ));

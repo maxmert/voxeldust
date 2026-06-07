@@ -123,7 +123,11 @@ impl MemHub {
         // The inbound bound is generous relative to outbound: it exists to make
         // overflow REPRODUCIBLE, not to throttle normal traffic. `register_bounded`
         // sets it explicitly for overflow scenarios.
-        self.register_bounded(id, outbound_capacity, outbound_capacity.saturating_mul(8).max(64))
+        self.register_bounded(
+            id,
+            outbound_capacity,
+            outbound_capacity.saturating_mul(8).max(64),
+        )
     }
 
     /// Register with an explicit inbound capacity (overflow-scenario tests).
@@ -266,7 +270,8 @@ mod tests {
         let mut a = hub.register(A, 8);
         let mut b = hub.register(B, 8);
 
-        a.send(B, MsgClass::Control, vec![1].into()).expect("accepted");
+        a.send(B, MsgClass::Control, vec![1].into())
+            .expect("accepted");
         assert!(b.drain_inbound().is_empty(), "no delivery before pump");
 
         hub.pump();
@@ -303,8 +308,12 @@ mod tests {
         let mut b = hub.register(B, 8);
         assert_eq!((a.local_id(), b.local_id()), (A, B));
 
-        let id0 = a.send(B, MsgClass::Control, vec![0].into()).expect("accepted");
-        let id1 = a.send(B, MsgClass::Control, vec![1].into()).expect("accepted");
+        let id0 = a
+            .send(B, MsgClass::Control, vec![0].into())
+            .expect("accepted");
+        let id1 = a
+            .send(B, MsgClass::Control, vec![1].into())
+            .expect("accepted");
         assert_eq!((id0, id1), (MsgId(0), MsgId(1)));
 
         hub.pump();
@@ -371,7 +380,8 @@ mod tests {
         let mut a = hub.register(A, 64);
         let mut b = hub.register_bounded(B, 64, 4);
         for n in 0..32u8 {
-            a.send(B, MsgClass::Snapshot, vec![n].into()).expect("accepted");
+            a.send(B, MsgClass::Snapshot, vec![n].into())
+                .expect("accepted");
             hub.pump();
         }
         let got = b.drain_inbound();
@@ -393,7 +403,8 @@ mod tests {
         let mut a = hub.register(A, 8);
         let mut b = hub.register(B, 8);
         hub.kill(NodeId(999));
-        a.send(B, MsgClass::Control, vec![5].into()).expect("accepted");
+        a.send(B, MsgClass::Control, vec![5].into())
+            .expect("accepted");
         hub.pump();
         assert_eq!(b.drain_inbound().len(), 1, "traffic unaffected");
     }

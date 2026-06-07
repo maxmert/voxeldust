@@ -38,7 +38,7 @@ impl core::fmt::Display for RealmId {
 }
 
 /// The reference frame a pose is expressed in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FrameRef {
     /// Planet-centered Cartesian, planet center at origin (surface worlds).
     PlanetCentered { planet_seed: u64 },

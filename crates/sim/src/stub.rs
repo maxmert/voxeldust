@@ -48,6 +48,9 @@ pub struct StubConfig {
     /// Bounded window for the input-conservation log (SCALE-3): production sets a
     /// small ring; the harness sets a large one so the oracle sees a whole run.
     pub input_log_capacity: usize,
+    /// How often (ticks) a shard re-reads its realm head to OBSERVE a lost lease
+    /// (fence rule 4 self-fence — FENCE-1/5/8). 0 disables (single-shard P1 tests).
+    pub realm_recheck_interval: u64,
 }
 
 /// One connected avatar.
@@ -67,6 +70,10 @@ pub struct Dot {
     /// the directory confirms its revoke — authority is released AT the
     /// directory, never by local despawn.
     pub departing: bool,
+    /// The directory-RECORDED authority fence for this entity (FENCE-1/5/8): every
+    /// grant/revoke uses THIS, never a hardcoded literal, so a transfer that
+    /// advanced the fence past genesis cannot wedge a logout forever.
+    pub entity_fence: Fence,
     pub pose: StampedPose,
     pub yaw: f64,
     pub pitch: f64,
@@ -205,24 +212,49 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
 fn request_pending_grants(
     config: Res<StubConfig>,
     identity: Res<NodeIdentity>,
+    clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     dots: Res<Dots>,
     mut outbox: ResMut<OutboundBox>,
 ) {
-    if authority.0.is_none() {
-        let op = DirectoryOp::LeaseGrant {
-            key: DirectoryKey::Realm(config.realm),
-            owner: AuthorityRef::Shard(identity.node_id),
-            fence: Fence::GENESIS.next(),
-        };
-        push_flow(
-            &mut outbox,
-            config.orchestrator,
-            &InterShardFlow::Directory(op),
-        );
+    match authority.0 {
+        None => {
+            let op = DirectoryOp::LeaseGrant {
+                key: DirectoryKey::Realm(config.realm),
+                owner: AuthorityRef::Shard(identity.node_id),
+                fence: Fence::GENESIS.next(),
+            };
+            push_flow(
+                &mut outbox,
+                config.orchestrator,
+                &InterShardFlow::Directory(op),
+            );
+        }
+        Some(_) if config.realm_recheck_interval > 0 => {
+            // Periodically re-read the realm head: the reply reveals a lost lease so
+            // the shard self-fences (the loss-reaction is otherwise unreachable).
+            if clock
+                .local_tick
+                .0
+                .is_multiple_of(config.realm_recheck_interval)
+            {
+                let op = DirectoryOp::HeadRead {
+                    key: DirectoryKey::Realm(config.realm),
+                };
+                push_flow(
+                    &mut outbox,
+                    config.orchestrator,
+                    &InterShardFlow::Directory(op),
+                );
+            }
+        }
+        Some(_) => {}
     }
     for dot in dots.0.values() {
         if !dot.granted {
+            // A provisional entity is always requested at the genesis-next fence (a
+            // never-recorded entity); the RECORDED fence (entity_fence) is what the
+            // revoke uses, which is the FENCE-1/5/8 fix.
             let op = DirectoryOp::LeaseGrant {
                 key: DirectoryKey::Entity(dot.entity),
                 owner: AuthorityRef::Shard(identity.node_id),
@@ -234,9 +266,12 @@ fn request_pending_grants(
                 &InterShardFlow::Directory(op),
             );
         } else if dot.departing {
+            // Revoke at the RECORDED fence (FENCE-1/5/8): a hardcoded literal would
+            // be Refused once any transfer advanced the entity's fence, stranding the
+            // logout forever.
             let op = DirectoryOp::LeaseRevoke {
                 key: DirectoryKey::Entity(dot.entity),
-                fence: Fence::GENESIS.next(),
+                fence: dot.entity_fence,
             };
             push_flow(
                 &mut outbox,
@@ -353,6 +388,7 @@ fn on_gateway_msg(
                     gateway: from,
                     granted: false,
                     departing: false,
+                    entity_fence: Fence::GENESIS,
                     pose: StampedPose::at_rest(
                         ctx.config.frame,
                         DVec3::ZERO,
@@ -447,7 +483,9 @@ fn mint_entity(mint: &mut EntityMint, node: NodeId) -> EntityId {
 
 fn push_session_reply(outbox: &mut OutboundBox, to: NodeId, reply: &ShardToGateway) {
     let bytes = postcard::to_allocvec(reply).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Control, crate::io::bytes(bytes)));
+    outbox
+        .0
+        .push((to, MsgClass::Control, crate::io::bytes(bytes)));
 }
 
 /// The input path: fence gate → decode → seq gate → integrate. Every outcome lands
@@ -539,11 +577,22 @@ fn on_directory_reply(
             if record.authority == AuthorityRef::Shard(identity.node_id) {
                 authority.0 = Some(record.fence);
             } else {
-                tracing::error!(
-                    "realm lease held by {:?}, not this shard — misconfigured topology",
+                // The realm was taken over (P2 transfer / reassignment): SELF-FENCE
+                // immediately (fence rule 4) — drop authority and stop emitting
+                // frames so a stale old owner cannot affect clients.
+                tracing::warn!(
+                    "realm lease now held by {:?}, not this shard — self-fencing",
                     record.authority
                 );
+                authority.0 = None;
             }
+        }
+        DirectoryReply::Head {
+            key: DirectoryKey::Realm(_),
+            record: None,
+        } => {
+            // The realm record is gone (revoked): self-fence (frames stop).
+            authority.0 = None;
         }
         DirectoryReply::Head {
             key: DirectoryKey::Entity(entity),
@@ -565,6 +614,7 @@ fn on_directory_reply(
             for (session, dot) in &mut dots.0 {
                 if dot.entity == entity && !dot.granted {
                     dot.granted = true;
+                    dot.entity_fence = record.fence; // the recorded authority fence
                     let reply = ShardToGateway::SessionAttached {
                         session: *session,
                         entity,
@@ -679,6 +729,7 @@ mod tests {
             orchestrator: ORCH,
             mint_seed: 99,
             input_log_capacity: 1024,
+            realm_recheck_interval: 0,
         }
     }
 
@@ -689,6 +740,10 @@ mod tests {
 
     impl Rig {
         fn new() -> Rig {
+            Rig::with_config(config())
+        }
+
+        fn with_config(cfg: StubConfig) -> Rig {
             let mut world = World::new();
             world.insert_resource(InboundBox::default());
             world.insert_resource(OutboundBox::default());
@@ -702,8 +757,14 @@ mod tests {
                 epoch: vd_core::EpochId(1),
             });
             let mut schedule = Schedule::default();
-            register_stub_shard(&mut world, &mut schedule, config());
+            register_stub_shard(&mut world, &mut schedule, cfg);
             Rig { world, schedule }
+        }
+
+        /// Set the rig's local tick (the test rig runs the schedule directly, so it
+        /// must drive the clock the node shell would normally advance).
+        fn set_local_tick(&mut self, tick: u64) {
+            self.world.resource_mut::<ClockSample>().local_tick = vd_core::TickId(tick);
         }
 
         /// Run one tick with the given inbound; returns everything sent.
@@ -843,6 +904,138 @@ mod tests {
         };
         let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &reply)]);
         assert_eq!(rig.world.resource::<RealmAuthority>().0, None);
+    }
+
+    #[test]
+    fn a_lost_realm_lease_self_fences_the_shard() {
+        // FENCE-1/5/8: once granted, a realm head showing a FOREIGN owner (a P2
+        // takeover) or NO record makes the shard drop authority and stop frames —
+        // a stale old owner cannot affect clients (fence rule 4).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)));
+        // A foreign owner head: self-fence.
+        let foreign = DirectoryReply::Head {
+            key: DirectoryKey::Realm(config().realm),
+            record: Some(vd_wire::seams::directory::OwnerRecord {
+                authority: AuthorityRef::Shard(NodeId(99)),
+                fence: Fence(2),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        };
+        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &foreign)]);
+        assert_eq!(
+            rig.world.resource::<RealmAuthority>().0,
+            None,
+            "self-fenced"
+        );
+
+        // Re-grant, then a headless realm read (record gone): also self-fence.
+        rig.grant_realm();
+        assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)));
+        let gone = DirectoryReply::Head {
+            key: DirectoryKey::Realm(config().realm),
+            record: None,
+        };
+        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &gone)]);
+        assert_eq!(rig.world.resource::<RealmAuthority>().0, None);
+    }
+
+    #[test]
+    fn a_granted_shard_periodically_re_reads_its_realm_head() {
+        // With a re-check interval, a granted shard sends a HeadRead so a revoked
+        // lease is OBSERVED (the self-fence reaction is otherwise unreachable).
+        let mut rig = Rig::with_config(StubConfig {
+            realm_recheck_interval: 2,
+            ..config()
+        });
+        rig.grant_realm();
+        let is_head_read = |sent: &[(NodeId, MsgClass, Vec<u8>)]| {
+            sent.iter()
+                .filter(|(to, _, _)| *to == ORCH)
+                .any(|(_, _, bytes)| {
+                    let flow: InterShardFlow =
+                        postcard::from_bytes(bytes).expect("directory flow decodes");
+                    flow == InterShardFlow::Directory(DirectoryOp::HeadRead {
+                        key: DirectoryKey::Realm(config().realm),
+                    })
+                })
+        };
+        // An EVEN tick (local_tick % 2 == 0) re-reads the realm head.
+        rig.set_local_tick(2);
+        assert!(is_head_read(&rig.tick(vec![])), "even tick re-reads");
+        // An ODD tick does not (the interval gate's other branch).
+        rig.set_local_tick(3);
+        assert!(!is_head_read(&rig.tick(vec![])), "odd tick is quiet");
+    }
+
+    #[test]
+    fn logout_revokes_at_the_recorded_entity_fence_not_a_literal() {
+        // FENCE-1/5/8: a dot granted at a NON-genesis fence revokes at THAT fence on
+        // logout — a hardcoded literal would be Refused and strand the logout.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach_request(SESSION, GATEWAY);
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        // The directory granted the entity at fence 5 (a transfer advanced it).
+        let granted_at_5 = DirectoryReply::Head {
+            key: DirectoryKey::Entity(entity),
+            record: Some(vd_wire::seams::directory::OwnerRecord {
+                authority: AuthorityRef::Shard(SHARD),
+                fence: Fence(5),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        };
+        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &granted_at_5)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].entity_fence,
+            Fence(5)
+        );
+        // Detach, then the retry driver revokes at the RECORDED fence 5.
+        let detach = GatewayToShard::DetachSession {
+            session: SESSION,
+            fence: Fence(1),
+        };
+        let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &detach)]);
+        let sent = rig.tick(vec![]);
+        let expected_revoke = InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
+            key: DirectoryKey::Entity(entity),
+            fence: Fence(5),
+        });
+        let to_orch: Vec<InterShardFlow> = sent
+            .iter()
+            .filter(|(to, _, _)| *to == ORCH)
+            .map(|(_, _, bytes)| postcard::from_bytes(bytes).expect("flow decodes"))
+            .collect();
+        assert!(
+            to_orch.contains(&expected_revoke),
+            "revoke at the recorded fence 5, not a literal: {to_orch:?}"
+        );
+    }
+
+    #[test]
+    fn non_head_directory_replies_are_ignored() {
+        // CAS results / clock answers carry no shard obligation (the catch-all arm).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let cas = DirectoryReply::CasResult {
+            key: DirectoryKey::Realm(config().realm),
+            outcome: vd_wire::seams::directory::CasOutcome::Won {
+                new_fence: Fence(9),
+            },
+        };
+        let clock = DirectoryReply::ClockNow {
+            universe_tick: UniverseTick(5),
+            epoch: vd_core::EpochId(1),
+        };
+        let _ = rig.tick(vec![
+            wire_msg(ORCH, MsgClass::Saga, &cas),
+            wire_msg(ORCH, MsgClass::Saga, &clock),
+        ]);
+        // Authority unaffected by non-Head replies.
+        assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)));
     }
 
     #[test]
@@ -1054,7 +1247,10 @@ mod tests {
         assert!((dot.pose.pos.z + expected_step).abs() < 1e-12, "moved -Z");
         assert_eq!(dot.pose.pos.x, 0.0);
         assert_eq!(dot.last_applied_seq, Some(1));
-        assert_eq!(rig.world.resource::<InputLog>().applied(), vec![(SESSION, 1)]);
+        assert_eq!(
+            rig.world.resource::<InputLog>().applied(),
+            vec![(SESSION, 1)]
+        );
         // Velocity is displacement over dt.
         assert!((dot.pose.vel.z + 2.0).abs() < 1e-12);
     }
@@ -1157,7 +1353,10 @@ mod tests {
             rig.world.resource::<Dots>().0[&SESSION].session_fence,
             Fence(4)
         );
-        assert_eq!(rig.world.resource::<InputLog>().applied(), vec![(SESSION, 1)]);
+        assert_eq!(
+            rig.world.resource::<InputLog>().applied(),
+            vec![(SESSION, 1)]
+        );
     }
 
     #[test]

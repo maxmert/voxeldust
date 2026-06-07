@@ -18,8 +18,7 @@ fn dependency_graph() -> BTreeMap<String, BTreeSet<String>> {
         .output()
         .expect("cargo metadata runs");
     assert!(output.status.success(), "cargo metadata failed: {output:?}");
-    let meta: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("metadata is JSON");
+    let meta: serde_json::Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
 
     let mut graph = BTreeMap::new();
     for pkg in meta["packages"].as_array().expect("packages array") {

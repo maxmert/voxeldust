@@ -241,7 +241,10 @@ mod tests {
         // The refused payloads are intact and ordered (returned, not lost).
         assert_eq!(
             a.world_mut().resource::<OutboundBox>().0,
-            vec![(B, MsgClass::Input, vec![2].into()), (B, MsgClass::Input, vec![3].into())]
+            vec![
+                (B, MsgClass::Input, vec![2].into()),
+                (B, MsgClass::Input, vec![3].into())
+            ]
         );
 
         // Drain the hub; the next tick sends the remainder in order.

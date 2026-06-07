@@ -21,6 +21,7 @@
 //! always returns the player to a live source (B2: never "warp into nothing").
 
 use serde::{Deserialize, Serialize};
+use vd_core::entity_kind::DurabilityClass;
 use vd_core::{Fence, NodeId, SessionId, TransferId};
 use vd_wire::seams::directory::DirectoryKey;
 use vd_wire::seams::transfer_control::{PrepareReject, PrepareResult, TransferControl};
@@ -35,6 +36,12 @@ pub struct SagaCtx {
     pub expected_fence: Fence,
     pub source: NodeId,
     pub dest: NodeId,
+    /// HR2: the durability class drives the commit fan-out on ONE machinery —
+    /// `Durable` rides the full per-entity FSM to a directory CAS; `Transient`
+    /// (debris/projectiles) commits via the BATCHED `TransientGo` go-token (one
+    /// orchestrator fsync per batch, not per item). Carried here so the persisted
+    /// checkpoint and the FSM proptests are class-aware from the first transfer.
+    pub class: DurabilityClass,
     /// Warp-class transfers must await destination provisioning first.
     pub needs_provision: bool,
 }
@@ -124,9 +131,15 @@ pub enum SagaEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SagaAction {
     Send(TransferControl),
-    /// Issue the directory CAS (commit point). Carries the expectation so the
-    /// wrapper's `DirectoryOp::CommitCas` is fully determined.
+    /// Issue the directory CAS (commit point for a DURABLE subject). Carries the
+    /// expectation; the wrapper fills `transfer`/`new_owner` from the `SagaCtx`.
     IssueCommitCas {
+        expected: Fence,
+    },
+    /// Issue the BATCHED `TransientGo` go-token (commit point for a TRANSIENT
+    /// subject) — the same Fence-CAS amortized across a batch (HR2). Present and
+    /// classified now; the batched transient flow is driven at P3.
+    IssueTransientGo {
         expected: Fence,
     },
     /// Durable checkpoint — exactly two per happy path (after Prepared, at CAS won),
@@ -136,6 +149,20 @@ pub enum SagaAction {
     NotifyRejected(AbortReason),
     /// The saga reached a terminal state; the wrapper may GC after tombstoning.
     Tombstone,
+}
+
+/// The class-appropriate commit action (HR2 fan-out on ONE FSM): Durable subjects
+/// commit via the directory CAS, Transient subjects via the batched go-token.
+#[must_use]
+fn commit_action(ctx: &SagaCtx) -> SagaAction {
+    match ctx.class {
+        DurabilityClass::Durable => SagaAction::IssueCommitCas {
+            expected: ctx.expected_fence,
+        },
+        DurabilityClass::Transient => SagaAction::IssueTransientGo {
+            expected: ctx.expected_fence,
+        },
+    }
 }
 
 /// The initial state + actions for a freshly created saga.
@@ -216,9 +243,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 marker_seq,
                 drained_seq,
             },
-            vec![A::IssueCommitCas {
-                expected: ctx.expected_fence,
-            }],
+            vec![commit_action(ctx)],
         ),
         // Freeze failed/timed out: the source MUST be thawed (the compensator).
         (S::Freezing { .. }, E::Timeout) => abort_with_thaw(ctx, AbortReason::FreezeTimeout),
@@ -242,12 +267,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         // A CAS in flight cannot time out into an abort: it may have WON durably.
         // The wrapper must re-read the directory head and re-deliver CasWon/CasLost
         // (this is why Timeout here re-issues, never aborts).
-        (S::CommittingCas { .. }, E::Timeout) => (
-            state,
-            vec![A::IssueCommitCas {
-                expected: ctx.expected_fence,
-            }],
-        ),
+        (S::CommittingCas { .. }, E::Timeout) => (state, vec![commit_action(ctx)]),
 
         // ---- post-commit: forward-only -------------------------------------------------
         (S::Swapping { new_fence }, E::RouteSwapped) => (S::Demoting { new_fence }, vec![]),
@@ -374,6 +394,10 @@ mod tests {
     use vd_wire::seams::transfer_control::SpatialReject;
 
     fn ctx(needs_provision: bool) -> SagaCtx {
+        ctx_class(needs_provision, DurabilityClass::Durable)
+    }
+
+    fn ctx_class(needs_provision: bool, class: DurabilityClass) -> SagaCtx {
         SagaCtx {
             transfer: TransferId(1),
             session: SessionId(2),
@@ -381,6 +405,7 @@ mod tests {
             expected_fence: Fence(5),
             source: NodeId(10),
             dest: NodeId(20),
+            class,
             needs_provision,
         }
     }
@@ -398,6 +423,61 @@ mod tests {
             all.extend(actions);
         }
         (state, all)
+    }
+
+    #[test]
+    fn durable_commit_issues_a_directory_cas() {
+        let c = ctx(false); // Durable
+        let (state, actions) = drive_from_freeze(&c);
+        assert_eq!(
+            state,
+            SagaState::CommittingCas {
+                marker_seq: 9,
+                drained_seq: 9,
+            }
+        );
+        assert!(
+            actions.contains(&SagaAction::IssueCommitCas { expected: Fence(5) }),
+            "Durable commits via the directory CAS: {actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SagaAction::IssueTransientGo { .. })),
+            "no go-token for a Durable subject"
+        );
+    }
+
+    #[test]
+    fn transient_commit_issues_the_batched_go_token() {
+        // HR2 fan-out on ONE FSM: a Transient subject reaches the same commit point
+        // but issues the batched TransientGo go-token, not a per-entity CAS.
+        let c = ctx_class(false, DurabilityClass::Transient);
+        let (_state, actions) = drive_from_freeze(&c);
+        assert!(
+            actions.contains(&SagaAction::IssueTransientGo { expected: Fence(5) }),
+            "Transient commits via the batched go-token: {actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SagaAction::IssueCommitCas { .. })),
+            "no per-entity CAS for a Transient subject"
+        );
+    }
+
+    /// Drive a fresh saga to the commit-issue point and return (state, actions there).
+    fn drive_from_freeze(c: &SagaCtx) -> (SagaState, Vec<SagaAction>) {
+        let (state, _) = drive(
+            c,
+            start(c).0,
+            &[
+                SagaEvent::Prepared(PrepareResult::Ready),
+                SagaEvent::CutConfirmed { marker_seq: 9 },
+            ],
+        );
+        // The SourceFrozen step is where the commit action is emitted.
+        step(c, state, SagaEvent::SourceFrozen { drained_seq: 9 })
     }
 
     #[test]

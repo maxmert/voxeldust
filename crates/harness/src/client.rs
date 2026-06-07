@@ -328,7 +328,8 @@ mod tests {
 
     fn send_control(gw: &mut crate::fabric::FabricTransport, msg: &ServerControlMsg) {
         let bytes = postcard::to_allocvec(msg).expect("encode");
-        gw.send(CLIENT, MsgClass::Control, bytes.into()).expect("sent");
+        gw.send(CLIENT, MsgClass::Control, bytes.into())
+            .expect("sent");
     }
 
     fn snapshot(sub: SubId, frame_id: u64, x: f64) -> SnapshotDatagram {
@@ -350,7 +351,8 @@ mod tests {
 
     fn send_snapshot(gw: &mut crate::fabric::FabricTransport, snap: &SnapshotDatagram) {
         let bytes = postcard::to_allocvec(snap).expect("encode");
-        gw.send(CLIENT, MsgClass::Snapshot, bytes.into()).expect("sent");
+        gw.send(CLIENT, MsgClass::Snapshot, bytes.into())
+            .expect("sent");
     }
 
     /// Drive the full lifecycle to Active.
@@ -603,7 +605,8 @@ mod tests {
     #[should_panic(expected = "unexpected class toward a client")]
     fn wrong_message_classes_panic_loudly() {
         let (fabric, mut gw, mut client) = rig(|_| None);
-        gw.send(CLIENT, MsgClass::Saga, vec![1].into()).expect("sent");
+        gw.send(CLIENT, MsgClass::Saga, vec![1].into())
+            .expect("sent");
         fabric.pump(TickId(1));
         let _ = client.step();
     }
