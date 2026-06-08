@@ -1,0 +1,17 @@
+# HR1/HR5 SEAM ENFORCEMENT — vd-client is Tier-A renderer-FREE logic. It reaches
+# time/randomness/network ONLY through injected seams (the render loop feeds it
+# wall-time as an f64; the bin owns the QUIC transport). The winit/wgpu/egui glue
+# and all sockets/fs live in the Tier-B client-bin, never here. Mirrors
+# crates/core/clippy.toml; the same bans prove the lib/glue split structurally.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "the render loop feeds wall-time IN (as f64); the lib reads no clock (determinism + testability)" },
+    { path = "std::time::Instant::now", reason = "the render loop feeds wall-time IN; the lib reads no clock" },
+    { path = "std::thread::sleep", reason = "the lib never sleeps; pacing belongs to the bin's render loop" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order feeds observable render order; use BTreeMap or vd_core::collections::DetHashMap" },
+    { path = "std::collections::HashSet", reason = "iteration order is observable; use BTreeSet or DetHashSet" },
+    { path = "std::net::UdpSocket", reason = "the client QUIC transport is the bin's job (Tier-B); the lib rides the sim::io::Transport seam" },
+    { path = "std::net::TcpStream", reason = "no sockets in the renderer-free lib; the dev-control listener is the bin's job" },
+    { path = "std::net::TcpListener", reason = "no sockets in the renderer-free lib; the dev-control listener is the bin's job" },
+]

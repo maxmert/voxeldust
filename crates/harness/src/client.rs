@@ -21,7 +21,8 @@ use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_node::TickReport;
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
-    ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SubId,
+    ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict, SubId,
+    classify_snapshot,
 };
 use vd_wire::seams::tickets::LoginTicket;
 use vd_wire::version::ProtoVersion;
@@ -178,23 +179,21 @@ impl ScriptedClient {
         let Ok(snap) = postcard::from_bytes::<SnapshotDatagram>(bytes) else {
             panic!("client received undecodable snapshot bytes from its gateway");
         };
-        // Drop datagrams for subs we don't hold (stale in-flight after re-sub).
-        if self.sub != Some(snap.sub) {
-            self.view.stale_frames_dropped += 1;
-            return;
-        }
-        // A STRICTLY older frame_id is stale. An EQUAL frame_id is a sibling chunk
-        // of the current tick (a partitioned multi-datagram snapshot, §6.3): apply
-        // it — each chunk is self-contained latest-wins, so reordered same-tick
-        // chunks all land and no partitioned entity is lost.
+        // THE §6.3 gate (shared with the real client via vd_wire, so they cannot
+        // drift): a strictly-older frame_id is stale; an EQUAL frame_id is a sibling
+        // chunk of the current tick and is applied — each chunk self-contained
+        // latest-wins, so reordered same-tick chunks all land.
         let high_water = self.view.last_frame.get(&snap.sub).copied();
-        if high_water.is_some_and(|last| snap.frame_id < last) {
-            self.view.stale_frames_dropped += 1;
-            return;
-        }
-        self.view.last_frame.insert(snap.sub, snap.frame_id);
-        for entity in snap.entities {
-            self.view.poses.insert(entity.entity, entity.pose);
+        match classify_snapshot(self.sub, high_water, snap.sub, snap.frame_id) {
+            SnapshotVerdict::Apply => {
+                self.view.last_frame.insert(snap.sub, snap.frame_id);
+                for entity in snap.entities {
+                    self.view.poses.insert(entity.entity, entity.pose);
+                }
+            }
+            SnapshotVerdict::DropForeignSub | SnapshotVerdict::DropStale => {
+                self.view.stale_frames_dropped += 1;
+            }
         }
     }
 

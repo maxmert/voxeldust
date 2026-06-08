@@ -25,7 +25,8 @@ use vd_io_prod::runtime::TickPacer;
 use vd_io_prod::trust::ClusterTrust;
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
-    ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SubId,
+    ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict, SubId,
+    classify_snapshot,
 };
 use vd_wire::version::ProtoVersion;
 
@@ -124,20 +125,17 @@ impl ProcessClient {
 
     fn on_snapshot(&mut self, bytes: &[u8]) {
         let snap: SnapshotDatagram = postcard::from_bytes(bytes).expect("decode snapshot");
-        // Foreign sub: drop. §6.3: sibling chunks of one tick share a frame_id
-        // (each self-contained latest-wins), so only a STRICTLY older frame_id is
-        // stale — a same-tick sibling (equal id) is applied. This mirrors the
-        // in-process ScriptedClient (harness/client.rs) so the parity gate stays
-        // faithful to the tier it checks even once a snapshot partitions.
-        if Some(snap.sub) != self.sub {
-            return;
-        }
-        if self.last_frame.is_some_and(|last| snap.frame_id < last) {
-            return;
-        }
-        self.last_frame = Some(snap.frame_id);
-        for entity in snap.entities {
-            self.poses.insert(entity.entity, entity.pose);
+        // THE shared §6.3 gate — the SAME vd_wire fn the production client and the
+        // in-process ScriptedClient call (no third hand-inlined copy to drift), so
+        // the real-binary parity gate is held to the very SSOT it validates.
+        match classify_snapshot(self.sub, self.last_frame, snap.sub, snap.frame_id) {
+            SnapshotVerdict::Apply => {
+                self.last_frame = Some(snap.frame_id);
+                for entity in snap.entities {
+                    self.poses.insert(entity.entity, entity.pose);
+                }
+            }
+            SnapshotVerdict::DropForeignSub | SnapshotVerdict::DropStale => {}
         }
     }
 }

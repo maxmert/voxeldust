@@ -1,0 +1,16 @@
+[package]
+name = "vd-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The renderer-FREE client logic core (P1.5): net + snapshot decode + continuous-f64 interpolation + input assembly, over the sim::io Transport seam. Tier-A (100% coverage); winit/wgpu/egui glue lives in the Tier-B client-bin. NO client-side prediction."
+
+[dependencies]
+vd-core = { workspace = true }
+vd-wire = { workspace = true }
+vd-sim = { workspace = true }
+glam = { workspace = true }
+postcard = { workspace = true }
+
+[lints]
+workspace = true

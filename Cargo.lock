@@ -2329,6 +2329,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vd-client"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+ "postcard",
+ "vd-core",
+ "vd-sim",
+ "vd-wire",
+]
+
+[[package]]
 name = "vd-connection-plane"
 version = "0.1.0"
 dependencies = [

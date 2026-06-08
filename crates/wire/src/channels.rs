@@ -210,6 +210,41 @@ pub fn partition_entities(entities: &[EntitySnap], budget_bytes: usize) -> Vec<V
     chunks
 }
 
+/// What a client does with one arriving [`SnapshotDatagram`], given the
+/// subscription it currently holds and the highest `frame_id` it has applied for
+/// that sub.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotVerdict {
+    /// Apply the frame's entities and advance the per-sub high-water to `frame_id`.
+    Apply,
+    /// Drop: the datagram targets a subscription the client does not hold (a stale
+    /// in-flight frame after a re-subscribe).
+    DropForeignSub,
+    /// Drop: a STRICTLY-older `frame_id` — a late straggler from a past tick.
+    DropStale,
+}
+
+/// THE §6.3 snapshot staleness gate, shared by every snapshot consumer (the
+/// in-process `ScriptedClient` and the real client) so they cannot drift: a
+/// strictly-older `frame_id` is stale, but an EQUAL `frame_id` is a sibling chunk
+/// of the current tick (a partitioned multi-datagram snapshot) and is APPLIED —
+/// each chunk self-contained, latest-wins. A foreign sub drops.
+#[must_use]
+pub fn classify_snapshot(
+    held_sub: Option<SubId>,
+    high_water: Option<u64>,
+    snap_sub: SubId,
+    snap_frame_id: u64,
+) -> SnapshotVerdict {
+    if held_sub != Some(snap_sub) {
+        return SnapshotVerdict::DropForeignSub;
+    }
+    if high_water.is_some_and(|hw| snap_frame_id < hw) {
+        return SnapshotVerdict::DropStale;
+    }
+    SnapshotVerdict::Apply
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +253,40 @@ mod tests {
 
     fn eid() -> EntityId {
         EntityId::pack(EntityKind::Player, 1, 1, 1)
+    }
+
+    #[test]
+    fn classify_snapshot_applies_siblings_and_drops_stale_or_foreign() {
+        let held = SubId(0);
+        // No sub held yet, or a different sub: foreign.
+        assert_eq!(
+            classify_snapshot(None, None, held, 5),
+            SnapshotVerdict::DropForeignSub
+        );
+        assert_eq!(
+            classify_snapshot(Some(SubId(9)), Some(5), held, 5),
+            SnapshotVerdict::DropForeignSub
+        );
+        // Held sub, no high-water yet: apply.
+        assert_eq!(
+            classify_snapshot(Some(held), None, held, 5),
+            SnapshotVerdict::Apply
+        );
+        // Newer frame: apply (advances the tick).
+        assert_eq!(
+            classify_snapshot(Some(held), Some(5), held, 6),
+            SnapshotVerdict::Apply
+        );
+        // EQUAL frame: a sibling chunk of the current tick — apply (latest-wins).
+        assert_eq!(
+            classify_snapshot(Some(held), Some(5), held, 5),
+            SnapshotVerdict::Apply
+        );
+        // Strictly older: stale.
+        assert_eq!(
+            classify_snapshot(Some(held), Some(5), held, 4),
+            SnapshotVerdict::DropStale
+        );
     }
 
     #[test]
