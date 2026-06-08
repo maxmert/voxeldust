@@ -136,6 +136,20 @@ impl EnvConfig {
     }
 }
 
+/// Lowercase-hex-encode bytes — the exact inverse of [`EnvConfig::hex32`]. ONE
+/// encoder for every site that renders a key/seed to env or the wire (the launcher
+/// and the parity test both need it). Allocation-free over the byte slice.
+#[must_use]
+pub fn hex32_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // Writing to a String is infallible.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// A drift-free fixed-rate tick pacer: deadlines advance by exact periods from
 /// genesis (`next += period`), so a slow tick is followed by catch-up rather than
 /// permanent phase drift. Production pacing lives HERE, behind the io seam — the
@@ -262,6 +276,18 @@ mod tests {
         assert_eq!(env.hex32("KEY"), Ok([0x42; 32]));
         assert!(env.hex32("SHORT").is_err());
         assert!(env.hex32("NOT_HEX").is_err());
+    }
+
+    #[test]
+    fn hex32_encode_is_the_inverse_of_hex32() {
+        let bytes = [0x42; 32];
+        let hex = hex32_encode(&bytes);
+        assert_eq!(hex, "42".repeat(32));
+        let env = cfg(&[("KEY", hex.as_str())]);
+        assert_eq!(env.hex32("KEY"), Ok(bytes));
+        // A mixed payload round-trips byte-for-byte and is zero-padded per byte.
+        let mixed = [0x00u8, 0x0f, 0xa0, 0xff];
+        assert_eq!(hex32_encode(&mixed), "000fa0ff");
     }
 
     #[test]

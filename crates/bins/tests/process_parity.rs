@@ -12,9 +12,14 @@ use std::net::SocketAddr;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use vd_bins::{
+    Cluster, ClusterAddrs, DEV, DEV_AUTH_SEED, GATEWAY, common_env, dev_auth_pubkey_hex,
+    gateway_env, orchestrator_env, shard_env,
+};
 use vd_core::glam::DVec3;
 use vd_core::pose::StampedPose;
 use vd_core::{AccountId, EntityId, EpochId, NodeId, SessionId, TickId};
+use vd_devproto::CLIENT_NODE_BASE;
 use vd_io_prod::mesh::{MeshConfig, MeshTransport, spawn_mesh};
 use vd_io_prod::runtime::TickPacer;
 use vd_io_prod::trust::ClusterTrust;
@@ -24,34 +29,11 @@ use vd_wire::channels::{
 };
 use vd_wire::version::ProtoVersion;
 
-const ORCH: NodeId = NodeId(1);
-const GATEWAY: NodeId = NodeId(2);
-const SHARD: NodeId = NodeId(3);
-const AUTH_SIGNING_KEY: [u8; 32] = [0x42; 32];
-const TICK_HZ: u32 = 50; // fast ticks keep the wall-clock of the test short
 const DEADLINE: Duration = Duration::from_secs(30);
-
-/// Kill the children even when the test panics.
-struct ChildGuard(Vec<Child>);
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        for child in &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
 
 fn reserve_addr() -> SocketAddr {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve");
     socket.local_addr().expect("addr")
-}
-
-fn book_string(book: &BTreeMap<NodeId, SocketAddr>) -> String {
-    book.iter()
-        .map(|(id, addr)| format!("{}={addr}", id.0))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 /// A minimal real-protocol client over the production mesh transport.
@@ -84,7 +66,7 @@ impl ProcessClient {
         let hello = ClientControlMsg::Hello {
             version: ProtoVersion::CURRENT,
             login: vd_connection_plane::tickets::mint_login(
-                &AUTH_SIGNING_KEY,
+                &DEV_AUTH_SEED,
                 account,
                 EpochId(1),
                 account.0 as u64,
@@ -177,80 +159,50 @@ fn p1_parity_real_binaries_over_quic() {
     let trust = ClusterTrust::generate("vd-parity").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
 
-    let auth_pubkey_hex: String = ed25519_dalek::SigningKey::from_bytes(&AUTH_SIGNING_KEY)
-        .verifying_key()
-        .to_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-
-    // Address books follow the trust topology: nodes know exactly whom they talk to.
-    let orch_book = BTreeMap::from([(GATEWAY, gateway_addr), (SHARD, shard_addr)]);
-    let gateway_book = BTreeMap::from([
-        (ORCH, orch_addr),
-        (SHARD, shard_addr),
-        (NodeId(100), client_a_addr),
-        (NodeId(101), client_b_addr),
-    ]);
-    let shard_book = BTreeMap::from([(ORCH, orch_addr), (GATEWAY, gateway_addr)]);
-
-    let common: Vec<(&str, String)> = vec![
-        ("VD_TRUST_DIR", trust_dir.display().to_string()),
-        ("VD_OUTBOUND_CAP", "256".to_owned()),
-        ("VD_TICK_HZ", TICK_HZ.to_string()),
+    // The cluster contract is the SHARED vd_bins source of truth — the exact env,
+    // params, roster, dev identity, and peer-book the launcher uses. If they ever
+    // drift, THIS gate is what bring-up is really validated against.
+    let addrs = ClusterAddrs {
+        orchestrator: orch_addr,
+        gateway: gateway_addr,
+        shard: shard_addr,
+        admin: admin_addr,
+    };
+    let clients = [
+        (NodeId(CLIENT_NODE_BASE), client_a_addr),
+        (NodeId(CLIENT_NODE_BASE + 1), client_b_addr),
     ];
-    let spawn = |bin: &str, extra: Vec<(&str, String)>| -> Child {
+    let auth_pubkey_hex = dev_auth_pubkey_hex();
+    let common = common_env(&trust_dir.display().to_string(), &DEV);
+
+    let spawn = |bin: &str, node_env: Vec<(&'static str, String)>| -> Child {
         let mut cmd = Command::new(bin);
-        for (k, v) in common.iter().chain(extra.iter()) {
+        for (k, v) in common.iter().chain(node_env.iter()) {
             cmd.env(k, v);
         }
         cmd.spawn().expect("spawn child binary")
     };
 
-    let _guard = ChildGuard(vec![
+    let mut cluster = Cluster::new();
+    cluster.push(
+        "vd-orchestrator",
         spawn(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            vec![
-                ("VD_NODE_ID", ORCH.0.to_string()),
-                ("VD_BIND", orch_addr.to_string()),
-                ("VD_PEERS", book_string(&orch_book)),
-                ("VD_EPOCH", "1".to_owned()),
-                ("VD_RESERVE_CHUNK", "4096".to_owned()),
-                ("VD_CLOCK_PEERS", "2,3".to_owned()),
-                ("VD_LEASE_TTL", "10000".to_owned()),
-                ("VD_ADMIN_ADDR", admin_addr.to_string()),
-            ],
+            orchestrator_env(&addrs, &DEV),
         ),
+    );
+    cluster.push(
+        "vd-gateway",
         spawn(
             env!("CARGO_BIN_EXE_vd-gateway"),
-            vec![
-                ("VD_NODE_ID", GATEWAY.0.to_string()),
-                ("VD_BIND", gateway_addr.to_string()),
-                ("VD_PEERS", book_string(&gateway_book)),
-                ("VD_ORCH", ORCH.0.to_string()),
-                ("VD_SHARD", SHARD.0.to_string()),
-                ("VD_AUTH_PUBKEY", auth_pubkey_hex),
-                ("VD_SESSION_SEED", "23".to_owned()),
-                ("VD_MAX_SESSIONS", "8".to_owned()),
-            ],
+            gateway_env(&addrs, &clients, &auth_pubkey_hex, &DEV),
         ),
-        spawn(
-            env!("CARGO_BIN_EXE_vd-shard"),
-            vec![
-                ("VD_NODE_ID", SHARD.0.to_string()),
-                ("VD_BIND", shard_addr.to_string()),
-                ("VD_PEERS", book_string(&shard_book)),
-                ("VD_REALM_SEED", "7".to_owned()),
-                ("VD_SPEED", "2.0".to_owned()),
-                ("VD_TICK_DT", "0.02".to_owned()),
-                ("VD_ORCH", ORCH.0.to_string()),
-                ("VD_MINT_SEED", "11".to_owned()),
-                ("VD_INPUT_LOG_CAP", "4096".to_owned()),
-                ("VD_REALM_RECHECK", "0".to_owned()),
-                ("VD_SNAPSHOT_BUDGET", "1100".to_owned()),
-            ],
-        ),
-    ]);
+    );
+    cluster.push(
+        "vd-shard",
+        spawn(env!("CARGO_BIN_EXE_vd-shard"), shard_env(&addrs, &DEV)),
+    );
+    let _guard = cluster; // RAII: kill the children on test end or panic
 
     // ---- two real-protocol clients over the production mesh ------------------
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -271,12 +223,12 @@ fn p1_parity_real_binaries_over_quic() {
         std::mem::forget(_c); // keep the endpoint alive for the test's duration
         t
     };
-    let mut walker = ProcessClient::new(mesh(NodeId(100), client_a_addr));
-    let mut idle = ProcessClient::new(mesh(NodeId(101), client_b_addr));
+    let mut walker = ProcessClient::new(mesh(NodeId(CLIENT_NODE_BASE), client_a_addr));
+    let mut idle = ProcessClient::new(mesh(NodeId(CLIENT_NODE_BASE + 1), client_b_addr));
 
     // ---- drive the scenario at real tick rate --------------------------------
     let started = Instant::now();
-    let mut pacer = TickPacer::new(TICK_HZ);
+    let mut pacer = TickPacer::new(DEV.tick_hz);
     let mut hello_retry = Instant::now();
     walker.send_hello(AccountId(1000));
     idle.send_hello(AccountId(1001));

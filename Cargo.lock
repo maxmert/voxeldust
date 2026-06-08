@@ -2321,6 +2321,7 @@ dependencies = [
  "tracing-subscriber",
  "vd-connection-plane",
  "vd-core",
+ "vd-devproto",
  "vd-io-prod",
  "vd-node",
  "vd-sim",
@@ -2354,6 +2355,13 @@ dependencies = [
  "postcard",
  "proptest",
  "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "vd-devproto"
+version = "0.1.0"
+dependencies = [
  "thiserror 2.0.18",
 ]
 

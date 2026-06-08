@@ -118,9 +118,14 @@ impl ClusterTrust {
     /// Filesystem failures.
     pub fn write_der_dir(&self, dir: &std::path::Path) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(dir)?;
+        // The directory holds the node's PRIVATE key — lock it to the owner before
+        // any secret lands (no world-readable window). The certs are public; the
+        // key is written 0600.
+        restrict_dir(dir)?;
         std::fs::write(dir.join("ca.der"), &self.ca_cert_der)?;
         std::fs::write(dir.join("node.der"), &self.node_cert_der)?;
-        std::fs::write(dir.join("key.der"), &self.node_key_pkcs8)?;
+        let key_path = dir.join("key.der");
+        write_secret(&key_path, &self.node_key_pkcs8)?;
         Ok(())
     }
 
@@ -191,6 +196,36 @@ impl ClusterTrust {
             .map_err(|e| TrustError::Tls(e.to_string()))?;
         Ok(quinn::ClientConfig::new(Arc::new(quic)))
     }
+}
+
+/// Lock a secret-bearing directory to its owner (0700) on Unix; a no-op elsewhere.
+#[cfg(unix)]
+fn restrict_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+#[cfg(not(unix))]
+fn restrict_dir(_dir: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Write a secret file created 0600 on Unix (owner-only) so the private key never
+/// has a world-readable window; a plain write elsewhere.
+#[cfg(unix)]
+fn write_secret(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
+}
+#[cfg(not(unix))]
+fn write_secret(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
 
 #[cfg(test)]
@@ -288,6 +323,28 @@ mod tests {
             ClusterTrust::from_der_dir(&dir).is_err(),
             "missing dir is loud"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn der_dir_locks_the_private_key_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let trust = ClusterTrust::generate("vd-test-cluster").expect("generate");
+        let dir = std::env::temp_dir().join(format!("vd-trust-perm-{}", std::process::id()));
+        trust.write_der_dir(&dir).expect("write");
+        let dir_mode = std::fs::metadata(&dir)
+            .expect("dir meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        let key_mode = std::fs::metadata(dir.join("key.der"))
+            .expect("key meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "trust dir is owner-only");
+        assert_eq!(key_mode, 0o600, "private key is owner-read/write only");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

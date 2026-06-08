@@ -18,8 +18,21 @@ path = "src/bin/gateway.rs"
 name = "vd-shard"
 path = "src/bin/shard.rs"
 
+# The dev-cluster port helper (HR6): resolves the DevPortScheme to shell-eval-able
+# env so scripts never hand-compute a port. Trivial; depends only on vd-devproto.
+[[bin]]
+name = "vd-slot"
+path = "src/bin/vd-slot.rs"
+
+# The local-process dev-cluster launcher (HR6): up/down/status, replaces k3d for
+# P1.5+. Generates trust + dev auth, spawns the cluster on DevPortScheme ports.
+[[bin]]
+name = "vd-devcluster"
+path = "src/bin/vd-devcluster.rs"
+
 [dependencies]
 vd-core = { workspace = true }
+vd-devproto = { workspace = true }
 vd-sim = { workspace = true }
 vd-node = { workspace = true }
 vd-connection-plane = { workspace = true }
@@ -29,11 +42,11 @@ tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
 axum = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 postcard = { workspace = true }
-serde_json = { workspace = true }
-ed25519-dalek = { workspace = true }
 
 [lints]
 workspace = true

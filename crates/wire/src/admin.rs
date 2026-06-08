@@ -97,6 +97,20 @@ impl AdminSnapshot {
             leases: Vec::new(),
         }
     }
+
+    /// True once the cluster has BOOTSTRAPPED: some shard has granted a realm into
+    /// the directory, which only happens after the orchestrator↔shard mTLS/QUIC
+    /// handshake. The dev-cluster launcher polls this (over the parsed admin
+    /// snapshot) as its readiness signal — replacing a brittle substring match on
+    /// raw JSON. (A shard's realm authority renders as `shard:…`; the gateway
+    /// registers no directory row in P1, so the launcher confirms gateway liveness
+    /// separately, by process.)
+    #[must_use]
+    pub fn cluster_bootstrapped(&self) -> bool {
+        self.directory
+            .iter()
+            .any(|entry| entry.authority.starts_with("shard:"))
+    }
 }
 
 /// The reviewed Prometheus metric-name registry (PLAN.md observability list). ONE
@@ -224,6 +238,36 @@ mod tests {
         let bytes = postcard::to_allocvec(&snap).expect("encode");
         let back: AdminSnapshot = postcard::from_bytes(&bytes).expect("decode");
         assert_eq!(back, snap);
+    }
+
+    #[test]
+    fn cluster_bootstrapped_iff_a_shard_holds_a_realm() {
+        // Empty directory: not bootstrapped.
+        let empty = AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(1));
+        assert!(!empty.cluster_bootstrapped());
+
+        // A realm granted to a SHARD: bootstrapped.
+        let with_shard = AdminSnapshot {
+            directory: vec![directory_entry_view(
+                &DirectoryKey::Realm(RealmId::System(7)),
+                &record(None),
+            )],
+            ..empty.clone()
+        };
+        assert!(with_shard.cluster_bootstrapped());
+
+        // A row owned only by a GATEWAY does NOT signal cluster bootstrap.
+        let gateway_only = AdminSnapshot {
+            directory: vec![directory_entry_view(
+                &DirectoryKey::Session(SessionId(1)),
+                &OwnerRecord {
+                    authority: AuthorityRef::Gateway(NodeId(2)),
+                    ..record(None)
+                },
+            )],
+            ..empty
+        };
+        assert!(!gateway_only.cluster_bootstrapped());
     }
 
     #[test]

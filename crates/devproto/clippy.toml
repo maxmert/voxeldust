@@ -1,0 +1,18 @@
+# HR1/HR5 SEAM ENFORCEMENT — vd-devproto is a PURE Tier-A leaf: it computes the
+# dev-cluster port scheme and (later) serializes the vdctl codec, and does NO I/O
+# itself. The actual socket binds live in the dev-control listener (client-bin,
+# Tier-B) and the launcher scripts. Mirrors crates/core/clippy.toml.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "a pure leaf reads no clock" },
+    { path = "std::time::Instant::now", reason = "a pure leaf reads no clock" },
+    { path = "std::thread::sleep", reason = "a pure leaf never sleeps" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is observable; use BTreeMap or a deterministic hasher" },
+    { path = "std::collections::HashSet", reason = "iteration order is observable; use BTreeSet" },
+    # The port scheme is COMPUTED here; sockets are bound by the listener/launcher,
+    # never by this leaf (HR1: bytes ride the seam, not an out-of-band socket).
+    { path = "std::net::UdpSocket", reason = "vd-devproto computes ports, it does not bind them" },
+    { path = "std::net::TcpStream", reason = "vd-devproto computes ports, it does not bind them" },
+    { path = "std::net::TcpListener", reason = "vd-devproto computes ports, it does not bind them" },
+]

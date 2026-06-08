@@ -1,0 +1,12 @@
+[package]
+name = "vd-devproto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The HR6 dev-control protocol leaf: the canonical dev-cluster port scheme (and, later, the vdctl request/response codec). Tiny, pure, Tier-A. No I/O, no ECS, no sim."
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
