@@ -669,6 +669,11 @@ mod tests {
         }
     }
 
+    /// CA-2 characterization: the mesh routes ONLY to statically-booked peers — an
+    /// id absent from the address book is permanent, loud back-pressure. This is the
+    /// limitation CA-1 (reply-on-connection, see `ca1_reply_on_connection…` below)
+    /// will lift; until then the dev launcher pre-seeds client addresses into the
+    /// gateway book (`client_book` in `vd-devcluster`) to work around it.
     #[test]
     fn unknown_destinations_are_loud_backpressure() {
         let rt = runtime();
@@ -678,6 +683,27 @@ mod tests {
             .send(NodeId(99), MsgClass::Control, vec![7].into())
             .expect_err("not in the address book");
         assert_eq!(err, SendError::QueueFull(vec![7].into()));
+    }
+
+    /// RED GUARD for CA-1 (deferred to M3). Today a peer is reachable only if it is in
+    /// the sender's static book (the CA-2 characterization above). The dev launcher
+    /// works around this by pre-seeding EVERY client's address into the gateway book
+    /// — the crutch this milestone fences (`client_book` in `vd-devcluster`). When
+    /// CA-1 lands, a peer that DIALS IN becomes replyable without being booked first;
+    /// this asserts exactly that, and fails by construction today (hence `#[ignore]`).
+    #[test]
+    #[ignore = "M3: reply-on-connection (CA-1) not yet implemented"]
+    fn ca1_reply_on_connection_reaches_a_peer_not_in_the_book() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let (mut nodes, _controls) = cluster(rt.handle(), &trust, 2, 4);
+        // The target behavior: reaching an UNBOOKED id succeeds once an inbound dial
+        // has taught the mesh that peer's return address. Today this is QueueFull.
+        let reply = nodes[0].send(NodeId(99), MsgClass::Control, vec![1].into());
+        assert!(
+            reply.is_ok(),
+            "CA-1: an inbound-dialed peer must be replyable without pre-booking",
+        );
     }
 
     #[test]

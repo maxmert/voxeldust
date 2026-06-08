@@ -50,6 +50,10 @@ pub struct GatewayConfig {
     pub auth_verifying_key: [u8; tickets::ED25519_KEY_BYTES],
     /// Seed for session-id proposal entropy (the directory insert is the mint).
     pub session_seed: u64,
+    /// The cluster's universe-tick rate (Hz), relayed to clients via
+    /// `ServerControlMsg::UniverseRate` so they drive the render cursor at the
+    /// server's rate. The SAME value the node feeds its `TickPacer` (VD_TICK_HZ).
+    pub tick_hz: u32,
     pub tuning: TransportTuning,
 }
 
@@ -99,6 +103,9 @@ struct Session {
     fence: Fence,
     phase: SessionPhase,
     next_sub: u32,
+    /// The negotiated proto minor for this connection (the sender-gates-variants
+    /// rule): minor-1+ variants like `UniverseRate` are emitted only when `>= 1`.
+    negotiated_minor: u16,
     hot: Arc<SessionHot>,
 }
 
@@ -323,7 +330,7 @@ fn on_client_control(
     };
     match msg {
         ClientControlMsg::Hello { version, login } => {
-            if ProtoVersion::negotiate(ProtoVersion::CURRENT, version).is_none() {
+            let Some(negotiated) = ProtoVersion::negotiate(ProtoVersion::CURRENT, version) else {
                 stats.version_rejected += 1;
                 push_control(
                     outbox,
@@ -333,7 +340,7 @@ fn on_client_control(
                     },
                 );
                 return;
-            }
+            };
             if tickets::validate_login(&config.auth_verifying_key, &login).is_err() {
                 stats.logins_rejected += 1;
                 push_control(
@@ -373,6 +380,7 @@ fn on_client_control(
                     fence,
                     phase: SessionPhase::AwaitingDirectory,
                     next_sub: 0,
+                    negotiated_minor: negotiated.minor,
                     hot: Arc::new(SessionHot {
                         route: ArcSwap::from_pointee(RouteSnapshot {
                             authority: config.shard,
@@ -624,6 +632,17 @@ fn on_directory_reply(
                 epoch: clock.epoch,
             },
         );
+        // Relay the cluster tick rate to a minor-1+ client (sender-gates-variants),
+        // so it drives its render cursor at the server's rate, not a guess.
+        if session.negotiated_minor >= 1 {
+            push_control(
+                outbox,
+                session.client,
+                &ServerControlMsg::UniverseRate {
+                    tick_hz: config.tick_hz,
+                },
+            );
+        }
         push_to_shard(
             outbox,
             config.shard,
@@ -717,9 +736,14 @@ mod tests {
             shard: SHARD,
             auth_verifying_key: verifying_key(),
             session_seed: 7,
+            tick_hz: 50,
             tuning: TransportTuning { max_sessions: 4 },
         }
     }
+
+    /// The per-tick sends captured across a login drive (one Vec of `(to, class,
+    /// bytes)` per tick).
+    type LoginSends = Vec<Vec<(NodeId, MsgClass, Vec<u8>)>>;
 
     struct Rig {
         world: World,
@@ -760,8 +784,12 @@ mod tests {
 
         /// Hello → directory grant → attach reply; returns (session_id, all sends).
         #[allow(clippy::type_complexity)] // test helper: ticks of raw sends
-        fn login(&mut self) -> (SessionId, Vec<Vec<(NodeId, MsgClass, Vec<u8>)>>) {
-            let hello = self.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        fn login(&mut self) -> (SessionId, LoginSends) {
+            self.login_with(&hello_msg())
+        }
+
+        fn login_with(&mut self, hello: &ClientControlMsg) -> (SessionId, LoginSends) {
+            let hello = self.tick(vec![wire(CLIENT, MsgClass::Control, hello)]);
             let session_id = *self
                 .world
                 .resource::<GatewaySessions>()
@@ -797,6 +825,32 @@ mod tests {
             version: ProtoVersion::CURRENT,
             login: tickets::mint_login(&SIGNING_KEY, AccountId(5), EpochId(9), 1),
         }
+    }
+
+    fn hello_msg_minor0() -> ClientControlMsg {
+        ClientControlMsg::Hello {
+            version: ProtoVersion { major: 1, minor: 0 },
+            login: tickets::mint_login(&SIGNING_KEY, AccountId(5), EpochId(9), 1),
+        }
+    }
+
+    #[test]
+    fn a_minor_0_client_is_welcomed_without_the_universe_rate_variant() {
+        // Sender-gates-variants: a peer that negotiated minor 0 must NOT be sent the
+        // minor-1 UniverseRate (it would desync an old decoder). Welcome only.
+        let mut rig = Rig::new();
+        let (session_id, sends) = rig.login_with(&hello_msg_minor0());
+        let welcomes = decode_controls(&sends[1], CLIENT);
+        assert_eq!(
+            welcomes,
+            vec![ServerControlMsg::Welcome {
+                version: ProtoVersion::CURRENT,
+                session: session_id,
+                session_fence: Fence(1),
+                epoch: EpochId(9),
+            }],
+            "a minor-0 client gets Welcome but NOT UniverseRate"
+        );
     }
 
     fn granted_head(session: SessionId) -> DirectoryReply {
@@ -867,15 +921,20 @@ mod tests {
 
         // Grant tick: Welcome to the client (with the directory-committed id,
         // fence, epoch) and an attach toward the shard.
+        // Welcome, then UniverseRate (the client negotiated minor 1, so the gateway
+        // relays the cluster tick rate right after the Welcome).
         let welcomes = decode_controls(&sends[1], CLIENT);
         assert_eq!(
             welcomes,
-            vec![ServerControlMsg::Welcome {
-                version: ProtoVersion::CURRENT,
-                session: session_id,
-                session_fence: Fence(1),
-                epoch: EpochId(9),
-            }]
+            vec![
+                ServerControlMsg::Welcome {
+                    version: ProtoVersion::CURRENT,
+                    session: session_id,
+                    session_fence: Fence(1),
+                    epoch: EpochId(9),
+                },
+                ServerControlMsg::UniverseRate { tick_hz: 50 },
+            ]
         );
         // Attach tick: SubscriptionOpened STRICTLY BEFORE AuthorityChanged (X1),
         // sub allocated from the monotonic allocator.

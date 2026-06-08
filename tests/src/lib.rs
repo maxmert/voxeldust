@@ -96,6 +96,7 @@ pub fn p1_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
             shard: SHARD,
             auth_verifying_key: auth_verifying_key(),
             session_seed: 23,
+            tick_hz: 50,
             tuning: TransportTuning { max_sessions },
         },
     );

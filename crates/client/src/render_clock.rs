@@ -39,6 +39,13 @@ impl RenderClock {
         }
     }
 
+    /// Update the universe-tick rate (learned from the wire via `UniverseRate`) in
+    /// place, preserving the current anchor so the cursor stays continuous across the
+    /// change. Replaces the lib default with the cluster's actual rate (R1).
+    pub fn set_tick_hz(&mut self, hz: f64) {
+        self.tuning.tick_hz = hz;
+    }
+
     /// Observe the freshest delivered `universe_tick` at wall-time `now_s`. Re-anchors
     /// ONLY on a strictly newer tick — a stale or equal tick keeps the existing
     /// anchor (the anchor tick only advances). NOTE: this keeps the anchor TICK

@@ -30,15 +30,37 @@ path = "src/bin/vd-slot.rs"
 name = "vd-devcluster"
 path = "src/bin/vd-devcluster.rs"
 
+# The headless dev-control client (HR6): the agent-operable client core
+# (`vd-client`) wrapped in the process shell — net thread + step thread + the
+# cfg-gated dev-control listener. Named `client` to match `scripts/client.sh`.
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+# The agent-facing dev-control CLI: one JSON request per line to the client's
+# localhost listener, one response line back. Pairs with the `dev-control` feature.
+[[bin]]
+name = "vdctl"
+path = "src/bin/vdctl.rs"
+
+[features]
+# The localhost dev-control listener (HR6). NON-default and cfg-gated, so a release
+# `cargo build -p vd-bins` contains NO listener code at all — absence is a compile
+# fact, not a runtime flag. `scripts/client.sh` builds the `client` bin WITH it.
+default = []
+dev-control = []
+
 [dependencies]
 vd-core = { workspace = true }
 vd-devproto = { workspace = true }
+vd-client = { workspace = true }
 vd-sim = { workspace = true }
 vd-node = { workspace = true }
 vd-connection-plane = { workspace = true }
 vd-io-prod = { path = "../io-prod" }
 vd-wire = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
 axum = { workspace = true }

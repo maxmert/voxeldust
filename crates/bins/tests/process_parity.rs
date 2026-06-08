@@ -7,14 +7,14 @@
 //! admin endpoint — everything the VirtualClock tier cannot see.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    Cluster, ClusterAddrs, DEV, DEV_AUTH_SEED, GATEWAY, common_env, dev_auth_pubkey_hex,
-    gateway_env, orchestrator_env, shard_env,
+    Cluster, ClusterAddrs, DEV, DEV_AUTH_SEED, GATEWAY, admin_get_body, common_env,
+    dev_auth_pubkey_hex, gateway_env, orchestrator_env, reserve_tcp_addr, reserve_udp_addr,
+    shard_env, spawn_node,
 };
 use vd_core::glam::DVec3;
 use vd_core::pose::StampedPose;
@@ -31,11 +31,6 @@ use vd_wire::channels::{
 use vd_wire::version::ProtoVersion;
 
 const DEADLINE: Duration = Duration::from_secs(30);
-
-fn reserve_addr() -> SocketAddr {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve");
-    socket.local_addr().expect("addr")
-}
 
 /// A minimal real-protocol client over the production mesh transport.
 struct ProcessClient {
@@ -119,6 +114,9 @@ impl ProcessClient {
             ServerControlMsg::SubscriptionOpened { sub, .. } => self.sub = Some(sub),
             ServerControlMsg::AuthorityChanged { entity, .. } => self.own_entity = Some(entity),
             ServerControlMsg::Close { reason } => panic!("gateway closed the session: {reason}"),
+            // The cluster tick rate (minor 1) — this minimal parity client does not
+            // interpolate; ignore it (the real client learns its render rate from it).
+            ServerControlMsg::UniverseRate { .. } => {}
             other => panic!("unexpected control message in P1: {other:?}"),
         }
     }
@@ -143,15 +141,12 @@ impl ProcessClient {
 #[test]
 fn p1_parity_real_binaries_over_quic() {
     // ---- topology: addresses, trust bundle, child processes ------------------
-    let orch_addr = reserve_addr();
-    let gateway_addr = reserve_addr();
-    let shard_addr = reserve_addr();
-    let client_a_addr = reserve_addr();
-    let client_b_addr = reserve_addr();
-    let admin_addr = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve tcp");
-        listener.local_addr().expect("addr")
-    };
+    let orch_addr = reserve_udp_addr();
+    let gateway_addr = reserve_udp_addr();
+    let shard_addr = reserve_udp_addr();
+    let client_a_addr = reserve_udp_addr();
+    let client_b_addr = reserve_udp_addr();
+    let admin_addr = reserve_tcp_addr();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-parity-{}", std::process::id()));
     let trust = ClusterTrust::generate("vd-parity").expect("trust");
@@ -174,11 +169,7 @@ fn p1_parity_real_binaries_over_quic() {
     let common = common_env(&trust_dir.display().to_string(), &DEV);
 
     let spawn = |bin: &str, node_env: Vec<(&'static str, String)>| -> Child {
-        let mut cmd = Command::new(bin);
-        for (k, v) in common.iter().chain(node_env.iter()) {
-            cmd.env(k, v);
-        }
-        cmd.spawn().expect("spawn child binary")
+        spawn_node(bin, &common, &node_env).expect("spawn child binary")
     };
 
     let mut cluster = Cluster::new();
@@ -309,17 +300,9 @@ fn p1_parity_real_binaries_over_quic() {
 fn http_get_json(addr: SocketAddr, path: &str) -> serde_json::Value {
     let started = Instant::now();
     loop {
-        let mut conn = std::net::TcpStream::connect(addr).expect("admin reachable");
-        let request =
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-        conn.write_all(request.as_bytes()).expect("request");
-        let mut response = String::new();
-        conn.read_to_string(&mut response).expect("response");
-        let body = response
-            .split_once("\r\n\r\n")
-            .map(|(_, b)| b.to_owned())
-            .expect("http body");
-        if let Ok(value) = serde_json::from_str(&body) {
+        if let Some(value) = admin_get_body(addr, path, None)
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        {
             return value;
         }
         assert!(

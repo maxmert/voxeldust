@@ -1,0 +1,506 @@
+//! The headless dev-control client (HR6) — the Tier-B process shell around the
+//! Tier-A `vd-client` core. It wires three roles, matching the Slice-2 thread model:
+//!
+//! - **net** (the tokio runtime): the production `MeshTransport` — quinn reader/
+//!   writer tasks bridging to the synchronous core over bounded queues.
+//! - **core** (THIS thread): the single-threaded deterministic `ClientCore` — the
+//!   SOLE owner of the client state. Each step drains the dev-command mailbox,
+//!   steps the core (drain inbound → assemble input), then publishes the decoded
+//!   delivered `DevState` to an `ArcSwap` for the listener to read lock-free.
+//! - **dev-control** (`#[cfg(feature = "dev-control")]`, the tokio runtime): a
+//!   loopback JSON-lines listener. Mutating commands are gated by
+//!   `--allow-dev-control`; everything is shed-not-blocked through a bounded mailbox.
+//!
+//! The dev-control listener is `cfg`-gated, NON-default: a release build of
+//! `vd-bins` contains no listener code at all (absence is a compile fact). The bin
+//! reads wall-time from the OS (the lib never does — it takes `now_s` as an arg).
+
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, sync_channel};
+use std::time::Instant;
+
+use arc_swap::ArcSwap;
+use vd_bins::{GATEWAY, loopback};
+use vd_client::net::{ClientCore, ClientPhase};
+use vd_client::tuning::ClientInterpTuning;
+use vd_connection_plane::tickets::mint_login;
+use vd_core::{AccountId, EpochId, NodeId};
+use vd_devproto::{CLIENT_NODE_BASE, DevState, InputAction};
+use vd_io_prod::mesh::{MeshConfig, MeshTransport, spawn_mesh};
+use vd_io_prod::runtime::{EnvConfig, TickPacer};
+use vd_io_prod::trust::ClusterTrust;
+
+/// The dev-client account namespace — `AccountId(BASE + agent_index)`, matching the
+/// process-parity convention (`AccountId(1000)`/`1001`). Distinct per agent ⇒
+/// distinct gateway sessions; `max_sessions` (8) covers the K=4 client cap.
+const DEV_CLIENT_ACCOUNT_BASE: u64 = 1000;
+
+/// The mesh outbound queue depth (matches the parity client's book; one peer).
+const CLIENT_OUTBOUND_CAP: usize = 64;
+
+/// The bounded dev-command mailbox depth. Past this the listener sheds commands
+/// LOUDLY (`DevError::Busy` + the `dev_commands_dropped` running total) rather than
+/// blocking the deterministic step thread — back-pressure is observable, never a hang.
+const COMMAND_MAILBOX_CAP: usize = 256;
+
+/// The headless client's drain+input cadence (Hz). One step = one inbound drain +
+/// one 20 Hz `InputDatagram`. Slice 3's real render loop will drive `step()` at the
+/// display refresh instead; until then this is the single knob, overridable via
+/// `--step-hz`.
+const DEFAULT_STEP_HZ: u32 = 20;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt().with_env_filter("info").init();
+    let args = parse_args()?;
+    let env = EnvConfig::from_process_env();
+    let signing_key = env.hex32("VD_AUTH_SIGNING_KEY")?;
+
+    let local = NodeId(CLIENT_NODE_BASE + args.agent_index);
+    let account = AccountId(u128::from(DEV_CLIENT_ACCOUNT_BASE + args.agent_index));
+    // The auth service's half: a deterministic Ed25519 login over (account, epoch,
+    // nonce) under the dev seed — what the gateway validates against `VD_AUTH_PUBKEY`.
+    // The nonce is deterministic dev seeding (a restart re-presents it, idempotent);
+    // single-use login-nonce replay protection is a later-phase auth-service concern.
+    let ticket = mint_login(&signing_key, account, EpochId(1), account.0 as u64);
+    tracing::info!(
+        name = %args.name, node = local.0, account = account.0, gateway = %args.gateway,
+        "client starting",
+    );
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let trust = ClusterTrust::from_der_dir(Path::new(&args.trust_dir))?;
+    // STRUCTURAL one-connection invariant: the address book holds ONLY the gateway —
+    // no other node is reachable, by construction (the client never re-homes).
+    let peers = BTreeMap::from([(GATEWAY, args.gateway)]);
+    let (transport, control) = spawn_mesh(
+        runtime.handle(),
+        &trust,
+        &MeshConfig::new(
+            local,
+            loopback(args.client_quic),
+            peers,
+            CLIENT_OUTBOUND_CAP,
+        ),
+    )?;
+    let core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
+
+    // The lock-free step ↔ listener bridge: ArcSwap publishes the decoded delivered
+    // DevState; the bounded mailbox carries injected InputActions; the atomics carry
+    // the step clock (wait-until termination) and the shed-command running total.
+    let published = Arc::new(ArcSwap::from_pointee(core.state().devstate(0.0, 0, 0)));
+    let step_seq = Arc::new(AtomicU64::new(0));
+    let dropped = Arc::new(AtomicU64::new(0));
+    let (command_tx, command_rx) = sync_channel::<InputAction>(COMMAND_MAILBOX_CAP);
+
+    #[cfg(feature = "dev-control")]
+    let _listener = match args.dev_control {
+        Some(port) => {
+            tracing::info!(
+                port,
+                allow_mutating = args.allow_dev_control,
+                "dev-control up"
+            );
+            let handles = dev_control::Handles {
+                commands: command_tx,
+                published: published.clone(),
+                step_seq: step_seq.clone(),
+                dropped: dropped.clone(),
+                allow_mutating: args.allow_dev_control,
+            };
+            Some(runtime.spawn(dev_control::serve(loopback(port), handles)))
+        }
+        None => {
+            drop(command_tx); // no listener: the mailbox has no producer
+            None
+        }
+    };
+    #[cfg(not(feature = "dev-control"))]
+    {
+        // Headless release build: no listener exists, so nothing feeds the mailbox.
+        let _ = (&args.dev_control, args.allow_dev_control);
+        drop(command_tx);
+    }
+
+    run_client_loop(
+        core,
+        command_rx,
+        &published,
+        &step_seq,
+        &dropped,
+        args.step_hz,
+    );
+
+    drop(control); // close the QUIC endpoint on a graceful exit
+    Ok(())
+}
+
+/// The deterministic core loop (THIS thread is the sole owner of `core`): drain the
+/// dev-command mailbox, step, publish the decoded `DevState`, advance the step clock.
+/// Exits when the session closes (client `Close` or a gateway `Close`).
+fn run_client_loop(
+    mut core: ClientCore<MeshTransport>,
+    commands: Receiver<InputAction>,
+    published: &ArcSwap<DevState>,
+    step_seq: &AtomicU64,
+    dropped: &AtomicU64,
+    step_hz: u32,
+) {
+    let mut pacer = TickPacer::new(step_hz);
+    // `applied` counts ALL drained dev actions (Move/Look/Action AND Close/Reset) —
+    // it is the dev-command throughput counter, distinct from `sent_input_count`,
+    // which honestly counts input FRAMES that rode the wire.
+    let mut applied: u64 = 0;
+    let start = Instant::now();
+    loop {
+        // Drain-at-top: apply every queued dev command before stepping, so an
+        // injected input rides THIS tick's InputDatagram (the agent's seam).
+        while let Ok(action) = commands.try_recv() {
+            core.state_mut().apply_input_action(action);
+            applied += 1;
+        }
+        let now_s = start.elapsed().as_secs_f64();
+        core.step(now_s);
+        let state = core
+            .state()
+            .devstate(now_s, applied, dropped.load(Ordering::Relaxed));
+        published.store(Arc::new(state));
+        step_seq.fetch_add(1, Ordering::Relaxed);
+        if core.state().phase() == ClientPhase::Closed {
+            break;
+        }
+        pacer.wait();
+    }
+}
+
+/// The parsed command line (`scripts/client.sh` supplies these flags; the auth
+/// signing key arrives via `VD_AUTH_SIGNING_KEY` in the cluster env).
+struct ClientArgs {
+    name: String,
+    gateway: SocketAddr,
+    client_quic: u16,
+    trust_dir: String,
+    dev_control: Option<u16>,
+    agent_index: u64,
+    allow_dev_control: bool,
+    step_hz: u32,
+}
+
+fn parse_args() -> Result<ClientArgs, String> {
+    let mut name = "client".to_owned();
+    let mut gateway: Option<SocketAddr> = None;
+    let mut client_quic: Option<u16> = None;
+    let mut trust_dir: Option<String> = None;
+    let mut dev_control: Option<u16> = None;
+    let mut agent_index: u64 = 0;
+    let mut allow_dev_control = false;
+    let mut step_hz: u32 = DEFAULT_STEP_HZ;
+
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--name" => name = next_val(&mut it, "--name")?,
+            "--gateway" => gateway = Some(parse_val(&mut it, "--gateway")?),
+            "--client-quic" => client_quic = Some(parse_val(&mut it, "--client-quic")?),
+            "--trust-dir" => trust_dir = Some(next_val(&mut it, "--trust-dir")?),
+            "--dev-control" => dev_control = Some(parse_val(&mut it, "--dev-control")?),
+            "--agent-index" => agent_index = parse_val(&mut it, "--agent-index")?,
+            "--allow-dev-control" => allow_dev_control = true,
+            "--step-hz" => step_hz = parse_val(&mut it, "--step-hz")?,
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+
+    Ok(ClientArgs {
+        name,
+        gateway: gateway.ok_or("missing --gateway <addr>")?,
+        client_quic: client_quic.ok_or("missing --client-quic <port>")?,
+        trust_dir: trust_dir.ok_or("missing --trust-dir <dir>")?,
+        dev_control,
+        agent_index,
+        allow_dev_control,
+        step_hz,
+    })
+}
+
+fn next_val(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+    it.next().ok_or_else(|| format!("{flag} requires a value"))
+}
+
+fn parse_val<T: std::str::FromStr>(
+    it: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> Result<T, String> {
+    let raw = next_val(it, flag)?;
+    raw.parse()
+        .map_err(|_| format!("{flag}: cannot parse {raw:?}"))
+}
+
+/// The loopback JSON-lines dev-control listener (HR6) — present ONLY under the
+/// `dev-control` feature, so a release build links none of it.
+#[cfg(feature = "dev-control")]
+mod dev_control {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::SyncSender;
+    use std::time::Duration;
+
+    use arc_swap::ArcSwap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Semaphore;
+    use vd_devproto::{
+        DevError, DevPhase, DevRequest, DevResponse, DevState, InputAction, WaitPredicate,
+        decode_request, encode_response,
+    };
+
+    /// The `wait-until` re-evaluation interval — short relative to a step tick so a
+    /// satisfied predicate is reported promptly. The wait is ALSO cancelled the instant
+    /// the socket sees activity (EOF), so a killed `vdctl` never strands a task.
+    const WAIT_POLL: Duration = Duration::from_millis(5);
+
+    /// The cap on concurrent dev-control connections — bounds listener memory; past it
+    /// new connections are refused (the agent retries), never queued unbounded.
+    const MAX_DEV_CONNECTIONS: usize = 8;
+
+    /// Backoff after a failed `accept()` so a persistent error (e.g. fd exhaustion,
+    /// where the bad connection is NOT dequeued) cannot busy-spin a core + flood logs.
+    const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+    /// The hard cap on ONE request line. A `DevRequest` is tiny; this only exists so a
+    /// peer that never sends a newline cannot grow the reader's buffer without bound
+    /// (the one unbounded TCP ingress the mesh path's frame caps don't cover).
+    const MAX_REQUEST_LINE: usize = 64 * 1024;
+    const READ_CHUNK: usize = 8 * 1024;
+
+    /// A bounded, cancel-safe line framer over a connection's read half. It owns the
+    /// accumulation buffer, so a read cancelled by `tokio::select!` loses nothing (the
+    /// bytes stay buffered), and it rejects a line past [`MAX_REQUEST_LINE`] instead of
+    /// growing forever. Yields one `\n`-terminated line at a time.
+    struct LineFramer {
+        reader: OwnedReadHalf,
+        buf: Vec<u8>,
+    }
+
+    impl LineFramer {
+        fn new(reader: OwnedReadHalf) -> LineFramer {
+            LineFramer {
+                reader,
+                buf: Vec::with_capacity(READ_CHUNK),
+            }
+        }
+
+        /// The next complete line, or `None` at EOF. Reads only as needed; buffered
+        /// bytes past a line (e.g. a pipelined request) are retained for the next call.
+        async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+            loop {
+                if let Some(line) = self.take_buffered_line() {
+                    return Ok(Some(line));
+                }
+                if self.fill().await? {
+                    return Ok(None); // EOF (a trailing partial line is dropped)
+                }
+            }
+        }
+
+        /// Split one `\n`-terminated line out of the buffer, if present (trims `\r\n`).
+        fn take_buffered_line(&mut self) -> Option<String> {
+            let nl = self.buf.iter().position(|&b| b == b'\n')?;
+            let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
+            line.pop(); // the '\n'
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            Some(String::from_utf8_lossy(&line).into_owned())
+        }
+
+        /// Read one chunk into the buffer. `Ok(true)` at EOF; `Ok(false)` on data.
+        /// Cancel-safe: any bytes read are retained in `self.buf`.
+        async fn fill(&mut self) -> std::io::Result<bool> {
+            if self.buf.len() >= MAX_REQUEST_LINE {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "dev-control request line exceeded the size cap",
+                ));
+            }
+            self.buf.reserve(READ_CHUNK);
+            Ok(self.reader.read_buf(&mut self.buf).await? == 0)
+        }
+    }
+
+    /// The lock-free bridge to the step thread (cloned per connection).
+    #[derive(Clone)]
+    pub struct Handles {
+        pub commands: SyncSender<InputAction>,
+        pub published: Arc<ArcSwap<DevState>>,
+        pub step_seq: Arc<AtomicU64>,
+        pub dropped: Arc<AtomicU64>,
+        pub allow_mutating: bool,
+    }
+
+    /// Accept loopback connections forever, one task per connection, bounded by a
+    /// permit semaphore.
+    pub async fn serve(addr: SocketAddr, handles: Handles) {
+        let listener = match TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                tracing::error!("dev-control bind {addr} failed: {e}");
+                return;
+            }
+        };
+        let limiter = Arc::new(Semaphore::new(MAX_DEV_CONNECTIONS));
+        loop {
+            match listener.accept().await {
+                Ok((stream, _peer)) => {
+                    let Ok(permit) = limiter.clone().try_acquire_owned() else {
+                        tracing::warn!(
+                            "dev-control at the connection cap ({MAX_DEV_CONNECTIONS}); refusing"
+                        );
+                        drop(stream); // close immediately; the agent retries
+                        continue;
+                    };
+                    let handles = handles.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit; // frees the slot when the connection ends
+                        if let Err(e) = serve_conn(stream, handles).await {
+                            tracing::debug!("dev-control connection ended: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("dev-control accept failed: {e}");
+                    tokio::time::sleep(ACCEPT_RETRY_BACKOFF).await;
+                }
+            }
+        }
+    }
+
+    /// One connection: a request per line, a response per line, until EOF. A
+    /// `wait-until` blocks here but is cancelled by socket EOF (a buffered pipelined
+    /// line survives the wait and is served on the next iteration).
+    async fn serve_conn(stream: TcpStream, handles: Handles) -> std::io::Result<()> {
+        let (read_half, mut write_half) = stream.into_split();
+        let mut framer = LineFramer::new(read_half);
+        while let Some(line) = framer.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let response = match decode_request(&line) {
+                Ok(DevRequest::WaitUntil {
+                    predicate,
+                    max_ticks,
+                }) => match wait_until(&handles, &mut framer, predicate, max_ticks).await {
+                    Some(response) => response,
+                    None => return Ok(()), // socket closed mid-wait
+                },
+                Ok(request) => dispatch_immediate(&handles, request),
+                Err(error) => DevResponse::Error { error },
+            };
+            write_line(&mut write_half, &response).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_line(
+        write_half: &mut OwnedWriteHalf,
+        response: &DevResponse,
+    ) -> std::io::Result<()> {
+        let mut encoded = encode_response(response);
+        encoded.push('\n');
+        write_half.write_all(encoded.as_bytes()).await
+    }
+
+    /// Route a non-blocking request: `State` reads the published snapshot, everything
+    /// else is an input command through the gated mailbox. (`WaitUntil` is handled in
+    /// `serve_conn`, which owns the read half the wait must cancel on.)
+    fn dispatch_immediate(handles: &Handles, request: DevRequest) -> DevResponse {
+        match request {
+            DevRequest::State => DevResponse::State {
+                state: current(handles),
+            },
+            // Unreachable: serve_conn intercepts WaitUntil. Defensive, not a panic.
+            DevRequest::WaitUntil { .. } => DevResponse::Error {
+                error: DevError::BadRequest,
+            },
+            input => apply(handles, input),
+        }
+    }
+
+    fn current(handles: &Handles) -> DevState {
+        handles.published.load().as_ref().clone()
+    }
+
+    /// Enqueue an input command (Move/Look/Action/Close/ResetInput), gating the
+    /// mutating arm behind `--allow-dev-control` and shedding loudly when full.
+    fn apply(handles: &Handles, input: DevRequest) -> DevResponse {
+        if input.is_mutating() && !handles.allow_mutating {
+            return DevResponse::Error {
+                error: DevError::NotAllowed,
+            };
+        }
+        match input.as_input_action() {
+            Some(action) => match handles.commands.try_send(action) {
+                Ok(()) => DevResponse::Ack,
+                Err(_) => {
+                    handles.dropped.fetch_add(1, Ordering::Relaxed);
+                    DevResponse::Error {
+                        error: DevError::Busy,
+                    }
+                }
+            },
+            // State/WaitUntil are routed in `dispatch`; any other non-input request
+            // is a protocol error rather than a panic.
+            None => DevResponse::Error {
+                error: DevError::BadRequest,
+            },
+        }
+    }
+
+    /// Block until the predicate holds over the published state, `max_ticks`
+    /// step-ticks elapse, the session closes, or the socket reaches EOF (cancel →
+    /// `None`). The `Closed` check is the termination guarantee: once the step loop
+    /// has exited, the step clock is FROZEN, so a `max_ticks` deadline would never
+    /// trip — a Closed session reports an honest `Timeout` (carrying `phase: closed`)
+    /// instead of hanging.
+    async fn wait_until(
+        handles: &Handles,
+        framer: &mut LineFramer,
+        predicate: WaitPredicate,
+        max_ticks: u64,
+    ) -> Option<DevResponse> {
+        let start = handles.step_seq.load(Ordering::Relaxed);
+        loop {
+            let state = handles.published.load_full();
+            if predicate.eval(state.as_ref()) {
+                return Some(DevResponse::State {
+                    state: state.as_ref().clone(),
+                });
+            }
+            let elapsed = handles.step_seq.load(Ordering::Relaxed).wrapping_sub(start);
+            if state.phase == DevPhase::Closed || elapsed >= max_ticks {
+                return Some(DevResponse::Timeout {
+                    state: state.as_ref().clone(),
+                });
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(WAIT_POLL) => {}
+                // EOF from a killed vdctl cancels the wait (frees the task at once);
+                // a buffered pipelined line is retained by the framer for after the
+                // wait responds, so it is never silently dropped.
+                read = framer.fill() => {
+                    if matches!(read, Ok(true) | Err(_)) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+}

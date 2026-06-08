@@ -2318,7 +2318,9 @@ dependencies = [
  "postcard",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
+ "vd-client",
  "vd-connection-plane",
  "vd-core",
  "vd-devproto",
@@ -2335,6 +2337,7 @@ dependencies = [
  "glam 0.29.3",
  "postcard",
  "vd-core",
+ "vd-devproto",
  "vd-sim",
  "vd-wire",
 ]
@@ -2373,6 +2376,8 @@ dependencies = [
 name = "vd-devproto"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

@@ -23,15 +23,15 @@
 //! Tier-B process glue; gated by the Slice-0 smoke test + G-RENDER-SMOKE.
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    Cluster, ClusterAddrs, DEV, common_env, dev_auth_pubkey_hex, gateway_env, orchestrator_env,
-    sh_quote, shard_env,
+    Cluster, ClusterAddrs, DEV, admin_get_body, common_env, dev_auth_pubkey_hex, gateway_env,
+    loopback, orchestrator_env, sh_quote, shard_env,
 };
 use vd_core::NodeId;
 use vd_devproto::{CLIENT_NODE_BASE, DevPortScheme, SlotPorts};
@@ -42,6 +42,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Grace between SIGTERM and the SIGKILL escalation in `down`.
 const TERM_GRACE: Duration = Duration::from_secs(3);
+/// Bounds the admin readiness GET so a wedged endpoint can't stall the poll.
+const ADMIN_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -140,8 +142,14 @@ fn up_inner(
         shard: loopback(ports.shard),
         admin: loopback(ports.admin),
     };
-    // Seed every dev-control client's QUIC addr into the gateway book so the
-    // gateway can route snapshots back to it (the mesh dials by address book).
+    // CA-1 CRUTCH (fenced; deferred to M3): seed every dev-control client's QUIC
+    // addr into the gateway book so the gateway can route snapshots back (the mesh
+    // dials by static address book — `unknown_destinations_are_loud_backpressure`).
+    // The cloud-correct design is reply-on-connection: the gateway learns a client's
+    // return address from its INBOUND QUIC connection, so clients need no fixed addr
+    // and no pre-seeding. Tracked by the ignored red guard
+    // `ca1_reply_on_connection_reaches_a_peer_not_in_the_book`. Remove this seeding
+    // when CA-1 lands.
     let clients = client_book(ports)?;
     let common = common_env(&trust_str, &DEV);
 
@@ -206,26 +214,16 @@ fn await_ready(cluster: &mut Cluster, admin_port: u16) -> Result<(), String> {
 /// A blocking HTTP/1.1 GET of `/admin/snapshot`, parsed and judged by the Tier-A
 /// [`AdminSnapshot::cluster_bootstrapped`] predicate (no brittle substring match).
 fn admin_bootstrapped(admin_port: u16) -> bool {
-    let Some(body) = admin_get(admin_port, "/admin/snapshot") else {
+    let Some(body) = admin_get_body(
+        loopback(admin_port),
+        "/admin/snapshot",
+        Some(ADMIN_READ_TIMEOUT),
+    ) else {
         return false;
     };
     serde_json::from_str::<AdminSnapshot>(&body)
         .map(|snap| snap.cluster_bootstrapped())
         .unwrap_or(false)
-}
-
-/// Raw blocking HTTP/1.1 GET; returns the response body on a 200, else `None`.
-fn admin_get(admin_port: u16, path: &str) -> Option<String> {
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", admin_port)).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).ok()?;
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).ok()?;
-    if !resp.starts_with("HTTP/1.1 200") {
-        return None;
-    }
-    resp.split_once("\r\n\r\n").map(|(_, body)| body.to_owned())
 }
 
 /// Tear the cluster down: SIGTERM each recorded process group, escalate to SIGKILL
@@ -338,6 +336,7 @@ fn sibling_binary(name: &str) -> Result<PathBuf, String> {
 
 /// The dev-control client address book seeded into the gateway: one
 /// `(CLIENT_NODE_BASE + agent → 127.0.0.1:client_quic)` per slot client window.
+/// This is the CA-1 crutch (see the call site) — superseded by reply-on-connection.
 fn client_book(ports: SlotPorts) -> Result<Vec<(NodeId, SocketAddr)>, String> {
     (0..DevPortScheme::DEFAULT.max_clients_per_worktree)
         .map(|agent| {
@@ -461,8 +460,4 @@ fn runfile(work: &Path) -> PathBuf {
 
 fn env_file(work: &Path) -> PathBuf {
     work.join("cluster.env")
-}
-
-fn loopback(port: u16) -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], port))
 }

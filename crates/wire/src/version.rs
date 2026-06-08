@@ -5,17 +5,20 @@
 //! drains old connections, it never changes schema mid-connection.
 //!
 //! - `proto_major` must match exactly; a mismatch is a typed refusal, never a guess.
-//! - `proto_minor` is forward/backward compatible by construction: postcard structs
-//!   evolve additively via `#[serde(default)]` on new trailing fields, and enums via
-//!   appended variants gated on the negotiated minor (a sender never emits a variant
-//!   the peer's minor predates).
+//! - `proto_minor` is forward/backward compatible by ONE mechanism: APPENDED ENUM
+//!   VARIANTS gated on the negotiated minor (a sender never emits a variant the
+//!   peer's minor predates). NOTE: adding a trailing FIELD to a struct/variant is
+//!   NOT additive in postcard — postcard is non-self-describing, so `#[serde(default)]`
+//!   does NOT help (a new decoder hits `DeserializeUnexpectedEnd` on old bytes; an
+//!   old decoder desyncs on the trailing bytes). New data rides a new trailing
+//!   variant, never a new field.
 
 use serde::{Deserialize, Serialize};
 
 /// Breaking-change generation of the whole wire contract.
 pub const PROTO_MAJOR: u16 = 1;
-/// Additive revision within the major.
-pub const PROTO_MINOR: u16 = 0;
+/// Additive revision within the major — minor 1 added `ServerControlMsg::UniverseRate`.
+pub const PROTO_MINOR: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -71,10 +74,21 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
+            PROTO_MINOR, 1,
+            "minor 1 added ServerControlMsg::UniverseRate"
+        );
+        assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.0");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.1");
+        // Sender-gates-variants: talking to an older minor-0 peer negotiates DOWN to
+        // minor 0, so the gateway withholds the minor-1 UniverseRate variant.
+        let old = ProtoVersion { major: 1, minor: 0 };
+        assert_eq!(
+            ProtoVersion::CURRENT.negotiate(old),
+            Some(ProtoVersion { major: 1, minor: 0 })
+        );
     }
 
     #[test]

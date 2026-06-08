@@ -70,6 +70,30 @@ impl DeliveredView {
     /// in P2). Cross-sub duplicates are suppressed.
     #[must_use]
     pub fn render(&self, cursor: f64) -> BTreeMap<EntityId, RenderPose> {
+        self.rendered(cursor)
+            .into_iter()
+            .map(|(entity, _sub, pose)| (entity, pose))
+            .collect()
+    }
+
+    /// Like [`DeliveredView::render`] but also reports each entity's authoritative
+    /// sub — the dev-control diagnosis surface (which sub a rendered entity came
+    /// from; in P1.5 always the one sub, disambiguated by authority in P2).
+    #[must_use]
+    pub fn rendered(&self, cursor: f64) -> Vec<(EntityId, SubId, RenderPose)> {
+        self.chosen_subs()
+            .into_iter()
+            .filter_map(|(entity, sub)| {
+                self.tracks
+                    .get(&(sub, entity))
+                    .map(|track| (entity, sub, track.sample(cursor)))
+            })
+            .collect()
+    }
+
+    /// Each entity's authoritative sub: explicit `AuthorityChanged`, else the lowest
+    /// sub it appears on. Suppresses cross-sub duplicates (each entity once).
+    fn chosen_subs(&self) -> BTreeMap<EntityId, SubId> {
         let mut chosen: BTreeMap<EntityId, SubId> = BTreeMap::new();
         for (sub, entity) in self.tracks.keys() {
             match self.authoritative_sub.get(entity) {
@@ -82,13 +106,6 @@ impl DeliveredView {
             }
         }
         chosen
-            .iter()
-            .filter_map(|(entity, sub)| {
-                self.tracks
-                    .get(&(*sub, *entity))
-                    .map(|track| (*entity, track.sample(cursor)))
-            })
-            .collect()
     }
 
     #[must_use]

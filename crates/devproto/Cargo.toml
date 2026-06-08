@@ -7,6 +7,8 @@ description = "The HR6 dev-control protocol leaf: the canonical dev-cluster port
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

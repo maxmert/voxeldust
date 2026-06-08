@@ -7,6 +7,7 @@ description = "The renderer-FREE client logic core (P1.5): net + snapshot decode
 
 [dependencies]
 vd-core = { workspace = true }
+vd-devproto = { workspace = true }
 vd-wire = { workspace = true }
 vd-sim = { workspace = true }
 glam = { workspace = true }

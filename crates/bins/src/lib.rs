@@ -11,7 +11,8 @@
 //! tests, not the coverage gate.
 
 use std::net::SocketAddr;
-use std::process::{Child, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
+use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use vd_core::NodeId;
@@ -89,6 +90,14 @@ pub const DEV: DevClusterParams = DevClusterParams {
     realm_recheck: 0,
     snapshot_budget: 1100,
 };
+
+/// SCALE-MAXSESSIONS-VS-K (compile-time): the gateway must admit at least K =
+/// `max_clients_per_worktree` sessions, or the last dev-control client window for a
+/// slot could never log in. A regression here fails the BUILD, not a flaky test.
+const _: () = assert!(
+    DEV.max_sessions as u64 >= vd_devproto::DevPortScheme::DEFAULT.max_clients_per_worktree as u64,
+    "DEV.max_sessions must be >= max_clients_per_worktree (K) so every client logs in",
+);
 
 // ---- the env contract --------------------------------------------------------
 
@@ -206,6 +215,81 @@ pub fn sh_quote(value: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+// ---- shared process / net glue ----------------------------------------------
+
+/// `127.0.0.1:port` — the ONE loopback-address constructor for the dev tooling (was
+/// hand-inlined in every bin and test).
+#[must_use]
+pub fn loopback(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+/// Reserve an ephemeral loopback UDP address (bind `:0`, read it back, drop) — the
+/// QUIC bind addr a node/client will reuse. Inherently TOCTOU-racy, fine for the
+/// local test/dev tiers. (One definition; was `reserve_addr`/`reserve_udp`.)
+#[must_use]
+pub fn reserve_udp_addr() -> SocketAddr {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .expect("reserve udp")
+        .local_addr()
+        .expect("addr")
+}
+
+/// Reserve an ephemeral loopback TCP address (for an admin / dev-control port).
+#[must_use]
+pub fn reserve_tcp_addr() -> SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve tcp")
+        .local_addr()
+        .expect("addr")
+}
+
+/// Spawn one node binary with the shared `common` env merged over its node-specific
+/// env — the exact merge every in-process cluster bring-up needs, once. (The
+/// `vd-devcluster` launcher wraps this with process-group + log redirection it alone
+/// requires; the parity/load tests use this plain form.)
+///
+/// # Errors
+/// Propagates the OS spawn error (e.g. the binary is missing).
+pub fn spawn_node(
+    bin: &str,
+    common: &[(&'static str, String)],
+    node_env: &[(&'static str, String)],
+) -> std::io::Result<Child> {
+    let mut cmd = Command::new(bin);
+    for (k, v) in common.iter().chain(node_env.iter()) {
+        cmd.env(k, v);
+    }
+    cmd.spawn()
+}
+
+/// One blocking HTTP/1.1 GET of an admin path — the SINGLE place the request framing
+/// lives (was hand-inlined in the launcher + two tests). Returns the response BODY on
+/// a `200`, else `None` (unreachable / non-200 / malformed). `read_timeout` bounds the
+/// read so a wedged endpoint can't hang the launcher's readiness poll.
+#[must_use]
+pub fn admin_get_body(
+    addr: SocketAddr,
+    path: &str,
+    read_timeout: Option<Duration>,
+) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).ok()?;
+    if let Some(timeout) = read_timeout {
+        stream.set_read_timeout(Some(timeout)).ok()?;
+    }
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    if !response.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
 }
 
 // ---- RAII child guard --------------------------------------------------------

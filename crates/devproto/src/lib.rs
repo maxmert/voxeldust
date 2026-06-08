@@ -27,6 +27,22 @@
 //! ```
 //! All port math lives HERE (covered) and is surfaced to bash through the
 //! `vd-slot` helper — never hand-computed in a shell script.
+//!
+//! ## Dev-control protocol (Slice 2)
+//! The `vdctl` ↔ client command protocol — [`dispatch`] (DevRequest/DevResponse +
+//! the pure `InputAction` seam), [`codec`] (the ONE JSON-lines codec), [`predicate`]
+//! (the structured `wait-until`), and [`state`] (the `DevState` diagnosis substrate).
+//! Pure data + serde; the actual socket lives in the Tier-B client-bin.
+
+pub mod codec;
+pub mod dispatch;
+pub mod predicate;
+pub mod state;
+
+pub use codec::{decode_request, encode_response};
+pub use dispatch::{DevError, DevRequest, DevResponse, InputAction};
+pub use predicate::{WaitField, WaitOp, WaitPredicate};
+pub use state::{DevEntityRow, DevPhase, DevState, DevTransferView};
 
 /// Ports reserved at the front of every slot block for the fixed cluster nodes
 /// (orchestrator, gateway, shard, admin) ahead of the per-client port bands.

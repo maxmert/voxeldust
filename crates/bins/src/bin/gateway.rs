@@ -45,6 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shard: env.node_id("VD_SHARD")?,
             auth_verifying_key: env.hex32("VD_AUTH_PUBKEY")?,
             session_seed: env.parse("VD_SESSION_SEED")?,
+            // The SAME VD_TICK_HZ that paces this node — relayed to clients via
+            // UniverseRate so the render cursor tracks the cluster's rate (R1).
+            tick_hz: env.parse("VD_TICK_HZ")?,
             tuning: TransportTuning {
                 max_sessions: env.parse("VD_MAX_SESSIONS")?,
             },

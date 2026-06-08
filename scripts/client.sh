@@ -9,9 +9,9 @@
 #   scripts/client.sh --name watcher --agent-index 1
 #
 # The slot DEFAULTS to this worktree's stable value (matching what
-# `dev-cluster.sh up` derived); pass `--slot N` to override. The real wgpu client
-# binary lands in P1.5 Slice 3; until then this resolves and prints the exact
-# conventions it WILL use (and fails loud if the cluster is not up).
+# `dev-cluster.sh up` derived); pass `--slot N` to override. This launches the
+# HEADLESS dev-control client (net + deterministic core + the cfg-gated `vdctl`
+# listener); the wgpu rendering window lands in P1.5 Slice 3.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,26 +41,29 @@ fi
 
 # The cluster contract (gateway addr, login key, trust dir) + this client's ports.
 # Values are sh-quoted by the emitters, so eval can neither word-split nor inject.
+# `set -a` (allexport) is REQUIRED: the client reads VD_AUTH_SIGNING_KEY from its
+# process ENV (a secret belongs in env, not argv where `ps` would expose it), so the
+# contract vars must be EXPORTED to cross the `exec` boundary into the client — a
+# plain eval leaves them shell-local and the client dies at boot with a missing key.
+set -a
 eval "$("$TARGET/vd-devcluster" env --slot "$SLOT")"
 eval "$("$TARGET/vd-slot" --slot "$SLOT" --agent "$AGENT")"
+set +a
 
 CLIENT_BIN="$TARGET/client"
-if [[ ! -x "$CLIENT_BIN" ]]; then
-    cat >&2 <<EOF
-client.sh: the wgpu client binary lands in P1.5 Slice 3 — not built yet.
-Resolved conventions for --name '$NAME' (slot $SLOT, agent $AGENT):
-  gateway          $VD_GW_ADDR
-  client QUIC port $VD_CLIENT_QUIC_PORT
-  dev-control port $VD_DEVCTL_PORT  (vdctl --port $VD_DEVCTL_PORT)
-  trust dir        $VD_TRUST_DIR
-  login key        (VD_AUTH_SIGNING_KEY from the cluster env)
-EOF
-    exit 0
-fi
+# `dev-control` is a NON-default feature, compiled in ONLY for this dev launcher
+# (a release build of the client links no listener at all). The build is
+# incremental — effectively a no-op once current.
+cargo build -q --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features dev-control
 
+# The agent drives this client over the dev-control listener: input injection at
+# the same seam the keyboard uses, `state`/`wait-until` reads of the decoded
+# delivered world. `--allow-dev-control` enables the privileged (mutating) commands.
 exec "$CLIENT_BIN" \
     --name "$NAME" \
+    --agent-index "$AGENT" \
     --gateway "$VD_GW_ADDR" \
     --client-quic "$VD_CLIENT_QUIC_PORT" \
     --trust-dir "$VD_TRUST_DIR" \
-    --dev-control "$VD_DEVCTL_PORT"
+    --dev-control "$VD_DEVCTL_PORT" \
+    --allow-dev-control

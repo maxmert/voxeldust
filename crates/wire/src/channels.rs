@@ -105,6 +105,14 @@ pub enum ServerControlMsg {
     Close {
         reason: String,
     },
+    /// The cluster's universe-tick rate (Hz), so the client drives its render cursor
+    /// at the server's rate instead of a hard-coded guess. Appended trailing variant
+    /// (proto_minor 1), emitted only to a peer that negotiated minor >= 1. (An
+    /// APPENDED VARIANT is the only postcard-safe additive shape — a new struct field
+    /// is NOT, even with `#[serde(default)]`; postcard is non-self-describing.)
+    UniverseRate {
+        tick_hz: u32,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -326,12 +334,33 @@ mod tests {
             ServerControlMsg::Close {
                 reason: "test".into(),
             },
+            ServerControlMsg::UniverseRate { tick_hz: 50 },
         ];
         for msg in msgs {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
             let back: ServerControlMsg = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(back, msg);
         }
+    }
+
+    #[test]
+    fn appended_variant_is_additive_a_prior_variant_decodes_unchanged() {
+        // The minor-1 additive shape: bytes a minor-0 sender produced (any variant
+        // BEFORE UniverseRate) still decode unchanged on a minor-1 decoder — appending
+        // a trailing variant never shifts a prior variant's discriminant or framing.
+        let prior = ServerControlMsg::Close {
+            reason: "bye".into(),
+        };
+        let bytes = postcard::to_allocvec(&prior).expect("encode");
+        let back: ServerControlMsg = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(back, prior);
+        // And the new variant itself is a clean self-contained message.
+        let rate = ServerControlMsg::UniverseRate { tick_hz: 20 };
+        let rate_bytes = postcard::to_allocvec(&rate).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&rate_bytes).expect("decode"),
+            rate
+        );
     }
 
     #[test]

@@ -169,6 +169,10 @@ impl ScriptedClient {
                 self.close_reason = Some(reason);
                 self.phase = ClientPhase::Closed;
             }
+            // The cluster tick rate (minor 1): this scripted test client does not
+            // interpolate, so it has nothing to apply — ignore it (the real client
+            // learns its render rate from this; vd-client net.rs).
+            ServerControlMsg::UniverseRate { .. } => {}
             // No transfers, pings, or sub teardown reach a P1 client; arriving
             // here means a protocol regression worth failing loudly.
             other => panic!("unexpected control message in P1: {other:?}"),
@@ -441,6 +445,19 @@ mod tests {
             },
         );
         fabric.pump(TickId(5));
+        let _ = client.step();
+        assert_eq!(client.phase(), ClientPhase::Active);
+    }
+
+    #[test]
+    fn the_universe_rate_control_is_tolerated_by_the_scripted_client() {
+        // The gateway relays UniverseRate (minor 1) after Welcome; this scripted
+        // test client does not interpolate, so it must IGNORE it (never panic on the
+        // legitimate variant), staying Active.
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client);
+        send_control(&mut gw, &ServerControlMsg::UniverseRate { tick_hz: 50 });
+        fabric.pump(TickId(9));
         let _ = client.step();
         assert_eq!(client.phase(), ClientPhase::Active);
     }

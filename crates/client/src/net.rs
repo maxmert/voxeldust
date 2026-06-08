@@ -16,6 +16,7 @@
 //! invariant and forward-compatibility, enforced without a crash.
 
 use vd_core::{EntityId, NodeId, SessionId, TickId};
+use vd_devproto::{DevEntityRow, DevPhase, DevState, DevTransferView, InputAction};
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
     ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict,
@@ -67,9 +68,15 @@ pub struct ClientState {
     sent_input_count: u64,
     last_sent_input: Option<(SessionId, u64)>,
     closing: bool,
+    /// Whether the cluster tick rate has been learned from the wire (R1) — applied
+    /// once; a duplicate `UniverseRate` must not reset the render cursor.
+    tick_hz_learned: bool,
     decode_errors: u64,
     ignored: u64,
     foreign_peer_drops: u64,
+    /// Snapshots accepted by the §6.3 gate (the liveness signal a `wait-until`
+    /// predicate polls — distinguishes "live and receiving" from "welcomed but starved").
+    snapshots_applied: u64,
 }
 
 impl ClientState {
@@ -89,9 +96,11 @@ impl ClientState {
             sent_input_count: 0,
             last_sent_input: None,
             closing: false,
+            tick_hz_learned: false,
             decode_errors: 0,
             ignored: 0,
             foreign_peer_drops: 0,
+            snapshots_applied: 0,
         }
     }
 
@@ -153,6 +162,9 @@ impl ClientState {
             ServerControlMsg::Close { .. } => {
                 self.phase = ClientPhase::Closed;
             }
+            ServerControlMsg::UniverseRate { tick_hz } => {
+                self.set_tick_hz_from_wire(tick_hz);
+            }
             // Transfer/cut/ping control is P2+; a P1.5 client ignores it (no crash).
             _ => self.ignored += 1,
         }
@@ -167,6 +179,7 @@ impl ClientState {
         // Anchor the render cursor only on an APPLIED frame (our sub, fresh).
         if self.view.on_snapshot(self.sub, snap) == SnapshotVerdict::Apply {
             self.render_clock.observe(tick, now_s);
+            self.snapshots_applied += 1;
         }
     }
 
@@ -220,6 +233,17 @@ impl ClientState {
         }
     }
 
+    /// Learn the cluster's universe-tick rate from the wire (R1) — applied to the
+    /// render cursor ONCE (the first `UniverseRate`), clamped to >= 1 Hz so a bad/zero
+    /// rate cannot freeze the cursor. A duplicate is idempotent (no cursor reset).
+    fn set_tick_hz_from_wire(&mut self, tick_hz: u32) {
+        if self.tick_hz_learned {
+            return;
+        }
+        self.tick_hz_learned = true;
+        self.render_clock.set_tick_hz(f64::from(tick_hz).max(1.0));
+    }
+
     fn send_bytes(&self, transport: &mut dyn Transport, class: MsgClass, buf: Vec<u8>) -> bool {
         transport
             .send(self.gateway, class, vd_sim::io::bytes(buf))
@@ -240,6 +264,19 @@ impl ClientState {
     }
     pub fn set_action_bit(&mut self, bit: u32, pressed: bool) {
         self.input.set_action_bit(bit, pressed);
+    }
+
+    /// Apply ONE decoded dev-control [`InputAction`] (the pure seam from `vd-devproto`)
+    /// onto the SAME input setters the keyboard drives — agent input is byte-identical
+    /// to real input (HR6). `ResetInput` clears all held input (the one privileged arm).
+    pub fn apply_input_action(&mut self, action: InputAction) {
+        match action {
+            InputAction::Move(movement) => self.set_movement(movement),
+            InputAction::Look(delta) => self.add_look(delta),
+            InputAction::Action { bit, pressed } => self.set_action_bit(bit, pressed),
+            InputAction::Close => self.request_close(),
+            InputAction::ResetInput => self.input = InputState::default(),
+        }
     }
 
     // ---- read-only views ----------------------------------------------------------
@@ -278,6 +315,78 @@ impl ClientState {
     pub fn dropped_counts(&self) -> (u64, u64, u64) {
         (self.decode_errors, self.ignored, self.foreign_peer_drops)
     }
+    #[must_use]
+    pub fn snapshots_applied(&self) -> u64 {
+        self.snapshots_applied
+    }
+
+    /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
+    /// at wall-time `now_s` — wire truth, never internal hope. `dev_commands_applied`/
+    /// `dropped` are the bin's mailbox counters (the lib does not own that mailbox), so
+    /// the bin passes them in. Every emitted float is sanitized finite, so the
+    /// `encode_response` codec is infallible.
+    #[must_use]
+    pub fn devstate(
+        &self,
+        now_s: f64,
+        dev_commands_applied: u64,
+        dev_commands_dropped: u64,
+    ) -> DevState {
+        let render_cursor = self.cursor(now_s).map(sanitize_f64);
+        // Entities are sampled at the cursor only once it is anchored (a snapshot has
+        // applied); before that there is nothing to render.
+        let entities = render_cursor
+            .map(|cursor| {
+                self.view
+                    .rendered(cursor)
+                    .into_iter()
+                    .map(|(entity, sub, pose)| DevEntityRow {
+                        entity: entity.to_string(),
+                        pos: sanitize_vec3(pose.pos),
+                        authoritative_sub: sub.0,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        DevState {
+            phase: dev_phase(self.phase),
+            session: self.session.map(|s| s.to_string()),
+            own_entity: self.view.own_entity().map(|e| e.to_string()),
+            render_cursor,
+            entities,
+            snapshots_applied: self.snapshots_applied,
+            stale_frames_dropped: self.view.stale_frames_dropped(),
+            sent_input_count: self.sent_input_count,
+            decode_errors: self.decode_errors,
+            ignored: self.ignored,
+            foreign_peer_drops: self.foreign_peer_drops,
+            dev_commands_applied,
+            dev_commands_dropped,
+            transfer: DevTransferView::None,
+        }
+    }
+}
+
+/// Map the client lifecycle phase to its serde-able twin (the dev surface mirrors the
+/// phases without re-exporting `ClientPhase`'s internals).
+fn dev_phase(phase: ClientPhase) -> DevPhase {
+    match phase {
+        ClientPhase::Connecting => DevPhase::Connecting,
+        ClientPhase::AwaitingWelcome => DevPhase::AwaitingWelcome,
+        ClientPhase::AwaitingSubscription => DevPhase::AwaitingSubscription,
+        ClientPhase::Active => DevPhase::Active,
+        ClientPhase::Closed => DevPhase::Closed,
+    }
+}
+
+/// Force a float finite (NaN/±∞ → 0.0) so the `DevState` always JSON-encodes — a
+/// non-finite float is the only value that makes `serde_json` fail on these types.
+fn sanitize_f64(x: f64) -> f64 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
+fn sanitize_vec3(v: glam::DVec3) -> [f64; 3] {
+    [sanitize_f64(v.x), sanitize_f64(v.y), sanitize_f64(v.z)]
 }
 
 /// The branchless shim: owns a concrete transport and delegates every step to the
@@ -610,6 +719,56 @@ mod tests {
         assert_eq!(c.local_id(), NodeId(100));
     }
 
+    fn universe_rate(tick_hz: u32) -> Vec<u8> {
+        postcard::to_allocvec(&ServerControlMsg::UniverseRate { tick_hz }).expect("test fixture")
+    }
+
+    #[test]
+    fn the_client_learns_the_tick_rate_from_the_wire_once() {
+        let mut c = core();
+        activate(&mut c);
+        // The default lib rate is 20 Hz; the cluster runs 50. Deliver UniverseRate{50}.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, universe_rate(50));
+        c.step(0.0);
+        // Anchor the cursor and confirm it advances at 50 ticks/sec, not 20.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
+        c.step(10.0);
+        let c0 = c.state().cursor(10.0).expect("anchored");
+        let c1 = c.state().cursor(11.0).expect("anchored");
+        assert!(
+            (c1 - c0 - 50.0).abs() < 1e-9,
+            "1 s advances 50 ticks (learned rate)"
+        );
+        // A DUPLICATE UniverseRate (even a different value) is idempotent — the rate
+        // is learned once and must not reset the cursor.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, universe_rate(200));
+        c.step(11.0);
+        let c2 = c.state().cursor(12.0).expect("anchored");
+        assert!(
+            (c2 - c1 - 50.0).abs() < 1e-9,
+            "still 50 ticks/sec after a duplicate"
+        );
+    }
+
+    #[test]
+    fn a_zero_tick_rate_is_clamped_so_the_cursor_never_freezes() {
+        let mut c = core();
+        activate(&mut c);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, universe_rate(0));
+        c.step(0.0);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
+        c.step(10.0);
+        // Clamped to 1 Hz: the cursor still ADVANCES (1 tick/sec), never frozen at 0.
+        let c0 = c.state().cursor(10.0).expect("anchored");
+        let c1 = c.state().cursor(11.0).expect("anchored");
+        assert!((c1 - c0 - 1.0).abs() < 1e-9, "clamped to 1 tick/sec");
+    }
+
     #[test]
     fn a_duplicate_subscription_opened_while_active_keeps_the_phase() {
         let mut c = core();
@@ -642,5 +801,140 @@ mod tests {
         );
         // The dropped frame's pose (x=99) never landed.
         assert_eq!(c.state().view().render(100.0)[&ent()].pos.x, 0.0);
+    }
+
+    // ---- dev-control glue (Slice 2 T3) --------------------------------------------
+
+    #[test]
+    fn injected_input_actions_are_byte_identical_to_keyboard_input() {
+        // THE honesty invariant (HR6): a dev-control client driven through the pure
+        // `InputAction` seam emits an `InputDatagram` byte-for-byte identical to a
+        // client driven through the raw keyboard setters. Two clients stepped in
+        // lockstep ⇒ identical seq/tick ⇒ identical bytes.
+        let mut dev = core();
+        let mut kbd = core();
+        activate(&mut dev);
+        activate(&mut kbd);
+        dev.state_mut()
+            .apply_input_action(InputAction::Move([0.5, -0.5, 1.0]));
+        dev.state_mut()
+            .apply_input_action(InputAction::Look([0.1, 0.2]));
+        dev.state_mut().apply_input_action(InputAction::Action {
+            bit: 0b10,
+            pressed: true,
+        });
+        kbd.state_mut().set_movement([0.5, -0.5, 1.0]);
+        kbd.state_mut().add_look([0.1, 0.2]);
+        kbd.state_mut().set_action_bit(0b10, true);
+        dev.step(0.0);
+        kbd.step(0.0);
+        let (dev_class, dev_buf) = dev.transport.sent.last().cloned().expect("dev input");
+        let (kbd_class, kbd_buf) = kbd.transport.sent.last().cloned().expect("kbd input");
+        assert_eq!(dev_class, MsgClass::Input);
+        assert_eq!(kbd_class, MsgClass::Input);
+        assert_eq!(
+            dev_buf, kbd_buf,
+            "dev-injected input is byte-identical to keyboard input"
+        );
+    }
+
+    #[test]
+    fn apply_input_action_close_requests_a_graceful_close() {
+        let mut c = core();
+        activate(&mut c);
+        c.state_mut().apply_input_action(InputAction::Close);
+        let r = c.step(0.0);
+        assert_eq!(r.sent, 1, "the Bye went out");
+        assert_eq!(c.state().phase(), ClientPhase::Closed);
+    }
+
+    #[test]
+    fn apply_input_action_reset_clears_all_held_input() {
+        let mut c = core();
+        activate(&mut c);
+        c.state_mut()
+            .apply_input_action(InputAction::Move([1.0, 1.0, 1.0]));
+        c.state_mut().apply_input_action(InputAction::Action {
+            bit: 0b1,
+            pressed: true,
+        });
+        c.state_mut().apply_input_action(InputAction::ResetInput);
+        c.step(0.0);
+        let (_class, buf) = c.transport.sent.last().cloned().expect("input");
+        let input: InputDatagram = postcard::from_bytes(&buf).expect("decode input");
+        assert_eq!(input.movement, [0.0, 0.0, 0.0], "reset cleared movement");
+        assert_eq!(input.action_bits, 0, "reset cleared actions");
+    }
+
+    #[test]
+    fn every_client_phase_maps_to_its_dev_phase() {
+        assert_eq!(dev_phase(ClientPhase::Connecting), DevPhase::Connecting);
+        assert_eq!(
+            dev_phase(ClientPhase::AwaitingWelcome),
+            DevPhase::AwaitingWelcome
+        );
+        assert_eq!(
+            dev_phase(ClientPhase::AwaitingSubscription),
+            DevPhase::AwaitingSubscription
+        );
+        assert_eq!(dev_phase(ClientPhase::Active), DevPhase::Active);
+        assert_eq!(dev_phase(ClientPhase::Closed), DevPhase::Closed);
+    }
+
+    #[test]
+    fn sanitize_forces_floats_finite_so_devstate_always_encodes() {
+        assert_eq!(sanitize_f64(1.5), 1.5);
+        assert_eq!(sanitize_f64(f64::NAN), 0.0);
+        assert_eq!(sanitize_f64(f64::INFINITY), 0.0);
+        assert_eq!(sanitize_f64(f64::NEG_INFINITY), 0.0);
+        assert_eq!(
+            sanitize_vec3(DVec3::new(1.0, f64::NAN, -2.0)),
+            [1.0, 0.0, -2.0]
+        );
+    }
+
+    #[test]
+    fn devstate_before_welcome_is_honest_about_nothing_delivered() {
+        let c = core();
+        let s = c.state().devstate(0.0, 0, 0);
+        assert_eq!(s.phase, DevPhase::Connecting);
+        assert_eq!(s.session, None);
+        assert_eq!(s.own_entity, None);
+        assert_eq!(s.render_cursor, None);
+        assert!(s.entities.is_empty(), "no cursor ⇒ nothing sampled");
+        assert_eq!(s.snapshots_applied, 0);
+        assert_eq!(s.transfer, DevTransferView::None);
+    }
+
+    #[test]
+    fn devstate_when_live_reports_the_decoded_delivered_view() {
+        let mut c = core();
+        activate(&mut c);
+        let auth = postcard::to_allocvec(&ServerControlMsg::AuthorityChanged {
+            entity: ent(),
+            sub: SubId(0),
+        })
+        .expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, auth);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
+        c.step(10.0);
+        // dev-command counters are the bin's mailbox totals, passed through verbatim.
+        let s = c.state().devstate(10.0, 3, 1);
+        assert_eq!(s.phase, DevPhase::Active);
+        assert_eq!(s.session, Some(SessionId(9).to_string()));
+        assert_eq!(s.own_entity, Some(ent().to_string()));
+        assert!(s.render_cursor.is_some(), "anchored after a snapshot");
+        assert_eq!(s.entities.len(), 1, "one composited entity");
+        assert_eq!(s.entities[0].entity, ent().to_string());
+        assert_eq!(s.entities[0].authoritative_sub, 0);
+        assert_eq!(s.snapshots_applied, 1);
+        assert_eq!(c.state().snapshots_applied(), 1);
+        assert_eq!(s.dev_commands_applied, 3);
+        assert_eq!(s.dev_commands_dropped, 1);
+        // The honesty contract end-to-end: the built state JSON-encodes (finite floats).
+        let line =
+            vd_devproto::encode_response(&vd_devproto::DevResponse::State { state: s.clone() });
+        assert!(!line.contains('\n'));
     }
 }
