@@ -34,7 +34,7 @@ vd-client = { path = "crates/client" }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc", "use-std"] }
 thiserror = "2"
-glam = { version = "0.29", features = ["serde"] }
+glam = { version = "0.30", features = ["serde"] }
 bevy_ecs = "0.18"
 arc-swap = "1"
 tracing = "0.1"

@@ -1,0 +1,24 @@
+[package]
+name = "spike-bevy-readback"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# THROWAWAY de-risking spike. Standalone (NOT a workspace member) so it cannot
+# pollute the parent voxeldust workspace lockfile / resolution.
+[workspace]
+
+[dependencies]
+# Pin to 0.18.x to match the project's bevy_ecs 0.18 + glam 0.30.
+# Use the FULL default feature set: representative of the real client, and avoids
+# plugin-ordering gaps (e.g. bevy_text's Assets<Font> not initialized) that a
+# hand-trimmed feature set causes. The spike still disables WinitPlugin at runtime.
+bevy = "0.18"
+bevy_egui = "0.39"
+crossbeam-channel = "0.5"
+
+# Spike: fast iteration, but still exercise the real release-ish render path enough.
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3

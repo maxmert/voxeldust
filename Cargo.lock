@@ -259,7 +259,7 @@ dependencies = [
  "downcast-rs",
  "erased-serde",
  "foldhash 0.2.0",
- "glam 0.30.10",
+ "glam",
  "indexmap",
  "serde",
  "smallvec",
@@ -859,15 +859,6 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
-]
-
-[[package]]
-name = "glam"
-version = "0.29.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -2334,7 +2325,7 @@ dependencies = [
 name = "vd-client"
 version = "0.1.0"
 dependencies = [
- "glam 0.29.3",
+ "glam",
  "postcard",
  "vd-core",
  "vd-devproto",
@@ -2365,7 +2356,7 @@ dependencies = [
 name = "vd-core"
 version = "0.1.0"
 dependencies = [
- "glam 0.29.3",
+ "glam",
  "postcard",
  "proptest",
  "serde",
@@ -2423,7 +2414,7 @@ name = "vd-node"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
- "glam 0.29.3",
+ "glam",
  "postcard",
  "proptest",
  "serde",
@@ -2439,7 +2430,7 @@ name = "vd-sim"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
- "glam 0.29.3",
+ "glam",
  "postcard",
  "proptest",
  "serde",
