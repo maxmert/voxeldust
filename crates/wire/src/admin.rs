@@ -118,6 +118,9 @@ pub mod metric_names {
     pub const GHOST_STALENESS_TICKS: &str = "vd_ghost_staleness_ticks";
     /// Gauge: sagas currently in flight.
     pub const TRANSFERS_IN_FLIGHT: &str = "vd_transfers_in_flight";
+    /// Counter: snapshot datagrams dropped because they exceeded the path MTU — a
+    /// partitioner-budget misconfiguration ALERT (must stay 0; audit GW-1).
+    pub const DATAGRAMS_DROPPED_TOO_LARGE: &str = "vd_datagrams_dropped_too_large";
 
     /// Every registered name (the conformance test iterates this; adding a metric
     /// without listing it here is a review-rejectable defect).
@@ -129,6 +132,7 @@ pub mod metric_names {
         FSYNC_DURATION_MS,
         GHOST_STALENESS_TICKS,
         TRANSFERS_IN_FLIGHT,
+        DATAGRAMS_DROPPED_TOO_LARGE,
     ];
 }
 

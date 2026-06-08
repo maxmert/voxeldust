@@ -61,7 +61,7 @@ struct ProcessClient {
     sub: Option<SubId>,
     own_entity: Option<EntityId>,
     poses: BTreeMap<EntityId, StampedPose>,
-    last_frame: u64,
+    last_frame: Option<u64>,
     next_seq: u64,
     tick: u64,
 }
@@ -74,7 +74,7 @@ impl ProcessClient {
             sub: None,
             own_entity: None,
             poses: BTreeMap::new(),
-            last_frame: 0,
+            last_frame: None,
             next_seq: 0,
             tick: 0,
         }
@@ -142,10 +142,18 @@ impl ProcessClient {
 
     fn on_snapshot(&mut self, bytes: &[u8]) {
         let snap: SnapshotDatagram = postcard::from_bytes(bytes).expect("decode snapshot");
-        if Some(snap.sub) != self.sub || snap.frame_id <= self.last_frame {
-            return; // unreliable datagrams: stale/foreign frames drop by data
+        // Foreign sub: drop. §6.3: sibling chunks of one tick share a frame_id
+        // (each self-contained latest-wins), so only a STRICTLY older frame_id is
+        // stale — a same-tick sibling (equal id) is applied. This mirrors the
+        // in-process ScriptedClient (harness/client.rs) so the parity gate stays
+        // faithful to the tier it checks even once a snapshot partitions.
+        if Some(snap.sub) != self.sub {
+            return;
         }
-        self.last_frame = snap.frame_id;
+        if self.last_frame.is_some_and(|last| snap.frame_id < last) {
+            return;
+        }
+        self.last_frame = Some(snap.frame_id);
         for entity in snap.entities {
             self.poses.insert(entity.entity, entity.pose);
         }
@@ -239,6 +247,7 @@ fn p1_parity_real_binaries_over_quic() {
                 ("VD_MINT_SEED", "11".to_owned()),
                 ("VD_INPUT_LOG_CAP", "4096".to_owned()),
                 ("VD_REALM_RECHECK", "0".to_owned()),
+                ("VD_SNAPSHOT_BUDGET", "1100".to_owned()),
             ],
         ),
     ]);

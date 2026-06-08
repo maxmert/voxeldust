@@ -47,6 +47,7 @@ pub fn stub_config() -> StubConfig {
         // Large window: the oracle must see a whole short test run.
         input_log_capacity: 1_000_000,
         realm_recheck_interval: 0,
+        snapshot_datagram_budget: 1100,
     }
 }
 

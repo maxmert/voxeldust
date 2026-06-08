@@ -23,7 +23,7 @@ use vd_core::glam::{DQuat, DVec3, EulerRot};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId};
-use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId};
+use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::session_flow::{GatewayToShard, ShardToGateway};
@@ -51,6 +51,10 @@ pub struct StubConfig {
     /// How often (ticks) a shard re-reads its realm head to OBSERVE a lost lease
     /// (fence rule 4 self-fence — FENCE-1/5/8). 0 disables (single-shard P1 tests).
     pub realm_recheck_interval: u64,
+    /// Per-datagram byte budget for snapshot partitioning (audit GW-1): a full-world
+    /// snapshot is split into chunks each encoding under this, so none exceeds the
+    /// QUIC datagram MTU. Operational param (never an inline literal in systems).
+    pub snapshot_datagram_budget: usize,
 }
 
 /// One connected avatar.
@@ -654,6 +658,7 @@ fn on_directory_reply(
 /// Emit one fence-stamped frame per tick to every gateway with an attached session.
 /// No realm authority ⇒ no frames (an unowned shard is silent, never speculative).
 fn emit_frames(
+    config: Res<StubConfig>,
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     dots: Res<Dots>,
@@ -683,29 +688,39 @@ fn emit_frames(
             pose: d.pose,
         })
         .collect();
-    let snapshot = SnapshotDatagram {
-        // The shard always stamps sub 0; the gateway re-tags per session.
-        sub: SubId(0),
-        frame_id: counter.0,
-        source_tick: clock.local_tick,
-        universe_tick: clock.universe_tick,
-        entities,
-    };
+    // Partition BY CONTENT so no datagram exceeds the MTU budget (audit GW-1): a
+    // full-world snapshot ships as several independent self-contained frames. Per
+    // connection_plane.md §6.3 EVERY chunk of one tick carries the SAME frame_id +
+    // celestial_tick (each chunk self-contained, latest-wins) — the client merges
+    // them and treats only a STRICTLY older frame_id as stale, so a reordered
+    // sibling chunk of the same tick is never dropped. The counter advances once per
+    // tick. The shared partitioner is the ONE place every shard type does this.
+    let frame_id = counter.0;
     counter.0 += 1;
-    let snapshot_bytes =
-        postcard::to_allocvec(&snapshot).expect("closed wire enums serialize infallibly");
-    let frame = ShardToGateway::Frame {
-        realm_fence,
-        source_tick: clock.local_tick,
-        snapshot_bytes,
-    };
-    // ONE shared body, cloned (refcount bump) to every subscribing gateway — never
-    // an O(entities) copy per gateway (SCALE-1).
-    let bytes = crate::io::bytes(
-        postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
-    );
-    for gateway in gateways {
-        outbox.0.push((gateway, MsgClass::Snapshot, bytes.clone()));
+    for chunk in partition_entities(&entities, config.snapshot_datagram_budget) {
+        let snapshot = SnapshotDatagram {
+            // The shard always stamps sub 0; the gateway re-tags per session.
+            sub: SubId(0),
+            frame_id,
+            source_tick: clock.local_tick,
+            universe_tick: clock.universe_tick,
+            entities: chunk,
+        };
+        let snapshot_bytes =
+            postcard::to_allocvec(&snapshot).expect("closed wire enums serialize infallibly");
+        let frame = ShardToGateway::Frame {
+            realm_fence,
+            source_tick: clock.local_tick,
+            snapshot_bytes,
+        };
+        // ONE shared body per chunk, cloned (refcount bump) to every subscribing
+        // gateway — never an O(entities) copy per gateway (SCALE-1).
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
+        );
+        for &gateway in &gateways {
+            outbox.0.push((gateway, MsgClass::Snapshot, bytes.clone()));
+        }
     }
 }
 
@@ -730,6 +745,7 @@ mod tests {
             mint_seed: 99,
             input_log_capacity: 1024,
             realm_recheck_interval: 0,
+            snapshot_datagram_budget: 1100,
         }
     }
 
@@ -1480,6 +1496,75 @@ mod tests {
         // Frame ids increment.
         let next = decode_frames(&rig.tick(vec![]));
         assert_eq!(next[0].frame_id, snap.frame_id + 1);
+    }
+
+    #[test]
+    fn a_large_world_partitions_into_multiple_under_budget_frames() {
+        // GW-1: many dots exceed the datagram budget, so the snapshot ships as
+        // several same-frame_id sibling chunks, each encoding under the budget,
+        // together carrying EVERY entity (no silent MTU drop).
+        let mut rig = Rig::with_config(StubConfig {
+            snapshot_datagram_budget: 300,
+            ..config()
+        });
+        rig.grant_realm();
+        // Insert 12 granted dots directly (bypassing the attach handshake).
+        {
+            let mut dots = rig.world.resource_mut::<Dots>();
+            for n in 0..12u64 {
+                dots.0.insert(
+                    SessionId(u128::from(n) + 1),
+                    Dot {
+                        entity: EntityId::pack(EntityKind::Player, 10, n, n as u32),
+                        account: AccountId(n as u128),
+                        session_fence: Fence(1),
+                        gateway: GATEWAY,
+                        granted: true,
+                        departing: false,
+                        entity_fence: Fence(1),
+                        pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(100)),
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        last_applied_seq: None,
+                    },
+                );
+            }
+        }
+        let frames = decode_frames(&rig.tick(vec![]));
+        assert!(
+            frames.len() > 1,
+            "12 dots must partition into multiple frames"
+        );
+        // Every chunk is under budget and the union is all 12 entities.
+        let mut all_entities = std::collections::BTreeSet::new();
+        for f in &frames {
+            let encoded = postcard::to_allocvec(f).expect("encode").len();
+            assert!(encoded <= 300, "chunk encodes to {encoded} > 300");
+            for e in &f.entities {
+                all_entities.insert(e.entity);
+            }
+        }
+        assert_eq!(all_entities.len(), 12, "no entity lost across chunks");
+        // §6.3: every chunk of ONE tick shares the SAME frame_id (each self-contained
+        // latest-wins) so a reordered sibling chunk is never dropped as stale.
+        let ids: std::collections::BTreeSet<u64> = frames.iter().map(|f| f.frame_id).collect();
+        assert_eq!(ids.len(), 1, "all chunks of one tick share a frame_id");
+        let tick0_id = *ids.iter().next().expect("at least one chunk");
+        // The next tick's chunks all share a STRICTLY GREATER frame_id: the counter
+        // advances exactly once per tick (monotonic between ticks, stable within one).
+        let next = decode_frames(&rig.tick(vec![]));
+        assert!(next.len() > 1, "still partitioned the next tick");
+        let next_ids: std::collections::BTreeSet<u64> = next.iter().map(|f| f.frame_id).collect();
+        assert_eq!(
+            next_ids.len(),
+            1,
+            "next tick's chunks also share one frame_id"
+        );
+        assert_eq!(
+            *next_ids.iter().next().expect("chunk"),
+            tick0_id + 1,
+            "frame_id advances exactly once per tick"
+        );
     }
 
     #[test]

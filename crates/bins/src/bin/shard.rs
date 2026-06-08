@@ -29,6 +29,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             env.parse("VD_OUTBOUND_CAP")?,
         ),
     )?;
+    // GW-1 §6.3: fail LOUD at boot if the snapshot budget exceeds the conservative
+    // datagram floor — a misconfiguration must never become a silent runtime drop.
+    let snapshot_budget: usize = env.parse("VD_SNAPSHOT_BUDGET")?;
+    assert!(
+        snapshot_budget <= vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET,
+        "VD_SNAPSHOT_BUDGET {snapshot_budget} exceeds the conservative datagram floor {}",
+        vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET
+    );
     let mut node = build_app(
         NodeConfig {
             node_id: local,
@@ -56,6 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input_log_capacity: env.parse("VD_INPUT_LOG_CAP")?,
             // How often to re-read the realm head to observe a lost lease (FENCE-1/5/8).
             realm_recheck_interval: env.parse("VD_REALM_RECHECK")?,
+            // Per-datagram snapshot budget — partitioned so none exceeds the MTU (GW-1).
+            snapshot_datagram_budget: snapshot_budget,
         },
     );
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);

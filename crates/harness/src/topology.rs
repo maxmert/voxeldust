@@ -717,6 +717,7 @@ mod tests {
                 mint_seed: 3,
                 input_log_capacity: 1_000_000,
                 realm_recheck_interval: 0,
+                snapshot_datagram_budget: 1100,
             },
         );
         topo.add_node(Box::new(shard));

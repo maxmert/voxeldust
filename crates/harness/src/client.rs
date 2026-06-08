@@ -8,7 +8,10 @@
 //! - ONE connection: every send targets the construction-time gateway `NodeId`, and
 //!   every received byte must come FROM it — any other peer is a hard panic (the
 //!   connection-target-constant P1 DoD assertion, structural + checked).
-//! - Stale frames are dropped by (sub, frame_id) — never applied out of order.
+//! - Stale frames are dropped by (sub, frame_id): a STRICTLY older frame_id is
+//!   stale, but sibling chunks of the SAME tick share one frame_id
+//!   (connection_plane.md §6.3) and are all merged latest-wins, so a reordered
+//!   same-tick chunk is never lost.
 //! - Every sent input lands in the sent-log the INPUT-CONSERVATION oracle audits.
 
 use std::collections::BTreeMap;
@@ -180,8 +183,12 @@ impl ScriptedClient {
             self.view.stale_frames_dropped += 1;
             return;
         }
+        // A STRICTLY older frame_id is stale. An EQUAL frame_id is a sibling chunk
+        // of the current tick (a partitioned multi-datagram snapshot, §6.3): apply
+        // it — each chunk is self-contained latest-wins, so reordered same-tick
+        // chunks all land and no partitioned entity is lost.
         let high_water = self.view.last_frame.get(&snap.sub).copied();
-        if high_water.is_some_and(|last| snap.frame_id <= last) {
+        if high_water.is_some_and(|last| snap.frame_id < last) {
             self.view.stale_frames_dropped += 1;
             return;
         }
@@ -332,14 +339,14 @@ mod tests {
             .expect("sent");
     }
 
-    fn snapshot(sub: SubId, frame_id: u64, x: f64) -> SnapshotDatagram {
+    fn snapshot_of(sub: SubId, frame_id: u64, entity: EntityId, x: f64) -> SnapshotDatagram {
         SnapshotDatagram {
             sub,
             frame_id,
             source_tick: TickId(1),
             universe_tick: UniverseTick(10),
             entities: vec![EntitySnap {
-                entity: EntityId(7),
+                entity,
                 pose: StampedPose::at_rest(
                     FrameRef::SystemSpace { system_seed: 1 },
                     DVec3::new(x, 0.0, 0.0),
@@ -347,6 +354,10 @@ mod tests {
                 ),
             }],
         }
+    }
+
+    fn snapshot(sub: SubId, frame_id: u64, x: f64) -> SnapshotDatagram {
+        snapshot_of(sub, frame_id, EntityId(7), x)
     }
 
     fn send_snapshot(gw: &mut crate::fabric::FabricTransport, snap: &SnapshotDatagram) {
@@ -436,22 +447,38 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_apply_in_order_and_stale_or_foreign_subs_drop() {
+    fn snapshots_apply_in_order_stale_drops_and_same_tick_chunks_all_land() {
         let (fabric, mut gw, mut client) = rig(|_| None);
         activate(&fabric, &mut gw, &mut client);
         send_snapshot(&mut gw, &snapshot(SubId(0), 5, 1.0));
         fabric.pump(TickId(3));
         let _ = client.step();
         assert_eq!(client.view.poses[&EntityId(7)].pos.x, 1.0);
-        // Older frame: dropped. Foreign sub: dropped. Newer frame: applied.
-        send_snapshot(&mut gw, &snapshot(SubId(0), 4, 9.0));
-        send_snapshot(&mut gw, &snapshot(SubId(0), 5, 9.0));
-        send_snapshot(&mut gw, &snapshot(SubId(3), 6, 9.0));
-        send_snapshot(&mut gw, &snapshot(SubId(0), 6, 2.0));
+        // A STRICTLY older frame and a foreign sub both drop. A SECOND chunk of the
+        // SAME tick (frame 5) carrying a DIFFERENT entity is a partitioned sibling
+        // (§6.3) and MUST land — even arriving after frame 5's first chunk — or a
+        // multi-datagram snapshot would silently lose the entities only that chunk
+        // carried. A genuinely newer frame still applies.
+        send_snapshot(&mut gw, &snapshot(SubId(0), 4, 9.0)); // strictly older -> drop
+        send_snapshot(&mut gw, &snapshot_of(SubId(0), 5, EntityId(8), 7.0)); // sibling chunk -> land
+        send_snapshot(&mut gw, &snapshot(SubId(3), 6, 9.0)); // foreign sub -> drop
+        send_snapshot(&mut gw, &snapshot(SubId(0), 6, 2.0)); // newer -> apply
         fabric.pump(TickId(4));
         let _ = client.step();
-        assert_eq!(client.view.poses[&EntityId(7)].pos.x, 2.0);
-        assert_eq!(client.view.stale_frames_dropped, 3);
+        assert_eq!(
+            client.view.poses[&EntityId(7)].pos.x,
+            2.0,
+            "the newest frame for entity 7 wins"
+        );
+        assert_eq!(
+            client.view.poses[&EntityId(8)].pos.x,
+            7.0,
+            "the same-tick sibling chunk's entity landed (no MTU-partition loss)"
+        );
+        assert_eq!(
+            client.view.stale_frames_dropped, 2,
+            "only the strictly-older frame and the foreign sub dropped"
+        );
     }
 
     #[test]

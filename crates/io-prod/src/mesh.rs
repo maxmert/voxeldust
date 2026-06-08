@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use vd_core::{MsgId, NodeId};
@@ -78,6 +79,25 @@ impl MeshConfig {
 /// Mutex is only ever held for a queue push/drain — never across an await.
 type SharedInbox = Arc<Mutex<BoundedInbox>>;
 
+/// Transport honesty counters — every dropped datagram is COUNTED, never silent
+/// (audit GW-1: the design's never-silent rule). Surfaced via [`MeshControl::stats`].
+#[derive(Debug, Default)]
+pub struct MeshStats {
+    /// Unreliable datagrams dropped because the encoded payload exceeded the path
+    /// datagram MTU — should be ZERO once snapshots are content-partitioned upstream;
+    /// a nonzero value is a partitioner-budget misconfiguration ALERT.
+    pub datagrams_dropped_too_large: AtomicU64,
+    /// Unreliable datagrams dropped by a full send queue (latest-wins back-pressure).
+    pub datagrams_dropped_send: AtomicU64,
+}
+
+/// A snapshot of the mesh counters (loads the atomics).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeshStatsSnapshot {
+    pub datagrams_dropped_too_large: u64,
+    pub datagrams_dropped_send: u64,
+}
+
 fn push_inbox(inbox: &SharedInbox, event: Inbound) {
     inbox
         .lock()
@@ -107,6 +127,7 @@ pub struct MeshTransport {
 /// Lifecycle handle: owns the endpoint (dropping closes it).
 pub struct MeshControl {
     endpoint: quinn::Endpoint,
+    stats: Arc<MeshStats>,
 }
 
 impl MeshControl {
@@ -123,6 +144,18 @@ impl MeshControl {
     pub fn kill(&self) {
         self.endpoint
             .close(quinn::VarInt::from_u32(1), b"killed by harness");
+    }
+
+    /// The transport honesty counters (dropped-datagram metrics; GW-1 never-silent).
+    #[must_use]
+    pub fn stats(&self) -> MeshStatsSnapshot {
+        MeshStatsSnapshot {
+            datagrams_dropped_too_large: self
+                .stats
+                .datagrams_dropped_too_large
+                .load(Ordering::Relaxed),
+            datagrams_dropped_send: self.stats.datagrams_dropped_send.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -160,6 +193,7 @@ pub fn spawn_mesh(
     };
 
     let inbox: SharedInbox = Arc::new(Mutex::new(BoundedInbox::new(cfg.inbound_capacity)));
+    let stats = Arc::new(MeshStats::default());
 
     // Accept loop: a Semaphore caps concurrently-served connections so a connection
     // flood cannot task-flood the node (TRANSPORT-4). Each connection serves BOTH
@@ -198,6 +232,7 @@ pub fn spawn_mesh(
             addr,
             rx,
             inbox: Arc::clone(&inbox),
+            stats: Arc::clone(&stats),
             backoff_min: cfg.redial_backoff_min,
             backoff_max: cfg.redial_backoff_max,
         }));
@@ -211,7 +246,7 @@ pub fn spawn_mesh(
             inbox,
             next_msg_id: 0,
         },
-        MeshControl { endpoint },
+        MeshControl { endpoint, stats },
     ))
 }
 
@@ -252,6 +287,7 @@ struct PeerWriter {
     addr: SocketAddr,
     rx: tokio::sync::mpsc::Receiver<OutFrame>,
     inbox: SharedInbox,
+    stats: Arc<MeshStats>,
     backoff_min: Duration,
     backoff_max: Duration,
 }
@@ -273,6 +309,7 @@ async fn peer_writer(mut w: PeerWriter) {
             &mut reliable_stream,
             w.local,
             &frame,
+            &w.stats,
         )
         .await;
         match sent {
@@ -301,6 +338,7 @@ async fn peer_writer(mut w: PeerWriter) {
 
 /// Ensure a connection (dial on demand) and write one frame on the carrier its
 /// class mandates.
+#[allow(clippy::too_many_arguments)] // writer state threaded explicitly
 async fn write_frame(
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
@@ -308,6 +346,7 @@ async fn write_frame(
     reliable_stream: &mut Option<quinn::SendStream>,
     local: NodeId,
     frame: &OutFrame,
+    stats: &MeshStats,
 ) -> Result<(), ()> {
     if connection.is_none() {
         // SNI is pinned to the cluster-trust SAN; identity comes from mTLS, not DNS.
@@ -348,8 +387,13 @@ async fn write_frame(
                 .max_datagram_size()
                 .is_none_or(|max| payload.len() > max)
             {
+                // COUNTED, never silent (GW-1): snapshots are content-partitioned
+                // upstream, so a too-large datagram here is a budget misconfiguration.
+                stats
+                    .datagrams_dropped_too_large
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
-                    "datagram payload {} exceeds the path MTU budget; dropped",
+                    "datagram payload {} exceeds the path MTU budget; dropped (counted)",
                     payload.len()
                 );
                 return Ok(()); // dropped, but the connection is healthy
@@ -359,7 +403,11 @@ async fn write_frame(
             match conn.send_datagram(payload.into()) {
                 Ok(()) => Ok(()),
                 Err(quinn::SendDatagramError::ConnectionLost(_)) => Err(()),
-                Err(_) => Ok(()), // unsupported/too-large/disabled: drop, stay up
+                Err(_) => {
+                    // Unsupported/too-large/queue-full: drop (latest-wins), stay up.
+                    stats.datagrams_dropped_send.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
             }
         }
     }
@@ -592,6 +640,33 @@ mod tests {
             vec![n],
             "the refused payload is returned intact"
         );
+    }
+
+    #[test]
+    fn an_oversize_datagram_is_dropped_but_counted_never_silent() {
+        // GW-1: a too-large unreliable payload (past the path MTU) is dropped — but
+        // COUNTED on the transport's honesty metric, never silently lost.
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let (mut nodes, controls) = cluster(rt.handle(), &trust, 2, 64);
+        // A payload far above any datagram MTU (well under MAX_FRAME_BYTES so the
+        // length guard doesn't reject it first).
+        let huge = vd_sim::io::bytes(vec![7u8; 64 * 1024]);
+        nodes[0]
+            .send(NodeId(2), MsgClass::Snapshot, huge)
+            .expect("enqueued");
+        let started = Instant::now();
+        loop {
+            let dropped = controls[0].stats().datagrams_dropped_too_large;
+            if dropped >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "the oversize datagram was never counted"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

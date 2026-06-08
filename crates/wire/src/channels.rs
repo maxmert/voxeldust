@@ -167,6 +167,49 @@ pub struct SnapshotDatagram {
     pub entities: Vec<EntitySnap>,
 }
 
+/// The fixed per-datagram overhead (sub + frame_id + source_tick + universe_tick +
+/// the entities-vec length prefix) — a generous postcard upper bound. Subtracted from
+/// the budget so a packed chunk's ENCODED size stays under the datagram MTU.
+const SNAPSHOT_HEADER_BUDGET: usize = 40;
+
+/// The conservative datagram budget every shard's snapshot partitioning must stay at
+/// or below: derived from the IPv6 minimum-MTU QUIC datagram floor minus headroom for
+/// the gateway's `sub_id` re-tag and QUIC/UDP overhead. A configured budget above this
+/// risks the path MTU; the bin asserts it at boot (never-silent, audit GW-1 §6.3).
+pub const CONSERVATIVE_DATAGRAM_BUDGET: usize = 1200;
+
+/// Split a world's entities into chunks each of which encodes to <= `budget_bytes` as a
+/// `SnapshotDatagram` (`connection_plane.md` §6.3: oversize snapshots are partitioned BY
+/// CONTENT into independent self-contained datagrams). THE shared, shard-agnostic
+/// partitioner — every shard calls this so a full-world snapshot never silently exceeds
+/// the QUIC datagram MTU (audit GW-1). Each returned chunk is non-empty (a single entity
+/// larger than the budget still ships alone, where the transport's counted-drop guard
+/// catches the impossible case). Greedy, deterministic, O(n) encodes.
+#[must_use]
+pub fn partition_entities(entities: &[EntitySnap], budget_bytes: usize) -> Vec<Vec<EntitySnap>> {
+    let body_budget = budget_bytes.saturating_sub(SNAPSHOT_HEADER_BUDGET).max(1);
+    let mut chunks: Vec<Vec<EntitySnap>> = Vec::new();
+    let mut current: Vec<EntitySnap> = Vec::new();
+    let mut current_bytes = 0usize;
+    for snap in entities {
+        let snap_bytes = postcard::to_allocvec(snap)
+            .map(|v| v.len())
+            .unwrap_or(SNAPSHOT_HEADER_BUDGET);
+        // Start a new chunk if this entity would overflow the body budget — unless the
+        // chunk is empty (one oversize entity still ships alone).
+        if !current.is_empty() && current_bytes + snap_bytes > body_budget {
+            chunks.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current.push(*snap);
+        current_bytes += snap_bytes;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +345,78 @@ mod tests {
         // Type-level separation: this is a compile-time property; the test documents it.
         let _sub: SubId = SubId(1);
         let _entity: EntityId = eid();
+    }
+
+    fn snap(n: u32) -> EntitySnap {
+        EntitySnap {
+            entity: EntityId::pack(EntityKind::Player, 1, u64::from(n), n),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 1 },
+                DVec3::new(f64::from(n), 0.0, 0.0),
+                UniverseTick(10),
+            ),
+        }
+    }
+
+    #[test]
+    fn partition_keeps_every_chunk_under_budget_and_loses_nothing() {
+        let entities: Vec<EntitySnap> = (0..50).map(snap).collect();
+        // A budget that fits only a handful of entities forces several chunks.
+        let budget = 300;
+        let chunks = partition_entities(&entities, budget);
+        assert!(chunks.len() > 1, "a 50-entity world must partition");
+        // Every chunk encodes (as a real SnapshotDatagram) within the budget...
+        let mut seen = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(!chunk.is_empty(), "no empty chunk");
+            let datagram = SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: i as u64,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(10),
+                entities: chunk.clone(),
+            };
+            let encoded = postcard::to_allocvec(&datagram).expect("encode").len();
+            assert!(
+                encoded <= budget,
+                "chunk {i} encodes to {encoded} > budget {budget}"
+            );
+            seen.extend(chunk.iter().map(|s| s.entity));
+        }
+        // ...and the union of chunks is exactly the input (no loss, no duplication).
+        let original: Vec<EntityId> = entities.iter().map(|s| s.entity).collect();
+        assert_eq!(seen, original);
+    }
+
+    #[test]
+    fn the_conservative_budget_leaves_room_for_a_header() {
+        // A single entity always fits the conservative budget (the partitioner never
+        // produces a chunk the transport must drop in normal operation).
+        let one = partition_entities(&[snap(0)], CONSERVATIVE_DATAGRAM_BUDGET);
+        assert_eq!(one.len(), 1);
+        let encoded = postcard::to_allocvec(&SnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 0,
+            source_tick: TickId(0),
+            universe_tick: UniverseTick(0),
+            entities: one[0].clone(),
+        })
+        .expect("encode")
+        .len();
+        assert!(encoded < CONSERVATIVE_DATAGRAM_BUDGET);
+    }
+
+    #[test]
+    fn partition_edge_cases() {
+        // Empty input -> no chunks.
+        assert_eq!(partition_entities(&[], 1000), Vec::<Vec<EntitySnap>>::new());
+        // A roomy budget keeps everything in one chunk.
+        let entities: Vec<EntitySnap> = (0..5).map(snap).collect();
+        assert_eq!(partition_entities(&entities, 100_000).len(), 1);
+        // A degenerate budget still ships one entity per chunk (the transport's
+        // counted-drop guard catches a truly-impossible single oversize entity).
+        let chunks = partition_entities(&entities, 1);
+        assert_eq!(chunks.len(), 5);
+        assert!(chunks.iter().all(|c| c.len() == 1));
     }
 }
