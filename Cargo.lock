@@ -6213,6 +6213,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vd-client",
+ "vd-client-harness",
  "vd-client-render",
  "vd-connection-plane",
  "vd-core",

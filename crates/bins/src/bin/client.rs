@@ -106,6 +106,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // listener (and consumed by the capture app) when `--capture` is set.
     #[cfg(all(feature = "dev-control", feature = "render"))]
     let (capture_tx, capture_rx) = crossbeam_channel::unbounded::<vd_client_render::CaptureJob>();
+    // The capture run dir + the shared run manifest (Capture mode): created up-front so the
+    // dev-control listener — the manifest's SINGLE writer (one `Mutex`, so concurrent
+    // connections can't race the file) — can record every capture (PNG path + aligned state
+    // + tick). The render thread writes the PNGs INTO this same dir; the dev side owns
+    // `manifest.json` and the `state/` dumps. `started_utc` is stamped here (the bin reads
+    // the clock; the lib never does — the manifest takes the timestamp IN).
+    #[cfg(all(feature = "dev-control", feature = "render"))]
+    let capture_run: Option<(std::path::PathBuf, dev_control::SharedManifest)> =
+        args.capture.then(|| {
+            let secs = unix_secs();
+            let manifest = std::sync::Arc::new(std::sync::Mutex::new(
+                vd_client_harness::manifest::RunManifest::new(args.name.clone(), iso_utc(secs)),
+            ));
+            (capture_run_dir(secs, &args.name), manifest)
+        });
 
     #[cfg(feature = "dev-control")]
     let _listener = match args.dev_control {
@@ -121,10 +136,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 step_seq: step_seq.clone(),
                 dropped: dropped.clone(),
                 allow_mutating: args.allow_dev_control,
-                // Wire the capture sender only in `--capture` mode; otherwise `Screenshot`
-                // is `Unsupported` (windowed/headless have no offscreen readback).
+                // Wire the capture sender only in `--capture` mode; otherwise `Screenshot`/
+                // `Record` are `Unsupported` (windowed/headless have no offscreen readback).
                 #[cfg(feature = "render")]
                 captures: args.capture.then(|| capture_tx.clone()),
+                // The run dir + manifest, so the listener can persist each capture. Cloned
+                // per connection; the `Arc<Mutex<…>>` keeps one writer across them all.
+                #[cfg(feature = "render")]
+                runs_dir: capture_run.as_ref().map(|(dir, _)| dir.clone()),
+                #[cfg(feature = "render")]
+                manifest: capture_run.as_ref().map(|(_, m)| m.clone()),
             };
             Some(runtime.spawn(dev_control::serve(loopback(port), handles)))
         }
@@ -175,7 +196,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(feature = "dev-control", feature = "render"))]
     if args.capture {
         let render_published = Arc::new(ArcSwap::from_pointee(core.state().render_snapshot()));
-        let runs_dir = capture_run_dir(&args.name);
+        // The same run dir the listener writes the manifest into (created up-front above).
+        let runs_dir = capture_run
+            .map(|(dir, _)| dir)
+            .expect("capture mode ⇒ capture_run was created");
         tracing::info!(dir = %runs_dir.display(), "headless capture run");
         run_render(
             core,
@@ -287,14 +311,41 @@ fn run_render(
     let _ = core_thread.join();
 }
 
+/// Wall-clock seconds since the unix epoch (the bin reads the OS clock; the lib never
+/// does). Used for the run-dir name AND the manifest's `started_utc`.
+#[cfg(all(feature = "dev-control", feature = "render"))]
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Format unix `secs` as an RFC-3339 UTC timestamp (`YYYY-MM-DDThh:mm:ssZ`) for the run
+/// manifest's `started_utc`. Uses Howard Hinnant's `civil_from_days` (exact, no leap-second
+/// table) so the manifest carries a real calendar time with no new dependency.
+#[cfg(all(feature = "dev-control", feature = "render"))]
+fn iso_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let sod = secs % 86_400;
+    let (hh, mm, ss) = (sod / 3600, (sod % 3600) / 60, sod % 60);
+    // civil_from_days: days since 1970-01-01 → (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
 /// The output dir for a capture run: `runs/<unix_secs>__<name>/` (created here); the
 /// manifest + PNGs land inside. The timestamp keeps successive runs distinct.
 #[cfg(all(feature = "dev-control", feature = "render"))]
-fn capture_run_dir(name: &str) -> std::path::PathBuf {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+fn capture_run_dir(secs: u64, name: &str) -> std::path::PathBuf {
     let safe: String = name
         .chars()
         .map(|c| {
@@ -457,6 +508,10 @@ mod dev_control {
     use arc_swap::ArcSwap;
     #[cfg(feature = "render")]
     use crossbeam_channel::Sender;
+    #[cfg(feature = "render")]
+    use vd_client_harness::capture::capture_entry;
+    #[cfg(feature = "render")]
+    use vd_client_harness::manifest::{CaptureKind, RunManifest};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::{TcpListener, TcpStream};
@@ -468,10 +523,24 @@ mod dev_control {
     #[cfg(feature = "render")]
     use vd_devproto::{WaitField, WaitOp};
 
+    /// The run manifest behind one writer (the dev-control listener), shared across
+    /// connections. One `Mutex` serializes appends + the `manifest.json` rewrite, so two
+    /// concurrent captures can never lose an entry or corrupt the file.
+    #[cfg(feature = "render")]
+    pub type SharedManifest = Arc<std::sync::Mutex<RunManifest>>;
+
     /// The reply timeout for a capture (Capture mode): the render thread writes a PNG and
     /// replies; if it does not within this, the request fails (never hangs the connection).
     #[cfg(feature = "render")]
     const CAPTURE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Record-sequence safety bounds: a fat-fingered `--secs 1e9` or `--fps 100000` is
+    /// clamped, never allowed to run unbounded. 3600 frames = 60 s at 60 fps — ample for a
+    /// transition clip; the agent can issue another `record` to continue.
+    #[cfg(feature = "render")]
+    const MAX_RECORD_FRAMES: u64 = 3600;
+    #[cfg(feature = "render")]
+    const MAX_RECORD_FPS: u32 = 120;
 
     /// The `screenshot --at-tick` wait budget (step-ticks) before giving up on the tick.
     #[cfg(feature = "render")]
@@ -559,11 +628,18 @@ mod dev_control {
         pub step_seq: Arc<AtomicU64>,
         pub dropped: Arc<AtomicU64>,
         pub allow_mutating: bool,
-        /// The capture seam (Capture mode only): the screenshot handler sends a job to the
-        /// Bevy render thread. `None` in windowed/headless modes (then `Screenshot` is
-        /// `Unsupported`).
+        /// The capture seam (Capture mode only): the screenshot/record handlers send jobs to
+        /// the Bevy render thread. `None` in windowed/headless modes (then `Screenshot`/
+        /// `Record` are `Unsupported`).
         #[cfg(feature = "render")]
         pub captures: Option<Sender<vd_client_render::CaptureJob>>,
+        /// The capture run dir (`runs/<ts>__<name>/`) — where `manifest.json` + `state/`
+        /// dumps land. `None` outside Capture mode.
+        #[cfg(feature = "render")]
+        pub runs_dir: Option<std::path::PathBuf>,
+        /// The shared run manifest (single-writer). `None` outside Capture mode.
+        #[cfg(feature = "render")]
+        pub manifest: Option<SharedManifest>,
     }
 
     /// Accept loopback connections forever, one task per connection, bounded by a
@@ -629,6 +705,16 @@ mod dev_control {
                     match screenshot(&handles, &mut framer, at_tick, label).await {
                         Some(response) => response,
                         None => return Ok(()), // socket closed mid-wait
+                    }
+                }
+                // Record (Capture mode): a frame SEQUENCE — paced here (off the reactor) and
+                // cancellable on EOF, like Screenshot/WaitUntil; handled in serve_conn for
+                // the same reason. Otherwise → Unsupported in dispatch_immediate.
+                #[cfg(feature = "render")]
+                Ok(DevRequest::Record { fps, secs, label }) if handles.captures.is_some() => {
+                    match record(&handles, &mut framer, fps, secs, label).await {
+                        Some(response) => response,
+                        None => return Ok(()), // socket closed mid-record
                     }
                 }
                 Ok(request) => dispatch_immediate(&handles, request),
@@ -745,9 +831,9 @@ mod dev_control {
     }
 
     /// Serve a `Screenshot` (Capture mode): optionally wait for the universe tick to reach
-    /// `at_tick` (reusing the wait-until machinery — cancellable on EOF), then ask the
-    /// render thread to write a PNG and reply with its path. Non-mutating (a read). Returns
-    /// `None` only on socket EOF (cancel).
+    /// `at_tick` (reusing the wait-until machinery — cancellable on EOF), capture one frame,
+    /// record it in the run manifest (PNG path + aligned state + tick), and reply with the
+    /// PNG path. Non-mutating (a read). Returns `None` only on socket EOF (cancel).
     #[cfg(feature = "render")]
     async fn screenshot(
         handles: &Handles,
@@ -755,11 +841,11 @@ mod dev_control {
         at_tick: Option<u64>,
         label: Option<String>,
     ) -> Option<DevResponse> {
-        let Some(captures) = &handles.captures else {
+        if handles.captures.is_none() {
             return Some(DevResponse::Error {
                 error: DevError::Unsupported,
             });
-        };
+        }
         // --at-tick: block until the delivered universe tick reaches T (run-stable), via
         // the SAME wait machinery; a Timeout/closed/EOF there propagates straight back.
         if let Some(tick) = at_tick {
@@ -773,35 +859,176 @@ mod dev_control {
                 other => return other,                // Timeout / closed / EOF (None)
             }
         }
-        // Hand the render thread a one-shot reply channel; it writes the PNG and replies.
+        match capture_one(handles, CaptureKind::Screenshot, label).await {
+            Some(Ok(result)) => {
+                let tick = handles.published.load().universe_tick;
+                record_capture(handles, CaptureKind::Screenshot, &result, at_tick);
+                flush_manifest(handles);
+                Some(DevResponse::Captured {
+                    path: result.path,
+                    tick,
+                })
+            }
+            // Render thread gone / timed out: shed honestly (it logs the real cause); retry.
+            _ => Some(DevResponse::Error {
+                error: DevError::Busy,
+            }),
+        }
+    }
+
+    /// Serve a `Record` (Capture mode): capture `round(fps*secs)` frames spaced by `1/fps`,
+    /// each a `Frame` written to `frames/<base>-NNNN.png` + recorded in the manifest, then
+    /// flush `manifest.json` ONCE. The cadence is driven HERE (off the reactor) by REUSING
+    /// the one-frame capture path per frame — so there is NO record-mode state in the render
+    /// thread (DRY). Cancellable on socket EOF; the frame count is clamped so a fat-fingered
+    /// `--secs 1e9` can't run forever. Reply: `Recorded { dir, frames_written }`.
+    #[cfg(feature = "render")]
+    async fn record(
+        handles: &Handles,
+        framer: &mut LineFramer,
+        fps: u32,
+        secs: f64,
+        label: Option<String>,
+    ) -> Option<DevResponse> {
+        if handles.captures.is_none() {
+            return Some(DevResponse::Error {
+                error: DevError::Unsupported,
+            });
+        }
+        if !(secs.is_finite() && secs > 0.0) {
+            return Some(DevResponse::Error {
+                error: DevError::BadRequest,
+            });
+        }
+        let fps = fps.clamp(1, MAX_RECORD_FPS);
+        let frames = ((f64::from(fps) * secs).round() as u64).clamp(1, MAX_RECORD_FRAMES);
+        let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+        let base = label.unwrap_or_else(|| "rec".to_owned());
+        let mut written = 0u64;
+        for i in 0..frames {
+            match capture_one(handles, CaptureKind::Frame, Some(format!("{base}-{i:04}"))).await {
+                Some(Ok(result)) => {
+                    record_capture(handles, CaptureKind::Frame, &result, None);
+                    written += 1;
+                }
+                // Render thread gone / timed out: stop, return what we captured so far.
+                _ => break,
+            }
+            // Pace to the next frame, cancelling the instant a killed vdctl closes the socket
+            // (EOF) so a long recording never strands the task.
+            if i + 1 < frames {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    read = framer.fill() => {
+                        if matches!(read, Ok(true) | Err(_)) {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        flush_manifest(handles);
+        let path = handles
+            .runs_dir
+            .as_ref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+        Some(DevResponse::Recorded {
+            path,
+            frames: written,
+        })
+    }
+
+    /// Send ONE capture job to the render thread and await its reply off the reactor (a
+    /// bounded blocking recv via `spawn_blocking`, so it never stalls the runtime or hangs).
+    /// `None` ⇒ no capture channel (not Capture mode); `Some(Err)` ⇒ render thread gone or
+    /// timed out; `Some(Ok)` ⇒ the written PNG. The ONE place a `CaptureJob` is sent —
+    /// shared by `screenshot` and `record`.
+    #[cfg(feature = "render")]
+    async fn capture_one(
+        handles: &Handles,
+        kind: CaptureKind,
+        label: Option<String>,
+    ) -> Option<Result<vd_client_render::CaptureResult, ()>> {
+        let captures = handles.captures.as_ref()?;
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         if captures
             .send(vd_client_render::CaptureJob {
+                kind,
                 label,
                 reply: reply_tx,
             })
             .is_err()
         {
-            // The render thread/app is gone (exited): not a malformed request.
-            return Some(DevResponse::Error {
-                error: DevError::Unsupported,
-            });
+            return Some(Err(())); // the render thread/app exited
         }
-        let tick = handles.published.load().universe_tick;
-        // The reply is a BLOCKING crossbeam recv → run it off the async runtime via
-        // spawn_blocking so it never stalls the reactor; bounded so it can never hang.
-        let received =
-            tokio::task::spawn_blocking(move || reply_rx.recv_timeout(CAPTURE_REPLY_TIMEOUT)).await;
-        match received {
-            Ok(Ok(Ok(result))) => Some(DevResponse::Captured {
-                path: result.path,
-                tick,
-            }),
-            // Timeout / render-side error / join error: shed honestly (the render side logs
-            // the real cause); the agent retries.
-            _ => Some(DevResponse::Error {
-                error: DevError::Busy,
-            }),
+        match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(CAPTURE_REPLY_TIMEOUT)).await
+        {
+            Ok(Ok(Ok(result))) => Some(Ok(result)),
+            _ => Some(Err(())),
         }
+    }
+
+    /// Record one served capture into the run: write its aligned `state/<stem>.json` dump
+    /// (the decoded delivered DevState — wire truth at capture time) and append a
+    /// `CaptureEntry` to the in-memory manifest via the Tier-A `capture_entry` alignment.
+    /// Best-effort — a write failure is logged, never fatal (the PNG already exists). The
+    /// `manifest.json` file is flushed separately so a record sequence rewrites it ONCE.
+    #[cfg(feature = "render")]
+    fn record_capture(
+        handles: &Handles,
+        kind: CaptureKind,
+        result: &vd_client_render::CaptureResult,
+        at_tick: Option<u64>,
+    ) {
+        let (Some(runs_dir), Some(manifest)) = (&handles.runs_dir, &handles.manifest) else {
+            return;
+        };
+        let state = current(handles);
+        // The aligned state dump sits beside the PNG: frames/foo.png → state/foo.json.
+        let stem = std::path::Path::new(&result.rel_path).file_stem().map_or_else(
+            || "capture".to_owned(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let state_rel = format!("state/{stem}.json");
+        let wrote_state = write_state_dump(&runs_dir.join(&state_rel), &state);
+        let entry = capture_entry(
+            kind,
+            result.rel_path.clone(),
+            at_tick,
+            &state,
+            wrote_state.then_some(state_rel),
+        );
+        if let Ok(mut m) = manifest.lock() {
+            m.push(entry);
+        }
+    }
+
+    /// Serialize the in-memory manifest to `runs_dir/manifest.json` (best-effort).
+    #[cfg(feature = "render")]
+    fn flush_manifest(handles: &Handles) {
+        let (Some(runs_dir), Some(manifest)) = (&handles.runs_dir, &handles.manifest) else {
+            return;
+        };
+        if let Ok(m) = manifest.lock()
+            && let Err(e) = std::fs::write(runs_dir.join("manifest.json"), m.to_json())
+        {
+            tracing::warn!(error = %e, "manifest write failed");
+        }
+    }
+
+    /// Write the aligned delivered state beside a capture (pretty JSON). Returns whether it
+    /// was written, so the manifest only references a `state_path` that actually exists.
+    #[cfg(feature = "render")]
+    fn write_state_dump(path: &std::path::Path, state: &DevState) -> bool {
+        let Ok(json) = serde_json::to_string_pretty(state) else {
+            return false;
+        };
+        if let Some(parent) = path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return false;
+        }
+        std::fs::write(path, json).is_ok()
     }
 }

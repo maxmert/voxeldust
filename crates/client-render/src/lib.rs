@@ -49,6 +49,7 @@ use vd_client::render_snapshot::RenderSnapshot;
 use vd_client::view::world_pos;
 use vd_client_harness::camera::FollowCamera;
 use vd_client_harness::input_map::{MovementKeys, mouse_look};
+use vd_client_harness::manifest::CaptureKind;
 use vd_core::EntityId;
 use vd_core::glam::DVec3;
 use vd_devproto::InputAction;
@@ -96,6 +97,8 @@ pub enum RenderMode {
 /// ALREADY done any `--at-tick` wait (reusing wait-until on the delivered universe tick),
 /// so this is just "capture the current frame now → reply with the path".
 pub struct CaptureJob {
+    /// Screenshot (→ `shots/`) or one record Frame (→ `frames/`); also the manifest kind.
+    pub kind: CaptureKind,
     /// Optional agent name for the file (else a frame counter).
     pub label: Option<String>,
     /// The render thread sends the result here (or an Err string).
@@ -104,8 +107,11 @@ pub struct CaptureJob {
 
 /// The result of a served capture.
 pub struct CaptureResult {
-    /// The written PNG path (under the run's `runs/` dir).
+    /// The written PNG path (cwd-relative — `runs/<run>/shots/foo.png`): what `vdctl`
+    /// reports so an agent can open it directly.
     pub path: String,
+    /// The SAME path relative to the run dir (`shots/foo.png`) — what the manifest stores.
+    pub rel_path: String,
 }
 
 /// The handles the bin wires into the window (constructed on the main thread before
@@ -624,13 +630,20 @@ fn serve_captures(
         return;
     };
     let shot = cfg.shot;
-    let name = job
-        .label
-        .clone()
-        .map_or_else(|| format!("shot-{shot:04}.png"), |l| format!("{l}.png"));
-    let path = cfg.runs_dir.join(&name);
+    // Organize captures by kind: screenshots under `shots/`, record frames under `frames/`
+    // (the manifest stores these run-relative paths). The requester usually supplies the
+    // stem (a screenshot label, or `<base>-NNNN` per record frame); the shot counter is the
+    // fallback.
+    let (subdir, fallback) = match job.kind {
+        CaptureKind::Screenshot => ("shots", format!("shot-{shot:04}")),
+        CaptureKind::Frame => ("frames", format!("frame-{shot:04}")),
+    };
+    let stem = job.label.clone().unwrap_or(fallback);
+    let rel = format!("{subdir}/{stem}.png");
+    let path = cfg.runs_dir.join(&rel);
     let result = write_capture_png(&path, &target, &images, &bytes).map(|()| CaptureResult {
         path: path.display().to_string(),
+        rel_path: rel,
     });
     match &result {
         Ok(r) => {

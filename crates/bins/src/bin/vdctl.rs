@@ -8,7 +8,8 @@
 //! Usage: `vdctl [--port P] <command>` (port falls back to `VD_DEVCTL_PORT`):
 //!   move <fwd> <strafe> <vert> | look <yaw> <pitch> | action <index> <on|off>
 //!   close | reset | state | wait <field> <op> <value> [max_ticks]
-//!   screenshot [--at-tick <N>] [label]   (capture a PNG — a `--capture` client only)
+//!   screenshot [--at-tick <N>] [label]       (capture a PNG — a `--capture` client only)
+//!   record [--fps <N>] [--secs <D>] [label]  (capture a frame sequence — `--capture` only)
 //! where `<index>` is a 0-based action-bit index (converted to a single-bit mask, so
 //!       you can never accidentally press two), and `<field>`/`<op>` are a `WaitField`/
 //!       `WaitOp` — the live lists are shown in the `bad field` / `bad op` errors,
@@ -24,6 +25,11 @@ use vd_devproto::{DevRequest, DevResponse, WaitField, WaitOp, WaitPredicate};
 /// Default `wait-until` budget when none is given, in STEP-TICKS (≈10 s at the default
 /// 20 Hz step cadence; shorter/longer if the client runs a non-default `--step-hz`).
 const DEFAULT_WAIT_TICKS: u64 = 200;
+
+/// `record` defaults when not given: 30 fps for 2 s (a short transition clip). The client
+/// clamps both to safe bounds, so a typo is corrected there, not silently honored.
+const DEFAULT_RECORD_FPS: u32 = 30;
+const DEFAULT_RECORD_SECS: f64 = 2.0;
 
 fn main() -> ExitCode {
     match run() {
@@ -75,7 +81,7 @@ fn take_port(args: &mut Vec<String>) -> Result<u16, String> {
 fn parse_command(args: &[String]) -> Result<DevRequest, String> {
     let cmd = args
         .first()
-        .ok_or("missing command: move|look|action|close|reset|state|wait")?;
+        .ok_or("missing command: move|look|action|close|reset|state|wait|screenshot|record")?;
     let rest = &args[1..];
     match cmd.as_str() {
         "move" => Ok(DevRequest::Move {
@@ -163,6 +169,38 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
                 }
             }
             Ok(DevRequest::Screenshot { at_tick, label })
+        }
+        "record" => {
+            // record [--fps <N>] [--secs <D>] [label] — a reduced-rate frame sequence
+            // (Capture-mode client). The client paces + clamps; defaults fill in the rest.
+            let mut fps = DEFAULT_RECORD_FPS;
+            let mut secs = DEFAULT_RECORD_SECS;
+            let mut label = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--fps" => {
+                        let raw = rest.get(i + 1).ok_or("--fps requires a value")?;
+                        fps = raw
+                            .parse()
+                            .map_err(|_| "record: --fps must be a positive integer".to_owned())?;
+                        i += 2;
+                    }
+                    "--secs" => {
+                        let raw = rest.get(i + 1).ok_or("--secs requires a value")?;
+                        secs = raw
+                            .parse()
+                            .map_err(|_| "record: --secs must be a number".to_owned())?;
+                        i += 2;
+                    }
+                    other if label.is_none() => {
+                        label = Some(other.to_owned());
+                        i += 1;
+                    }
+                    other => return Err(format!("record: unexpected argument {other:?}")),
+                }
+            }
+            Ok(DevRequest::Record { fps, secs, label })
         }
         other => Err(format!("unknown command: {other}")),
     }
