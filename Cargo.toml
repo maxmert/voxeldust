@@ -40,6 +40,11 @@ postcard = { version = "1", features = ["alloc", "use-std"] }
 thiserror = "2"
 glam = { version = "0.30", features = ["serde"] }
 bevy_ecs = "0.18"
+# Full Bevy (the windowed client renderer, Tier-B vd-client-render only — lands at
+# Slice-3 T4; the readback recipe was validated in docs/design/spikes/bevy-readback/).
+# Full default features deliberately (the spike proved a hand-trimmed set causes
+# plugin-ordering panics, e.g. bevy_text's Assets<Font>); pinned to 0.18 to match bevy_ecs.
+bevy = "0.18"
 arc-swap = "1"
 tracing = "0.1"
 

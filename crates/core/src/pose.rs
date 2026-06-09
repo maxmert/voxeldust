@@ -63,6 +63,22 @@ impl FrameRef {
             FrameRef::GalaxySpace => None,
         }
     }
+
+    /// A short human-readable label for the player-stats HUD and the `vdctl` location
+    /// readout — the player's "where am I", derived from their authoritative frame, NOT a
+    /// raw shard id (the client never sees shard processes; this is fence-validated and
+    /// changes only on a real cross-realm move). Stub realms have no name yet, so it is
+    /// the realm KIND + its seed/id; named planets/ships (P4/P8) refine the text here
+    /// without changing the seam.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            FrameRef::PlanetCentered { planet_seed } => format!("Planet {planet_seed}"),
+            FrameRef::ShipLocal { ship } => format!("Ship {ship}"),
+            FrameRef::SystemSpace { system_seed } => format!("System {system_seed}"),
+            FrameRef::GalaxySpace => "Galaxy".to_owned(),
+        }
+    }
 }
 
 /// A pose + motion state bound to one frame at one analytic-clock instant.
@@ -88,6 +104,28 @@ impl StampedPose {
         }
     }
 
+    /// A copy with every non-finite component replaced by a safe default (`pos`/`vel`
+    /// per-component → 0, `orient` → identity). Delivered poses ride the wire, so a
+    /// corrupt/diverged sender could carry `NaN`/`Inf`; the CLIENT must never feed one
+    /// into its render transforms (it would poison the whole scene graph) — so the view
+    /// sanitizes HERE, at the single decode-ingress chokepoint, and EVERY downstream
+    /// consumer (interpolation, the render snapshot, the DevState rows) inherits finite
+    /// values. The "never trust/panic on network input" mandate, applied once.
+    #[must_use]
+    pub fn sanitized(self) -> StampedPose {
+        StampedPose {
+            frame: self.frame,
+            pos: finite_or_zero(self.pos),
+            vel: finite_or_zero(self.vel),
+            orient: if self.orient.is_finite() {
+                self.orient
+            } else {
+                DQuat::IDENTITY
+            },
+            universe_tick: self.universe_tick,
+        }
+    }
+
     /// Closed-form ballistic advance under constant acceleration for `dt_s` seconds
     /// (Category A: the ONLY way frozen/transient motion is re-advanced across hosts —
     /// never by re-stepping a physics engine, which is not cross-binary deterministic).
@@ -106,6 +144,17 @@ impl StampedPose {
             universe_tick: new_tick,
         }
     }
+}
+
+/// A finite scalar (`NaN`/`±Inf` → 0) — the per-component guard for [`StampedPose::sanitized`].
+fn finite(x: f64) -> f64 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
+/// A vector with each non-finite component zeroed (one bad component does not nuke the
+/// other two).
+fn finite_or_zero(v: DVec3) -> DVec3 {
+    DVec3::new(finite(v.x), finite(v.y), finite(v.z))
 }
 
 #[cfg(test)]
@@ -135,6 +184,22 @@ mod tests {
     }
 
     #[test]
+    fn label_is_human_readable_per_frame_kind() {
+        // The player-facing location string for every frame variant (the HUD / vdctl
+        // readout) — kind + seed/id for stub realms; GalaxySpace has no seed.
+        assert_eq!(
+            FrameRef::PlanetCentered { planet_seed: 5 }.label(),
+            "Planet 5"
+        );
+        assert_eq!(FrameRef::SystemSpace { system_seed: 9 }.label(), "System 9");
+        assert_eq!(
+            FrameRef::ShipLocal { ship: ship_id() }.label(),
+            format!("Ship {}", ship_id())
+        );
+        assert_eq!(FrameRef::GalaxySpace.label(), "Galaxy");
+    }
+
+    #[test]
     fn realm_display_is_unambiguous() {
         assert_eq!(RealmId::Planet(0xAB).to_string(), "planet-00000000000000ab");
         assert_eq!(RealmId::System(0xCD).to_string(), "system-00000000000000cd");
@@ -155,6 +220,34 @@ mod tests {
         assert_eq!(p.vel, DVec3::ZERO);
         assert_eq!(p.orient, DQuat::IDENTITY);
         assert_eq!(p.universe_tick, UniverseTick(40));
+    }
+
+    #[test]
+    fn sanitized_replaces_non_finite_components_with_safe_defaults() {
+        // An all-finite pose passes through unchanged.
+        let good = StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            pos: DVec3::new(1.0, 2.0, 3.0),
+            vel: DVec3::new(-1.0, 0.0, 4.0),
+            orient: DQuat::from_rotation_y(0.5),
+            universe_tick: UniverseTick(7),
+        };
+        assert_eq!(good.sanitized(), good);
+        // Non-finite pos/vel components are zeroed PER-COMPONENT; a non-finite orient
+        // collapses to identity. Frame + tick are preserved.
+        let bad = StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            pos: DVec3::new(f64::NAN, 2.0, f64::INFINITY),
+            vel: DVec3::new(1.0, f64::NEG_INFINITY, 3.0),
+            orient: DQuat::from_xyzw(f64::NAN, 0.0, 0.0, 1.0),
+            universe_tick: UniverseTick(7),
+        };
+        let s = bad.sanitized();
+        assert_eq!(s.pos, DVec3::new(0.0, 2.0, 0.0));
+        assert_eq!(s.vel, DVec3::new(1.0, 0.0, 3.0));
+        assert_eq!(s.orient, DQuat::IDENTITY);
+        assert_eq!(s.frame, bad.frame);
+        assert_eq!(s.universe_tick, UniverseTick(7));
     }
 
     #[test]

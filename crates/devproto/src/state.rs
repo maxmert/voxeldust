@@ -42,6 +42,12 @@ pub struct DevState {
     pub session: Option<String>,
     /// Canonical `Display` of this client's own entity (from `AuthorityChanged`).
     pub own_entity: Option<String>,
+    /// The player's LOCATION — a human-readable realm label (e.g. "System 7", later
+    /// named planets/ships) derived from the authoritative FrameRef of the own entity,
+    /// NOT a raw shard id (the client never sees shard processes). `None` until the own
+    /// entity has a delivered pose. Fence-validated; changes only on a real cross-realm
+    /// move. The player-stats-HUD source + a P2 transfer-test hook.
+    pub location: Option<String>,
     /// The continuous render cursor (universe-tick units); `None` before the first
     /// snapshot. Always finite (the builder sanitizes), so this state JSON-encodes.
     pub render_cursor: Option<f64>,
@@ -67,6 +73,10 @@ pub struct DevState {
     pub ignored: u64,
     /// FAULT: messages from a non-gateway peer — the one-connection invariant tripped.
     pub foreign_peer_drops: u64,
+    /// FAULT: delivered poses carrying a non-finite (NaN/Inf) component, sanitized at
+    /// ingress. Nonzero means a sender (gateway/shard) is shipping corrupt floats — a
+    /// real fault, surfaced (not silently fixed).
+    pub nonfinite_poses: u64,
     /// THROUGHPUT: dev-control actions dequeued and applied (incl. Close/Reset).
     pub dev_commands_applied: u64,
     /// FAULT (overload): dev commands shed because the bounded mailbox was full.
@@ -83,6 +93,7 @@ pub(crate) mod tests {
             phase: DevPhase::Active,
             session: Some("sess-1".to_owned()),
             own_entity: Some("ent-7".to_owned()),
+            location: Some("System 7".to_owned()),
             render_cursor: Some(101.5),
             universe_tick: Some(101),
             entities: vec![DevEntityRow {
@@ -96,6 +107,7 @@ pub(crate) mod tests {
             decode_errors: 0,
             ignored: 0,
             foreign_peer_drops: 0,
+            nonfinite_poses: 0,
             dev_commands_applied: 2,
             dev_commands_dropped: 0,
             transfer: DevTransferView::None,
@@ -108,6 +120,7 @@ pub(crate) mod tests {
         let json = serde_json::to_string(&state).expect("encode");
         // ids are strings (u128 cannot ride a JSON number).
         assert!(json.contains("\"session\":\"sess-1\""));
+        assert!(json.contains("\"location\":\"System 7\""));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         let back: DevState = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, state);

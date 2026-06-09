@@ -49,6 +49,10 @@ path = "src/bin/vdctl.rs"
 # fact, not a runtime flag. `scripts/client.sh` builds the `client` bin WITH it.
 default = []
 dev-control = []
+# The windowed Bevy client (Slice-3 T4). OPT-IN so the headless/process-tier build stays
+# Bevy-free + fast: `--features render` pulls vd-client-render (the ~8.8 GB Bevy dep) and
+# enables the `client --window` mode. The default + dev-control builds contain no Bevy.
+render = ["dep:vd-client-render"]
 
 [dependencies]
 vd-core = { workspace = true }
@@ -58,6 +62,7 @@ vd-sim = { workspace = true }
 vd-node = { workspace = true }
 vd-connection-plane = { workspace = true }
 vd-io-prod = { path = "../io-prod" }
+vd-client-render = { workspace = true, optional = true }
 vd-wire = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

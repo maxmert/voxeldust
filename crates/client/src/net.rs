@@ -26,6 +26,7 @@ use vd_wire::version::ProtoVersion;
 
 use crate::input::InputState;
 use crate::render_clock::RenderClock;
+use crate::render_snapshot::RenderSnapshot;
 use crate::tuning::ClientInterpTuning;
 use crate::view::DeliveredView;
 
@@ -343,6 +344,16 @@ impl ClientState {
         self.snapshots_applied
     }
 
+    /// An immutable [`RenderSnapshot`] for the windowed renderer (Slice-3 T4): the
+    /// delivered view + the render clock + the lifecycle phase. The core thread publishes
+    /// one per step via `ArcSwap`; the Bevy app reads it wait-free and samples at its own
+    /// display cursor (sim cadence decoupled from frame rate). Cheap: the view is
+    /// `BTreeMap`s of `Copy` tracks.
+    #[must_use]
+    pub fn render_snapshot(&self) -> RenderSnapshot {
+        RenderSnapshot::new(self.view.clone(), self.render_clock, self.phase)
+    }
+
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
     /// at wall-time `now_s` — wire truth, never internal hope. `dev_commands_applied`/
     /// `dropped` are the bin's mailbox counters (the lib does not own that mailbox), so
@@ -375,6 +386,12 @@ impl ClientState {
             phase: dev_phase(self.phase),
             session: self.session.map(|s| s.to_string()),
             own_entity: self.view.own_entity().map(|e| e.to_string()),
+            // The player's location (realm label) from the own entity's authoritative
+            // frame — the player-stats HUD source, also surfaced to `vdctl state`.
+            location: self
+                .view
+                .own_location_frame()
+                .map(vd_core::pose::FrameRef::label),
             render_cursor,
             universe_tick: self.latest_universe_tick,
             entities,
@@ -384,6 +401,7 @@ impl ClientState {
             decode_errors: self.decode_errors,
             ignored: self.ignored,
             foreign_peer_drops: self.foreign_peer_drops,
+            nonfinite_poses: self.view.nonfinite_poses(),
             dev_commands_applied,
             dev_commands_dropped,
             transfer: DevTransferView::None,
@@ -973,6 +991,7 @@ mod tests {
         assert_eq!(s.phase, DevPhase::Connecting);
         assert_eq!(s.session, None);
         assert_eq!(s.own_entity, None);
+        assert_eq!(s.location, None, "no own entity ⇒ no location");
         assert_eq!(s.render_cursor, None);
         assert_eq!(s.universe_tick, None, "no snapshot ⇒ no universe tick");
         assert!(s.entities.is_empty(), "no cursor ⇒ nothing sampled");
@@ -998,6 +1017,11 @@ mod tests {
         assert_eq!(s.phase, DevPhase::Active);
         assert_eq!(s.session, Some(SessionId(9).to_string()));
         assert_eq!(s.own_entity, Some(ent().to_string()));
+        assert_eq!(
+            s.location,
+            Some("System 1".to_owned()),
+            "the player's location = the own entity's delivered realm frame"
+        );
         assert!(s.render_cursor.is_some(), "anchored after a snapshot");
         assert_eq!(
             s.universe_tick,
@@ -1015,5 +1039,32 @@ mod tests {
         let line =
             vd_devproto::encode_response(&vd_devproto::DevResponse::State { state: s.clone() });
         assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn render_snapshot_carries_the_live_view_clock_and_phase() {
+        // The Slice-3 T4 hand-off: render_snapshot() reflects the same delivered world
+        // the headless DevState path sees, ready for the windowed renderer to sample at
+        // its own display cursor.
+        let mut c = core();
+        activate(&mut c);
+        let auth = postcard::to_allocvec(&ServerControlMsg::AuthorityChanged {
+            entity: ent(),
+            sub: SubId(0),
+        })
+        .expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, auth);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
+        c.step(10.0);
+        let snap = c.state().render_snapshot();
+        assert_eq!(snap.phase(), ClientPhase::Active);
+        assert_eq!(snap.own_entity(), Some(ent()));
+        assert_eq!(snap.location(), Some("System 1".to_owned()));
+        // Anchored after a snapshot → a display cursor, and the entity renders.
+        assert!(snap.cursor(10.0).is_some());
+        let rendered = snap.rendered(10.0);
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].0, ent());
     }
 }

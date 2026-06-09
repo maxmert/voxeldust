@@ -138,6 +138,13 @@ impl EntityTrack {
     pub fn newest_tick(self) -> UniverseTick {
         self.current.universe_tick
     }
+
+    /// The frame the entity is currently expressed in (the leading edge) — the basis for
+    /// the player-location stat. Frame does not interpolate, so no cursor is needed.
+    #[must_use]
+    pub fn current_frame(self) -> FrameRef {
+        self.current.frame
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +284,22 @@ mod tests {
             FrameRef::PlanetCentered { planet_seed: 5 }
         );
         assert_eq!(track.newest_tick(), UniverseTick(14));
+    }
+
+    #[test]
+    fn current_frame_tracks_the_leading_edge_pose_frame() {
+        let mut track = EntityTrack::new(pose_at(10, 0.0)); // SystemSpace { 1 }
+        assert_eq!(
+            track.current_frame(),
+            FrameRef::SystemSpace { system_seed: 1 }
+        );
+        let mut other = pose_at(12, 9.0);
+        other.frame = FrameRef::PlanetCentered { planet_seed: 5 };
+        track.observe(other); // frame change → leading edge is the new frame
+        assert_eq!(
+            track.current_frame(),
+            FrameRef::PlanetCentered { planet_seed: 5 }
+        );
     }
 
     #[test]

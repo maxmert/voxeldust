@@ -19,13 +19,16 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "render")]
+use std::sync::mpsc::SyncSender;
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use vd_bins::{GATEWAY, loopback};
 use vd_client::net::{ClientCore, ClientPhase};
+use vd_client::render_snapshot::RenderSnapshot;
 use vd_client::tuning::ClientInterpTuning;
 use vd_connection_plane::tickets::mint_login;
 use vd_core::{AccountId, EpochId, NodeId};
@@ -108,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "dev-control up"
             );
             let handles = dev_control::Handles {
-                commands: command_tx,
+                commands: command_tx.clone(),
                 published: published.clone(),
                 step_seq: step_seq.clone(),
                 dropped: dropped.clone(),
@@ -116,24 +119,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             Some(runtime.spawn(dev_control::serve(loopback(port), handles)))
         }
-        None => {
-            drop(command_tx); // no listener: the mailbox has no producer
-            None
-        }
+        // No listener: the later dispatch drops `command_tx` (headless) or hands it to
+        // the window — so the mailbox's producer lifetime is owned by the dispatch, not
+        // here.
+        None => None,
     };
     #[cfg(not(feature = "dev-control"))]
-    {
-        // Headless release build: no listener exists, so nothing feeds the mailbox.
-        let _ = (&args.dev_control, args.allow_dev_control);
-        drop(command_tx);
+    let _ = (&args.dev_control, args.allow_dev_control);
+
+    let started_at = Instant::now();
+
+    // `--window` requires the render feature (it pulls Bevy); reject early otherwise.
+    #[cfg(not(feature = "render"))]
+    if args.window {
+        return Err("--window requires building with --features render".into());
     }
 
+    // Windowed mode (Slice-3 T4): the core loop runs on a WORKER thread at a
+    // deterministic 20 Hz while Bevy owns the MAIN thread (winit requires it); the
+    // window reads the published RenderSnapshot + feeds the SAME input mailbox.
+    #[cfg(feature = "render")]
+    if args.window {
+        let render_published = Arc::new(ArcSwap::from_pointee(core.state().render_snapshot()));
+        run_windowed(
+            core,
+            command_rx,
+            &command_tx,
+            published,
+            render_published,
+            step_seq,
+            dropped,
+            started_at,
+            args.step_hz,
+        );
+        drop(control);
+        return Ok(());
+    }
+
+    // Headless (default + the process-tier path): the core loop owns THIS thread. Drop
+    // our spare producer handle so the mailbox closes cleanly when the listener is gone.
+    drop(command_tx);
     run_client_loop(
         core,
         command_rx,
-        &published,
-        &step_seq,
-        &dropped,
+        published,
+        step_seq,
+        dropped,
+        None, // no render sink
+        None, // no external stop signal (exits on vdctl/gateway Close)
+        started_at,
         args.step_hz,
     );
 
@@ -141,15 +175,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The deterministic core loop (THIS thread is the sole owner of `core`): drain the
-/// dev-command mailbox, step, publish the decoded `DevState`, advance the step clock.
-/// Exits when the session closes (client `Close` or a gateway `Close`).
+/// Run the windowed client: spawn the deterministic core loop on a worker thread, then
+/// run Bevy on this (main) thread until the window closes, then ask the core to close.
+#[cfg(feature = "render")]
+#[allow(clippy::too_many_arguments)]
+fn run_windowed(
+    core: ClientCore<MeshTransport>,
+    command_rx: Receiver<InputAction>,
+    command_tx: &SyncSender<InputAction>,
+    published: Arc<ArcSwap<DevState>>,
+    render_published: Arc<ArcSwap<RenderSnapshot>>,
+    step_seq: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+    started_at: Instant,
+    step_hz: u32,
+) {
+    // Reliable, BIDIRECTIONAL shutdown — independent of the bounded input mailbox:
+    //  - `stop` (window → worker): set when the window closes; the worker checks it every
+    //    tick and drives a graceful Close. An AtomicBool can never be "full"/shed, so the
+    //    close signal can never be lost (the old best-effort `try_send(Close)` could be —
+    //    and then `join()` would hang the process forever).
+    //  - `core_alive` (worker → window): a drop-guard flips it false when the worker loop
+    //    EXITS for ANY reason (a gateway Close, or a panic unwinding the thread); a Bevy
+    //    system emits AppExit when it sees false, so a server-initiated disconnect or a
+    //    dead core tears the window down too — no zombie frozen window.
+    let stop = Arc::new(AtomicBool::new(false));
+    let core_alive = Arc::new(AtomicBool::new(true));
+    let render_sink = render_published.clone();
+    let worker_stop = stop.clone();
+    let worker_alive = core_alive.clone();
+    let worker_dropped = dropped.clone();
+    let core_thread = std::thread::spawn(move || {
+        // Flip `core_alive` false on EXIT or PANIC so the window always learns.
+        struct AliveGuard(Arc<AtomicBool>);
+        impl Drop for AliveGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Relaxed);
+            }
+        }
+        let _alive = AliveGuard(worker_alive);
+        run_client_loop(
+            core,
+            command_rx,
+            published,
+            step_seq,
+            worker_dropped,
+            Some(render_sink),
+            Some(worker_stop),
+            started_at,
+            step_hz,
+        );
+    });
+    // Blocks on the main thread until the window closes — by the human, OR by the
+    // AppExit the render crate emits when `core_alive` goes false.
+    vd_client_render::run_window(vd_client_render::RenderHandles {
+        snapshot: render_published,
+        input: command_tx.clone(),
+        dropped,
+        core_alive,
+        started_at,
+    });
+    // Window closed → reliably ask the core to close (AtomicBool — never shed), then join.
+    stop.store(true, Ordering::Relaxed);
+    let _ = core_thread.join();
+}
+
+/// The deterministic core loop (the sole owner of `core` — on the main thread for the
+/// headless client, or a worker thread for the windowed one): drain the dev-command
+/// mailbox, step, publish the decoded `DevState` (+ the `RenderSnapshot` if a render sink
+/// is wired), advance the step clock. Exits when the session closes (client `Close` or a
+/// gateway `Close`). `started_at` is the shared monotonic epoch — the windowed renderer
+/// computes its display cursor in this SAME timeline so motion stays continuous.
+#[allow(clippy::too_many_arguments)]
 fn run_client_loop(
     mut core: ClientCore<MeshTransport>,
     commands: Receiver<InputAction>,
-    published: &ArcSwap<DevState>,
-    step_seq: &AtomicU64,
-    dropped: &AtomicU64,
+    published: Arc<ArcSwap<DevState>>,
+    step_seq: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+    render_sink: Option<Arc<ArcSwap<RenderSnapshot>>>,
+    stop: Option<Arc<AtomicBool>>,
+    started_at: Instant,
     step_hz: u32,
 ) {
     let mut pacer = TickPacer::new(step_hz);
@@ -157,7 +263,7 @@ fn run_client_loop(
     // it is the dev-command throughput counter, distinct from `sent_input_count`,
     // which honestly counts input FRAMES that rode the wire.
     let mut applied: u64 = 0;
-    let start = Instant::now();
+    let mut stop_injected = false;
     loop {
         // Drain-at-top: apply every queued dev command before stepping, so an
         // injected input rides THIS tick's InputDatagram (the agent's seam).
@@ -165,12 +271,23 @@ fn run_client_loop(
             core.state_mut().apply_input_action(action);
             applied += 1;
         }
-        let now_s = start.elapsed().as_secs_f64();
+        // A stop request (window closed) injects a graceful Close ONCE — reliably, via
+        // the AtomicBool, NOT the shed-able mailbox — so the next assemble sends Bye, the
+        // phase flips to Closed, and the loop exits below (never a lost-close hang).
+        if !stop_injected && stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            core.state_mut().apply_input_action(InputAction::Close);
+            stop_injected = true;
+        }
+        let now_s = started_at.elapsed().as_secs_f64();
         core.step(now_s);
-        let state = core
-            .state()
-            .devstate(now_s, applied, dropped.load(Ordering::Relaxed));
-        published.store(Arc::new(state));
+        published.store(Arc::new(core.state().devstate(
+            now_s,
+            applied,
+            dropped.load(Ordering::Relaxed),
+        )));
+        if let Some(sink) = &render_sink {
+            sink.store(Arc::new(core.state().render_snapshot()));
+        }
         step_seq.fetch_add(1, Ordering::Relaxed);
         if core.state().phase() == ClientPhase::Closed {
             break;
@@ -190,6 +307,9 @@ struct ClientArgs {
     agent_index: u64,
     allow_dev_control: bool,
     step_hz: u32,
+    /// Open the Bevy window (Slice-3 T4) instead of running headless. Requires the
+    /// `render` build feature.
+    window: bool,
 }
 
 fn parse_args() -> Result<ClientArgs, String> {
@@ -201,6 +321,7 @@ fn parse_args() -> Result<ClientArgs, String> {
     let mut agent_index: u64 = 0;
     let mut allow_dev_control = false;
     let mut step_hz: u32 = DEFAULT_STEP_HZ;
+    let mut window = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -213,6 +334,7 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--agent-index" => agent_index = parse_val(&mut it, "--agent-index")?,
             "--allow-dev-control" => allow_dev_control = true,
             "--step-hz" => step_hz = parse_val(&mut it, "--step-hz")?,
+            "--window" => window = true,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -226,6 +348,7 @@ fn parse_args() -> Result<ClientArgs, String> {
         agent_index,
         allow_dev_control,
         step_hz,
+        window,
     })
 }
 

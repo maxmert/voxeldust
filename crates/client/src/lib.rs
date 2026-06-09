@@ -18,6 +18,7 @@ pub mod input;
 pub mod interp;
 pub mod net;
 pub mod render_clock;
+pub mod render_snapshot;
 pub mod tuning;
 pub mod view;
 

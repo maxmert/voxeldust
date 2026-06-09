@@ -5,9 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 description = "P1.5 Slice 3 Tier-B render glue: the Bevy app (window + offscreen modes), the billboard/egui draw, the ImageCopyDriver readback node, and the winit-input -> InputAction-mailbox bridge. Renderer-ONLY (wgpu/winit/egui/Bevy); ALL pure logic lives in vd-client-harness. Coverage-exempt (absent from the Tier-A set); proven by the HR6 visual harness + G-RENDER-SMOKE, not llvm-cov. Bevy deps + content land at Slice-3 T4."
 
-# Bevy/bevy_egui deps + the render code land at T4 (the readback recipe is validated:
-# docs/design/spikes/bevy-readback/). Kept a dep-free skeleton until then so the Tier-A
-# work (T1-T3) does not pay the ~2.5min Bevy cold compile.
+# T4: the windowed Bevy app. Renderer-ONLY; ALL pure logic stays in vd-client-harness
+# (Tier-A) + vd-client (the renderer-free core). Coverage-exempt (absent from the Tier-A
+# set); proven by the human-in-the-loop window + (T6) G-RENDER-SMOKE, not llvm-cov.
+[dependencies]
+vd-core = { workspace = true }
+vd-client = { workspace = true }
+vd-client-harness = { workspace = true }
+vd-devproto = { workspace = true }
+bevy = { workspace = true }
+arc-swap = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

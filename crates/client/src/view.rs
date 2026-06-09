@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 
 use glam::DVec3;
 use vd_core::EntityId;
+use vd_core::pose::FrameRef;
 use vd_wire::channels::{SnapshotDatagram, SnapshotVerdict, SubId, classify_snapshot};
 
 use crate::interp::{EntityTrack, RenderPose};
@@ -38,6 +39,10 @@ pub struct DeliveredView {
     authoritative_sub: BTreeMap<EntityId, SubId>,
     own_entity: Option<EntityId>,
     stale_frames_dropped: u64,
+    /// FAULT count: delivered poses that carried a non-finite (NaN/Inf) component and had
+    /// to be sanitized at ingress. A corrupt/diverged sender is a real fault, so it is
+    /// COUNTED (not silently fixed) — the codebase's "never silent" discipline.
+    nonfinite_poses: u64,
 }
 
 impl DeliveredView {
@@ -56,10 +61,20 @@ impl DeliveredView {
             SnapshotVerdict::Apply => {
                 self.high_water.insert(snap.sub, snap.frame_id);
                 for entity in snap.entities {
+                    // Sanitize at the decode-ingress chokepoint: a corrupt/diverged
+                    // sender could ship a non-finite pose, which must never reach the
+                    // render transforms (it would poison the scene). Guarding here keeps
+                    // EVERY downstream consumer (interp, render snapshot, DevState) finite.
+                    // A sanitized pose is a real FAULT — count it (never silently fix).
+                    let raw = entity.pose;
+                    let pose = raw.sanitized();
+                    if pose != raw {
+                        self.nonfinite_poses += 1;
+                    }
                     self.tracks
                         .entry((snap.sub, entity.entity))
-                        .and_modify(|track| track.observe(entity.pose))
-                        .or_insert_with(|| EntityTrack::new(entity.pose));
+                        .and_modify(|track| track.observe(pose))
+                        .or_insert_with(|| EntityTrack::new(pose));
                 }
             }
             SnapshotVerdict::DropForeignSub | SnapshotVerdict::DropStale => {
@@ -125,9 +140,31 @@ impl DeliveredView {
         self.own_entity
     }
 
+    /// The frame the OWN entity is currently in — its authoritative track's leading
+    /// edge — i.e. the player's LOCATION (realm), the basis for the player-stats HUD and
+    /// the `vdctl` location readout. `None` until the own entity is known AND has a
+    /// delivered track on its authoritative sub. Cursor-free (frame does not interpolate)
+    /// and authority-disambiguated by the SAME `chosen_subs` the render path uses, so the
+    /// location can never disagree with the rendered pose. It is the delivered FrameRef,
+    /// so it is fence-validated and changes only on a real cross-realm move.
+    #[must_use]
+    pub fn own_location_frame(&self) -> Option<FrameRef> {
+        let own = self.own_entity?;
+        let sub = self.chosen_subs().get(&own).copied()?;
+        self.tracks
+            .get(&(sub, own))
+            .map(|track| track.current_frame())
+    }
+
     #[must_use]
     pub fn stale_frames_dropped(&self) -> u64 {
         self.stale_frames_dropped
+    }
+
+    /// FAULT count of delivered poses that were non-finite and had to be sanitized.
+    #[must_use]
+    pub fn nonfinite_poses(&self) -> u64 {
+        self.nonfinite_poses
     }
 }
 
@@ -214,6 +251,41 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_delivered_pose_is_sanitized_at_ingress() {
+        // A corrupt sender ships NaN/Inf coordinates; the view must sanitize them at
+        // ingress so the renderer never gets a poisoned transform.
+        let mut view = DeliveredView::default();
+        let mut pose = StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 1 },
+            DVec3::new(f64::NAN, 1.0, 0.0),
+            UniverseTick(10),
+        );
+        pose.pos.z = f64::INFINITY;
+        view.on_snapshot(
+            Some(SubId(0)),
+            SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 1,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(10),
+                entities: vec![EntitySnap {
+                    entity: ent(1),
+                    pose,
+                }],
+            },
+        );
+        let rendered = view.render(10.0);
+        let pos = rendered[&ent(1)].pos;
+        assert!(pos.is_finite(), "ingress sanitized the pose, got {pos:?}");
+        assert_eq!(pos, DVec3::new(0.0, 1.0, 0.0));
+        // The corruption is COUNTED, not silently fixed (the "never silent" rule).
+        assert_eq!(view.nonfinite_poses(), 1);
+        // A subsequent FINITE pose does NOT bump the fault counter.
+        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 2, 11, vec![(ent(1), 3.0)]));
+        assert_eq!(view.nonfinite_poses(), 1, "a clean pose is not a fault");
+    }
+
+    #[test]
     fn authority_changed_sets_own_entity() {
         let mut view = DeliveredView::default();
         assert_eq!(view.own_entity(), None);
@@ -240,6 +312,27 @@ mod tests {
         let r = view.render(10.0);
         assert_eq!(r.len(), 1, "still exactly once");
         assert_eq!(r[&ent(1)].pos, DVec3::new(50.0, 0.0, 0.0), "now from sub 1");
+    }
+
+    #[test]
+    fn own_location_frame_is_the_own_entitys_current_frame() {
+        let mut view = DeliveredView::default();
+        // (a) No own entity yet → None.
+        assert_eq!(view.own_location_frame(), None);
+        // (b) Own entity known but NO delivered track yet (authority arrived before any
+        // snapshot) → None: it is not in chosen_subs.
+        view.set_authority(ent(1), SubId(0));
+        assert_eq!(view.own_location_frame(), None);
+        // (c) A snapshot delivers the own entity → its frame IS the player's location.
+        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
+        assert_eq!(
+            view.own_location_frame(),
+            Some(FrameRef::SystemSpace { system_seed: 1 })
+        );
+        // (d) Authority moved to a sub with no track for it → None (mirrors render: we
+        // show nothing for an entity we have no delivered pose for).
+        view.set_authority(ent(1), SubId(9));
+        assert_eq!(view.own_location_frame(), None);
     }
 
     #[test]
