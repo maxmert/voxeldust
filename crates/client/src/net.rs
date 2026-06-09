@@ -716,7 +716,11 @@ mod tests {
         c.transport.deliver(GATEWAY, MsgClass::Control, foreign);
         c.step(10.0);
         assert_eq!(c.state().sub(), Some(SubId(0)), "held sub unchanged");
-        assert_eq!(c.state().view().render(10.0).len(), 1, "our entity still present");
+        assert_eq!(
+            c.state().view().render(10.0).len(),
+            1,
+            "our entity still present"
+        );
 
         let closing =
             postcard::to_allocvec(&ServerControlMsg::SubscriptionClosing { sub: SubId(0) })

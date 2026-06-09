@@ -357,7 +357,10 @@ mod tests {
             pos: DVec3::new(5.0, 0.0, 0.0),
             orient: DQuat::IDENTITY,
         };
-        assert_eq!(view.world_pos(&interior_pose, 11.0), DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(
+            view.world_pos(&interior_pose, 11.0),
+            DVec3::new(5.0, 0.0, 0.0)
+        );
 
         // Galaxy + Planet frames are identity too (the combined world-frame arm).
         let gal = RenderPose {

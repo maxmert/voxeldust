@@ -6207,6 +6207,7 @@ dependencies = [
  "axum",
  "crossbeam-channel",
  "ed25519-dalek",
+ "image",
  "postcard",
  "serde_json",
  "tokio",

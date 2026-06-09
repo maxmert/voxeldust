@@ -78,6 +78,10 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 postcard = { workspace = true }
+# G-RENDER-SMOKE (render_smoke.rs, Tier-B/coverage-exempt): decode a captured PNG to RGBA8
+# for the Tier-A smoke assertions. image 0.25 is already pinned at the workspace root (a
+# dep of vd-client-render) — this is a dep MOVE into bins' test deps, not a new library.
+image = { workspace = true }
 
 [lints]
 workspace = true

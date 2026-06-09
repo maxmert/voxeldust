@@ -200,7 +200,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let runs_dir = capture_run
             .map(|(dir, _)| dir)
             .expect("capture mode ⇒ capture_run was created");
-        tracing::info!(dir = %runs_dir.display(), "headless capture run");
+        // GPU PRECONDITION (cloud-1): headless capture renders through wgpu and REQUIRES a
+        // working GPU adapter (the dev Apple-Silicon Metal GPU today). G-RENDER-SMOKE is a
+        // LOCAL gate — there is no software-rasterizer fallback (it would poison the visual
+        // baseline) and no CI yet. A host with no adapter fails in wgpu adapter selection;
+        // steer the backend/power-pref with WGPU_BACKENDS / WGPU_POWER_PREF if needed.
+        tracing::info!(
+            dir = %runs_dir.display(),
+            "headless capture run — requires a GPU adapter (steer via WGPU_BACKENDS/WGPU_POWER_PREF)",
+        );
         run_render(
             core,
             command_rx,
@@ -515,14 +523,16 @@ mod dev_control {
     use arc_swap::ArcSwap;
     #[cfg(feature = "render")]
     use crossbeam_channel::Sender;
-    #[cfg(feature = "render")]
-    use vd_client_harness::capture::{at_tick_predicate, capture_entry, plan_record, state_rel_for};
-    #[cfg(feature = "render")]
-    use vd_client_harness::manifest::{CaptureKind, RunManifest};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Semaphore;
+    #[cfg(feature = "render")]
+    use vd_client_harness::capture::{
+        at_tick_predicate, capture_entry, plan_record, state_rel_for,
+    };
+    #[cfg(feature = "render")]
+    use vd_client_harness::manifest::{CaptureKind, RunManifest};
     use vd_devproto::{
         DevError, DevPhase, DevRequest, DevResponse, DevState, InputAction, WaitPredicate,
         decode_request, encode_response,
@@ -855,7 +865,14 @@ mod dev_control {
         // the SAME wait machinery + the SAME Tier-A predicate the harness uses (no second
         // copy); a Timeout/closed/EOF there propagates straight back.
         if let Some(tick) = at_tick {
-            match wait_until(handles, framer, at_tick_predicate(tick), SCREENSHOT_WAIT_TICKS).await {
+            match wait_until(
+                handles,
+                framer,
+                at_tick_predicate(tick),
+                SCREENSHOT_WAIT_TICKS,
+            )
+            .await
+            {
                 Some(DevResponse::State { .. }) => {} // tick reached → capture
                 other => return other,                // Timeout / closed / EOF (None)
             }
@@ -964,7 +981,8 @@ mod dev_control {
         {
             return Some(Err(())); // the render thread/app exited
         }
-        match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(CAPTURE_REPLY_TIMEOUT)).await
+        match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(CAPTURE_REPLY_TIMEOUT))
+            .await
         {
             Ok(Ok(Ok(result))) => Some(Ok(result)),
             _ => Some(Err(())),

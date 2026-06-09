@@ -47,8 +47,16 @@ lint:
 fmt:
     cargo fmt --all
 
-# Everything a merge requires.
-gate: fmt lint test coverage
+# G-RENDER-SMOKE (HR6 permanent visual gate): bring up the local cluster, launch a HEADLESS
+# `client --capture`, capture a real wgpu-readback frame, and assert no-magenta +
+# content-present over it. Builds the client with `--features dev-control,render` (pulls
+# Bevy). REQUIRES A WORKING GPU ADAPTER (the dev Metal GPU) — it is a LOCAL gate (no CI yet,
+# no software fallback). Steer the adapter with WGPU_BACKENDS / WGPU_POWER_PREF if needed.
+render-smoke:
+    cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
+
+# Everything a merge requires (render-smoke is GPU-required + local; see its recipe).
+gate: fmt lint test render-smoke coverage
 
 # One-time setup helper.
 coverage-setup:

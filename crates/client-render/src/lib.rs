@@ -56,6 +56,10 @@ use vd_devproto::InputAction;
 // ---- render tuning (named consts; no inline magic numbers) ----------------------
 const WINDOW_W: u32 = 1280;
 const WINDOW_H: u32 = 720;
+/// The scene clear color (sRGB) — the cleared-background of BOTH the windowed and the
+/// headless-capture cameras (single-sourced so the two can never drift, and so the
+/// G-RENDER-SMOKE content check measures content against the one true background).
+const CLEAR_SRGB: [f32; 3] = [0.02, 0.03, 0.06];
 const DOT_RADIUS: f32 = 0.5;
 /// Reference-scene extents so motion is VISIBLE in the empty stub world (P1.5 has no
 /// terrain): a ground plate + a ring of distinct landmark pillars for parallax. Pure
@@ -200,7 +204,11 @@ pub fn run(handles: RenderHandles) {
 fn run_windowed(handles: RenderHandles) {
     tracing::info!("windowed client starting (Bevy {}x{})", WINDOW_W, WINDOW_H);
     App::new()
-        .insert_resource(ClearColor(Color::srgb(0.02, 0.03, 0.06)))
+        .insert_resource(ClearColor(Color::srgb(
+            CLEAR_SRGB[0],
+            CLEAR_SRGB[1],
+            CLEAR_SRGB[2],
+        )))
         .insert_resource(Net {
             snapshot: handles.snapshot,
             input: handles.input,
@@ -552,7 +560,11 @@ fn run_capture(handles: RenderHandles) {
         .captures
         .expect("Capture mode requires a capture channel");
     App::new()
-        .insert_resource(ClearColor(Color::srgb(0.02, 0.03, 0.06)))
+        .insert_resource(ClearColor(Color::srgb(
+            CLEAR_SRGB[0],
+            CLEAR_SRGB[1],
+            CLEAR_SRGB[2],
+        )))
         .insert_resource(Net {
             snapshot: handles.snapshot,
             input: handles.input,

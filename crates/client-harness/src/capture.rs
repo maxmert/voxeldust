@@ -143,10 +143,10 @@ mod tests {
         let e = capture_entry(
             CaptureKind::Screenshot,
             "shots/0001.png".to_owned(),
-            Some(100),       // requested target
-            Some(102),       // render-sampled freshest tick (the pixels' tick)
-            Some(99.6),      // render-sampled cursor
-            7,               // session diagnostic
+            Some(100),  // requested target
+            Some(102),  // render-sampled freshest tick (the pixels' tick)
+            Some(99.6), // render-sampled cursor
+            7,          // session diagnostic
             Some("state/0001.json".to_owned()),
         );
         assert_eq!(e.tick, Some(100));
@@ -161,7 +161,14 @@ mod tests {
     fn plan_record_clamps_fps_and_frames_and_rejects_bad_durations() {
         // Normal: 8 fps for 1 s = 8 frames, 0.125 s interval.
         let p = plan_record(8, 1.0, 120, 3600).expect("valid");
-        assert_eq!(p, RecordPlan { fps: 8, frames: 8, interval_secs: 0.125 });
+        assert_eq!(
+            p,
+            RecordPlan {
+                fps: 8,
+                frames: 8,
+                interval_secs: 0.125
+            }
+        );
         // fps clamped up to 1; a sub-frame duration still yields at least 1 frame.
         assert_eq!(plan_record(0, 0.01, 120, 3600).expect("valid").frames, 1);
         // fps + frames clamped down to the ceilings.
@@ -175,7 +182,10 @@ mod tests {
 
     #[test]
     fn state_rel_for_pairs_the_state_dump_with_the_png() {
-        assert_eq!(state_rel_for("frames/flyby-0007.png"), "state/flyby-0007.json");
+        assert_eq!(
+            state_rel_for("frames/flyby-0007.png"),
+            "state/flyby-0007.json"
+        );
         assert_eq!(state_rel_for("shots/hero.png"), "state/hero.json");
         // No directory, and a non-.png path, both handled.
         assert_eq!(state_rel_for("hero.png"), "state/hero.json");
