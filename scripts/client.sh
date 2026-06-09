@@ -25,12 +25,14 @@ SLOT=""
 AGENT=0
 NAME="client"
 WINDOW=0
+CAPTURE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --slot) SLOT="${2:?--slot needs a value}"; shift 2 ;;
         --agent-index) AGENT="${2:?--agent-index needs a value}"; shift 2 ;;
         --name) NAME="${2:?--name needs a value}"; shift 2 ;;
         --window) WINDOW=1; shift ;;
+        --capture) CAPTURE=1; shift ;;
         *) echo "client.sh: unexpected argument '$1'" >&2; exit 1 ;;
     esac
 done
@@ -60,7 +62,7 @@ CLIENT_BIN="$TARGET/client"
 # additionally enables `render` (the Bevy window) — a heavier build (pulls Bevy), so it
 # is opt-in. Builds are incremental — effectively a no-op once current.
 FEATURES="dev-control"
-[[ "$WINDOW" == "1" ]] && FEATURES="dev-control,render"
+{ [[ "$WINDOW" == "1" ]] || [[ "$CAPTURE" == "1" ]]; } && FEATURES="dev-control,render"
 cargo build -q --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features "$FEATURES"
 
 # The agent drives this client over the dev-control listener: input injection at
@@ -78,4 +80,5 @@ CMD=(
     --allow-dev-control
 )
 [[ "$WINDOW" == "1" ]] && CMD+=(--window)
+[[ "$CAPTURE" == "1" ]] && CMD+=(--capture)
 exec "${CMD[@]}"

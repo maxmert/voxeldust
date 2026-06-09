@@ -101,6 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let step_seq = Arc::new(AtomicU64::new(0));
     let dropped = Arc::new(AtomicU64::new(0));
     let (command_tx, command_rx) = sync_channel::<InputAction>(COMMAND_MAILBOX_CAP);
+    // The capture seam (Capture mode): the dev-control screenshot handler → the Bevy
+    // render thread. Created in any dev-control+render build; only WIRED into the
+    // listener (and consumed by the capture app) when `--capture` is set.
+    #[cfg(all(feature = "dev-control", feature = "render"))]
+    let (capture_tx, capture_rx) = crossbeam_channel::unbounded::<vd_client_render::CaptureJob>();
 
     #[cfg(feature = "dev-control")]
     let _listener = match args.dev_control {
@@ -116,6 +121,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 step_seq: step_seq.clone(),
                 dropped: dropped.clone(),
                 allow_mutating: args.allow_dev_control,
+                // Wire the capture sender only in `--capture` mode; otherwise `Screenshot`
+                // is `Unsupported` (windowed/headless have no offscreen readback).
+                #[cfg(feature = "render")]
+                captures: args.capture.then(|| capture_tx.clone()),
             };
             Some(runtime.spawn(dev_control::serve(loopback(port), handles)))
         }
@@ -129,19 +138,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let started_at = Instant::now();
 
-    // `--window` requires the render feature (it pulls Bevy); reject early otherwise.
+    // `--window`/`--capture` need the render feature (Bevy); `--capture` also needs
+    // dev-control (to receive the screenshot request). Reject early otherwise.
     #[cfg(not(feature = "render"))]
-    if args.window {
-        return Err("--window requires building with --features render".into());
+    if args.window || args.capture {
+        return Err("--window/--capture require building with --features render".into());
+    }
+    #[cfg(all(feature = "render", not(feature = "dev-control")))]
+    if args.capture {
+        return Err("--capture requires --features dev-control".into());
     }
 
-    // Windowed mode (Slice-3 T4): the core loop runs on a WORKER thread at a
-    // deterministic 20 Hz while Bevy owns the MAIN thread (winit requires it); the
-    // window reads the published RenderSnapshot + feeds the SAME input mailbox.
+    // Windowed (T4) / headless-capture (T5): the core loop runs on a WORKER thread at a
+    // deterministic 20 Hz while Bevy owns the MAIN thread; the render app reads the
+    // published RenderSnapshot. Windowed feeds the input mailbox; capture writes PNGs.
     #[cfg(feature = "render")]
     if args.window {
         let render_published = Arc::new(ArcSwap::from_pointee(core.state().render_snapshot()));
-        run_windowed(
+        run_render(
             core,
             command_rx,
             &command_tx,
@@ -151,6 +165,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dropped,
             started_at,
             args.step_hz,
+            vd_client_render::RenderMode::Windowed,
+            None,
+            std::path::PathBuf::from("runs"),
+        );
+        drop(control);
+        return Ok(());
+    }
+    #[cfg(all(feature = "dev-control", feature = "render"))]
+    if args.capture {
+        let render_published = Arc::new(ArcSwap::from_pointee(core.state().render_snapshot()));
+        let runs_dir = capture_run_dir(&args.name);
+        tracing::info!(dir = %runs_dir.display(), "headless capture run");
+        run_render(
+            core,
+            command_rx,
+            &command_tx,
+            published,
+            render_published,
+            step_seq,
+            dropped,
+            started_at,
+            args.step_hz,
+            vd_client_render::RenderMode::Capture,
+            Some(capture_rx),
+            runs_dir,
         );
         drop(control);
         return Ok(());
@@ -175,11 +214,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Run the windowed client: spawn the deterministic core loop on a worker thread, then
-/// run Bevy on this (main) thread until the window closes, then ask the core to close.
+/// Run the render client (Windowed or headless Capture): spawn the deterministic core
+/// loop on a worker thread, then run Bevy on this (main) thread until it exits, then ask
+/// the core to close. Shared by `--window` and `--capture` (only the `RenderHandles`
+/// mode/captures/runs_dir differ — one render path, two front-ends).
 #[cfg(feature = "render")]
 #[allow(clippy::too_many_arguments)]
-fn run_windowed(
+fn run_render(
     core: ClientCore<MeshTransport>,
     command_rx: Receiver<InputAction>,
     command_tx: &SyncSender<InputAction>,
@@ -189,6 +230,9 @@ fn run_windowed(
     dropped: Arc<AtomicU64>,
     started_at: Instant,
     step_hz: u32,
+    mode: vd_client_render::RenderMode,
+    captures: Option<crossbeam_channel::Receiver<vd_client_render::CaptureJob>>,
+    runs_dir: std::path::PathBuf,
 ) {
     // Reliable, BIDIRECTIONAL shutdown — independent of the bounded input mailbox:
     //  - `stop` (window → worker): set when the window closes; the worker checks it every
@@ -234,13 +278,36 @@ fn run_windowed(
         dropped,
         core_alive,
         started_at,
-        mode: vd_client_render::RenderMode::Windowed,
-        captures: None, // capture (headless) mode wiring lands in the next T5 step
-        runs_dir: std::path::PathBuf::from("runs"),
+        mode,
+        captures,
+        runs_dir,
     });
-    // Window closed → reliably ask the core to close (AtomicBool — never shed), then join.
+    // Window/app exited → reliably ask the core to close (AtomicBool — never shed), join.
     stop.store(true, Ordering::Relaxed);
     let _ = core_thread.join();
+}
+
+/// The output dir for a capture run: `runs/<unix_secs>__<name>/` (created here); the
+/// manifest + PNGs land inside. The timestamp keeps successive runs distinct.
+#[cfg(all(feature = "dev-control", feature = "render"))]
+fn capture_run_dir(name: &str) -> std::path::PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = std::path::PathBuf::from("runs").join(format!("{secs}__{safe}"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 /// The deterministic core loop (the sole owner of `core` — on the main thread for the
@@ -313,6 +380,9 @@ struct ClientArgs {
     /// Open the Bevy window (Slice-3 T4) instead of running headless. Requires the
     /// `render` build feature.
     window: bool,
+    /// Headless offscreen render + wgpu readback for `vdctl screenshot` (Slice-3 T5) — the
+    /// agent's eyes, no display. Requires `--features dev-control,render` + `--dev-control`.
+    capture: bool,
 }
 
 fn parse_args() -> Result<ClientArgs, String> {
@@ -325,6 +395,7 @@ fn parse_args() -> Result<ClientArgs, String> {
     let mut allow_dev_control = false;
     let mut step_hz: u32 = DEFAULT_STEP_HZ;
     let mut window = false;
+    let mut capture = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -338,8 +409,12 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--allow-dev-control" => allow_dev_control = true,
             "--step-hz" => step_hz = parse_val(&mut it, "--step-hz")?,
             "--window" => window = true,
+            "--capture" => capture = true,
             other => return Err(format!("unknown argument: {other}")),
         }
+    }
+    if window && capture {
+        return Err("--window and --capture are mutually exclusive".to_owned());
     }
 
     Ok(ClientArgs {
@@ -352,6 +427,7 @@ fn parse_args() -> Result<ClientArgs, String> {
         allow_dev_control,
         step_hz,
         window,
+        capture,
     })
 }
 
@@ -379,6 +455,8 @@ mod dev_control {
     use std::time::Duration;
 
     use arc_swap::ArcSwap;
+    #[cfg(feature = "render")]
+    use crossbeam_channel::Sender;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::{TcpListener, TcpStream};
@@ -387,6 +465,17 @@ mod dev_control {
         DevError, DevPhase, DevRequest, DevResponse, DevState, InputAction, WaitPredicate,
         decode_request, encode_response,
     };
+    #[cfg(feature = "render")]
+    use vd_devproto::{WaitField, WaitOp};
+
+    /// The reply timeout for a capture (Capture mode): the render thread writes a PNG and
+    /// replies; if it does not within this, the request fails (never hangs the connection).
+    #[cfg(feature = "render")]
+    const CAPTURE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The `screenshot --at-tick` wait budget (step-ticks) before giving up on the tick.
+    #[cfg(feature = "render")]
+    const SCREENSHOT_WAIT_TICKS: u64 = 600;
 
     /// The `wait-until` re-evaluation interval — short relative to a step tick so a
     /// satisfied predicate is reported promptly. The wait is ALSO cancelled the instant
@@ -470,6 +559,11 @@ mod dev_control {
         pub step_seq: Arc<AtomicU64>,
         pub dropped: Arc<AtomicU64>,
         pub allow_mutating: bool,
+        /// The capture seam (Capture mode only): the screenshot handler sends a job to the
+        /// Bevy render thread. `None` in windowed/headless modes (then `Screenshot` is
+        /// `Unsupported`).
+        #[cfg(feature = "render")]
+        pub captures: Option<Sender<vd_client_render::CaptureJob>>,
     }
 
     /// Accept loopback connections forever, one task per connection, bounded by a
@@ -527,6 +621,16 @@ mod dev_control {
                     Some(response) => response,
                     None => return Ok(()), // socket closed mid-wait
                 },
+                // Capture mode only (a wired `captures` channel): handled here (not in
+                // dispatch_immediate) because the optional `--at-tick` wait is async +
+                // cancellable on EOF, like WaitUntil. Otherwise → Unsupported below.
+                #[cfg(feature = "render")]
+                Ok(DevRequest::Screenshot { at_tick, label }) if handles.captures.is_some() => {
+                    match screenshot(&handles, &mut framer, at_tick, label).await {
+                        Some(response) => response,
+                        None => return Ok(()), // socket closed mid-wait
+                    }
+                }
                 Ok(request) => dispatch_immediate(&handles, request),
                 Err(error) => DevResponse::Error { error },
             };
@@ -637,6 +741,67 @@ mod dev_control {
                     }
                 }
             }
+        }
+    }
+
+    /// Serve a `Screenshot` (Capture mode): optionally wait for the universe tick to reach
+    /// `at_tick` (reusing the wait-until machinery — cancellable on EOF), then ask the
+    /// render thread to write a PNG and reply with its path. Non-mutating (a read). Returns
+    /// `None` only on socket EOF (cancel).
+    #[cfg(feature = "render")]
+    async fn screenshot(
+        handles: &Handles,
+        framer: &mut LineFramer,
+        at_tick: Option<u64>,
+        label: Option<String>,
+    ) -> Option<DevResponse> {
+        let Some(captures) = &handles.captures else {
+            return Some(DevResponse::Error {
+                error: DevError::Unsupported,
+            });
+        };
+        // --at-tick: block until the delivered universe tick reaches T (run-stable), via
+        // the SAME wait machinery; a Timeout/closed/EOF there propagates straight back.
+        if let Some(tick) = at_tick {
+            let predicate = WaitPredicate {
+                field: WaitField::UniverseTick,
+                op: WaitOp::Ge,
+                value: tick,
+            };
+            match wait_until(handles, framer, predicate, SCREENSHOT_WAIT_TICKS).await {
+                Some(DevResponse::State { .. }) => {} // tick reached → capture
+                other => return other,                // Timeout / closed / EOF (None)
+            }
+        }
+        // Hand the render thread a one-shot reply channel; it writes the PNG and replies.
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        if captures
+            .send(vd_client_render::CaptureJob {
+                label,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            // The render thread/app is gone (exited): not a malformed request.
+            return Some(DevResponse::Error {
+                error: DevError::Unsupported,
+            });
+        }
+        let tick = handles.published.load().universe_tick;
+        // The reply is a BLOCKING crossbeam recv → run it off the async runtime via
+        // spawn_blocking so it never stalls the reactor; bounded so it can never hang.
+        let received =
+            tokio::task::spawn_blocking(move || reply_rx.recv_timeout(CAPTURE_REPLY_TIMEOUT)).await;
+        match received {
+            Ok(Ok(Ok(result))) => Some(DevResponse::Captured {
+                path: result.path,
+                tick,
+            }),
+            // Timeout / render-side error / join error: shed honestly (the render side logs
+            // the real cause); the agent retries.
+            _ => Some(DevResponse::Error {
+                error: DevError::Busy,
+            }),
         }
     }
 }

@@ -8,6 +8,7 @@
 //! Usage: `vdctl [--port P] <command>` (port falls back to `VD_DEVCTL_PORT`):
 //!   move <fwd> <strafe> <vert> | look <yaw> <pitch> | action <index> <on|off>
 //!   close | reset | state | wait <field> <op> <value> [max_ticks]
+//!   screenshot [--at-tick <N>] [label]   (capture a PNG — a `--capture` client only)
 //! where `<index>` is a 0-based action-bit index (converted to a single-bit mask, so
 //!       you can never accidentally press two), and `<field>`/`<op>` are a `WaitField`/
 //!       `WaitOp` — the live lists are shown in the `bad field` / `bad op` errors,
@@ -138,6 +139,30 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
                 predicate,
                 max_ticks,
             })
+        }
+        "screenshot" => {
+            // screenshot [--at-tick <N>] [label] — capture a PNG (Capture-mode client).
+            let mut at_tick = None;
+            let mut label = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--at-tick" => {
+                        let raw = rest.get(i + 1).ok_or("--at-tick requires a value")?;
+                        at_tick =
+                            Some(raw.parse().map_err(|_| {
+                                "screenshot: --at-tick must be an integer".to_owned()
+                            })?);
+                        i += 2;
+                    }
+                    other if label.is_none() => {
+                        label = Some(other.to_owned());
+                        i += 1;
+                    }
+                    other => return Err(format!("screenshot: unexpected argument {other:?}")),
+                }
+            }
+            Ok(DevRequest::Screenshot { at_tick, label })
         }
         other => Err(format!("unknown command: {other}")),
     }
