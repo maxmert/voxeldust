@@ -375,6 +375,62 @@ mod tests {
     }
 
     #[test]
+    fn world_pos_rotates_a_shiplocal_interior_by_the_hull_orientation() {
+        // Pins the `hull.orient * interior.pos` ROTATION term (the literal "walk inside a
+        // flying ship" math) — not just the position add. A 180°-about-Y hull is
+        // sign-convention-independent: local +x (5,0,0) maps to (-5,0,0), so the interior
+        // lands at hull.pos + (-5,0,0) = (95,0,0) — vs (105,0,0) if orient were ignored.
+        use glam::DQuat;
+        use std::f64::consts::PI;
+        use vd_core::pose::StampedPose;
+        let mut view = DeliveredView::default();
+        let hull = ent(1);
+        let interior = ent(2);
+        let mut hull_pose = StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 1 },
+            DVec3::new(100.0, 0.0, 0.0),
+            UniverseTick(11),
+        );
+        hull_pose.orient = DQuat::from_rotation_y(PI); // 180° about Y
+        view.on_snapshot(
+            Some(SubId(0)),
+            SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 1,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(11),
+                entities: vec![EntitySnap {
+                    entity: hull,
+                    pose: hull_pose,
+                }],
+            },
+        );
+        view.on_snapshot(
+            Some(SubId(0)),
+            SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 2,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(11),
+                entities: vec![EntitySnap {
+                    entity: interior,
+                    pose: StampedPose::at_rest(
+                        FrameRef::ShipLocal { ship: hull },
+                        DVec3::new(5.0, 0.0, 0.0),
+                        UniverseTick(11),
+                    ),
+                }],
+            },
+        );
+        let r = view.render(11.0);
+        let world = view.world_pos(&r[&interior], 11.0);
+        assert!(
+            (world - DVec3::new(95.0, 0.0, 0.0)).length() < 1e-9,
+            "the hull orientation must rotate the interior offset, got {world:?}"
+        );
+    }
+
+    #[test]
     fn foreign_sub_and_stale_frames_are_dropped_and_counted() {
         let mut view = DeliveredView::default();
         let held = Some(SubId(0));

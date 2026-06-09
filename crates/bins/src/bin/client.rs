@@ -986,8 +986,13 @@ mod dev_control {
         let (Some(runs_dir), Some(manifest)) = (&handles.runs_dir, &handles.manifest) else {
             return;
         };
+        // NOTE: `current` is a post-roundtrip poll, so the dumped DevState's `universe_tick`
+        // may LEAD the render-sampled `freshest_tick` below by the render round-trip — a
+        // bounded, low-severity skew. The MANIFEST's `freshest_tick`/`cursor` (from the
+        // captured frame) are the aligned quantities; the state dump is a best-effort
+        // diagnostic snapshot of the delivered world around the capture.
         let state = current(handles); // for the session-diagnostic count + the dump
-        // The aligned state dump sits beside the PNG (frames/foo.png → state/foo.json) — the
+        // The state dump sits beside the PNG (frames/foo.png → state/foo.json) — the
         // run-relative pairing is the Tier-A `state_rel_for`.
         let state_rel = state_rel_for(&result.rel_path);
         let wrote_state = write_state_dump(&runs_dir.join(&state_rel), &state);
