@@ -4,17 +4,14 @@
 //! turns the camera immediately; the rendered ENTITY orientation stays server-delivered
 //! (NOT prediction).
 
-use glam::{DQuat, DVec3};
+use glam::DVec3;
+use vd_core::kinematics;
 
 /// Max pitch (radians, ~89°) — just under straight-up to avoid the gimbal flip.
 pub const PITCH_LIMIT: f64 = 1.553_343;
 
 /// First-person eye height above the entity origin (m), along `up`.
 pub const DEFAULT_EYE_OFFSET: f64 = 1.6;
-
-/// `up` is treated as parallel to the yaw reference (so swap to the alternate axis)
-/// when their cross product is shorter than this — keeps the basis well-conditioned.
-const PARALLEL_EPS: f64 = 1e-6;
 
 /// A follow camera's orientation state (the entity position is supplied per frame).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,26 +43,14 @@ impl FollowCamera {
         self.pitch = (self.pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
-    /// The world-space look direction from `(yaw, pitch)` around `up`. Matches the stub
-    /// server's convention exactly (forward is `-Z` at rest for `up = +Y`; `+pitch`
-    /// tilts toward `up`), so the local view agrees with the server-delivered orient.
+    /// The world-space look direction from `(yaw, pitch)` around `up`. A PURE CONSUMER
+    /// of the one up-relative convention ([`vd_core::kinematics::forward_in_frame`]) —
+    /// NOT a second basis — so it matches the stub server exactly (forward is `-Z` at
+    /// rest for `up = +Y`; `+pitch` tilts toward `up`) and stays correct for the
+    /// planet-radial / ship-local `up` the end goal needs, with no drift to maintain.
     #[must_use]
     pub fn forward(&self) -> DVec3 {
-        let up = self.up.normalize();
-        // A reference tangent not parallel to `up`, so the basis is well-conditioned.
-        let reference = if up.cross(DVec3::Z).length() < PARALLEL_EPS {
-            DVec3::X
-        } else {
-            DVec3::Z
-        };
-        // Rest forward = -(reference made perpendicular to up): -Z for up=+Y, matching
-        // the server's `forward = orient · -Z`. Right completes a right-handed frame.
-        let fwd0 = -(reference - up * reference.dot(up)).normalize();
-        let right0 = fwd0.cross(up);
-        let yaw_rot = DQuat::from_axis_angle(up, self.yaw);
-        let fwd_yawed = yaw_rot * fwd0;
-        let right = yaw_rot * right0;
-        (DQuat::from_axis_angle(right, self.pitch) * fwd_yawed).normalize()
+        kinematics::forward_in_frame(self.up, self.yaw, self.pitch)
     }
 
     /// The first-person eye position for an entity at `own_pos`.
@@ -114,37 +99,45 @@ mod tests {
     }
 
     #[test]
-    fn forward_matches_the_shared_kinematics_convention_for_world_up() {
-        // PARITY: for world-Y up, the camera's forward MUST equal the ONE shared
-        // convention the stub/nav use (vd_core::kinematics). This couples the camera to
-        // the authority — a drift in either trips this red (closes the audit hazard).
-        use vd_core::kinematics::forward_from_yaw_pitch;
-        for yi in -3..=3 {
-            for pi in -3..=3 {
-                let yaw = f64::from(yi) * 0.4;
-                let pitch = f64::from(pi) * 0.4; // |pitch| <= 1.2 < PITCH_LIMIT
-                let cam = FollowCamera {
-                    up: DVec3::Y,
-                    yaw,
-                    pitch,
-                    eye_offset: 0.0,
-                };
-                let got = cam.forward();
-                let want = forward_from_yaw_pitch(yaw, pitch);
-                assert!(
-                    close(got, want),
-                    "yaw {yaw} pitch {pitch}: {got:?} vs {want:?}"
-                );
+    fn forward_matches_the_shared_convention_for_any_up() {
+        // PARITY: the camera's forward MUST equal the ONE shared up-relative convention
+        // (vd_core::kinematics::forward_in_frame) for EVERY up — world-Y now,
+        // planet-radial / ship-local later. The camera is a pure consumer, so a drift in
+        // either trips this red (closes the second-source hazard, incl. the non-Y case).
+        use vd_core::kinematics::forward_in_frame;
+        for up in [DVec3::Y, DVec3::Z, DVec3::new(1.0, 2.0, 3.0).normalize()] {
+            for yi in -3..=3 {
+                for pi in -3..=3 {
+                    let yaw = f64::from(yi) * 0.4;
+                    let pitch = f64::from(pi) * 0.4; // |pitch| <= 1.2 < PITCH_LIMIT
+                    let cam = FollowCamera {
+                        up,
+                        yaw,
+                        pitch,
+                        eye_offset: 0.0,
+                    };
+                    let got = cam.forward();
+                    let want = forward_in_frame(up, yaw, pitch);
+                    assert!(
+                        close(got, want),
+                        "up {up:?} yaw {yaw} pitch {pitch}: {got:?} vs {want:?}"
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn up_parallel_to_z_reference_swaps_to_x_axis() {
-        // up == Z is parallel to the default reference -> the alternate (X) branch.
-        let cam = FollowCamera::new(DVec3::Z);
-        // reference X -> rest forward = -X.
-        let fwd = cam.forward();
-        assert!(close(fwd, DVec3::NEG_X), "got {fwd:?}");
+    fn rest_forward_for_up_z_is_plus_y_an_independent_non_world_up_oracle() {
+        // INDEPENDENT value oracle for the non-Y path, hand-derived (NOT via
+        // forward_in_frame, so it is not tautological): frame_from_up(Z) is the minimal
+        // rotation Y→Z (90° about +X), so rest forward = that · (-Z) = +Y. This is the
+        // real cross-check now that `forward_matches_the_shared_convention_for_any_up` is
+        // tautological-by-construction (a guard against re-introducing a second basis).
+        let fwd = FollowCamera::new(DVec3::Z).forward(); // pre-computed (a call in a msg is uncovered)
+        assert!(
+            close(fwd, DVec3::Y),
+            "rest forward for up=Z is +Y, got {fwd:?}"
+        );
     }
 }

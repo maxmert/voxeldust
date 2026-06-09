@@ -34,6 +34,26 @@ pub fn forward_to_yaw_pitch(forward: DVec3) -> (f64, f64) {
     (yaw, pitch)
 }
 
+/// The minimal rotation taking the canonical up (`+Y`) to `up` (normalized) — the ONE
+/// definition of an `up`-relative frame (world-Y for P1.5, planet-radial / ship-local
+/// later), shared by the camera (now) and surface-relative motion (P5) so the
+/// up-relative convention has no second source. Antiparallel `up` (`-Y`) resolves to a
+/// deterministic perpendicular axis (`glam`'s `from_rotation_arc`), never a panic.
+#[must_use]
+pub fn frame_from_up(up: DVec3) -> DQuat {
+    DQuat::from_rotation_arc(DVec3::Y, up.normalize())
+}
+
+/// The world forward direction for a `(yaw, pitch)` taken in the `up`-relative frame:
+/// the canonical [`forward_from_yaw_pitch`] rotated by [`frame_from_up`]. For `up = +Y`
+/// the rotation is identity, so this is EXACTLY [`forward_from_yaw_pitch`] (the P1.5
+/// convention is unchanged); any other `up` generalizes by the single most-natural
+/// rotation rather than a second hand-built basis.
+#[must_use]
+pub fn forward_in_frame(up: DVec3, yaw: f64, pitch: f64) -> DVec3 {
+    frame_from_up(up) * forward_from_yaw_pitch(yaw, pitch)
+}
+
 /// The LOCAL-frame motion axes for an input `movement = [forward, strafe, vertical]`
 /// (each clamped to `[-1, 1]`): `(strafe, vertical, -forward)`. The sim applies
 /// `orient · these · speed·dt`.
@@ -83,6 +103,59 @@ mod tests {
                 assert!((rp - pitch).abs() < 1e-9, "pitch {pitch} -> {rp}");
             }
         }
+    }
+
+    #[test]
+    fn up_y_frame_is_identity_so_forward_in_frame_is_the_canonical_forward() {
+        // For world-Y up, the up-relative forward MUST equal the canonical forward
+        // (the rotation is identity) — this is what keeps the P1.5 convention exact.
+        for yi in -3..=3 {
+            for pi in -3..=3 {
+                let yaw = f64::from(yi) * 0.4;
+                let pitch = f64::from(pi) * 0.4;
+                assert!(
+                    forward_in_frame(DVec3::Y, yaw, pitch)
+                        .abs_diff_eq(forward_from_yaw_pitch(yaw, pitch), 1e-12),
+                    "yaw {yaw} pitch {pitch}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rest_forward_is_perpendicular_to_up_in_any_frame() {
+        // At pitch 0 the forward is horizontal in the frame (⊥ up) for ANY up —
+        // covers a tilted up AND the antiparallel (-Y) case without a panic.
+        for up in [DVec3::Z, DVec3::new(1.0, 2.0, 3.0), DVec3::NEG_Y] {
+            let fwd = forward_in_frame(up, 0.7, 0.0);
+            assert!(
+                fwd.dot(up.normalize()).abs() < 1e-9,
+                "rest forward ⊥ up for {up:?}"
+            );
+            assert!((fwd.length() - 1.0).abs() < 1e-9, "unit forward for {up:?}");
+        }
+    }
+
+    #[test]
+    fn tilted_frame_has_the_right_yaw_sense_and_pitch_sign() {
+        // INDEPENDENT hand-derived oracles for a non-Y up WITH non-zero yaw/pitch —
+        // pins the yaw rotational SENSE and the pitch SIGN of the generalized frame (the
+        // planet-radial / ship-local path), which the rest-only / identity / tautological
+        // tests cannot catch. up = +Z: frame_from_up(Z) maps Y→Z (90° about +X), so rest
+        // forward = +Y.
+        let up = DVec3::Z;
+        // Yaw +90° about +up(+Z) is right-handed: +Y → -X.
+        assert!(
+            forward_in_frame(up, std::f64::consts::FRAC_PI_2, 0.0).abs_diff_eq(DVec3::NEG_X, 1e-12),
+            "yaw is right-handed about +up"
+        );
+        // +pitch tilts toward +up: forward_in_frame(Z, 0, p) = (0, cos p, sin p), so the
+        // +Z (up) component is sin p > 0 for p > 0 (a wrong pitch sign would flip it).
+        let p = 0.3_f64;
+        assert!(
+            forward_in_frame(up, 0.0, p).abs_diff_eq(DVec3::new(0.0, p.cos(), p.sin()), 1e-12),
+            "+pitch tilts toward +up"
+        );
     }
 
     #[test]

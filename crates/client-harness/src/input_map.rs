@@ -53,14 +53,14 @@ pub fn mouse_look(dx: f32, dy: f32) -> InputAction {
     InputAction::Look([dx * LOOK_SENSITIVITY, dy * LOOK_SENSITIVITY])
 }
 
-/// A physical action-key index + edge → an `Action` input. `bit` is a SINGLE-bit mask
-/// (`1 << index`); the bit→meaning binding is server-side, never here.
+/// A physical action-key index + edge → an `Action` input, or `None` if `index` is
+/// outside the `u32` action channel (`> vd_devproto::MAX_ACTION_INDEX`). The index→mask
+/// transform is the SHARED [`vd_devproto::action_bit`] — the SAME bound `vdctl` applies,
+/// so the two input-injection paths can't diverge. The bit→meaning binding is
+/// server-side, never here.
 #[must_use]
-pub fn action(index: u32, pressed: bool) -> InputAction {
-    InputAction::Action {
-        bit: 1u32 << index,
-        pressed,
-    }
+pub fn action(index: u32, pressed: bool) -> Option<InputAction> {
+    vd_devproto::action_bit(index).map(|bit| InputAction::Action { bit, pressed })
 }
 
 #[cfg(test)]
@@ -124,17 +124,19 @@ mod tests {
     fn action_is_a_single_bit_mask_by_index() {
         assert_eq!(
             action(3, true),
-            InputAction::Action {
+            Some(InputAction::Action {
                 bit: 0b1000,
                 pressed: true
-            }
+            })
         );
         assert_eq!(
             action(0, false),
-            InputAction::Action {
+            Some(InputAction::Action {
                 bit: 1,
                 pressed: false
-            }
+            })
         );
+        // Out of the u32 action channel → None (same bound vdctl enforces).
+        assert_eq!(action(vd_devproto::MAX_ACTION_INDEX + 1, true), None);
     }
 }

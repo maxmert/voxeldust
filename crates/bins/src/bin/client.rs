@@ -430,6 +430,16 @@ mod dev_control {
             DevRequest::WaitUntil { .. } => DevResponse::Error {
                 error: DevError::BadRequest,
             },
+            // Decodable but not yet wired (capture + closed loops land at T4/T5): an
+            // HONEST `Unsupported`, NOT `BadRequest` (which stays reserved for malformed
+            // input). Routed explicitly so the honesty surface is correct before the
+            // feature lands.
+            DevRequest::Screenshot { .. }
+            | DevRequest::Record { .. }
+            | DevRequest::WalkTo { .. }
+            | DevRequest::LookAt { .. } => DevResponse::Error {
+                error: DevError::Unsupported,
+            },
             input => apply(handles, input),
         }
     }

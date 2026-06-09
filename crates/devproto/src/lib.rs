@@ -40,7 +40,7 @@ pub mod predicate;
 pub mod state;
 
 pub use codec::{decode_request, encode_response};
-pub use dispatch::{DevError, DevRequest, DevResponse, InputAction};
+pub use dispatch::{DevError, DevRequest, DevResponse, InputAction, MAX_ACTION_INDEX, action_bit};
 pub use predicate::{WaitField, WaitOp, WaitPredicate};
 pub use state::{DevEntityRow, DevPhase, DevState, DevTransferView};
 

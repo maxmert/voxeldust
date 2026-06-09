@@ -24,7 +24,11 @@ pub struct CaptureEntry {
     pub tick: Option<u64>,
     /// The ACTUAL render cursor at capture (`None` before the first snapshot).
     pub cursor: Option<f64>,
-    /// The ACTUAL applied-snapshot count at capture (the delivered-tick proxy).
+    /// The ACTUAL freshest UNIVERSE tick at capture (run-stable; the alignment quantity
+    /// that lets two runs recover the same world state for a golden diff). `None` before
+    /// the first snapshot.
+    pub freshest_tick: Option<u64>,
+    /// The ACTUAL applied-snapshot count at capture (session-relative; diagnostic).
     pub snapshots_applied: u64,
     /// The aligned `state/…` dump for this capture, if written.
     pub state_path: Option<String>,
@@ -80,6 +84,7 @@ mod tests {
             path: "shots/0001.png".to_owned(),
             tick: Some(100),
             cursor: Some(97.6),
+            freshest_tick: Some(100),
             snapshots_applied: 12,
             state_path: Some("state/0001.json".to_owned()),
         });
@@ -88,6 +93,7 @@ mod tests {
             path: "frames/0001.png".to_owned(),
             tick: None,
             cursor: None,
+            freshest_tick: None,
             snapshots_applied: 0,
             state_path: None,
         });

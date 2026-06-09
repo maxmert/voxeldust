@@ -77,6 +77,9 @@ pub struct ClientState {
     /// Snapshots accepted by the §6.3 gate (the liveness signal a `wait-until`
     /// predicate polls — distinguishes "live and receiving" from "welcomed but starved").
     snapshots_applied: u64,
+    /// The freshest APPLIED universe tick (run-stable + join-independent) — what
+    /// `screenshot --at-tick` aligns on; `None` before the first applied snapshot.
+    latest_universe_tick: Option<u64>,
 }
 
 impl ClientState {
@@ -101,21 +104,40 @@ impl ClientState {
             ignored: 0,
             foreign_peer_drops: 0,
             snapshots_applied: 0,
+            latest_universe_tick: None,
         }
     }
 
-    /// One client step: drain delivered messages, then send (Hello while connecting,
-    /// a 20 Hz `InputDatagram` while active, `Bye` when closing). `now_s` is wall-time
-    /// fed IN by the render loop (the lib reads no clock); it anchors the render cursor.
+    /// One full client step = [`pump_inbound`](Self::pump_inbound) then
+    /// [`assemble_input`](Self::assemble_input). The headless driver + the parity tests
+    /// call THIS at 20 Hz; the windowed renderer (Slice-3 T4) instead pumps every display
+    /// frame and assembles on a 20 Hz accumulator — same two halves, so input stays
+    /// byte-identical regardless of the render rate. `now_s` is wall-time fed IN by the
+    /// loop (the lib reads no clock); it anchors the render cursor.
     pub fn step(&mut self, transport: &mut dyn Transport, now_s: f64) -> ClientStepReport {
-        self.tick = self.tick.next();
+        let received = self.pump_inbound(transport, now_s);
+        let sent = self.assemble_input(transport);
+        ClientStepReport { received, sent }
+    }
+
+    /// Drain + decode delivered messages, folding snapshots into the view and anchoring
+    /// the render cursor. Idempotent w.r.t. the input clock — safe to call EVERY render
+    /// frame (does not advance the input tick or send anything). Returns the count drained.
+    pub fn pump_inbound(&mut self, transport: &mut dyn Transport, now_s: f64) -> usize {
         let inbound = transport.drain_inbound();
         let received = inbound.len();
         for msg in inbound {
             self.ingest(msg, now_s);
         }
-        let sent = self.send_outbound(transport);
-        ClientStepReport { received, sent }
+        received
+    }
+
+    /// Advance the input tick and emit ONE outbound frame (Hello while connecting, a
+    /// 20 Hz `InputDatagram` while active, `Bye` when closing). Call at the fixed 20 Hz
+    /// input cadence, NOT per render frame. Returns the count sent.
+    pub fn assemble_input(&mut self, transport: &mut dyn Transport) -> usize {
+        self.tick = self.tick.next();
+        self.send_outbound(transport)
     }
 
     fn ingest(&mut self, msg: Inbound, now_s: f64) {
@@ -180,6 +202,7 @@ impl ClientState {
         if self.view.on_snapshot(self.sub, snap) == SnapshotVerdict::Apply {
             self.render_clock.observe(tick, now_s);
             self.snapshots_applied += 1;
+            self.latest_universe_tick = Some(tick.0);
         }
     }
 
@@ -353,6 +376,7 @@ impl ClientState {
             session: self.session.map(|s| s.to_string()),
             own_entity: self.view.own_entity().map(|e| e.to_string()),
             render_cursor,
+            universe_tick: self.latest_universe_tick,
             entities,
             snapshots_applied: self.snapshots_applied,
             stale_frames_dropped: self.view.stale_frames_dropped(),
@@ -412,6 +436,18 @@ impl<T: Transport> ClientCore<T> {
 
     pub fn step(&mut self, now_s: f64) -> ClientStepReport {
         self.state.step(&mut self.transport, now_s)
+    }
+
+    /// Drain + decode inbound (every render frame in the windowed client). See
+    /// [`ClientState::pump_inbound`].
+    pub fn pump_inbound(&mut self, now_s: f64) -> usize {
+        self.state.pump_inbound(&mut self.transport, now_s)
+    }
+
+    /// Emit one outbound frame at the 20 Hz input cadence. See
+    /// [`ClientState::assemble_input`].
+    pub fn assemble_input(&mut self) -> usize {
+        self.state.assemble_input(&mut self.transport)
     }
 
     /// This client's own node identity (from its transport).
@@ -719,6 +755,43 @@ mod tests {
         assert_eq!(c.local_id(), NodeId(100));
     }
 
+    #[test]
+    fn the_windowed_pump_assemble_cadence_sends_identical_input_to_step() {
+        // T2: a windowed client pumps inbound EVERY render frame but assembles input only
+        // on the 20 Hz tick. That must produce the SAME InputDatagram as one `step()` —
+        // input is byte-identical regardless of render rate.
+        let mut stepped = core();
+        let mut windowed = core();
+        activate(&mut stepped);
+        activate(&mut windowed); // identical state: same seq, same tick
+        stepped.state_mut().set_movement([1.0, 0.0, 0.0]);
+        windowed.state_mut().set_movement([1.0, 0.0, 0.0]);
+        // stepped: one full step (= pump + assemble) -> one input.
+        stepped.step(0.0);
+        // windowed: three render-frame pumps (no send), then one 20 Hz assemble -> one input.
+        windowed.pump_inbound(0.0);
+        windowed.pump_inbound(0.0);
+        windowed.pump_inbound(0.0);
+        let sent = windowed.assemble_input();
+        assert_eq!(sent, 1, "exactly one input on the 20 Hz tick, not per pump");
+        let from_step = stepped
+            .transport
+            .sent
+            .last()
+            .cloned()
+            .expect("stepped input");
+        let from_windowed = windowed
+            .transport
+            .sent
+            .last()
+            .cloned()
+            .expect("windowed input");
+        assert_eq!(
+            from_step, from_windowed,
+            "pump×N + assemble == step (byte-identical input)"
+        );
+    }
+
     fn universe_rate(tick_hz: u32) -> Vec<u8> {
         postcard::to_allocvec(&ServerControlMsg::UniverseRate { tick_hz }).expect("test fixture")
     }
@@ -901,6 +974,7 @@ mod tests {
         assert_eq!(s.session, None);
         assert_eq!(s.own_entity, None);
         assert_eq!(s.render_cursor, None);
+        assert_eq!(s.universe_tick, None, "no snapshot ⇒ no universe tick");
         assert!(s.entities.is_empty(), "no cursor ⇒ nothing sampled");
         assert_eq!(s.snapshots_applied, 0);
         assert_eq!(s.transfer, DevTransferView::None);
@@ -925,6 +999,11 @@ mod tests {
         assert_eq!(s.session, Some(SessionId(9).to_string()));
         assert_eq!(s.own_entity, Some(ent().to_string()));
         assert!(s.render_cursor.is_some(), "anchored after a snapshot");
+        assert_eq!(
+            s.universe_tick,
+            Some(100),
+            "the applied snapshot's universe tick"
+        );
         assert_eq!(s.entities.len(), 1, "one composited entity");
         assert_eq!(s.entities[0].entity, ent().to_string());
         assert_eq!(s.entities[0].authoritative_sub, 0);

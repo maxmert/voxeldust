@@ -12,6 +12,14 @@ use vd_devproto::InputAction;
 /// Max look delta per tick (radians) — caps the turn rate so look-at is smooth.
 pub const MAX_LOOK_STEP: f64 = 0.2;
 
+/// `|forward.y|` at/above which a direction is treated as "at the gimbal pole" (within
+/// ~0.8° of straight up/down): there yaw is ill-defined (`atan2` of ~0/~0), so a yaw
+/// correction is meaningless. Inside this band `look_at` holds yaw and drives pitch only
+/// — reducing pitch pulls the facing off the pole, after which yaw resumes (cleaner +
+/// faster than letting yaw chase the degenerate value). The convention itself stays in
+/// [`vd_core::kinematics`]; this is monomorphic controller logic (HR5).
+const NEAR_VERTICAL: f64 = 0.9999;
+
 /// One walk-to tick: the `Move` axes to drive toward the target + whether arrived.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WalkStep {
@@ -27,8 +35,15 @@ impl WalkStep {
     }
 }
 
-/// Proportional walk-to in the server's LOCAL movement frame. Aims the per-tick step at
-/// the target (clamped `[-1, 1]` axes); `arrived` once within `arrive_epsilon`.
+/// Fixed-magnitude walk-to in the server's LOCAL movement frame: aims the per-tick step
+/// at the target with UNIT-clamped axes; `arrived` once within `arrive_epsilon`. It does
+/// NOT know the sim's per-tick step length (`move_speed_mps · tick_dt_s`), so it cannot
+/// taper near the target.
+///
+/// CONTRACT: `arrive_epsilon` MUST exceed one sim step. Because the magnitude is fixed,
+/// a smaller tolerance makes the dot overshoot and oscillate around the target forever
+/// (it can never settle inside a sub-step band) — callers pick a waypoint tolerance ≥
+/// one step (pinned by `walk_to_oscillates_if_arrive_epsilon_is_below_the_step`).
 #[must_use]
 pub fn walk_to(own_pos: DVec3, own_orient: DQuat, target: DVec3, arrive_epsilon: f64) -> WalkStep {
     let to_target = target - own_pos;
@@ -62,8 +77,9 @@ impl LookStep {
 }
 
 /// Closed-loop look-at: turn the entity to face `target`, emitting a per-tick `Look`
-/// delta (clamped to ±[`MAX_LOOK_STEP`]); `aligned` when both angular errors are within
-/// `align_epsilon`. Uses the delivered orient as the current facing.
+/// delta (clamped to ±[`MAX_LOOK_STEP`]); `aligned` once the facing is within
+/// `align_epsilon` of the target (the true 3-D angle, so it stays honest at the pole).
+/// Uses the delivered orient as the current facing.
 #[must_use]
 pub fn look_at(own_pos: DVec3, own_orient: DQuat, target: DVec3, align_epsilon: f64) -> LookStep {
     let to_target = target - own_pos;
@@ -73,15 +89,34 @@ pub fn look_at(own_pos: DVec3, own_orient: DQuat, target: DVec3, align_epsilon: 
             aligned: true,
         };
     }
-    let (desired_yaw, desired_pitch) = kinematics::forward_to_yaw_pitch(to_target.normalize());
-    let (current_yaw, current_pitch) = kinematics::forward_to_yaw_pitch(own_orient * DVec3::NEG_Z);
-    let yaw_err = wrap_pi(desired_yaw - current_yaw);
+    let desired_dir = to_target.normalize();
+    let current_dir = own_orient * DVec3::NEG_Z;
+    let (desired_yaw, desired_pitch) = kinematics::forward_to_yaw_pitch(desired_dir);
+    let (current_yaw, current_pitch) = kinematics::forward_to_yaw_pitch(current_dir);
+    // Gimbal pole guard: if EITHER endpoint is near-vertical, its yaw is ill-defined —
+    // hold yaw this tick and drive pitch only. `|` (not `||`) evaluates both endpoints
+    // unconditionally, so there is no short-circuit arm to leave uncovered (HR5).
+    let near_pole = near_vertical(desired_dir) | near_vertical(current_dir);
+    let yaw_err = if near_pole {
+        0.0
+    } else {
+        wrap_pi(desired_yaw - current_yaw)
+    };
     let pitch_err = desired_pitch - current_pitch;
-    let aligned = yaw_err.abs() <= align_epsilon && pitch_err.abs() <= align_epsilon;
+    // `aligned` is the TRUE 3-D angle between the facing and the target — not a
+    // yaw/pitch decomposition. This is honest at the pole (where the guard zeroes
+    // yaw_err): it can never report aligned while the facing is still > align_epsilon
+    // off the target, even though the per-tick COMMAND drops yaw to avoid spinning.
+    let aligned = current_dir.angle_between(desired_dir) <= align_epsilon;
     LookStep {
         look: [clamp_step(yaw_err), clamp_step(pitch_err)],
         aligned,
     }
+}
+
+/// Whether a unit direction is within [`NEAR_VERTICAL`] of straight up/down.
+fn near_vertical(dir: DVec3) -> bool {
+    dir.y.abs() >= NEAR_VERTICAL
 }
 
 /// Wrap an angle to `[-π, π)` (shortest turn) — branchless.
@@ -101,6 +136,71 @@ mod tests {
     // Build a test orient through the SHARED convention (no hand-rolled from_euler).
     fn yawed(yaw: f64, pitch: f64) -> DQuat {
         kinematics::orient_from_yaw_pitch(yaw, pitch)
+    }
+
+    /// Drive a `walk_to` CLOSED LOOP exactly as `stub::integrate` does (world step =
+    /// `orient · local_axes_from_movement(movement) · step_len`, via the shared
+    /// convention), asserting the distance to target never regresses. Returns the tick
+    /// it arrived, or `None` if it never did within `max_ticks` (a stall/oscillation).
+    fn drive_walk_to(
+        mut pos: DVec3,
+        orient: DQuat,
+        target: DVec3,
+        arrive_eps: f64,
+        step_len: f64,
+        max_ticks: u32,
+    ) -> Option<u32> {
+        let mut prev = f64::INFINITY;
+        for tick in 0..max_ticks {
+            let s = walk_to(pos, orient, target, arrive_eps);
+            if s.arrived {
+                return Some(tick);
+            }
+            let dist = (target - pos).length();
+            assert!(dist <= prev + 1e-9, "distance regressed: {dist} > {prev}");
+            prev = dist;
+            let axes = kinematics::local_axes_from_movement(s.movement);
+            pos += orient * axes * step_len;
+        }
+        None
+    }
+
+    /// Drive a `look_at` CLOSED LOOP exactly as `stub::integrate` applies look
+    /// (`yaw += look[0]; pitch += look[1]; orient = orient_from_yaw_pitch`). Returns the
+    /// tick it aligned, or `None` (a stall/oscillation). When `monotone`, asserts the
+    /// controller's own error `max(|yaw_err|, |pitch_err|)` never grows — the clamped
+    /// per-axis turn must converge without overshoot (off at the pole, where recovered
+    /// yaw is noise; there convergence-to-aligned alone proves no spin).
+    fn drive_look_at(
+        start_yaw: f64,
+        start_pitch: f64,
+        target: DVec3,
+        align_eps: f64,
+        max_ticks: u32,
+        monotone: bool,
+    ) -> Option<u32> {
+        let (mut yaw, mut pitch) = (start_yaw, start_pitch);
+        let (dyaw, dpitch) = kinematics::forward_to_yaw_pitch(target.normalize());
+        let mut prev = f64::INFINITY;
+        for tick in 0..max_ticks {
+            let orient = kinematics::orient_from_yaw_pitch(yaw, pitch);
+            let s = look_at(DVec3::ZERO, orient, target, align_eps);
+            if s.aligned {
+                return Some(tick);
+            }
+            if monotone {
+                let (cyaw, cpitch) = kinematics::forward_to_yaw_pitch(orient * DVec3::NEG_Z);
+                let err = wrap_pi(dyaw - cyaw).abs().max((dpitch - cpitch).abs());
+                assert!(
+                    err <= prev + 1e-9,
+                    "controller error regressed: {err} > {prev}"
+                );
+                prev = err;
+            }
+            yaw += f64::from(s.look[0]);
+            pitch += f64::from(s.look[1]);
+        }
+        None
     }
 
     #[test]
@@ -195,8 +295,8 @@ mod tests {
 
     #[test]
     fn look_at_pitch_only_error_is_not_aligned() {
-        // Face the target in yaw (still -Z) but the target is ABOVE -> pitch error only:
-        // exercises the (yaw aligned) && (pitch not) arm.
+        // Face the target in yaw (still -Z) but the target is ABOVE -> a pitch-only
+        // angular error keeps it not-aligned and commands a pitch turn.
         let step = look_at(
             DVec3::ZERO,
             DQuat::IDENTITY,
@@ -205,6 +305,114 @@ mod tests {
         );
         assert!(!step.aligned, "LHS-true RHS-false branch (pitch error)");
         assert!(step.look[1].abs() > 0.0, "a pitch turn is commanded");
+    }
+
+    #[test]
+    fn walk_to_converges_monotonically_even_from_a_wrong_heading() {
+        // CONVERGENCE (not just one tick): a fixed heading that does NOT face the
+        // target must still strafe/back toward it, the distance shrinking every tick
+        // until arrival. A bang-bang oscillation or a stall would fail to arrive.
+        let orient = yawed(0.9, 0.3);
+        let arrived = drive_walk_to(
+            DVec3::new(4.0, -1.0, 2.0),
+            orient,
+            DVec3::new(-2.0, 1.5, -3.0),
+            0.25, // arrive_eps > step_len, so it lands inside the band (no overshoot loop)
+            0.1,
+            1000,
+        );
+        assert!(arrived.is_some(), "walk_to did not converge");
+    }
+
+    #[test]
+    fn walk_to_oscillates_if_arrive_epsilon_is_below_the_step() {
+        // CONTRACT (pinned): walk_to emits fixed unit-magnitude movement and does NOT
+        // know the sim step, so an arrive_epsilon BELOW one step can never settle — the
+        // step overshoots and the dot oscillates around the target forever. Documented
+        // so callers pick a tolerance ≥ one step; a sub-step epsilon never arrives.
+        let step_len = 0.1;
+        let arrive_eps = 0.02; // < step_len
+        let mut pos = DVec3::new(0.0, 0.0, -0.55);
+        let mut min_dist = f64::INFINITY;
+        let mut ever_arrived = false;
+        for _ in 0..200 {
+            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps);
+            ever_arrived |= s.arrived; // accumulate with `|=` (no branch to leave uncovered)
+            min_dist = min_dist.min(pos.length());
+            let axes = kinematics::local_axes_from_movement(s.movement);
+            pos += DQuat::IDENTITY * axes * step_len;
+        }
+        assert!(
+            !ever_arrived,
+            "a sub-step tolerance cannot settle — it oscillates"
+        );
+        assert!(
+            min_dist <= step_len,
+            "it does get within a step of the target, just never inside epsilon"
+        );
+    }
+
+    #[test]
+    fn look_at_converges_monotonically_for_an_off_axis_target() {
+        // Yaw AND pitch error together: the clamped per-tick turn must converge with no
+        // overshoot in the controller's own error space.
+        let arrived = drive_look_at(0.5, -0.2, DVec3::new(3.0, 2.0, -1.0), 0.02, 1000, true);
+        assert!(arrived.is_some(), "off-axis look_at did not converge");
+    }
+
+    #[test]
+    fn look_at_converges_for_a_pure_pitch_target() {
+        // Facing -Z, target above and ahead → pitch-only error; converges monotonically.
+        let arrived = drive_look_at(0.0, 0.0, DVec3::new(0.0, 5.0, -5.0), 0.02, 1000, true);
+        assert!(arrived.is_some(), "pure-pitch look_at did not converge");
+    }
+
+    #[test]
+    fn look_at_at_the_pole_commands_zero_yaw_so_it_cannot_spin() {
+        // PINS the guard directly: target straight up (near-vertical) from a yawed +
+        // pitched facing → the yaw command is EXACTLY zero (yaw held), so it can never
+        // chase the degenerate atan2; pitch still drives toward vertical. Without the
+        // guard, look[0] would be a non-zero (clamped) yaw — this test kills that.
+        let orient = kinematics::orient_from_yaw_pitch(1.2, 0.3);
+        let step = look_at(DVec3::ZERO, orient, DVec3::Y, 0.01);
+        assert_eq!(step.look[0], 0.0, "yaw is held at the pole");
+        assert!(!step.aligned, "not yet aligned — pitch must still drive up");
+        assert!(step.look[1] > 0.0, "pitch drives toward vertical");
+    }
+
+    #[test]
+    fn look_at_converges_at_the_vertical_pole_without_spinning() {
+        // Target straight up: yaw is ill-defined. The pole guard holds yaw and drives
+        // pitch, so it REACHES aligned (and faster than chasing the degenerate yaw).
+        let arrived = drive_look_at(0.7, 0.0, DVec3::Y, 0.02, 1000, false);
+        assert!(
+            arrived.is_some(),
+            "vertical-target look_at did not converge via the pole guard"
+        );
+    }
+
+    #[test]
+    fn the_convergence_budget_is_a_real_bound_not_a_hang() {
+        // A budget too small to reach the (far) target returns None — proving the
+        // controllers don't falsely report arrival/alignment, and exercising the
+        // budget-exhausted path of the drivers.
+        assert_eq!(
+            drive_walk_to(
+                DVec3::ZERO,
+                DQuat::IDENTITY,
+                DVec3::new(0.0, 0.0, -100.0),
+                0.25,
+                0.1,
+                3,
+            ),
+            None,
+            "100 m is unreachable in 3 ticks of 0.1 m"
+        );
+        assert_eq!(
+            drive_look_at(0.0, 0.0, DVec3::new(10.0, 0.0, 0.0), 0.02, 2, true),
+            None,
+            "a 90° turn is unreachable in 2 ticks of 0.2 rad"
+        );
     }
 
     #[test]

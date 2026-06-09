@@ -7,6 +7,18 @@
 //! composited render pass picks ONE authoritative sub per entity and suppresses the
 //! duplicate copies; in P1.5's single-subscription world that is simply the one
 //! sub, but the seam is already correct for P2.
+//!
+//! ## Track eviction is a P2 wire-contract decision (intentionally deferred)
+//! Tracks are NEVER removed here, and that is deliberate at P1.5: snapshots ride
+//! UNRELIABLE datagrams, so an entity merely ABSENT from one datagram is
+//! indistinguishable from packet loss — evicting on absence would delete live entities
+//! whenever a frame dropped. Correct eviction needs an explicit signal the wire does not
+//! carry yet: a per-sub despawn/leave-AoI event (reliable) or full-membership snapshot
+//! semantics. Both arrive with cross-shard overlap + interest management in P2, where
+//! "out of range ⇒ rendered nowhere" and bounded memory become real requirements; until
+//! then the world is a handful of dots through one sub and growth is non-issue. (Raised
+//! by the Slice-0–T3 audit as a latent scale/ghost-render gap; the fix is gated on that
+//! P2 wire decision, not bolted on here as an unsound TTL.)
 
 use std::collections::BTreeMap;
 

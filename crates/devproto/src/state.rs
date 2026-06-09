@@ -45,6 +45,11 @@ pub struct DevState {
     /// The continuous render cursor (universe-tick units); `None` before the first
     /// snapshot. Always finite (the builder sanitizes), so this state JSON-encodes.
     pub render_cursor: Option<f64>,
+    /// The freshest APPLIED universe tick (integer, run-stable + join-independent);
+    /// `None` before the first snapshot. This — NOT the session-relative
+    /// `snapshots_applied` count — is what `screenshot --at-tick` aligns on, so a
+    /// capture lands on the same world state across runs.
+    pub universe_tick: Option<u64>,
     /// The composited render rows — each entity once, exactly what pixels show.
     pub entities: Vec<DevEntityRow>,
     // The honesty counters, classified so an agent reads them right: a nonzero FAULT
@@ -79,6 +84,7 @@ pub(crate) mod tests {
             session: Some("sess-1".to_owned()),
             own_entity: Some("ent-7".to_owned()),
             render_cursor: Some(101.5),
+            universe_tick: Some(101),
             entities: vec![DevEntityRow {
                 entity: "ent-7".to_owned(),
                 pos: [1.0, 2.0, 3.0],

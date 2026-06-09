@@ -9,8 +9,9 @@
 //!   move <fwd> <strafe> <vert> | look <yaw> <pitch> | action <index> <on|off>
 //!   close | reset | state | wait <field> <op> <value> [max_ticks]
 //! where `<index>` is a 0-based action-bit index (converted to a single-bit mask, so
-//!       you can never accidentally press two), field ∈ active|entity_count|
-//!       own_entity_set|snapshots_applied and op ∈ eq|ne|ge|le|gt|lt.
+//!       you can never accidentally press two), and `<field>`/`<op>` are a `WaitField`/
+//!       `WaitOp` — the live lists are shown in the `bad field` / `bad op` errors,
+//!       derived from `WaitField::ALL` / `WaitOp::ALL` so they can never go stale.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -19,10 +20,8 @@ use std::process::ExitCode;
 use vd_bins::loopback;
 use vd_devproto::{DevRequest, DevResponse, WaitField, WaitOp, WaitPredicate};
 
-/// Action bits are a u32 mask, so a 0-based index must be in `0..32`.
-const MAX_ACTION_INDEX: u32 = 31;
-
-/// Default `wait-until` budget when none is given (step-ticks; ~10 s at 20 Hz).
+/// Default `wait-until` budget when none is given, in STEP-TICKS (≈10 s at the default
+/// 20 Hz step cadence; shorter/longer if the client runs a non-default `--step-hz`).
 const DEFAULT_WAIT_TICKS: u64 = 200;
 
 fn main() -> ExitCode {
@@ -45,7 +44,10 @@ fn run() -> Result<ExitCode, String> {
         serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
     );
     Ok(match response {
-        DevResponse::Ack | DevResponse::State { .. } => ExitCode::SUCCESS,
+        DevResponse::Ack
+        | DevResponse::State { .. }
+        | DevResponse::Captured { .. }
+        | DevResponse::Recorded { .. } => ExitCode::SUCCESS,
         DevResponse::Timeout { .. } => ExitCode::from(3),
         DevResponse::Error { .. } => ExitCode::FAILURE,
     })
@@ -87,16 +89,18 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
             let index: u32 = rest[0]
                 .parse()
                 .map_err(|_| "action: <index> must be an integer".to_owned())?;
-            if index > MAX_ACTION_INDEX {
-                return Err(format!("action: <index> must be 0..={MAX_ACTION_INDEX}"));
-            }
+            // The index→single-bit-mask transform and its bound are the SHARED
+            // vd_devproto::action_bit (the same the windowed keymap uses), so an agent
+            // can never set two bits at once and both injection paths reject an
+            // out-of-range index identically — no local `1 << index`.
+            let bit = vd_devproto::action_bit(index).ok_or_else(|| {
+                format!(
+                    "action: <index> must be 0..={}",
+                    vd_devproto::MAX_ACTION_INDEX
+                )
+            })?;
             let pressed = parse_bool(&rest[1])?;
-            // Convert the 0-based index to a single-bit mask so the agent can never
-            // set two action bits at once (the wire field is a u32 bitmask).
-            Ok(DevRequest::Action {
-                bit: 1u32 << index,
-                pressed,
-            })
+            Ok(DevRequest::Action { bit, pressed })
         }
         "close" => no_args(rest, "close").map(|()| DevRequest::Close),
         "reset" => no_args(rest, "reset").map(|()| DevRequest::ResetInput),
@@ -114,12 +118,13 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
                 .parse()
                 .map_err(|_| "wait: <value> must be an integer".to_owned())?;
             let predicate = WaitPredicate { field, op, value };
-            // A 0/1 flag compared so it can NEVER hold (e.g. `eq 2`, `gt 1`, `lt 0`) is a
-            // typo that would silently only ever time out; reject it loudly. The
-            // operator-aware rule lives in vd-devproto so client and vdctl can't drift.
-            if field.is_boolean() && !predicate.is_satisfiable_for_boolean() {
+            // A predicate that can NEVER hold — a 0/1 flag like `active eq 2`/`gt 1`, OR
+            // a count like `universe_tick lt 0` — is a typo that would silently only ever
+            // time out; reject it loudly. The field-class-aware rule lives in vd-devproto
+            // so the client and vdctl can't drift.
+            if !predicate.is_satisfiable(field.is_boolean()) {
                 return Err(format!(
-                    "wait: `{} {} {value}` can never hold for a 0/1 flag",
+                    "wait: `{} {} {value}` can never hold",
                     rest[0], rest[1]
                 ));
             }
@@ -180,13 +185,18 @@ fn parse_bool(raw: &str) -> Result<bool, String> {
 /// snake_case names) — no second mapping to drift.
 fn parse_field(raw: &str) -> Result<WaitField, String> {
     serde_json::from_value(serde_json::Value::String(raw.to_owned())).map_err(|_| {
-        format!("bad field {raw:?} (active|entity_count|own_entity_set|snapshots_applied)")
+        // The valid-field list is derived from WaitField::ALL — it can never go stale.
+        let fields: Vec<&str> = WaitField::ALL.iter().map(|f| f.name()).collect();
+        format!("bad field {raw:?} ({})", fields.join("|"))
     })
 }
 
 fn parse_op(raw: &str) -> Result<WaitOp, String> {
-    serde_json::from_value(serde_json::Value::String(raw.to_owned()))
-        .map_err(|_| format!("bad op {raw:?} (eq|ne|ge|le|gt|lt)"))
+    serde_json::from_value(serde_json::Value::String(raw.to_owned())).map_err(|_| {
+        // The valid-op list is derived from WaitOp::ALL — it can never go stale.
+        let ops: Vec<&str> = WaitOp::ALL.iter().map(|o| o.name()).collect();
+        format!("bad op {raw:?} ({})", ops.join("|"))
+    })
 }
 
 /// Send one request line, read one response line. The client always answers (a
