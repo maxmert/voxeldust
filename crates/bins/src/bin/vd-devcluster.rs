@@ -30,8 +30,9 @@ use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    Cluster, ClusterAddrs, DEV, admin_get_body, common_env, dev_auth_pubkey_hex, gateway_env,
-    loopback, orchestrator_env, sh_quote, shard_env,
+    Cluster, ClusterAddrs, DEV, RUNFILE_NAME, TRUST_DIR_NAME, admin_get_body, common_env,
+    dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env, sh_quote, shard_env,
+    slot_workdir,
 };
 use vd_core::NodeId;
 use vd_devproto::{CLIENT_NODE_BASE, DevPortScheme, SlotPorts};
@@ -128,7 +129,7 @@ fn up_inner(
     runfile: &mut std::fs::File,
 ) -> Result<(), String> {
     // mTLS trust bundle (shared by every node) + the dev auth identity.
-    let trust_dir = work.join("trust");
+    let trust_dir = work.join(TRUST_DIR_NAME);
     let trust = ClusterTrust::generate("vd-devcluster").map_err(|e| format!("trust: {e}"))?;
     trust
         .write_der_dir(&trust_dir)
@@ -449,13 +450,11 @@ fn parse_slot(args: &[String]) -> Result<u16, String> {
 }
 
 fn work_dir(slot: u16) -> PathBuf {
-    std::env::temp_dir()
-        .join("vd-devcluster")
-        .join(format!("slot-{slot}"))
+    slot_workdir(slot) // ONE layout definition (vd_bins), shared with the process tests
 }
 
 fn runfile(work: &Path) -> PathBuf {
-    work.join("cluster.pids")
+    work.join(RUNFILE_NAME)
 }
 
 fn env_file(work: &Path) -> PathBuf {

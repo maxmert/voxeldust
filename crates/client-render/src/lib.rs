@@ -47,6 +47,7 @@ use crossbeam_channel::{Receiver, Sender};
 use vd_client::net::ClientPhase;
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client_harness::camera::FollowCamera;
+use vd_client_harness::capture::capture_rel_path;
 use vd_client_harness::input_map::{MovementKeys, mouse_look};
 use vd_client_harness::manifest::CaptureKind;
 use vd_core::EntityId;
@@ -686,12 +687,15 @@ fn serve_captures(
     // (the manifest stores these run-relative paths). The requester usually supplies the
     // stem (a screenshot label, or `<base>-NNNN` per record frame); the shot counter is the
     // fallback.
-    let (subdir, fallback) = match job.kind {
-        CaptureKind::Screenshot => ("shots", format!("shot-{shot:04}")),
-        CaptureKind::Frame => ("frames", format!("frame-{shot:04}")),
+    let fallback = match job.kind {
+        CaptureKind::Screenshot => format!("shot-{shot:04}"),
+        CaptureKind::Frame => format!("frame-{shot:04}"),
     };
     let stem = job.label.clone().unwrap_or(fallback);
-    let rel = format!("{subdir}/{stem}.png");
+    // The ONE Tier-A derivation of a capture's on-disk identity: kind → shots/|frames/, the
+    // agent-supplied stem SANITIZED (a slashed/`..` label is contained to one component, so
+    // it can never escape the run dir or desync the PNG↔state pairing).
+    let rel = capture_rel_path(job.kind, &stem);
     let path = cfg.runs_dir.join(&rel);
     // Sample the alignment from the render snapshot AT serve time (not a dev-side
     // post-roundtrip poll), so the manifest tick identifies the captured world.

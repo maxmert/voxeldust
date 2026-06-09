@@ -93,6 +93,43 @@ pub fn state_rel_for(rel_path: &str) -> String {
     format!("state/{stem}.json")
 }
 
+/// Sanitize an agent-supplied name into a single SAFE path component: `[A-Za-z0-9_-]`
+/// kept, everything else (slashes, dots, spaces, …) mapped to `_`, and an empty result
+/// becomes `"capture"`. The ONE filename rule for everything an agent names on disk
+/// (capture labels, run names) — so a label like `../../x` can never escape the run dir
+/// or desynchronize the PNG↔state pairing.
+#[must_use]
+pub fn sanitize_stem(raw: &str) -> String {
+    let safe: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "capture".to_owned()
+    } else {
+        safe
+    }
+}
+
+/// The run-relative PNG path for a capture: screenshots under `shots/`, record frames
+/// under `frames/`, the stem sanitized through [`sanitize_stem`]. The ONE derivation of
+/// a capture's on-disk identity (the render thread writes it; the manifest stores it;
+/// [`state_rel_for`] pairs the state dump with it).
+#[must_use]
+pub fn capture_rel_path(kind: CaptureKind, stem: &str) -> String {
+    let subdir = match kind {
+        CaptureKind::Screenshot => "shots",
+        CaptureKind::Frame => "frames",
+    };
+    format!("{subdir}/{}.png", sanitize_stem(stem))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +227,31 @@ mod tests {
         // No directory, and a non-.png path, both handled.
         assert_eq!(state_rel_for("hero.png"), "state/hero.json");
         assert_eq!(state_rel_for("weird"), "state/weird.json");
+    }
+
+    #[test]
+    fn sanitize_stem_contains_traversal_and_never_returns_empty() {
+        assert_eq!(sanitize_stem("hero-Shot_42"), "hero-Shot_42"); // safe chars kept
+        // Slashes + dots become '_' — a traversal attempt is contained to ONE component.
+        assert_eq!(sanitize_stem("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(sanitize_stem("a b.png"), "a_b_png");
+        assert_eq!(sanitize_stem(""), "capture"); // empty → the fallback stem
+        assert_eq!(sanitize_stem("///"), "___"); // non-empty unsafe input keeps its length
+    }
+
+    #[test]
+    fn capture_rel_path_routes_by_kind_and_sanitizes_the_stem() {
+        assert_eq!(
+            capture_rel_path(CaptureKind::Screenshot, "hero"),
+            "shots/hero.png"
+        );
+        assert_eq!(
+            capture_rel_path(CaptureKind::Frame, "fly-0001"),
+            "frames/fly-0001.png"
+        );
+        // A hostile label cannot escape the run dir or desync the state pairing.
+        let rel = capture_rel_path(CaptureKind::Screenshot, "../../x");
+        assert_eq!(rel, "shots/______x.png");
+        assert_eq!(state_rel_for(&rel), "state/______x.json");
     }
 }

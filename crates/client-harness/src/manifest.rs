@@ -4,6 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The manifest's on-disk filename inside a run dir — ONE definition for the writer
+/// (the dev-control listener) and every reader (the G-RENDER-SMOKE gate, agents).
+pub const MANIFEST_FILENAME: &str = "manifest.json";
+
 /// What a capture is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -1,10 +1,13 @@
 //! G-RENDER-SMOKE — the permanent HR6 visual-regression gate. Brings the local-process
 //! QUIC cluster up, launches a HEADLESS `client --capture`, drives it over dev-control to a
 //! real wgpu-readback screenshot, decodes the captured PNG, and asserts the Tier-A
-//! [`render_smoke`] verdict (no-magenta + content-present) over it — turning the agent's
-//! eyeball check into an automated gate. Tears everything down leak-free (the
-//! `dev_cluster_smoke` `DownGuard` precedent + a kill-on-drop guard for the 4th process,
-//! the capture client, which the cluster's PID reaper does not own).
+//! [`render_smoke`] verdict (no-magenta + content-present) PLUS gate-level SCENE checks
+//! (a content floor far above what the HUD alone can satisfy + a non-empty scene region)
+//! over it — turning the agent's eyeball check into an automated gate. Tears everything
+//! down leak-free: the shared `DevClusterDown` guard + a kill-on-drop guard for the 4th
+//! process (the capture client) + the client's PID recorded into the slot RUNFILE, so even
+//! a SIGKILL of the test runner leaves an orphan the next pre-clean `down` reaps (it can
+//! never poison the slot's ports).
 //!
 //! GPU PRECONDITION (cloud-1): this renders through wgpu and REQUIRES a working GPU adapter
 //! (the dev Apple-Silicon Metal GPU today). It is a LOCAL gate — no CI yet, and no
@@ -17,53 +20,37 @@
 //! the whole module is gated on the features the capture client needs.
 #![cfg(all(feature = "dev-control", feature = "render"))]
 
-use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use vd_bins::{dev_auth_signing_key_hex, loopback};
-use vd_client_harness::assert::{MIN_CONTENT_FRACTION, render_smoke};
-use vd_client_harness::manifest::{CaptureKind, RunManifest};
-use vd_devproto::{
-    DevPortScheme, DevRequest, DevResponse, WORKTREE_SLOT_CEILING, WaitField, WaitOp, WaitPredicate,
+use vd_bins::{
+    DevClusterDown, RENDER_SMOKE_SLOT, dev_auth_signing_key_hex, dev_roundtrip, devcluster,
+    loopback, record_extra_pid, slot_trust_dir, slot_workdir,
 };
+use vd_client_harness::assert::{MIN_CONTENT_FRACTION, Rect, region_nonempty, render_smoke};
+use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
+use vd_devproto::{DevPortScheme, DevRequest, DevResponse, WaitField, WaitOp, WaitPredicate};
 
-/// Test-reserved slot ABOVE the worktree auto-derivation ceiling (so it can never coincide
-/// with a developer's running `dev-cluster.sh up`), DISTINCT from `dev_cluster_smoke`'s
-/// 80/81 so a parallel run never collides.
-const RENDER_SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 18; // 82
 const CLIENT_NAME: &str = "g-render-smoke";
 /// How long to wait for the capture client's dev-control listener to come up (it binds
 /// before the GPU/render init, so this is generous headroom, not a tight bound).
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
+/// The listener poll interval while waiting for the client to boot.
+const READY_POLL: Duration = Duration::from_millis(200);
 /// Step-tick budget for the "delivered frame arrived" wait (≈30 s at the 20 Hz client step).
 const CAPTURE_WAIT_TICKS: u64 = 600;
+/// GATE-level scene floor, far stricter than the Tier-A [`MIN_CONTENT_FRACTION`] contract:
+/// the egui HUD alone (a few text lines) is well under 1% of the frame, while the reference
+/// SCENE (the ground plate fills roughly the lower half) measures ~50% live — so a 5% floor
+/// cleanly separates "the 3D scene drew" from "only the HUD drew" with ~10x margin BOTH
+/// ways. A regression that loses the whole scene but keeps egui can NOT pass this gate.
+const MIN_SCENE_FRACTION: f64 = 0.05;
 
-fn workdir(slot: u16) -> PathBuf {
-    std::env::temp_dir()
-        .join("vd-devcluster")
-        .join(format!("slot-{slot}"))
-}
-
-fn devcluster(sub: &str, slot: u16) -> std::process::ExitStatus {
-    Command::new(env!("CARGO_BIN_EXE_vd-devcluster"))
-        .args([sub, "--slot", &slot.to_string()])
-        .status()
-        .unwrap_or_else(|e| panic!("vd-devcluster {sub}: {e}"))
-}
-
-/// Tear the cluster down on drop (even on panic) — the `dev_cluster_smoke` precedent.
-struct DownGuard(u16);
-impl Drop for DownGuard {
-    fn drop(&mut self) {
-        let _ = devcluster("down", self.0);
-    }
-}
-
-/// Kill the capture client on drop — the 4th process beyond the cluster's 3 nodes (the
-/// `down` PID reaper only owns the recorded node PIDs, not this child).
+/// Kill the capture client on drop — the 4th process beyond the cluster's 3 nodes. Covers
+/// every in-process exit (assertion panic included); the runfile record (below) covers a
+/// SIGKILL of the test runner itself.
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -72,21 +59,13 @@ impl Drop for ChildGuard {
     }
 }
 
-/// One dev-control request → response (a fresh connection per request, like `vdctl`).
+/// One dev-control request → response over the SHARED `vd_bins::dev_roundtrip` framing
+/// (the same wire path `vdctl` uses — by construction, not by-eye), failing with a
+/// GPU-precondition-pointing message instead of a raw error.
 fn round_trip(port: u16, req: &DevRequest) -> DevResponse {
-    let stream = TcpStream::connect(loopback(port)).unwrap_or_else(|e| {
-        panic!("dev-control connect {port}: {e} — capture client gone? (GPU precondition?)")
-    });
-    let mut writer = stream.try_clone().expect("clone stream");
-    let mut line = serde_json::to_string(req).expect("encode request");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write request");
-    writer.flush().ok();
-    let mut reply = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply)
-        .expect("read response");
-    serde_json::from_str(reply.trim()).expect("decode response")
+    dev_roundtrip(port, req).unwrap_or_else(|e| {
+        panic!("dev-control round-trip on {port} failed: {e} — capture client gone? (GPU precondition?)")
+    })
 }
 
 /// Block until the dev-control listener accepts (the capture client booted + bound), or
@@ -109,16 +88,19 @@ fn await_listener(port: u16, child: &mut Child) {
             "dev-control listener on {port} never came up within {READY_TIMEOUT:?} \
              (capture client stuck; GPU precondition?)"
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(READY_POLL);
     }
 }
 
 #[test]
 fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
-    let _ = devcluster("down", RENDER_SMOKE_SLOT); // clean slate (idempotent)
-    let _down = DownGuard(RENDER_SMOKE_SLOT);
+    let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
+    // Clean slate (idempotent) — and the SIGKILL-orphan reaper: if a previous run was
+    // SIGKILLed, its capture client's PID is in this slot's runfile and dies here.
+    let _ = devcluster(launcher, "down", RENDER_SMOKE_SLOT);
+    let _down = DevClusterDown::new(launcher, RENDER_SMOKE_SLOT);
     assert!(
-        devcluster("up", RENDER_SMOKE_SLOT).success(),
+        devcluster(launcher, "up", RENDER_SMOKE_SLOT).success(),
         "dev-cluster up should reach ready and exit 0"
     );
 
@@ -130,35 +112,42 @@ fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
     let gateway = loopback(ports.gateway);
     let devctl = ports.dev_control(0).expect("dev-control port");
     let client_quic = ports.client_quic(0).expect("client-quic port");
-    let trust_dir = workdir(RENDER_SMOKE_SLOT).join("trust");
+    let trust_dir = slot_trust_dir(RENDER_SMOKE_SLOT);
     let signing_key = dev_auth_signing_key_hex();
     // A contained cwd so the client's `runs/` lands here (reaped with the workdir on `down`).
-    let cwd = workdir(RENDER_SMOKE_SLOT).join("capture-cwd");
+    let cwd = slot_workdir(RENDER_SMOKE_SLOT).join("capture-cwd");
     std::fs::create_dir_all(&cwd).expect("make client cwd");
 
-    let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_client"))
-            .current_dir(&cwd)
-            .env("VD_AUTH_SIGNING_KEY", &signing_key)
-            .args([
-                "--name",
-                CLIENT_NAME,
-                "--agent-index",
-                "0",
-                "--gateway",
-                &gateway.to_string(),
-                "--client-quic",
-                &client_quic.to_string(),
-                "--trust-dir",
-                trust_dir.to_str().expect("utf8 trust dir"),
-                "--dev-control",
-                &devctl.to_string(),
-                "--allow-dev-control",
-                "--capture",
-            ])
-            .spawn()
-            .expect("spawn capture client"),
-    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_client"));
+    cmd.current_dir(&cwd)
+        .env("VD_AUTH_SIGNING_KEY", &signing_key)
+        .args([
+            "--name",
+            CLIENT_NAME,
+            "--agent-index",
+            "0",
+            "--gateway",
+            &gateway.to_string(),
+            "--client-quic",
+            &client_quic.to_string(),
+            "--trust-dir",
+            trust_dir.to_str().expect("utf8 trust dir"),
+            "--dev-control",
+            &devctl.to_string(),
+            "--allow-dev-control",
+            "--capture",
+        ]);
+    // Own process group, matching the launcher's nodes — `down` reaps by group id.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = ChildGuard(cmd.spawn().expect("spawn capture client"));
+    // Record the client into the slot's durable kill record: ChildGuard covers in-process
+    // exits/panics, but a SIGKILL of the test runner skips Drop — the runfile entry makes
+    // the next pre-clean `down` reap the orphan instead of leaving it to poison slot 82.
+    record_extra_pid(RENDER_SMOKE_SLOT, child.0.id()).expect("record capture-client pid");
 
     await_listener(devctl, &mut child.0);
 
@@ -200,9 +189,12 @@ fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
     let (w, h) = img.dimensions();
     let buf = img.into_raw();
 
-    // Self-calibrate the clear color from the top-right corner (reference-scene sky), so the
-    // gate is immune to the platform/pipeline sRGB encoding of the cleared target. A blank or
-    // uniform-garbage frame still FAILS: every pixel equals the corner → content fraction 0.
+    // Self-calibrate the clear color from the top-right corner — guaranteed sky in the
+    // reference scene (the camera at eye height looks at the horizon; the scene's tallest
+    // content subtends ~10° of elevation vs the ≥22.5° corner ray at the 45° vFOV, and the
+    // HUD anchors LEFT_TOP) — so the gate is immune to the platform/pipeline sRGB encoding
+    // of the cleared target. A blank or uniform-garbage frame still FAILS: every pixel
+    // equals the corner → content fraction 0.
     let corner = (w as usize - 1) * 4;
     let clear = [
         buf[corner],
@@ -211,6 +203,7 @@ fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
         buf[corner + 3],
     ];
 
+    // The Tier-A permanent contract: zero magenta + the baseline content floor.
     let verdict = render_smoke(&buf, clear);
     println!(
         "G-RENDER-SMOKE: {w}x{h} frame at tick {tick:?}, clear {clear:?} \
@@ -223,12 +216,32 @@ fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
          content_fraction={:.4} (need 0 magenta and >= {MIN_CONTENT_FRACTION} content)",
         verdict.magenta, verdict.content_fraction,
     );
+    // GATE-level scene checks, stricter than the Tier-A floor: the HUD alone (<1% of the
+    // frame) can NOT satisfy these — a regression that loses the entire 3D scene fails.
+    assert!(
+        verdict.content_fraction >= MIN_SCENE_FRACTION,
+        "the 3D SCENE did not draw: content_fraction {:.4} < {MIN_SCENE_FRACTION} \
+         (the egui HUD alone is under 1% — this floor proves the ground plate rendered)",
+        verdict.content_fraction,
+    );
+    // The center of the frame (away from the LEFT_TOP HUD anchor) must hold content — the
+    // ground plate spans the lower half and the landmark pillar sits center-screen.
+    let center = Rect {
+        x: w as usize / 3,
+        y: h as usize / 3,
+        w: w as usize / 3,
+        h: h as usize / 3,
+    };
+    assert!(
+        region_nonempty(&buf, w as usize, center, clear),
+        "the center scene region is empty — only HUD/clear pixels in the middle third",
+    );
 
     // The HR6 manifest aligns the capture to its tick + state — confirm it was written and
     // records this screenshot (proves the full runs/ artifact pipeline ran, not just the PNG).
     let run_dir = png.parent().and_then(Path::parent).expect("run dir");
     let manifest_json =
-        std::fs::read_to_string(run_dir.join("manifest.json")).expect("read manifest.json");
+        std::fs::read_to_string(run_dir.join(MANIFEST_FILENAME)).expect("read manifest.json");
     let manifest = RunManifest::from_json(&manifest_json).expect("parse manifest");
     assert!(
         manifest

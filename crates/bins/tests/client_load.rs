@@ -10,15 +10,14 @@
 //! `cargo test -p vd-bins --features dev-control`.
 #![cfg(feature = "dev-control")]
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use vd_bins::{
     Cluster, ClusterAddrs, DEV, admin_get_body, common_env, dev_auth_pubkey_hex,
-    dev_auth_signing_key_hex, gateway_env, orchestrator_env, reserve_tcp_addr, reserve_udp_addr,
-    shard_env,
+    dev_auth_signing_key_hex, dev_roundtrip, gateway_env, orchestrator_env, reserve_tcp_addr,
+    reserve_udp_addr, shard_env,
 };
 use vd_core::NodeId;
 use vd_devproto::{
@@ -32,17 +31,11 @@ const DEADLINE: Duration = Duration::from_secs(40);
 const SNAPSHOT_FLOOR: u64 = 5;
 const INPUT_FLOOR: u64 = 5;
 
-/// One dev-control round-trip. `None` if the client is not yet accepting (booting).
+/// One dev-control round-trip — the SHARED `vd_bins::dev_roundtrip` framing (one wire
+/// definition for vdctl, this load test, and the render-smoke gate). `None` if the client
+/// is not yet accepting (booting) — this test's poll loops tolerate that.
 fn devctl(port: u16, request: &DevRequest) -> Option<DevResponse> {
-    let stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
-    let mut writer = stream.try_clone().ok()?;
-    let mut line = serde_json::to_string(request).ok()?;
-    line.push('\n');
-    writer.write_all(line.as_bytes()).ok()?;
-    writer.flush().ok();
-    let mut reply = String::new();
-    BufReader::new(stream).read_line(&mut reply).ok()?;
-    serde_json::from_str(reply.trim()).ok()
+    dev_roundtrip(port, request).ok()
 }
 
 fn poll_state(port: u16) -> Option<DevState> {

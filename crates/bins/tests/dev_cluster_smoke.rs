@@ -7,28 +7,17 @@
 //! (`dev-cluster.sh` + `vdctl`) and the G-RENDER-SMOKE gate stand on.
 
 use std::net::UdpSocket;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use vd_devproto::{DevPortScheme, WORKTREE_SLOT_CEILING};
-
-/// Test-reserved slots ABOVE the worktree auto-derivation ceiling (so they can
-/// never coincide with a developer's running `dev-cluster.sh up` for some
-/// worktree — whose slot is always `< WORKTREE_SLOT_CEILING` — and the test's
-/// pre-clean `down` can't clobber it), yet still below the high range Docker grabs
-/// on macOS (10000+; these slots map to ports 9560-9623).
-const SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 16; // 80
-const RECOVERY_SLOT: u16 = WORKTREE_SLOT_CEILING + 17; // 81
-
-fn workdir(slot: u16) -> PathBuf {
-    std::env::temp_dir()
-        .join("vd-devcluster")
-        .join(format!("slot-{slot}"))
-}
+// The slot constants, the on-disk layout, the launcher runner, and the down-on-drop guard
+// are the SHARED vd_bins definitions (one registry/layout for every process-tier test —
+// they can never drift from the launcher or collide with each other).
+use vd_bins::{DevClusterDown, RECOVERY_SLOT, SMOKE_SLOT, devcluster, slot_runfile, slot_workdir};
+use vd_devproto::DevPortScheme;
 
 /// The node PIDs recorded in the runfile (empty if not up).
 fn recorded_pids(slot: u16) -> Vec<u32> {
-    std::fs::read_to_string(workdir(slot).join("cluster.pids"))
+    std::fs::read_to_string(slot_runfile(slot))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| l.trim().parse::<u32>().ok())
@@ -47,25 +36,14 @@ fn alive(pid: u32) -> bool {
 }
 
 fn run(launcher: &str, sub: &str, slot: u16) -> std::process::ExitStatus {
-    Command::new(launcher)
-        .args([sub, "--slot", &slot.to_string()])
-        .status()
-        .unwrap_or_else(|e| panic!("run {sub}: {e}"))
-}
-
-/// Tear the cluster down even if an assertion panics — never leak child processes.
-struct DownGuard(u16);
-impl Drop for DownGuard {
-    fn drop(&mut self) {
-        let _ = run(env!("CARGO_BIN_EXE_vd-devcluster"), "down", self.0);
-    }
+    devcluster(launcher, sub, slot)
 }
 
 #[test]
 fn dev_cluster_comes_up_over_quic_and_tears_down_without_leaking() {
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let _ = run(launcher, "down", SMOKE_SLOT); // clean slate (idempotent)
-    let _guard = DownGuard(SMOKE_SLOT);
+    let _guard = DevClusterDown::new(launcher, SMOKE_SLOT);
 
     // `up` exits 0 ONLY after the shard granted its realm (the QUIC mesh works).
     assert!(
@@ -103,7 +81,7 @@ fn dev_cluster_comes_up_over_quic_and_tears_down_without_leaking() {
         "every node process must be dead after down: {pids:?}"
     );
     assert!(
-        !workdir(SMOKE_SLOT).exists(),
+        !slot_workdir(SMOKE_SLOT).exists(),
         "the workdir must be removed after down"
     );
     let ports = DevPortScheme::DEFAULT
@@ -126,12 +104,12 @@ fn a_sigkill_mid_claim_crash_state_is_always_recoverable() {
     // lock-before-runfile wedge.
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let _ = run(launcher, "down", RECOVERY_SLOT); // clean slate
-    let _guard = DownGuard(RECOVERY_SLOT);
+    let _guard = DevClusterDown::new(launcher, RECOVERY_SLOT);
 
     // Forge the crash state: workdir + empty runfile, no pids.
-    let wd = workdir(RECOVERY_SLOT);
+    let wd = slot_workdir(RECOVERY_SLOT);
     std::fs::create_dir_all(&wd).expect("mk workdir");
-    std::fs::write(wd.join("cluster.pids"), "").expect("empty runfile");
+    std::fs::write(slot_runfile(RECOVERY_SLOT), "").expect("empty runfile");
 
     // `down` must recover it (not print "already down" while leaving it wedged).
     assert!(

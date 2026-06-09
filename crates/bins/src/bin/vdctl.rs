@@ -15,11 +15,9 @@
 //!       `WaitOp` — the live lists are shown in the `bad field` / `bad op` errors,
 //!       derived from `WaitField::ALL` / `WaitOp::ALL` so they can never go stale.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
 use std::process::ExitCode;
 
-use vd_bins::loopback;
+use vd_bins::dev_roundtrip;
 use vd_devproto::{DevRequest, DevResponse, WaitField, WaitOp, WaitPredicate};
 
 /// Default `wait-until` budget when none is given, in STEP-TICKS (≈10 s at the default
@@ -262,27 +260,10 @@ fn parse_op(raw: &str) -> Result<WaitOp, String> {
     })
 }
 
-/// Send one request line, read one response line. The client always answers (a
-/// `wait` terminates by `max_ticks`), so a closed/empty read means the client died.
+/// Send one request line, read one response line — the SHARED `vd_bins::dev_roundtrip`
+/// (one wire framing for vdctl, the load test, and the render-smoke gate; read bounded by
+/// `DEVCTL_READ_TIMEOUT`). The client always answers (a `wait` terminates by `max_ticks`),
+/// so a closed/empty read means the client died.
 fn round_trip(port: u16, request: &DevRequest) -> Result<DevResponse, String> {
-    let addr = loopback(port);
-    let stream = TcpStream::connect(addr).map_err(|e| format!("connect {addr}: {e}"))?;
-    let mut writer = stream
-        .try_clone()
-        .map_err(|e| format!("clone stream: {e}"))?;
-    let mut line = serde_json::to_string(request).map_err(|e| e.to_string())?;
-    line.push('\n');
-    writer
-        .write_all(line.as_bytes())
-        .map_err(|e| format!("write: {e}"))?;
-    writer.flush().ok();
-
-    let mut reply = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply)
-        .map_err(|e| format!("read: {e}"))?;
-    if reply.trim().is_empty() {
-        return Err("no response (client closed the connection)".to_owned());
-    }
-    serde_json::from_str(reply.trim()).map_err(|e| format!("decode response: {e}"))
+    dev_roundtrip(port, request)
 }

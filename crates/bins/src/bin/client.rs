@@ -119,7 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manifest = std::sync::Arc::new(std::sync::Mutex::new(
                 vd_client_harness::manifest::RunManifest::new(args.name.clone(), iso_utc(secs)),
             ));
-            (capture_run_dir(secs, &args.name), manifest)
+            (
+                capture_run_dir(secs, &args.name, args.agent_index),
+                manifest,
+            )
         });
 
     #[cfg(feature = "dev-control")]
@@ -350,21 +353,16 @@ fn iso_utc(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
-/// The output dir for a capture run: `runs/<unix_secs>__<name>/` (created here); the
-/// manifest + PNGs land inside. The timestamp keeps successive runs distinct.
+/// The output dir for a capture run: `runs/<unix_secs>__<name>__a<agent>/` (created here);
+/// the manifest + PNGs land inside. The timestamp keeps successive runs distinct, and the
+/// AGENT INDEX keeps concurrent same-named clients distinct — the P2 paired visual scenario
+/// launches K clients in the same second with the same default name, and each must own its
+/// run dir (a shared dir would silently interleave two manifests). The name is sanitized by
+/// the SAME Tier-A rule capture labels use (one filename discipline).
 #[cfg(all(feature = "dev-control", feature = "render"))]
-fn capture_run_dir(secs: u64, name: &str) -> std::path::PathBuf {
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let dir = std::path::PathBuf::from("runs").join(format!("{secs}__{safe}"));
+fn capture_run_dir(secs: u64, name: &str, agent_index: u64) -> std::path::PathBuf {
+    let safe = vd_client_harness::capture::sanitize_stem(name);
+    let dir = std::path::PathBuf::from("runs").join(format!("{secs}__{safe}__a{agent_index}"));
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -532,7 +530,7 @@ mod dev_control {
         at_tick_predicate, capture_entry, plan_record, state_rel_for,
     };
     #[cfg(feature = "render")]
-    use vd_client_harness::manifest::{CaptureKind, RunManifest};
+    use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
     use vd_devproto::{
         DevError, DevPhase, DevRequest, DevResponse, DevState, InputAction, WaitPredicate,
         decode_request, encode_response,
@@ -881,12 +879,9 @@ mod dev_control {
             Some(Ok(result)) => {
                 // The render-sampled tick (the captured frame's), not a post-roundtrip poll.
                 let tick = result.freshest_tick;
-                record_capture(handles, CaptureKind::Screenshot, &result, at_tick);
-                flush_manifest(handles);
-                Some(DevResponse::Captured {
-                    path: result.path,
-                    tick,
-                })
+                let path = result.path.clone();
+                persist_capture(handles, CaptureKind::Screenshot, result, at_tick, true).await;
+                Some(DevResponse::Captured { path, tick })
             }
             // Render thread gone / timed out: shed honestly (it logs the real cause); retry.
             _ => Some(DevResponse::Error {
@@ -927,7 +922,7 @@ mod dev_control {
         for i in 0..plan.frames {
             match capture_one(handles, CaptureKind::Frame, Some(format!("{base}-{i:04}"))).await {
                 Some(Ok(result)) => {
-                    record_capture(handles, CaptureKind::Frame, &result, None);
+                    persist_capture(handles, CaptureKind::Frame, result, None, false).await;
                     written += 1;
                 }
                 // Render thread gone / timed out: stop, return what we captured so far.
@@ -940,13 +935,18 @@ mod dev_control {
                     _ = tokio::time::sleep(interval) => {}
                     read = framer.fill() => {
                         if matches!(read, Ok(true) | Err(_)) {
+                            // The driver vanished mid-record (a killed vdctl — routine in
+                            // agent loops). The frames captured SO FAR are on disk and in
+                            // the in-memory manifest: flush it so manifest.json reflects
+                            // every artifact that exists (never under-reports a run).
+                            flush_manifest_blocking(handles).await;
                             return None;
                         }
                     }
                 }
             }
         }
-        flush_manifest(handles);
+        flush_manifest_blocking(handles).await;
         let path = handles
             .runs_dir
             .as_ref()
@@ -989,11 +989,42 @@ mod dev_control {
         }
     }
 
+    /// Persist one served capture OFF the reactor (these are filesystem writes — the same
+    /// never-block-the-listener discipline as the blocking capture reply): the state dump +
+    /// the manifest entry, plus the `manifest.json` flush when `flush` (a screenshot flushes
+    /// per capture; a record sequence flushes once at the end + on cancel).
+    #[cfg(feature = "render")]
+    async fn persist_capture(
+        handles: &Handles,
+        kind: CaptureKind,
+        result: vd_client_render::CaptureResult,
+        at_tick: Option<u64>,
+        flush: bool,
+    ) {
+        let handles = handles.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            record_capture(&handles, kind, &result, at_tick);
+            if flush {
+                flush_manifest(&handles);
+            }
+        })
+        .await;
+    }
+
+    /// Flush the manifest OFF the reactor (a filesystem write).
+    #[cfg(feature = "render")]
+    async fn flush_manifest_blocking(handles: &Handles) {
+        let handles = handles.clone();
+        let _ = tokio::task::spawn_blocking(move || flush_manifest(&handles)).await;
+    }
+
     /// Record one served capture into the run: write its aligned `state/<stem>.json` dump
     /// (the decoded delivered DevState — wire truth at capture time) and append a
     /// `CaptureEntry` to the in-memory manifest via the Tier-A `capture_entry` alignment.
     /// Best-effort — a write failure is logged, never fatal (the PNG already exists). The
     /// `manifest.json` file is flushed separately so a record sequence rewrites it ONCE.
+    /// Synchronous fs I/O — call via [`persist_capture`] (spawn_blocking), never directly
+    /// on the reactor.
     #[cfg(feature = "render")]
     fn record_capture(
         handles: &Handles,
@@ -1031,13 +1062,14 @@ mod dev_control {
     }
 
     /// Serialize the in-memory manifest to `runs_dir/manifest.json` (best-effort).
+    /// Synchronous fs I/O — call via [`flush_manifest_blocking`]/[`persist_capture`].
     #[cfg(feature = "render")]
     fn flush_manifest(handles: &Handles) {
         let (Some(runs_dir), Some(manifest)) = (&handles.runs_dir, &handles.manifest) else {
             return;
         };
         if let Ok(m) = manifest.lock()
-            && let Err(e) = std::fs::write(runs_dir.join("manifest.json"), m.to_json())
+            && let Err(e) = std::fs::write(runs_dir.join(MANIFEST_FILENAME), m.to_json())
         {
             tracing::warn!(error = %e, "manifest write failed");
         }

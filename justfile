@@ -44,6 +44,20 @@ coverage-html:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Lint the OTHER supported vd-bins feature combos (the workspace lint covers only the
+# default set): `dev-control` alone is the DAILY agent-loop build (client.sh headless) and
+# `render` alone exercises the requires-dev-control rejection arms — combo rot in either
+# would otherwise surface only when a human next runs client.sh. The full
+# `dev-control,render` combo is compiled by `render-smoke`.
+lint-combos:
+    cargo clippy -p vd-bins --features dev-control --all-targets -- -D warnings
+    cargo clippy -p vd-bins --features render --all-targets -- -D warnings
+
+# SCALE-1 (the K-client load/collapse gate): K real dev-control clients log into one
+# cluster concurrently — fan-out + per-client routing proven at the per-slot client cap.
+client-load:
+    cargo test -p vd-bins --features dev-control --test client_load
+
 fmt:
     cargo fmt --all
 
@@ -56,7 +70,7 @@ render-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
 
 # Everything a merge requires (render-smoke is GPU-required + local; see its recipe).
-gate: fmt lint test render-smoke coverage
+gate: fmt lint lint-combos test client-load render-smoke coverage
 
 # One-time setup helper.
 coverage-setup:
