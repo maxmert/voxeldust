@@ -12,6 +12,7 @@
 //! [`RenderClock`] the headless [`DevState`](vd_devproto::DevState) path already uses, so
 //! the window and `vdctl state` can never disagree about what was delivered.
 
+use glam::DVec3;
 use vd_core::EntityId;
 use vd_core::pose::FrameRef;
 use vd_wire::channels::SubId;
@@ -59,6 +60,24 @@ impl RenderSnapshot {
             Some(cursor) => self.view.rendered(cursor),
             None => Vec::new(),
         }
+    }
+
+    /// Map a rendered pose into WORLD space through the frame-eval seam
+    /// ([`DeliveredView::world_pos`]) — identity for world-origin frames, composing a
+    /// `ShipLocal` interior through its hull at the SAME display cursor `now_s` resolves to
+    /// (so interior + hull agree in time). Before the clock anchors there is nothing to
+    /// render; the seam falls back to the frame-local pos.
+    #[must_use]
+    pub fn world_pos(&self, pose: &RenderPose, now_s: f64) -> DVec3 {
+        let cursor = self.clock.cursor(now_s).unwrap_or(0.0);
+        self.view.world_pos(pose, cursor)
+    }
+
+    /// The freshest delivered universe tick (the run-stable capture-alignment quantity);
+    /// `None` until the first snapshot anchored the clock.
+    #[must_use]
+    pub fn freshest_tick(&self) -> Option<u64> {
+        self.clock.freshest_tick()
     }
 
     /// This client's own entity (so the renderer can highlight its dot), if known.
@@ -145,6 +164,40 @@ mod tests {
         );
         assert_eq!(snap.own_entity(), Some(ent(1)), "own is cursor-independent");
         assert_eq!(snap.location(), Some("System 1".to_owned()));
+    }
+
+    #[test]
+    fn exposes_freshest_tick_and_world_pos_when_anchored() {
+        let mut view = DeliveredView::default();
+        view.on_snapshot(Some(SubId(0)), snap(1, 10, vec![(ent(1), 4.0)]));
+        view.set_authority(ent(1), SubId(0));
+        let mut clock = RenderClock::new(ClientInterpTuning::DEFAULT);
+        clock.observe(UniverseTick(10), 100.0);
+        let s = RenderSnapshot::new(view, clock, ClientPhase::Active);
+        assert_eq!(s.freshest_tick(), Some(10), "the anchored tick");
+        let rendered = s.rendered(100.0);
+        assert_eq!(rendered.len(), 1);
+        // A system-frame pose → world_pos is the identity (the sampled pos).
+        let pose = rendered[0].2;
+        assert_eq!(s.world_pos(&pose, 100.0), pose.pos);
+    }
+
+    #[test]
+    fn freshest_tick_is_none_and_world_pos_falls_back_before_anchor() {
+        let s = RenderSnapshot::new(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT), // unanchored
+            ClientPhase::Connecting,
+        );
+        assert_eq!(s.freshest_tick(), None);
+        // Unanchored clock → cursor is None → world_pos uses the 0.0 fallback; a world-frame
+        // pose is still the identity, so it is finite and correct.
+        let pose = RenderPose {
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            pos: DVec3::new(1.0, 2.0, 3.0),
+            orient: glam::DQuat::IDENTITY,
+        };
+        assert_eq!(s.world_pos(&pose, 5.0), DVec3::new(1.0, 2.0, 3.0));
     }
 
     #[test]

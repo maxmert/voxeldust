@@ -37,7 +37,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
-use bevy::window::ExitCondition;
+use bevy::window::{CursorGrabMode, CursorOptions, ExitCondition, PrimaryWindow};
 use bevy::winit::WinitPlugin;
 use bevy_egui::{
     EguiContext, EguiContexts, EguiGlobalSettings, EguiMultipassSchedule, EguiPlugin,
@@ -46,7 +46,6 @@ use bevy_egui::{
 use crossbeam_channel::{Receiver, Sender};
 use vd_client::net::ClientPhase;
 use vd_client::render_snapshot::RenderSnapshot;
-use vd_client::view::world_pos;
 use vd_client_harness::camera::FollowCamera;
 use vd_client_harness::input_map::{MovementKeys, mouse_look};
 use vd_client_harness::manifest::CaptureKind;
@@ -112,6 +111,14 @@ pub struct CaptureResult {
     pub path: String,
     /// The SAME path relative to the run dir (`shots/foo.png`) — what the manifest stores.
     pub rel_path: String,
+    /// The freshest delivered universe tick sampled from the render snapshot AT capture time
+    /// (NOT a post-roundtrip poll on the dev-control side, which drifts forward by the whole
+    /// render round-trip) — so the manifest tick identifies the captured world. Residual: the
+    /// served readback is up to `CAPTURE_PRE_ROLL` frames old, so this can lead the pixels by
+    /// that bounded margin; far tighter than the unbounded post-roundtrip skew it replaces.
+    pub freshest_tick: Option<u64>,
+    /// The render cursor at capture time (the same snapshot), for the manifest.
+    pub cursor: Option<f64>,
 }
 
 /// The handles the bin wires into the window (constructed on the main thread before
@@ -212,13 +219,24 @@ fn run_windowed(handles: RenderHandles) {
                 resolution: (WINDOW_W, WINDOW_H).into(),
                 ..default()
             }),
+            // First-person: start the pointer LOCKED + hidden so mouse-look gets unbounded
+            // delta and never sticks at the window edge (the AAA FPS baseline). Esc releases
+            // it (click away / close); a click re-grabs — see `cursor_grab`.
+            primary_cursor_options: Some(CursorOptions {
+                grab_mode: CursorGrabMode::Locked,
+                visible: false,
+                ..default()
+            }),
             ..default()
         }))
         // egui (multipass primary context — the default; auto-creates the window's
         // PrimaryEguiContext + its EguiPrimaryContextPass schedule).
         .add_plugins(EguiPlugin::default())
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (input_system, sync_world, exit_when_core_stops))
+        .add_systems(
+            Update,
+            (input_system, sync_world, cursor_grab, exit_when_core_stops),
+        )
         // The HUD draws in the egui pass (NOT Update — the 0.39 multipass idiom).
         .add_systems(EguiPrimaryContextPass, hud_primary)
         .run();
@@ -342,6 +360,26 @@ fn input_system(
     }
 }
 
+/// First-person pointer discipline (windowed only): Esc RELEASES the cursor (so the human
+/// can click away or close the window) and a left-click RE-GRABS it (locked + hidden). The
+/// window starts locked (set in `WindowPlugin`), so mouse-look has unbounded delta from the
+/// first frame and never sticks at the window edge. `Single` silently skips the system if the
+/// window is gone (shutdown) — no panic.
+fn cursor_grab(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    let mut cursor = cursor.into_inner();
+    if keys.just_pressed(KeyCode::Escape) {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
+    } else if buttons.just_pressed(MouseButton::Left) {
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
+    }
+}
+
 /// Sync the dot entities to the delivered+interpolated snapshot (spawn/move/despawn) and
 /// place the first-person camera at the own entity's eye.
 #[allow(clippy::too_many_arguments)]
@@ -363,7 +401,7 @@ fn sync_world(
     let mut own_world: Option<DVec3> = None;
     for (id, _sub, pose) in &rendered {
         seen.insert(*id);
-        let world = world_pos(pose); // the frame-eval seam (identity in P1.5)
+        let world = snap.world_pos(pose, now_s); // the frame-eval seam (composes via the view)
         if Some(*id) == own {
             own_world = Some(world);
         }
@@ -602,12 +640,14 @@ fn hud_offscreen(mut ctx: Single<&mut EguiContext, Without<PrimaryEguiContext>>,
 
 /// Serve at most one capture per frame: keep the freshest readback, and once a job is
 /// pending AND a warm frame exists, strip the row-padding, write the PNG, reply.
+#[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources
 fn serve_captures(
     mut cfg: ResMut<CaptureCfg>,
     chan: Res<CaptureChannel>,
     receiver: Res<MainWorldReceiver>,
     target: Res<RenderTargetImage>,
     images: Res<Assets<Image>>,
+    net: Res<Net>,
     mut latest: Local<Option<Vec<u8>>>,
     mut pending: Local<Option<CaptureJob>>,
 ) {
@@ -641,9 +681,15 @@ fn serve_captures(
     let stem = job.label.clone().unwrap_or(fallback);
     let rel = format!("{subdir}/{stem}.png");
     let path = cfg.runs_dir.join(&rel);
+    // Sample the alignment from the render snapshot AT serve time (not a dev-side
+    // post-roundtrip poll), so the manifest tick identifies the captured world.
+    let now_s = net.started_at.elapsed().as_secs_f64();
+    let snap = net.snapshot.load();
     let result = write_capture_png(&path, &target, &images, &bytes).map(|()| CaptureResult {
         path: path.display().to_string(),
         rel_path: rel,
+        freshest_tick: snap.freshest_tick(),
+        cursor: snap.cursor(now_s),
     });
     match &result {
         Ok(r) => {

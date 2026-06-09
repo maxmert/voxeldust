@@ -60,6 +60,15 @@ impl RenderClock {
         }
     }
 
+    /// The freshest delivered universe tick the clock is anchored on (`None` until the
+    /// first snapshot). The run-stable alignment quantity a capture records in its manifest
+    /// — sampled from the SAME snapshot the pixels came from, so it identifies the captured
+    /// world (unlike a post-capture poll, which drifts by the render round-trip).
+    #[must_use]
+    pub fn freshest_tick(&self) -> Option<u64> {
+        self.anchor.map(|(tick, _)| tick.0)
+    }
+
     /// The render cursor (f64, universe-tick units) at wall-time `now_s`:
     /// `anchored_tick + elapsed·tick_hz − buffer_ticks`. `None` until the first
     /// snapshot anchors it. The cursor is fed to [`crate::interp::EntityTrack::sample`],
@@ -85,6 +94,16 @@ mod tests {
     #[test]
     fn no_cursor_before_the_first_tick() {
         assert_eq!(clock().cursor(1.0), None);
+    }
+
+    #[test]
+    fn freshest_tick_is_none_until_anchored_then_the_anchor_tick() {
+        let mut c = clock();
+        assert_eq!(c.freshest_tick(), None);
+        c.observe(UniverseTick(100), 10.0);
+        assert_eq!(c.freshest_tick(), Some(100));
+        c.observe(UniverseTick(90), 10.2); // stale → anchor unchanged
+        assert_eq!(c.freshest_tick(), Some(100));
     }
 
     #[test]

@@ -401,11 +401,18 @@ fn run_client_loop(
         }
         let now_s = started_at.elapsed().as_secs_f64();
         core.step(now_s);
+        // The DevState is consumed ONLY by the dev-control listener (cfg dev-control). A
+        // release client (render, no dev-control) builds none of this String-heavy struct
+        // every step. `published` is created in `main` regardless (one cheap alloc) so the
+        // signature stays uniform; without a listener it simply never updates.
+        #[cfg(feature = "dev-control")]
         published.store(Arc::new(core.state().devstate(
             now_s,
             applied,
             dropped.load(Ordering::Relaxed),
         )));
+        #[cfg(not(feature = "dev-control"))]
+        let _ = (&published, applied, &dropped);
         if let Some(sink) = &render_sink {
             sink.store(Arc::new(core.state().render_snapshot()));
         }
@@ -509,7 +516,7 @@ mod dev_control {
     #[cfg(feature = "render")]
     use crossbeam_channel::Sender;
     #[cfg(feature = "render")]
-    use vd_client_harness::capture::capture_entry;
+    use vd_client_harness::capture::{at_tick_predicate, capture_entry, plan_record, state_rel_for};
     #[cfg(feature = "render")]
     use vd_client_harness::manifest::{CaptureKind, RunManifest};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -520,8 +527,6 @@ mod dev_control {
         DevError, DevPhase, DevRequest, DevResponse, DevState, InputAction, WaitPredicate,
         decode_request, encode_response,
     };
-    #[cfg(feature = "render")]
-    use vd_devproto::{WaitField, WaitOp};
 
     /// The run manifest behind one writer (the dev-control listener), shared across
     /// connections. One `Mutex` serializes appends + the `manifest.json` rewrite, so two
@@ -847,21 +852,18 @@ mod dev_control {
             });
         }
         // --at-tick: block until the delivered universe tick reaches T (run-stable), via
-        // the SAME wait machinery; a Timeout/closed/EOF there propagates straight back.
+        // the SAME wait machinery + the SAME Tier-A predicate the harness uses (no second
+        // copy); a Timeout/closed/EOF there propagates straight back.
         if let Some(tick) = at_tick {
-            let predicate = WaitPredicate {
-                field: WaitField::UniverseTick,
-                op: WaitOp::Ge,
-                value: tick,
-            };
-            match wait_until(handles, framer, predicate, SCREENSHOT_WAIT_TICKS).await {
+            match wait_until(handles, framer, at_tick_predicate(tick), SCREENSHOT_WAIT_TICKS).await {
                 Some(DevResponse::State { .. }) => {} // tick reached → capture
                 other => return other,                // Timeout / closed / EOF (None)
             }
         }
         match capture_one(handles, CaptureKind::Screenshot, label).await {
             Some(Ok(result)) => {
-                let tick = handles.published.load().universe_tick;
+                // The render-sampled tick (the captured frame's), not a post-roundtrip poll.
+                let tick = result.freshest_tick;
                 record_capture(handles, CaptureKind::Screenshot, &result, at_tick);
                 flush_manifest(handles);
                 Some(DevResponse::Captured {
@@ -895,17 +897,17 @@ mod dev_control {
                 error: DevError::Unsupported,
             });
         }
-        if !(secs.is_finite() && secs > 0.0) {
+        // The clamped frame count + interval are the Tier-A `plan_record` (the cadence math
+        // is tested there, not in this bin shell); `None` rejects a bad duration loudly.
+        let Some(plan) = plan_record(fps, secs, MAX_RECORD_FPS, MAX_RECORD_FRAMES) else {
             return Some(DevResponse::Error {
                 error: DevError::BadRequest,
             });
-        }
-        let fps = fps.clamp(1, MAX_RECORD_FPS);
-        let frames = ((f64::from(fps) * secs).round() as u64).clamp(1, MAX_RECORD_FRAMES);
-        let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+        };
+        let interval = Duration::from_secs_f64(plan.interval_secs);
         let base = label.unwrap_or_else(|| "rec".to_owned());
         let mut written = 0u64;
-        for i in 0..frames {
+        for i in 0..plan.frames {
             match capture_one(handles, CaptureKind::Frame, Some(format!("{base}-{i:04}"))).await {
                 Some(Ok(result)) => {
                     record_capture(handles, CaptureKind::Frame, &result, None);
@@ -916,7 +918,7 @@ mod dev_control {
             }
             // Pace to the next frame, cancelling the instant a killed vdctl closes the socket
             // (EOF) so a long recording never strands the task.
-            if i + 1 < frames {
+            if i + 1 < plan.frames {
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {}
                     read = framer.fill() => {
@@ -984,19 +986,20 @@ mod dev_control {
         let (Some(runs_dir), Some(manifest)) = (&handles.runs_dir, &handles.manifest) else {
             return;
         };
-        let state = current(handles);
-        // The aligned state dump sits beside the PNG: frames/foo.png → state/foo.json.
-        let stem = std::path::Path::new(&result.rel_path).file_stem().map_or_else(
-            || "capture".to_owned(),
-            |s| s.to_string_lossy().into_owned(),
-        );
-        let state_rel = format!("state/{stem}.json");
+        let state = current(handles); // for the session-diagnostic count + the dump
+        // The aligned state dump sits beside the PNG (frames/foo.png → state/foo.json) — the
+        // run-relative pairing is the Tier-A `state_rel_for`.
+        let state_rel = state_rel_for(&result.rel_path);
         let wrote_state = write_state_dump(&runs_dir.join(&state_rel), &state);
+        // freshest_tick + cursor are RENDER-sampled (the captured frame's), so the manifest
+        // identifies the captured world; snapshots_applied is the session diagnostic.
         let entry = capture_entry(
             kind,
             result.rel_path.clone(),
             at_tick,
-            &state,
+            result.freshest_tick,
+            result.cursor,
+            state.snapshots_applied,
             wrote_state.then_some(state_rel),
         );
         if let Ok(mut m) = manifest.lock() {

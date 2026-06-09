@@ -8,17 +8,21 @@
 //! duplicate copies; in P1.5's single-subscription world that is simply the one
 //! sub, but the seam is already correct for P2.
 //!
-//! ## Track eviction is a P2 wire-contract decision (intentionally deferred)
-//! Tracks are NEVER removed here, and that is deliberate at P1.5: snapshots ride
-//! UNRELIABLE datagrams, so an entity merely ABSENT from one datagram is
-//! indistinguishable from packet loss — evicting on absence would delete live entities
-//! whenever a frame dropped. Correct eviction needs an explicit signal the wire does not
-//! carry yet: a per-sub despawn/leave-AoI event (reliable) or full-membership snapshot
-//! semantics. Both arrive with cross-shard overlap + interest management in P2, where
-//! "out of range ⇒ rendered nowhere" and bounded memory become real requirements; until
-//! then the world is a handful of dots through one sub and growth is non-issue. (Raised
-//! by the Slice-0–T3 audit as a latent scale/ghost-render gap; the fix is gated on that
-//! P2 wire decision, not bolted on here as an unsound TTL.)
+//! ## Track eviction — sound signals only (NEVER datagram-absence)
+//! A track is dropped ONLY on a RELIABLE signal, never on absence from a datagram:
+//! snapshots ride UNRELIABLE datagrams, so an entity merely ABSENT from one frame is
+//! indistinguishable from packet loss — evicting on absence would delete live entities.
+//! Two reliable signals bound the view to its live set:
+//!   * per-SUB teardown — [`DeliveredView::drop_sub`], driven by the gateway's reliable
+//!     `SubscriptionClosing`; this is wired NOW (it keeps memory + per-step clone cost
+//!     proportional to the LIVE subscription set as AoI churns on the end-goal cross-shard
+//!     path, not to every sub ever seen).
+//!   * per-ENTITY teardown within a still-open sub — `EventMsg::EntityRemoved`; this is the
+//!     remaining P2 piece, gated on routing the reliable EventMsg class to the client
+//!     (there is no Bulk/Event arm on the client inbound seam yet). Until then a still-open
+//!     sub's tracks persist, which is correct (lossy datagrams cannot prove departure).
+//!
+//! (Raised by the Slice-0–T3 + P1.5-foundation audits; drop_sub closes the per-sub half.)
 
 use std::collections::BTreeMap;
 
@@ -89,6 +93,19 @@ impl DeliveredView {
     pub fn set_authority(&mut self, entity: EntityId, sub: SubId) {
         self.authoritative_sub.insert(entity, sub);
         self.own_entity = Some(entity);
+    }
+
+    /// Drop every track (+ high-water + authority pointer) for a subscription the gateway
+    /// has RELIABLY closed (`SubscriptionClosing`). The SOUND eviction signal — reliable +
+    /// per-sub, unlike datagram-absence — so the view (and the per-step clone of it) stays
+    /// bounded to the live subscription set as AoI churns. An entity whose authority pointed
+    /// at the closed sub loses that override and falls back to its lowest remaining sub (or
+    /// is no longer rendered if it had only this one). `own_entity` is retained: it is an id,
+    /// and `own_location_frame` already reports `None` once the own track is gone.
+    pub fn drop_sub(&mut self, sub: SubId) {
+        self.tracks.retain(|(s, _), _| *s != sub);
+        self.high_water.remove(&sub);
+        self.authoritative_sub.retain(|_, s| *s != sub);
     }
 
     /// The composited render poses at `cursor`: each entity rendered EXACTLY ONCE,
@@ -166,16 +183,40 @@ impl DeliveredView {
     pub fn nonfinite_poses(&self) -> u64 {
         self.nonfinite_poses
     }
-}
 
-/// The frame-evaluation seam: map a rendered pose's frame-local position into world
-/// space. In P1.5 every frame is static (system/planet origin fixed), so this is
-/// the identity — but it is THE single chokepoint where P8 composes a `ShipLocal`
-/// pose through its moving hull and P10 applies the galaxy ly-cell offset, without
-/// touching any call site.
-#[must_use]
-pub fn world_pos(pose: &RenderPose) -> DVec3 {
-    pose.pos
+    /// The frame-evaluation seam: map a rendered pose's FRAME-LOCAL position into world
+    /// space, composing through the view as the frame requires. Planet/System/Galaxy frames
+    /// are world-origin in P1.5 (identity). A `ShipLocal` interior pose composes through its
+    /// hull entity's LIVE pose — `hull.pos + hull.orient * interior.pos` — sampled at the
+    /// SAME `cursor` so interior and hull agree in time ("walk inside a flying ship", P8);
+    /// until a hull is delivered (no ships pre-P8) the lookup is `None` and the interior
+    /// renders at its frame origin. This is THE single chokepoint for that composition (and
+    /// the P10 galaxy ly-cell offset) — it now takes the view + cursor those need, so they
+    /// land here WITHOUT reshaping call sites. Never panics; always finite (poses sanitized
+    /// at ingress).
+    #[must_use]
+    pub fn world_pos(&self, pose: &RenderPose, cursor: f64) -> DVec3 {
+        match pose.frame {
+            FrameRef::PlanetCentered { .. }
+            | FrameRef::SystemSpace { .. }
+            | FrameRef::GalaxySpace => pose.pos,
+            FrameRef::ShipLocal { ship } => self
+                .hull_pose(ship, cursor)
+                .map_or(pose.pos, |hull| hull.pos + hull.orient * pose.pos),
+        }
+    }
+
+    /// The hull entity's rendered pose at `cursor` — the basis a `ShipLocal` interior pose
+    /// composes against. The hull is just-another-delivered-entity (the id named by the
+    /// frame), resolved on its authoritative sub via the SAME `chosen_subs` the render path
+    /// uses. `None` until the hull is delivered there (no ships pre-P8, or authority points
+    /// at a sub we hold no track for) ⇒ the interior renders at its frame origin.
+    fn hull_pose(&self, hull: EntityId, cursor: f64) -> Option<RenderPose> {
+        let sub = self.chosen_subs().get(&hull).copied()?;
+        self.tracks
+            .get(&(sub, hull))
+            .map(|track| track.sample(cursor))
+    }
 }
 
 #[cfg(test)]
@@ -232,8 +273,105 @@ mod tests {
         assert_eq!(rendered[&ent(1)].pos, DVec3::new(5.0, 0.0, 0.0));
         assert_eq!(rendered[&ent(2)].pos, DVec3::new(105.0, 0.0, 0.0));
         assert_eq!(view.stale_frames_dropped(), 0);
-        // world_pos is the identity for P1.5 static frames.
-        assert_eq!(world_pos(&rendered[&ent(1)]), DVec3::new(5.0, 0.0, 0.0));
+        // world_pos is the identity for P1.5 static (system) frames.
+        assert_eq!(
+            view.world_pos(&rendered[&ent(1)], 11.0),
+            DVec3::new(5.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn drop_sub_evicts_only_that_subs_tracks_and_keeps_the_view_bounded() {
+        // Two entities through two subs; closing sub 0 evicts ONLY its tracks + authority,
+        // leaving sub 1 intact — the reliable per-sub eviction that bounds the view.
+        let mut view = DeliveredView::default();
+        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
+        view.on_snapshot(Some(SubId(1)), snap(SubId(1), 1, 10, vec![(ent(2), 2.0)]));
+        view.set_authority(ent(1), SubId(0));
+        assert_eq!(view.render(10.0).len(), 2);
+
+        view.drop_sub(SubId(0));
+        let r = view.render(10.0);
+        assert_eq!(r.len(), 1, "only sub 1 survives");
+        assert!(r.contains_key(&ent(2)));
+        // high-water for the dropped sub is gone, so a fresh frame_id on a re-opened sub 0
+        // is not rejected as stale.
+        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 12, vec![(ent(3), 3.0)]));
+        assert!(view.render(12.0).contains_key(&ent(3)));
+        // Dropping a sub that was never delivered is a harmless no-op.
+        view.drop_sub(SubId(7));
+    }
+
+    #[test]
+    fn world_pos_is_identity_for_world_frames_and_composes_shiplocal_through_its_hull() {
+        use glam::DQuat;
+        use vd_core::pose::StampedPose;
+        let mut view = DeliveredView::default();
+        // System-frame entity → identity.
+        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 7.0)]));
+        let r = view.render(10.0);
+        assert_eq!(view.world_pos(&r[&ent(1)], 10.0), DVec3::new(7.0, 0.0, 0.0));
+
+        // A hull (ent 1) at world x=100 and an interior entity in ShipLocal{ship=ent(1)} at
+        // local x=5 → composes to world x=105 (hull orient identity).
+        let hull = ent(1);
+        let interior = ent(2);
+        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 2, 11, vec![(hull, 100.0)]));
+        view.on_snapshot(
+            Some(SubId(0)),
+            SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 3,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(11),
+                entities: vec![EntitySnap {
+                    entity: interior,
+                    pose: StampedPose::at_rest(
+                        FrameRef::ShipLocal { ship: hull },
+                        DVec3::new(5.0, 0.0, 0.0),
+                        UniverseTick(11),
+                    ),
+                }],
+            },
+        );
+        let r = view.render(11.0);
+        assert_eq!(
+            view.world_pos(&r[&interior], 11.0),
+            DVec3::new(105.0, 0.0, 0.0),
+            "interior composes through the hull pose"
+        );
+
+        // ShipLocal whose hull is NOT delivered → falls back to the frame-local pos.
+        let orphan = RenderPose {
+            frame: FrameRef::ShipLocal { ship: ent(99) },
+            pos: DVec3::new(3.0, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(view.world_pos(&orphan, 11.0), DVec3::new(3.0, 0.0, 0.0));
+
+        // ShipLocal whose hull authority points at a sub with NO track → also falls back
+        // (defensive: no panic, no stale pose) — exercises hull_pose's trackless-sub arm.
+        view.set_authority(hull, SubId(9));
+        let interior_pose = RenderPose {
+            frame: FrameRef::ShipLocal { ship: hull },
+            pos: DVec3::new(5.0, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(view.world_pos(&interior_pose, 11.0), DVec3::new(5.0, 0.0, 0.0));
+
+        // Galaxy + Planet frames are identity too (the combined world-frame arm).
+        let gal = RenderPose {
+            frame: FrameRef::GalaxySpace,
+            pos: DVec3::new(1.0, 2.0, 3.0),
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(view.world_pos(&gal, 11.0), DVec3::new(1.0, 2.0, 3.0));
+        let planet = RenderPose {
+            frame: FrameRef::PlanetCentered { planet_seed: 1 },
+            pos: DVec3::new(4.0, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(view.world_pos(&planet, 11.0), DVec3::new(4.0, 0.0, 0.0));
     }
 
     #[test]

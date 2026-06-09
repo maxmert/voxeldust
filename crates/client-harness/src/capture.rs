@@ -29,26 +29,68 @@ pub fn ready_to_capture(target_tick: Option<u64>, state: &DevState) -> bool {
     }
 }
 
-/// Build the manifest entry for a capture, recording the ACTUAL delivered alignment —
-/// the run-stable `freshest_tick` (the deterministic alignment quantity) plus the cursor
-/// and the diagnostic session count — from the state at capture time.
+/// Build the manifest entry for a capture. `freshest_tick` + `cursor` are the alignment
+/// quantities sampled from the SAME render snapshot the PIXELS came from (NOT a post-capture
+/// poll, which drifts forward by the render round-trip) — so the manifest identifies the
+/// captured world. `snapshots_applied` is the session-relative diagnostic count.
 #[must_use]
 pub fn capture_entry(
     kind: CaptureKind,
     path: String,
     target_tick: Option<u64>,
-    state: &DevState,
+    freshest_tick: Option<u64>,
+    cursor: Option<f64>,
+    snapshots_applied: u64,
     state_path: Option<String>,
 ) -> CaptureEntry {
     CaptureEntry {
         kind,
         path,
         tick: target_tick,
-        cursor: state.render_cursor,
-        freshest_tick: state.universe_tick,
-        snapshots_applied: state.snapshots_applied,
+        cursor,
+        freshest_tick,
+        snapshots_applied,
         state_path,
     }
+}
+
+/// A planned `record` sequence: a clamped frame count + the per-frame interval. Pure (the
+/// bin supplies the live clock + the safety bounds), so the cadence math is Tier-A tested
+/// rather than buried in the dev-control bin shell.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecordPlan {
+    pub fps: u32,
+    pub frames: u64,
+    pub interval_secs: f64,
+}
+
+/// Plan `record fps secs`: clamp `fps` to `[1, max_fps]` and the frame count to
+/// `[1, max_frames]` (so a fat-fingered `--secs 1e9` cannot run unbounded), with
+/// `interval = 1/fps`. `None` for a non-finite or non-positive duration — a loud reject,
+/// never a silent zero-frame run.
+#[must_use]
+pub fn plan_record(fps: u32, secs: f64, max_fps: u32, max_frames: u64) -> Option<RecordPlan> {
+    if !(secs.is_finite() && secs > 0.0) {
+        return None;
+    }
+    let fps = fps.clamp(1, max_fps.max(1));
+    // fps>=1 and secs>0 ⇒ want>0; the f64→u64 cast saturates, then clamps into the budget.
+    let frames = ((f64::from(fps) * secs).round() as u64).clamp(1, max_frames.max(1));
+    Some(RecordPlan {
+        fps,
+        frames,
+        interval_secs: 1.0 / f64::from(fps),
+    })
+}
+
+/// The run-relative state-dump path paired with a capture's PNG: `frames/foo.png` →
+/// `state/foo.json` (so the aligned wire-truth dump sits beside its pixels). Pure string
+/// mapping — handles a path with or without a directory and with or without the `.png` ext.
+#[must_use]
+pub fn state_rel_for(rel_path: &str) -> String {
+    let after_slash = rel_path.rfind('/').map_or(rel_path, |i| &rel_path[i + 1..]);
+    let stem = after_slash.strip_suffix(".png").unwrap_or(after_slash);
+    format!("state/{stem}.json")
 }
 
 #[cfg(test)]
@@ -97,19 +139,46 @@ mod tests {
     }
 
     #[test]
-    fn capture_entry_records_the_actual_delivered_alignment() {
+    fn capture_entry_records_the_render_sampled_alignment() {
         let e = capture_entry(
             CaptureKind::Screenshot,
             "shots/0001.png".to_owned(),
-            Some(100),
-            &state(Some(102), 7, Some(99.6)),
+            Some(100),       // requested target
+            Some(102),       // render-sampled freshest tick (the pixels' tick)
+            Some(99.6),      // render-sampled cursor
+            7,               // session diagnostic
             Some("state/0001.json".to_owned()),
         );
-        assert_eq!(e.tick, Some(100)); // the requested target
-        assert_eq!(e.freshest_tick, Some(102)); // the ACTUAL universe tick (run-stable)
-        assert_eq!(e.snapshots_applied, 7); // the session count (diagnostic)
-        assert_eq!(e.cursor, Some(99.6)); // the ACTUAL cursor
+        assert_eq!(e.tick, Some(100));
+        assert_eq!(e.freshest_tick, Some(102));
+        assert_eq!(e.snapshots_applied, 7);
+        assert_eq!(e.cursor, Some(99.6));
         assert_eq!(e.kind, CaptureKind::Screenshot);
         assert_eq!(e.state_path.as_deref(), Some("state/0001.json"));
+    }
+
+    #[test]
+    fn plan_record_clamps_fps_and_frames_and_rejects_bad_durations() {
+        // Normal: 8 fps for 1 s = 8 frames, 0.125 s interval.
+        let p = plan_record(8, 1.0, 120, 3600).expect("valid");
+        assert_eq!(p, RecordPlan { fps: 8, frames: 8, interval_secs: 0.125 });
+        // fps clamped up to 1; a sub-frame duration still yields at least 1 frame.
+        assert_eq!(plan_record(0, 0.01, 120, 3600).expect("valid").frames, 1);
+        // fps + frames clamped down to the ceilings.
+        let c = plan_record(10_000, 1e9, 120, 3600).expect("valid");
+        assert_eq!((c.fps, c.frames), (120, 3600));
+        // Non-finite / non-positive durations are rejected loudly.
+        assert_eq!(plan_record(30, 0.0, 120, 3600), None);
+        assert_eq!(plan_record(30, -1.0, 120, 3600), None);
+        assert_eq!(plan_record(30, f64::NAN, 120, 3600), None);
+    }
+
+    #[test]
+    fn state_rel_for_pairs_the_state_dump_with_the_png() {
+        assert_eq!(state_rel_for("frames/flyby-0007.png"), "state/flyby-0007.json");
+        assert_eq!(state_rel_for("shots/hero.png"), "state/hero.json");
+        // No directory, and a non-.png path, both handled.
+        assert_eq!(state_rel_for("hero.png"), "state/hero.json");
+        assert_eq!(state_rel_for("weird"), "state/weird.json");
     }
 }

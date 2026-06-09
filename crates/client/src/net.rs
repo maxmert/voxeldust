@@ -179,6 +179,15 @@ impl ClientState {
                     self.phase = ClientPhase::Active;
                 }
             }
+            // The reliable per-sub teardown: drop that sub's tracks so the view stays
+            // bounded to the live set (vs swallowing it as `ignored` and leaking tracks).
+            // If it was the held sub, clear it — a later SubscriptionOpened re-arms.
+            ServerControlMsg::SubscriptionClosing { sub } => {
+                self.view.drop_sub(sub);
+                if self.sub == Some(sub) {
+                    self.sub = None;
+                }
+            }
             ServerControlMsg::AuthorityChanged { entity, sub } => {
                 self.view.set_authority(entity, sub);
             }
@@ -319,6 +328,12 @@ impl ClientState {
     #[must_use]
     pub fn view(&self) -> &DeliveredView {
         &self.view
+    }
+    /// The subscription the client currently holds (`None` before the first
+    /// `SubscriptionOpened` or after a `SubscriptionClosing`).
+    #[must_use]
+    pub fn sub(&self) -> Option<vd_wire::channels::SubId> {
+        self.sub
     }
     /// The render cursor at wall-time `now_s` (`None` until the first snapshot).
     #[must_use]
@@ -666,10 +681,8 @@ mod tests {
             .deliver(GATEWAY, MsgClass::Control, vec![0xff, 0xff]); // bad control
         c.transport
             .deliver(GATEWAY, MsgClass::Snapshot, vec![0xff, 0xff]); // bad snapshot
-        let closing =
-            postcard::to_allocvec(&ServerControlMsg::SubscriptionClosing { sub: SubId(0) })
-                .expect("test fixture");
-        c.transport.deliver(GATEWAY, MsgClass::Control, closing); // P2 control, ignored
+        let ping = postcard::to_allocvec(&ServerControlMsg::Ping { nonce: 1 }).expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, ping); // P2 control, ignored
         c.transport.inbound.push(Inbound::NodeUnreachable {
             to: GATEWAY,
             class: MsgClass::Input,
@@ -682,6 +695,41 @@ mod tests {
         assert_eq!(ignored, 2, "the wrong class + the P2 control variant");
         assert_eq!(foreign, 1, "the non-gateway peer");
         assert_eq!(c.state().phase(), ClientPhase::Active, "still alive");
+    }
+
+    #[test]
+    fn subscription_closing_evicts_the_subs_tracks_and_clears_the_held_sub() {
+        // The reliable per-sub teardown: a delivered entity exists, then the gateway closes
+        // the sub → its track is evicted (view bounded to the live set) and the held sub is
+        // cleared (not left dangling), so a later SubscriptionOpened cleanly re-arms.
+        let mut c = core();
+        activate(&mut c);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 10, 5.0));
+        c.step(10.0);
+        assert_eq!(c.state().view().render(10.0).len(), 1, "entity delivered");
+
+        // Closing a sub we do NOT hold leaves the held sub + our tracks intact.
+        let foreign =
+            postcard::to_allocvec(&ServerControlMsg::SubscriptionClosing { sub: SubId(5) })
+                .expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, foreign);
+        c.step(10.0);
+        assert_eq!(c.state().sub(), Some(SubId(0)), "held sub unchanged");
+        assert_eq!(c.state().view().render(10.0).len(), 1, "our entity still present");
+
+        let closing =
+            postcard::to_allocvec(&ServerControlMsg::SubscriptionClosing { sub: SubId(0) })
+                .expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, closing);
+        c.step(10.0);
+        assert!(
+            c.state().view().render(10.0).is_empty(),
+            "the closed sub's track is evicted"
+        );
+        assert_eq!(c.state().sub(), None, "held sub cleared");
+        // It is NOT counted as an ignored drop — it was handled.
+        assert_eq!(c.state().dropped_counts().1, 0, "closing is not 'ignored'");
     }
 
     #[test]
