@@ -23,6 +23,7 @@ pub mod fence;
 pub mod frame;
 pub mod geometry;
 pub mod ids;
+pub mod kinematics;
 pub mod pose;
 pub mod rng;
 pub mod tlv;

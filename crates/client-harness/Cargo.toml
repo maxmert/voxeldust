@@ -1,0 +1,16 @@
+[package]
+name = "vd-client-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "P1.5 Slice 3 PURE harness logic (Tier-A, 100% coverage): the HR6 visual-regression assertions over a readback buffer, the walk-to/look-at NavController, the runs/ manifest serde, the --at-tick capture-alignment, the follow-own-dot camera math, and the keyboard->InputAction mapping. ZERO renderer/GPU deps — the wgpu/winit/egui/Bevy glue lives in the Tier-B vd-client-render crate around this."
+
+[dependencies]
+vd-core = { workspace = true }
+vd-devproto = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

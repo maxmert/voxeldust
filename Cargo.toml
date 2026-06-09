@@ -9,6 +9,8 @@ members = [
     "crates/connection-plane",
     "crates/harness",
     "crates/client",
+    "crates/client-harness",
+    "crates/client-render",
     "crates/io-prod",
     "crates/bins",
     "tests",
@@ -29,6 +31,8 @@ vd-node = { path = "crates/node" }
 vd-connection-plane = { path = "crates/connection-plane" }
 vd-harness = { path = "crates/harness" }
 vd-client = { path = "crates/client" }
+vd-client-harness = { path = "crates/client-harness" }
+vd-client-render = { path = "crates/client-render" }
 
 # Pure-logic dependencies (Tier-A safe: no I/O)
 serde = { version = "1", features = ["derive"] }

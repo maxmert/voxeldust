@@ -2334,6 +2334,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vd-client-harness"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "serde",
+ "serde_json",
+ "vd-core",
+ "vd-devproto",
+]
+
+[[package]]
+name = "vd-client-render"
+version = "0.1.0"
+
+[[package]]
 name = "vd-connection-plane"
 version = "0.1.0"
 dependencies = [

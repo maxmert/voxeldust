@@ -19,7 +19,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::entity_kind::EntityKind;
-use vd_core::glam::{DQuat, DVec3, EulerRot};
+use vd_core::glam::DVec3;
+use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId};
@@ -542,12 +543,9 @@ fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &
     dot.yaw += f64::from(input.look[0]);
     dot.pitch += f64::from(input.look[1]);
     dot.orient_from_angles();
-    let axes = DVec3::new(
-        f64::from(input.movement[1].clamp(-1.0, 1.0)),
-        f64::from(input.movement[2].clamp(-1.0, 1.0)),
-        // Forward is -Z in the dot's local frame (right-handed, Y-up).
-        -f64::from(input.movement[0].clamp(-1.0, 1.0)),
-    );
+    // The movement-axis map is the ONE shared input convention (vd_core::kinematics) —
+    // the client's nav/camera invert the SAME definition (no hand-re-encoded drift).
+    let axes = kinematics::local_axes_from_movement(input.movement);
     let step = dot.pose.orient * axes * (config.move_speed_mps * config.tick_dt_s);
     dot.pose.pos += step;
     dot.pose.vel = step / config.tick_dt_s;
@@ -556,7 +554,7 @@ fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &
 
 impl Dot {
     fn orient_from_angles(&mut self) {
-        self.pose.orient = DQuat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+        self.pose.orient = kinematics::orient_from_yaw_pitch(self.yaw, self.pitch);
     }
 }
 
