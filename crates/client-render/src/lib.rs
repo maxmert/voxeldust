@@ -14,15 +14,36 @@
 //! human-in-the-loop window + (T6) `G-RENDER-SMOKE`, not by `llvm-cov`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
-use bevy::app::AppExit;
+use bevy::app::{AppExit, ScheduleRunnerPlugin};
+use bevy::camera::RenderTarget;
+use bevy::ecs::schedule::ScheduleLabel;
+use bevy::image::TextureFormatPixelInfo;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_graph::{
+    self, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
+};
+use bevy::render::render_resource::{
+    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, PollType,
+    TexelCopyBufferInfo, TexelCopyBufferLayout, TextureFormat, TextureUsages,
+};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
+use bevy::window::ExitCondition;
+use bevy::winit::WinitPlugin;
+use bevy_egui::{
+    EguiContext, EguiContexts, EguiGlobalSettings, EguiMultipassSchedule, EguiPlugin,
+    EguiPrimaryContextPass, PrimaryEguiContext, egui,
+};
+use crossbeam_channel::{Receiver, Sender};
 use vd_client::net::ClientPhase;
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client::view::world_pos;
@@ -52,6 +73,40 @@ const LANDMARK_COLORS: [Color; 8] = [
     Color::srgb(0.6, 0.3, 0.9),
     Color::srgb(0.9, 0.3, 0.7),
 ];
+/// Offscreen capture resolution. Width chosen so `width*4` is NOT a multiple of 256
+/// (1280*4 = 5120 IS a multiple → no padding; use 1284 to force the 256-byte row-pad
+/// strip path that the readback must handle). Height even.
+const CAPTURE_W: u32 = 1284;
+const CAPTURE_H: u32 = 720;
+/// Frames to render before the first capture can serve (let the render world warm up +
+/// the egui pass + the readback pipeline fill — the spike used 8).
+const CAPTURE_PRE_ROLL: u32 = 8;
+
+/// Which app to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderMode {
+    /// A real window for a human (winit + egui primary-context HUD).
+    Windowed,
+    /// Headless offscreen render → wgpu readback → PNG on request (the AGENT's eyes; no
+    /// display needed). egui composites into the captured image via the multipass schedule.
+    Capture,
+}
+
+/// A capture request from the dev-control listener to the render thread. The listener has
+/// ALREADY done any `--at-tick` wait (reusing wait-until on the delivered universe tick),
+/// so this is just "capture the current frame now → reply with the path".
+pub struct CaptureJob {
+    /// Optional agent name for the file (else a frame counter).
+    pub label: Option<String>,
+    /// The render thread sends the result here (or an Err string).
+    pub reply: Sender<Result<CaptureResult, String>>,
+}
+
+/// The result of a served capture.
+pub struct CaptureResult {
+    /// The written PNG path (under the run's `runs/` dir).
+    pub path: String,
+}
 
 /// The handles the bin wires into the window (constructed on the main thread before
 /// `run_window`). Every field is `Send + Sync`, so the Bevy resource is plain.
@@ -70,6 +125,13 @@ pub struct RenderHandles {
     /// The shared monotonic epoch the core anchored its render clock on (so this
     /// thread computes the display cursor in the same timeline).
     pub started_at: Instant,
+    /// Windowed (human) or headless Capture (agent).
+    pub mode: RenderMode,
+    /// Capture requests (Capture mode only — `None` for Windowed). A `crossbeam`
+    /// receiver so it can be a Bevy Resource (Send+Sync).
+    pub captures: Option<Receiver<CaptureJob>>,
+    /// Where capture PNGs land (Capture mode); the bin creates the run dir.
+    pub runs_dir: PathBuf,
 }
 
 /// The bin's handles, held as a Bevy resource (read by every system).
@@ -111,14 +173,18 @@ struct Dot;
 #[derive(Component)]
 struct FollowCam;
 
-/// Marker: the stats-HUD text node.
-#[derive(Component)]
-struct StatsHud;
+/// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
+/// (winit/the runner need it) with the core loop on a separate thread. Dispatches on the
+/// mode: a real window (human) or headless offscreen capture (the agent's eyes).
+pub fn run(handles: RenderHandles) {
+    match handles.mode {
+        RenderMode::Windowed => run_windowed(handles),
+        RenderMode::Capture => run_capture(handles),
+    }
+}
 
-/// Run the windowed client. BLOCKS on the calling thread until the window closes, so the
-/// bin MUST call this on the MAIN thread (winit requires the event loop there) with the
-/// core loop on a separate thread.
-pub fn run_window(handles: RenderHandles) {
+/// The windowed app (winit window + egui primary-context HUD + winit input).
+fn run_windowed(handles: RenderHandles) {
     tracing::info!("windowed client starting (Bevy {}x{})", WINDOW_W, WINDOW_H);
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.02, 0.03, 0.06)))
@@ -142,15 +208,17 @@ pub fn run_window(handles: RenderHandles) {
             }),
             ..default()
         }))
+        // egui (multipass primary context — the default; auto-creates the window's
+        // PrimaryEguiContext + its EguiPrimaryContextPass schedule).
+        .add_plugins(EguiPlugin::default())
         .add_systems(Startup, setup_scene)
-        .add_systems(
-            Update,
-            (input_system, sync_world, update_hud, exit_when_core_stops),
-        )
+        .add_systems(Update, (input_system, sync_world, exit_when_core_stops))
+        // The HUD draws in the egui pass (NOT Update — the 0.39 multipass idiom).
+        .add_systems(EguiPrimaryContextPass, hud_primary)
         .run();
 }
 
-/// Spawn the camera, key light, reference scene, shared dot assets, and the HUD.
+/// Windowed setup: the window follow-camera + the shared world.
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -162,6 +230,19 @@ fn setup_scene(
         Transform::from_xyz(0.0, 1.6, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
         FollowCam,
     ));
+    setup_world(&mut commands, &mut meshes, &mut materials);
+}
+
+// (the windowed camera above; the shared world below — capture's offscreen camera lives
+// in `run_capture` and reuses `setup_world`.)
+
+/// Spawn the key light, reference scene (ground + landmark pillars), and the shared dot
+/// assets — identical for the windowed and capture cameras (DRY: one world, two views).
+fn setup_world(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
     // A single key light (dots are also emissive, so they read even unlit).
     commands.spawn((
         DirectionalLight {
@@ -213,23 +294,7 @@ fn setup_scene(
             ..default()
         }),
     });
-
-    // Stats HUD (top-left, multi-line native UI text; the default font is built in).
-    commands.spawn((
-        Text::new("connecting…"),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.85, 0.92, 0.98)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-        StatsHud,
-    ));
+    // The stats HUD is drawn each frame by `hud_primary` via egui (no entity to spawn).
 }
 
 /// Keyboard → held movement (resent only on change; latest-wins on the wire); mouse →
@@ -343,31 +408,41 @@ fn sync_world(
     }
 }
 
-/// Update the stats HUD from the delivered snapshot (wire truth) — phase, the player's
-/// LOCATION (realm), own entity, position, and the visible count.
-fn update_hud(net: Res<Net>, mut hud: Query<&mut Text, With<StatsHud>>) {
+/// The windowed HUD: draw into the PRIMARY egui context (the 0.39 multipass idiom —
+/// registered in `EguiPrimaryContextPass`, context via `EguiContexts::ctx_mut()` which
+/// returns a `Result`, so this system returns `Result`).
+fn hud_primary(mut contexts: EguiContexts, net: Res<Net>) -> Result {
+    draw_hud(contexts.ctx_mut()?, &net);
+    Ok(())
+}
+
+/// Draw the player-stats HUD from the delivered snapshot (wire truth) into an egui
+/// context — a floating top-left overlay. SHARED by the windowed primary-context pass and
+/// the headless capture multipass (so the captured overlay is byte-for-byte the same HUD).
+fn draw_hud(ctx: &egui::Context, net: &Net) {
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
     let rendered = snap.rendered(now_s);
     let own = snap.own_entity();
-    let own_pos = rendered
+    let pos = rendered
         .iter()
         .find(|(id, _, _)| Some(*id) == own)
-        .map(|(_, _, pose)| pose.pos);
+        .map_or_else(
+            || "—".to_owned(),
+            |(_, _, pose)| format!("{:.1}, {:.1}, {:.1}", pose.pos.x, pose.pos.y, pose.pos.z),
+        );
     let location = snap.location().unwrap_or_else(|| "—".to_owned());
     let entity = own.map(|e| e.to_string()).unwrap_or_else(|| "—".to_owned());
-    let pos = own_pos.map_or_else(
-        || "—".to_owned(),
-        |p| format!("{:.1}, {:.1}, {:.1}", p.x, p.y, p.z),
-    );
-    let text = format!(
-        "VOXELDUST — dev client\nstatus:   {}\nlocation: {location}\nentity:   {entity}\nposition: {pos}\nvisible:  {}",
-        phase_label(snap.phase()),
-        rendered.len(),
-    );
-    if let Some(mut node) = hud.iter_mut().next() {
-        node.0 = text;
-    }
+    egui::Area::new(egui::Id::new("vd_hud"))
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
+        .show(ctx, |ui| {
+            ui.label("VOXELDUST — dev client");
+            ui.label(format!("status:   {}", phase_label(snap.phase())));
+            ui.label(format!("location: {location}"));
+            ui.label(format!("entity:   {entity}"));
+            ui.label(format!("position: {pos}"));
+            ui.label(format!("visible:  {}", rendered.len()));
+        });
 }
 
 /// Close the window when the core loop has stopped — a gateway `Close` drove the session
@@ -388,5 +463,360 @@ fn phase_label(phase: ClientPhase) -> &'static str {
         ClientPhase::AwaitingSubscription => "subscribing",
         ClientPhase::Active => "live",
         ClientPhase::Closed => "closed",
+    }
+}
+
+// ===================== headless offscreen capture (Slice-3 T5) =====================
+// The recipe is the validated spike (docs/design/spikes/bevy-readback/): render the scene
+// + the egui HUD into a RenderTarget::Image, copy that texture to a CPU buffer via a
+// render-graph node each frame, and write a PNG when the dev-control listener asks. NO
+// window/display — this is the AGENT's eyes (HR6). egui composites into the captured image
+// via the multipass schedule (NOT the Screenshot component, which drops egui — issue #16689).
+
+/// The custom egui pass for the offscreen camera's (non-primary) context.
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+struct OffscreenEguiPass;
+
+/// The capture-request channel from the dev-control listener (crossbeam → Send+Sync Resource).
+#[derive(Resource)]
+struct CaptureChannel(Receiver<CaptureJob>);
+
+/// Capture run state: the output dir + frame/shot counters.
+#[derive(Resource)]
+struct CaptureCfg {
+    runs_dir: PathBuf,
+    frame: u32,
+    shot: u64,
+}
+
+/// The offscreen render-target image handle (main world), read by the PNG writer.
+#[derive(Resource)]
+struct RenderTargetImage(Handle<Image>);
+
+/// The render-world → main-world readback channel (crossbeam: a Bevy Resource needs Sync,
+/// which `std::sync::mpsc::Receiver` is not).
+#[derive(Resource, Deref)]
+struct MainWorldReceiver(crossbeam_channel::Receiver<Vec<u8>>);
+#[derive(Resource, Deref)]
+struct RenderWorldSender(crossbeam_channel::Sender<Vec<u8>>);
+
+/// The headless capture app (no window): renders the scene + egui HUD into an Image, reads
+/// it back each frame, writes a PNG on a dev-control request.
+fn run_capture(handles: RenderHandles) {
+    tracing::info!("headless capture client starting ({CAPTURE_W}x{CAPTURE_H})");
+    let captures = handles
+        .captures
+        .expect("Capture mode requires a capture channel");
+    App::new()
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.03, 0.06)))
+        .insert_resource(Net {
+            snapshot: handles.snapshot,
+            input: handles.input,
+            dropped: handles.dropped,
+            core_alive: handles.core_alive,
+            started_at: handles.started_at,
+        })
+        .insert_resource(CameraState {
+            cam: FollowCamera::new(DVec3::Y),
+            last_movement: MovementKeys::default(),
+        })
+        .insert_resource(CaptureChannel(captures))
+        .insert_resource(CaptureCfg {
+            runs_dir: handles.runs_dir,
+            frame: 0,
+            shot: 0,
+        })
+        .init_resource::<DotEntities>()
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                // No window/display server (headless): the runner drives frames instead.
+                .disable::<WinitPlugin>(),
+        )
+        .add_plugins(EguiPlugin::default())
+        .add_plugins(ImageCopyPlugin)
+        .add_plugins(ScheduleRunnerPlugin::run_loop(
+            std::time::Duration::from_secs_f64(1.0 / 60.0),
+        ))
+        // Headless: no window ⇒ no primary egui context; the offscreen camera owns its own.
+        .add_systems(PreStartup, disable_primary_egui_context)
+        .add_systems(Startup, setup_capture)
+        .add_systems(OffscreenEguiPass, hud_offscreen)
+        .add_systems(Update, (sync_world, serve_captures, exit_when_core_stops))
+        .run();
+}
+
+/// Headless: stop bevy_egui auto-creating a primary (window) context — the offscreen
+/// camera's `EguiMultipassSchedule` context is the only one.
+fn disable_primary_egui_context(mut settings: ResMut<EguiGlobalSettings>) {
+    settings.auto_create_primary_context = false;
+}
+
+/// Capture setup: the offscreen camera (renders to an Image, egui composited via the
+/// multipass schedule) + the readback copier + the SHARED world.
+fn setup_capture(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    render_device: Res<RenderDevice>,
+) {
+    let size = Extent3d {
+        width: CAPTURE_W,
+        height: CAPTURE_H,
+        ..default()
+    };
+    let mut image =
+        Image::new_target_texture(CAPTURE_W, CAPTURE_H, TextureFormat::bevy_default(), None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let handle = images.add(image);
+    commands.insert_resource(RenderTargetImage(handle.clone()));
+    commands.spawn(ImageCopier::new(handle.clone(), size, &render_device));
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 1.6, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
+        // In Bevy 0.18 RenderTarget is a SEPARATE component (not a Camera field).
+        RenderTarget::Image(handle.into()),
+        // bevy_egui creates+manages a (non-primary) EguiContext on this entity and renders
+        // its passes INTO this camera's image, so the readback composites scene + HUD.
+        EguiMultipassSchedule::new(OffscreenEguiPass),
+        FollowCam,
+    ));
+    setup_world(&mut commands, &mut meshes, &mut materials);
+}
+
+/// The offscreen HUD: draw into the (non-primary) egui context bound to the Image camera.
+fn hud_offscreen(mut ctx: Single<&mut EguiContext, Without<PrimaryEguiContext>>, net: Res<Net>) {
+    draw_hud(ctx.get_mut(), &net);
+}
+
+/// Serve at most one capture per frame: keep the freshest readback, and once a job is
+/// pending AND a warm frame exists, strip the row-padding, write the PNG, reply.
+fn serve_captures(
+    mut cfg: ResMut<CaptureCfg>,
+    chan: Res<CaptureChannel>,
+    receiver: Res<MainWorldReceiver>,
+    target: Res<RenderTargetImage>,
+    images: Res<Assets<Image>>,
+    mut latest: Local<Option<Vec<u8>>>,
+    mut pending: Local<Option<CaptureJob>>,
+) {
+    cfg.frame += 1;
+    while let Ok(data) = receiver.try_recv() {
+        *latest = Some(data);
+    }
+    if pending.is_none()
+        && let Ok(job) = chan.0.try_recv()
+    {
+        *pending = Some(job);
+    }
+    if cfg.frame < CAPTURE_PRE_ROLL || pending.is_none() {
+        return;
+    }
+    let Some(bytes) = latest.clone() else {
+        return; // no readback frame yet — keep the job pending for a later frame
+    };
+    let Some(job) = pending.take() else {
+        return;
+    };
+    let shot = cfg.shot;
+    let name = job
+        .label
+        .clone()
+        .map_or_else(|| format!("shot-{shot:04}.png"), |l| format!("{l}.png"));
+    let path = cfg.runs_dir.join(&name);
+    let result = write_capture_png(&path, &target, &images, &bytes).map(|()| CaptureResult {
+        path: path.display().to_string(),
+    });
+    match &result {
+        Ok(r) => {
+            cfg.shot += 1;
+            tracing::info!(path = %r.path, "capture written");
+        }
+        Err(e) => tracing::warn!(error = %e, "capture failed"),
+    }
+    let _ = job.reply.send(result);
+}
+
+/// Strip the 256-byte row padding from the raw readback bytes and encode a PNG to `path`.
+fn write_capture_png(
+    path: &std::path::Path,
+    target: &RenderTargetImage,
+    images: &Assets<Image>,
+    raw: &[u8],
+) -> Result<(), String> {
+    let img = images.get(&target.0).ok_or("offscreen image missing")?;
+    let pixel_size = img
+        .texture_descriptor
+        .format
+        .pixel_size()
+        .map_err(|e| e.to_string())?;
+    let row_bytes = CAPTURE_W as usize * pixel_size;
+    let aligned = RenderDevice::align_copy_bytes_per_row(row_bytes);
+    let unpadded: Vec<u8> = if row_bytes == aligned {
+        raw.to_vec()
+    } else {
+        raw.chunks(aligned)
+            .take(CAPTURE_H as usize)
+            .flat_map(|row| &row[..row_bytes.min(row.len())])
+            .copied()
+            .collect()
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut copy = img.clone();
+    copy.data = Some(unpadded);
+    let dynamic = copy.try_into_dynamic().map_err(|e| e.to_string())?;
+    dynamic.to_rgba8().save(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---- render-world image copy (ported verbatim-ish from the bevy headless_renderer
+// ---- example via the spike; .unwrap()/.expect()/panic! replaced by guards for -D warnings).
+struct ImageCopyPlugin;
+impl Plugin for ImageCopyPlugin {
+    fn build(&self, app: &mut App) {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let render_app = app
+            .insert_resource(MainWorldReceiver(receiver))
+            .sub_app_mut(RenderApp);
+        let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
+        graph.add_node(ImageCopyLabel, ImageCopyDriver);
+        graph.add_node_edge(bevy::render::graph::CameraDriverLabel, ImageCopyLabel);
+        render_app
+            .insert_resource(RenderWorldSender(sender))
+            .add_systems(ExtractSchedule, image_copy_extract)
+            .add_systems(
+                Render,
+                receive_image_from_buffer.after(RenderSystems::Render),
+            );
+    }
+}
+
+#[derive(Clone, Default, Resource, Deref, DerefMut)]
+struct ImageCopiers(Vec<ImageCopier>);
+
+#[derive(Clone, Component)]
+struct ImageCopier {
+    buffer: Buffer,
+    enabled: Arc<AtomicBool>,
+    src_image: Handle<Image>,
+}
+
+impl ImageCopier {
+    fn new(src_image: Handle<Image>, size: Extent3d, render_device: &RenderDevice) -> ImageCopier {
+        let padded_bytes_per_row = RenderDevice::align_copy_bytes_per_row(size.width as usize) * 4;
+        let buffer = render_device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: padded_bytes_per_row as u64 * size.height as u64,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ImageCopier {
+            buffer,
+            src_image,
+            enabled: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+}
+
+fn image_copy_extract(mut commands: Commands, image_copiers: Extract<Query<&ImageCopier>>) {
+    commands.insert_resource(ImageCopiers(image_copiers.iter().cloned().collect()));
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, RenderLabel)]
+struct ImageCopyLabel;
+
+#[derive(Default)]
+struct ImageCopyDriver;
+
+impl render_graph::Node for ImageCopyDriver {
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let Some(image_copiers) = world.get_resource::<ImageCopiers>() else {
+            return Ok(());
+        };
+        let Some(gpu_images) =
+            world.get_resource::<RenderAssets<bevy::render::texture::GpuImage>>()
+        else {
+            return Ok(());
+        };
+        for image_copier in image_copiers.iter() {
+            if !image_copier.enabled() {
+                continue;
+            }
+            let Some(src_image) = gpu_images.get(&image_copier.src_image) else {
+                continue;
+            };
+            let mut encoder = render_context
+                .render_device()
+                .create_command_encoder(&CommandEncoderDescriptor::default());
+            let block_dimensions = src_image.texture_format.block_dimensions();
+            let Some(block_size) = src_image.texture_format.block_copy_size(None) else {
+                continue;
+            };
+            let padded_bytes_per_row = RenderDevice::align_copy_bytes_per_row(
+                (src_image.size.width as usize / block_dimensions.0 as usize) * block_size as usize,
+            );
+            let Some(bytes_per_row) = std::num::NonZero::<u32>::new(padded_bytes_per_row as u32)
+            else {
+                continue;
+            };
+            encoder.copy_texture_to_buffer(
+                src_image.texture.as_image_copy(),
+                TexelCopyBufferInfo {
+                    buffer: &image_copier.buffer,
+                    layout: TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row.into()),
+                        rows_per_image: None,
+                    },
+                },
+                src_image.size,
+            );
+            let Some(render_queue) = world.get_resource::<RenderQueue>() else {
+                continue;
+            };
+            render_queue.submit(std::iter::once(encoder.finish()));
+        }
+        Ok(())
+    }
+}
+
+fn receive_image_from_buffer(
+    image_copiers: Res<ImageCopiers>,
+    render_device: Res<RenderDevice>,
+    sender: Res<RenderWorldSender>,
+) {
+    for image_copier in image_copiers.0.iter() {
+        if !image_copier.enabled() {
+            continue;
+        }
+        let buffer_slice = image_copier.buffer.slice(..);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        buffer_slice.map_async(MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        if render_device.poll(PollType::wait_indefinitely()).is_err() {
+            continue;
+        }
+        if !matches!(rx.recv(), Ok(Ok(()))) {
+            continue;
+        }
+        let _ = sender.send(buffer_slice.get_mapped_range().to_vec());
+        image_copier.buffer.unmap();
     }
 }

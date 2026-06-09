@@ -68,6 +68,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
+crossbeam-channel = { workspace = true }
 axum = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde_json = { workspace = true }

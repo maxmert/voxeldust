@@ -228,12 +228,15 @@ fn run_windowed(
     });
     // Blocks on the main thread until the window closes — by the human, OR by the
     // AppExit the render crate emits when `core_alive` goes false.
-    vd_client_render::run_window(vd_client_render::RenderHandles {
+    vd_client_render::run(vd_client_render::RenderHandles {
         snapshot: render_published,
         input: command_tx.clone(),
         dropped,
         core_alive,
         started_at,
+        mode: vd_client_render::RenderMode::Windowed,
+        captures: None, // capture (headless) mode wiring lands in the next T5 step
+        runs_dir: std::path::PathBuf::from("runs"),
     });
     // Window closed → reliably ask the core to close (AtomicBool — never shed), then join.
     stop.store(true, Ordering::Relaxed);

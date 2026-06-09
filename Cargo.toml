@@ -45,6 +45,11 @@ bevy_ecs = "0.18"
 # Full default features deliberately (the spike proved a hand-trimmed set causes
 # plugin-ordering panics, e.g. bevy_text's Assets<Font>); pinned to 0.18 to match bevy_ecs.
 bevy = "0.18"
+# egui HUD + the egui-in-readback capture overlay (Slice-3 T5; spike-validated). Paired
+# with bevy 0.18; re-exports its own `egui` (do NOT add a separate egui dep — version skew).
+bevy_egui = "0.39"
+# PNG encode for the wgpu readback capture (Slice-3 T5). Matches Bevy 0.18's image pin.
+image = { version = "0.25", default-features = false, features = ["png"] }
 arc-swap = "1"
 tracing = "0.1"
 

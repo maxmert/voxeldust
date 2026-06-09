@@ -14,7 +14,13 @@ vd-client = { workspace = true }
 vd-client-harness = { workspace = true }
 vd-devproto = { workspace = true }
 bevy = { workspace = true }
+bevy_egui = { workspace = true }
+image = { workspace = true }
 arc-swap = { workspace = true }
+# The render-world -> main-world readback channel (+ the capture-job channel) must be
+# Bevy Resources, so they need Send+Sync receivers — std::sync::mpsc::Receiver is !Sync;
+# crossbeam's is Sync (the spike used it for exactly this).
+crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 
 [lints]
