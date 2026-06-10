@@ -11,6 +11,8 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 - `docs/design/*.md` — the hardened subsystem designs (connection_plane, transfer_protocol,
   test_harness, identity_persistence, generic_transfer, sealed_shards, coverage_e2e).
 - `docs/design/integration.json` — 19 binding cross-design conflict resolutions + glossary.
+- `docs/design/DEFERRED.md` — the binding registry of every interim/stub: WHAT proper solution is missing,
+  WHERE it lives, WHEN (which slice/phase) it lands. A phase isn't done until its entries flip to 🟩.
 - `docs/audit/` — evidence for why the old architecture was unfixable (root causes R1–R10).
 
 ## Hard rules (user-mandated; violations are defects)

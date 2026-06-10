@@ -196,6 +196,15 @@ De-risking spikes (blocking where marked): **SPIKE-0a** sync-step_tick/async-QUI
 
 Standing rule from P4 onward: **every feature lands with its must-not-regress harness scenarios, its G-IDENTICAL fixture (≥2 shard kinds), and the entire accumulated transfer/crash/chaos suite re-runs green** — the structural inversion of the old project's features-first failure.
 
+### Deferred-work registry (binding)
+
+Every interim/stub shipped "working now" with a proper solution owed later is tracked in
+**[`DEFERRED.md`](DEFERRED.md)** — the single source of truth for WHAT is missing, WHERE the interim lives,
+WHEN (which slice/phase) the proper version lands, and its dependency. Each entry is also pinned in-code (a
+`tracing::warn`, a `KNOWN LIMIT` doc, and/or an "exists-to-be-flipped" test) so it can never be silently
+forgotten. **Standing rule: a slice/phase is not "done" until every `DEFERRED.md` entry whose "when" names it
+has been built and its entry flipped to 🟩.** Surfaced + hardened by the P1.5/P2 adversarial audit cycles.
+
 ## Verification
 
 - **Per phase:** the DoD column above; each phase's scenarios become permanent gates (nothing is deleted from `tests/`).

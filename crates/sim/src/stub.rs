@@ -235,9 +235,9 @@ fn request_pending_grants(
                 owner: AuthorityRef::Shard(identity.node_id),
                 fence: Fence::GENESIS.next(),
             };
-            push_flow(
-                &mut outbox,
+            outbox.push_flow(
                 config.orchestrator,
+                MsgClass::Saga,
                 &InterShardFlow::Directory(op),
             );
         }
@@ -252,9 +252,9 @@ fn request_pending_grants(
                 let op = DirectoryOp::HeadRead {
                     key: DirectoryKey::Realm(config.realm),
                 };
-                push_flow(
-                    &mut outbox,
+                outbox.push_flow(
                     config.orchestrator,
+                    MsgClass::Saga,
                     &InterShardFlow::Directory(op),
                 );
             }
@@ -271,9 +271,9 @@ fn request_pending_grants(
                 owner: AuthorityRef::Shard(identity.node_id),
                 fence: Fence::GENESIS.next(),
             };
-            push_flow(
-                &mut outbox,
+            outbox.push_flow(
                 config.orchestrator,
+                MsgClass::Saga,
                 &InterShardFlow::Directory(op),
             );
         } else if dot.departing {
@@ -284,20 +284,13 @@ fn request_pending_grants(
                 key: DirectoryKey::Entity(dot.entity),
                 fence: dot.entity_fence,
             };
-            push_flow(
-                &mut outbox,
+            outbox.push_flow(
                 config.orchestrator,
+                MsgClass::Saga,
                 &InterShardFlow::Directory(op),
             );
         }
     }
-}
-
-/// Encode one inter-shard flow into the outbox (the InterShardFlow encoder is the
-/// SOLE producer of shard-bound bytes — HR1).
-fn push_flow(outbox: &mut OutboundBox, to: NodeId, flow: &InterShardFlow) {
-    let bytes = postcard::to_allocvec(flow).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, MsgClass::Saga, crate::io::bytes(bytes)));
 }
 
 /// Drain and dispatch everything delivered this tick.
@@ -432,9 +425,9 @@ fn on_gateway_msg(
                     owner: AuthorityRef::Shard(ctx.identity.node_id),
                     fence: Fence::GENESIS.next(),
                 };
-                push_flow(
-                    outbox,
+                outbox.push_flow(
                     ctx.config.orchestrator,
+                    MsgClass::Saga,
                     &InterShardFlow::Directory(op),
                 );
             }

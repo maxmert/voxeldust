@@ -87,16 +87,16 @@ fn advance_and_broadcast_clock(
     sample.universe_tick = now;
     sample.epoch = clock.0.epoch();
 
+    // The clock broadcast is a small Membership-class cold-path flow; route each peer
+    // through the ONE shared encode-and-push (DRY-1). Membership is re-derivable +
+    // loss-tolerated, so a per-peer re-encode is immaterial (if profiling ever shows it
+    // matters, restore the encode-once/clone-per-peer inline — this is not a hot path).
     let flow = InterShardFlow::Directory(DirectoryOp::ClockSync {
         universe_tick: now,
         epoch: clock.0.epoch(),
     });
-    // ONE shared body, refcount-bumped to every clock peer.
-    let bytes = vd_sim::io::bytes(
-        postcard::to_allocvec(&flow).expect("closed wire enums serialize infallibly"),
-    );
     for peer in &peers.0 {
-        outbox.0.push((*peer, MsgClass::Membership, bytes.clone()));
+        outbox.push_flow(*peer, MsgClass::Membership, &flow);
     }
 }
 

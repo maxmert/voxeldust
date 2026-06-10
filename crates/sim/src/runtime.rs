@@ -21,6 +21,26 @@ pub struct InboundBox(pub Vec<Inbound>);
 #[derive(Resource, Debug, Default)]
 pub struct OutboundBox(pub Vec<(NodeId, MsgClass, Bytes)>);
 
+impl OutboundBox {
+    /// Encode one `InterShardFlow` and enqueue it to `to` on `class` — the ONE
+    /// encode-and-push for every shard-bound flow (DRY-1: was hand-rolled at four sites —
+    /// the saga runtime, the stub, and two orchestrator inlines). `class` is a PARAMETER,
+    /// never hardcoded, so each caller states its message class deliberately (lease/CAS
+    /// ride `Saga`; the clock broadcast rides `Membership`). The closed wire enums encode
+    /// infallibly; the body is an `Arc`-backed `Bytes`.
+    pub fn push_flow(
+        &mut self,
+        to: NodeId,
+        class: MsgClass,
+        flow: &vd_wire::intershard::InterShardFlow,
+    ) {
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(flow).expect("closed wire enums serialize infallibly"),
+        );
+        self.0.push((to, class, bytes));
+    }
+}
+
 /// This node's identity + kind, readable by systems.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NodeIdentity {

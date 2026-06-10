@@ -114,14 +114,6 @@ fn ack_to_event(ack: TransferControlAck) -> SagaEvent {
     }
 }
 
-/// Serialize one `InterShardFlow` onto the outbox to one peer (the closed wire enums encode
-/// infallibly; the body is an `Arc`-backed `Bytes`).
-fn push_flow(outbox: &mut OutboundBox, to: NodeId, flow: &InterShardFlow) {
-    let bytes =
-        vd_sim::io::bytes(postcard::to_allocvec(flow).expect("closed wire enums serialize"));
-    outbox.0.push((to, MsgClass::Saga, bytes));
-}
-
 /// The action executor: run a saga from `(state, actions)` to quiescence, executing each
 /// action and feeding any SYNCHRONOUS follow-up event (the direct CAS outcome) back into the
 /// FSM. Returns the final state, whether it tombstoned (terminal), and any client rejections.
@@ -147,7 +139,9 @@ fn run_to_quiescence(
     loop {
         for action in actions {
             match action {
-                SagaAction::Send(cmd) => push_flow(outbox, gateway, &InterShardFlow::Saga(cmd)),
+                SagaAction::Send(cmd) => {
+                    outbox.push_flow(gateway, MsgClass::Saga, &InterShardFlow::Saga(cmd));
+                }
                 // THE single commit point, called DIRECTLY (this thread owns the directory).
                 // The outcome re-enters the FSM immediately — no wire round-trip, no tick split.
                 SagaAction::IssueCommitCas { expected } => {
