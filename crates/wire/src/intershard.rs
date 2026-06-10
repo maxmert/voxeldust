@@ -24,7 +24,7 @@ use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, TickId, TransferId};
 
-use crate::seams::directory::DirectoryOp;
+use crate::seams::directory::{DirectoryOp, DirectoryReply};
 use crate::seams::transfer_control::{TransferControl, TransferControlAck};
 
 /// The closed taxonomy. Compiler-forced exhaustive handling everywhere.
@@ -43,6 +43,12 @@ pub enum InterShardFlow {
     Saga(TransferControl),
     /// Gateway → saga acks for the `Saga` arm (one per command phase).
     SagaAck(TransferControlAck),
+    /// Orchestrator → requester REPLY to a `Directory` op (P2): the standing head or the
+    /// CAS outcome. Carried as its OWN arm (not bare bytes) so the requester can decode
+    /// `InterShardFlow` ONCE and dispatch by variant — a `Saga(TransferControl)` and a
+    /// directory reply both ride orchestrator→peer on `MsgClass::Saga`, and postcard is
+    /// non-self-describing, so without this they would mis-decode into each other.
+    DirectoryReply(DirectoryReply),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -101,6 +107,13 @@ impl InterShardFlow {
                     step_id: ack.step_id(),
                 },
             },
+            // A reply mutates NOTHING at the receiver: it reports the standing head / CAS
+            // outcome, which the receiver treats as a HINT and pulls through to the
+            // authority-of-record directory (a lost reply is recovered by re-reading the
+            // head — the directory REQUEST it answers carries the real idempotency). So it
+            // is re-derivable + loss-tolerated = FireAndForget; it carries no transfer
+            // trigger and is never the authority of record (the CAS at the directory is).
+            InterShardFlow::DirectoryReply(_) => EffectClass::FireAndForget,
         }
     }
 }
@@ -358,6 +371,14 @@ mod tests {
                 }
             }
         );
+
+        // A directory REPLY is a re-derivable report (the receiver pulls through to the
+        // authority-of-record directory), never a transfer trigger → FireAndForget.
+        let reply = InterShardFlow::DirectoryReply(DirectoryReply::Head {
+            key: crate::seams::directory::DirectoryKey::Realm(RealmId::System(1)),
+            record: None,
+        });
+        assert_eq!(reply.effect_class(), EffectClass::FireAndForget);
     }
 
     #[test]
@@ -370,6 +391,14 @@ mod tests {
             }),
             InterShardFlow::SagaAck(TransferControlAck::Committed {
                 transfer: TransferId(11),
+            }),
+            // The reply arm must roundtrip distinctly from the Saga arms (the dispatch
+            // split depends on the InterShardFlow tag discriminating them).
+            InterShardFlow::DirectoryReply(DirectoryReply::CasResult {
+                key: crate::seams::directory::DirectoryKey::Session(vd_core::SessionId(3)),
+                outcome: crate::seams::directory::CasOutcome::Won {
+                    new_fence: Fence(4),
+                },
             }),
         ] {
             let bytes = postcard::to_allocvec(&flow).expect("encode");

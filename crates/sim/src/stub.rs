@@ -573,9 +573,16 @@ fn on_directory_reply(
     dots: &mut Dots,
     outbox: &mut OutboundBox,
 ) {
-    let Ok(reply) = postcard::from_bytes::<DirectoryReply>(bytes) else {
-        tracing::error!("undecodable directory reply");
-        return;
+    // The orchestrator wraps every reply in InterShardFlow::DirectoryReply (the dispatch
+    // split); decode the envelope once and route the inner reply. Any other Saga-class arm
+    // to a stub (none today; the Transfer arm to a dest shard lands at 1d) is ignored.
+    let reply = match postcard::from_bytes::<InterShardFlow>(bytes) {
+        Ok(InterShardFlow::DirectoryReply(reply)) => reply,
+        Ok(_) => return,
+        Err(_) => {
+            tracing::error!("undecodable saga-class message");
+            return;
+        }
     };
     match reply {
         DirectoryReply::Head {
@@ -807,7 +814,9 @@ mod tests {
                     in_transfer: None,
                 }),
             };
-            let bytes = crate::io::bytes(postcard::to_allocvec(&reply).expect("encode"));
+            let bytes = crate::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
+            );
             let _ = self.tick(vec![Inbound::Wire {
                 from: ORCH,
                 class: MsgClass::Saga,
@@ -841,7 +850,11 @@ mod tests {
                     in_transfer: None,
                 }),
             };
-            self.tick(vec![wire_msg(ORCH, MsgClass::Saga, &reply)])
+            self.tick(vec![wire_msg(
+                ORCH,
+                MsgClass::Saga,
+                &InterShardFlow::DirectoryReply(reply),
+            )])
         }
 
         /// The full attach flow: request, then grant confirmation.
@@ -922,7 +935,11 @@ mod tests {
                 in_transfer: None,
             }),
         };
-        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &reply)]);
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(reply),
+        )]);
         assert_eq!(rig.world.resource::<RealmAuthority>().0, None);
     }
 
@@ -944,7 +961,11 @@ mod tests {
                 in_transfer: None,
             }),
         };
-        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &foreign)]);
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(foreign),
+        )]);
         assert_eq!(
             rig.world.resource::<RealmAuthority>().0,
             None,
@@ -958,7 +979,11 @@ mod tests {
             key: DirectoryKey::Realm(config().realm),
             record: None,
         };
-        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &gone)]);
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(gone),
+        )]);
         assert_eq!(rig.world.resource::<RealmAuthority>().0, None);
     }
 
@@ -1008,7 +1033,11 @@ mod tests {
                 in_transfer: None,
             }),
         };
-        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &granted_at_5)]);
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(granted_at_5),
+        )]);
         assert_eq!(
             rig.world.resource::<Dots>().0[&SESSION].entity_fence,
             Fence(5)
@@ -1050,11 +1079,21 @@ mod tests {
             universe_tick: UniverseTick(5),
             epoch: vd_core::EpochId(1),
         };
+        // A non-reply InterShardFlow arm misdirected to the stub on Saga (a SagaAck — the
+        // gateway→saga ack) is also ignored: the stub handles ONLY DirectoryReply, every
+        // other arm is a no-op (the dispatch `Ok(_) => return`), never a panic or a decode
+        // error. (The real Transfer arm to a dest shard lands at Slice 1d.)
+        let stray = InterShardFlow::SagaAck(
+            vd_wire::seams::transfer_control::TransferControlAck::Committed {
+                transfer: vd_core::TransferId(9),
+            },
+        );
         let _ = rig.tick(vec![
-            wire_msg(ORCH, MsgClass::Saga, &cas),
-            wire_msg(ORCH, MsgClass::Saga, &clock),
+            wire_msg(ORCH, MsgClass::Saga, &InterShardFlow::DirectoryReply(cas)),
+            wire_msg(ORCH, MsgClass::Saga, &InterShardFlow::DirectoryReply(clock)),
+            wire_msg(ORCH, MsgClass::Saga, &stray),
         ]);
-        // Authority unaffected by non-Head replies.
+        // Authority unaffected by non-Head replies and the stray arm.
         assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)));
     }
 
@@ -1071,8 +1110,16 @@ mod tests {
             record: None,
         };
         let _ = rig.tick(vec![
-            wire_msg(ORCH, MsgClass::Saga, &none_head),
-            wire_msg(ORCH, MsgClass::Saga, &entity_head),
+            wire_msg(
+                ORCH,
+                MsgClass::Saga,
+                &InterShardFlow::DirectoryReply(none_head),
+            ),
+            wire_msg(
+                ORCH,
+                MsgClass::Saga,
+                &InterShardFlow::DirectoryReply(entity_head),
+            ),
         ]);
         assert_eq!(rig.world.resource::<RealmAuthority>().0, None);
     }
@@ -1202,7 +1249,11 @@ mod tests {
                 in_transfer: None,
             }),
         };
-        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &foreign)]);
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(foreign),
+        )]);
         assert!(!rig.world.resource::<Dots>().0[&SESSION].granted);
     }
 
@@ -1225,7 +1276,11 @@ mod tests {
                 in_transfer: None,
             }),
         };
-        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &head)]);
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(head),
+        )]);
         assert!(!rig.world.resource::<Dots>().0[&SESSION].granted);
     }
 
@@ -1464,7 +1519,11 @@ mod tests {
             key: DirectoryKey::Entity(entity),
             record: None,
         };
-        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &gone)]);
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(gone),
+        )]);
         assert_eq!(rig.world.resource::<Dots>().0.len(), 0);
         let confirms: Vec<ShardToGateway> = sent
             .iter()

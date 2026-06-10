@@ -129,10 +129,14 @@ fn serve_directory(
             continue;
         };
         if let Some(reply) = apply_directory_op(&mut dir.0, op, &clock) {
-            let bytes = vd_sim::io::bytes(
-                postcard::to_allocvec(&reply).expect("closed wire enums serialize infallibly"),
+            // Wrap the reply in its own InterShardFlow arm (DRY-1 site 4 + the dispatch
+            // fix): the requester decodes InterShardFlow once and routes by variant, so a
+            // reply and a Saga(TransferControl) on the same MsgClass::Saga never collide.
+            outbox.push_flow(
+                *from,
+                MsgClass::Saga,
+                &InterShardFlow::DirectoryReply(reply),
             );
-            outbox.0.push((*from, MsgClass::Saga, bytes));
         }
     }
 }
@@ -325,12 +329,15 @@ mod tests {
         requester.drain_inbound()
     }
 
-    /// The expected wire form of one directory reply from the orchestrator.
+    /// The expected wire form of one directory reply from the orchestrator — wrapped in
+    /// the InterShardFlow::DirectoryReply envelope (the dispatch split).
     fn reply_wire(reply: &DirectoryReply) -> Inbound {
         Inbound::Wire {
             from: ORCH,
             class: MsgClass::Saga,
-            bytes: postcard::to_allocvec(reply).expect("encode").into(),
+            bytes: postcard::to_allocvec(&InterShardFlow::DirectoryReply(*reply))
+                .expect("encode")
+                .into(),
         }
     }
 

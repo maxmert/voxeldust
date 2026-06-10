@@ -158,6 +158,10 @@ pub struct GatewayStats {
     pub inputs_malformed: u64,
     pub stale_frames_dropped: u64,
     pub undecodable: u64,
+    /// TransferControl commands received before the consumer exists (Slice 1c.2 wires it).
+    /// Counted, never mis-applied — a transient honesty surface that should be 0 once 1c.2
+    /// lands (the consumer replaces this arm).
+    pub transfer_control_unhandled: u64,
 }
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
@@ -256,15 +260,25 @@ fn process_gateway_inbound(
             }
         } else if from == config.orchestrator {
             match class {
-                MsgClass::Saga => on_directory_reply(
-                    bytes,
-                    &config,
-                    &identity,
-                    &clock,
-                    &mut sessions,
-                    &mut stats,
-                    &mut outbox,
-                ),
+                // The orchestrator→gateway Saga class carries an InterShardFlow envelope:
+                // a DirectoryReply (session-grant head) OR a Saga(TransferControl) command.
+                // Decode ONCE and dispatch by variant (the dispatch split that lets them
+                // coexist on one class without mis-decoding into each other).
+                MsgClass::Saga => match postcard::from_bytes::<InterShardFlow>(bytes) {
+                    Ok(InterShardFlow::DirectoryReply(reply)) => on_directory_reply(
+                        reply,
+                        &config,
+                        &identity,
+                        &clock,
+                        &mut sessions,
+                        &mut stats,
+                        &mut outbox,
+                    ),
+                    // The TransferControl consumer (the 7-command saga vocabulary) lands in
+                    // Slice 1c.2; until then a command is counted, not mis-applied.
+                    Ok(InterShardFlow::Saga(_)) => stats.transfer_control_unhandled += 1,
+                    Ok(_) | Err(_) => stats.undecodable += 1,
+                },
                 // Membership (clock sync) is consumed by the follower system.
                 MsgClass::Membership => {}
                 _ => stats.undecodable += 1,
@@ -591,7 +605,7 @@ fn on_shard_frame(
 
 /// Handle a directory reply: the Session-key head confirms (or denies) the mint.
 fn on_directory_reply(
-    bytes: &[u8],
+    reply: DirectoryReply,
     config: &GatewayConfig,
     identity: &NodeIdentity,
     clock: &ClockSample,
@@ -599,10 +613,6 @@ fn on_directory_reply(
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
 ) {
-    let Ok(reply) = postcard::from_bytes::<DirectoryReply>(bytes) else {
-        stats.undecodable += 1;
-        return;
-    };
     let DirectoryReply::Head {
         key: DirectoryKey::Session(session_id),
         record,
@@ -853,8 +863,10 @@ mod tests {
         );
     }
 
-    fn granted_head(session: SessionId) -> DirectoryReply {
-        DirectoryReply::Head {
+    /// A session-grant head reply as the orchestrator now sends it — wrapped in the
+    /// InterShardFlow::DirectoryReply envelope (the dispatch split).
+    fn granted_head(session: SessionId) -> InterShardFlow {
+        InterShardFlow::DirectoryReply(DirectoryReply::Head {
             key: DirectoryKey::Session(session),
             record: Some(OwnerRecord {
                 authority: AuthorityRef::Gateway(GW),
@@ -862,7 +874,7 @@ mod tests {
                 lease_expires: UniverseTick(1_000),
                 in_transfer: None,
             }),
-        }
+        })
     }
 
     fn decode_controls(sent: &[(NodeId, MsgClass, Vec<u8>)], to: NodeId) -> Vec<ServerControlMsg> {
@@ -1105,7 +1117,7 @@ mod tests {
             .next()
             .expect("pending session");
         // The directory says someone ELSE holds the session key.
-        let refused = DirectoryReply::Head {
+        let refused = InterShardFlow::DirectoryReply(DirectoryReply::Head {
             key: DirectoryKey::Session(session_id),
             record: Some(OwnerRecord {
                 authority: AuthorityRef::Gateway(NodeId(55)),
@@ -1113,7 +1125,7 @@ mod tests {
                 lease_expires: UniverseTick(1_000),
                 in_transfer: None,
             }),
-        };
+        });
         let sent = rig.tick(vec![wire(ORCH, MsgClass::Saga, &refused)]);
         assert_eq!(
             decode_controls(&sent, CLIENT)[0],
@@ -1313,6 +1325,61 @@ mod tests {
         // active session receives NOTHING and the failure is counted exactly once.
         assert_eq!(sent.len(), 0, "no output from a corrupt body");
         assert_eq!(rig.stats().undecodable, 1, "counted exactly once");
+    }
+
+    #[test]
+    fn the_orchestrator_saga_class_dispatch_splits_reply_from_command_from_garbage() {
+        use vd_wire::seams::transfer_control::TransferControl;
+        let mut rig = Rig::new();
+
+        // A TransferControl command (the saga driving the gateway) is COUNTED as
+        // not-yet-handled — never mis-decoded as a directory reply (1c.2 wires the consumer).
+        let cmd = InterShardFlow::Saga(TransferControl::PrepareSubscribe {
+            transfer: vd_core::TransferId(1),
+            session: SessionId(7),
+            dest: SHARD,
+        });
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &cmd)]);
+        assert_eq!(rig.stats().transfer_control_unhandled, 1);
+        assert_eq!(rig.stats().undecodable, 0, "a command is NOT undecodable");
+
+        // A non-reply / non-command Saga-class arm (a misdirected Ghost) → undecodable.
+        let ghost = InterShardFlow::Ghost(vd_wire::intershard::GhostFlow::Despawn {
+            entity: EntityId::pack(vd_core::entity_kind::EntityKind::Player, 1, 7, 3),
+            source_fence: Fence(1),
+        });
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &ghost)]);
+        assert_eq!(
+            rig.stats().undecodable,
+            1,
+            "a non-dispatchable arm is undecodable"
+        );
+
+        // Raw garbage on the orchestrator Saga path → also undecodable (the Err arm).
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Saga,
+            bytes: vec![0xFF, 0xFF].into(),
+        }]);
+        assert_eq!(rig.stats().undecodable, 2);
+        // The command count did not move (the split is clean in both directions).
+        assert_eq!(rig.stats().transfer_control_unhandled, 1);
+
+        // A well-formed reply that is NOT a Session head (a CAS outcome carries no gateway
+        // obligation) decodes + dispatches to on_directory_reply, which returns without
+        // effect — it is NOT undecodable (valid arm), just no-op for the gateway.
+        let cas = InterShardFlow::DirectoryReply(DirectoryReply::CasResult {
+            key: DirectoryKey::Session(SessionId(7)),
+            outcome: vd_wire::seams::directory::CasOutcome::Won {
+                new_fence: Fence(2),
+            },
+        });
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &cas)]);
+        assert_eq!(
+            rig.stats().undecodable,
+            2,
+            "a valid non-Head reply is not undecodable"
+        );
     }
 
     #[test]
