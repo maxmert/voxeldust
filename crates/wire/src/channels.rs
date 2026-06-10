@@ -133,6 +133,19 @@ pub struct InputDatagram {
     pub action_bits: u32,
 }
 
+impl InputDatagram {
+    /// Every float component is finite — the AUTHORITATIVE-ingress gate (the server
+    /// twin of the client's delivered-pose `sanitized()` chokepoint): a forged/corrupt
+    /// NaN or Inf in `movement`/`look` would otherwise integrate into the shard's
+    /// authoritative pose and STICK (NaN propagates through every subsequent tick),
+    /// fanning out to every observer. Never trust network input — a shard MUST discard
+    /// (and count) a non-finite datagram instead of integrating it.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        self.movement.iter().all(|c| c.is_finite()) && self.look.iter().all(|c| c.is_finite())
+    }
+}
+
 /// Reliable per-subscription bulk data (chunk payloads land at P4/P6).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BulkMsg {
@@ -378,6 +391,31 @@ mod tests {
             let back: ClientControlMsg = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(back, msg);
         }
+    }
+
+    #[test]
+    fn input_finite_gate_catches_nan_and_inf_in_either_field() {
+        let finite = InputDatagram {
+            seq: 1,
+            is_cut_marker: false,
+            client_tick: TickId(1),
+            movement: [1.0, -1.0, 0.0],
+            look: [0.1, -0.2],
+            action_bits: 0,
+        };
+        assert!(finite.is_finite());
+        // NaN in movement trips the gate (the look arm short-circuits — both arms below).
+        let mut bad = finite;
+        bad.movement[1] = f32::NAN;
+        assert!(!bad.is_finite());
+        // Inf in look trips the gate with movement finite (covers the second arm).
+        let mut bad = finite;
+        bad.look[0] = f32::INFINITY;
+        assert!(!bad.is_finite());
+        // -Inf likewise.
+        let mut bad = finite;
+        bad.look[1] = f32::NEG_INFINITY;
+        assert!(!bad.is_finite());
     }
 
     #[test]

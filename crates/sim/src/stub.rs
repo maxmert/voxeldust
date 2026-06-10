@@ -119,6 +119,12 @@ pub enum DiscardReason {
     Departing,
     /// The payload failed to decode.
     MalformedInput,
+    /// The payload decoded but carried a non-finite (NaN/Inf) movement/look component —
+    /// a forged or corrupt client. Integrating it would PERMANENTLY poison the
+    /// authoritative pose (NaN sticks through every later tick), so it is discarded
+    /// and counted at the ingress gate (`InputDatagram::is_finite`), mirroring the
+    /// client's delivered-pose `sanitized()` chokepoint.
+    NonFiniteInput,
 }
 
 /// The INPUT-CONSERVATION ground truth: every delivered input lands here, applied or
@@ -528,6 +534,13 @@ fn apply_input(
         log.record_discarded(session, None, DiscardReason::MalformedInput);
         return;
     };
+    // The authoritative-ingress finite gate (never trust network input): a NaN/Inf
+    // component would integrate into the pose and STICK. Discarded + counted; the seq
+    // does NOT advance (the input was never applied — INPUT-CONSERVATION holds).
+    if !input.is_finite() {
+        log.record_discarded(session, Some(input.seq), DiscardReason::NonFiniteInput);
+        return;
+    }
     if dot.last_applied_seq.is_some_and(|last| input.seq <= last) {
         log.record_discarded(session, Some(input.seq), DiscardReason::DuplicateSeq);
         return;
@@ -1342,6 +1355,13 @@ mod tests {
             input_bytes: vec![],
         };
         let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Input, &pending)]);
+        // NonFiniteInput: a forged NaN component is caught by the finite gate.
+        let _ = rig.tick(vec![input_msg(
+            6,
+            Fence(1),
+            [f32::NAN, 0.0, 0.0],
+            [0.0, 0.0],
+        )]);
 
         let log = rig.world.resource::<InputLog>();
         assert_eq!(log.applied(), vec![(SESSION, 5)]);
@@ -1353,7 +1373,46 @@ mod tests {
                 (SESSION, None, DiscardReason::MalformedInput),
                 (SessionId(0xBB), None, DiscardReason::UnknownSession),
                 (SessionId(0xCC), None, DiscardReason::PendingAuthority),
+                (SESSION, Some(6), DiscardReason::NonFiniteInput),
             ]
+        );
+    }
+
+    #[test]
+    fn non_finite_input_is_discarded_and_never_poisons_the_pose() {
+        // ROB-1 (whole-codebase audit): a forged/corrupt NaN or Inf input must NEVER
+        // integrate — NaN sticks in the authoritative pose forever and fans out to every
+        // observer. The finite gate discards + counts it, the pose stays untouched, and
+        // the seq does NOT advance (the input was never applied), so a subsequent FINITE
+        // datagram at the same seq applies normally — the session is not wedged.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach();
+        let _ = rig.tick(vec![input_msg(
+            1,
+            Fence(1),
+            [f32::NAN, 0.0, 0.0],
+            [f32::INFINITY, 0.0],
+        )]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(dot.pose.pos, vd_core::glam::DVec3::ZERO, "pose untouched");
+        // Split asserts (no `&&` short-circuit branch — the HR5 coverage discipline).
+        assert_eq!(dot.yaw, 0.0, "yaw untouched");
+        assert_eq!(dot.pitch, 0.0, "pitch untouched");
+
+        // The same seq, now finite: applies (the poisoned datagram never consumed it).
+        let _ = rig.tick(vec![input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+        let log = rig.world.resource::<InputLog>();
+        assert_eq!(log.applied(), vec![(SESSION, 1)]);
+        assert_eq!(
+            log.discarded(),
+            vec![(SESSION, Some(1), DiscardReason::NonFiniteInput)]
+        );
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert!(dot.pose.pos.is_finite(), "authoritative pose finite");
+        assert!(
+            dot.pose.pos.z < 0.0,
+            "the finite input integrated (moved -Z)"
         );
     }
 

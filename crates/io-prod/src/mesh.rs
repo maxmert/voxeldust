@@ -89,6 +89,16 @@ pub struct MeshStats {
     pub datagrams_dropped_too_large: AtomicU64,
     /// Unreliable datagrams dropped by a full send queue (latest-wins back-pressure).
     pub datagrams_dropped_send: AtomicU64,
+    /// RELIABLE inbound events dropped by a full BoundedInbox — the design's explicit
+    /// "genuine overload" ALERT case (a dropped grant/attach/revoke). Also warned loudly
+    /// at the drop site; this must stay ~0 in any healthy run. NOTE: this is the per-NODE
+    /// aggregate derived from the `push_inbox` verdict; the `BoundedInbox::dropped_reliable`
+    /// counter (vd-sim) is the per-INBOX tally — the two are distinct surfaces (never
+    /// summed): MeshStats for the live transport, the inbox tally for unit tests.
+    pub inbound_dropped_reliable: AtomicU64,
+    /// Unreliable inbound events evicted/dropped by a full BoundedInbox (latest-wins
+    /// back-pressure — by design under load; the counter is the observability surface).
+    pub inbound_dropped_unreliable: AtomicU64,
 }
 
 /// A snapshot of the mesh counters (loads the atomics).
@@ -96,13 +106,36 @@ pub struct MeshStats {
 pub struct MeshStatsSnapshot {
     pub datagrams_dropped_too_large: u64,
     pub datagrams_dropped_send: u64,
+    pub inbound_dropped_reliable: u64,
+    pub inbound_dropped_unreliable: u64,
 }
 
-fn push_inbox(inbox: &SharedInbox, event: Inbound) {
-    inbox
+/// THE inbound-push chokepoint: applies the BoundedInbox overflow policy AND surfaces
+/// the result (audit ROB-2 — the drop return exists to be surfaced, never discarded).
+/// A RELIABLE drop is the design's explicit overload ALERT: warned + counted. An
+/// unreliable drop is by-design latest-wins back-pressure: counted only.
+pub(crate) fn push_inbox(inbox: &SharedInbox, stats: &MeshStats, event: Inbound) {
+    let dropped = inbox
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(event);
+    match dropped {
+        Some(vd_sim::io::InboxDrop::Reliable) => {
+            stats
+                .inbound_dropped_reliable
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "BoundedInbox FULL of reliable events: a RELIABLE inbound was dropped \
+                 (genuine overload — raise the inbound capacity or shed load upstream)"
+            );
+        }
+        Some(vd_sim::io::InboxDrop::Unreliable) => {
+            stats
+                .inbound_dropped_unreliable
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        None => {}
+    }
 }
 
 struct PeerLane {
@@ -155,6 +188,11 @@ impl MeshControl {
                 .datagrams_dropped_too_large
                 .load(Ordering::Relaxed),
             datagrams_dropped_send: self.stats.datagrams_dropped_send.load(Ordering::Relaxed),
+            inbound_dropped_reliable: self.stats.inbound_dropped_reliable.load(Ordering::Relaxed),
+            inbound_dropped_unreliable: self
+                .stats
+                .inbound_dropped_unreliable
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -200,6 +238,7 @@ pub fn spawn_mesh(
     // reliable uni streams and unreliable datagrams.
     let accept_endpoint = endpoint.clone();
     let accept_inbox = Arc::clone(&inbox);
+    let accept_stats = Arc::clone(&stats);
     let permits = Arc::new(tokio::sync::Semaphore::new(
         cfg.max_inbound_connections.max(1),
     ));
@@ -209,12 +248,13 @@ pub fn spawn_mesh(
                 break; // semaphore closed: endpoint shutting down
             };
             let inbox = Arc::clone(&accept_inbox);
+            let stats = Arc::clone(&accept_stats);
             tokio::spawn(async move {
                 let _permit = permit; // held for the connection's lifetime
                 let Ok(connection) = incoming.await else {
                     return; // handshake failed (foreign trust): drop, never serve
                 };
-                serve_connection(connection, inbox).await;
+                serve_connection(connection, inbox, stats).await;
             });
         }
     });
@@ -252,15 +292,21 @@ pub fn spawn_mesh(
 
 /// Serve one accepted connection: reliable uni streams AND unreliable datagrams,
 /// both feeding the shared bounded inbox.
-async fn serve_connection(connection: quinn::Connection, inbox: SharedInbox) {
+async fn serve_connection(
+    connection: quinn::Connection,
+    inbox: SharedInbox,
+    stats: Arc<MeshStats>,
+) {
     let stream_conn = connection.clone();
     let stream_inbox = Arc::clone(&inbox);
+    let stream_stats = Arc::clone(&stats);
     // Reliable streams.
     let streams = tokio::spawn(async move {
         while let Ok(recv) = stream_conn.accept_uni().await {
             let inbox = Arc::clone(&stream_inbox);
+            let stats = Arc::clone(&stream_stats);
             tokio::spawn(async move {
-                crate::read_frames_into(recv, &inbox).await;
+                crate::read_frames_into(recv, &inbox, &stats).await;
             });
         }
     });
@@ -269,6 +315,7 @@ async fn serve_connection(connection: quinn::Connection, inbox: SharedInbox) {
         if let Ok(frame) = postcard::from_bytes::<WireFrame>(&datagram) {
             push_inbox(
                 &inbox,
+                &stats,
                 Inbound::Wire {
                     from: frame.from,
                     class: frame.class,
@@ -322,6 +369,7 @@ async fn peer_writer(mut w: PeerWriter) {
                 if frame.class.reliability() == Reliability::Reliable {
                     push_inbox(
                         &w.inbox,
+                        &w.stats,
                         Inbound::NodeUnreachable {
                             to: frame.to,
                             class: frame.class,

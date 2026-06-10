@@ -6,11 +6,12 @@
 //! Two orthogonal closed taxonomies (`docs/design/sealed_shards.md` §0):
 //! 1. **Connection plane** (client↔gateway↔shard world state):
 //!    `ControlMsg | InputDatagram | BulkMsg | EventMsg | SnapshotDatagram`.
-//! 2. **`InterShardFlow`** (shard↔shard / shard↔orchestrator):
-//!    `Ghost | Transfer | Directory | BlockEdit | Coupling | Signal` — one reviewed file
+//! 2. **`InterShardFlow`** (shard↔shard / shard↔orchestrator) — the CURRENT closed set:
+//!    `Ghost | Transfer | Directory | Saga | SagaAck` — one reviewed file
 //!    (`intershard.rs`), arms frozen INCREMENTALLY with their first consumer
-//!    (P0: Ghost/Transfer-Durable/Directory; P3/P6: BlockEdit + Transfer-Transient;
-//!    P8: Coupling; P9: Signal).
+//!    (P0: Ghost/Transfer-Durable/Directory; P2: Saga/SagaAck — the route-swap saga;
+//!    RESERVED future arms, added under review with their phases: BlockEdit +
+//!    Transfer-Transient at P3/P6, Coupling at P8, Signal at P9).
 //!
 //! Also owns the three contract-tested seams (frozen before any consumer is built):
 //! - `TransferControl` — the saga→gateway command/ack vocabulary,

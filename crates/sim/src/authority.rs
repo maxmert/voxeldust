@@ -11,6 +11,16 @@
 //! Ghosts are kinematic mirrors that NEVER independently integrate physics; Frozen
 //! entities accept no input and no integration — the gateway fence makes the freeze
 //! enforced, not cooperative.
+//!
+//! ## NOT YET WIRED (P2 Slice 1d connects it)
+//! This FSM is fully built + proptested but has ZERO production consumers today: the
+//! LIVE authority mechanism in the stub world is the realm-level grant/self-fence in
+//! `stub.rs` (`granted` + `entity_fence`), NOT per-entity `Authority` states. Slice 1d
+//! attaches this FSM to the stub's entities (the dest frozen Ghost on PrepareSubscribe,
+//! Freeze/Promote/Demote/Thaw through the saga). Until then there is exactly ONE
+//! authority representation in effect — do not treat these states as live, and do not
+//! build a second mechanism beside them (split-brain hides where two representations
+//! that look like one disagree). (Audit FG-2.)
 
 use serde::{Deserialize, Serialize};
 use vd_core::{Fence, TickId, TransferId};

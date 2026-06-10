@@ -45,13 +45,15 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
 # Lint the OTHER supported vd-bins feature combos (the workspace lint covers only the
-# default set): `dev-control` alone is the DAILY agent-loop build (client.sh headless) and
-# `render` alone exercises the requires-dev-control rejection arms — combo rot in either
-# would otherwise surface only when a human next runs client.sh. The full
-# `dev-control,render` combo is compiled by `render-smoke`.
+# default set): `dev-control` alone is the DAILY agent-loop build (client.sh headless),
+# `render` alone exercises the requires-dev-control rejection arms, and the COMBINED
+# `dev-control,render` combo carries the capture/cut-cycle code — previously compiled
+# ONLY by the GPU-required render-smoke, so a violation there slipped every GPU-less
+# gate (audit FG-1; clippy needs no GPU, it only type-checks).
 lint-combos:
     cargo clippy -p vd-bins --features dev-control --all-targets -- -D warnings
     cargo clippy -p vd-bins --features render --all-targets -- -D warnings
+    cargo clippy -p vd-bins --features dev-control,render --all-targets -- -D warnings
 
 # SCALE-1 (the K-client load/collapse gate): K real dev-control clients log into one
 # cluster concurrently — fan-out + per-client routing proven at the per-slot client cap.
@@ -70,6 +72,11 @@ spike2a:
 fmt:
     cargo fmt --all
 
+# The GATE's fmt step: fail-on-drift (a gate must never silently rewrite the tree it
+# validates — audit AAA-1). `just fmt` stays the dev fixup.
+fmt-check:
+    cargo fmt --all --check
+
 # G-RENDER-SMOKE (HR6 permanent visual gate): bring up the local cluster, launch a HEADLESS
 # `client --capture`, capture a real wgpu-readback frame, and assert no-magenta +
 # content-present over it. Builds the client with `--features dev-control,render` (pulls
@@ -79,8 +86,9 @@ render-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
 
 # Everything a merge requires (render-smoke is GPU-required + local; spike2a is a release
-# build — both are documented in their recipes).
-gate: fmt lint lint-combos test client-load spike2a render-smoke coverage
+# build — both are documented in their recipes). fmt-check FAILS on drift (run `just fmt`
+# to fix); every gate step is fail-on-violation, none mutates the tree.
+gate: fmt-check lint lint-combos test client-load spike2a render-smoke coverage
 
 # One-time setup helper.
 coverage-setup:

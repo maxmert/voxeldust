@@ -380,6 +380,7 @@ pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<
 pub(crate) async fn read_frames_into(
     mut recv: quinn::RecvStream,
     inbox: &std::sync::Arc<std::sync::Mutex<vd_sim::io::BoundedInbox>>,
+    stats: &mesh::MeshStats,
 ) {
     loop {
         let mut len_buf = [0u8; 4];
@@ -396,14 +397,17 @@ pub(crate) async fn read_frames_into(
         }
         match postcard::from_bytes::<WireFrame>(&buf) {
             Ok(frame) => {
-                inbox
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(Inbound::Wire {
+                // Through the ONE surfacing chokepoint (a dropped RELIABLE frame here is
+                // the loudest case of all — this is the reliable-stream reader).
+                mesh::push_inbox(
+                    inbox,
+                    stats,
+                    Inbound::Wire {
                         from: frame.from,
                         class: frame.class,
                         bytes: vd_sim::io::bytes(frame.bytes),
-                    });
+                    },
+                );
             }
             Err(_) => return,
         }

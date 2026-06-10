@@ -40,6 +40,17 @@ pub struct OwnerRecord {
     pub fence: Fence,
     /// Soft lease deadline against the analytic clock; renewals never touch durable
     /// storage — only ASSIGNMENTS are persisted.
+    ///
+    /// ## TTL ENFORCEMENT IS NOT YET IMPLEMENTED (binding pre-crash-matrix item)
+    /// The deadline is WRITTEN on every grant/renew/commit but nothing DRIVES the
+    /// lifecycle yet: no node sends `LeaseRenew` (the heartbeat producer is unbuilt)
+    /// and no sweep reads `lease_expires` to reap a lapsed record — a crashed node's
+    /// keys currently stay owned forever. Inert for P1's fixed roster (keys are
+    /// explicitly revoked on detach); MUST land before the P2 crash/stagger matrix +
+    /// P3 chaos: a renewal heartbeat from each authority holder AND an orchestrator
+    /// expiry sweep gated on unreachable-confirmation (lapsed lease ⇒ ownership loss
+    /// ONLY when the owner is confirmed unreachable). Do NOT assume crash recovery
+    /// exists yet. (Audit XSI-1.)
     pub lease_expires: UniverseTick,
     pub in_transfer: Option<TransferId>,
 }

@@ -254,6 +254,45 @@ mod tests {
     }
 
     #[test]
+    fn the_registry_cannot_drift_from_the_enum() {
+        // ALL and from_tag are hand-maintained; HR2 hinges on tag decode, so a variant
+        // missing from either is a silently-unspawnable entity CLASS (audit FG-3).
+        //
+        // Tripwire 1 — adding an enum variant breaks THIS exhaustive match at compile
+        // time, directing the author here: register it in ALL + from_tag + this list.
+        for kind in EntityKind::ALL {
+            match kind {
+                EntityKind::Player
+                | EntityKind::Ship
+                | EntityKind::NamedConstruction
+                | EntityKind::Debris
+                | EntityKind::DroppedBlock
+                | EntityKind::Projectile
+                | EntityKind::Rocket => {}
+            }
+        }
+        // Tripwire 2 — sweep the FULL tag space: every accepted tag must round-trip to
+        // itself AND appear in ALL, and the accepted count must equal ALL's length —
+        // so from_tag and ALL can never disagree in either direction.
+        let mut accepted = 0usize;
+        for tag in 0..=u8::MAX {
+            if let Ok(kind) = EntityKind::from_tag(tag) {
+                accepted += 1;
+                assert_eq!(kind as u8, tag, "tag {tag} decodes to a kind with that tag");
+                assert!(
+                    EntityKind::ALL.contains(&kind),
+                    "{kind:?} decodable but missing from ALL"
+                );
+            }
+        }
+        assert_eq!(
+            accepted,
+            EntityKind::ALL.len(),
+            "from_tag accepts exactly the registered set"
+        );
+    }
+
+    #[test]
     fn durable_kinds_have_zero_loss_budget() {
         for kind in EntityKind::ALL {
             let def = kind.def();

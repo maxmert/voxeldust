@@ -205,12 +205,22 @@ impl MemHub {
                         },
                     )
                 };
-                inner
+                // Surface the overflow verdict (audit ROB-2): a dropped RELIABLE event is
+                // the design's explicit overload ALERT — warn loudly even in the in-memory
+                // hub (the BoundedInbox counters stay the queryable surface for tests).
+                let dropped = inner
                     .nodes
                     .get_mut(&target)
                     .expect("pump target exists: receiver checked alive, or sender owns the frame")
                     .inbound
                     .push(event);
+                if dropped == Some(crate::io::InboxDrop::Reliable) {
+                    tracing::warn!(
+                        node = target.0,
+                        "BoundedInbox FULL of reliable events: a RELIABLE inbound was \
+                         dropped (genuine overload)"
+                    );
+                }
             }
         }
     }
@@ -254,6 +264,20 @@ impl Transport for MemTransport {
 
     fn local_id(&self) -> NodeId {
         self.local
+    }
+}
+
+impl MemTransport {
+    /// The count of RELIABLE inbound events this node's inbox has dropped under overload
+    /// (the design's loud-ALERT case — also `tracing::warn`ed at the pump). A test/oracle
+    /// surface for the ROB-2 never-silent guarantee; 0 in any healthy run.
+    #[must_use]
+    pub fn inbound_dropped_reliable(&self) -> u64 {
+        self.hub
+            .lock()
+            .nodes
+            .get(&self.local)
+            .map_or(0, |node| node.inbound.dropped_reliable())
     }
 }
 
@@ -394,6 +418,34 @@ mod tests {
                 bytes: vec![31].into(),
             },
             "the newest snapshot always survives"
+        );
+    }
+
+    #[test]
+    fn a_reliable_overflow_drops_the_newcomer_and_is_surfaced() {
+        // The design's explicit overload ALERT (audit ROB-2): an inbox FULL of reliable
+        // traffic drops the incoming RELIABLE event (warned at the pump site + counted by
+        // the inbox). The earlier reliable events survive; the newcomer is the casualty.
+        let hub = MemHub::new();
+        let mut a = hub.register(A, 64);
+        let mut b = hub.register_bounded(B, 64, 1);
+        a.send(B, MsgClass::Control, vec![1].into()).expect("sent");
+        a.send(B, MsgClass::Control, vec![2].into()).expect("sent");
+        hub.pump();
+        // The drop is SURFACED (audit ROB-2): the counter records it (and the pump warns).
+        assert_eq!(
+            b.inbound_dropped_reliable(),
+            1,
+            "the reliable drop is counted"
+        );
+        assert_eq!(
+            b.drain_inbound(),
+            vec![Inbound::Wire {
+                from: A,
+                class: MsgClass::Control,
+                bytes: vec![1].into(),
+            }],
+            "the first reliable survives; the overflowing newcomer was dropped"
         );
     }
 

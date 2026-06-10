@@ -101,6 +101,21 @@ const _: () = assert!(
     "DEV.max_sessions must be >= max_clients_per_worktree (K) so every client logs in",
 );
 
+/// TICK-PAIR (compile-time): `tick_hz` (the pacer rate) and `tick_dt` (the shard's
+/// integration step) are ONE physical quantity — the tick period — expressed twice.
+/// If they drift (e.g. retuning tick_hz without flipping tick_dt) the shard silently
+/// integrates motion at the wrong dt while the pacer ticks at the wrong rate: avatar
+/// speed, snapshot cadence, and the client interp buffer all desync with no error.
+/// A drift fails the BUILD (audit DRY-A).
+const _: () = assert!(
+    {
+        let diff = 1.0 / (DEV.tick_hz as f64) - DEV.tick_dt;
+        // const-context abs(): both signs checked explicitly.
+        diff < 1e-9 && diff > -1e-9
+    },
+    "DEV.tick_dt must equal 1/DEV.tick_hz (one tick period, two encodings)",
+);
+
 // ---- the env contract --------------------------------------------------------
 
 /// The bind addresses of the three fixed cluster nodes (admin is the orchestrator's

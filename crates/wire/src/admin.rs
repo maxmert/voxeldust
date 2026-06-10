@@ -6,6 +6,12 @@
 //! Views are OPERATOR-FACING: ids are pre-rendered through their canonical `Display`
 //! forms (hex-stable, grep-friendly) so a dump is readable without tooling, and the
 //! u128 ids never hit a JSON number (which cannot carry them).
+//!
+//! SECURITY CONTRACT: read-only by construction AND loopback/internal-only — the
+//! snapshot serves internal topology (node ids, fences, leases), so the serving
+//! endpoint MUST gain authentication (bearer/mTLS on the route) before any routable
+//! bind. The dev cluster binds loopback; real auth is a deploy-readiness item.
+//! (Audit CAF-2.)
 
 use serde::{Deserialize, Serialize};
 use vd_core::{EpochId, Fence, NodeId, UniverseTick};
