@@ -12,6 +12,21 @@
 
 use glam::{DQuat, DVec3, EulerRot};
 
+/// The authoritative look-pitch limit: avatars look up/down to just shy of the ±π/2
+/// gimbal pole. The small epsilon keeps `orient_from_yaw_pitch` non-degenerate (at
+/// EXACTLY ±π/2 the YXZ decomposition collapses yaw and roll). Accumulated look-pitch
+/// is clamped to `[-PITCH_LIMIT, PITCH_LIMIT]` every tick so authoritative orientation
+/// can never wrap past vertical (WB-1). ONE home for the convention the sim integrator
+/// and any client camera share.
+pub const PITCH_LIMIT: f64 = std::f64::consts::FRAC_PI_2 - 1.0e-4;
+
+/// Clamp an accumulated look-pitch to the valid range (see [`PITCH_LIMIT`]). Branchless
+/// (`f64::clamp`): the integrator calls it every tick on `pitch + Δlook`.
+#[must_use]
+pub fn clamp_pitch(pitch: f64) -> f64 {
+    pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT)
+}
+
 /// Orientation for a `(yaw, pitch)`: `from_euler(YXZ, yaw, pitch, 0)`. Yaw is around
 /// `+Y`; forward is `orient · -Z`.
 #[must_use]
@@ -89,6 +104,16 @@ mod tests {
     #[test]
     fn rest_forward_is_minus_z() {
         assert!(forward_from_yaw_pitch(0.0, 0.0).abs_diff_eq(DVec3::NEG_Z, 1e-12));
+    }
+
+    #[test]
+    fn clamp_pitch_bounds_to_just_shy_of_the_poles() {
+        // Below, within, and above the range — the WB-1 guard. The limit is strictly
+        // inside the gimbal pole, so a clamped orientation stays non-degenerate.
+        assert_eq!(clamp_pitch(10.0), PITCH_LIMIT);
+        assert_eq!(clamp_pitch(-10.0), -PITCH_LIMIT);
+        assert_eq!(clamp_pitch(0.3), 0.3);
+        assert!(orient_from_yaw_pitch(0.0, clamp_pitch(10.0)).is_normalized());
     }
 
     #[test]

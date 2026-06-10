@@ -39,6 +39,16 @@ pub struct UniverseClockRes(pub CeilingClock);
 #[derive(Resource, Clone, Debug)]
 struct ClockPeers(Vec<NodeId>);
 
+/// Orchestrator-side honesty counters — tolerated anomalies that must never be silent.
+#[derive(Resource, Debug, Default, PartialEq, Eq)]
+pub struct OrchestratorStats {
+    /// Saga-class frames that failed to decode at the directory ingress (a malformed
+    /// or garbage envelope). Dropped, never mis-applied, but counted so a decode
+    /// regression is observable rather than log-only (ROB-E2E-1; mirrors the gateway
+    /// and stub `undecodable`). 0 in any healthy run.
+    pub undecodable: u64,
+}
+
 /// Install the orchestrator systems. Genesis-reserves the clock ceiling and
 /// confirms it in memory (the durable wrapper arrives with redb at P3).
 ///
@@ -53,6 +63,7 @@ pub fn register_orchestrator(world: &mut World, schedule: &mut Schedule, cfg: &O
     world.insert_resource(UniverseClockRes(clock));
     world.insert_resource(DirectoryRes(DirectoryCore::new(cfg.directory)));
     world.insert_resource(ClockPeers(cfg.clock_peers.clone()));
+    world.insert_resource(OrchestratorStats::default());
     world.insert_resource(crate::saga_runtime::SagaRuntimeRes::default());
     // serve_directory then drive_sagas: both read the Saga-class inbound (directory ops vs
     // gateway acks); the saga runtime's direct commit_cas runs after the directory service.
@@ -107,6 +118,7 @@ fn serve_directory(
     inbox: Res<InboundBox>,
     clock: Res<ClockSample>,
     mut dir: ResMut<DirectoryRes>,
+    mut stats: ResMut<OrchestratorStats>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     for msg in &inbox.0 {
@@ -119,6 +131,7 @@ fn serve_directory(
         let flow = match postcard::from_bytes::<InterShardFlow>(bytes) {
             Ok(flow) => flow,
             Err(_) => {
+                stats.undecodable += 1;
                 tracing::error!("undecodable saga-class message from {from}");
                 continue;
             }
@@ -217,6 +230,12 @@ pub fn admin_snapshot(world: &mut bevy_ecs::prelude::World) -> vd_wire::admin::A
             .entries()
             .map(|(key, record)| vd_wire::admin::directory_entry_view(key, record))
             .collect();
+    }
+    // AAA-1: the in-flight sagas — the "curl a stuck saga at 2am" promise. A saga that
+    // parks (e.g. a P3-stub TransientGo, or a Demoting tail awaiting the band predicate)
+    // stays in this set with its state + staleness visible, never silently wedged.
+    if let Some(sagas) = world.get_resource::<crate::saga_runtime::SagaRuntimeRes>() {
+        snapshot.sagas = sagas.views();
     }
     snapshot
 }
@@ -472,6 +491,12 @@ mod tests {
             report.sent, 0,
             "garbage replied nothing, wrong class ignored"
         );
+        // The Saga-class decode failure is COUNTED, never silent (ROB-E2E-1); the
+        // wrong-class (Control) message is skipped before decode, so it adds nothing.
+        assert_eq!(
+            orch.world_mut().resource::<OrchestratorStats>().undecodable,
+            1
+        );
     }
 
     #[test]
@@ -499,6 +524,9 @@ mod tests {
         assert_eq!(snap.universe_tick, 1);
         assert_eq!(snap.epoch, 7);
         assert_eq!(snap.directory, vec![]);
+        // No saga has been triggered, so the (present) saga runtime renders an empty
+        // list — the saga view is populated from real state, never fabricated (AAA-1).
+        assert_eq!(snap.sagas, vec![]);
 
         // A granted lease appears in the dump.
         let mut requester = hub.register(SHARD, 64);

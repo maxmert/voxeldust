@@ -199,6 +199,12 @@ pub struct StubStats {
     /// Attach requests that arrived before the realm lease was granted; the
     /// gateway retries attach until it sees `SessionAttached` (at-least-once).
     pub attaches_deferred: u64,
+    /// Inter-shard frames that failed to decode at ingress (a malformed/garbage
+    /// gateway→shard or directory-reply payload). Tolerated — the frame is dropped,
+    /// never mis-applied — but counted so a decode regression is observable rather
+    /// than log-only (ROB-E2E-1; mirrors the gateway's `undecodable`). 0 in any
+    /// healthy run.
+    pub undecodable: u64,
 }
 
 /// Install the stub-shard systems and resources onto a node's world + schedule.
@@ -338,6 +344,7 @@ fn process_inbound(
                 &config,
                 &mut authority,
                 &mut dots,
+                &mut stats,
                 &mut outbox,
             ),
             // Membership (clock sync) is consumed by the node-level follower system;
@@ -368,6 +375,7 @@ fn on_gateway_msg(
     outbox: &mut OutboundBox,
 ) {
     let Ok(msg) = postcard::from_bytes::<GatewayToShard>(bytes) else {
+        stats.undecodable += 1;
         tracing::error!("undecodable gateway->shard message");
         return;
     };
@@ -547,7 +555,10 @@ fn apply_input(
 /// speed·dt in the dot's yaw-rotated heading. Pure f64 closed-form per tick.
 fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &ClockSample) {
     dot.yaw += f64::from(input.look[0]);
-    dot.pitch += f64::from(input.look[1]);
+    // Pitch is CLAMPED to the valid look range (WB-1): unbounded accumulation would wrap
+    // past the ±π/2 gimbal pole and silently corrupt authoritative orientation. Yaw wraps
+    // freely (no pole). ONE shared bound (`vd_core::kinematics::PITCH_LIMIT`).
+    dot.pitch = kinematics::clamp_pitch(dot.pitch + f64::from(input.look[1]));
     dot.orient_from_angles();
     // The movement-axis map is the ONE shared input convention (vd_core::kinematics) —
     // the client's nav/camera invert the SAME definition (no hand-re-encoded drift).
@@ -565,12 +576,14 @@ impl Dot {
 }
 
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
+#[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
     bytes: &[u8],
     identity: &NodeIdentity,
     config: &StubConfig,
     authority: &mut RealmAuthority,
     dots: &mut Dots,
+    stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
     // The orchestrator wraps every reply in InterShardFlow::DirectoryReply (the dispatch
@@ -580,6 +593,7 @@ fn on_directory_reply(
         Ok(InterShardFlow::DirectoryReply(reply)) => reply,
         Ok(_) => return,
         Err(_) => {
+            stats.undecodable += 1;
             tracing::error!("undecodable saga-class message");
             return;
         }
@@ -1158,6 +1172,9 @@ mod tests {
             },
         ]);
         assert_eq!(rig.world.resource::<Dots>().0.len(), 0);
+        // Both decode failures (Saga + Control) are COUNTED, never silent (ROB-E2E-1);
+        // the Snapshot/Membership garbage is not decoded by the stub, so it adds nothing.
+        assert_eq!(rig.world.resource::<StubStats>().undecodable, 2);
     }
 
     #[test]
@@ -1347,6 +1364,23 @@ mod tests {
         let expected_step = 2.0 * 0.05;
         assert!((dot.pose.pos.x + expected_step).abs() < 1e-6, "moved -X");
         assert!(dot.pose.pos.z.abs() < 1e-6);
+    }
+
+    #[test]
+    fn pitch_is_clamped_at_the_gimbal_pole_never_wraps_past_vertical() {
+        // WB-1: a huge look-up delta must NOT accumulate past ±π/2 (which would flip the
+        // authoritative orientation). Two big up-pitches in a row stay clamped at the limit.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach();
+        let _ = rig.tick(vec![input_msg(1, Fence(1), [0.0, 0.0, 0.0], [0.0, 3.0])]);
+        let _ = rig.tick(vec![input_msg(2, Fence(1), [0.0, 0.0, 0.0], [0.0, 3.0])]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(
+            dot.pitch,
+            vd_core::kinematics::PITCH_LIMIT,
+            "accumulated pitch is held at the limit, never wrapped past vertical"
+        );
     }
 
     #[test]

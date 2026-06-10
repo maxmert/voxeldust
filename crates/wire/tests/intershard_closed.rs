@@ -2,19 +2,23 @@
 //! in-module unit test to the design-named INTEGRATION location so the closed-set
 //! guarantee is a per-release gate, not a convention (audit SEAL-2).
 //!
-//! The closed taxonomy `InterShardFlow{Ghost,Transfer,Directory}` is the ONLY shape
-//! that crosses a shard boundary; every arm has a coherent `EffectClass`, and every
-//! SIDE-EFFECTING arm carries an idempotency key (so an authority-gating payload can
-//! never ride a fire-and-forget channel). The exhaustive `match` in `effect_class`
-//! means adding an arm without classifying it does not compile.
+//! The closed taxonomy `InterShardFlow{Ghost,Transfer,Directory,Saga,SagaAck,
+//! DirectoryReply}` is the ONLY shape that crosses a shard boundary; every arm has a
+//! coherent `EffectClass`, and every SIDE-EFFECTING arm carries an idempotency key (so
+//! an authority-gating payload can never ride a fire-and-forget channel). Two compile-
+//! time tripwires keep this gate honest as arms are added: the exhaustive `match` in
+//! `effect_class` (adding an arm without classifying it does not compile) and the
+//! `arm_tripwire` below (adding an arm without representing it in `every_arm` here does
+//! not compile) — so the per-release surface enumeration can never silently drift.
 
 use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
-use vd_core::{EntityId, EpochId, Fence, NodeId, TickId, TransferId, UniverseTick};
+use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
 use vd_wire::intershard::{
     EffectClass, GhostFlow, IdempotencyKey, InterShardFlow, TransferEnvelope, TransitionPayload,
 };
-use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp};
+use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
+use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
 
 fn pose() -> StampedPose {
     StampedPose::at_rest(
@@ -103,7 +107,38 @@ fn every_arm() -> Vec<InterShardFlow> {
         InterShardFlow::Directory(DirectoryOp::HeadRead {
             key: DirectoryKey::Realm(RealmId::System(1)),
         }),
+        // P2 arms (the route-swap saga) — SIDE-EFFECTING (TransferStep) for the command
+        // + its ack; FIRE-AND-FORGET for the directory reply envelope.
+        InterShardFlow::Saga(TransferControl::PrepareSubscribe {
+            transfer: TransferId(7),
+            session: SessionId(1),
+            dest: NodeId(2),
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::Prepared {
+            transfer: TransferId(8),
+            result: PrepareResult::Ready,
+        }),
+        InterShardFlow::DirectoryReply(DirectoryReply::Head {
+            key: DirectoryKey::Realm(RealmId::System(1)),
+            record: None,
+        }),
     ]
+}
+
+/// Compile-time tripwire: adding an `InterShardFlow` arm MUST break this exhaustive
+/// match (no wildcard), forcing the author back here to also represent it in
+/// [`every_arm`] above — so the per-release surface gate can never silently omit an arm
+/// (audit HR1-1). This is never called; its body is the structural assertion.
+#[allow(dead_code)]
+fn arm_tripwire(flow: &InterShardFlow) {
+    match flow {
+        InterShardFlow::Ghost(_)
+        | InterShardFlow::Transfer(_)
+        | InterShardFlow::Directory(_)
+        | InterShardFlow::Saga(_)
+        | InterShardFlow::SagaAck(_)
+        | InterShardFlow::DirectoryReply(_) => {}
+    }
 }
 
 #[test]

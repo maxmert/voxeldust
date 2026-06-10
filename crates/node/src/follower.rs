@@ -21,6 +21,11 @@ pub struct FollowerState {
     /// Syncs carrying a different epoch than the one first observed (a wiped or
     /// rolled universe) — fail-safe ignored, loudly counted.
     pub epoch_mismatches: u64,
+    /// Membership-class frames that did not decode to a `ClockSync` (a malformed
+    /// payload or an unexpected arm on the membership class). Ignored, but counted
+    /// so the failure is observable rather than log-only (ROB-E2E-1). 0 in any
+    /// healthy run.
+    pub undecodable: u64,
 }
 
 /// Install the clock-follower system (shards and gateways).
@@ -46,6 +51,7 @@ fn observe_clock_syncs(
             epoch,
         })) = postcard::from_bytes::<InterShardFlow>(bytes)
         else {
+            state.undecodable += 1;
             tracing::error!("undecodable membership-class message");
             continue;
         };
@@ -207,5 +213,9 @@ mod tests {
             world.resource::<ClockSample>().universe_tick,
             UniverseTick(0)
         );
+        // Both membership frames that did not yield a ClockSync — the undecodable
+        // garbage AND the valid-but-wrong directory op — are COUNTED (ROB-E2E-1);
+        // the wrong-class frame is skipped before decode, so it adds nothing.
+        assert_eq!(world.resource::<FollowerState>().undecodable, 2);
     }
 }

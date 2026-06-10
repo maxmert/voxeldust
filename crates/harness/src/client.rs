@@ -290,6 +290,7 @@ impl SteppableNode for ScriptedClient {
             drained,
             sent,
             backpressured: 0,
+            staging_shed: 0,
             unreachable,
         }
     }

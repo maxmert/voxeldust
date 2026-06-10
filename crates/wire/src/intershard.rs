@@ -206,7 +206,13 @@ pub struct TransientItem {
     pub state: Vec<u8>,
 }
 
-/// Acks for the side-effecting arms (delivered via the same flow channel).
+/// RESERVED (frozen ahead of its consumer; lands WITH the shard-bound `Transfer`-arm
+/// receiver at Slice 1d — see DEFERRED.md D-21). The dest shard's ack of a
+/// side-effecting `Transfer(TransferEnvelope)` step, delivered via the same flow
+/// channel. NOT the gateway↔saga vocabulary: that is
+/// `seams::transfer_control::TransferControlAck` (the route-swap saga). This is the
+/// shard→orchestrator ack of the entity-state envelope, keyed by `(transfer_id,
+/// step_id)` for idempotent journaling.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransferAck {
     /// Destination accepted and durably journaled the step.
@@ -218,13 +224,16 @@ pub enum TransferAck {
     Rejected {
         transfer_id: TransferId,
         step_id: u32,
-        reason: TransferRejectReason,
+        reason: TransferStepRejectReason,
     },
 }
 
-/// Typed rejection causes (never a stringly-typed warn-and-drop).
+/// Typed causes a dest shard refuses a `Transfer`-arm STEP (never a stringly-typed
+/// warn-and-drop). Distinct from the CLIENT-facing `channels::TransferRejectReason`
+/// (which explains a refusal to the player) — this is the shard-internal step-ack
+/// reason, paired with [`TransferAck`] and keyed by `step_id`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TransferRejectReason {
+pub enum TransferStepRejectReason {
     SpatialPrecondition,
     StaleFence,
     EpochMismatch,
@@ -466,7 +475,7 @@ mod tests {
             TransferAck::Rejected {
                 transfer_id: TransferId(1),
                 step_id: 2,
-                reason: TransferRejectReason::SpatialPrecondition,
+                reason: TransferStepRejectReason::SpatialPrecondition,
             },
         ] {
             let bytes = postcard::to_allocvec(&ack).expect("encode");
@@ -480,11 +489,11 @@ mod tests {
     #[test]
     fn reject_reasons_are_typed_and_distinct() {
         let reasons = [
-            TransferRejectReason::SpatialPrecondition,
-            TransferRejectReason::StaleFence,
-            TransferRejectReason::EpochMismatch,
-            TransferRejectReason::VersionFloor,
-            TransferRejectReason::UnknownKind,
+            TransferStepRejectReason::SpatialPrecondition,
+            TransferStepRejectReason::StaleFence,
+            TransferStepRejectReason::EpochMismatch,
+            TransferStepRejectReason::VersionFloor,
+            TransferStepRejectReason::UnknownKind,
         ];
         for (i, a) in reasons.iter().enumerate() {
             for (j, b) in reasons.iter().enumerate() {

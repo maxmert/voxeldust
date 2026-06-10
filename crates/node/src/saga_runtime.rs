@@ -52,6 +52,12 @@ struct LiveSaga {
     ctx: SagaCtx,
     state: SagaState,
     gateway: NodeId,
+    /// The universe tick of the most recent transition that advanced this saga (set
+    /// at creation, refreshed on every write-back). A PARKED saga receives no events,
+    /// so `commit_result` is never re-entered for it and `since` stays put — which is
+    /// exactly when it entered its current (stuck) state. The admin view reports
+    /// `now - since` as staleness so a 2am operator sees how long a saga has been wedged.
+    since: UniverseTick,
 }
 
 /// A pending create-on-trigger. Enqueued by [`SagaRuntimeRes::start_transfer`] and processed
@@ -92,6 +98,23 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn live(&self) -> usize {
         self.sagas.len()
+    }
+
+    /// Operator-facing view of every live (in-flight) saga — the admin snapshot's
+    /// `sagas` list, the 2am `curl` that AAA-1 promised. Bounded: terminal sagas are
+    /// tombstoned, so this is the in-flight set only, in deterministic `TransferId`
+    /// order (BTreeMap). `SagaState` is `Debug`-only and lives in `vd-sim`, so the
+    /// operator string is its `{:?}` (wire cannot depend on sim — admin.rs §SagaView).
+    #[must_use]
+    pub fn views(&self) -> Vec<vd_wire::admin::SagaView> {
+        self.sagas
+            .values()
+            .map(|live| vd_wire::admin::SagaView {
+                transfer: live.ctx.transfer.to_string(),
+                state: format!("{:?}", live.state),
+                since: live.since,
+            })
+            .collect()
     }
 }
 
@@ -206,7 +229,7 @@ fn deliver(
     let (state, actions) = saga::step(&ctx, live.state, event);
     let (final_state, tombstone, rejected) =
         run_to_quiescence(&ctx, gateway, state, actions, dir, outbox, now);
-    commit_result(runtime, transfer, final_state, tombstone, rejected);
+    commit_result(runtime, transfer, final_state, tombstone, rejected, now);
 }
 
 /// Persist a quiescent saga: record rejections, then GC (terminal) or write back the state.
@@ -216,6 +239,7 @@ fn commit_result(
     final_state: SagaState,
     tombstone: bool,
     rejected: Vec<(TransferId, AbortReason)>,
+    now: UniverseTick,
 ) {
     runtime.rejected.extend(rejected);
     if tombstone {
@@ -225,11 +249,21 @@ fn commit_result(
         // `runtime.sagas`: `run_to_quiescence` takes only `dir`/`outbox` (the borrow
         // checker enforces it cannot reach the runtime), and this schedule is
         // single-threaded. If a future refactor hands it the runtime, re-prove this.
-        runtime
+        let live = runtime
             .sagas
             .get_mut(&transfer)
-            .expect("the saga was present at the start of this run")
-            .state = final_state;
+            .expect("the saga was present at the start of this run");
+        // AAA-1 staleness: refresh `since` ONLY on an ACTUAL state change. `deliver` runs
+        // for EVERY matching ack — including at-least-once duplicates / stray acks the FSM
+        // absorbs as same-state (`saga.rs`'s `(state, _) => (state, vec![])` no-op arm) — so
+        // an unconditional bump would RESET a parked saga's staleness on a redelivery,
+        // defeating the very stuck-saga metric this field exists for. The stored `live.state`
+        // is still the prior state here (single-threaded schedule; nothing touched it between
+        // the lookup and now), so the compare is exact.
+        if live.state != final_state {
+            live.since = now;
+        }
+        live.state = final_state;
     }
 }
 
@@ -255,11 +289,12 @@ fn process_starts(
                 ctx,
                 state,
                 gateway,
+                since: now,
             },
         );
         let (final_state, tombstone, rejected) =
             run_to_quiescence(&ctx, gateway, state, actions, dir, outbox, now);
-        commit_result(runtime, ctx.transfer, final_state, tombstone, rejected);
+        commit_result(runtime, ctx.transfer, final_state, tombstone, rejected, now);
     }
 }
 
@@ -651,6 +686,79 @@ mod tests {
         );
         assert_eq!(rig.subject_head().fence, Fence(1));
         assert_eq!(rig.live(), 1);
+
+        // AAA-1: the parked saga is CURL-VISIBLE through the real admin snapshot — its
+        // transfer id, its actual stuck phase, and a staleness anchor, never silently
+        // wedged. (This drives both `SagaRuntimeRes::views` and `admin_snapshot`'s
+        // saga-population end to end.)
+        let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+        assert_eq!(snap.sagas.len(), 1);
+        assert_eq!(snap.sagas[0].transfer, XFER.to_string());
+        // The operator sees the REAL parked phase with its fields (acked marker_seq=3,
+        // drained_seq=3), not a placeholder. Exact equality (no `assert!`-message format
+        // arm — the HR5 uncoverable-region discipline).
+        assert_eq!(
+            snap.sagas[0].state,
+            "CommittingCas { marker_seq: 3, drained_seq: 3 }"
+        );
+        // `since` was set when the saga last advanced and is bounded by the clock.
+        assert!(snap.sagas[0].since.0 <= snap.universe_tick);
+    }
+
+    #[test]
+    fn a_stray_ack_to_a_parked_saga_preserves_its_staleness_anchor() {
+        // AAA-1-SINCE regression guard: a PARKED saga that receives a duplicate / stray ack
+        // the FSM absorbs as same-state must KEEP its `since`. An unconditional bump would
+        // reset stuck-saga staleness on every at-least-once redelivery. (This also exercises
+        // the same-state arm of the `final_state != prior` gate in `commit_result`.)
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.trigger(ctx(DurabilityClass::Transient, Fence(1)));
+        rig.settle();
+        rig.ack(TransferControlAck::Prepared {
+            transfer: XFER,
+            result: PrepareResult::Ready,
+        });
+        rig.ack(TransferControlAck::CutConfirmed {
+            transfer: XFER,
+            marker_seq: 3,
+        });
+        let _ = rig.drain_gateway();
+        rig.ack(TransferControlAck::SourceFrozen {
+            transfer: XFER,
+            drained_seq: 3,
+        }); // parks in CommittingCas (the IssueTransientGo stub yields no CasWon)
+        let since_parked = crate::orchestrator::admin_snapshot(rig.orch.world_mut()).sagas[0].since;
+
+        // Two duplicate SourceFrozen acks (at-least-once redelivery). The FSM absorbs each
+        // as same-state; the clock advances on every step.
+        rig.ack(TransferControlAck::SourceFrozen {
+            transfer: XFER,
+            drained_seq: 3,
+        });
+        rig.ack(TransferControlAck::SourceFrozen {
+            transfer: XFER,
+            drained_seq: 3,
+        });
+
+        let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+        assert_eq!(
+            snap.sagas.len(),
+            1,
+            "still parked, not advanced by stray acks"
+        );
+        assert_eq!(
+            snap.sagas[0].state, "CommittingCas { marker_seq: 3, drained_seq: 3 }",
+            "state unchanged by the stray acks"
+        );
+        assert_eq!(
+            snap.sagas[0].since.0, since_parked.0,
+            "the staleness anchor is NOT reset by a stray same-state ack"
+        );
+        assert!(
+            snap.universe_tick > since_parked.0,
+            "the clock DID advance — proving `since` was held, not re-stamped to `now`"
+        );
     }
 
     #[test]

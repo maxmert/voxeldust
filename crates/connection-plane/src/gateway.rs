@@ -184,12 +184,18 @@ pub fn route_input(hot: &SessionHot, input_bytes: &[u8]) -> InputRouting {
     let Ok(seq) = peek_input_seq(input_bytes) else {
         return InputRouting::Malformed;
     };
-    // Latest-wins dedup: monotonic high-water mark on one atomic.
-    let last = hot.last_input_seq.load(Ordering::Relaxed);
-    if seq <= last {
+    // Latest-wins dedup: monotonic high-water mark on one atomic. `fetch_max` is a
+    // SINGLE atomic RMW — it advances the mark to `max(prev, seq)` and returns the
+    // PRIOR value, so the load+compare+store is indivisible. A non-atomic load-then-
+    // store (FG-2) would let two concurrent forwarder threads both read the same
+    // `last`, both pass, and both forward the same datagram (or store out of order).
+    // With `fetch_max` exactly one observes `seq > prev` for any given seq, and the
+    // mark never moves backward regardless of arrival interleaving. Still wait-free
+    // (one instruction; no lock, no retry loop) — the SPIKE-2a hot-path budget holds.
+    let prev = hot.last_input_seq.fetch_max(seq, Ordering::Relaxed);
+    if seq <= prev {
         return InputRouting::Deduped;
     }
-    hot.last_input_seq.store(seq, Ordering::Relaxed);
     let route = hot.route.load();
     // P1: `cut` is always None; the P2 cut partition slots in right here.
     InputRouting::Forward {
@@ -471,7 +477,13 @@ fn on_client_input(
         stats.inputs_unroutable += 1;
         return;
     };
-    let session = &sessions.by_session[session_id];
+    // Guarded lookup, never `[]`: the two session maps are kept in sync by construction,
+    // but a desync must DROP-and-count on this 20Hz hot path, never panic the gateway
+    // (R2 lineage — a routing-map slip is a counted unroutable, not a crash).
+    let Some(session) = sessions.by_session.get(session_id) else {
+        stats.inputs_unroutable += 1;
+        return;
+    };
     if !matches!(session.phase, SessionPhase::Active { .. }) {
         stats.inputs_unroutable += 1;
         return;
@@ -1185,6 +1197,26 @@ mod tests {
         assert_eq!(stats.inputs_deduped, 1);
         assert_eq!(stats.inputs_malformed, 1);
         assert_eq!(stats.inputs_unroutable, 1);
+    }
+
+    #[test]
+    fn input_for_a_desynced_session_map_is_dropped_and_counted_never_panics() {
+        // WB-1: `by_client` and `by_session` are kept in sync by construction, but a slip
+        // must DROP-and-count on the 20Hz input path, never panic the gateway. Proven by
+        // an artificially desynced table (present in `by_client`, absent from `by_session`).
+        let mut sessions = GatewaySessions::default();
+        sessions.by_client.insert(CLIENT, SessionId(7));
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_client_input(&input_bytes(1), CLIENT, &sessions, &mut stats, &mut outbox);
+        assert_eq!(
+            stats.inputs_unroutable, 1,
+            "the desync is counted, not crashed"
+        );
+        assert!(
+            outbox.0.is_empty(),
+            "nothing forwarded for a desynced session"
+        );
     }
 
     #[test]
@@ -1910,5 +1942,48 @@ mod tests {
             .expect("current fence forwards");
         let decoded: SnapshotDatagram = postcard::from_bytes(&big).expect("decode");
         assert_eq!(decoded.sub, SubId(40_000));
+    }
+
+    #[test]
+    fn concurrent_inputs_at_one_seq_forward_exactly_once() {
+        // FG-2: the dedup is a SINGLE atomic `fetch_max`, so many threads racing the
+        // SAME seq yield exactly ONE Forward — every other thread dedups. The prior
+        // non-atomic load-then-store could let several threads observe the same stale
+        // high-water mark, all pass, and all forward a duplicate input. A barrier
+        // maximizes the contention window.
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
+
+        const THREADS: usize = 32;
+        let hot = SessionHot {
+            route: ArcSwap::from_pointee(RouteSnapshot {
+                authority: SHARD,
+                fence: Fence(2),
+                cut: None,
+            }),
+            last_input_seq: AtomicU64::new(0),
+        };
+        let forwards = AtomicUsize::new(0);
+        let barrier = Barrier::new(THREADS);
+        std::thread::scope(|s| {
+            for _ in 0..THREADS {
+                s.spawn(|| {
+                    barrier.wait();
+                    if route_input(&hot, &input_bytes(7)) == (InputRouting::Forward { to: SHARD }) {
+                        forwards.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            forwards.load(Ordering::Relaxed),
+            1,
+            "exactly one thread forwards seq 7; the rest dedup"
+        );
+        assert_eq!(
+            hot.last_input_seq.load(Ordering::Relaxed),
+            7,
+            "the high-water mark advanced to seq 7 exactly once"
+        );
     }
 }

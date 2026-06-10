@@ -26,24 +26,30 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Dependency:** the Slice-2 at-least-once / adaptive-timeout / CAS-re-read machinery.
 - **Source:** Slice-1b audit `wf_34ef74d1` (CPO-1/CPO-2).
 
-### D-2 🟧 Demote→Release has no real producer (the `interim_demote_complete` seam)
-- **Missing:** the proper event-driven `DemoteComplete` — the source ghost (a kinematic collider, so players
-  collide across the boundary) is torn down ONLY when the dest has **delivered the entity to all observers**
-  (a server-side watermark, never a client ack — HR1) **AND** the entity has **left the source overlap band**
+### D-2 🟥 Demote→Release has no producer (the saga parks in `Demoting` — the `interim_demote_complete` seam is NOT yet built)
+- **Missing:** ANY producer of `DemoteComplete`. Today a committed durable saga reaches `Demoting` and PARKS —
+  there is no caller of `deliver(.., DemoteComplete)` of any kind (neither the 1c interim stand-in NOR the
+  proper predicate). The proper, event-driven producer tears the source ghost down (a kinematic collider, so
+  players collide across the boundary) ONLY when the dest has **delivered the entity to all observers** (a
+  server-side watermark, never a client ack — HR1) **AND** the entity has **left the source overlap band**
   (`OverlapBand::update_membership` false on the swept segment `segment_shell_crossing`, gated by
   `width_safe_for`/`K_SAFETY` — velocity-aware hysteresis, NO magic tick count).
-- **Where:** `crates/node/src/saga_runtime.rs` — a single loudly-named `interim_demote_complete` seam: an
-  unconditional bandless stand-in that calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the
-  existing sink — NOT a magic tick, NOT an in-flight-queue injection). The FSM tail
-  (`Swapping→Demoting→Releasing→Done`) is COMPLETE + proptested in `crates/sim/src/saga.rs` and is UNTOUCHED.
-  Pinned by a `KNOWN LIMIT` doc + an always-on `tracing::warn` + an "exists-to-be-flipped" test.
-- **When / proper:** the **post-1d band/ghost P2 slice** writes the real per-tick dest-shard predicate.
-- **Single-point upgrade (verified reshape-free, `wf_0ed2dc0c`):** swap that ONE function's body
-  (unconditional → the conjoined predicate); ZERO change to the FSM / `deliver` / `run_to_quiescence` / the
-  gateway `ReleaseSubscribe` handler / the frozen `TransferControl` vocabulary.
+- **Where (today):** `crates/node/src/saga_runtime.rs` — the `Committed→Demoting` transition is reached
+  (saga_runtime.rs ~line 549 documents the park) but NO `interim_demote_complete` fn exists; the saga stays
+  live in `Demoting`. The FSM tail (`Swapping→Demoting→Releasing→Done`) IS complete + proptested in
+  `crates/sim/src/saga.rs` (so the park is now ADMIN-VISIBLE via AAA-1 — `admin_snapshot.sagas` shows a saga
+  stuck in `Demoting`). The park is also pinned by the `KNOWN 1b LIMIT` module doc.
+- **When / interim (1c step):** add ONE loudly-named `interim_demote_complete` seam — an unconditional bandless
+  stand-in that calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the existing sink — NOT a magic
+  tick, NOT an in-flight-queue injection) + a `tracing::warn` + an "exists-to-be-flipped" test. This drives
+  `Swapping→Demoting→Releasing→Done` end-to-end NOW, replacing the 1b silent park.
+- **When / proper:** the **post-1d band/ghost P2 slice** swaps that ONE function's body (unconditional → the
+  conjoined predicate). **Verified reshape-free (`wf_0ed2dc0c`):** ZERO change to the FSM / `deliver` /
+  `run_to_quiescence` / the gateway `ReleaseSubscribe` handler / the frozen `TransferControl` vocabulary.
 - **Dependency:** Slice 1d (per-entity `Authority` attach so the dest owns + emits the post-commit entity) +
   the ghost-as-collider + band-instance + observer-delivery-watermark machinery (the band/ghost slice).
-- **Source:** 1c design `wf_f3eae69e` + the demote refinement `wf_0ed2dc0c`.
+- **Source:** 1c design `wf_f3eae69e` + the demote refinement `wf_0ed2dc0c`; status corrected by whole-codebase
+  audit `wwg7ydm9y` (the 🟧→🟥 reconcile: no interim seam had actually shipped).
 
 ### D-3 🟥 Lease lifecycle: no renewal producer, no expiry reaper (TTL unenforced)
 - **Missing:** `OwnerRecord.lease_expires` is written on every grant/renew/commit, but NO node sends
@@ -61,16 +67,26 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   driver systems + the unreachable-confirmation gate.
 - **Source:** whole-codebase audit `wf_43fea0dd` (XSI-1 / SCALE-A).
 
-### D-4 🟥 Per-entity AoI eviction needs the `EventMsg` client `MsgClass` arm
-- **Missing:** the client `DeliveredView` is bounded per-SUB (`drop_sub` on `SubscriptionClosing`), but a
-  still-open sub's departed entities are not evicted — that needs `EventMsg::EntityRemoved`, which has no
-  transport class to arrive on (`MsgClass` has Control/Saga/Snapshot/Input/Membership — no Event/Bulk arm).
-- **Where:** `crates/client/src/view.rs` doc (names this "the remaining P2 piece"); `crates/sim/src/io/mod.rs`
-  (`MsgClass`, no Event arm); `crates/client/src/net.rs` (routes only Control/Snapshot; others → `ignored`).
-- **When / proper:** **P2** — add the `EventMsg` client `MsgClass` arm + route `EntityRemoved` → a per-entity
-  `drop`. Retires the foundation-audit `scalability-1` root (bounds the view at entity granularity, not just
-  per-sub).
-- **Source:** P1.5 foundation audit (deferral) + whole-codebase audit.
+### D-4 🟥 The reliable `EventMsg` client `MsgClass` arm — carrier for BOTH AoI eviction AND cross-shard signals
+- **Missing:** `MsgClass` has Control/Saga/Snapshot/Input/Membership — **no `Event`/`Bulk` arm** — so the
+  reliable G→C `EventMsg` family has no transport class to arrive on. TWO independent consumers need this ONE
+  arm (build it once; it is shared infra, never per-feature — HR3/DRY):
+  - **(a) Per-entity AoI eviction (P2):** the client `DeliveredView` is bounded per-SUB (`drop_sub` on
+    `SubscriptionClosing`), but a still-open sub's departed entities are not evicted — that needs
+    `EventMsg::EntityRemoved` routed to a per-entity `drop`. Retires the foundation-audit `scalability-1` root.
+  - **(b) Cross-shard functional-block SIGNALS → client (P9):** the signal system's gameplay events
+    (damage/destroyed/notice and functional-block signal deliveries that surface to the player) ride the SAME
+    reliable `EventMsg` arm to the client — opened causally after `SubscriptionOpened` (connection-plane X1).
+    The cross-SHARD half of signals rides `InterShardFlow::Signal` (a RESERVED arm, P9) over the N-peer mesh +
+    Galaxy Relay; this `EventMsg` arm is only the final shard→gateway→client leg. **No rewrite to land it** —
+    the whole-codebase audit `wwg7ydm9y` confirmed signals are additive into the current seams (effect_class
+    is exhaustive, the capability lattice already carves `SignalGraphCap`/`GalaxyRelay`).
+- **Where:** `crates/client/src/view.rs` doc ("the remaining P2 piece"); `crates/sim/src/io/mod.rs` (`MsgClass`,
+  no Event arm); `crates/wire/src/channels.rs` (`EventMsg{Notice,EntityRemoved}` + `BulkMsg{Blob}` declared but
+  unroutable); `crates/client/src/net.rs` (routes only Control/Snapshot; others → `ignored`).
+- **When / proper:** **P2** adds the arm + `EntityRemoved` eviction (consumer a); **P9** adds the signal
+  deliveries (consumer b) on the same arm. Building the arm is registry-only here — no code lands today.
+- **Source:** P1.5 foundation audit (deferral) + whole-codebase audits `wf_43fea0dd` / `wwg7ydm9y` (SIG-1).
 
 ### D-5 🟥 Client cut cycle (the `net.rs` marker emit) — Slice 1e
 - **Missing:** on `ServerControlMsg::RequestCut` the client must record it and emit the triple-sent in-band
@@ -116,13 +132,19 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   the throwaway sizing allocation dies in the same refactor. Negligible at current volumes (a few dots).
 - **Source:** whole-codebase audit `wf_43fea0dd` (SCALE-B).
 
-### D-10 🟥 Per-node honesty counters (gateway/shard/follower) unobservable at runtime
-- **Missing:** gateway-undecodable / shard-malformed / follower-clock-anomaly / inbox-drop counters are
-  maintained but only the orchestrator publishes an admin snapshot — the others are unreachable operationally.
+### D-10 🟥 Per-node honesty counters exist on every node but are unobservable at runtime (only the orchestrator publishes)
+- **Missing:** the COUNTERS now exist on every node — gateway (`GatewayStats.undecodable`/`inputs_*`),
+  stub-shard (`StubStats.undecodable`/`attaches_deferred`), orchestrator (`OrchestratorStats.undecodable`),
+  follower (`FollowerState.undecodable`/`rejected_backward`/`epoch_mismatches`), inbox-drop
+  (`BoundedInbox.dropped_reliable`). What is missing is **runtime EXPOSURE**: only the orchestrator publishes an
+  `admin_snapshot`, so the gateway/shard/follower counters are unreachable by a `curl` operationally.
 - **Where:** `crates/node/src/orchestrator.rs` (`admin_snapshot` is orchestrator-only); the gateway/shard bins.
 - **When / proper:** **Slice 1c/P3** — extend the orchestrator's `ArcSwap` admin-cell pattern to the gateway
-  and shard bins (a `NodeStatsView`); needed before the P3 crash matrix with real nodes. Counters already exist.
-- **Source:** whole-codebase audit `wf_43fea0dd` (ROB-3).
+  and shard bins (a `NodeStatsView`); needed before the P3 crash matrix with real nodes.
+- **Correction (`wwg7ydm9y`, ROB-E2E-1):** the prior "Counters already exist" line was FALSE — the shard,
+  orchestrator, and follower DECODE-failure counters did not exist (the path was `tracing::error!`-only). They
+  were ADDED (stub/orchestrator/follower `undecodable`, each test-asserted), so the gap is now purely exposure.
+- **Source:** whole-codebase audits `wf_43fea0dd` (ROB-3) + `wwg7ydm9y` (ROB-E2E-1).
 
 ### D-11 🟥 Reconnect / session-lifecycle (resume without replay)
 - **Missing:** the client never sends `Resume`; no node consumes it; the directory `resume_nonce` is unused;
@@ -131,6 +153,36 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **When / proper:** **P2/P3/P7** — P2 must ensure the saga does not assume a stable connection;
   gateway-adoption fence-CAS at P3; full reconnect-without-replay at P7.
 - **Source:** the roadmap + P1.5 foundation audit.
+
+### D-20 🟧 Gateway `transfer_control_unhandled` counter (no `TransferControl` consumer yet)
+- **Missing:** the gateway has no consumer for `InterShardFlow::Saga(TransferControl)` — the saga→gateway
+  command vocabulary (PrepareSubscribe/RequestCut/FreezeSource/CommitAuthority/…). Until Slice 1c.2 wires the
+  `on_transfer_control` consumer + per-session `TransferProgress`, a received command is COUNTED on
+  `GatewayStats.transfer_control_unhandled` and dropped — never mis-applied, never silent.
+- **Where:** `crates/connection-plane/src/gateway.rs` — the orchestrator-Saga-class dispatch arm
+  `Ok(InterShardFlow::Saga(_)) => stats.transfer_control_unhandled += 1` (test-asserted: a delivered command
+  increments the counter, nothing routes). The counter doc says it "should be 0 once 1c.2 lands."
+- **When / proper:** **Slice 1c.2** — the `on_transfer_control` consumer REPLACES this arm (drives the session
+  route/cut + replies `SagaAck` per phase — the mirror of `saga_runtime::ack_to_event`). The counter is then
+  expected to stay 0 in healthy operation (or be removed if the dispatch no longer has an unhandled arm).
+- **Dependency:** Slice 1c.2 (the gateway TransferControl consumer + `TransferProgress` cold state +
+  applied-steps idempotency journal).
+- **Source:** Slice 1c.1 (the dispatch-collision fix) + whole-codebase audit `wwg7ydm9y` (registered the
+  unpinned interim counter).
+
+### D-21 🟧 `TransferAck` / `TransferStepRejectReason` are RESERVED wire vocabulary (no consumer yet)
+- **Missing:** the shard-bound `Transfer(TransferEnvelope)`-arm RECEIVER. The dest shard's
+  ack of a transferred entity-state step (`TransferAck{Accepted|Rejected{reason}}`) is frozen
+  in the wire contract but has no producer/consumer — the 1b/1c saga uses the gateway↔saga
+  `TransferControlAck` vocabulary, not this shard→orchestrator envelope ack.
+- **Where:** `crates/wire/src/intershard.rs` — `TransferAck` + `TransferStepRejectReason`
+  (RESERVED doc on each; roundtrip-tested but unconsumed). Renamed from `TransferRejectReason`
+  to end the name collision with the live CLIENT-facing `channels::TransferRejectReason` (DRY-1).
+- **When / proper:** **Slice 1d** — the shard-bound `StubCrossing` transfer receiver journals
+  each step idempotently by `(transfer_id, step_id)` and replies `TransferAck`; that is its
+  first consumer (the "freeze arms WITH their first consumer" rule). Reconcile then whether the
+  shard step-reject reasons should fold into / map cleanly onto the client-facing reasons.
+- **Source:** whole-codebase convergence audit `wf_8d81c753` (DRY-1).
 
 ---
 
@@ -150,9 +202,11 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 ### D-13 🟥 Admin endpoint authentication
 - **Missing:** the read-only admin endpoint serves internal topology with no auth — safe only on loopback.
 - **Where:** `crates/wire/src/admin.rs` (security-contract doc); the dev cluster binds loopback.
-- **When / proper:** **deploy-readiness** — bearer/mTLS on the route before any routable bind. Also reconcile
-  `k8s/orchestrator.yaml`'s `0.0.0.0:8080` listener (+ its CLI flags the real bin doesn't parse) at that time.
-- **Source:** whole-codebase audit `wf_43fea0dd` (CAF-2).
+- **When / proper:** **deploy-readiness** — bearer/mTLS on the route before any routable bind. The greenfield
+  cloud/deploy manifests are authored fresh at that time (the pre-rebuild `Dockerfile`/root `dev-cluster.sh`/
+  `k8s/*.yaml` stack — flat-layout, per-shard-kind images violating HR3, unauthenticated `0.0.0.0` admin — was
+  DELETED in CAF-NEW-1; `scripts/dev-cluster.sh` + `vd-devcluster` are the local-process launcher).
+- **Source:** whole-codebase audits `wf_43fea0dd` (CAF-2) + `wwg7ydm9y` (CAF-NEW-1, stale stack removed).
 
 ---
 
