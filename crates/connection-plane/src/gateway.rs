@@ -1590,6 +1590,231 @@ mod tests {
         );
     }
 
+    /// SPIKE-2a (the route-swap hot-path GATE — formally blocks the P2 route-swap design):
+    /// proves the gateway route swap is WAIT-FREE and TORN-READ-FREE under a CONCURRENT
+    /// `route.store` publisher (modeling a P2 `CommitAuthority` swap under load). The ONE
+    /// `ArcSwap` swap means any `route.load()` yields exactly ONE published `RouteSnapshot` —
+    /// never a field-mix — so authority + fence + cut (incl. `cut: Some(SeqCut)`, the field
+    /// P2 adds) move together atomically; the read path is one `ArcSwap::load` (+ for
+    /// `route_input` one relaxed atomic), no `Mutex` anywhere. No `CommitAuthority`-driven
+    /// `route.store` lands until this is green.
+    ///
+    /// SCOPE (honest): this gates the SWAP MECHANIC (atomicity + the wait-free read latency).
+    /// It does NOT prove the cut-PARTITIONING read logic — `route_input`'s future
+    /// `seq <= marker → source / > marker → dest` branch (the slot at line ~190) is a
+    /// CORRECTNESS property that gets its own test in Slice 1c, not a latency gate. Two
+    /// timed bands are measured separately: the isolated ROUTE DECISION (`frame_passes_fence`
+    /// = one `route.load` + fence compare, no alloc — the thing the swap actually contends),
+    /// and the end-to-end per-sub FORWARD (`forward_frame` = load + retag, where production
+    /// amortizes the retag once-per-SubId via SCALE-1, so this is a fan-out figure, not the
+    /// route decision). The tight ROUTE-DECISION budget is what catches a contended-load
+    /// regression that the alloc-dominated forward number would hide.
+    ///
+    /// HAND-ROLLED (no bench crate): no library expresses a concurrent-contention p99
+    /// HARD-FAIL gate — criterion/divan are report-only steady-state harnesses with no p99
+    /// and no fail-threshold (investigated, 2026); we would hand-compute p99 + the assert
+    /// regardless. The latency ASSERTS are RELEASE-ONLY: debug + coverage instrumentation
+    /// make a tail meaningless, so a debug/coverage run still exercises the concurrency plus
+    /// the torn-read invariant (fast, small N) while a release run (`just spike2a`,
+    /// `--test-threads=1` so siblings don't oversubscribe) enforces the timing. `Instant` is
+    /// the justified seam exemption (a latency microbench is exactly what wall-clock is for).
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn spike_2a_route_swap_is_wait_free_and_torn_read_free() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        // The publisher's small FIXED set of known-good routes (distinct authority + fence),
+        // INCLUDING a `cut: Some(SeqCut)` member — the exact field P2's CommitAuthority adds —
+        // so a Some-cut genuinely crosses the swap under contention and the torn-read
+        // membership check covers the SeqCut bytes (not just the always-None P1 shape).
+        // A frame at Fence(9) is never stale against any fence here, so `forward_frame`
+        // always reaches the full retag (the worst-case forward).
+        let routes = [
+            RouteSnapshot {
+                authority: SHARD,
+                fence: Fence(1),
+                cut: None,
+            },
+            RouteSnapshot {
+                authority: ORCH,
+                fence: Fence(2),
+                cut: Some(SeqCut {
+                    marker_seq: 7,
+                    dest: SHARD,
+                }),
+            },
+            RouteSnapshot {
+                authority: SHARD,
+                fence: Fence(3),
+                cut: None,
+            },
+        ];
+        let hot = Arc::new(SessionHot {
+            route: ArcSwap::from_pointee(routes[0]),
+            last_input_seq: AtomicU64::new(0),
+        });
+        let frame = frame_msg(Fence(9), 1)
+            .into_snapshot_bytes()
+            .expect("frame_msg builds a Frame");
+
+        // 4 readers vs 1 publisher: a CONSERVATIVE-on-dev-hardware contention figure (a 4-core
+        // box oversubscribes 5:N) — NOT a model of cloud core counts. Production reads a
+        // session's hot state from ~one forwarder; 4 concurrent loaders is strictly HARDER, so
+        // a pass here is a safe upper bound, not a scale claim.
+        const READERS: usize = 4;
+        // Small N under debug/coverage (instrumented — keep it quick); large N in release for
+        // a stable tail. `cfg!` folds at compile time → no runtime branch (no coverage hole).
+        const SAMPLES_PER_READER: usize = if cfg!(debug_assertions) {
+            2_000
+        } else {
+            200_000
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let misses = Arc::new(AtomicU64::new(0));
+
+        // Each reader returns TWO sample bands: (isolated route-decision, end-to-end forward).
+        type Bands = (Vec<Duration>, Vec<Duration>);
+        let bands: Vec<Bands> = std::thread::scope(|s| {
+            // Publisher: swap the route as fast as it can (CommitAuthority under contention).
+            let pub_hot = Arc::clone(&hot);
+            let pub_stop = Arc::clone(&stop);
+            s.spawn(move || {
+                let mut i = 0usize;
+                while !pub_stop.load(Ordering::Relaxed) {
+                    pub_hot.route.store(Arc::new(routes[i % routes.len()]));
+                    i = i.wrapping_add(1);
+                }
+            });
+            let handles: Vec<_> = (0..READERS)
+                .map(|_| {
+                    let hot = Arc::clone(&hot);
+                    let misses = Arc::clone(&misses);
+                    let frame = frame.clone();
+                    s.spawn(move || {
+                        let mut route_read = Vec::with_capacity(SAMPLES_PER_READER);
+                        let mut forward = Vec::with_capacity(SAMPLES_PER_READER);
+                        let mut local = 0u64;
+                        for _ in 0..SAMPLES_PER_READER {
+                            // Band 1 — the ISOLATED route decision the swap contends: one
+                            // `route.load` + fence compare, NO alloc, so a contended-load
+                            // regression can't hide under the retag's heap-alloc noise.
+                            let t = Instant::now();
+                            let pass = frame_passes_fence(&hot, Fence(9));
+                            route_read.push(t.elapsed());
+                            // Band 2 — the end-to-end per-sub forward (load + retag alloc).
+                            let t = Instant::now();
+                            let out = forward_frame(&hot, SubId(0), Fence(9), &frame);
+                            forward.push(t.elapsed());
+                            // Invariants — accumulated via `+= u64::from(..)` (NOT an `if`), so
+                            // each never-taken failure case stays a COVERED region, not a hole.
+                            // A high-fence frame always passes + forwards (proves the reads
+                            // RAN); a DIRECT load is a COMPLETE member of the published set.
+                            // This last check is a STRUCTURAL-INVARIANT CANARY: ArcSwap cannot
+                            // tear a single Arc today, so it guards a FUTURE regression where
+                            // authority/fence/cut stop sharing one Arc (e.g. the P2 temptation
+                            // to bolt marker_seq onto a separate atomic) — then a mixed load
+                            // would be a non-member and fire here.
+                            local += u64::from(!pass);
+                            local += u64::from(out.is_none());
+                            let loaded: RouteSnapshot = **hot.route.load();
+                            local += u64::from(!routes.contains(&loaded));
+                        }
+                        misses.fetch_add(local, Ordering::Relaxed);
+                        (route_read, forward)
+                    })
+                })
+                .collect();
+            let bands = handles
+                .into_iter()
+                .map(|h| h.join().expect("reader thread"))
+                .collect();
+            stop.store(true, Ordering::Relaxed); // let the publisher exit before scope-join
+            bands
+        });
+
+        // Invariants checked in EVERY build (incl. debug/coverage): no torn read AND every
+        // high-fence read passed + forwarded (misses counts all failure modes → exactly 0).
+        assert_eq!(
+            misses.load(Ordering::Relaxed),
+            0,
+            "a route.load() was not a complete member of the published set (torn read), or a \
+             high-fence frame failed to pass/forward"
+        );
+        let route_read: Vec<Duration> = bands.iter().flat_map(|(r, _)| r.iter().copied()).collect();
+        let forward: Vec<Duration> = bands.iter().flat_map(|(_, f)| f.iter().copied()).collect();
+        assert_eq!(route_read.len(), READERS * SAMPLES_PER_READER);
+        assert_eq!(forward.len(), READERS * SAMPLES_PER_READER);
+
+        let route_p99 = percentile_unstable(route_read, 99);
+        let forward_p99 = percentile_unstable(forward, 99);
+        // The hard latency GATES are release-only (a debug/coverage tail is meaningless).
+        #[cfg(not(debug_assertions))]
+        {
+            // The route DECISION (one ArcSwap load + fence compare) must be lost in the noise
+            // of a 50 ms (20 Hz) tick — this is ~10,000x under. The budget guards the property
+            // that actually matters: WAIT-FREE (no lock). Observed p99 ~625 ns under a
+            // hammering publisher; a Mutex/lock in this read would be ≥20 µs under the same
+            // contention, so 5 µs (~8x over observed) cleanly catches that regression while
+            // staying robust on a throttled CI-less dev box. THE number that blocks P2.
+            const ROUTE_DECISION_P99_BUDGET: Duration = Duration::from_micros(5);
+            // The end-to-end forward includes the retag alloc production amortizes per-SubId
+            // (SCALE-1) — a looser fan-out ceiling, not the route decision (observed ~600 ns).
+            const FORWARD_FAN_OUT_P99_BUDGET: Duration = Duration::from_micros(50);
+            eprintln!(
+                "SPIKE-2a: route-decision p99 = {route_p99:?} (budget {ROUTE_DECISION_P99_BUDGET:?}); \
+                 forward-fan-out p99 = {forward_p99:?} (budget {FORWARD_FAN_OUT_P99_BUDGET:?}); \
+                 {} samples/band across {READERS} readers, 0 torn reads",
+                READERS * SAMPLES_PER_READER
+            );
+            assert!(
+                route_p99 < ROUTE_DECISION_P99_BUDGET,
+                "route-decision p99 {route_p99:?} exceeded {ROUTE_DECISION_P99_BUDGET:?} under a \
+                 concurrent route.store publisher (a contended-load regression)"
+            );
+            assert!(
+                forward_p99 < FORWARD_FAN_OUT_P99_BUDGET,
+                "forward-fan-out p99 {forward_p99:?} exceeded {FORWARD_FAN_OUT_P99_BUDGET:?}"
+            );
+        }
+        #[cfg(debug_assertions)]
+        let _ = (route_p99, forward_p99);
+    }
+
+    /// The p99-style tail of a latency sample set (sort + nearest-rank index). TOTAL — an
+    /// empty set is `Duration::ZERO` (no panic), since this is earmarked for extraction to a
+    /// shared harness helper for the 2nd hard latency gate (SPIKE-3a, P3) whose caller may not
+    /// guarantee non-empty. Hand-rolled (no bench crate — see the spike doc).
+    fn percentile_unstable(
+        mut samples: Vec<std::time::Duration>,
+        pct: usize,
+    ) -> std::time::Duration {
+        if samples.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+        samples.sort_unstable();
+        let rank = samples.len().saturating_mul(pct) / 100;
+        samples[rank.min(samples.len() - 1)]
+    }
+
+    #[test]
+    fn percentile_unstable_total_over_empty_single_and_edges() {
+        use std::time::Duration;
+        let d = Duration::from_nanos;
+        // Empty → ZERO (the total-ness the future harness reuse relies on; no panic).
+        assert_eq!(percentile_unstable(Vec::new(), 99), Duration::ZERO);
+        // Single element → itself at any percentile.
+        assert_eq!(percentile_unstable(vec![d(5)], 99), d(5));
+        assert_eq!(percentile_unstable(vec![d(5)], 0), d(5));
+        // Nearest-rank over a known set; p100 clamps to the max (no out-of-bounds).
+        let s = vec![d(10), d(40), d(20), d(30), d(50)]; // sorts to 10,20,30,40,50
+        assert_eq!(percentile_unstable(s.clone(), 99), d(50)); // rank 4
+        assert_eq!(percentile_unstable(s.clone(), 100), d(50)); // rank 5 → clamp to 4
+        assert_eq!(percentile_unstable(s, 50), d(30)); // rank 2
+    }
+
     #[test]
     fn hot_path_unit_outcomes() {
         let hot = SessionHot {

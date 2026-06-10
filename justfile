@@ -58,6 +58,15 @@ lint-combos:
 client-load:
     cargo test -p vd-bins --features dev-control --test client_load
 
+# SPIKE-2a (the route-swap hot-path gate): the gateway 20Hz route decision stays wait-free
+# + torn-read-free under a concurrent route.store publisher, p99 < 50us. RELEASE build (a
+# debug/coverage build's instrumentation makes a 50us tail meaningless; the debug run still
+# exercises the concurrency + torn-read invariant via `just test`, just not the timing).
+# Hand-rolled (no bench crate expresses a concurrent hard-fail p99 gate — investigated).
+# Formally BLOCKS the P2 route-swap design.
+spike2a:
+    cargo test --release -p vd-connection-plane spike_2a -- --nocapture --test-threads=1
+
 fmt:
     cargo fmt --all
 
@@ -69,8 +78,9 @@ fmt:
 render-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
 
-# Everything a merge requires (render-smoke is GPU-required + local; see its recipe).
-gate: fmt lint lint-combos test client-load render-smoke coverage
+# Everything a merge requires (render-smoke is GPU-required + local; spike2a is a release
+# build — both are documented in their recipes).
+gate: fmt lint lint-combos test client-load spike2a render-smoke coverage
 
 # One-time setup helper.
 coverage-setup:
