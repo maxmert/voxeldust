@@ -53,7 +53,17 @@ pub fn register_orchestrator(world: &mut World, schedule: &mut Schedule, cfg: &O
     world.insert_resource(UniverseClockRes(clock));
     world.insert_resource(DirectoryRes(DirectoryCore::new(cfg.directory)));
     world.insert_resource(ClockPeers(cfg.clock_peers.clone()));
-    schedule.add_systems((advance_and_broadcast_clock, serve_directory).chain());
+    world.insert_resource(crate::saga_runtime::SagaRuntimeRes::default());
+    // serve_directory then drive_sagas: both read the Saga-class inbound (directory ops vs
+    // gateway acks); the saga runtime's direct commit_cas runs after the directory service.
+    schedule.add_systems(
+        (
+            advance_and_broadcast_clock,
+            serve_directory,
+            crate::saga_runtime::drive_sagas,
+        )
+            .chain(),
+    );
 }
 
 /// Advance the authoritative clock one tick and broadcast `ClockSync` to every
@@ -106,9 +116,16 @@ fn serve_directory(
         if *class != MsgClass::Saga {
             continue;
         }
-        let Ok(InterShardFlow::Directory(op)) = postcard::from_bytes::<InterShardFlow>(bytes)
-        else {
-            tracing::error!("undecodable saga-class message from {from}");
+        let flow = match postcard::from_bytes::<InterShardFlow>(bytes) {
+            Ok(flow) => flow,
+            Err(_) => {
+                tracing::error!("undecodable saga-class message from {from}");
+                continue;
+            }
+        };
+        // Only Directory ops are this service's; SagaAck (gateway → saga) is `drive_sagas`',
+        // and Saga commands flow OUT to the gateway, never in — skip the non-Directory arms.
+        let InterShardFlow::Directory(op) = flow else {
             continue;
         };
         if let Some(reply) = apply_directory_op(&mut dir.0, op, &clock) {
