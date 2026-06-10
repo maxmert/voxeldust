@@ -124,6 +124,73 @@ impl PrepareReject {
     }
 }
 
+impl TransferControl {
+    /// The transfer this command belongs to (every command carries it). The directory
+    /// key the saga is serialized on derives from this.
+    #[must_use]
+    pub fn transfer(self) -> TransferId {
+        match self {
+            TransferControl::PrepareSubscribe { transfer, .. }
+            | TransferControl::RequestCut { transfer, .. }
+            | TransferControl::FreezeSource { transfer, .. }
+            | TransferControl::CommitAuthority { transfer, .. }
+            | TransferControl::ThawSource { transfer, .. }
+            | TransferControl::AbortTransfer { transfer, .. }
+            | TransferControl::ReleaseSubscribe { transfer, .. } => transfer,
+        }
+    }
+
+    /// The saga PHASE this command is, as a stable idempotency step id: `(transfer,
+    /// step_id)` is journaled in `applied_steps` before the gateway applies the command,
+    /// so a re-delivery at the same step is a no-op (the at-least-once half of HR1's
+    /// side-effecting contract). The value is the phase ORDER, frozen with the vocabulary;
+    /// the matching ack shares it (`FreezeSource`/`SourceFrozen` are both phase 2).
+    #[must_use]
+    pub fn step_id(self) -> u32 {
+        match self {
+            TransferControl::PrepareSubscribe { .. } => 0,
+            TransferControl::RequestCut { .. } => 1,
+            TransferControl::FreezeSource { .. } => 2,
+            TransferControl::CommitAuthority { .. } => 3,
+            TransferControl::ThawSource { .. } => 4,
+            TransferControl::AbortTransfer { .. } => 5,
+            TransferControl::ReleaseSubscribe { .. } => 6,
+        }
+    }
+}
+
+impl TransferControlAck {
+    /// The transfer this ack belongs to (every ack carries it).
+    #[must_use]
+    pub fn transfer(self) -> TransferId {
+        match self {
+            TransferControlAck::Prepared { transfer, .. }
+            | TransferControlAck::CutConfirmed { transfer, .. }
+            | TransferControlAck::SourceFrozen { transfer, .. }
+            | TransferControlAck::Committed { transfer }
+            | TransferControlAck::SourceThawed { transfer }
+            | TransferControlAck::Aborted { transfer }
+            | TransferControlAck::Released { transfer } => transfer,
+        }
+    }
+
+    /// The saga phase this ack reports, parallel to the command's [`TransferControl::step_id`]
+    /// (the ack of `FreezeSource` is `SourceFrozen`, both phase 2) — the saga's idempotency
+    /// key for "phase N acknowledged".
+    #[must_use]
+    pub fn step_id(self) -> u32 {
+        match self {
+            TransferControlAck::Prepared { .. } => 0,
+            TransferControlAck::CutConfirmed { .. } => 1,
+            TransferControlAck::SourceFrozen { .. } => 2,
+            TransferControlAck::Committed { .. } => 3,
+            TransferControlAck::SourceThawed { .. } => 4,
+            TransferControlAck::Aborted { .. } => 5,
+            TransferControlAck::Released { .. } => 6,
+        }
+    }
+}
+
 /// The compensator pairing, encoded as data so the saga's compensation chain is
 /// testable without the gateway: which command undoes which.
 #[must_use]
@@ -189,23 +256,12 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn commands_and_acks_roundtrip() {
-        for cmd in all_commands() {
-            let bytes = postcard::to_allocvec(&cmd).expect("encode");
-            assert_eq!(
-                postcard::from_bytes::<TransferControl>(&bytes).expect("decode"),
-                cmd
-            );
-        }
-        let acks = vec![
+    /// One ack per VARIANT (the phase order), shared by the roundtrip + step-id tests.
+    fn all_acks() -> Vec<TransferControlAck> {
+        vec![
             TransferControlAck::Prepared {
                 transfer: T,
                 result: PrepareResult::Ready,
-            },
-            TransferControlAck::Prepared {
-                transfer: T,
-                result: PrepareResult::Rejected(PrepareReject::Spatial(SpatialReject::Obstructed)),
             },
             TransferControlAck::CutConfirmed {
                 transfer: T,
@@ -219,14 +275,72 @@ mod tests {
             TransferControlAck::SourceThawed { transfer: T },
             TransferControlAck::Aborted { transfer: T },
             TransferControlAck::Released { transfer: T },
-        ];
-        for ack in acks {
+        ]
+    }
+
+    #[test]
+    fn commands_and_acks_roundtrip() {
+        for cmd in all_commands() {
+            let bytes = postcard::to_allocvec(&cmd).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<TransferControl>(&bytes).expect("decode"),
+                cmd
+            );
+        }
+        // Every ack variant + the Rejected `PrepareResult` arm (the Ready arm is in all_acks).
+        let rejected = TransferControlAck::Prepared {
+            transfer: T,
+            result: PrepareResult::Rejected(PrepareReject::Spatial(SpatialReject::Obstructed)),
+        };
+        for ack in all_acks().into_iter().chain(std::iter::once(rejected)) {
             let bytes = postcard::to_allocvec(&ack).expect("encode");
             assert_eq!(
                 postcard::from_bytes::<TransferControlAck>(&bytes).expect("decode"),
                 ack
             );
         }
+    }
+
+    #[test]
+    fn transfer_and_step_id_cover_every_command_and_ack() {
+        use std::collections::BTreeSet;
+        // Every command exposes its transfer + a DISTINCT stable phase step_id.
+        let cmds = all_commands();
+        let mut cmd_steps = BTreeSet::new();
+        for cmd in &cmds {
+            assert_eq!(cmd.transfer(), T);
+            cmd_steps.insert(cmd.step_id());
+        }
+        assert_eq!(
+            cmd_steps.len(),
+            cmds.len(),
+            "each command phase has a distinct step_id"
+        );
+
+        let acks = all_acks();
+        let mut ack_steps = BTreeSet::new();
+        for ack in &acks {
+            assert_eq!(ack.transfer(), T);
+            ack_steps.insert(ack.step_id());
+        }
+        assert_eq!(
+            ack_steps.len(),
+            acks.len(),
+            "each ack phase has a distinct step_id"
+        );
+
+        // The ack of a command shares its phase (parallel numbering): FreezeSource (a
+        // command) and SourceFrozen (its ack) are both phase 2.
+        let freeze = TransferControl::FreezeSource {
+            transfer: T,
+            session: S,
+            marker_seq: 5,
+        };
+        let frozen = TransferControlAck::SourceFrozen {
+            transfer: T,
+            drained_seq: 5,
+        };
+        assert_eq!(freeze.step_id(), frozen.step_id());
     }
 
     #[test]

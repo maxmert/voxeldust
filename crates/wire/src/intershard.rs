@@ -8,6 +8,8 @@
 //! Arms freeze INCREMENTALLY with their first consumer (the closed-set guarantee is
 //! the per-release conformance test below, not a day-one empty freeze):
 //! - P0 (now): `Ghost`, `Transfer` (Durable class), `Directory`.
+//! - P2: `Saga` (the saga→gateway transfer commands) + `SagaAck` (gateway→saga acks) —
+//!   the route-swap saga drives the gateway exclusively through these.
 //! - P3/P6: `Transfer` transient batches + `BlockEdit`.
 //! - P8: `Coupling` (`EffectFree` ports). — variant reserved, payload lands with ships.
 //! - P9: `Signal`.
@@ -23,6 +25,7 @@ use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, TickId, TransferId};
 
 use crate::seams::directory::DirectoryOp;
+use crate::seams::transfer_control::{TransferControl, TransferControlAck};
 
 /// The closed taxonomy. Compiler-forced exhaustive handling everywhere.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -34,6 +37,12 @@ pub enum InterShardFlow {
     /// Orchestrator-authoritative control ONLY (lease/CAS/clock — never spatial
     /// interest, which is shard-local by design).
     Directory(DirectoryOp),
+    /// Saga → gateway transfer commands (P2): the route-swap saga drives the gateway
+    /// through the phased, separately-acked command vocabulary (the gateway never
+    /// decides a transfer). Side-effecting + ack-driven by `(transfer, phase)`.
+    Saga(TransferControl),
+    /// Gateway → saga acks for the `Saga` arm (one per command phase).
+    SagaAck(TransferControlAck),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -77,6 +86,21 @@ impl InterShardFlow {
                 },
             },
             InterShardFlow::Directory(op) => op.effect_class(),
+            // Saga commands + acks are side-effecting + ack-driven; `(transfer, phase)`
+            // is their `applied_steps` idempotency key (the gateway/saga no-op a
+            // re-delivery at the same phase).
+            InterShardFlow::Saga(cmd) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: cmd.transfer(),
+                    step_id: cmd.step_id(),
+                },
+            },
+            InterShardFlow::SagaAck(ack) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: ack.transfer(),
+                    step_id: ack.step_id(),
+                },
+            },
         }
     }
 }
@@ -303,6 +327,57 @@ mod tests {
                 }
             }
         );
+
+        // Saga commands + acks ride the closed taxonomy as side-effecting arms keyed by
+        // (transfer, phase) — the route swap is never untyped bytes (HR1). FreezeSource and
+        // its ack SourceFrozen are both phase 2.
+        let saga = InterShardFlow::Saga(TransferControl::FreezeSource {
+            transfer: TransferId(11),
+            session: vd_core::SessionId(3),
+            marker_seq: 17,
+        });
+        assert_eq!(
+            saga.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: 2,
+                }
+            }
+        );
+        let saga_ack = InterShardFlow::SagaAck(TransferControlAck::SourceFrozen {
+            transfer: TransferId(11),
+            drained_seq: 17,
+        });
+        assert_eq!(
+            saga_ack.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: 2,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn saga_arms_roundtrip() {
+        for flow in [
+            InterShardFlow::Saga(TransferControl::CommitAuthority {
+                transfer: TransferId(11),
+                session: vd_core::SessionId(3),
+                new_fence: Fence(4),
+            }),
+            InterShardFlow::SagaAck(TransferControlAck::Committed {
+                transfer: TransferId(11),
+            }),
+        ] {
+            let bytes = postcard::to_allocvec(&flow).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
+                flow
+            );
+        }
     }
 
     #[test]
