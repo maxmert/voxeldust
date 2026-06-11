@@ -215,10 +215,16 @@ pub struct GatewayStats {
     /// phase command whose `TransferProgress` prerequisite is missing — dropped + counted,
     /// never panicked (mirrors `inputs_unroutable`).
     pub transfer_unroutable: u64,
-    /// `FreezeSource`/`CommitAuthority`/`ReleaseSubscribe` received in 1c.2 — the route-
-    /// touching phases land at 1c.3/1c.4. Counted + warned, no ack (the saga correctly
-    /// pins until its handler exists), never journaled.
+    /// A still-parked route phase (after 1c.4: `ReleaseSubscribe`, the demote tail).
+    /// Counted + warned, no ack (the saga correctly pins until its handler exists),
+    /// never journaled.
     pub transfer_control_parked: u64,
+    /// `CommitAuthority` arrived for a BOUND transfer (session + matching `TransferProgress`
+    /// present) but `route.cut` is `None` — a FreezeSource-precedes-commit ordered-control
+    /// protocol violation. Counted + `tracing::error`-logged; the saga PINS (route untouched),
+    /// never a garbage-dest swap. DISTINCT from `transfer_unroutable` (the session or the
+    /// in-flight transfer is absent) so the WEDGE-1 pin signal stays unblurred.
+    pub commit_without_cut: u64,
 }
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
@@ -600,10 +606,11 @@ fn on_client_input(
 }
 
 /// THE gateway counterpart to the saga runtime: consume one `TransferControl` command.
-/// 1c.2 handles the NO-AUTHORITY-MOVE phases; the route-touching phases park (1c.3/1c.4).
-/// The applied-steps journal gates every command BEFORE any effect (consult-before-effect)
-/// and records AFTER (record-after-effect) so an at-least-once redelivery re-sends the
-/// recorded ack verbatim and never re-applies.
+/// LIVE: Prepare/RequestCut/FreezeSource (the cut install, 1c.3)/CommitAuthority (the route
+/// swap, 1c.4)/ThawSource/AbortTransfer; only `ReleaseSubscribe` (the demote tail) still
+/// parks. The applied-steps journal gates every command BEFORE any effect
+/// (consult-before-effect) and records AFTER (record-after-effect) so an at-least-once
+/// redelivery re-sends the recorded ack verbatim and never re-applies.
 fn on_transfer_control(
     cmd: TransferControl,
     config: &GatewayConfig,
@@ -649,16 +656,17 @@ fn on_transfer_control(
         } => apply_freeze(session, transfer, marker_seq, dest, stats),
         TransferControl::ThawSource { .. } => apply_thaw(session, transfer, stats),
         TransferControl::AbortTransfer { .. } => apply_abort(session, transfer),
-        TransferControl::CommitAuthority { .. } | TransferControl::ReleaseSubscribe { .. } => {
-            // PARK-LOUD: CommitAuthority (the route swap = 1c.4) + the demote-release tail.
-            // No ack ⇒ the saga correctly pins until its handler lands; not journaled ⇒ that
-            // handler applies cleanly.
+        TransferControl::CommitAuthority { new_fence, .. } => {
+            apply_commit(session, transfer, new_fence, stats)
+        }
+        TransferControl::ReleaseSubscribe { .. } => {
+            // PARK-LOUD: the demote-release tail (closes the source subscription after demote
+            // grace) lands later — no ack ⇒ the saga pins; not journaled ⇒ it applies cleanly.
             stats.transfer_control_parked += 1;
             tracing::warn!(
                 transfer = transfer.0,
                 step,
-                "TransferControl phase parks after 1c.3 (route swap = 1c.4, demote tail later); \
-                 no ack, not journaled"
+                "ReleaseSubscribe parks (demote tail, later); no ack, not journaled"
             );
             None
         }
@@ -805,19 +813,85 @@ fn apply_freeze(
     })
 }
 
-/// Carry the route's `authority` + `fence` forward and swap ONLY the `cut` — the gateway's
-/// SOLE cut install/clear primitive (via the one `route.store`). Centralizing the
-/// field-carry is what makes install (`apply_freeze`, `cut: Some`) and clear (`apply_thaw`,
-/// `cut: None`) provable mirror images: a future field added to `RouteSnapshot` can never
-/// silently drop authority/fence on one of them. (The attach path in `on_shard_control`
-/// SETS a fresh fence, a different shape, so it does NOT use this.)
-fn store_cut(hot: &SessionHot, cut: Option<SeqCut>) {
-    let current = hot.route.load();
+/// THE sole route-mutation primitive: the one `route.store` for every transfer/attach
+/// write. `store_cut` (carry authority+fence, swap cut), `store_commit` (move authority→dest,
+/// carry fence, clear cut), and the attach path (fresh fence) all funnel here — so a future
+/// `RouteSnapshot` field can never silently drop on any of them: the exhaustive no-`..rest`
+/// struct literal lives in EXACTLY one place, and a 4th field is a single compile-fix every
+/// caller inherits. (Login route BIRTH stays a direct `ArcSwap::from_pointee` — not a store.)
+fn store_route(hot: &SessionHot, authority: NodeId, fence: Fence, cut: Option<SeqCut>) {
     hot.route.store(Arc::new(RouteSnapshot {
-        authority: current.authority,
-        fence: current.fence,
+        authority,
+        fence,
         cut,
     }));
+}
+
+/// Carry the route's `authority` + `fence` forward and swap ONLY the `cut` — the cut
+/// install/clear policy (`apply_freeze` `Some`, `apply_thaw`/`apply_abort` `None`). Its
+/// mirror image is `store_commit`; both go through the lone `store_route` literal.
+fn store_cut(hot: &SessionHot, cut: Option<SeqCut>) {
+    let current = hot.route.load();
+    store_route(hot, current.authority, current.fence, cut); // CARRY authority + fence
+}
+
+/// `CommitAuthority`: MOVE authority → `dest`, CARRY the realm fence UNCHANGED, CLEAR the
+/// cut — ONE atomic `route.store` (the SPIKE-2a one-publish guarantee). The fence is CARRIED,
+/// NOT advanced to the per-Entity CAS `new_fence` (R-FENCE / DEFERRED D-25 — see `apply_commit`).
+fn store_commit(hot: &SessionHot, dest: NodeId) {
+    let current = hot.route.load();
+    store_route(hot, dest, current.fence, None); // MOVE authority→dest, CARRY fence, CLEAR cut
+}
+
+/// `CommitAuthority` (step 3): THE route swap. MOVE authority → `dest` (the `SeqCut.dest` the
+/// preceding `FreezeSource` installed), CLEAR the cut, in ONE atomic `store_commit`.
+///
+/// `dest` HAS NO WIRE CARRIER by construction — `CommitAuthority { transfer, session, new_fence }`
+/// carries no dest — so the installed `route.cut.dest` is authoritative: the gateway-local
+/// crystallization of the saga's durable `SagaCtx.dest` (the SAME value `FreezeSource.dest`
+/// rode). FreezeSource strictly precedes commit on reliable+ordered CONTROL (the saga emits
+/// CommitAuthority only after `CommittingCas`), so the cut is present at first delivery.
+///
+/// Bound-check FIRST (mirror `apply_freeze`): a post-CAS forward phase must NOT fabricate
+/// `Committed` for a session this gateway no longer holds (WEDGE-1) — pin instead.
+///
+/// **R-FENCE (DEFERRED D-25): `new_fence` is CARRIED, NOT installed as `route.fence`.** Frames
+/// stamp the REALM fence (route attaches `realm_fence`; checked at `frame_passes_fence`),
+/// whereas `new_fence` is the per-ENTITY CAS fence (`DirectoryKey::Entity`). Installing the
+/// Entity fence here would make the dest's OWN realm-stamped frames stale
+/// (`realm_fence.is_stale_against(new_fence) == true`) — a black screen. Fence rule 5 (fence
+/// out a demoted REMOTE owner) activates by REALM-fence movement at 1d/mesh when source/dest
+/// are distinct realm leases; intra-shard (one realm lease) it correctly does NOT fire.
+/// `new_fence` stays threaded through wire+saga (the CAS linearization point); the gateway
+/// consumes it without installing it until the dest re-stamps its realm lease (1d/mesh).
+fn apply_commit(
+    session: &mut Session,
+    transfer: TransferId,
+    new_fence: Fence,
+    stats: &mut GatewayStats,
+) -> Option<TransferControlAck> {
+    let bound = session
+        .transfer
+        .as_ref()
+        .is_some_and(|tp| tp.transfer == transfer);
+    if !bound {
+        stats.transfer_unroutable += 1; // session/transfer absent: pin (WEDGE-1)
+        return None;
+    }
+    let Some(SeqCut { dest, .. }) = session.hot.route.load().cut else {
+        // BOUND but no cut: FreezeSource must precede commit (ordered CONTROL). Loud,
+        // counted, route UNTOUCHED — never a swap to a garbage dest; the saga pins.
+        stats.commit_without_cut += 1;
+        tracing::error!(
+            transfer = transfer.0,
+            "CommitAuthority with no installed cut — FreezeSource must precede commit; \
+             route untouched, saga pins"
+        );
+        return None;
+    };
+    let _ = new_fence; // R-FENCE: carried-not-installed in 1c.4 (D-25); 1d/mesh installs on dest re-stamp
+    store_commit(&session.hot, dest); // ONE store: authority:=dest, fence carried, cut:=None
+    Some(TransferControlAck::Committed { transfer })
 }
 
 /// `ThawSource` (step 4): the `FreezeSource` compensator — input resumes to the source.
@@ -941,14 +1015,11 @@ fn on_shard_control(
             // sub ids come from the per-session monotonic allocator — NEVER reused.
             let sub = SubId(session.next_sub);
             session.next_sub += 1;
-            // THE route mutation primitive: one atomic store (P2 drives this same
-            // call from CommitAuthority).
+            // THE sole route-mutation primitive: one atomic store (P2 NOW drives this same
+            // `store_route` from `CommitAuthority`'s `store_commit`). Attach SETS a fresh
+            // realm fence (its distinct carry policy); commit/cut CARRY it.
             let authority = session.hot.route.load().authority;
-            session.hot.route.store(Arc::new(RouteSnapshot {
-                authority,
-                fence: realm_fence,
-                cut: None,
-            }));
+            store_route(&session.hot, authority, realm_fence, None);
             session.phase = SessionPhase::Active { sub, entity };
             // X1: SubscriptionOpened strictly precedes any data for the sub.
             push_control(
@@ -2483,15 +2554,20 @@ mod tests {
     }
 
     fn route_cut(rig: &Rig, sid: SessionId) -> Option<SeqCut> {
-        rig.world
+        route_state(rig, sid).cut
+    }
+
+    /// The full loaded route snapshot (all three fields from ONE coherent load) — the swap
+    /// oracle for 1c.4 (authority + fence + cut together).
+    fn route_state(rig: &Rig, sid: SessionId) -> RouteSnapshot {
+        *rig.world
             .resource::<GatewaySessions>()
             .by_session
             .get(&sid)
             .expect("session present")
             .hot
             .route
-            .load()
-            .cut
+            .load_full()
     }
 
     #[test]
@@ -2769,6 +2845,152 @@ mod tests {
         assert_eq!(rig.stats().transfer_unroutable, 1);
     }
 
+    // ---- Slice 1c.4: CommitAuthority — the route swap --------------------------
+
+    #[test]
+    fn commit_swaps_authority_to_dest_and_acks() {
+        // T2: the route swap moves authority -> cut.dest, clears the cut, and CARRIES the
+        // realm fence UNCHANGED (R-FENCE: NOT the per-Entity CAS new_fence). DEST != SHARD
+        // (the source/authority), so this proves dest threads from the installed cut.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login(); // attach installs route.fence = Fence(1)
+        let _ = freeze_to_live_cut(&mut rig, sid, 7);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Committed { transfer: XFER }]
+        );
+        assert_eq!(
+            route_state(&rig, sid),
+            RouteSnapshot {
+                authority: DEST,
+                fence: Fence(1), // R-FENCE: CARRIED, not the new_fence(2)
+                cut: None,
+            }
+        );
+    }
+
+    #[test]
+    fn commit_does_not_drop_the_dest_own_realm_frames() {
+        // T3 (R-FENCE regression guard): after the swap the route fence is CARRIED (Fence(1)),
+        // so the dest's own realm-stamped frames (Fence(1)) still FORWARD. This FAILS the
+        // instant someone installs new_fence(2) as route.fence (the black-screen bug). A
+        // genuinely-stale frame (GENESIS) still drops — rule-5 machinery is live by data.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 7);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+        })]);
+        // A realm-stamped frame at the carried fence is forwarded to the client.
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Snapshot,
+            &frame_msg(Fence(1), 9),
+        )]);
+        let forwarded = sent
+            .iter()
+            .filter(|(to, class, _)| (*to == CLIENT) & (*class == MsgClass::Snapshot))
+            .count();
+        assert_eq!(
+            forwarded, 1,
+            "the dest's own realm frame still forwards post-swap"
+        );
+        assert_eq!(rig.stats().stale_frames_dropped, 0);
+        // A genuinely stale frame still drops + counts.
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Snapshot,
+            &frame_msg(Fence::GENESIS, 10),
+        )]);
+        assert_eq!(sent.len(), 0);
+        assert_eq!(rig.stats().stale_frames_dropped, 1);
+    }
+
+    #[test]
+    fn commit_without_a_prior_freeze_pins_and_counts() {
+        // T4: BOUND (prepared) but no cut installed -> commit_without_cut, no ack, route
+        // untouched (never a garbage-dest swap). The saga pins.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+        })]);
+        assert_eq!(acks_to_orch(&sent), vec![], "no ack -> the saga pins");
+        assert_eq!(route_state(&rig, sid).authority, SHARD, "route untouched");
+        assert_eq!(route_state(&rig, sid).cut, None);
+        assert_eq!(rig.stats().commit_without_cut, 1);
+        assert_eq!(
+            rig.stats().transfer_unroutable,
+            0,
+            "distinct from unroutable"
+        );
+    }
+
+    #[test]
+    fn commit_for_an_absent_transfer_pins_and_counts_unroutable() {
+        // T5: no prepare at all (unbound) -> transfer_unroutable, no ack, route untouched.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let sent = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+        })]);
+        assert_eq!(acks_to_orch(&sent), vec![]);
+        assert_eq!(rig.stats().transfer_unroutable, 1);
+        assert_eq!(rig.stats().commit_without_cut, 0, "distinct from no-cut");
+        assert_eq!(route_state(&rig, sid).authority, SHARD, "route untouched");
+    }
+
+    #[test]
+    fn commit_is_idempotent_on_redelivery() {
+        // T6: a redelivered CommitAuthority re-serves Committed FROM THE JOURNAL and NEVER
+        // re-enters apply_commit — proven by STATE (the route is byte-identical), since a
+        // re-entry could not reconstruct dest from the now-None cut.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 7);
+        let commit = || {
+            saga_cmd(TransferControl::CommitAuthority {
+                transfer: XFER,
+                session: sid,
+                new_fence: Fence(2),
+            })
+        };
+        let first = rig.tick(vec![commit()]);
+        let after_first = route_state(&rig, sid);
+        let second = rig.tick(vec![commit()]);
+        assert_eq!(
+            acks_to_orch(&first),
+            acks_to_orch(&second),
+            "same Committed re-served"
+        );
+        assert_eq!(
+            route_state(&rig, sid),
+            after_first,
+            "route byte-identical: the redelivery never re-ran apply_commit"
+        );
+        assert_eq!(
+            rig.stats().commit_without_cut,
+            0,
+            "redelivery is not a no-cut fault"
+        );
+    }
+
     #[test]
     fn abort_acks_and_prunes_the_progress() {
         let mut rig = Rig::new();
@@ -2839,7 +3061,9 @@ mod tests {
     }
 
     #[test]
-    fn the_route_touching_phases_park_loudly_without_acking() {
+    fn release_subscribe_parks_loudly_without_acking() {
+        // After 1c.4, only ReleaseSubscribe (the demote tail) still parks; FreezeSource (1c.3)
+        // and CommitAuthority (1c.4) are LIVE.
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
         let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
@@ -2847,24 +3071,13 @@ mod tests {
             session: sid,
             dest: SHARD,
         })]);
-        // FreezeSource is LIVE as of 1c.3 — only CommitAuthority (1c.4) + the demote tail park.
-        let parked = [
-            saga_cmd(TransferControl::CommitAuthority {
-                transfer: XFER,
-                session: sid,
-                new_fence: Fence(2),
-            }),
-            saga_cmd(TransferControl::ReleaseSubscribe {
-                transfer: XFER,
-                session: sid,
-                src: SHARD,
-            }),
-        ];
-        for (i, cmd) in parked.into_iter().enumerate() {
-            let sent = rig.tick(vec![cmd]);
-            assert_eq!(acks_to_orch(&sent), vec![], "a parked phase sends no ack");
-            assert_eq!(rig.stats().transfer_control_parked, (i + 1) as u64);
-        }
+        let sent = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: SHARD,
+        })]);
+        assert_eq!(acks_to_orch(&sent), vec![], "a parked phase sends no ack");
+        assert_eq!(rig.stats().transfer_control_parked, 1);
     }
 
     #[test]

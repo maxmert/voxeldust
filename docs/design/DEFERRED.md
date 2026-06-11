@@ -104,9 +104,11 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **1c.2/1c.3 landed (gateway side):** the cut-marker OBSERVER (`on_cut_marker`) consumes an injected
   `is_cut_marker=true` `InputDatagram` on the INPUT flow (1c.3: via `peek_is_cut_marker`, not a full decode) and
   replies `CutConfirmed{marker_seq}` (journaled at step 1; a triple-sent marker re-sends the same ack). 1c.3 also
-  INSTALLS the route cut: `FreezeSource` → `apply_freeze` → `store_cut(Some(SeqCut{marker_seq, dest}))`; the
-  partition READ (`seq > marker → dest buffer`) is 1c.5. The **client** emit remains 🟥 for 1e. The `CutEmitted`
-  CONTROL message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
+  INSTALLS the route cut: `FreezeSource` → `apply_freeze` → `store_cut(Some(SeqCut{marker_seq, dest}))`; **1c.4**
+  SWAPS the route: `CommitAuthority` → `apply_commit` → `store_commit` (authority := `cut.dest`, fence CARRIED,
+  cut := None); `Committed` rides the existing redelivery gate (idempotent, never re-swaps). The partition READ
+  (`seq > marker → dest buffer`) remains 1c.5. The **client** emit remains 🟥 for 1e. The `CutEmitted` CONTROL
+  message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
 ### D-6 🟧 `PersistCheckpoint` is an in-memory no-op (no durable saga WAL)
@@ -131,9 +133,11 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 ### D-8 🟥 Transfer dest-input buffer has no hard cap / counted drop
 - **Missing:** the gateway's `seq > marker` dest buffer (filled while the cut is open) is unbounded.
 - **Where:** `crates/connection-plane/src/gateway.rs` — the `TransferProgress.dest_buffer` (lands in Slice 1c).
-- **When / proper:** **Slice 2.** Inert in 1c (the in-process saga commits `SourceFrozen→CommitAuthority`
-  within one tick — a ~1-datagram window), but a HARD prerequisite once a stalled saga can hold the cut open
-  across ticks: a `BoundedInbox`-style cap + counted drop (`crates/sim/src/io/mod.rs` discipline).
+- **When / proper:** **Slice 2.** Inert in 1c (the saga commits `SourceFrozen→CommitAuthority` within the
+  gateway↔orchestrator round-trip — a small bounded window), but a HARD prerequisite once a stalled saga can
+  hold the cut open across ticks: a `BoundedInbox`-style cap + counted drop (`crates/sim/src/io/mod.rs`
+  discipline). NOTE: 1c.4 flips `authority`→`dest` and clears the cut at commit (`apply_commit`) but does NOT
+  add the buffer/drain — the `seq > marker` partition READ + the buffer are 1c.5; the cap stays Slice 2.
 - **Source:** 1c design `wf_f3eae69e`.
 
 ### D-9 🟥 Snapshot emit is full-world + double-encoded (no AoI / delta)
@@ -281,6 +285,24 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   by a real bench, not before.
 - **Source:** whole-codebase audits `wwk1uh5k9` / `wo2gkj7t7` / `wg9gc765s` / `wdznr0x6i` / `wxwinv5no`
   (SCALE-1C2-1 / SCALE-3-inbox / SCALE-5 / SCALE-CLOUD-1 / SCALE-3-input-copy).
+
+### D-25 🟥 Route swap CARRIES the realm fence; the per-Entity CAS `new_fence` is NOT installed (single-realm 1c)
+- **Missing:** `apply_commit` (the 1c.4 `CommitAuthority` route swap) carries `route.fence` UNCHANGED;
+  `new_fence` (the `DirectoryKey::Entity` CAS fence — `crates/node/src/saga_runtime.rs`) is consumed (`let _`),
+  NOT installed as `route.fence`. **Fence rule 5** (the gateway fences out a DEMOTED REMOTE owner's frames by
+  dropping a stale frame fence vs `route.fence` — `frame_passes_fence`) therefore cannot fire intra-shard.
+- **Why carry-not-install (NOT a bug):** frames stamp the **REALM** fence (`route` attaches `realm_fence`;
+  checked at `frame_passes_fence`); `new_fence` is a **per-ENTITY** CAS fence — a DIFFERENT fence domain.
+  Installing the Entity fence as `route.fence` would make the dest's OWN realm-stamped frames stale
+  (`realm_fence.is_stale_against(new_fence) == true`, `core/src/fence.rs`) → a black screen. Guarded red/green
+  by the 1c.4 test `commit_does_not_drop_the_dest_own_realm_frames`.
+- **Where:** `crates/connection-plane/src/gateway.rs` — `apply_commit` (`let _ = new_fence`).
+- **When / proper:** **1d / mesh** — once source and dest are DISTINCT realm leases, the dest re-stamps at its
+  own realm fence and the swap installs THAT realm fence, so the demoting source's lower-realm-fence frames go
+  stale at `frame_passes_fence` (rule 5 fires, with the SAME `is_stale_against` already in use). Inert + correct
+  in 1c (one realm lease). `new_fence` stays threaded on the wire + saga (the CAS linearization point) so the
+  upgrade is install-on-dest-re-stamp, no reshape.
+- **Source:** P2 Slice 1c.4 design `wf_2e0f6c1d` (the R-FENCE / fence-domain resolution).
 
 ### D-14 🟥 `rendered()` recomputed ~3×/display-frame on the client
 - **Missing:** the windowed/headless render path recomputes the composited view 2–3× per frame.
