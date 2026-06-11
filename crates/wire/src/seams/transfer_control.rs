@@ -140,6 +140,22 @@ impl TransferControl {
         }
     }
 
+    /// The session this command targets (every command carries it). The gateway
+    /// correlates a `TransferControl` to its `Session` by this — the same identity the
+    /// saga serializes on — so the consumer never destructures all seven arms by hand.
+    #[must_use]
+    pub fn session(self) -> SessionId {
+        match self {
+            TransferControl::PrepareSubscribe { session, .. }
+            | TransferControl::RequestCut { session, .. }
+            | TransferControl::FreezeSource { session, .. }
+            | TransferControl::CommitAuthority { session, .. }
+            | TransferControl::ThawSource { session, .. }
+            | TransferControl::AbortTransfer { session, .. }
+            | TransferControl::ReleaseSubscribe { session, .. } => session,
+        }
+    }
+
     /// The saga PHASE this command is, as a stable idempotency step id: `(transfer,
     /// step_id)` is journaled in `applied_steps` before the gateway applies the command,
     /// so a re-delivery at the same step is a no-op (the at-least-once half of HR1's
@@ -309,6 +325,7 @@ mod tests {
         let mut cmd_steps = BTreeSet::new();
         for cmd in &cmds {
             assert_eq!(cmd.transfer(), T);
+            assert_eq!(cmd.session(), S, "every command carries its session");
             cmd_steps.insert(cmd.step_id());
         }
         assert_eq!(

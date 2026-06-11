@@ -65,7 +65,13 @@ pub enum EffectClass {
 /// The idempotency mechanisms a side-effecting arm may use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdempotencyKey {
-    /// `(TransferId, step_id)` — journaled in `applied_steps` before any effect.
+    /// `(TransferId, step_id)` — journaled in `applied_steps` before any effect. THE shared
+    /// dedup KEY across every altitude (HR3 one machinery, many stores): the gateway's
+    /// per-session RAM journal keys its map on `(transfer, step_id)` (Slice 1c.2); the dest
+    /// shard's durable redb `applied_steps` table keys on the same (Slice 1d); cross-shard
+    /// durable signals reuse it with a correlation id as the `TransferId` (P9). The store
+    /// differs per altitude; the KEY and the consult-before-effect / record-after-effect
+    /// discipline do not.
     TransferStep { transfer: TransferId, step_id: u32 },
     /// Idempotent by fence comparison (lease grants/revokes).
     FencedKey { fence: Fence },

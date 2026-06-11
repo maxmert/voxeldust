@@ -72,13 +72,23 @@ struct PendingStart {
 pub struct SagaRuntimeRes {
     sagas: BTreeMap<TransferId, LiveSaga>,
     pending: Vec<PendingStart>,
-    /// Typed client-facing rejections awaiting the 1c surfacing system. BINDING CONTRACT
-    /// (audit ROB-1): the 1c consumer MUST drain via `std::mem::take` as it surfaces each
-    /// batch — the ledger's lifetime is ONE consumer cycle, matching `pending`'s
-    /// `mem::take` discipline and the `BoundedInbox`. A read-only consumer would make this
-    /// an unbounded append-only leak on the orchestrator at MMO scale; do NOT build that.
+    /// Typed client-facing rejections awaiting the surfacing system. BOUNDED ring
+    /// (`REJECTION_LEDGER_CAP`): the PROPER consumer — the typed rejection→client channel —
+    /// lands at Slice 1c.9 (CPO-4) and drains via `std::mem::take` (lifetime ONE cycle,
+    /// matching `pending`). Until then this is capped so it can NEVER grow without limit on
+    /// the orchestrator at MMO scale (audit ROB-1): on overflow the OLDEST rejections are
+    /// shed with a counted + warned drop (`rejections_dropped`) — never an unbounded leak,
+    /// never silent.
     pub rejected: Vec<(TransferId, AbortReason)>,
+    /// Rejections shed because `rejected` reached `REJECTION_LEDGER_CAP` before the 1c.9
+    /// consumer drained it — the loud overflow ALERT (0 in any healthy run).
+    pub rejections_dropped: u64,
 }
+
+/// Hard ceiling on the un-drained rejection ledger (operational param, ONE home — no inline
+/// literal). Sized to absorb a large abort burst between 1c.9 drain cycles; beyond it the
+/// oldest rejections are shed (counted) rather than grow the orchestrator without bound.
+const REJECTION_LEDGER_CAP: usize = 1024;
 
 impl SagaRuntimeRes {
     /// Trigger a new transfer (create-on-trigger). `ctx.subject` MUST already be a directory
@@ -232,6 +242,23 @@ fn deliver(
     commit_result(runtime, transfer, final_state, tombstone, rejected, now);
 }
 
+/// ROB-1: bound the un-drained rejection ledger to `REJECTION_LEDGER_CAP`, shedding the
+/// OLDEST beyond it with a counted, warned drop — never an unbounded leak, never silent.
+/// Monomorphic helper (the branch is covered once; `commit_result` stays a straight shim).
+fn bound_rejection_ledger(runtime: &mut SagaRuntimeRes) {
+    let shed = runtime.rejected.len().saturating_sub(REJECTION_LEDGER_CAP);
+    if shed > 0 {
+        runtime.rejected.drain(0..shed);
+        runtime.rejections_dropped += shed as u64;
+        tracing::warn!(
+            shed,
+            cap = REJECTION_LEDGER_CAP,
+            "saga rejection ledger over cap: shed oldest (un-surfaced until Slice 1c.9 CPO-4); \
+             never silent"
+        );
+    }
+}
+
 /// Persist a quiescent saga: record rejections, then GC (terminal) or write back the state.
 fn commit_result(
     runtime: &mut SagaRuntimeRes,
@@ -242,6 +269,7 @@ fn commit_result(
     now: UniverseTick,
 ) {
     runtime.rejected.extend(rejected);
+    bound_rejection_ledger(runtime); // ROB-1: never let the un-drained ledger grow unbounded
     if tombstone {
         runtime.sagas.remove(&transfer);
     } else {
@@ -826,5 +854,25 @@ mod tests {
         for (ack, event) in cases {
             assert_eq!(ack_to_event(ack), event);
         }
+    }
+
+    #[test]
+    fn the_rejection_ledger_is_bounded_with_a_counted_drop() {
+        // ROB-1: the un-drained ledger can NEVER grow without limit — beyond the cap the
+        // oldest rejections are shed, counted (the loud overflow ALERT), oldest-first.
+        let mut runtime = SagaRuntimeRes::default();
+        for i in 0..(REJECTION_LEDGER_CAP as u128 + 5) {
+            runtime
+                .rejected
+                .push((TransferId(i), AbortReason::Cancelled));
+        }
+        bound_rejection_ledger(&mut runtime);
+        assert_eq!(runtime.rejected.len(), REJECTION_LEDGER_CAP);
+        assert_eq!(runtime.rejections_dropped, 5);
+        assert_eq!(
+            runtime.rejected.first().expect("non-empty").0,
+            TransferId(5),
+            "the 5 OLDEST were shed; the newest survive"
+        );
     }
 }

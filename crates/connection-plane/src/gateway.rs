@@ -22,12 +22,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::rng::SplitMix64;
-use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId};
+use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
-use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
+use vd_wire::channels::{ClientControlMsg, InputDatagram, ServerControlMsg, SubId};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
+use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
 use vd_wire::session_flow::{GatewayToShard, ShardToGateway, peek_input_seq, retag_snapshot_sub};
 use vd_wire::version::ProtoVersion;
 
@@ -75,6 +76,53 @@ pub struct SeqCut {
     pub dest: NodeId,
 }
 
+/// COLD per-session transfer state, owned solely by the single-threaded control plane
+/// (`on_transfer_control` + the cut-marker observer). It lives on the cold [`Session`],
+/// NEVER on the `Arc<SessionHot>` shared with the (future, threaded) 20 Hz forwarder, so
+/// that forwarder can never race it. `Session.transfer` is `None` when no transfer is in
+/// flight. ONE in-flight transfer per session: the orchestrator serializes a session's
+/// saga on its `DirectoryKey` (`DirectoryCore::lock_transfer`), so a second concurrent
+/// transfer on the same subject is refused upstream — no `by_transfer` index is needed.
+#[derive(Debug)]
+struct TransferProgress {
+    /// Binds this progress to ONE transfer; a command/marker for a different transfer on
+    /// this session is rejected (counted), never absorbed against the wrong saga.
+    transfer: TransferId,
+    /// Whether `RequestCut` has been issued for this transfer — the precondition for
+    /// confirming a cut marker. A marker that arrives before `RequestCut` (a premature or
+    /// forged emit) is dropped, so a `CutConfirmed` can never be journaled before its
+    /// issuing command (the saga FSM also gates `CutConfirmed` by state; this is the
+    /// gateway-side half of that guard).
+    cut_requested: bool,
+    // (`dest` from `PrepareSubscribe` returns at 1c.3 WITH its consumer — `FreezeSource`
+    // installs the `SeqCut.dest`. Per the freeze-with-consumer rule, it is not stored yet.)
+    /// The applied-steps idempotency journal: `(transfer, step_id) -> the recorded ack`,
+    /// re-sent VERBATIM on an at-least-once redelivery (never re-applies the effect),
+    /// reached ONLY through [`TransferProgress::recorded`] / [`TransferProgress::journal`]
+    /// (the gateway's ONE dedup accessor — never touched inline). The key is the wire's
+    /// `IdempotencyKey::TransferStep` — the SAME key the 1d durable redb `applied_steps`
+    /// table builds (HR3 one machinery, many stores; only the STORE differs per altitude).
+    /// RAM-ONLY by design — the gateway is soft-state (on resume it re-registers with the
+    /// saga, never replays from RAM); the DURABLE table is the dest shard's at 1d (DEFERRED
+    /// D-22). Bounded: O(phases) per live transfer, dropped whole on terminal/Bye/mint-refusal.
+    applied: BTreeMap<(TransferId, u32), TransferControlAck>,
+}
+
+impl TransferProgress {
+    /// The recorded outcome for this transfer's `step`, or `None` if not yet applied — the
+    /// ONE dedup READ (the redelivery gate + the cut-marker observer both call it). Keyed by
+    /// `(self.transfer, step)` = the wire's `IdempotencyKey::TransferStep`.
+    fn recorded(&self, step: u32) -> Option<TransferControlAck> {
+        self.applied.get(&(self.transfer, step)).copied()
+    }
+
+    /// Record `ack` at this transfer's `step` — the ONE dedup WRITE, so the recorded value
+    /// is re-sent verbatim on a redelivery. Keyed by `(self.transfer, step)`.
+    fn journal(&mut self, step: u32, ack: TransferControlAck) {
+        self.applied.insert((self.transfer, step), ack);
+    }
+}
+
 /// The lock-free per-session hot state shared with the (future, threaded) 20 Hz
 /// forwarding path. The cold session record owns an `Arc` of this.
 #[derive(Debug)]
@@ -106,6 +154,9 @@ struct Session {
     /// The negotiated proto minor for this connection (the sender-gates-variants
     /// rule): minor-1+ variants like `UniverseRate` are emitted only when `>= 1`.
     negotiated_minor: u16,
+    /// COLD transfer state, `None` until a saga's `PrepareSubscribe` opens one (1c.2).
+    /// Dropped whole on the in-flight terminal (`AbortTransfer`) or when the session ends.
+    transfer: Option<TransferProgress>,
     hot: Arc<SessionHot>,
 }
 
@@ -158,10 +209,14 @@ pub struct GatewayStats {
     pub inputs_malformed: u64,
     pub stale_frames_dropped: u64,
     pub undecodable: u64,
-    /// TransferControl commands received before the consumer exists (Slice 1c.2 wires it).
-    /// Counted, never mis-applied — a transient honesty surface that should be 0 once 1c.2
-    /// lands (the consumer replaces this arm).
-    pub transfer_control_unhandled: u64,
+    /// A `TransferControl` command (or cut marker) for an unknown/absent session, or a
+    /// phase command whose `TransferProgress` prerequisite is missing — dropped + counted,
+    /// never panicked (mirrors `inputs_unroutable`).
+    pub transfer_unroutable: u64,
+    /// `FreezeSource`/`CommitAuthority`/`ReleaseSubscribe` received in 1c.2 — the route-
+    /// touching phases land at 1c.3/1c.4. Counted + warned, no ack (the saga correctly
+    /// pins until its handler exists), never journaled.
+    pub transfer_control_parked: u64,
 }
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
@@ -197,7 +252,9 @@ pub fn route_input(hot: &SessionHot, input_bytes: &[u8]) -> InputRouting {
         return InputRouting::Deduped;
     }
     let route = hot.route.load();
-    // P1: `cut` is always None; the P2 cut partition slots in right here.
+    // `cut` is still always None through 1c.2 (FreezeSource — the only writer — parks
+    // until 1c.3); the seq>marker dest-buffer partition slots in right here at 1c.3,
+    // leaving this benched hot path otherwise untouched (SPIKE-2a).
     InputRouting::Forward {
         to: route.authority,
     }
@@ -280,9 +337,12 @@ fn process_gateway_inbound(
                         &mut stats,
                         &mut outbox,
                     ),
-                    // The TransferControl consumer (the 7-command saga vocabulary) lands in
-                    // Slice 1c.2; until then a command is counted, not mis-applied.
-                    Ok(InterShardFlow::Saga(_)) => stats.transfer_control_unhandled += 1,
+                    // The TransferControl consumer (the gateway counterpart to the saga
+                    // runtime): the no-authority-move phases (1c.2); the route-touching
+                    // phases park until 1c.3/1c.4.
+                    Ok(InterShardFlow::Saga(cmd)) => {
+                        on_transfer_control(cmd, &config, &mut sessions, &mut stats, &mut outbox)
+                    }
                     Ok(_) | Err(_) => stats.undecodable += 1,
                 },
                 // Membership (clock sync) is consumed by the follower system.
@@ -303,7 +363,7 @@ fn process_gateway_inbound(
                     &mut outbox,
                 ),
                 MsgClass::Input => {
-                    on_client_input(bytes, from, &sessions, &mut stats, &mut outbox);
+                    on_client_input(bytes, from, &config, &mut sessions, &mut stats, &mut outbox);
                 }
                 _ => stats.undecodable += 1,
             }
@@ -329,6 +389,13 @@ fn push_directory(outbox: &mut OutboundBox, to: NodeId, op: DirectoryOp) {
     outbox
         .0
         .push((to, MsgClass::Saga, vd_sim::io::bytes(bytes)));
+}
+
+/// The ONE `SagaAck` encode-and-push — the exact inverse of the saga runtime's
+/// `outbox.push_flow(gateway, Saga, &InterShardFlow::Saga(cmd))` (DRY: reuses the shared
+/// `push_flow`). Every gateway reply to the orchestrator's saga rides this.
+fn reply_ack(outbox: &mut OutboundBox, orchestrator: NodeId, ack: TransferControlAck) {
+    outbox.push_flow(orchestrator, MsgClass::Saga, &InterShardFlow::SagaAck(ack));
 }
 
 /// Handle one client control message. The gateway is the SOLE ticket validator;
@@ -401,6 +468,7 @@ fn on_client_control(
                     phase: SessionPhase::AwaitingDirectory,
                     next_sub: 0,
                     negotiated_minor: negotiated.minor,
+                    transfer: None,
                     hot: Arc::new(SessionHot {
                         route: ArcSwap::from_pointee(RouteSnapshot {
                             authority: config.shard,
@@ -441,6 +509,19 @@ fn on_client_control(
                 .by_session
                 .remove(&session_id)
                 .expect("session maps are kept in sync");
+            // WEDGE-1 (pinned to Slice 2 — DEFERRED D-23): a Bye mid-transfer drops the
+            // session + its journal; subsequent saga commands for it then count as
+            // `transfer_unroutable` with NO producer to unstick the pinned saga. The real
+            // backstop is the Slice-2 saga timeout/abort producer; pin loud here so the
+            // dropped in-flight transfer is never silent.
+            if let Some(tp) = session.transfer.as_ref() {
+                tracing::warn!(
+                    session = %session_id,
+                    transfer = tp.transfer.0,
+                    "client Bye dropped a session with an in-flight transfer — the saga will \
+                     pin until the Slice-2 timeout producer lands (D-23)"
+                );
+            }
             push_to_shard(
                 outbox,
                 config.shard,
@@ -465,22 +546,24 @@ fn on_client_control(
     }
 }
 
-/// Route one client input datagram (hot path + bookkeeping).
+/// Route one client input datagram (HOT decision + bookkeeping), then COLD-observe the
+/// transfer cut marker — strictly OFF the SPIKE-2a hot path (`route_input` is unchanged).
 fn on_client_input(
     bytes: &[u8],
     client: NodeId,
-    sessions: &GatewaySessions,
+    config: &GatewayConfig,
+    sessions: &mut GatewaySessions,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
 ) {
-    let Some(session_id) = sessions.by_client.get(&client) else {
+    let Some(session_id) = sessions.by_client.get(&client).copied() else {
         stats.inputs_unroutable += 1;
         return;
     };
     // Guarded lookup, never `[]`: the two session maps are kept in sync by construction,
-    // but a desync must DROP-and-count on this 20Hz hot path, never panic the gateway
+    // but a desync must DROP-and-count on this 20Hz path, never panic the gateway
     // (R2 lineage — a routing-map slip is a counted unroutable, not a crash).
-    let Some(session) = sessions.by_session.get(session_id) else {
+    let Some(session) = sessions.by_session.get_mut(&session_id) else {
         stats.inputs_unroutable += 1;
         return;
     };
@@ -488,6 +571,7 @@ fn on_client_input(
         stats.inputs_unroutable += 1;
         return;
     }
+    // HOT: the benched route decision (ArcSwap load + one atomic). Unchanged.
     match route_input(&session.hot, bytes) {
         InputRouting::Forward { to } => {
             push_to_shard(
@@ -495,7 +579,7 @@ fn on_client_input(
                 to,
                 MsgClass::Input,
                 &GatewayToShard::SessionInput {
-                    session: *session_id,
+                    session: session_id,
                     fence: session.fence,
                     input_bytes: bytes.to_vec(),
                 },
@@ -504,6 +588,244 @@ fn on_client_input(
         InputRouting::Deduped => stats.inputs_deduped += 1,
         InputRouting::Malformed => stats.inputs_malformed += 1,
     }
+    // COLD: observe the in-band cut marker ONLY while a transfer is in flight (1c sources
+    // it SCRIPTED on the input flow; the client emit is 1e — DEFERRED D-5). `route_input`
+    // never decodes `is_cut_marker`; this is a separate cold decode, off the hot path.
+    if let Some(tp) = session.transfer.as_mut() {
+        on_cut_marker(tp, bytes, config.orchestrator, outbox);
+    }
+}
+
+/// THE gateway counterpart to the saga runtime: consume one `TransferControl` command.
+/// 1c.2 handles the NO-AUTHORITY-MOVE phases; the route-touching phases park (1c.3/1c.4).
+/// The applied-steps journal gates every command BEFORE any effect (consult-before-effect)
+/// and records AFTER (record-after-effect) so an at-least-once redelivery re-sends the
+/// recorded ack verbatim and never re-applies.
+fn on_transfer_control(
+    cmd: TransferControl,
+    config: &GatewayConfig,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    let transfer = cmd.transfer();
+    let step = cmd.step_id();
+    let Some(session) = sessions.by_session.get_mut(&cmd.session()) else {
+        stats.transfer_unroutable += 1; // unknown/absent session: counted, never panic
+        return;
+    };
+    // REDELIVERY GATE (consult-before-effect): a recorded step for THIS transfer re-sends
+    // the recorded ack verbatim, no effect — via the ONE dedup accessor `TransferProgress::
+    // recorded` (the cut-marker observer reads the SAME way; DRY-1). A let-chain (each link's
+    // true/false arm is separately exercised: no-transfer / wrong-transfer / unrecorded-step
+    // / recorded-step).
+    //
+    // RequestCut is EXCLUDED (F1): it is NOT self-acking — its `CutConfirmed` is journaled
+    // at the SAME step-1 slot by the cut-marker observer, NOT by RequestCut itself. So a
+    // redelivered RequestCut must re-run `apply_request_cut` (an idempotent client re-push
+    // the client de-dups), never consult the marker's slot and wrongly answer the command
+    // with a `CutConfirmed`. The marker observer owns the step-1 journal exclusively.
+    let is_request_cut = matches!(cmd, TransferControl::RequestCut { .. });
+    if !is_request_cut
+        && let Some(tp) = session.transfer.as_ref()
+        && tp.transfer == transfer
+        && let Some(prior) = tp.recorded(step)
+    {
+        reply_ack(outbox, config.orchestrator, prior);
+        return;
+    }
+    // Compute the ack (or None for deferred/parked phases), then record-then-send below.
+    let ack: Option<TransferControlAck> = match cmd {
+        TransferControl::PrepareSubscribe { .. } => Some(apply_prepare(session, transfer)),
+        TransferControl::RequestCut { .. } => {
+            apply_request_cut(session, outbox, transfer, stats);
+            None // the ack (CutConfirmed) is deferred to the cut-marker observer
+        }
+        TransferControl::ThawSource { .. } => apply_thaw(session, transfer, stats),
+        TransferControl::AbortTransfer { .. } => apply_abort(session, transfer),
+        TransferControl::FreezeSource { .. }
+        | TransferControl::CommitAuthority { .. }
+        | TransferControl::ReleaseSubscribe { .. } => {
+            // PARK-LOUD: these touch the route/cut (1c.3 FreezeSource, 1c.4 CommitAuthority,
+            // the demote-release tail). No ack ⇒ the saga correctly pins until its handler
+            // lands; not journaled ⇒ that handler applies cleanly.
+            stats.transfer_control_parked += 1;
+            tracing::warn!(
+                transfer = transfer.0,
+                step,
+                "TransferControl phase parks in 1c.2 (cut cycle = 1c.3, route swap = 1c.4); \
+                 no ack, not journaled"
+            );
+            None
+        }
+    };
+    // RECORD-then-SEND for the LIVE acking phases. The journal write is GUARDED to the
+    // IN-FLIGHT transfer (`tp.transfer == transfer`): an idempotent re-ack of a phase for a
+    // NON-in-flight transfer (e.g. a stray Thaw/Abort while a different transfer is live)
+    // must never pollute the live transfer's journal — bounding it to its own steps. (A
+    // terminal AbortTransfer prunes `session.transfer` inside `apply_abort`, so `as_mut()`
+    // is already `None` there — no record, the abort being idempotently re-ackable anyway.)
+    if let Some(ack) = ack {
+        if let Some(tp) = session.transfer.as_mut()
+            && tp.transfer == transfer
+        {
+            tp.journal(step, ack);
+        }
+        reply_ack(outbox, config.orchestrator, ack);
+    }
+}
+
+/// `PrepareSubscribe` (step 0): open the per-session transfer progress + reply `Prepared`.
+/// 1c STUB readiness — there is no dest-subscription/ghost machinery yet (one stub shard),
+/// so the verdict is `Ready` (the typed `Rejected` path stays WIRED for later bands, not
+/// dead live code). DEFENSIVE replace: overwrite any stale progress.
+fn apply_prepare(session: &mut Session, transfer: TransferId) -> TransferControlAck {
+    // RACE-1 (pinned to Slice 2 — DEFERRED D-23): replacing a LIVE, different transfer's
+    // progress discards its journal. Impossible today — the orchestrator serializes one
+    // saga per session-subject (`DirectoryCore::lock_transfer`), and a redelivered SAME
+    // transfer is caught by the redelivery gate before reaching here — so any existing
+    // progress here is necessarily a stale DIFFERENT transfer. Becomes reachable only once
+    // Slice-2 closes the abort-lock leak (D-1); pinned loud so it is never silently relied on.
+    if let Some(displaced) = session.transfer.as_ref() {
+        tracing::warn!(
+            displaced = displaced.transfer.0,
+            opening = transfer.0,
+            "PrepareSubscribe replaced a stale in-flight transfer's progress — revisit at \
+             Slice 2 (the one-saga-per-subject lock makes this benign today; D-23)"
+        );
+    }
+    session.transfer = Some(TransferProgress {
+        transfer,
+        cut_requested: false,
+        applied: BTreeMap::new(),
+    });
+    tracing::debug!(
+        transfer = transfer.0,
+        "PrepareSubscribe readiness is a 1c stub (Ready)"
+    );
+    TransferControlAck::Prepared {
+        transfer,
+        result: PrepareResult::Ready,
+    }
+}
+
+/// `RequestCut` (step 1): mark the cut as requested + ask the client to emit the in-band
+/// cut marker. The ack (`CutConfirmed`) is DEFERRED to the marker observer, so this returns
+/// nothing. Re-pushing `RequestCut` is harmless (reliable+ordered CONTROL; the client
+/// de-dups), so it is not journaled at command time. Requires the matching progress
+/// (`PrepareSubscribe` precedes it); setting `cut_requested` is what later authorizes the
+/// marker observer to confirm a cut (F1: no `CutConfirmed` before its `RequestCut`).
+fn apply_request_cut(
+    session: &mut Session,
+    outbox: &mut OutboundBox,
+    transfer: TransferId,
+    stats: &mut GatewayStats,
+) {
+    let bound = session
+        .transfer
+        .as_ref()
+        .is_some_and(|tp| tp.transfer == transfer);
+    if !bound {
+        stats.transfer_unroutable += 1; // RequestCut without a matching Prepared: drop+count
+        return;
+    }
+    session
+        .transfer
+        .as_mut()
+        .expect("bound implies the in-flight transfer is present")
+        .cut_requested = true;
+    push_control(
+        outbox,
+        session.client,
+        &ServerControlMsg::RequestCut { transfer },
+    );
+}
+
+/// `ThawSource` (step 4): the `FreezeSource` compensator — input resumes to the source.
+/// Clears the cut via the SOLE route-store primitive ONLY for the matching in-flight
+/// transfer (ROB-THAW-UNBOUND-STORE): a thaw naming a different/absent transfer must NOT
+/// touch the route, else once 1c.3 makes `cut` live it would clobber the in-flight
+/// transfer's cut. A thaw against a never-frozen source is a correct no-op (the source
+/// never stopped), so it ALWAYS acks `SourceThawed` (even unbound — counted — so the saga's
+/// thaw compensator can always complete), but only the BOUND case stores the route.
+fn apply_thaw(
+    session: &mut Session,
+    transfer: TransferId,
+    stats: &mut GatewayStats,
+) -> Option<TransferControlAck> {
+    let bound = session
+        .transfer
+        .as_ref()
+        .is_some_and(|tp| tp.transfer == transfer);
+    if bound {
+        let current = session.hot.route.load();
+        session.hot.route.store(Arc::new(RouteSnapshot {
+            authority: current.authority,
+            fence: current.fence,
+            cut: None,
+        }));
+    } else {
+        stats.transfer_unroutable += 1;
+    }
+    Some(TransferControlAck::SourceThawed { transfer })
+}
+
+/// `AbortTransfer` (step 5, terminal): `PrepareSubscribe`'s compensator — tear down the dest
+/// ghost. In 1c.2 `PrepareSubscribe` built no ghost (`Ready` stub), so teardown is inert on
+/// session state and the route is untouched (the source stayed authoritative). NOT a
+/// disconnect: the `Session`/`phase` are untouched. Prunes ONLY the matching in-flight
+/// transfer (CP-1: an abort for transfer B must never clobber a live transfer A). An abort
+/// is an IDEMPOTENT terminal: a redelivered abort, or an abort for a transfer this gateway
+/// never held, is a benign no-op re-ack — NOT a routing failure (F2: it is uncounted, so
+/// `transfer_unroutable` stays about genuine failures). Always acks `Aborted`.
+fn apply_abort(session: &mut Session, transfer: TransferId) -> Option<TransferControlAck> {
+    if session
+        .transfer
+        .as_ref()
+        .is_some_and(|tp| tp.transfer == transfer)
+    {
+        session.transfer = None; // prune ONLY the matching in-flight transfer
+    }
+    tracing::debug!(
+        transfer = transfer.0,
+        "AbortTransfer teardown is inert in 1c.2 (no ghost)"
+    );
+    Some(TransferControlAck::Aborted { transfer })
+}
+
+/// COLD cut-marker observer (off the hot path): when a transfer is in flight and a client
+/// `InputDatagram` carries `is_cut_marker`, derive `CutConfirmed{marker_seq}` and ack it —
+/// journaled at step 1 (via the SAME `TransferProgress` accessors as the redelivery gate),
+/// so a triple-sent marker re-sends the SAME ack. REQUIRES `RequestCut` to have been issued
+/// (`tp.cut_requested`) first (F1): a premature/forged marker must NEVER journal a
+/// `CutConfirmed` before its issuing command. 1c sources the marker SCRIPTED (the client
+/// emit is 1e — D-5).
+fn on_cut_marker(
+    tp: &mut TransferProgress,
+    bytes: &[u8],
+    orchestrator: NodeId,
+    outbox: &mut OutboundBox,
+) {
+    let Ok(dgram) = postcard::from_bytes::<InputDatagram>(bytes) else {
+        return; // a decode failure here is just "not a marker"; route_input already counts malformed
+    };
+    if !dgram.is_cut_marker {
+        return; // ordinary input
+    }
+    if !tp.cut_requested {
+        return; // F1: a marker before its RequestCut is premature/forged — never confirm it
+    }
+    const CUT_STEP: u32 = 1; // step 1 = RequestCut/CutConfirmed
+    if let Some(prior) = tp.recorded(CUT_STEP) {
+        reply_ack(outbox, orchestrator, prior); // triple-sent marker: re-send the SAME ack
+        return;
+    }
+    let ack = TransferControlAck::CutConfirmed {
+        transfer: tp.transfer,
+        marker_seq: dgram.seq,
+    };
+    tp.journal(CUT_STEP, ack);
+    reply_ack(outbox, orchestrator, ack);
 }
 
 /// Handle a shard control reply (attach/detach lifecycle).
@@ -1208,7 +1530,14 @@ mod tests {
         sessions.by_client.insert(CLIENT, SessionId(7));
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        on_client_input(&input_bytes(1), CLIENT, &sessions, &mut stats, &mut outbox);
+        on_client_input(
+            &input_bytes(1),
+            CLIENT,
+            &config(),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
         assert_eq!(
             stats.inputs_unroutable, 1,
             "the desync is counted, not crashed"
@@ -1364,15 +1693,16 @@ mod tests {
         use vd_wire::seams::transfer_control::TransferControl;
         let mut rig = Rig::new();
 
-        // A TransferControl command (the saga driving the gateway) is COUNTED as
-        // not-yet-handled — never mis-decoded as a directory reply (1c.2 wires the consumer).
+        // A TransferControl command (the saga driving the gateway) DISPATCHES to the
+        // consumer — never mis-decoded as a directory reply. With no session 7 here it is
+        // counted unroutable (consumed, not undecodable): the split is what this asserts.
         let cmd = InterShardFlow::Saga(TransferControl::PrepareSubscribe {
             transfer: vd_core::TransferId(1),
             session: SessionId(7),
             dest: SHARD,
         });
         let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &cmd)]);
-        assert_eq!(rig.stats().transfer_control_unhandled, 1);
+        assert_eq!(rig.stats().transfer_unroutable, 1);
         assert_eq!(rig.stats().undecodable, 0, "a command is NOT undecodable");
 
         // A non-reply / non-command Saga-class arm (a misdirected Ghost) → undecodable.
@@ -1394,8 +1724,8 @@ mod tests {
             bytes: vec![0xFF, 0xFF].into(),
         }]);
         assert_eq!(rig.stats().undecodable, 2);
-        // The command count did not move (the split is clean in both directions).
-        assert_eq!(rig.stats().transfer_control_unhandled, 1);
+        // The consumed-command count did not move (the split is clean in both directions).
+        assert_eq!(rig.stats().transfer_unroutable, 1);
 
         // A well-formed reply that is NOT a Session head (a CAS outcome carries no gateway
         // obligation) decodes + dispatches to on_directory_reply, which returns without
@@ -1984,6 +2314,547 @@ mod tests {
             hot.last_input_seq.load(Ordering::Relaxed),
             7,
             "the high-water mark advanced to seq 7 exactly once"
+        );
+    }
+
+    // ---- Slice 1c.2: the gateway TransferControl consumer ----------------------
+
+    const XFER: TransferId = TransferId(0x1c2);
+
+    fn saga_cmd(cmd: TransferControl) -> Inbound {
+        wire(ORCH, MsgClass::Saga, &InterShardFlow::Saga(cmd))
+    }
+
+    /// The `SagaAck`s the gateway sent back to the orchestrator (ignoring the directory
+    /// ops that also ride ORCH+Saga — login's LeaseGrant, etc.).
+    fn acks_to_orch(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<TransferControlAck> {
+        sent.iter()
+            .filter(|(node, class, _)| (*node == ORCH) & (*class == MsgClass::Saga))
+            .filter_map(|(_, _, bytes)| {
+                // The gateway only ever sends valid flows; `.expect` keeps the Err path in
+                // std (no caller branch). A non-SagaAck ORCH/Saga send (a directory op, e.g.
+                // login's LeaseGrant) maps to None — exercised by the login-tick assertion.
+                match postcard::from_bytes::<InterShardFlow>(bytes)
+                    .expect("gateway sends a valid flow")
+                {
+                    InterShardFlow::SagaAck(ack) => Some(ack),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    fn marker_input(seq: u64) -> Inbound {
+        wire(
+            CLIENT,
+            MsgClass::Input,
+            &InputDatagram {
+                seq,
+                is_cut_marker: true,
+                client_tick: TickId(1),
+                movement: [0.0, 0.0, 0.0],
+                look: [0.0, 0.0],
+                action_bits: 0,
+            },
+        )
+    }
+
+    fn transfer_in_flight(rig: &Rig, sid: SessionId) -> bool {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session present")
+            .transfer
+            .is_some()
+    }
+
+    fn route_cut(rig: &Rig, sid: SessionId) -> Option<SeqCut> {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session present")
+            .hot
+            .route
+            .load()
+            .cut
+    }
+
+    #[test]
+    fn prepare_opens_progress_and_acks_ready() {
+        let mut rig = Rig::new();
+        let (sid, login_sends) = rig.login();
+        // The hello tick's ORCH/Saga send is a directory LeaseGrant, not a SagaAck — so
+        // `acks_to_orch` yields none (covers the non-ack decode arm of the helper).
+        assert_eq!(acks_to_orch(&login_sends[0]), vec![]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Prepared {
+                transfer: XFER,
+                result: PrepareResult::Ready,
+            }]
+        );
+        assert!(
+            transfer_in_flight(&rig, sid),
+            "PrepareSubscribe opened progress"
+        );
+    }
+
+    #[test]
+    fn request_cut_pushes_to_client_and_defers_the_ack_to_the_marker() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        // RequestCut → exactly one ServerControlMsg::RequestCut to the CLIENT, ZERO SagaAck.
+        let sent = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![ServerControlMsg::RequestCut { transfer: XFER }]
+        );
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "the ack is deferred to the marker"
+        );
+
+        // The scripted in-band cut marker on the INPUT flow → CutConfirmed{marker_seq}.
+        let sent = rig.tick(vec![marker_input(42)]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::CutConfirmed {
+                transfer: XFER,
+                marker_seq: 42,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_redelivered_request_cut_after_the_marker_re_pushes_never_re_confirms() {
+        // F1: RequestCut is NOT self-acking — its CutConfirmed is journaled at step 1 by the
+        // marker observer. A redelivered RequestCut must re-push to the client (idempotent),
+        // never answer the COMMAND with the marker's CutConfirmed from the shared slot.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let request_cut = || {
+            saga_cmd(TransferControl::RequestCut {
+                transfer: XFER,
+                session: sid,
+            })
+        };
+        let _ = rig.tick(vec![request_cut()]);
+        let _ = rig.tick(vec![marker_input(5)]); // CutConfirmed journaled at step 1
+        // Redeliver RequestCut: re-pushes to the client, does NOT re-send CutConfirmed.
+        let sent = rig.tick(vec![request_cut()]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![ServerControlMsg::RequestCut { transfer: XFER }],
+            "the redelivered RequestCut re-pushes to the client"
+        );
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "it never answers the command with the marker's CutConfirmed"
+        );
+    }
+
+    #[test]
+    fn thaw_acks_and_leaves_the_route_cut_clear() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::ThawSource {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::SourceThawed { transfer: XFER }]
+        );
+        assert_eq!(route_cut(&rig, sid), None, "thaw leaves the cut clear");
+    }
+
+    #[test]
+    fn abort_acks_and_prunes_the_progress() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        assert!(transfer_in_flight(&rig, sid));
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Aborted { transfer: XFER }]
+        );
+        assert!(
+            !transfer_in_flight(&rig, sid),
+            "AbortTransfer pruned the progress (the saga's terminal)"
+        );
+    }
+
+    #[test]
+    fn a_redelivered_prepare_resends_the_same_ack_without_re_applying() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let prepare = || {
+            saga_cmd(TransferControl::PrepareSubscribe {
+                transfer: XFER,
+                session: sid,
+                dest: SHARD,
+            })
+        };
+        let first = rig.tick(vec![prepare()]);
+        let second = rig.tick(vec![prepare()]);
+        // The SAME Prepared ack both times (the journal re-sent it; no second effect).
+        assert_eq!(acks_to_orch(&first), acks_to_orch(&second));
+        assert_eq!(acks_to_orch(&second).len(), 1);
+    }
+
+    #[test]
+    fn a_triple_sent_cut_marker_resends_the_same_cut_confirmed() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+            transfer: XFER,
+            session: sid,
+        })]);
+        // Three sends of the marker at the same seq (the channel's triple-send) → the SAME
+        // CutConfirmed each time (journaled at step 1), never three distinct acks.
+        let a = rig.tick(vec![marker_input(9)]);
+        let b = rig.tick(vec![marker_input(9)]);
+        let c = rig.tick(vec![marker_input(9)]);
+        let confirmed = vec![TransferControlAck::CutConfirmed {
+            transfer: XFER,
+            marker_seq: 9,
+        }];
+        assert_eq!(acks_to_orch(&a), confirmed);
+        assert_eq!(acks_to_orch(&b), confirmed);
+        assert_eq!(acks_to_orch(&c), confirmed);
+    }
+
+    #[test]
+    fn the_route_touching_phases_park_loudly_without_acking() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let parked = [
+            saga_cmd(TransferControl::FreezeSource {
+                transfer: XFER,
+                session: sid,
+                marker_seq: 3,
+            }),
+            saga_cmd(TransferControl::CommitAuthority {
+                transfer: XFER,
+                session: sid,
+                new_fence: Fence(2),
+            }),
+            saga_cmd(TransferControl::ReleaseSubscribe {
+                transfer: XFER,
+                session: sid,
+                src: SHARD,
+            }),
+        ];
+        for (i, cmd) in parked.into_iter().enumerate() {
+            let sent = rig.tick(vec![cmd]);
+            assert_eq!(acks_to_orch(&sent), vec![], "a parked phase sends no ack");
+            assert_eq!(rig.stats().transfer_control_parked, (i + 1) as u64);
+        }
+    }
+
+    #[test]
+    fn thaw_for_an_unrecorded_transfer_still_acks_but_is_counted() {
+        // ThawSource's compensator must always complete (a thaw against a never-frozen
+        // source is a correct no-op), yet the missing progress is counted, not silent.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let sent = rig.tick(vec![saga_cmd(TransferControl::ThawSource {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::SourceThawed { transfer: XFER }]
+        );
+        assert_eq!(rig.stats().transfer_unroutable, 1);
+    }
+
+    #[test]
+    fn abort_for_an_unrecorded_transfer_is_an_idempotent_uncounted_re_ack() {
+        // An abort is an idempotent terminal: aborting a transfer this gateway never held
+        // re-acks Aborted and is NOT a routing failure (F2: transfer_unroutable stays clean).
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Aborted { transfer: XFER }]
+        );
+        assert_eq!(
+            rig.stats().transfer_unroutable,
+            0,
+            "an abort is not unroutable"
+        );
+    }
+
+    #[test]
+    fn a_redelivered_terminal_abort_is_idempotent_and_uncounted() {
+        // F2: after a bound abort prunes the progress, a redelivered abort (now unbound)
+        // re-acks Aborted without inflating transfer_unroutable (healthy at-least-once).
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let abort = || {
+            saga_cmd(TransferControl::AbortTransfer {
+                transfer: XFER,
+                session: sid,
+            })
+        };
+        let first = rig.tick(vec![abort()]);
+        let second = rig.tick(vec![abort()]); // redelivered terminal
+        let aborted = vec![TransferControlAck::Aborted { transfer: XFER }];
+        assert_eq!(acks_to_orch(&first), aborted);
+        assert_eq!(
+            acks_to_orch(&second),
+            aborted,
+            "the redelivered terminal re-acks"
+        );
+        assert_eq!(
+            rig.stats().transfer_unroutable,
+            0,
+            "no spurious unroutable count"
+        );
+    }
+
+    #[test]
+    fn abort_of_a_different_transfer_does_not_clobber_the_in_flight_one() {
+        // CP-1: an AbortTransfer for transfer B must NOT prune in-flight transfer A's
+        // progress — the prune is keyed on the matching transfer, not the variant.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let other = TransferId(0x777);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        assert!(transfer_in_flight(&rig, sid));
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: other,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Aborted { transfer: other }],
+            "the foreign abort still acks idempotently"
+        );
+        assert!(
+            transfer_in_flight(&rig, sid),
+            "in-flight transfer A survives an abort aimed at transfer B"
+        );
+    }
+
+    #[test]
+    fn a_bye_with_an_in_flight_transfer_is_warned_and_detaches() {
+        // WEDGE-1 pin: a Bye mid-transfer drops the session + journal (the saga then pins
+        // until the Slice-2 timeout). The path runs cleanly + detaches; the warn fires.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        assert!(transfer_in_flight(&rig, sid));
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        // The session (and its in-flight-transfer journal) is dropped on Bye — the WEDGE-1
+        // warn path ran without panic. (The DetachSession/LeaseRevoke fan-out is covered by
+        // `bye_detaches_revokes_and_clears`.)
+        assert!(
+            !rig.world
+                .resource::<GatewaySessions>()
+                .by_session
+                .contains_key(&sid),
+            "the session (and its journal) is dropped on Bye"
+        );
+    }
+
+    #[test]
+    fn request_cut_without_a_matching_prepare_is_counted_and_pushes_nothing() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let sent = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![],
+            "no RequestCut pushed"
+        );
+        assert_eq!(rig.stats().transfer_unroutable, 1);
+    }
+
+    #[test]
+    fn an_ordinary_input_during_a_transfer_is_not_a_cut_marker() {
+        // The cold marker observer runs while a transfer is in flight, but a NON-marker
+        // input (`is_cut_marker = false`) produces no CutConfirmed — only routing.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let sent = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Input,
+            &InputDatagram {
+                seq: 5,
+                is_cut_marker: false,
+                client_tick: TickId(1),
+                movement: [1.0, 0.0, 0.0],
+                look: [0.0, 0.0],
+                action_bits: 0,
+            },
+        )]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "ordinary input yields no CutConfirmed"
+        );
+    }
+
+    #[test]
+    fn a_cut_marker_before_its_request_cut_is_dropped_not_confirmed() {
+        // F1: a marker that arrives before `RequestCut` was issued (a premature or forged
+        // emit) must NOT be confirmed — no `CutConfirmed`, nothing journaled at step 1.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        // No RequestCut issued yet — feed a cut marker directly.
+        let sent = rig.tick(vec![marker_input(7)]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "a marker before RequestCut is dropped, never confirmed"
+        );
+        // And a LATER RequestCut + marker still confirms cleanly (the premature one left no
+        // poisoned journal entry).
+        let _ = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+            transfer: XFER,
+            session: sid,
+        })]);
+        let sent = rig.tick(vec![marker_input(8)]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::CutConfirmed {
+                transfer: XFER,
+                marker_seq: 8,
+            }],
+            "the real cut (after RequestCut) confirms with its own marker_seq"
+        );
+    }
+
+    #[test]
+    fn a_seq_valid_but_undecodable_input_during_a_transfer_is_not_a_marker() {
+        // The cold observer full-decodes; `route_input` only peeks the leading seq varint.
+        // A datagram whose seq varint is valid but whose body is truncated routes normally,
+        // then the observer's decode fails → no CutConfirmed, no panic.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let sent = rig.tick(vec![Inbound::Wire {
+            from: CLIENT,
+            class: MsgClass::Input,
+            bytes: vec![0x05].into(), // seq=5 (valid varint), then EOF → full decode fails
+        }]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "an undecodable input yields no CutConfirmed"
+        );
+    }
+
+    #[test]
+    fn a_command_for_a_different_transfer_does_not_consult_the_wrong_journal() {
+        // The redelivery gate only re-sends from the journal when the in-flight transfer
+        // matches. A command for a DIFFERENT transfer falls through and is handled fresh
+        // (defensive replace), never absorbed against the wrong saga.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let other = TransferId(0x999);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: other,
+            session: sid,
+            dest: SHARD,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Prepared {
+                transfer: other,
+                result: PrepareResult::Ready,
+            }],
+            "the different transfer is handled fresh, not re-sent from the XFER journal"
         );
     }
 }

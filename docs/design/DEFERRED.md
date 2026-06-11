@@ -39,6 +39,12 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   live in `Demoting`. The FSM tail (`Swapping→Demoting→Releasing→Done`) IS complete + proptested in
   `crates/sim/src/saga.rs` (so the park is now ADMIN-VISIBLE via AAA-1 — `admin_snapshot.sagas` shows a saga
   stuck in `Demoting`). The park is also pinned by the `KNOWN 1b LIMIT` module doc.
+- **ROB-DEMOTE-PARK consequence (audit `wdznr0x6i`):** because a parked saga never reaches a terminal, it is
+  never tombstoned, so `SagaRuntimeRes.sagas` GROWS with every successful transfer under churn. This is NOT
+  analogous to the `rejected` LOG (which got a counted-drop cap, D-22/ROB-1): a parked saga is a LIVE in-flight
+  transfer, so a force-cap-and-drop would ABANDON the player's transfer — INCORRECT. The ONLY correct bound is
+  THIS entry's producer (terminal → tombstone). The growth is admin-visible (AAA-1), never silent; it is inert
+  until real transfer churn exists (1d). Do NOT add a dropping cap to `sagas`.
 - **When / interim (1c step):** add ONE loudly-named `interim_demote_complete` seam — an unconditional bandless
   stand-in that calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the existing sink — NOT a magic
   tick, NOT an in-flight-queue injection) + a `tracing::warn` + an "exists-to-be-flipped" test. This drives
@@ -95,7 +101,11 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   `assemble_input`/`send_outbound` build `InputDatagram` with `is_cut_marker` hardcoded `false`.
 - **When / proper:** **Slice 1e.** (HR1: the client only emits a marker — it never participates in the
   transfer. Slice 1c builds + tests the gateway cut partition with an injected/scripted marker.)
-- **Source:** the P2 vertical-slice plan.
+- **1c.2 landed (gateway side):** the cut-marker OBSERVER (`on_cut_marker`) consumes an injected
+  `is_cut_marker=true` `InputDatagram` on the INPUT flow and replies `CutConfirmed{marker_seq}` (journaled at
+  step 1; a triple-sent marker re-sends the same ack). The **client** emit remains 🟥 for 1e. The `CutEmitted`
+  CONTROL message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
+- **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc`.
 
 ### D-6 🟧 `PersistCheckpoint` is an in-memory no-op (no durable saga WAL)
 - **Missing:** the saga's two durable checkpoints are in-memory only; an orchestrator restart loses every
@@ -154,21 +164,56 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   gateway-adoption fence-CAS at P3; full reconnect-without-replay at P7.
 - **Source:** the roadmap + P1.5 foundation audit.
 
-### D-20 🟧 Gateway `transfer_control_unhandled` counter (no `TransferControl` consumer yet)
-- **Missing:** the gateway has no consumer for `InterShardFlow::Saga(TransferControl)` — the saga→gateway
-  command vocabulary (PrepareSubscribe/RequestCut/FreezeSource/CommitAuthority/…). Until Slice 1c.2 wires the
-  `on_transfer_control` consumer + per-session `TransferProgress`, a received command is COUNTED on
-  `GatewayStats.transfer_control_unhandled` and dropped — never mis-applied, never silent.
-- **Where:** `crates/connection-plane/src/gateway.rs` — the orchestrator-Saga-class dispatch arm
-  `Ok(InterShardFlow::Saga(_)) => stats.transfer_control_unhandled += 1` (test-asserted: a delivered command
-  increments the counter, nothing routes). The counter doc says it "should be 0 once 1c.2 lands."
-- **When / proper:** **Slice 1c.2** — the `on_transfer_control` consumer REPLACES this arm (drives the session
-  route/cut + replies `SagaAck` per phase — the mirror of `saga_runtime::ack_to_event`). The counter is then
-  expected to stay 0 in healthy operation (or be removed if the dispatch no longer has an unhandled arm).
-- **Dependency:** Slice 1c.2 (the gateway TransferControl consumer + `TransferProgress` cold state +
-  applied-steps idempotency journal).
+### D-20 🟩 Gateway `TransferControl` consumer (replaced the `transfer_control_unhandled` counter)
+- **Landed (Slice 1c.2):** `on_transfer_control` consumes `InterShardFlow::Saga(TransferControl)` with per-
+  session `TransferProgress` cold state + a `(transfer, step_id)` applied-steps idempotency journal (re-sends
+  the recorded `SagaAck` verbatim on at-least-once redelivery). The no-authority-move phases ack now:
+  PrepareSubscribe→Prepared{Ready stub}, RequestCut→client `RequestCut` (its `CutConfirmed` deferred to the
+  cut-marker observer on the INPUT flow), ThawSource→SourceThawed, AbortTransfer→Aborted. The route-touching
+  phases (FreezeSource/CommitAuthority/ReleaseSubscribe) PARK loudly on `transfer_control_parked` (no ack ⇒ the
+  saga pins) until 1c.3/1c.4. `transfer_control_unhandled` REMOVED; new counters: `transfer_unroutable`,
+  `transfer_control_parked`.
+- **Where:** `crates/connection-plane/src/gateway.rs` (`on_transfer_control`, `apply_prepare/_request_cut/
+  _thaw/_abort`, `on_cut_marker`, `reply_ack`); the ONE dedup accessor is `TransferProgress::recorded`/`journal`
+  (both the redelivery gate and the cut-marker observer go through it), keyed by `IdempotencyKey::TransferStep`.
+- **Still owed (carried by other entries):** the route swap + cut partition (1c.3/1c.4); durable journal (D-22);
+  the client marker emit (D-5).
 - **Source:** Slice 1c.1 (the dispatch-collision fix) + whole-codebase audit `wwg7ydm9y` (registered the
   unpinned interim counter).
+
+### D-22 🟥 Gateway applied-steps journal is RAM-only by design (the durable table is the dest shard's at 1d)
+- **Missing:** the gateway's `TransferProgress.applied` (`BTreeMap<(TransferId, u32), TransferControlAck>`) is
+  IN-MEMORY; a gateway crash mid-transfer loses the recorded acks. This is BY DESIGN — the gateway is soft-state
+  (`connection_plane.md` resume model): on resume it re-registers with the saga, it does NOT replay from RAM.
+  The DURABLE `(TransferId, step_id)` `applied_steps` redb table is the **dest shard's** (Slice 1d, D-21) /
+  the orchestrator saga WAL's (P3, D-6). This entry exists so no future reader mistakes the per-session RAM
+  field for the durable journal.
+- **Where:** `crates/connection-plane/src/gateway.rs` — `TransferProgress.applied`.
+- **When / proper:** durability is NOT a gateway concern; the durable journal lands at **1d** (shard
+  `TransferAck` receiver) and **P3** (saga WAL) — keyed by the SAME `IdempotencyKey::TransferStep` (the ONE
+  shared anchor; HR3 one machinery, many STORES). No rewrite: durability is a different backing for the same
+  key + the consult-before-effect / record-after-effect discipline.
+- **Source:** Slice 1c.2 design `wf_726a51bc`. The shared element is the KEY (`IdempotencyKey::TransferStep`),
+  not a forwarding fn: the ceremonial `recorded_step` shim was REMOVED and the gateway's two journal sites
+  unified behind `TransferProgress::recorded`/`journal` — corrected by audits `wwk1uh5k9` (DRY-1/F1, the dead
+  shim) + `wo2gkj7t7` (DRY-1-RESIDUAL, the second inline path).
+
+### D-23 🟥 Gateway single-slot `transfer: Option<TransferProgress>` assumes one-transfer-per-session (masked by D-1)
+- **Missing:** the gateway holds at most ONE in-flight transfer per session (`Session.transfer:
+  Option<TransferProgress>`). Two latent bugs are masked TODAY only because the orchestrator serializes one saga
+  per session-subject (`DirectoryCore::lock_transfer`) AND the abort-lock leak (D-1) never frees that lock:
+  - **RACE-1:** `apply_prepare` defensively REPLACES any existing progress; once D-1 is fixed and a second saga
+    can start, a `PrepareSubscribe` for transfer B would discard transfer A's in-flight journal.
+  - **WEDGE-1:** a client `Bye` mid-transfer drops the `Session` + its journal; subsequent saga commands for it
+    then count `transfer_unroutable` with NO producer to unstick the pinned saga. The real backstop is the
+    Slice-2 saga timeout/abort producer.
+- **Where:** `crates/connection-plane/src/gateway.rs` — `apply_prepare` (RACE-1, loud `tracing::warn` on a
+  replaced different transfer) + the `Bye` handler (WEDGE-1, loud `tracing::warn` when a transfer was in flight).
+  Both pinned in-code; the in-flight-survives-foreign-abort property has a test (CP-1).
+- **When / proper:** **Slice 2** — alongside the D-1 `abort_cas` lock-clear + the saga timeout producer. Revisit
+  whether `Option<TransferProgress>` must become a keyed map (it likely must once SIGNALS multiplex multiple
+  correlation streams over one session — the signal-readiness prerequisite the audit flagged).
+- **Source:** whole-codebase audit `wwk1uh5k9` (RACE-1 / WEDGE-1, pinned; masked by D-1).
 
 ### D-21 🟧 `TransferAck` / `TransferStepRejectReason` are RESERVED wire vocabulary (no consumer yet)
 - **Missing:** the shard-bound `Transfer(TransferEnvelope)`-arm RECEIVER. The dest shard's
@@ -211,6 +256,24 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 ---
 
 ## PERF / SCALE (negligible now; land with the slice that makes them matter)
+
+### D-24 🟥 Per-input cut-marker decode + per-tick inbound/session rescans (gateway/orchestrator)
+- **Missing:** three correct-but-O(n) hot spots, all negligible at current volumes: (a) **SCALE-CUTDECODE-1** —
+  while a transfer is in flight the gateway full-decodes EVERY client `InputDatagram` (`on_cut_marker`) just to
+  read the `is_cut_marker` bool; (b) **SCALE-3** — `BoundedInbox::push` linear-scans for the oldest unreliable
+  on every full push; (c) **SCALE-5** — per-tick systems re-scan the whole inbound `Vec`, and
+  `drive_pending_sessions` scans ALL sessions including `Active` ones.
+- **Where:** `crates/connection-plane/src/gateway.rs` (`on_cut_marker`, `drive_pending_sessions`);
+  `crates/sim/src/io/mod.rs` (`BoundedInbox::push`); `crates/node/src/orchestrator.rs` + `saga_runtime.rs`
+  (`serve_directory` / `drive_sagas` inbound loops).
+- **When / proper:** SCALE-CUTDECODE-1 folds into **Slice 1c.3** — the real cut partition lands a cheap
+  `peek_is_cut_marker` header peek (`[varint seq][1 bool byte]`) for free, off the full decode. SCALE-3 / SCALE-5
+  / SCALE-CLOUD-1 → the **P1/P3 load-test + observability slice** (the load-tests-when-applicable standard): an
+  index for active vs pending sessions + a ring/heap for the inbox + publish the admin snapshot on-change or at
+  a sub-tick rate (SCALE-CLOUD-1: the orchestrator bin currently rebuilds+clones the FULL directory + saga
+  views every tick at `tick_hz` — `crates/bins/src/bin/orchestrator.rs`), each sized by a real bench, not before.
+- **Source:** whole-codebase audits `wwk1uh5k9` / `wo2gkj7t7` / `wg9gc765s` / `wdznr0x6i` (SCALE-1C2-1 / SCALE-3 /
+  SCALE-5 / SCALE-CLOUD-1).
 
 ### D-14 🟥 `rendered()` recomputed ~3×/display-frame on the client
 - **Missing:** the windowed/headless render path recomputes the composited view 2–3× per frame.
