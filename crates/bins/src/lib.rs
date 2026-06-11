@@ -66,6 +66,7 @@ pub struct DevClusterParams {
     pub lease_ttl: u64,
     pub session_seed: u64,
     pub max_sessions: u32,
+    pub max_buffered_inputs: u32,
     pub realm_seed: u64,
     pub move_speed: f64,
     pub tick_dt: f64,
@@ -84,6 +85,10 @@ pub const DEV: DevClusterParams = DevClusterParams {
     lease_ttl: 10_000,
     session_seed: 23,
     max_sessions: 8,
+    // The canonical cut-window-sized default (kept below the transport per-tick caps — the
+    // drain-burst invariant); sourced from the ONE config struct, never an inline literal.
+    max_buffered_inputs: vd_connection_plane::gateway::TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS
+        as u32,
     realm_seed: 7,
     move_speed: 2.0,
     tick_dt: 0.02,
@@ -189,6 +194,7 @@ pub fn gateway_env(
         ("VD_AUTH_PUBKEY", auth_pubkey_hex.to_owned()),
         str_pair("VD_SESSION_SEED", p.session_seed),
         str_pair("VD_MAX_SESSIONS", p.max_sessions),
+        str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
     ]
 }
 

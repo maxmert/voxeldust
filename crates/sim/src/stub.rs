@@ -71,6 +71,15 @@ pub struct Dot {
     /// visible, and attachable only after its entity grant is recorded. Until
     /// then it is provisional — it renders nowhere and applies nothing.
     pub granted: bool,
+    /// A TRANSFER-DESTINATION input slot may APPLY input before its full directory grant
+    /// (1c.5): the gateway sends `OpenInputSlot` only AFTER the directory committed authority
+    /// to this shard (the saga's `commit_cas`), so this is the gateway's commit-time
+    /// attestation that the shard owns the session's INPUT. It is NARROWER than `granted`:
+    /// an `input_active` dot applies input (so the post-marker cut buffer drains here, input-
+    /// conservation) but is NOT rendered and holds NO directory record — the real per-entity
+    /// `Authority` attach + render + ghost is 1d (D-27), which sets `granted`. A regular
+    /// attach sets `granted` (and `input_active` stays false; `granted` alone permits input).
+    pub input_active: bool,
     /// The mirror on release: a detached dot stays HELD (authoritative) until
     /// the directory confirms its revoke — authority is released AT the
     /// directory, never by local despawn.
@@ -205,6 +214,17 @@ pub struct StubStats {
     /// than log-only (ROB-E2E-1; mirrors the gateway's `undecodable`). 0 in any
     /// healthy run.
     pub undecodable: u64,
+    /// `OpenInputSlot` arrived before this shard holds its realm lease — dropped + counted.
+    /// **1c.5 has NO re-drive**: the gateway emits `OpenInputSlot` exactly once (at
+    /// `apply_commit`) and the saga is forward-only past `Committed`, so a deferred slot means
+    /// the post-marker buffer the gateway already take-drained is PERMANENTLY lost — the
+    /// re-drive / durable-backstop producer is owed 1d/P3 (DEFERRED D-8 + the 1c.7 conservation
+    /// gate). 0 in a healthy single-process run where the dest realm lease precedes the commit.
+    pub input_slots_deferred: u64,
+    /// `OpenInputSlot` carrying a fence BELOW the dot's session fence — a replay or a
+    /// partitioned old gateway; dropped + counted, input never re-armed (the day-one
+    /// stale-gateway-drop rule, `wire::session_flow`). 0 in a healthy run.
+    pub input_slots_stale: u64,
 }
 
 /// Install the stub-shard systems and resources onto a node's world + schedule.
@@ -399,6 +419,7 @@ fn on_gateway_msg(
                     session_fence: fence,
                     gateway: from,
                     granted: false,
+                    input_active: false,
                     departing: false,
                     entity_fence: Fence::GENESIS,
                     pose: StampedPose::at_rest(
@@ -479,6 +500,66 @@ fn on_gateway_msg(
                 }
             }
         }
+        GatewayToShard::OpenInputSlot {
+            session,
+            fence,
+            account,
+            resume_from_seq,
+        } => {
+            // A transfer-DESTINATION input slot. The gateway sends this only AFTER the
+            // directory committed authority to this shard (the saga's `commit_cas`), so the
+            // shard may APPLY this session's input even before its own per-entity grant
+            // records (1d): the post-marker cut buffer the gateway held drains here. The dot
+            // is `input_active` but NOT `granted` — it renders nowhere and holds no directory
+            // record until 1d promotes it (D-27). No `SessionAttached` reply (the source still
+            // owns the client connection — R2).
+            let Some(_realm_fence) = ctx.realm_fence else {
+                // No realm lease yet: drop + count. NO re-drive in 1c.5 (the gateway already
+                // take-drained the buffer; OpenInputSlot is emitted once, the saga is
+                // forward-only past Committed) — the recovery producer is owed 1d/P3 (D-8).
+                stats.input_slots_deferred += 1;
+                return;
+            };
+            let dot = dots.0.entry(session).or_insert_with(|| Dot {
+                entity: mint_entity(mint, ctx.identity.node_id), // provisional; 1d swaps the transferred entity
+                account,
+                session_fence: fence,
+                gateway: from,
+                granted: false,
+                input_active: false,
+                departing: false,
+                entity_fence: Fence::GENESIS,
+                pose: StampedPose::at_rest(ctx.config.frame, DVec3::ZERO, ctx.clock.universe_tick),
+                yaw: 0.0,
+                pitch: 0.0,
+                last_applied_seq: None,
+            });
+            // STALE-GATEWAY-DROP (the binding day-one rule, `wire::session_flow`): a slot whose
+            // fence is BELOW the dot's session fence is a replay or a partitioned old gateway —
+            // drop it, never re-arm input (1d adds departing/revoking states this guards). A
+            // fresh mint set `session_fence := fence`, so it is never stale against itself.
+            if fence.is_stale_against(dot.session_fence) {
+                stats.input_slots_stale += 1;
+                return;
+            }
+            // SECURITY / HR1: only activate + seed a PROVISIONAL slot, and only from the
+            // gateway that owns the session — a shard must never apply input for a session it
+            // was not legitimately routed, and a granted entity's input stream is owned by its
+            // own applied watermark.
+            if !dot.granted && dot.gateway == from {
+                dot.input_active = true;
+                // SEED the dedup watermark to `resume_from_seq` (= marker_seq): the drained
+                // resume batch (marker+1..) applies in order; a `seq <= marker` replay is
+                // rejected (the source already applied it). MAX-merge — never LOWER it.
+                dot.last_applied_seq = Some(
+                    dot.last_applied_seq
+                        .map_or(resume_from_seq, |s| s.max(resume_from_seq)),
+                );
+                if fence > dot.session_fence {
+                    dot.session_fence = fence;
+                }
+            }
+        }
     }
 }
 
@@ -515,7 +596,11 @@ fn apply_input(
         log.record_discarded(session, None, DiscardReason::UnknownSession);
         return;
     };
-    if !dot.granted {
+    // A dot may apply input once it is the AUTHORITY for the session's input: either a fully
+    // granted attach (`granted`) OR a committed transfer-destination input slot
+    // (`input_active`, 1c.5 — the gateway opened it only post-directory-commit). A purely
+    // provisional dot (neither) drops input as PendingAuthority.
+    if !dot.granted && !dot.input_active {
         log.record_discarded(session, None, DiscardReason::PendingAuthority);
         return;
     }
@@ -1663,6 +1748,7 @@ mod tests {
                         session_fence: Fence(1),
                         gateway: GATEWAY,
                         granted: true,
+                        input_active: false,
                         departing: false,
                         entity_fence: Fence(1),
                         pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(100)),
@@ -1769,5 +1855,174 @@ mod tests {
         tiny.record_applied(SessionId(9), 1);
         tiny.record_applied(SessionId(9), 2);
         assert_eq!(tiny.applied(), vec![(SessionId(9), 2)]);
+    }
+
+    // ---- Slice 1c.5: the dest-side OpenInputSlot (transfer-destination input slot) ------
+
+    fn open_input_slot_f(
+        session: SessionId,
+        gateway: NodeId,
+        resume_from_seq: u64,
+        fence: Fence,
+    ) -> Inbound {
+        wire_msg(
+            gateway,
+            MsgClass::Control,
+            &GatewayToShard::OpenInputSlot {
+                session,
+                fence,
+                account: AccountId(5),
+                resume_from_seq,
+            },
+        )
+    }
+
+    fn open_input_slot(session: SessionId, gateway: NodeId, resume_from_seq: u64) -> Inbound {
+        open_input_slot_f(session, gateway, resume_from_seq, Fence(1))
+    }
+
+    fn input_for(session: SessionId, seq: u64, gateway: NodeId) -> Inbound {
+        wire_msg(
+            gateway,
+            MsgClass::Input,
+            &GatewayToShard::SessionInput {
+                session,
+                fence: Fence(1),
+                input_bytes: postcard::to_allocvec(&InputDatagram {
+                    seq,
+                    is_cut_marker: false,
+                    client_tick: vd_core::TickId(2),
+                    movement: [1.0, 0.0, 0.0],
+                    look: [0.0, 0.0],
+                    action_bits: 0,
+                })
+                .expect("encode"),
+            },
+        )
+    }
+
+    #[test]
+    fn open_input_slot_mints_an_input_active_provisional_dot_without_attaching() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let sent = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert!(dot.input_active, "the slot is input-active");
+        assert!(
+            !dot.granted,
+            "but NOT granted — not rendered, no directory record (1d)"
+        );
+        assert_eq!(
+            dot.last_applied_seq,
+            Some(5),
+            "seeded to the resume watermark"
+        );
+        // The slot is a SILENT inbound state change: it emits NOTHING — no SessionAttached,
+        // no re-home (the source still owns the client connection — R2), and the provisional
+        // dot is not granted so it renders no snapshot frame either.
+        assert!(sent.is_empty(), "the input slot emits nothing back");
+    }
+
+    #[test]
+    fn the_dest_applies_post_marker_input_and_rejects_replays_at_the_marker() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 10)]); // watermark = 10
+        // marker+1, marker+2 apply in order; a seq <= marker is a counted DuplicateSeq.
+        let _ = rig.tick(vec![
+            input_for(SESSION, 11, GATEWAY),
+            input_for(SESSION, 12, GATEWAY),
+            input_for(SESSION, 9, GATEWAY),
+        ]);
+        let log = rig.world.resource::<InputLog>();
+        assert_eq!(log.applied(), vec![(SESSION, 11), (SESSION, 12)]);
+        assert_eq!(
+            log.discarded(),
+            vec![(SESSION, Some(9), DiscardReason::DuplicateSeq)],
+            "a seq <= marker was already applied at the source"
+        );
+    }
+
+    #[test]
+    fn open_input_slot_before_the_realm_lease_is_deferred_and_counted() {
+        let mut rig = Rig::new(); // NO grant_realm
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        assert!(
+            !rig.world.resource::<Dots>().0.contains_key(&SESSION),
+            "no slot yet"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().input_slots_deferred, 1);
+    }
+
+    #[test]
+    fn open_input_slot_max_merges_the_watermark_and_guards_a_granted_dot() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 20)]);
+        // A re-sent slot with a LOWER watermark never lowers it (max-merge).
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].last_applied_seq,
+            Some(20)
+        );
+        // A slot from a NON-owning gateway does not touch the dot (security guard false arm).
+        let other_gateway = NodeId(999);
+        let _ = rig.tick(vec![open_input_slot(SESSION, other_gateway, 100)]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(
+            dot.last_applied_seq,
+            Some(20),
+            "a foreign gateway cannot move the watermark"
+        );
+        assert_eq!(dot.gateway, GATEWAY, "ownership unchanged");
+    }
+
+    #[test]
+    fn open_input_slot_bumps_the_session_fence_then_is_inert_on_a_granted_dot() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // Mint the provisional slot at fence 1, watermark 5.
+        let _ = rig.tick(vec![open_input_slot_f(SESSION, GATEWAY, 5, Fence(1))]);
+        // A slot at a HIGHER fence (as 1d/P3 will re-issue under a fresher realm lease) bumps
+        // the session fence and MAX-merges the watermark.
+        let _ = rig.tick(vec![open_input_slot_f(SESSION, GATEWAY, 7, Fence(4))]);
+        {
+            let dot = rig.world.resource::<Dots>().0[&SESSION];
+            assert_eq!(dot.session_fence, Fence(4), "bumped to the fresher lease");
+            assert_eq!(dot.last_applied_seq, Some(7), "watermark advanced");
+        }
+        // A STALE slot (fence below the dot's session fence — a replay or partitioned old
+        // gateway) is dropped + counted, never re-arming input (the day-one stale-gateway rule).
+        let _ = rig.tick(vec![open_input_slot_f(SESSION, GATEWAY, 999, Fence(1))]);
+        {
+            let dot = rig.world.resource::<Dots>().0[&SESSION];
+            assert_eq!(
+                dot.session_fence,
+                Fence(4),
+                "stale slot does not touch the fence"
+            );
+            assert_eq!(
+                dot.last_applied_seq,
+                Some(7),
+                "stale slot does not move the watermark"
+            );
+            assert_eq!(rig.world.resource::<StubStats>().input_slots_stale, 1);
+        }
+        // Once the dot is GRANTED (the 1d promotion), a stray OpenInputSlot is inert —
+        // the granted entity owns its own input watermark (the `!granted` guard false arm).
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&SESSION)
+            .expect("the provisional dot was minted above")
+            .granted = true;
+        let _ = rig.tick(vec![open_input_slot_f(SESSION, GATEWAY, 999, Fence(9))]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(dot.session_fence, Fence(4), "granted dot's fence untouched");
+        assert_eq!(
+            dot.last_applied_seq,
+            Some(7),
+            "granted dot's watermark untouched"
+        );
     }
 }

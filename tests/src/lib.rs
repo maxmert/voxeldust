@@ -97,7 +97,10 @@ pub fn p1_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
             auth_verifying_key: auth_verifying_key(),
             session_seed: 23,
             tick_hz: 50,
-            tuning: TransportTuning { max_sessions },
+            tuning: TransportTuning {
+                max_sessions,
+                max_buffered_inputs: TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS,
+            },
         },
     );
     topo.add_node(Box::new(gateway));

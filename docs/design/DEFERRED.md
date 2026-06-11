@@ -106,8 +106,13 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   replies `CutConfirmed{marker_seq}` (journaled at step 1; a triple-sent marker re-sends the same ack). 1c.3 also
   INSTALLS the route cut: `FreezeSource` → `apply_freeze` → `store_cut(Some(SeqCut{marker_seq, dest}))`; **1c.4**
   SWAPS the route: `CommitAuthority` → `apply_commit` → `store_commit` (authority := `cut.dest`, fence CARRIED,
-  cut := None); `Committed` rides the existing redelivery gate (idempotent, never re-swaps). The partition READ
-  (`seq > marker → dest buffer`) remains 1c.5. The **client** emit remains 🟥 for 1e. The `CutEmitted` CONTROL
+  cut := None); `Committed` rides the existing redelivery gate (idempotent, never re-swaps). **1c.5** lands the
+  partition: `route_input` returns `Buffer` for `seq > marker`, the gateway holds it in `dest_buffer`, and
+  `apply_commit` opens the dest `OpenInputSlot{resume_from_seq=marker}` then drains the buffer to the dest as
+  `SessionInput` (in seq order). This lands the TWO HALVES (gateway buffer/drain + dest provisional slot); the
+  end-to-end cross-crate INPUT-CONSERVATION gate is OWED (D-28, the 1c.7 gate) — the two halves are never joined
+  in one scenario yet, and the recovery producer for a lost buffer does not exist (D-29). The **client** emit
+  remains 🟥 for 1e. The `CutEmitted` CONTROL
   message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
@@ -130,15 +135,34 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   — OR `start_transfer` must assert transients never lock CAS-backed `Entity` keys (held-set anchored instead).
 - **Source:** the P2 plan + Slice-1b audit (CPO-3).
 
-### D-8 🟥 Transfer dest-input buffer has no hard cap / counted drop
-- **Missing:** the gateway's `seq > marker` dest buffer (filled while the cut is open) is unbounded.
-- **Where:** `crates/connection-plane/src/gateway.rs` — the `TransferProgress.dest_buffer` (lands in Slice 1c).
-- **When / proper:** **Slice 2.** Inert in 1c (the saga commits `SourceFrozen→CommitAuthority` within the
-  gateway↔orchestrator round-trip — a small bounded window), but a HARD prerequisite once a stalled saga can
-  hold the cut open across ticks: a `BoundedInbox`-style cap + counted drop (`crates/sim/src/io/mod.rs`
-  discipline). NOTE: 1c.4 flips `authority`→`dest` and clears the cut at commit (`apply_commit`) but does NOT
-  add the buffer/drain — the `seq > marker` partition READ + the buffer are 1c.5; the cap stays Slice 2.
-- **Source:** 1c design `wf_f3eae69e`.
+### D-8 🟧 Transfer dest-input buffer: SOFT cap landed (1c.5); the durable interval-map backstop owed (1d/P3)
+- **Landed (1c.5):** the gateway `seq > marker` cut buffer `TransferProgress.dest_buffer: VecDeque<Vec<u8>>`
+  (cold `Session`), the `route_input` partition READ (`seq > marker → Buffer`), the drain to the dest at
+  `apply_commit`, AND a never-silent SOFT cap: `TransportTuning.max_buffered_inputs` + a counted drop-oldest
+  (`GatewayStats.dest_inputs_dropped`, latest-wins input). The cap shipped WITH the fill (NOT deferred) because
+  a parked saga (`ReleaseSubscribe` not yet landed; `Bye`-mid-transfer, D-23) can hold the cut open across
+  unbounded ticks — the "bounded by one round-trip" premise is false the moment the partition goes live.
+- **Still owed (1d/P3):** the gateway buffer is RAM-only soft-state and **1c.5 has NO re-drive producer** —
+  `apply_commit` `std::mem::take`-drains the buffer and emits `OpenInputSlot` exactly ONCE, and the saga is
+  forward-only past `Committed` (`saga_runtime.rs`), so any drop AFTER that point is PERMANENT: (i) a gateway
+  crash mid-cut loses the RAM buffer; (ii) a dest that drops `OpenInputSlot` because its realm lease is late at
+  commit (`StubStats.input_slots_deferred`) discards the same-batch `SessionInput` as `UnknownSession`; (iii) the
+  soft-cap drop-oldest. The DURABLE cross-shard backstop is the **seq-range interval map** (per-txn,
+  reload-from-directory on reconnect; integration.json #1) and the re-drive producer that re-issues the slot +
+  re-supplies the buffer — both 1d/P3 (registered as D-29). A HARD/tunable abort-on-overflow POLICY (vs today's
+  latest-wins drop) also lands then; the soft cap shrinks that to a policy swap.
+- **NAMED LOSS POINT (owed honesty, not yet fixed):** `apply_commit` drains the whole buffer in ONE tick as
+  UNRELIABLE `MsgClass::Input` frames — the exact class send-shed (`OutboundStagingCap`) and `BoundedInbox` drop
+  FIRST under congestion, while the reliable `OpenInputSlot` survives. So the conserved resume batch is the
+  designated shed casualty exactly when it matters (many concurrent crossings = congestion), counted only as
+  generic `staging_shed`/`dropped_unreliable`, NOT transfer-attributable. 1c.5 mitigations: the burst is bounded
+  by `TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS` (256, an order of magnitude below the per-tick transport caps
+  — the drain-burst invariant). The real fix — a RELIABLE `GatewayToShard::ResumeInput` carrier OR making the
+  durable seq-range interval map the authoritative conservation mechanism — is a 1d/P3 design decision (the loss
+  is inert in single-process 1c.5; the in-mem transport does not shed).
+- **Where:** `crates/connection-plane/src/gateway.rs` (`TransferProgress.dest_buffer`, `route_input`,
+  `on_client_input` Buffer arm, `apply_commit` drain, `TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS`).
+- **Source:** 1c design `wf_f3eae69e` + Slice 1c.5 (the cap-with-fill resolution) + the 1c.5 audit `wf_e3397eb2`.
 
 ### D-9 🟥 Snapshot emit is full-world + double-encoded (no AoI / delta)
 - **Missing:** `emit_frames` sends the full world every tick with no interest filter, and
@@ -303,6 +327,66 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   in 1c (one realm lease). `new_fence` stays threaded on the wire + saga (the CAS linearization point) so the
   upgrade is install-on-dest-re-stamp, no reshape.
 - **Source:** P2 Slice 1c.4 design `wf_2e0f6c1d` (the R-FENCE / fence-domain resolution).
+
+### D-27 🟧 Dest `OpenInputSlot` is a STATE-FREE provisional input slot; 1d promotes it to a real owned entity
+- **Landed (1c.5):** to let the transfer-DESTINATION shard ACCEPT (not drop as `UnknownSession`) the post-
+  marker input the gateway drains at commit, `GatewayToShard::OpenInputSlot{session, fence, account,
+  resume_from_seq}` mints a provisional `Dot` on the dest: `input_active: true` (applies input via the existing
+  `apply_input` + `last_applied_seq` dedup, seeded to `marker_seq`) but `granted: false` — so it is **NOT
+  rendered** (`emit_frames` filters `granted`), holds **NO directory record**, and emits **NO `SessionAttached`**
+  (the source still owns the client connection — R2). Sent only at `CommitAuthority` (after the directory
+  committed authority to the dest), guarded `!granted && dot.gateway == from` (a shard never applies input for a
+  session not legitimately routed by its owning gateway — HR1/security; a stale/replayed slot is dropped +
+  counted `StubStats.input_slots_stale`). This is the INPUT half of the dest receiver — it LANDS the dest's
+  ability to apply the drained batch; it does NOT by itself CLOSE cross-cut input-conservation (the two crate
+  halves are never joined in one scenario, and a dropped/lost buffer has no recovery — D-28, D-29).
+- **Still owed (1d):** the `granted` promotion — the real per-entity `Authority` attach so the dest OWNS +
+  EMITS + RENDERS the entity, the entity-STATE crossing (`StubCrossing`/`Transfer` envelope + durable
+  `applied_steps`, D-21/D-22), the real ghost, the dest spatial `PrepareResult::Rejected`, the
+  `AbortTransfer`-tears-down-the-dest-slot teardown, and the provisional minted entity replaced by the
+  transferred one. 1d is a PROMOTION of this slot (a grant flip + state attach), never a rewrite.
+- **Also owed:** the EARLY (prepare-time) `OpenInputSlot` for the gateway-adoption-mid-cut race is a **P3**
+  resilience item (the gateway re-drives the slot before the buffer drain); inert in 1c (single process, commit
+  emits the slot in the same handler before the drain).
+- **Where:** `crates/wire/src/session_flow.rs` (`OpenInputSlot`); `crates/connection-plane/src/gateway.rs`
+  (`apply_commit` emit); `crates/sim/src/stub.rs` (`on_gateway_msg` arm, `Dot.input_active`, `apply_input`).
+- **Source:** Slice 1c.5 design `wf_9679f7c7` (the dest-side reconciliation of integration.json #1).
+
+### D-28 🟥 Cross-cut INPUT-CONSERVATION is proven only in unjoined per-crate halves (the 1c.7 end-to-end gate)
+- **Missing:** the gateway's buffer/drain (connection-plane) and the dest's `OpenInputSlot`/`apply_input`
+  (sim) are each unit-tested, but NOTHING wires the gateway's drained output into a real stub `apply_input` in
+  ONE scenario. `marker_seq` consistency is asserted on each side against HARDCODED constants (the gateway sends
+  `resume_from_seq=marker_seq`; the stub test seeds `last_applied_seq` with a literal), never threaded through.
+  `verify_input_conservation` (`harness/src/oracle.rs` — the exactly-once + per-session strict-monotonic oracle
+  that would catch a post-marker input lost in the buffer, double-applied across the seam, or applied out of
+  order) is NEVER invoked on a transfer scenario; `process_parity.rs` hardcodes `is_cut_marker: false`.
+- **Where:** `crates/connection-plane/src/gateway.rs` (1c.5 tests), `crates/sim/src/stub.rs` (1c.5 tests),
+  `crates/harness/src/oracle.rs` (`verify_input_conservation`).
+- **When / proper:** **Slice 1c.7** — one scenario (harness topology or a connection-plane+sim integration
+  test) that drives `Prepare → RequestCut → marker → Freeze → client inputs straddling the marker → Commit`,
+  feeds the gateway's drained `OpenInputSlot` + `SessionInput` into a real stub, quiesces, and asserts
+  `verify_input_conservation(reports) == Ok` AND that the `marker_seq` the gateway EMITTED equals the one the
+  stub SEEDED (threaded, not hardcoded on both sides). The central transfer-first invariant is not "closed"
+  until this is green.
+- **Source:** the 1c.5 audit `wf_e3397eb2` (cut-conservation-untested-crossseam-and-untracked).
+
+### D-29 🟥 No recovery producer for a lost cut buffer (deferred slot / over-cap / gateway crash)
+- **Missing:** when the dest drops `OpenInputSlot` (realm lease late at commit → `input_slots_deferred`), or the
+  soft cap drops the oldest, or the gateway crashes mid-cut, the take-drained `dest_buffer` is gone and there is
+  NO mechanism to re-issue the slot or re-supply the buffer. `apply_commit` emits `OpenInputSlot` once and the
+  saga is forward-only past `Committed` (`saga_runtime.rs`). In single-process 1c.5 this is inert (the directory
+  CAS-to-dest implies the dest already holds its realm lease; the buffer is never congestion-shed in the in-mem
+  transport), but the moment the dest is a genuinely distinct shard whose lease lands a tick late (k8s pod
+  cold-start) the loss fires with zero recovery. Distinct from D-27's prepare-time gateway-ADOPTION-mid-cut P3
+  note (a different race).
+- **Where:** `crates/connection-plane/src/gateway.rs` (`apply_commit` one-shot drain); `crates/sim/src/stub.rs`
+  (`input_slots_deferred` drop); `crates/node/src/saga_runtime.rs` (forward-only past `Committed`).
+- **When / proper:** **1d/P3** — either a CONFIRMED `OpenInputSlot` step (dest acks slot-open; the gateway holds
+  `dest_buffer` and re-emits on the per-tick retry like `AttachSession`, gating the drain on the confirm), OR the
+  durable seq-range interval map (D-8) as the authoritative conservation mechanism (reload-from-directory on
+  reconnect; integration.json #1's rare-failure-only `InputGap` becomes the honest signal). Closes WITH D-28's
+  end-to-end gate.
+- **Source:** the 1c.5 audit `wf_e3397eb2` (openinputslot-deferred-loses-buffer-no-redrive).
 
 ### D-14 🟥 `rendered()` recomputed ~3×/display-frame on the client
 - **Missing:** the windowed/headless render path recomputes the composited view 2–3× per frame.

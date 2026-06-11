@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tick_hz: env.parse("VD_TICK_HZ")?,
             tuning: TransportTuning {
                 max_sessions: env.parse("VD_MAX_SESSIONS")?,
+                max_buffered_inputs: env.parse("VD_MAX_BUFFERED_INPUTS")?,
             },
         },
     );

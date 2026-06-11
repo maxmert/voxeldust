@@ -42,6 +42,24 @@ pub enum GatewayToShard {
     },
     /// Detach (logout/disconnect): the shard despawns the avatar.
     DetachSession { session: SessionId, fence: Fence },
+    /// Open a STATE-FREE provisional input-landing slot on a TRANSFER DESTINATION shard so
+    /// it can ACCEPT (not drop as `UnknownSession`) the `seq > marker_seq` input the gateway
+    /// buffered during the cut and drains here at commit (integration.json #1: "dest applies
+    /// gateway-buffered post-marker frames after commit"). The dest mints a provisional dot
+    /// (NOT granted, NOT rendered, NO `SessionAttached` reply — the source still owns the
+    /// client, R2) and seeds its input dedup watermark to `resume_from_seq` (= `marker_seq`)
+    /// so the resume batch is non-vacuously deduped (a `seq <= marker` replay is rejected;
+    /// `marker+1..` apply in order). Sent at `CommitAuthority` (`resume_from_seq = marker_seq`)
+    /// — the gateway buffers locally during the cut, so the dest needs nothing until the
+    /// commit drain. The slot's grant→owned-entity promotion (render, ghost, directory record)
+    /// is 1d (D-27); in 1c.5 the slot is `input_active` but never granted.
+    OpenInputSlot {
+        session: SessionId,
+        fence: Fence,
+        account: AccountId,
+        /// The dest treats `seq <= resume_from_seq` as already-applied (at the source).
+        resume_from_seq: u64,
+    },
 }
 
 /// Shard → gateway session replies and world frames.
@@ -239,6 +257,12 @@ mod tests {
             GatewayToShard::DetachSession {
                 session: SessionId(1),
                 fence: Fence(2),
+            },
+            GatewayToShard::OpenInputSlot {
+                session: SessionId(1),
+                fence: Fence(2),
+                account: AccountId(3),
+                resume_from_seq: 42,
             },
         ];
         for msg in g2s {

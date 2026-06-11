@@ -15,7 +15,7 @@
 //! - The gateway is the SOLE ticket validator; the session mint COMMITS at the
 //!   orchestrator's directory insert (the gateway only proposes entropy).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -41,6 +41,38 @@ use crate::tickets;
 pub struct TransportTuning {
     /// Hard cap on concurrent sessions (beyond it, logins are refused loudly).
     pub max_sessions: usize,
+    /// Soft cap on a session's `seq > marker` cut buffer (`TransferProgress.dest_buffer`):
+    /// beyond it the OLDEST buffered input is dropped (latest-wins) + counted
+    /// (`GatewayStats.dest_inputs_dropped`) — never silent, never unbounded. The cap ships
+    /// WITH the buffer (NOT Slice 2) because a parked saga (`ReleaseSubscribe` not yet
+    /// landed; `Bye`-mid-transfer, D-23) can hold the cut open across unbounded ticks. The
+    /// HARD durable backstop (the seq-range interval map) stays 1d/P3 (D-8).
+    ///
+    /// INVARIANT (drain-burst bound): `apply_commit` drains the WHOLE buffer to the dest in ONE
+    /// tick as unreliable `SessionInput` frames, so this cap also bounds that single-tick burst.
+    /// It MUST stay well below the transport's per-tick capacity (the dest `BoundedInbox`
+    /// capacity and the sender `OutboundStagingCap`) or the conserved resume batch — riding the
+    /// unreliable Input class — becomes the designated shed casualty under congestion. The
+    /// reliable-carrier-vs-durable-watermark redesign that removes this fragility is owed 1d/P3
+    /// (D-8); until then keep this at [`Self::DEFAULT_MAX_BUFFERED_INPUTS`]-scale.
+    pub max_buffered_inputs: usize,
+}
+
+impl TransportTuning {
+    /// Default `max_buffered_inputs`. Sized by the CUT WINDOW (freeze → directory CAS →
+    /// commit = a handful of ticks of 20 Hz input, sub-second even under tick-skew), not by the
+    /// transport caps: 256 inputs ≈ 12 s of input — a generous margin over any realistic cut
+    /// window — while staying below the `OutboundStagingCap` (4096) and the dest `BoundedInbox`
+    /// capacity. The dest inbox is `outbound_capacity × 8` with a **`.max(256)` floor**
+    /// (`io_prod::mesh`): at the shipped DEV `outbound_cap = 256` that is 2048 (8× headroom), but
+    /// the order-of-magnitude margin holds only while `outbound_cap ≥ 256` — below ~32 the inbox
+    /// floors at 256 == this drain burst, reintroducing the foot-gun. So treat
+    /// `DEFAULT_MAX_BUFFERED_INPUTS ≤ dest_inbound_floor` as a deployment INVARIANT until the
+    /// reliable-carrier / durable-watermark redesign removes the unreliable-drain fragility
+    /// (D-8, 1d/P3). The earlier 2048 default exactly EQUALLED the DEV dest inbox capacity — a
+    /// foot-gun where one full drain plus any co-arriving frame shed a conserved (unreliable)
+    /// input.
+    pub const DEFAULT_MAX_BUFFERED_INPUTS: usize = 256;
 }
 
 /// Gateway configuration (composer-provided).
@@ -108,6 +140,20 @@ struct TransferProgress {
     /// saga, never replays from RAM); the DURABLE table is the dest shard's at 1d (DEFERRED
     /// D-22). Bounded: O(phases) per live transfer, dropped whole on terminal/Bye/mint-refusal.
     applied: BTreeMap<(TransferId, u32), TransferControlAck>,
+    /// The CUT BUFFER: `seq > marker_seq` client input captured while the cut is open,
+    /// drained to the dest as `SessionInput` at `CommitAuthority` (integration.json #1: the
+    /// gateway holds it; the dest applies it post-commit). FIFO = seq order (the hot
+    /// `route_input` `fetch_max` dedups `seq <= prev` BEFORE the partition, so a buffered
+    /// frame is strictly increasing). Bounded by `TransportTuning.max_buffered_inputs` —
+    /// over cap the OLDEST is dropped + counted (latest-wins input). COLD/single-threaded
+    /// state (never on `Arc<SessionHot>` — HR1; the 20 Hz forwarder must never race it);
+    /// dropped whole on the in-flight terminal (`apply_abort` / `Bye`). RAM-only soft-state:
+    /// a gateway crash mid-cut — OR a dest that drops `OpenInputSlot` (realm lease late at
+    /// commit) — PERMANENTLY loses this take-drained buffer. **1c.5 has NO re-drive producer**
+    /// (`OpenInputSlot` is emitted once at `apply_commit`; the saga is forward-only past
+    /// `Committed`). The durable seq-range interval-map backstop + the re-drive are owed 1d/P3
+    /// (D-8 + the 1c.7 cross-crate conservation gate).
+    dest_buffer: VecDeque<Vec<u8>>,
 }
 
 impl TransferProgress {
@@ -225,6 +271,13 @@ pub struct GatewayStats {
     /// never a garbage-dest swap. DISTINCT from `transfer_unroutable` (the session or the
     /// in-flight transfer is absent) so the WEDGE-1 pin signal stays unblurred.
     pub commit_without_cut: u64,
+    /// A `seq > marker_seq` client input held in the cut buffer for the dest (the partition
+    /// fired). Drained to the dest at `CommitAuthority`. 0 outside a transfer's cut window.
+    pub inputs_buffered_for_dest: u64,
+    /// A buffered input dropped because the cut buffer hit `max_buffered_inputs` (oldest-
+    /// first, latest-wins) — the never-silent floor; nonzero only under a parked/stalled
+    /// saga holding the cut open (D-23). The durable backstop is 1d/P3 (D-8).
+    pub dest_inputs_dropped: u64,
 }
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
@@ -260,19 +313,31 @@ pub fn route_input(hot: &SessionHot, input_bytes: &[u8]) -> InputRouting {
         return InputRouting::Deduped;
     }
     let route = hot.route.load();
-    // `apply_freeze` (1c.3) now installs `cut: Some(..)`, but this hot path reads ONLY
-    // `.authority` and never dereferences `.cut` — an installed cut is a LATENT field here.
-    // The `seq > marker_seq` dest-buffer partition read slots in right here at 1c.5, leaving
-    // this benched hot path byte-identical until then (SPIKE-2a).
-    InputRouting::Forward {
-        to: route.authority,
+    // THE CUT PARTITION (1c.5): a `seq > marker_seq` frame during the cut window is held for
+    // the dest (the cold caller buffers it; `apply_commit` drains it post-swap). This is ONE
+    // `Option` discriminant test + (only when a cut is installed) one `u64` compare, reading
+    // `.cut`/`.marker_seq` off the SAME `route` Arc already loaded above — no 2nd load, no
+    // lock, no alloc. Steady state (`cut == None`) falls straight to the byte-identical
+    // `Forward { authority }` the SPIKE-2a benches assert; the `Some` arm is predicted-not-
+    // taken. `fetch_max` (above) still precedes, so a buffered seq is strictly increasing.
+    match route.cut {
+        Some(SeqCut { marker_seq, .. }) if seq > marker_seq => InputRouting::Buffer,
+        _ => InputRouting::Forward {
+            to: route.authority,
+        },
     }
 }
 
 /// What the input hot path decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputRouting {
-    Forward { to: NodeId },
+    Forward {
+        to: NodeId,
+    },
+    /// `seq > marker_seq` while a cut is installed: the cold caller holds it in the session's
+    /// cut buffer for the dest (drained at commit). Carries no `dest` — the drain reads it
+    /// off `route.cut` (keeping this hot return a pure compare).
+    Buffer,
     Deduped,
     Malformed,
 }
@@ -594,6 +659,25 @@ fn on_client_input(
                 },
             );
         }
+        InputRouting::Buffer => {
+            // COLD: hold the seq>marker frame in the session's cut buffer for the dest
+            // (drained at CommitAuthority). The hot `route_input` only DECIDED Buffer; the
+            // buffer lives on the cold `TransferProgress`, never on `SessionHot` (HR1).
+            // `route_input` returns Buffer ONLY when `route.cut` is Some, which `apply_freeze`
+            // installs together with the in-flight `transfer` — so `transfer` is Some here by
+            // construction (`expect`, the unreachable-arm shape). Bounded: over cap, drop the
+            // OLDEST (latest-wins input) + count.
+            let tp = session
+                .transfer
+                .as_mut()
+                .expect("an installed cut implies an in-flight transfer (apply_freeze sets both)");
+            if tp.dest_buffer.len() >= config.tuning.max_buffered_inputs {
+                tp.dest_buffer.pop_front();
+                stats.dest_inputs_dropped += 1;
+            }
+            tp.dest_buffer.push_back(bytes.to_vec());
+            stats.inputs_buffered_for_dest += 1;
+        }
         InputRouting::Deduped => stats.inputs_deduped += 1,
         InputRouting::Malformed => stats.inputs_malformed += 1,
     }
@@ -620,7 +704,8 @@ fn on_transfer_control(
 ) {
     let transfer = cmd.transfer();
     let step = cmd.step_id();
-    let Some(session) = sessions.by_session.get_mut(&cmd.session()) else {
+    let session_id = cmd.session(); // the get_mut key; reused for the dest-bound OpenInputSlot/SessionInput
+    let Some(session) = sessions.by_session.get_mut(&session_id) else {
         stats.transfer_unroutable += 1; // unknown/absent session: counted, never panic
         return;
     };
@@ -657,7 +742,7 @@ fn on_transfer_control(
         TransferControl::ThawSource { .. } => apply_thaw(session, transfer, stats),
         TransferControl::AbortTransfer { .. } => apply_abort(session, transfer),
         TransferControl::CommitAuthority { new_fence, .. } => {
-            apply_commit(session, transfer, new_fence, stats)
+            apply_commit(session, transfer, new_fence, session_id, stats, outbox)
         }
         TransferControl::ReleaseSubscribe { .. } => {
             // PARK-LOUD: the demote-release tail (closes the source subscription after demote
@@ -727,7 +812,11 @@ fn apply_prepare(
         transfer,
         cut_requested: false,
         applied: BTreeMap::new(),
+        dest_buffer: VecDeque::new(),
     });
+    // The dest input slot is opened at CommitAuthority (apply_commit) — the gateway BUFFERS
+    // seq>marker locally during the cut, so the dest needs nothing until the commit drain.
+    // (An early prepare-time open is a P3 gateway-adoption resilience concern, not 1c.5.)
     tracing::debug!(
         transfer = transfer.0,
         "PrepareSubscribe readiness is a 1c stub (Ready)"
@@ -868,7 +957,9 @@ fn apply_commit(
     session: &mut Session,
     transfer: TransferId,
     new_fence: Fence,
+    session_id: SessionId,
     stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
 ) -> Option<TransferControlAck> {
     let bound = session
         .transfer
@@ -878,7 +969,9 @@ fn apply_commit(
         stats.transfer_unroutable += 1; // session/transfer absent: pin (WEDGE-1)
         return None;
     }
-    let Some(SeqCut { dest, .. }) = session.hot.route.load().cut else {
+    // Capture BOTH `dest` and `marker_seq` from the installed cut BEFORE `store_commit`
+    // clears it: `marker_seq` seeds the dest's resume watermark; `dest` is the new authority.
+    let Some(SeqCut { dest, marker_seq }) = session.hot.route.load().cut else {
         // BOUND but no cut: FreezeSource must precede commit (ordered CONTROL). Loud,
         // counted, route UNTOUCHED — never a swap to a garbage dest; the saga pins.
         stats.commit_without_cut += 1;
@@ -890,7 +983,51 @@ fn apply_commit(
         return None;
     };
     let _ = new_fence; // R-FENCE: carried-not-installed in 1c.4 (D-25); 1d/mesh installs on dest re-stamp
-    store_commit(&session.hot, dest); // ONE store: authority:=dest, fence carried, cut:=None
+    // (a) AUTHORITATIVE OpenInputSlot: the dest seeds last_applied_seq = marker_seq, so the
+    // drained resume batch (marker+1..) applies in order and a `seq <= marker` replay is
+    // rejected — closing the UnknownSession input-loss hole for the genuinely-distinct dest.
+    push_to_shard(
+        outbox,
+        dest,
+        MsgClass::Control,
+        &GatewayToShard::OpenInputSlot {
+            session: session_id,
+            fence: session.fence,
+            account: session.account,
+            resume_from_seq: marker_seq,
+        },
+    );
+    // (b) THE swap: authority:=dest, fence carried, cut:=None (ONE atomic publish).
+    store_commit(&session.hot, dest);
+    // (c) DRAIN the cut buffer to the now-authoritative dest as ordinary SessionInput, in
+    // push order (== seq order: route_input's fetch_max dropped seq<=prev BEFORE buffering,
+    // so the buffer is strictly increasing). `std::mem::take` empties it — the STRUCTURAL
+    // drain-once guarantee: a redelivered CommitAuthority re-serves Committed via the gate
+    // (above) AND finds the buffer empty, so it never re-drains.
+    // The bound-check above guarantees `session.transfer` is Some (the in-flight transfer);
+    // `expect` is the unreachable-arm shape.
+    // Push order == seq order: `route_input`'s `fetch_max` returns `Deduped` for any
+    // `seq <= prev` BEFORE the partition, so only a strictly-increasing subsequence is ever
+    // buffered. The dest's own `last_applied_seq` dedup is the backstop regardless of order.
+    let buffered = std::mem::take(
+        &mut session
+            .transfer
+            .as_mut()
+            .expect("bound-check above guarantees the in-flight transfer is present")
+            .dest_buffer,
+    );
+    for input_bytes in buffered {
+        push_to_shard(
+            outbox,
+            dest,
+            MsgClass::Input,
+            &GatewayToShard::SessionInput {
+                session: session_id,
+                fence: session.fence, // session-grant fence (NOT new_fence; R-FENCE/D-25)
+                input_bytes,
+            },
+        );
+    }
     Some(TransferControlAck::Committed { transfer })
 }
 
@@ -1240,7 +1377,10 @@ mod tests {
             auth_verifying_key: verifying_key(),
             session_seed: 7,
             tick_hz: 50,
-            tuning: TransportTuning { max_sessions: 4 },
+            tuning: TransportTuning {
+                max_sessions: 4,
+                max_buffered_inputs: 8,
+            },
         }
     }
 
@@ -2171,10 +2311,38 @@ mod tests {
             assert!(!out.is_empty());
         }
         assert_eq!(forwarded, 50_000);
+        // MV-4: the 1c.5 cut partition adds a `.cut` read to `route_input`. Time it under
+        // volume against a `cut: Some` route, crossing the marker, proving the added branch
+        // is no contended-load regression (the partition is one compare on the loaded Arc).
+        let cut_hot = SessionHot {
+            route: ArcSwap::from_pointee(RouteSnapshot {
+                authority: SHARD,
+                fence: Fence(1),
+                cut: Some(SeqCut {
+                    marker_seq: 25_000,
+                    dest: DEST,
+                }),
+            }),
+            last_input_seq: AtomicU64::new(0),
+        };
+        let (mut to_source, mut to_buffer) = (0u64, 0u64);
+        for seq in 1..=50_000u64 {
+            // seq <= marker → Forward (source); seq > marker → Buffer (held for the dest).
+            if route_input(&cut_hot, &input_bytes(seq)) == InputRouting::Buffer {
+                to_buffer += 1;
+            } else {
+                to_source += 1;
+            }
+        }
+        assert_eq!(
+            (to_source, to_buffer),
+            (25_000, 25_000),
+            "partitioned at the marker"
+        );
         let elapsed = started.elapsed();
         assert!(
             elapsed < std::time::Duration::from_secs(5),
-            "hot path collapsed: 50k rounds took {elapsed:?}"
+            "hot path collapsed: 100k rounds took {elapsed:?}"
         );
     }
 
@@ -2690,25 +2858,43 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_cut_is_inert_on_the_hot_route_input() {
-        // G3 (LBD-1): the installed cut is LATENT — route_input still Forwards to the
-        // AUTHORITY (source), never to DEST, for a seq past the marker. The seq>marker
-        // partition is 1c.5; this pins the installed-but-inert baseline so 1c.5 lands red/green.
-        let mut rig = Rig::new();
-        let (sid, _) = rig.login();
-        let _ = freeze_to_live_cut(&mut rig, sid, 42);
-        let hot = &rig
-            .world
-            .resource::<GatewaySessions>()
-            .by_session
-            .get(&sid)
-            .expect("session")
-            .hot;
-        // A seq well past the marker still routes to the authority (cut is not yet enforced).
+    fn an_installed_cut_partitions_input_at_the_marker() {
+        // 1c.5: the live cut PARTITIONS `route_input` — all three arms (a SessionHot built
+        // directly so the dedup high-water is BELOW the marker, exercising the `seq <= marker`
+        // Forward arm that the marker-advanced rig high-water would otherwise hide).
+        // (Flipped from the 1c.4 installed-but-inert baseline this test reserved.)
+        let hot = SessionHot {
+            route: ArcSwap::from_pointee(RouteSnapshot {
+                authority: SHARD,
+                fence: Fence(2),
+                cut: Some(SeqCut {
+                    marker_seq: 42,
+                    dest: DEST,
+                }),
+            }),
+            last_input_seq: AtomicU64::new(0),
+        };
+        // seq <= marker (and past the dedup high-water) → Forward to the SOURCE authority.
         assert_eq!(
-            route_input(hot, &input_bytes(99)),
-            InputRouting::Forward { to: SHARD },
-            "an installed cut does not (yet) divert seq>marker — that is 1c.5"
+            route_input(&hot, &input_bytes(40)),
+            InputRouting::Forward { to: SHARD }
+        );
+        // seq > marker → Buffer (the cold caller holds it for the dest).
+        assert_eq!(route_input(&hot, &input_bytes(99)), InputRouting::Buffer);
+        // a duplicate (<= the dedup high-water, now 99) is Deduped, NOT buffered.
+        assert_eq!(route_input(&hot, &input_bytes(50)), InputRouting::Deduped);
+        // and with NO cut installed, a fresh seq is a plain Forward (the `_` arm).
+        let no_cut = SessionHot {
+            route: ArcSwap::from_pointee(RouteSnapshot {
+                authority: SHARD,
+                fence: Fence(2),
+                cut: None,
+            }),
+            last_input_seq: AtomicU64::new(0),
+        };
+        assert_eq!(
+            route_input(&no_cut, &input_bytes(100)),
+            InputRouting::Forward { to: SHARD }
         );
     }
 
@@ -2988,6 +3174,187 @@ mod tests {
             rig.stats().commit_without_cut,
             0,
             "redelivery is not a no-cut fault"
+        );
+    }
+
+    // ---- Slice 1c.5: the cut partition — gateway buffer + drain-at-commit -------
+
+    fn client_input(seq: u64) -> Inbound {
+        Inbound::Wire {
+            from: CLIENT,
+            class: MsgClass::Input,
+            bytes: input_bytes(seq).into(),
+        }
+    }
+
+    /// The `seq`s of `SessionInput` frames the gateway sent to `dest` (the drained cut buffer).
+    /// The variant match (not a class pre-filter) discriminates — the commit-drain stream to
+    /// `dest` mixes `OpenInputSlot` + `SessionInput`, so both match arms are live.
+    fn shard_input_seqs(sent: &[(NodeId, MsgClass, Vec<u8>)], dest: NodeId) -> Vec<u64> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == dest)
+            .filter_map(|(_, _, bytes)| {
+                match postcard::from_bytes::<GatewayToShard>(bytes).expect("gateway sends valid") {
+                    GatewayToShard::SessionInput { input_bytes, .. } => {
+                        Some(peek_input_seq(&input_bytes).expect("valid input"))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// The `resume_from_seq`s of `OpenInputSlot` frames the gateway sent to `dest`.
+    /// As above, the variant match discriminates so the `_ => None` arm is exercised by the
+    /// `SessionInput` frames in the same drained stream.
+    fn open_slot_watermarks(sent: &[(NodeId, MsgClass, Vec<u8>)], dest: NodeId) -> Vec<u64> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == dest)
+            .filter_map(|(_, _, bytes)| {
+                match postcard::from_bytes::<GatewayToShard>(bytes).expect("gateway sends valid") {
+                    GatewayToShard::OpenInputSlot {
+                        resume_from_seq, ..
+                    } => Some(resume_from_seq),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    fn dest_buffer_len(rig: &Rig, sid: SessionId) -> usize {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session")
+            .transfer
+            .as_ref()
+            .map_or(0, |tp| tp.dest_buffer.len())
+    }
+
+    #[test]
+    fn seq_past_the_marker_buffers_for_the_dest_and_is_not_forwarded() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 10);
+        // Three seq>marker inputs: held in the cut buffer, NOT forwarded to the source.
+        let sent = rig.tick(vec![client_input(11), client_input(12), client_input(13)]);
+        assert_eq!(rig.stats().inputs_buffered_for_dest, 3);
+        assert_eq!(dest_buffer_len(&rig, sid), 3);
+        assert_eq!(
+            shard_input_seqs(&sent, SHARD),
+            Vec::<u64>::new(),
+            "buffered input does NOT go to the source"
+        );
+        assert_eq!(
+            shard_input_seqs(&sent, DEST),
+            Vec::<u64>::new(),
+            "nothing reaches the dest until commit"
+        );
+    }
+
+    #[test]
+    fn the_cut_buffer_drops_oldest_over_cap_and_counts() {
+        // Default cap is 8 (config()); 11 inputs ⇒ 3 oldest shed, newest 8 kept.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 100);
+        for seq in 101..=111 {
+            let _ = rig.tick(vec![client_input(seq)]);
+        }
+        assert_eq!(
+            dest_buffer_len(&rig, sid),
+            8,
+            "capped at max_buffered_inputs"
+        );
+        assert_eq!(rig.stats().dest_inputs_dropped, 3);
+        assert_eq!(
+            rig.stats().inputs_buffered_for_dest,
+            11,
+            "all counted as buffered"
+        );
+        // Commit + drain and assert WHICH seqs survive: drop-OLDEST means the kept window is the
+        // NEWEST 8 (104..=111), drained in seq order — proving the latest-wins identity, not just
+        // the length. A drop-NEWEST inversion would strand the player's most recent input here.
+        let sent = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+        })]);
+        assert_eq!(
+            shard_input_seqs(&sent, DEST),
+            vec![104, 105, 106, 107, 108, 109, 110, 111],
+            "the drained survivors are exactly the kept newest-8 window, in order"
+        );
+    }
+
+    #[test]
+    fn commit_opens_the_dest_slot_then_drains_the_buffer_in_seq_order() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 10);
+        let _ = rig.tick(vec![client_input(11), client_input(12), client_input(13)]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+        })]);
+        // The authoritative OpenInputSlot carries resume_from_seq == marker_seq.
+        assert_eq!(open_slot_watermarks(&sent, DEST), vec![10]);
+        // The buffer drained to the dest, in seq order.
+        assert_eq!(shard_input_seqs(&sent, DEST), vec![11, 12, 13]);
+        assert_eq!(dest_buffer_len(&rig, sid), 0, "buffer emptied by the drain");
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Committed { transfer: XFER }]
+        );
+    }
+
+    #[test]
+    fn a_redelivered_commit_does_not_re_drain_the_buffer() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 10);
+        let _ = rig.tick(vec![client_input(11), client_input(12)]);
+        let commit = || {
+            saga_cmd(TransferControl::CommitAuthority {
+                transfer: XFER,
+                session: sid,
+                new_fence: Fence(2),
+            })
+        };
+        let first = rig.tick(vec![commit()]);
+        assert_eq!(shard_input_seqs(&first, DEST), vec![11, 12]);
+        // Redelivery: re-serves Committed from the journal, drains NOTHING (buffer is empty).
+        let second = rig.tick(vec![commit()]);
+        assert_eq!(
+            acks_to_orch(&second),
+            acks_to_orch(&first),
+            "same Committed re-served"
+        );
+        assert_eq!(
+            shard_input_seqs(&second, DEST),
+            Vec::<u64>::new(),
+            "the redelivery never re-drains"
+        );
+    }
+
+    #[test]
+    fn abort_drops_the_cut_buffer() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 10);
+        let _ = rig.tick(vec![client_input(11), client_input(12)]);
+        assert_eq!(dest_buffer_len(&rig, sid), 2);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert!(!transfer_in_flight(&rig, sid), "abort pruned the progress");
+        assert_eq!(
+            shard_input_seqs(&sent, DEST),
+            Vec::<u64>::new(),
+            "buffered seq>marker frames reach NEITHER shard on abort (player stays on source)"
         );
     }
 
