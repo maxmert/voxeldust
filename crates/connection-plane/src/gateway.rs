@@ -25,11 +25,13 @@ use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
-use vd_wire::channels::{ClientControlMsg, InputDatagram, ServerControlMsg, SubId};
+use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
-use vd_wire::session_flow::{GatewayToShard, ShardToGateway, peek_input_seq, retag_snapshot_sub};
+use vd_wire::session_flow::{
+    GatewayToShard, ShardToGateway, peek_input_seq, peek_is_cut_marker, retag_snapshot_sub,
+};
 use vd_wire::version::ProtoVersion;
 
 use crate::tickets;
@@ -252,9 +254,10 @@ pub fn route_input(hot: &SessionHot, input_bytes: &[u8]) -> InputRouting {
         return InputRouting::Deduped;
     }
     let route = hot.route.load();
-    // `cut` is still always None through 1c.2 (FreezeSource — the only writer — parks
-    // until 1c.3); the seq>marker dest-buffer partition slots in right here at 1c.3,
-    // leaving this benched hot path otherwise untouched (SPIKE-2a).
+    // `apply_freeze` (1c.3) now installs `cut: Some(..)`, but this hot path reads ONLY
+    // `.authority` and never dereferences `.cut` — an installed cut is a LATENT field here.
+    // The `seq > marker_seq` dest-buffer partition read slots in right here at 1c.5, leaving
+    // this benched hot path byte-identical until then (SPIKE-2a).
     InputRouting::Forward {
         to: route.authority,
     }
@@ -636,24 +639,25 @@ fn on_transfer_control(
     }
     // Compute the ack (or None for deferred/parked phases), then record-then-send below.
     let ack: Option<TransferControlAck> = match cmd {
-        TransferControl::PrepareSubscribe { .. } => Some(apply_prepare(session, transfer)),
+        TransferControl::PrepareSubscribe { .. } => apply_prepare(session, transfer, stats),
         TransferControl::RequestCut { .. } => {
             apply_request_cut(session, outbox, transfer, stats);
             None // the ack (CutConfirmed) is deferred to the cut-marker observer
         }
+        TransferControl::FreezeSource {
+            marker_seq, dest, ..
+        } => apply_freeze(session, transfer, marker_seq, dest, stats),
         TransferControl::ThawSource { .. } => apply_thaw(session, transfer, stats),
         TransferControl::AbortTransfer { .. } => apply_abort(session, transfer),
-        TransferControl::FreezeSource { .. }
-        | TransferControl::CommitAuthority { .. }
-        | TransferControl::ReleaseSubscribe { .. } => {
-            // PARK-LOUD: these touch the route/cut (1c.3 FreezeSource, 1c.4 CommitAuthority,
-            // the demote-release tail). No ack ⇒ the saga correctly pins until its handler
-            // lands; not journaled ⇒ that handler applies cleanly.
+        TransferControl::CommitAuthority { .. } | TransferControl::ReleaseSubscribe { .. } => {
+            // PARK-LOUD: CommitAuthority (the route swap = 1c.4) + the demote-release tail.
+            // No ack ⇒ the saga correctly pins until its handler lands; not journaled ⇒ that
+            // handler applies cleanly.
             stats.transfer_control_parked += 1;
             tracing::warn!(
                 transfer = transfer.0,
                 step,
-                "TransferControl phase parks in 1c.2 (cut cycle = 1c.3, route swap = 1c.4); \
+                "TransferControl phase parks after 1c.3 (route swap = 1c.4, demote tail later); \
                  no ack, not journaled"
             );
             None
@@ -679,7 +683,24 @@ fn on_transfer_control(
 /// 1c STUB readiness — there is no dest-subscription/ghost machinery yet (one stub shard),
 /// so the verdict is `Ready` (the typed `Rejected` path stays WIRED for later bands, not
 /// dead live code). DEFENSIVE replace: overwrite any stale progress.
-fn apply_prepare(session: &mut Session, transfer: TransferId) -> TransferControlAck {
+///
+/// REQUIRES the session be ACTIVE (WB-1): a transfer can only run for an attached avatar.
+/// This single guard ENFORCES "attach strictly precedes transfer" LOCALLY (rather than
+/// borrowing it from saga ordering) and is what makes every downstream route writer safe:
+/// `session.transfer` is set Some ONLY here, ONLY when Active; Active is monotonic-until-
+/// removal; and the attach path early-returns once Active (never re-storing the route). So a
+/// cut installed by `apply_freeze` — or a route swapped by 1c.4 `CommitAuthority` — can never
+/// be clobbered by a late `SessionAttached`. A not-Active prepare is counted + un-acked (pins
+/// the saga, per WEDGE-1), never a route-touching transfer on a half-attached session.
+fn apply_prepare(
+    session: &mut Session,
+    transfer: TransferId,
+    stats: &mut GatewayStats,
+) -> Option<TransferControlAck> {
+    if !matches!(session.phase, SessionPhase::Active { .. }) {
+        stats.transfer_unroutable += 1;
+        return None;
+    }
     // RACE-1 (pinned to Slice 2 — DEFERRED D-23): replacing a LIVE, different transfer's
     // progress discards its journal. Impossible today — the orchestrator serializes one
     // saga per session-subject (`DirectoryCore::lock_transfer`), and a redelivered SAME
@@ -703,10 +724,10 @@ fn apply_prepare(session: &mut Session, transfer: TransferId) -> TransferControl
         transfer = transfer.0,
         "PrepareSubscribe readiness is a 1c stub (Ready)"
     );
-    TransferControlAck::Prepared {
+    Some(TransferControlAck::Prepared {
         transfer,
         result: PrepareResult::Ready,
-    }
+    })
 }
 
 /// `RequestCut` (step 1): mark the cut as requested + ask the client to emit the in-band
@@ -741,13 +762,71 @@ fn apply_request_cut(
     );
 }
 
+/// `FreezeSource` (step 2): INSTALL the live cut — `seq <= marker_seq` stays bound to the
+/// source, `seq > marker_seq` will buffer toward `dest`. The SOLE `cut: Some(..)` writer; its
+/// mirror image is `apply_thaw`'s `cut: None`, both via `store_cut`. The `seq > marker`
+/// partition READ lands in 1c.5; 1c.3 installs the latent field only (this hot path reads
+/// only `.authority`, so the install is inert to routing until then).
+///
+/// UNBOUND DIVERGES from `apply_thaw`: freeze is a FORWARD phase (its `SourceFrozen` drives
+/// the directory CAS), so an unbound freeze must NOT fabricate an ack — acking a
+/// never-installed cut would advance the saga to a CAS / route-swap against a session this
+/// gateway no longer holds (the Bye-mid-transfer wedge, WEDGE-1). Returning `None` correctly
+/// PINS the saga until the Slice-2 abort producer (D-23). Bound-check FIRST, mirroring
+/// `apply_request_cut` (the forward sibling), NOT `apply_thaw` (a compensator that no-ops
+/// truthfully when unbound). Self-acking, so a redelivery is re-served by the gate, never
+/// re-entered here (the route is never re-touched).
+fn apply_freeze(
+    session: &mut Session,
+    transfer: TransferId,
+    marker_seq: u64,
+    dest: NodeId,
+    stats: &mut GatewayStats,
+) -> Option<TransferControlAck> {
+    let bound = session
+        .transfer
+        .as_ref()
+        .is_some_and(|tp| tp.transfer == transfer);
+    if !bound {
+        stats.transfer_unroutable += 1; // no source to freeze: pin the saga (no ack)
+        return None;
+    }
+    store_cut(&session.hot, Some(SeqCut { marker_seq, dest }));
+    // drained_seq = marker_seq: the 1c SINGLE-STUB-SHARD value. By construction of the cut
+    // (seq <= marker -> source), the marker IS the last source-bound seq, so "the source
+    // applied input through exactly this seq" == marker_seq. NOT last_input_seq (the OBSERVED
+    // high-water, which a client racing dest-bound input past the marker pushes ABOVE
+    // marker_seq, breaking input-conservation). A real source-applied drain watermark replaces
+    // this at 1d (the shard drain oracle); until then nothing READS drained_seq (the FSM
+    // carries it unread into CommittingCas), so the stub is observability-only.
+    Some(TransferControlAck::SourceFrozen {
+        transfer,
+        drained_seq: marker_seq,
+    })
+}
+
+/// Carry the route's `authority` + `fence` forward and swap ONLY the `cut` — the gateway's
+/// SOLE cut install/clear primitive (via the one `route.store`). Centralizing the
+/// field-carry is what makes install (`apply_freeze`, `cut: Some`) and clear (`apply_thaw`,
+/// `cut: None`) provable mirror images: a future field added to `RouteSnapshot` can never
+/// silently drop authority/fence on one of them. (The attach path in `on_shard_control`
+/// SETS a fresh fence, a different shape, so it does NOT use this.)
+fn store_cut(hot: &SessionHot, cut: Option<SeqCut>) {
+    let current = hot.route.load();
+    hot.route.store(Arc::new(RouteSnapshot {
+        authority: current.authority,
+        fence: current.fence,
+        cut,
+    }));
+}
+
 /// `ThawSource` (step 4): the `FreezeSource` compensator — input resumes to the source.
-/// Clears the cut via the SOLE route-store primitive ONLY for the matching in-flight
-/// transfer (ROB-THAW-UNBOUND-STORE): a thaw naming a different/absent transfer must NOT
-/// touch the route, else once 1c.3 makes `cut` live it would clobber the in-flight
-/// transfer's cut. A thaw against a never-frozen source is a correct no-op (the source
-/// never stopped), so it ALWAYS acks `SourceThawed` (even unbound — counted — so the saga's
-/// thaw compensator can always complete), but only the BOUND case stores the route.
+/// Clears the cut (via `store_cut`) ONLY for the matching in-flight transfer
+/// (ROB-THAW-UNBOUND-STORE): a thaw naming a different/absent transfer must NOT touch the
+/// route, else it would clobber the in-flight transfer's LIVE cut (live since 1c.3). A thaw
+/// against a never-frozen source is a correct no-op (the source never stopped), so it ALWAYS
+/// acks `SourceThawed` (even unbound — counted — so the saga's thaw compensator can always
+/// complete), but only the BOUND case stores the route. The live mirror image of `apply_freeze`.
 fn apply_thaw(
     session: &mut Session,
     transfer: TransferId,
@@ -758,12 +837,7 @@ fn apply_thaw(
         .as_ref()
         .is_some_and(|tp| tp.transfer == transfer);
     if bound {
-        let current = session.hot.route.load();
-        session.hot.route.store(Arc::new(RouteSnapshot {
-            authority: current.authority,
-            fence: current.fence,
-            cut: None,
-        }));
+        store_cut(&session.hot, None);
     } else {
         stats.transfer_unroutable += 1;
     }
@@ -785,10 +859,17 @@ fn apply_abort(session: &mut Session, transfer: TransferId) -> Option<TransferCo
         .is_some_and(|tp| tp.transfer == transfer)
     {
         session.transfer = None; // prune ONLY the matching in-flight transfer
+        // ROB-1c3: clear any installed cut LOCALLY. The saga emits ThawSource before
+        // AbortTransfer over reliable CONTROL, so today the cut is usually already clear —
+        // but abort must be LOCALLY fail-safe, not borrow that ordering: once the cut READ
+        // goes live (1c.5) a survived cut becomes a live mis-route, and Slice-2/warp abort
+        // producers need not preserve Thaw-before-Abort. `store_cut(None)` is idempotent
+        // (a no-op when the cut is already clear), so it is safe on every abort path.
+        store_cut(&session.hot, None);
     }
     tracing::debug!(
         transfer = transfer.0,
-        "AbortTransfer teardown is inert in 1c.2 (no ghost)"
+        "AbortTransfer tears down the dest ghost (inert in 1c.2 — no ghost) + clears any cut"
     );
     Some(TransferControlAck::Aborted { transfer })
 }
@@ -806,10 +887,13 @@ fn on_cut_marker(
     orchestrator: NodeId,
     outbox: &mut OutboundBox,
 ) {
-    let Ok(dgram) = postcard::from_bytes::<InputDatagram>(bytes) else {
-        return; // a decode failure here is just "not a marker"; route_input already counts malformed
+    // PEEK the two head fields (seq + is_cut_marker) — never a full InputDatagram decode
+    // (D-24 SCALE-CUTDECODE-1): on_cut_marker runs for EVERY input mid-transfer, so it reads
+    // only what it needs off the postcard prefix.
+    let Ok((seq, is_cut_marker)) = peek_is_cut_marker(bytes) else {
+        return; // malformed/truncated/bad-bool = "not a marker"; route_input already counts malformed
     };
-    if !dgram.is_cut_marker {
+    if !is_cut_marker {
         return; // ordinary input
     }
     if !tp.cut_requested {
@@ -822,7 +906,7 @@ fn on_cut_marker(
     }
     let ack = TransferControlAck::CutConfirmed {
         transfer: tp.transfer,
-        marker_seq: dgram.seq,
+        marker_seq: seq,
     };
     tp.journal(CUT_STEP, ack);
     reply_ack(outbox, orchestrator, ack);
@@ -1066,6 +1150,10 @@ mod tests {
     const SHARD: NodeId = NodeId(2);
     const ORCH: NodeId = NodeId(3);
     const CLIENT: NodeId = NodeId(100);
+    /// The transfer DESTINATION authority — DISTINCT from the source `SHARD(2)` so a test
+    /// asserting `SeqCut.dest == DEST` proves `dest` threads from the wire command, not from
+    /// `route.authority` (== SHARD) or a default.
+    const DEST: NodeId = NodeId(42);
     const SIGNING_KEY: [u8; 32] = [0x42; 32];
 
     fn verifying_key() -> [u8; 32] {
@@ -2369,6 +2457,31 @@ mod tests {
             .is_some()
     }
 
+    /// Drive a session to a LIVE cut: Prepare(dest:DEST) -> RequestCut -> marker(M) ->
+    /// FreezeSource(marker_seq:M, dest:DEST). Returns the tick's sends from the freeze.
+    fn freeze_to_live_cut(
+        rig: &mut Rig,
+        sid: SessionId,
+        marker: u64,
+    ) -> Vec<(NodeId, MsgClass, Vec<u8>)> {
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+            transfer: XFER,
+            session: sid,
+        })]);
+        let _ = rig.tick(vec![marker_input(marker)]);
+        rig.tick(vec![saga_cmd(TransferControl::FreezeSource {
+            transfer: XFER,
+            session: sid,
+            marker_seq: marker,
+            dest: DEST,
+        })])
+    }
+
     fn route_cut(rig: &Rig, sid: SessionId) -> Option<SeqCut> {
         rig.world
             .resource::<GatewaySessions>()
@@ -2476,14 +2589,113 @@ mod tests {
     }
 
     #[test]
-    fn thaw_acks_and_leaves_the_route_cut_clear() {
+    fn freeze_installs_the_live_cut_and_acks_source_frozen() {
+        // G2: FreezeSource installs Some(SeqCut{marker_seq, dest}) on the route and acks
+        // SourceFrozen{drained_seq == marker_seq}. Asserting dest == DEST (!= the authority
+        // SHARD) proves `dest` THREADS from the wire command into the cut, not defaulted.
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
-        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+        let sent = freeze_to_live_cut(&mut rig, sid, 42);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::SourceFrozen {
+                transfer: XFER,
+                drained_seq: 42,
+            }]
+        );
+        assert_eq!(
+            route_cut(&rig, sid),
+            Some(SeqCut {
+                marker_seq: 42,
+                dest: DEST,
+            }),
+            "the live cut carries the wire-supplied marker_seq + dest"
+        );
+    }
+
+    #[test]
+    fn an_installed_cut_is_inert_on_the_hot_route_input() {
+        // G3 (LBD-1): the installed cut is LATENT — route_input still Forwards to the
+        // AUTHORITY (source), never to DEST, for a seq past the marker. The seq>marker
+        // partition is 1c.5; this pins the installed-but-inert baseline so 1c.5 lands red/green.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 42);
+        let hot = &rig
+            .world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session")
+            .hot;
+        // A seq well past the marker still routes to the authority (cut is not yet enforced).
+        assert_eq!(
+            route_input(hot, &input_bytes(99)),
+            InputRouting::Forward { to: SHARD },
+            "an installed cut does not (yet) divert seq>marker — that is 1c.5"
+        );
+    }
+
+    #[test]
+    fn a_redelivered_freeze_resends_source_frozen_without_re_storing_the_route() {
+        // G4: FreezeSource owns its step-2 journal slot, so a redelivery short-circuits at
+        // the gate (re-sends the SAME SourceFrozen) and NEVER re-enters apply_freeze — the
+        // route keeps the ORIGINAL cut even if the redelivery names a different marker/dest.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let first = freeze_to_live_cut(&mut rig, sid, 42);
+        let second = rig.tick(vec![saga_cmd(TransferControl::FreezeSource {
             transfer: XFER,
             session: sid,
-            dest: SHARD,
+            marker_seq: 999,
+            dest: ORCH,
         })]);
+        assert_eq!(
+            acks_to_orch(&first),
+            acks_to_orch(&second),
+            "same SourceFrozen re-sent"
+        );
+        assert_eq!(
+            route_cut(&rig, sid),
+            Some(SeqCut {
+                marker_seq: 42,
+                dest: DEST,
+            }),
+            "the route keeps the original cut; the redelivery never re-touched it"
+        );
+    }
+
+    #[test]
+    fn freeze_for_an_unrecorded_transfer_drops_and_counts_no_ack() {
+        // G6 (LBD-2): an unbound FreezeSource installs NO cut, sends NO ack (pinning the
+        // saga — WEDGE-1), and is counted. Diverges from thaw (a compensator that acks).
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let sent = rig.tick(vec![saga_cmd(TransferControl::FreezeSource {
+            transfer: XFER,
+            session: sid,
+            marker_seq: 7,
+            dest: DEST,
+        })]);
+        assert_eq!(acks_to_orch(&sent), vec![], "no ack -> the saga pins");
+        assert_eq!(
+            route_cut(&rig, sid),
+            None,
+            "no cut installed for an unbound freeze"
+        );
+        assert_eq!(rig.stats().transfer_unroutable, 1);
+    }
+
+    #[test]
+    fn thaw_clears_a_live_cut_then_acks() {
+        // G5: drive a genuinely-LIVE cut, THEN thaw — the compensator clears it to None.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 42);
+        assert!(
+            route_cut(&rig, sid).is_some(),
+            "cut is live before the thaw"
+        );
         let sent = rig.tick(vec![saga_cmd(TransferControl::ThawSource {
             transfer: XFER,
             session: sid,
@@ -2492,7 +2704,69 @@ mod tests {
             acks_to_orch(&sent),
             vec![TransferControlAck::SourceThawed { transfer: XFER }]
         );
-        assert_eq!(route_cut(&rig, sid), None, "thaw leaves the cut clear");
+        assert_eq!(route_cut(&rig, sid), None, "thaw cleared the live cut");
+    }
+
+    #[test]
+    fn abort_clears_a_live_cut_locally() {
+        // ROB-1c3: AbortTransfer must clear an installed cut LOCALLY, not borrow safety from
+        // the saga's Thaw-before-Abort ordering. Drive a LIVE cut, then abort DIRECTLY (no
+        // preceding thaw) — the cut is gone and the progress pruned.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = freeze_to_live_cut(&mut rig, sid, 42);
+        assert!(
+            route_cut(&rig, sid).is_some(),
+            "cut is live before the abort"
+        );
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Aborted { transfer: XFER }]
+        );
+        assert_eq!(
+            route_cut(&rig, sid),
+            None,
+            "abort cleared the live cut locally"
+        );
+        assert!(!transfer_in_flight(&rig, sid), "abort pruned the progress");
+    }
+
+    #[test]
+    fn prepare_for_a_not_yet_active_session_is_refused_and_counted() {
+        // WB-1: a transfer phase can only run for an ATTACHED (Active) session. A
+        // PrepareSubscribe that races ahead of SessionAttached (session still AwaitingAttach)
+        // is refused — no ack (pins the saga), no progress created, counted — so a later
+        // attach can never clobber a cut/route installed on a half-attached session.
+        let mut rig = Rig::new();
+        // Drive Hello + the directory grant, but NOT SessionAttached → AwaitingAttach.
+        let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let sid = rig
+            .world
+            .resource::<GatewaySessions>()
+            .sessions()
+            .next()
+            .expect("session pending");
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        // The session is NOT Active yet — a PrepareSubscribe must be refused.
+        let sent = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "no Prepared ack for a non-Active session"
+        );
+        assert!(
+            !transfer_in_flight(&rig, sid),
+            "no transfer progress created on a half-attached session"
+        );
+        assert_eq!(rig.stats().transfer_unroutable, 1);
     }
 
     #[test]
@@ -2573,12 +2847,8 @@ mod tests {
             session: sid,
             dest: SHARD,
         })]);
+        // FreezeSource is LIVE as of 1c.3 — only CommitAuthority (1c.4) + the demote tail park.
         let parked = [
-            saga_cmd(TransferControl::FreezeSource {
-                transfer: XFER,
-                session: sid,
-                marker_seq: 3,
-            }),
             saga_cmd(TransferControl::CommitAuthority {
                 transfer: XFER,
                 session: sid,

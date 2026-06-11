@@ -33,6 +33,11 @@ pub enum TransferControl {
         transfer: TransferId,
         session: SessionId,
         marker_seq: u64,
+        /// The dest authority the cut buffers `seq > marker_seq` toward. Carried from
+        /// the saga's durable `SagaCtx.dest` (the SAME source as `PrepareSubscribe.dest`),
+        /// NOT re-derived in the gateway: the gateway is soft-state and re-registers from
+        /// the saga on resume/adoption, so the durable carrier is the saga, not gateway RAM.
+        dest: NodeId,
     },
     /// THE route swap: a single atomic store after the directory CAS won.
     CommitAuthority {
@@ -250,6 +255,7 @@ mod tests {
                 transfer: T,
                 session: S,
                 marker_seq: 17,
+                dest: NodeId(2),
             },
             TransferControl::CommitAuthority {
                 transfer: T,
@@ -352,6 +358,7 @@ mod tests {
             transfer: T,
             session: S,
             marker_seq: 5,
+            dest: NodeId(2),
         };
         let frozen = TransferControlAck::SourceFrozen {
             transfer: T,
@@ -366,6 +373,7 @@ mod tests {
             transfer: T,
             session: S,
             marker_seq: 5,
+            dest: NodeId(2),
         };
         assert_eq!(
             compensator_of(freeze),

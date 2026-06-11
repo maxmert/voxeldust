@@ -101,11 +101,13 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   `assemble_input`/`send_outbound` build `InputDatagram` with `is_cut_marker` hardcoded `false`.
 - **When / proper:** **Slice 1e.** (HR1: the client only emits a marker — it never participates in the
   transfer. Slice 1c builds + tests the gateway cut partition with an injected/scripted marker.)
-- **1c.2 landed (gateway side):** the cut-marker OBSERVER (`on_cut_marker`) consumes an injected
-  `is_cut_marker=true` `InputDatagram` on the INPUT flow and replies `CutConfirmed{marker_seq}` (journaled at
-  step 1; a triple-sent marker re-sends the same ack). The **client** emit remains 🟥 for 1e. The `CutEmitted`
+- **1c.2/1c.3 landed (gateway side):** the cut-marker OBSERVER (`on_cut_marker`) consumes an injected
+  `is_cut_marker=true` `InputDatagram` on the INPUT flow (1c.3: via `peek_is_cut_marker`, not a full decode) and
+  replies `CutConfirmed{marker_seq}` (journaled at step 1; a triple-sent marker re-sends the same ack). 1c.3 also
+  INSTALLS the route cut: `FreezeSource` → `apply_freeze` → `store_cut(Some(SeqCut{marker_seq, dest}))`; the
+  partition READ (`seq > marker → dest buffer`) is 1c.5. The **client** emit remains 🟥 for 1e. The `CutEmitted`
   CONTROL message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
-- **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc`.
+- **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
 ### D-6 🟧 `PersistCheckpoint` is an in-memory no-op (no durable saga WAL)
 - **Missing:** the saga's two durable checkpoints are in-memory only; an orchestrator restart loses every
@@ -257,23 +259,28 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 
 ## PERF / SCALE (negligible now; land with the slice that makes them matter)
 
-### D-24 🟥 Per-input cut-marker decode + per-tick inbound/session rescans (gateway/orchestrator)
-- **Missing:** three correct-but-O(n) hot spots, all negligible at current volumes: (a) **SCALE-CUTDECODE-1** —
-  while a transfer is in flight the gateway full-decodes EVERY client `InputDatagram` (`on_cut_marker`) just to
-  read the `is_cut_marker` bool; (b) **SCALE-3** — `BoundedInbox::push` linear-scans for the oldest unreliable
-  on every full push; (c) **SCALE-5** — per-tick systems re-scan the whole inbound `Vec`, and
-  `drive_pending_sessions` scans ALL sessions including `Active` ones.
-- **Where:** `crates/connection-plane/src/gateway.rs` (`on_cut_marker`, `drive_pending_sessions`);
-  `crates/sim/src/io/mod.rs` (`BoundedInbox::push`); `crates/node/src/orchestrator.rs` + `saga_runtime.rs`
-  (`serve_directory` / `drive_sagas` inbound loops).
-- **When / proper:** SCALE-CUTDECODE-1 folds into **Slice 1c.3** — the real cut partition lands a cheap
-  `peek_is_cut_marker` header peek (`[varint seq][1 bool byte]`) for free, off the full decode. SCALE-3 / SCALE-5
+### D-24 🟥 Per-tick inbound/session rescans (gateway/orchestrator) — (SCALE-CUTDECODE-1 🟩 resolved 1c.3)
+- **SCALE-CUTDECODE-1 🟩 RESOLVED in Slice 1c.3:** `on_cut_marker` no longer full-decodes every input — it calls
+  `vd_wire::session_flow::peek_is_cut_marker`, reading only the `(seq, is_cut_marker)` postcard prefix
+  (`[varint seq][1 canonical bool byte]`) off the head, never the body.
+- **Missing (remaining):** three correct-but-O(n)/per-frame-alloc hot spots, all negligible at current volumes:
+  (a) **SCALE-INBOX** — `BoundedInbox::push` linear-scans for the oldest unreliable on every full push;
+  (b) **SCALE-5** — per-tick systems re-scan the whole inbound `Vec`, and `drive_pending_sessions` scans ALL
+  sessions including `Active` ones; (c) **SCALE-INPUT-COPY** — every forwarded client input is heap-copied
+  (`input_bytes: bytes.to_vec()`) into a fresh `GatewayToShard::SessionInput` on the 20 Hz path. The fix mirrors
+  the snapshot fan-out: carry the body as the already-available Arc-backed `vd_sim::io::Bytes` (`Arc<[u8]>`)
+  end-to-end instead of re-allocating per input/client/tick.
+- **Where:** `crates/connection-plane/src/gateway.rs` (`drive_pending_sessions`; `on_client_input`'s
+  `bytes.to_vec()`); `crates/sim/src/io/mod.rs` (`BoundedInbox::push`); `crates/node/src/orchestrator.rs` +
+  `saga_runtime.rs` (`serve_directory` / `drive_sagas` inbound loops).
+- **When / proper:** SCALE-INBOX / SCALE-5 / SCALE-INPUT-COPY
   / SCALE-CLOUD-1 → the **P1/P3 load-test + observability slice** (the load-tests-when-applicable standard): an
-  index for active vs pending sessions + a ring/heap for the inbox + publish the admin snapshot on-change or at
-  a sub-tick rate (SCALE-CLOUD-1: the orchestrator bin currently rebuilds+clones the FULL directory + saga
-  views every tick at `tick_hz` — `crates/bins/src/bin/orchestrator.rs`), each sized by a real bench, not before.
-- **Source:** whole-codebase audits `wwk1uh5k9` / `wo2gkj7t7` / `wg9gc765s` / `wdznr0x6i` (SCALE-1C2-1 / SCALE-3 /
-  SCALE-5 / SCALE-CLOUD-1).
+  index for active vs pending sessions + a ring/heap for the inbox + an Arc-carried input body + publish the
+  admin snapshot on-change or at a sub-tick rate (SCALE-CLOUD-1: the orchestrator bin currently rebuilds+clones
+  the FULL directory + saga views every tick at `tick_hz` — `crates/bins/src/bin/orchestrator.rs`), each sized
+  by a real bench, not before.
+- **Source:** whole-codebase audits `wwk1uh5k9` / `wo2gkj7t7` / `wg9gc765s` / `wdznr0x6i` / `wxwinv5no`
+  (SCALE-1C2-1 / SCALE-3-inbox / SCALE-5 / SCALE-CLOUD-1 / SCALE-3-input-copy).
 
 ### D-14 🟥 `rendered()` recomputed ~3×/display-frame on the client
 - **Missing:** the windowed/headless render path recomputes the composited view 2–3× per frame.

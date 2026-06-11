@@ -363,6 +363,7 @@ mod tests {
             transfer: TransferId(11),
             session: vd_core::SessionId(3),
             marker_seq: 17,
+            dest: vd_core::NodeId(2),
         });
         assert_eq!(
             saga.effect_class(),

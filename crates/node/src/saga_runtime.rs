@@ -558,6 +558,7 @@ mod tests {
                 transfer: XFER,
                 session: SESSION,
                 marker_seq: 42,
+                dest: DEST,
             })]
         );
 

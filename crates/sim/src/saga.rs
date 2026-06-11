@@ -232,6 +232,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 transfer: ctx.transfer,
                 session: ctx.session,
                 marker_seq,
+                dest: ctx.dest,
             })],
         ),
         (S::Cutting, E::Timeout) => abort_from_pre_freeze(ctx, AbortReason::CutTimeout),
@@ -542,6 +543,7 @@ mod tests {
                     transfer: c.transfer,
                     session: c.session,
                     marker_seq: 17,
+                    dest: c.dest,
                 },
                 TransferControl::CommitAuthority {
                     transfer: c.transfer,

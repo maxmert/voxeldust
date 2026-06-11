@@ -88,6 +88,10 @@ pub enum HeaderError {
     TruncatedVarint,
     #[error("varint exceeds the maximum width for its field")]
     VarintTooWide,
+    #[error("buffer ended before the is_cut_marker byte")]
+    Truncated,
+    #[error("is_cut_marker byte is not a canonical bool (0x00/0x01)")]
+    BadBool,
 }
 
 /// Read one unsigned LEB128 varint (postcard's integer encoding) from the front of
@@ -132,6 +136,37 @@ pub fn peek_input_seq(bytes: &[u8]) -> Result<u64, HeaderError> {
     read_varint(bytes, 10).map(|(v, _)| v)
 }
 
+/// Read `(seq, is_cut_marker)` of a postcard-encoded [`crate::channels::InputDatagram`]
+/// WITHOUT decoding the rest: `seq: u64` (varint) then `is_cut_marker: bool` (one
+/// `0x00`/`0x01` byte). The gateway's cut-marker observer peeks these two head fields
+/// instead of full-decoding every input mid-transfer (D-24 SCALE-CUTDECODE-1).
+///
+/// CONTRACT: agreement with the real codec is on the `(seq, is_cut_marker)` PREFIX only;
+/// the tail (`client_tick`/`movement`/`look`/`action_bits`) is deliberately NOT validated
+/// — `on_cut_marker` never reads it. The bool byte IS validated (postcard rejects non-0/1),
+/// so the peek is no more permissive than the decode it replaces on the fields it reads.
+///
+/// # Errors
+/// [`HeaderError`] if the seq varint is malformed, the bool byte is missing
+/// ([`HeaderError::Truncated`]), or the bool byte is not canonical ([`HeaderError::BadBool`]).
+pub fn peek_is_cut_marker(bytes: &[u8]) -> Result<(u64, bool), HeaderError> {
+    let (seq, used) = read_varint(bytes, 10)?;
+    let &flag = bytes.get(used).ok_or(HeaderError::Truncated)?;
+    let is_cut_marker = decode_cut_bool(flag)?;
+    Ok((seq, is_cut_marker))
+}
+
+/// Decode the postcard bool byte that follows the seq varint (canonical `0x00`/`0x01`).
+/// Monomorphic so [`peek_is_cut_marker`] stays a straight-line shim and these arms are
+/// covered once over `u8` (the branchless-generic-shim discipline, HR5).
+fn decode_cut_bool(byte: u8) -> Result<bool, HeaderError> {
+    match byte {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(HeaderError::BadBool),
+    }
+}
+
 /// Rewrite the leading `sub: SubId(u32)` of a postcard-encoded
 /// [`crate::channels::SnapshotDatagram`] WITHOUT decoding the rest — `sub` is its
 /// first field; everything after it is copied verbatim. This is the gateway's
@@ -157,9 +192,13 @@ mod tests {
     use vd_core::{UniverseTick, glam::DVec3};
 
     fn input(seq: u64) -> InputDatagram {
+        input_with(seq, false)
+    }
+
+    fn input_with(seq: u64, is_cut_marker: bool) -> InputDatagram {
         InputDatagram {
             seq,
-            is_cut_marker: false,
+            is_cut_marker,
             client_tick: TickId(3),
             movement: [0.5, 0.0, -1.0],
             look: [0.1, 0.2],
@@ -303,12 +342,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn peek_is_cut_marker_reads_seq_and_canonical_bool() {
+        // W2: seq varint then a canonical bool byte (0x05 = seq 5).
+        assert_eq!(peek_is_cut_marker(&[0x05, 0x00]), Ok((5, false)));
+        assert_eq!(peek_is_cut_marker(&[0x05, 0x01]), Ok((5, true)));
+    }
+
+    #[test]
+    fn peek_is_cut_marker_typed_errors() {
+        // W3: malformed at the seq stage (reuses read_varint's errors).
+        assert_eq!(peek_is_cut_marker(&[]), Err(HeaderError::TruncatedVarint));
+        assert_eq!(
+            peek_is_cut_marker(&[0x80]),
+            Err(HeaderError::TruncatedVarint)
+        );
+        assert_eq!(
+            peek_is_cut_marker(&[0x80; 11]),
+            Err(HeaderError::VarintTooWide)
+        );
+        // W4: the seq is a valid varint but the bool byte is MISSING. `.get(used)` (not
+        // indexing) is what keeps this from panicking — including when a multi-byte varint
+        // consumes the whole buffer (used == len).
+        assert_eq!(peek_is_cut_marker(&[0x05]), Err(HeaderError::Truncated));
+        assert_eq!(
+            peek_is_cut_marker(&[0x80, 0x01]),
+            Err(HeaderError::Truncated)
+        );
+        // W5: the bool byte is present but non-canonical. This is the ONLY thing covering
+        // the BadBool arm — the via-codec proptest can never emit a 0x02. Document that the
+        // real codec rejects it too, so the peek is no more permissive than the decode.
+        assert_eq!(peek_is_cut_marker(&[0x05, 0x02]), Err(HeaderError::BadBool));
+        assert_eq!(peek_is_cut_marker(&[0x00, 0xFF]), Err(HeaderError::BadBool));
+        assert!(postcard::from_bytes::<InputDatagram>(&[0x00, 0xFF, 0, 0, 0, 0, 0, 0, 0]).is_err());
+    }
+
     proptest! {
         /// The byte-level peek agrees with the real codec for EVERY seq.
         #[test]
         fn peek_agrees_with_postcard(seq in any::<u64>()) {
             let bytes = postcard::to_allocvec(&input(seq)).expect("encode");
             prop_assert_eq!(peek_input_seq(&bytes), Ok(seq));
+        }
+
+        /// The cut-marker peek agrees with the real codec on the (seq, is_cut_marker)
+        /// PREFIX for EVERY seq and BOTH flag values (two-sided conformance, both bool arms).
+        #[test]
+        fn peek_is_cut_marker_agrees_with_postcard(seq in any::<u64>(), flag in any::<bool>()) {
+            let bytes = postcard::to_allocvec(&input_with(seq, flag)).expect("encode");
+            prop_assert_eq!(peek_is_cut_marker(&bytes), Ok((seq, flag)));
         }
 
         /// The byte-level re-tag agrees with decode-modify-encode for EVERY pair of
