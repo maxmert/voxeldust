@@ -46,6 +46,16 @@ pub struct InspectReport {
     pub discarded_inputs: Vec<(SessionId, Option<u64>, DiscardReason)>,
     /// Inputs this node SENT (scripted clients fill this).
     pub sent_inputs: Vec<(SessionId, u64)>,
+    /// The `resume_from_seq` the gateway EMITTED in the most recent `OpenInputSlot` this shard
+    /// honored — the transfer-dest's resume watermark (`None` on nodes/runs with no cut). The
+    /// cross-cut conservation gate asserts it equals the client's own CUT_MARKER seq, threaded
+    /// through the real saga (D-28). Read from `StubStats.last_input_slot_resume`, NOT the dot,
+    /// so it is immune to the provisional dot's watermark advancing or its grant flipping.
+    pub dest_resume_seq: Option<u64>,
+    /// `InputLog.window_evictions` — inputs the bounded log silently aged out of its window.
+    /// MUST be 0 for a conservation assertion to be trustworthy (a non-zero value means the
+    /// oracle did not see the whole run).
+    pub input_window_evictions: u64,
 }
 
 /// Anything the topology can drive. `ShardNode<FabricTransport>` is the canonical
@@ -64,7 +74,7 @@ pub trait SteppableNode {
     }
 }
 
-impl<T: vd_sim::io::Transport> SteppableNode for vd_node::ShardNode<T> {
+impl<T: vd_sim::io::Transport + 'static> SteppableNode for vd_node::ShardNode<T> {
     fn node_id(&self) -> NodeId {
         vd_node::ShardNode::node_id(self)
     }
@@ -73,6 +83,11 @@ impl<T: vd_sim::io::Transport> SteppableNode for vd_node::ShardNode<T> {
     }
     fn inspect(&mut self) -> InspectReport {
         inspect_world(self.world_mut())
+    }
+    /// Scenario code that DRIVES a transfer (e.g. the orchestrator's `SagaRuntimeRes`) needs
+    /// the concrete node; opt in (the default returns `None`).
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -119,6 +134,10 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
     if let Some(log) = world.get_resource::<vd_sim::stub::InputLog>() {
         report.applied_inputs = log.applied();
         report.discarded_inputs = log.discarded();
+        report.input_window_evictions = log.window_evictions;
+    }
+    if let Some(stats) = world.get_resource::<vd_sim::stub::StubStats>() {
+        report.dest_resume_seq = stats.last_input_slot_resume;
     }
     report
 }
@@ -752,6 +771,17 @@ mod tests {
         assert_eq!(shard_report.held_entities, Vec::new(), "no dots attached");
         assert_eq!(shard_report.applied_inputs, Vec::new());
         assert_eq!(shard_report.pending_entities, Vec::new());
+        assert_eq!(
+            shard_report.dest_resume_seq, None,
+            "no OpenInputSlot honored yet"
+        );
+        assert_eq!(
+            shard_report.input_window_evictions, 0,
+            "nothing aged out of the input log"
+        );
+        // The orchestrator has no StubStats/InputLog — the scrape's None arms.
+        assert_eq!(orch_report.dest_resume_seq, None);
+        assert_eq!(orch_report.input_window_evictions, 0);
 
         // Attach one session through a bare gateway endpoint: the dot transits
         // provisional → granted through the REAL directory, and the inspect
@@ -778,6 +808,18 @@ mod tests {
         assert_eq!(shard_report.held_entities.len(), 1, "granted and held");
         assert_eq!(shard_report.pending_entities, Vec::new());
         assert_eq!(shard_report.departing_entities, Vec::new());
+
+        // ShardNodes OPT INTO downcasting (the saga-driving scenario hook): the concrete node
+        // is reachable via `as_any_mut`, unlike the infra `Liar` that uses the None default.
+        let shard = topo.node_mut(B).expect("shard present");
+        assert!(
+            shard
+                .as_any_mut()
+                .expect("ShardNode opts into downcasting")
+                .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
+                .is_some(),
+            "the stub node downcasts to its concrete ShardNode",
+        );
     }
 
     #[test]

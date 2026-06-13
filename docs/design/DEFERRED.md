@@ -352,23 +352,37 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   (`apply_commit` emit); `crates/sim/src/stub.rs` (`on_gateway_msg` arm, `Dot.input_active`, `apply_input`).
 - **Source:** Slice 1c.5 design `wf_9679f7c7` (the dest-side reconciliation of integration.json #1).
 
-### D-28 🟥 Cross-cut INPUT-CONSERVATION is proven only in unjoined per-crate halves (the 1c.7 end-to-end gate)
-- **Missing:** the gateway's buffer/drain (connection-plane) and the dest's `OpenInputSlot`/`apply_input`
-  (sim) are each unit-tested, but NOTHING wires the gateway's drained output into a real stub `apply_input` in
-  ONE scenario. `marker_seq` consistency is asserted on each side against HARDCODED constants (the gateway sends
-  `resume_from_seq=marker_seq`; the stub test seeds `last_applied_seq` with a literal), never threaded through.
-  `verify_input_conservation` (`harness/src/oracle.rs` — the exactly-once + per-session strict-monotonic oracle
-  that would catch a post-marker input lost in the buffer, double-applied across the seam, or applied out of
-  order) is NEVER invoked on a transfer scenario; `process_parity.rs` hardcodes `is_cut_marker: false`.
-- **Where:** `crates/connection-plane/src/gateway.rs` (1c.5 tests), `crates/sim/src/stub.rs` (1c.5 tests),
-  `crates/harness/src/oracle.rs` (`verify_input_conservation`).
-- **When / proper:** **Slice 1c.7** — one scenario (harness topology or a connection-plane+sim integration
-  test) that drives `Prepare → RequestCut → marker → Freeze → client inputs straddling the marker → Commit`,
-  feeds the gateway's drained `OpenInputSlot` + `SessionInput` into a real stub, quiesces, and asserts
-  `verify_input_conservation(reports) == Ok` AND that the `marker_seq` the gateway EMITTED equals the one the
-  stub SEEDED (threaded, not hardcoded on both sides). The central transfer-first invariant is not "closed"
-  until this is green.
-- **Source:** the 1c.5 audit `wf_e3397eb2` (cut-conservation-untested-crossseam-and-untracked).
+### D-28 🟧 Cross-cut INPUT-CONSERVATION: the durable-player zero-fault instance is CLOSED (1c.7); the tail forms are owed
+- **Landed (1c.7):** the end-to-end gate `tests/tests/p2_transfer_gates.rs ::
+  p2_dod_cross_cut_input_is_conserved_exactly_once` drives a REAL transfer through the REAL saga producer
+  (`SagaRuntimeRes::start_transfer` → `PrepareSubscribe → RequestCut → FreezeSource → commit_cas →
+  CommitAuthority`) over a two-stub fabric topology, the client stamping the CUT_MARKER in response to the real
+  `RequestCut` (then pausing across the freeze window so no `seq > marker` leaks to the source) and resuming so
+  post-marker inputs BUFFER and DRAIN to the dest. It asserts `verify_input_conservation == Ok` (the gateway's
+  drained output fed into a REAL stub `apply_input` — the two crate halves JOINED for the first time), a REAL
+  source/dest partition (`source <= M`, `dest > M`, `dest.min == M+1`, non-empty drained batch), the marker
+  THREADED (the gateway-emitted `resume_from_seq` latched on the dest == the client's own marker seq, no
+  hardcoded literal on either side — via `StubStats.last_input_slot_resume` → `InspectReport.dest_resume_seq`),
+  zero `input_window_evictions`, and the directory CAS landed authority at the dest. Five negative controls are
+  checked-in + locally verified (lost-drain ⇒ Unaccounted, mis-thread ⇒ dest-empty, no-pause ⇒ source-leak, all
+  confirmed RED; double-apply + out-of-order-drain covered at the unit level). A determinism sibling proves the
+  bounded-poll choreography is byte-identical under one seed.
+- **Still owed (tail forms):** (a) the DONE/release-tail conservation — 1c.7 asserts the saga PARKS in
+  `Demoting` (`live() == 1`), since the demote/release tail has no producer (1c.8+, see D-28-tail below);
+  (b) the `verify_authority_settled`/`verify_authority_unique` PAIRING across the cut (the kind-generic HR2
+  backstop) — INVALID at 1c.7 (the source retains its granted dot while the directory says dest, a legitimate
+  half-done split), graduates with the demote tail; (c) the EPOCH-stamped ghost-misapply form (`test_harness.md`
+  §8#9 CONFLICT-B: input carries `(cid, authority_epoch)` + a `stale-authority` discard reason) — the oracle/
+  `InspectReport` key only on `(SessionId, seq)`, so this proves the epoch-LESS projection; lands with the real
+  ghost (D-27); (d) the TRANSIENT-class re-run — BLOCKED on the P3 `TransientGo` go-token (D-7), not merely
+  deferred; (e) tick-skew + N-concurrent-transfer siblings (the kind-generic scenario is parameterized to re-run
+  for them once the lockstep gate + demote tail are in).
+- **Where:** `tests/tests/p2_transfer_gates.rs`, `tests/src/lib.rs` (`p2_cluster`/`trigger_transfer`/
+  `read_subject`/`saga_states`), `crates/harness/src/client.rs` (`RequestCut` → marker + pause/resume),
+  `crates/harness/src/topology.rs` (`dest_resume_seq`/`input_window_evictions` scrape, `ShardNode::as_any_mut`),
+  `crates/sim/src/stub.rs` (`StubStats.last_input_slot_resume`).
+- **Source:** the 1c.5 audit `wf_e3397eb2` + Slice 1c.7 plan `wf_ab09d799` (the focused-scope decision: input
+  conservation now, the authority-settled pairing with the demote tail).
 
 ### D-29 🟥 No recovery producer for a lost cut buffer (deferred slot / over-cap / gateway crash)
 - **Missing:** when the dest drops `OpenInputSlot` (realm lease late at commit → `input_slots_deferred`), or the

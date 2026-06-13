@@ -225,6 +225,13 @@ pub struct StubStats {
     /// partitioned old gateway; dropped + counted, input never re-armed (the day-one
     /// stale-gateway-drop rule, `wire::session_flow`). 0 in a healthy run.
     pub input_slots_stale: u64,
+    /// The `resume_from_seq` of the most recent HONORED `OpenInputSlot` — the watermark this
+    /// shard last opened a transfer-dest input slot at. Observability latch (NOT a counter): it
+    /// makes the gateway-EMITTED resume value visible to the cross-cut conservation gate (the
+    /// emitted value must equal the client's own CUT_MARKER seq, threaded through the real saga —
+    /// D-28), and is the operational answer to "what seq did this shard resume a handed-off
+    /// session at". `None` until the first honored slot.
+    pub last_input_slot_resume: Option<u64>,
 }
 
 /// Install the stub-shard systems and resources onto a node's world + schedule.
@@ -548,6 +555,11 @@ fn on_gateway_msg(
             // own applied watermark.
             if !dot.granted && dot.gateway == from {
                 dot.input_active = true;
+                // OBSERVABILITY: record the gateway-EMITTED resume watermark (unmutated) so the
+                // cross-cut conservation gate can assert it equals the client's CUT_MARKER seq
+                // (D-28). Distinct from `dot.last_applied_seq`, which advances as the drained
+                // batch applies — this latch holds the AS-RECEIVED value.
+                stats.last_input_slot_resume = Some(resume_from_seq);
                 // SEED the dedup watermark to `resume_from_seq` (= marker_seq): the drained
                 // resume batch (marker+1..) applies in order; a `seq <= marker` replay is
                 // rejected (the source already applied it). MAX-merge — never LOWER it.
@@ -1916,6 +1928,11 @@ mod tests {
             dot.last_applied_seq,
             Some(5),
             "seeded to the resume watermark"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().last_input_slot_resume,
+            Some(5),
+            "the as-received resume watermark is latched for the conservation gate"
         );
         // The slot is a SILENT inbound state change: it emits NOTHING — no SessionAttached,
         // no re-home (the source still owns the client connection — R2), and the provisional

@@ -85,6 +85,13 @@ pub struct ScriptedClient {
     sent_inputs: Vec<(SessionId, u64)>,
     close_reason: Option<String>,
     paused: bool,
+    /// Set when the gateway asks for the cut (`ServerControlMsg::RequestCut`): the NEXT input
+    /// the client sends carries `is_cut_marker = true`. The client emits the marker in RESPONSE
+    /// to the gateway (1c); the real net.rs autonomous emit is 1e (D-5).
+    emit_marker_next: bool,
+    /// The seq the client stamped its CUT_MARKER on — the one value the conservation gate
+    /// threads end-to-end (client marker → gateway emit → dest seed). `None` until it emits one.
+    marker_seq: Option<u64>,
     tick: TickId,
 }
 
@@ -110,6 +117,8 @@ impl ScriptedClient {
             sent_inputs: Vec::new(),
             close_reason: None,
             paused: false,
+            emit_marker_next: false,
+            marker_seq: None,
             tick: TickId(0),
         }
     }
@@ -133,6 +142,20 @@ impl ScriptedClient {
     /// drains) — the quiesce primitive for end-of-run conservation checks.
     pub fn pause_input(&mut self) {
         self.paused = true;
+    }
+
+    /// Resume the script after a pause — the cut-window primitive: the client pauses the tick it
+    /// stamps the CUT_MARKER (so no `seq > marker` leaks to the gateway before the cut installs),
+    /// then resumes once the scenario has stepped past `FreezeSource` so the next inputs buffer.
+    pub fn resume_input(&mut self) {
+        self.paused = false;
+    }
+
+    /// The seq the client stamped its CUT_MARKER on, if it has emitted one — the value the
+    /// conservation gate threads end-to-end (never a hardcoded literal).
+    #[must_use]
+    pub fn marker_seq(&self) -> Option<u64> {
+        self.marker_seq
     }
 
     /// Politely end the session on the next step.
@@ -173,9 +196,12 @@ impl ScriptedClient {
             // interpolate, so it has nothing to apply — ignore it (the real client
             // learns its render rate from this; vd-client net.rs).
             ServerControlMsg::UniverseRate { .. } => {}
-            // No transfers, pings, or sub teardown reach a P1 client; arriving
-            // here means a protocol regression worth failing loudly.
-            other => panic!("unexpected control message in P1: {other:?}"),
+            // The gateway asks the client to cut its input flow: the NEXT input carries the
+            // in-band CUT_MARKER (the seq becomes the transfer's marker_seq, threaded end-to-end).
+            ServerControlMsg::RequestCut { .. } => self.emit_marker_next = true,
+            // No pings or sub teardown reach a P1/P2 client; arriving here means a protocol
+            // regression worth failing loudly.
+            other => panic!("unexpected control message: {other:?}"),
         }
     }
 
@@ -205,9 +231,12 @@ impl ScriptedClient {
         let session = self.session.expect("active implies welcomed");
         self.next_input_seq += 1;
         let seq = self.next_input_seq;
+        // Stamp the CUT_MARKER on the input that follows a RequestCut (PEEK, not take — a refused
+        // send must leave the request armed so it retries on the next tick's higher seq).
+        let is_cut_marker = self.emit_marker_next;
         let input = InputDatagram {
             seq,
-            is_cut_marker: false,
+            is_cut_marker,
             client_tick: self.tick,
             movement: cmd.movement,
             look: cmd.look,
@@ -220,9 +249,18 @@ impl ScriptedClient {
             .is_ok()
         {
             self.sent_inputs.push((session, seq));
+            if is_cut_marker {
+                // Recorded (above — the SOLE sent-log emitter, honesty preserved), the request
+                // consumed, and the client PAUSES: no `seq > marker` reaches the gateway until the
+                // scenario resumes it past `FreezeSource`, so the source/dest input partition is
+                // clean by construction.
+                self.emit_marker_next = false;
+                self.marker_seq = Some(seq);
+                self.paused = true;
+            }
         }
-        // A refused send is back-pressure: the input is simply not sent this tick
-        // (latest-wins input tolerates gaps by design).
+        // A refused send is back-pressure: the input is simply not sent this tick (latest-wins
+        // input tolerates gaps; an un-acked marker request stays armed for the next tick).
     }
 }
 
@@ -518,6 +556,54 @@ mod tests {
     }
 
     #[test]
+    fn request_cut_stamps_the_marker_then_pauses_until_resumed() {
+        let (fabric, mut gw, mut client) = rig(|_| {
+            Some(InputCmd {
+                movement: [1.0, 0.0, 0.0],
+                look: [0.0, 0.0],
+            })
+        });
+        activate(&fabric, &mut gw, &mut client); // ran the script once (seq 1), no marker yet
+        assert_eq!(client.marker_seq(), None, "no marker before RequestCut");
+
+        // The gateway asks the client to cut its input flow.
+        send_control(
+            &mut gw,
+            &ServerControlMsg::RequestCut {
+                transfer: vd_core::TransferId(1),
+            },
+        );
+        fabric.pump(TickId(5));
+
+        // In ONE step the client drains RequestCut (drain precedes the script) and the next
+        // input it sends carries the marker at its own seq; then it PAUSES so no seq > marker
+        // can leak to the gateway before the cut installs.
+        let report = client.step();
+        assert_eq!(report.sent, 1, "the marker input was sent");
+        let m = client.marker_seq().expect("the client stamped a marker");
+        let report = client.step();
+        assert_eq!(
+            report.sent, 0,
+            "paused after the marker — no post-marker leak"
+        );
+        assert_eq!(
+            client.marker_seq(),
+            Some(m),
+            "the marker seq is final while paused"
+        );
+
+        // Resume past the cut window: inputs flow again (every seq > the marker).
+        client.resume_input();
+        let report = client.step();
+        assert_eq!(report.sent, 1, "resumed after FreezeSource");
+        assert_eq!(
+            client.marker_seq(),
+            Some(m),
+            "the marker seq does not change on resume"
+        );
+    }
+
+    #[test]
     fn identity_and_downcast_hooks() {
         let (_fabric, _gw, mut client) = rig(|_| None);
         assert_eq!(SteppableNode::node_id(&client), CLIENT);
@@ -637,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unexpected control message in P1")]
+    #[should_panic(expected = "unexpected control message")]
     fn out_of_phase_protocol_messages_panic_loudly() {
         let (fabric, mut gw, mut client) = rig(|_| None);
         send_control(&mut gw, &ServerControlMsg::Ping { nonce: 1 });
