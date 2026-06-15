@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use vd_core::{Fence, NodeId, SessionId, TransferId};
 
 use crate::channels::TransferRejectReason;
+use crate::seams::directory::DirectoryKey;
 
 /// Saga → gateway commands. Idempotent: re-delivery of any command is a no-op
 /// acknowledged with the same ack.
@@ -44,6 +45,12 @@ pub enum TransferControl {
         transfer: TransferId,
         session: SessionId,
         new_fence: Fence,
+        /// The transfer SUBJECT (the directory key the CAS moved) — carried VERBATIM from the
+        /// saga's `SagaCtx.subject` so the gateway can hand it to the dest's `OpenInputSlot`
+        /// (the dest extracts the `Entity` to ADOPT the transferred avatar; a non-`Entity`
+        /// subject, e.g. a Realm saga, is a counted no-op at the dest — never an extraction
+        /// panic). Appended (postcard field order is positional; additive-only).
+        subject: DirectoryKey,
     },
     /// COMPENSATOR for FreezeSource: input resumes flowing to the source.
     ThawSource {
@@ -261,6 +268,7 @@ mod tests {
                 transfer: T,
                 session: S,
                 new_fence: Fence(4),
+                subject: DirectoryKey::Entity(vd_core::EntityId(7)),
             },
             TransferControl::ThawSource {
                 transfer: T,

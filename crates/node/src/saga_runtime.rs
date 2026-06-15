@@ -221,6 +221,55 @@ fn run_to_quiescence(
     (state, tombstone, rejected)
 }
 
+/// INTERIM (D-2, LANDED-interim): the bandless stand-in for the post-1d demote predicate.
+///
+/// The PROPER `DemoteComplete` fires only when (a) the dest acked delivered-to-ALL-observers
+/// (a server-side watermark) AND (b) the entity left the OverlapBand (K_SAFETY-gated,
+/// integration.json Issue 15) — neither machinery exists yet. So this UNCONDITIONALLY delivers
+/// `DemoteComplete` to every live saga sitting in `Demoting`, the EXACT D-2-mandated shape: a
+/// new CALLER of the existing `deliver` sink, NOT a magic tick and NOT an in-flight-queue
+/// injection. It is body-swappable to the proper predicate post-1d with ZERO FSM change
+/// (wf_0ed2dc0c). It fires at most once per saga (the next tick the saga is in `Releasing`, not
+/// `Demoting`); a redelivery to a saga already past `Demoting` is the FSM's catch-all no-op.
+///
+/// FF-1 (loop-depth bound): the resulting `Demoting + DemoteComplete → Releasing +
+/// Send(ReleaseSubscribe)` emits NO synchronous-feedback action (no CAS), so `run_to_quiescence`
+/// processes a single action with an empty event queue — loop depth stays at 1, preserving the
+/// FF-1 second-feedback-source bound. This runs as a SEPARATE pass OUTSIDE the per-ack loop.
+fn interim_demote_complete(
+    runtime: &mut SagaRuntimeRes,
+    dir: &mut DirectoryCore,
+    outbox: &mut OutboundBox,
+    now: UniverseTick,
+) {
+    // Snapshot the transfers in `Demoting` FIRST (immutable borrow), then `deliver` each (a
+    // mutable borrow per call). The two-arm filter — Demoting → collect, not-Demoting → skip —
+    // is a straight monomorphic predicate; both arms are covered by the unit test.
+    let demoting: Vec<TransferId> = runtime
+        .sagas
+        .iter()
+        .filter(|(_, live)| matches!(live.state, SagaState::Demoting { .. }))
+        .map(|(transfer, _)| *transfer)
+        .collect();
+    for transfer in demoting {
+        tracing::warn!(
+            transfer = transfer.0,
+            "interim_demote_complete: BANDLESS interim stand-in firing DemoteComplete \
+             unconditionally — the proper (observer-watermark && OverlapBand-exit) predicate \
+             is owed post-1d (D-2 stays partially open); never let this read as if the proper \
+             demote signal exists"
+        );
+        deliver(
+            runtime,
+            dir,
+            outbox,
+            now,
+            transfer,
+            SagaEvent::DemoteComplete,
+        );
+    }
+}
+
 /// Apply one event to an existing saga, then run it to quiescence + persist the result. A
 /// stale event for an unknown/GC'd saga is an idempotent no-op (at-least-once delivery).
 fn deliver(
@@ -360,6 +409,10 @@ pub fn drive_sagas(
             ack_to_event(ack),
         );
     }
+    // AFTER the ack loop: drive the demote tail. The bandless interim (D-2) delivers
+    // DemoteComplete to every saga in `Demoting`, advancing it to `Releasing` (which emits
+    // ReleaseSubscribe; the gateway acks Released → Done → Tombstone next tick).
+    interim_demote_complete(&mut runtime, &mut dir.0, &mut outbox, now);
 }
 
 #[cfg(test)]
@@ -575,6 +628,7 @@ mod tests {
                 transfer: XFER,
                 session: SESSION,
                 new_fence,
+                subject: subject(),
             })]
         );
         // The directory CAS committed: the dest now owns the subject at the new fence.
@@ -582,14 +636,86 @@ mod tests {
         assert_eq!(head.authority, AuthorityRef::Shard(DEST));
         assert_eq!(head.fence, new_fence);
 
-        // Committed (the route swapped) advances to Demoting (the tail — DemoteComplete +
-        // Released — lands with the demote signal at Slice 1c). The saga is still live.
+        // Committed (the route swapped) advances to Demoting; in the SAME tick the bandless
+        // interim (1c.8 `interim_demote_complete`, run after the ack loop) fires DemoteComplete
+        // → Releasing, emitting ReleaseSubscribe to close the source subscription. The saga is
+        // still live (Releasing is not terminal).
         rig.ack(TransferControlAck::Committed { transfer: XFER });
-        assert!(
-            rig.drain_gateway().is_empty(),
-            "Demoting awaits the demote signal"
+        assert_eq!(
+            rig.drain_gateway(),
+            vec![saga_wire(TransferControl::ReleaseSubscribe {
+                transfer: XFER,
+                session: SESSION,
+                src: SOURCE,
+            })],
+            "the interim demote drives Demoting → Releasing in the same tick"
         );
         assert_eq!(rig.live(), 1);
+
+        // Released → Done → Tombstone: the tail closes, live()→0 with the subject settled at DEST.
+        rig.ack(TransferControlAck::Released { transfer: XFER });
+        assert_eq!(rig.live(), 0, "the demote/release tail reaches Done");
+    }
+
+    #[test]
+    fn interim_demote_complete_drives_a_demoting_saga_to_done() {
+        // D-2 exists-to-be-flipped: a saga manually placed in `Demoting` advances
+        // Demoting → Releasing (emitting ReleaseSubscribe) → Done across drive_sagas ticks,
+        // driven SOLELY by the unconditional bandless interim (no DemoteComplete ack exists).
+        // This pins the interim caller; when the proper observer-watermark predicate lands
+        // post-1d, this test's DRIVER changes but the FSM tail it exercises does not.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        let new_fence = Fence(1).next();
+        // Manually inject a live saga already in Demoting (the 1c.8 tail's entry state).
+        {
+            let c = ctx(DurabilityClass::Durable, Fence(1));
+            let mut runtime = rig.orch.world_mut().resource_mut::<super::SagaRuntimeRes>();
+            runtime.sagas.insert(
+                XFER,
+                LiveSaga {
+                    ctx: c,
+                    state: SagaState::Demoting { new_fence },
+                    gateway: GATEWAY,
+                    since: UniverseTick(0),
+                },
+            );
+        }
+        // One tick: drive_sagas runs interim_demote_complete → DemoteComplete → Releasing →
+        // ReleaseSubscribe emitted (the warn path is exercised; verified by the saga advancing).
+        rig.settle();
+        assert_eq!(
+            rig.drain_gateway(),
+            vec![saga_wire(TransferControl::ReleaseSubscribe {
+                transfer: XFER,
+                session: SESSION,
+                src: SOURCE,
+            })],
+            "the interim fires DemoteComplete and the FSM emits ReleaseSubscribe"
+        );
+        assert_eq!(rig.live(), 1, "Releasing is not terminal");
+        // Released closes the tail: Done → Tombstone → live()→0.
+        rig.ack(TransferControlAck::Released { transfer: XFER });
+        assert_eq!(rig.live(), 0, "the demote/release tail reached Done");
+    }
+
+    #[test]
+    fn interim_demote_complete_skips_a_non_demoting_saga() {
+        // The two-arm filter's SKIP arm: a saga NOT in Demoting (here Preparing) is untouched
+        // by the interim — it emits no ReleaseSubscribe and stays in its current phase.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.trigger(ctx(DurabilityClass::Durable, Fence(1)));
+        rig.settle(); // process the start → Preparing (PrepareSubscribe emitted)
+        let _ = rig.drain_gateway();
+        // Another tick with no acks: drive_sagas runs interim_demote_complete, which finds the
+        // saga in Preparing (not Demoting) and skips it — nothing new is sent.
+        rig.settle();
+        assert!(
+            rig.drain_gateway().is_empty(),
+            "a non-Demoting saga is skipped by the interim"
+        );
+        assert_eq!(rig.live(), 1, "still live in Preparing");
     }
 
     #[test]

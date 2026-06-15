@@ -54,7 +54,11 @@ pub fn stub_config() -> StubConfig {
         mint_seed: 11,
         // Large window: the oracle must see a whole short test run.
         input_log_capacity: 1_000_000,
-        realm_recheck_interval: 0,
+        // 1c.8: a small NON-ZERO recheck interval (the EXISTING knob, not a new magic number) so
+        // the SOURCE periodically HeadReads its held Entity keys and self-fences when a transfer
+        // moves the avatar to the dest — closing the demote tail. (The interim per-entity poll
+        // retires when the proper observer-watermark demote predicate lands post-1d.)
+        realm_recheck_interval: 4,
         snapshot_datagram_budget: 1100,
     }
 }

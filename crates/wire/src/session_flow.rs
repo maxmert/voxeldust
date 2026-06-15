@@ -20,6 +20,7 @@ use vd_core::pose::FrameRef;
 use vd_core::{AccountId, EntityId, Fence, SessionId, TickId};
 
 use crate::channels::SubId;
+use crate::seams::directory::DirectoryKey;
 
 /// Gateway → shard session control and input.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,12 +54,22 @@ pub enum GatewayToShard {
     /// — the gateway buffers locally during the cut, so the dest needs nothing until the
     /// commit drain. The slot's grant→owned-entity promotion (render, ghost, directory record)
     /// is 1d (D-27); in 1c.5 the slot is `input_active` but never granted.
+    ///
+    /// 1c.8: `subject` carries the transfer SUBJECT (forwarded VERBATIM from
+    /// [`crate::seams::transfer_control::TransferControl::CommitAuthority`]). The dest ADOPTS
+    /// the transferred avatar by extracting the `Entity` from it (its provisional dot's entity
+    /// becomes the SUBJECT id, not a fresh mint, so the dest's directory adopt-grant lands on
+    /// the record the CAS moved). A non-`Entity` subject is a counted no-op (no adopt) — the
+    /// extraction NEVER panics. The dest learns `new_fence` from its own directory HeadRead
+    /// (pull-through, the single source of truth), so it is NOT carried here.
     OpenInputSlot {
         session: SessionId,
         fence: Fence,
         account: AccountId,
         /// The dest treats `seq <= resume_from_seq` as already-applied (at the source).
         resume_from_seq: u64,
+        /// The transfer subject the dest adopts (the `Entity` becomes the dot's id).
+        subject: DirectoryKey,
     },
 }
 
@@ -263,6 +274,7 @@ mod tests {
                 fence: Fence(2),
                 account: AccountId(3),
                 resume_from_seq: 42,
+                subject: DirectoryKey::Entity(EntityId(9)),
             },
         ];
         for msg in g2s {

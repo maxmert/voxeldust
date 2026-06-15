@@ -259,6 +259,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                     transfer: ctx.transfer,
                     session: ctx.session,
                     new_fence,
+                    subject: ctx.subject, // carried VERBATIM (Realm or Entity); the dest adopts the Entity
                 }),
             ],
         ),
@@ -280,6 +281,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 transfer: ctx.transfer,
                 session: ctx.session,
                 new_fence,
+                subject: ctx.subject, // idempotent re-send carries the same subject
             })],
         ),
         (S::Demoting { new_fence }, E::DemoteComplete) => (
@@ -549,6 +551,7 @@ mod tests {
                     transfer: c.transfer,
                     session: c.session,
                     new_fence: Fence(6),
+                    subject: c.subject,
                 },
                 TransferControl::ReleaseSubscribe {
                     transfer: c.transfer,
@@ -752,6 +755,7 @@ mod tests {
                 transfer: c.transfer,
                 session: c.session,
                 new_fence: Fence(7),
+                subject: c.subject,
             })]
         );
         let state = SagaState::Releasing {

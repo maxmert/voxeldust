@@ -26,36 +26,74 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Dependency:** the Slice-2 at-least-once / adaptive-timeout / CAS-re-read machinery.
 - **Source:** Slice-1b audit `wf_34ef74d1` (CPO-1/CPO-2).
 
-### D-2 🟥 Demote→Release has no producer (the saga parks in `Demoting` — the `interim_demote_complete` seam is NOT yet built)
-- **Missing:** ANY producer of `DemoteComplete`. Today a committed durable saga reaches `Demoting` and PARKS —
-  there is no caller of `deliver(.., DemoteComplete)` of any kind (neither the 1c interim stand-in NOR the
-  proper predicate). The proper, event-driven producer tears the source ghost down (a kinematic collider, so
-  players collide across the boundary) ONLY when the dest has **delivered the entity to all observers** (a
-  server-side watermark, never a client ack — HR1) **AND** the entity has **left the source overlap band**
-  (`OverlapBand::update_membership` false on the swept segment `segment_shell_crossing`, gated by
-  `width_safe_for`/`K_SAFETY` — velocity-aware hysteresis, NO magic tick count).
-- **Where (today):** `crates/node/src/saga_runtime.rs` — the `Committed→Demoting` transition is reached
-  (saga_runtime.rs ~line 549 documents the park) but NO `interim_demote_complete` fn exists; the saga stays
-  live in `Demoting`. The FSM tail (`Swapping→Demoting→Releasing→Done`) IS complete + proptested in
-  `crates/sim/src/saga.rs` (so the park is now ADMIN-VISIBLE via AAA-1 — `admin_snapshot.sagas` shows a saga
-  stuck in `Demoting`). The park is also pinned by the `KNOWN 1b LIMIT` module doc.
-- **ROB-DEMOTE-PARK consequence (audit `wdznr0x6i`):** because a parked saga never reaches a terminal, it is
-  never tombstoned, so `SagaRuntimeRes.sagas` GROWS with every successful transfer under churn. This is NOT
-  analogous to the `rejected` LOG (which got a counted-drop cap, D-22/ROB-1): a parked saga is a LIVE in-flight
-  transfer, so a force-cap-and-drop would ABANDON the player's transfer — INCORRECT. The ONLY correct bound is
-  THIS entry's producer (terminal → tombstone). The growth is admin-visible (AAA-1), never silent; it is inert
-  until real transfer churn exists (1d). Do NOT add a dropping cap to `sagas`.
-- **When / interim (1c step):** add ONE loudly-named `interim_demote_complete` seam — an unconditional bandless
-  stand-in that calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the existing sink — NOT a magic
-  tick, NOT an in-flight-queue injection) + a `tracing::warn` + an "exists-to-be-flipped" test. This drives
-  `Swapping→Demoting→Releasing→Done` end-to-end NOW, replacing the 1b silent park.
-- **When / proper:** the **post-1d band/ghost P2 slice** swaps that ONE function's body (unconditional → the
-  conjoined predicate). **Verified reshape-free (`wf_0ed2dc0c`):** ZERO change to the FSM / `deliver` /
-  `run_to_quiescence` / the gateway `ReleaseSubscribe` handler / the frozen `TransferControl` vocabulary.
+### D-2 🟧 Demote→Release tail: the bandless INTERIM landed (1c.8); the proper ORDERED, fence-enforced demote-before-promote is still owed
+- **LANDED (1c.8 — interim):** `interim_demote_complete` now exists in `crates/node/src/saga_runtime.rs` — an
+  UNCONDITIONAL bandless stand-in, invoked from `drive_sagas` AFTER the ack loop, that for every live saga in
+  `Demoting` calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the existing sink — NOT a magic
+  tick, NOT an in-flight-queue injection) with a LOUD `tracing::warn` naming it the interim, + the
+  "exists-to-be-flipped" unit tests (`interim_demote_complete_drives_a_demoting_saga_to_done` and its
+  not-Demoting skip twin). This drives `Swapping→Demoting→Releasing→Done` end-to-end NOW. The gateway's
+  `ReleaseSubscribe` handler flipped from PARK to acking `Released` (`apply_release`, the only existing-vocabulary
+  ack the tail needs — `release_subscribe_acks_released`). `ROB-DEMOTE-PARK` is RETIRED: a successful saga now
+  reaches a terminal and tombstones, so `SagaRuntimeRes.sagas` no longer grows per transfer (the only correct
+  bound, as this entry always said). FF-1 holds (the `DemoteComplete→Send(ReleaseSubscribe)` emits no
+  synchronous CAS feedback — loop depth stays 1; stated in a code comment).
+- **⚠️ ORDERING INVERSION — the 1c.8 interim does NOT honor the binding ordered Demote-before-Promote invariant**
+  (`transfer_protocol.md` §2.1 "the #1 fatal" split-brain mitigation; `integration.json` blocking-resolution #1
+  — the COMMIT / route-swap-ordering issue, same ref as `generic_transfer.md`: "Keep
+  transfer_protocol's Demote-before-Promote ordering AND the gateway lease-epoch/fence frame-drop fence"). 1c.8
+  does the OPPOSITE — **promote-before-demote, both as independent unordered directory polls**: the DEST promotes
+  via its own post-CAS adopt-`HeadRead` grant-flip (`stub.rs` `flip_grant`), and the SOURCE demotes LATER via its
+  own granted-key poll (`stub.rs` `granted_key_poll_tick` → `self_fence_foreign_entity`, a LOCAL `dots.remove`).
+  There is NO saga-driven `Demote`/`DemoteAck` and NO ordering gate. CONSEQUENCES, stated plainly so a 1d
+  implementer does not under-budget or mistake this for the permanent design:
+  1. **Transient two-holder / different-fence window** — between the dest grant (`@new_fence`) and the source's
+     next poll-drop (`@old_fence`), BOTH shards report `granted`. `verify_authority_unique` would REJECT this
+     mid-window (WrongHolderCount / FenceMismatch); the 1c.8 gate only samples authority POST-quiesce (after the
+     two-window precondition poll resolves), so the invariant is asserted at steady state, never proven mid-flight.
+     It is MASKED today (not prevented): `render_ready=false` (D-27) means neither emits client frames, and the
+     single-shard gateway routes only to the dest post-swap — so there is no client double-vision, but the
+     AUTHORITY-level double-hold is live.
+  2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
+     by the **fence**, not by cooperative in-memory state." The interim's source freeze IS cooperative in-memory
+     (`self_fence_foreign_entity` does a local `dots.remove` with NO fence pushed to the gateway to drop stale
+     source frames).
+  3. **Crash double-hold** — an orchestrator/source crash AFTER `CasWon`+`OpenInputSlot` but BEFORE the source's
+     next poll leaves a PERSISTENT stale source grant. The Tier-3 "abort to last-known directory owner" recovery
+     CANNOT un-stick it (last-known owner is already the DEST). Within the already-deferred saga-durability gap
+     (D-6 `PersistCheckpoint` stub / ROB-2) but WIDENED by promote-before-demote — flagged here, not silent.
+  4. **Poll-best-effort, no re-drive, unreachable at `realm_recheck_interval==0`** — the source demote has NO
+     durable `Demote` record and NO re-drive (a lost reply strands it; same class as D-29). `realm_recheck_interval`
+     defaults to `0` (`stub.rs` `config()`, `harness::topology`), which DISABLES the source poll entirely — the
+     1c.8 gate only works because `tests/src/lib.rs` sets the interval to `4` (both shards inherit it via
+     `..stub_config()`, but it is the SOURCE poll that CLOSES the demote). A CAS-backed Entity transfer against
+     an `interval==0` source would never demote (permanent two-holder). `interval>0` is therefore an undocumented
+     transfer PREREQUISITE today; the proper saga-pushed `Demote` removes the dependency.
+  5. **Logout-vs-transfer race (SF-1)** — `pending_grant_op` orders the `departing` (LeaseRevoke) arm BEFORE the
+     granted-key poll arm, and `foreign_takeover_target` requires `!departing`, so a `granted && departing` dot is
+     structurally blind to a foreign takeover and can strand. Inert today (no 1c.8 scenario issues `DetachSession`
+     mid-transfer); owed a unit test once the second (logout) producer lands.
+- **STILL OWED (proper, post-1d band/ghost slice) — TWO distinct pieces, NOT one predicate body-swap:**
+  - **(a) the demote PREDICATE (reshape-free, body-swap):** `interim_demote_complete`'s unconditional fire →
+    the EVENT-DRIVEN conjunction "dest **delivered to all observers** (server-side watermark, never a client ack —
+    HR1) **AND** entity **left the source overlap band** (`OverlapBand::update_membership` false on the swept
+    `segment_shell_crossing`, `width_safe_for`/`K_SAFETY` hysteresis — NO magic tick)". This ONE function's body
+    is genuinely reshape-free (`wf_0ed2dc0c`).
+  - **(b) the source-side ORDERED, fence-enforced demote (a TEAR-OUT, NOT a body-swap):** replace the `stub.rs`
+    `granted_key_poll_tick`/`self_fence_foreign_entity` POLL (which DROPS the dot) with a SAGA-pushed
+    `Demote`/`DemoteAck` driving the per-entity `authority.rs` `Owned→Frozen→Ghost` FSM — the source flips to a
+    **retained ghost-as-collider** (so players still collide across the boundary — a HARD requirement) and STOPS
+    emitting because of the **fence** (lease-epoch pushed to the gateway), demote-before-promote, BEFORE the dest
+    promotes. This introduces the source ghost (the interim has NONE — it drops), attaches `authority.rs`, and
+    rips out the stub poll. The **reshape-free promise (`wf_0ed2dc0c`) covers ONLY (a)** — (b) is a re-architecture.
+- **When / proper:** the **post-1d band/ghost P2 slice** (it owns the ghost + band + observer-watermark + the
+  per-entity `Authority` attach). Pinned exists-to-be-flipped in `crates/sim/src/stub.rs` (the
+  `granted_key_poll_tick`/`self_fence_foreign_entity` interim doc-comments) + a test that the source demote is
+  poll-dependent (not fence-driven), which flips when the saga-pushed `Demote` lands.
 - **Dependency:** Slice 1d (per-entity `Authority` attach so the dest owns + emits the post-commit entity) +
   the ghost-as-collider + band-instance + observer-delivery-watermark machinery (the band/ghost slice).
-- **Source:** 1c design `wf_f3eae69e` + the demote refinement `wf_0ed2dc0c`; status corrected by whole-codebase
-  audit `wwg7ydm9y` (the 🟧→🟥 reconcile: no interim seam had actually shipped).
+- **Source:** 1c design `wf_f3eae69e` + the demote refinement `wf_0ed2dc0c`; interim landed in Slice 1c.8;
+  ordering-inversion honesty + tear-out scoping from the 1c.8 audit `wf_13656136`.
 
 ### D-3 🟥 Lease lifecycle: no renewal producer, no expiry reaper (TTL unenforced)
 - **Missing:** `OwnerRecord.lease_expires` is written on every grant/renew/commit, but NO node sends
@@ -328,29 +366,38 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   upgrade is install-on-dest-re-stamp, no reshape.
 - **Source:** P2 Slice 1c.4 design `wf_2e0f6c1d` (the R-FENCE / fence-domain resolution).
 
-### D-27 🟧 Dest `OpenInputSlot` is a STATE-FREE provisional input slot; 1d promotes it to a real owned entity
+### D-27 🟧 Dest `OpenInputSlot`: the AUTHORITY adopt (front half) landed (1c.8); pose/render/ghost/multi-shard-routing (back half) is 1d
 - **Landed (1c.5):** to let the transfer-DESTINATION shard ACCEPT (not drop as `UnknownSession`) the post-
-  marker input the gateway drains at commit, `GatewayToShard::OpenInputSlot{session, fence, account,
-  resume_from_seq}` mints a provisional `Dot` on the dest: `input_active: true` (applies input via the existing
-  `apply_input` + `last_applied_seq` dedup, seeded to `marker_seq`) but `granted: false` — so it is **NOT
-  rendered** (`emit_frames` filters `granted`), holds **NO directory record**, and emits **NO `SessionAttached`**
-  (the source still owns the client connection — R2). Sent only at `CommitAuthority` (after the directory
-  committed authority to the dest), guarded `!granted && dot.gateway == from` (a shard never applies input for a
-  session not legitimately routed by its owning gateway — HR1/security; a stale/replayed slot is dropped +
-  counted `StubStats.input_slots_stale`). This is the INPUT half of the dest receiver — it LANDS the dest's
-  ability to apply the drained batch; it does NOT by itself CLOSE cross-cut input-conservation (the two crate
-  halves are never joined in one scenario, and a dropped/lost buffer has no recovery — D-28, D-29).
-- **Still owed (1d):** the `granted` promotion — the real per-entity `Authority` attach so the dest OWNS +
-  EMITS + RENDERS the entity, the entity-STATE crossing (`StubCrossing`/`Transfer` envelope + durable
-  `applied_steps`, D-21/D-22), the real ghost, the dest spatial `PrepareResult::Rejected`, the
-  `AbortTransfer`-tears-down-the-dest-slot teardown, and the provisional minted entity replaced by the
-  transferred one. 1d is a PROMOTION of this slot (a grant flip + state attach), never a rewrite.
+  marker input the gateway drains at commit, `OpenInputSlot` minted a provisional `Dot` on the dest:
+  `input_active: true` (applies input via the existing `apply_input` + `last_applied_seq` dedup, seeded to
+  `marker_seq`) but not yet authority-held.
+- **Landed (1c.8 — AUTHORITY adopt, the FRONT half):** `OpenInputSlot` now also carries the transfer `subject`
+  (verbatim from `CommitAuthority`); the dest extracts the `Entity` and ADOPTS it — its provisional dot's
+  `entity` becomes the SUBJECT id (not a fresh mint), `adopting: true`, and `request_pending_grants`'s 3-way
+  emits `HeadRead{Entity}` (NOT a `LeaseGrant`, which the post-genesis CAS fence would Refuse). The existing
+  grant-flip then sets `granted: true` + `entity_fence = record.fence (== new_fence)` matched by `dot.entity ==
+  subject`, so `held_entities == [(SUBJECT, new_fence)]` matches the directory's `Entity(SUBJECT)@Shard(DEST)@
+  new_fence` (FENCE-9 passes). The load-bearing `granted` flag was SPLIT: `granted` is now AUTHORITY-held
+  (oracle/held_entities/directory-record-owner — flipped on adopt) while a NEW `render_ready` gates
+  `emit_frames`; an adopt sets `granted` WITHOUT `render_ready` (renders NOTHING — no origin-teleport) and
+  WITHOUT `SessionAttached` (the source still owns the client — R2). A non-`Entity` subject is a counted no-op
+  (`StubStats.input_slots_malformed`), never an extraction panic. This GRADUATES `verify_authority_settled`/
+  `verify_authority_unique` after a full transfer (D-28(b) below).
+- **Still owed (1d — the BACK half):** flip `render_ready` with the real CARRIED pose (the entity-STATE crossing
+  — `StubCrossing`/`Transfer` envelope + durable `applied_steps`, D-21/D-22); the real ghost-as-collider (players
+  collide across the boundary; the per-entity `authority.rs` `Authority` FSM stays unattached — the 1c.8 lever is
+  the stub `Dot`); the dest spatial `PrepareResult::Rejected`; the `AbortTransfer`-tears-down-the-dest-slot
+  teardown; and **DEST FRAME ROUTING** — the gateway is single-shard-aware (`GatewayConfig.shard`, routes only
+  `from == config.shard`), so a render-ready dest would emit frames the gateway cannot route; 1c.8 keeps
+  `render_ready: false` so the dest emits NOTHING, sidestepping this — multi-shard gateway routing is a HARD 1d
+  prerequisite for render.
 - **Also owed:** the EARLY (prepare-time) `OpenInputSlot` for the gateway-adoption-mid-cut race is a **P3**
   resilience item (the gateway re-drives the slot before the buffer drain); inert in 1c (single process, commit
   emits the slot in the same handler before the drain).
-- **Where:** `crates/wire/src/session_flow.rs` (`OpenInputSlot`); `crates/connection-plane/src/gateway.rs`
-  (`apply_commit` emit); `crates/sim/src/stub.rs` (`on_gateway_msg` arm, `Dot.input_active`, `apply_input`).
-- **Source:** Slice 1c.5 design `wf_9679f7c7` (the dest-side reconciliation of integration.json #1).
+- **Where:** `crates/wire/src/session_flow.rs` (`OpenInputSlot.subject`); `crates/connection-plane/src/gateway.rs`
+  (`apply_commit` forwards `subject`); `crates/sim/src/stub.rs` (the adopt mint, `subject_entity`, the 3-way
+  `pending_grant_op`, `flip_grant`, `Dot.adopting`/`Dot.render_ready`, `emit_frames` on `render_ready`).
+- **Source:** Slice 1c.5 design `wf_9679f7c7`; the front-half adopt landed in Slice 1c.8.
 
 ### D-28 🟧 Cross-cut INPUT-CONSERVATION: the durable-player zero-fault instance is CLOSED (1c.7); the tail forms are owed
 - **Landed (1c.7):** the end-to-end gate `tests/tests/p2_transfer_gates.rs ::
@@ -367,11 +414,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   checked-in + locally verified (lost-drain ⇒ Unaccounted, mis-thread ⇒ dest-empty, no-pause ⇒ source-leak, all
   confirmed RED; double-apply + out-of-order-drain covered at the unit level). A determinism sibling proves the
   bounded-poll choreography is byte-identical under one seed.
-- **Still owed (tail forms):** (a) the DONE/release-tail conservation — 1c.7 asserts the saga PARKS in
-  `Demoting` (`live() == 1`), since the demote/release tail has no producer (1c.8+, see D-28-tail below);
-  (b) the `verify_authority_settled`/`verify_authority_unique` PAIRING across the cut (the kind-generic HR2
-  backstop) — INVALID at 1c.7 (the source retains its granted dot while the directory says dest, a legitimate
-  half-done split), graduates with the demote tail; (c) the EPOCH-stamped ghost-misapply form (`test_harness.md`
+- **Landed (1c.8 — the DONE/settle tail, closes (a)+(b)):** the same gate now drives the saga to `live() == 0`
+  (the bandless interim + the gateway `Released` ack close `Demoting → Releasing → Done`; D-2), the dest ADOPTS
+  the subject and the source SELF-FENCES its dot (D-27 front half), and — after a two-window precondition poll
+  (SOURCE reports nothing for the subject AND DEST holds it, resolving the transient promote-then-demote windows)
+  — it asserts `verify_authority_unique` AND `verify_authority_settled` Ok, the directory holding exactly one
+  `Entity(SUBJECT)@Shard(DEST)@new_fence`, DEST `held_entities == [(SUBJECT, new_fence)]`, SOURCE holding
+  nothing. A stability-soak sibling proves the settle is idempotent under continued operation. This is the
+  D-28(b) graduation — the kind-generic HR2 backstop is now assertable after a FULL transfer.
+- **Still owed (tail forms):** (c) the EPOCH-stamped ghost-misapply form (`test_harness.md`
   §8#9 CONFLICT-B: input carries `(cid, authority_epoch)` + a `stale-authority` discard reason) — the oracle/
   `InspectReport` key only on `(SessionId, seq)`, so this proves the epoch-LESS projection; lands with the real
   ghost (D-27); (d) the TRANSIENT-class re-run — BLOCKED on the P3 `TransientGo` go-token (D-7), not merely

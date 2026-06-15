@@ -690,11 +690,12 @@ fn on_client_input(
 }
 
 /// THE gateway counterpart to the saga runtime: consume one `TransferControl` command.
-/// LIVE: Prepare/RequestCut/FreezeSource (the cut install, 1c.3)/CommitAuthority (the route
-/// swap, 1c.4)/ThawSource/AbortTransfer; only `ReleaseSubscribe` (the demote tail) still
-/// parks. The applied-steps journal gates every command BEFORE any effect
-/// (consult-before-effect) and records AFTER (record-after-effect) so an at-least-once
-/// redelivery re-sends the recorded ack verbatim and never re-applies.
+/// EVERY phase is now LIVE: Prepare/RequestCut/FreezeSource (the cut install, 1c.3)/
+/// CommitAuthority (the route swap, 1c.4)/ThawSource/AbortTransfer/ReleaseSubscribe (the demote
+/// tail's SUCCESS teardown, 1c.8 — acks `Released` so the saga reaches `Done`). The applied-steps
+/// journal gates every command BEFORE any effect (consult-before-effect) and records AFTER
+/// (record-after-effect) so an at-least-once redelivery re-sends the recorded ack verbatim and
+/// never re-applies.
 fn on_transfer_control(
     cmd: TransferControl,
     config: &GatewayConfig,
@@ -741,20 +742,12 @@ fn on_transfer_control(
         } => apply_freeze(session, transfer, marker_seq, dest, stats),
         TransferControl::ThawSource { .. } => apply_thaw(session, transfer, stats),
         TransferControl::AbortTransfer { .. } => apply_abort(session, transfer),
-        TransferControl::CommitAuthority { new_fence, .. } => {
-            apply_commit(session, transfer, new_fence, session_id, stats, outbox)
-        }
-        TransferControl::ReleaseSubscribe { .. } => {
-            // PARK-LOUD: the demote-release tail (closes the source subscription after demote
-            // grace) lands later — no ack ⇒ the saga pins; not journaled ⇒ it applies cleanly.
-            stats.transfer_control_parked += 1;
-            tracing::warn!(
-                transfer = transfer.0,
-                step,
-                "ReleaseSubscribe parks (demote tail, later); no ack, not journaled"
-            );
-            None
-        }
+        TransferControl::CommitAuthority {
+            new_fence, subject, ..
+        } => apply_commit(
+            session, transfer, new_fence, subject, session_id, stats, outbox,
+        ),
+        TransferControl::ReleaseSubscribe { .. } => apply_release(session, transfer),
     };
     // RECORD-then-SEND for the LIVE acking phases. The journal write is GUARDED to the
     // IN-FLIGHT transfer (`tp.transfer == transfer`): an idempotent re-ack of a phase for a
@@ -957,6 +950,7 @@ fn apply_commit(
     session: &mut Session,
     transfer: TransferId,
     new_fence: Fence,
+    subject: DirectoryKey,
     session_id: SessionId,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
@@ -986,6 +980,9 @@ fn apply_commit(
     // (a) AUTHORITATIVE OpenInputSlot: the dest seeds last_applied_seq = marker_seq, so the
     // drained resume batch (marker+1..) applies in order and a `seq <= marker` replay is
     // rejected — closing the UnknownSession input-loss hole for the genuinely-distinct dest.
+    // 1c.8: it ALSO carries the transfer `subject` (forwarded verbatim from CommitAuthority) so
+    // the dest ADOPTS the transferred avatar (its Entity becomes the dot's id). `new_fence` is
+    // NOT carried — the dest learns it from its own directory HeadRead (pull-through).
     push_to_shard(
         outbox,
         dest,
@@ -995,6 +992,7 @@ fn apply_commit(
             fence: session.fence,
             account: session.account,
             resume_from_seq: marker_seq,
+            subject,
         },
     );
     // (b) THE swap: authority:=dest, fence carried, cut:=None (ONE atomic publish).
@@ -1083,6 +1081,31 @@ fn apply_abort(session: &mut Session, transfer: TransferId) -> Option<TransferCo
         "AbortTransfer tears down the dest ghost (inert in 1c.2 — no ghost) + clears any cut"
     );
     Some(TransferControlAck::Aborted { transfer })
+}
+
+/// `ReleaseSubscribe` (step 6, the SUCCESS teardown of the demote tail): close the source
+/// subscription after demote grace and ack `Released` so the saga reaches `Done`. The cut is
+/// already `None` (cleared at `CommitAuthority`'s `store_commit`) and the dest buffer was
+/// take-drained there, so the ONLY post-commit remnant to clear is `session.transfer` — pruned
+/// here ONLY when bound to THIS transfer (mirroring `apply_abort`'s prune). A stray re-ack of an
+/// absent/torn-down transfer is a clean no-op-and-ack: it touches no state and still acks
+/// `Released`, so an at-least-once redelivery is idempotent without polluting the journal (the
+/// record-then-send guard sees `session.transfer == None` and skips the write, exactly as on
+/// `apply_abort`). NOT a routing failure (uncounted) — `transfer_unroutable` stays about genuine
+/// failures. Always acks `Released`.
+fn apply_release(session: &mut Session, transfer: TransferId) -> Option<TransferControlAck> {
+    if session
+        .transfer
+        .as_ref()
+        .is_some_and(|tp| tp.transfer == transfer)
+    {
+        session.transfer = None; // prune ONLY the matching in-flight transfer (the last remnant)
+    }
+    tracing::debug!(
+        transfer = transfer.0,
+        "ReleaseSubscribe closes the source subscription (demote tail) + clears session.transfer"
+    );
+    Some(TransferControlAck::Released { transfer })
 }
 
 /// COLD cut-marker observer (off the hot path): when a transfer is in flight and a client
@@ -2647,6 +2670,9 @@ mod tests {
     // ---- Slice 1c.2: the gateway TransferControl consumer ----------------------
 
     const XFER: TransferId = TransferId(0x1c2);
+    /// The transfer SUBJECT the saga carries on `CommitAuthority` — the avatar the dest adopts
+    /// (1c.8). The gateway forwards it VERBATIM into `OpenInputSlot`; these tests assert that.
+    const XFER_SUBJECT: DirectoryKey = DirectoryKey::Entity(EntityId(0x1c8));
 
     fn saga_cmd(cmd: TransferControl) -> Inbound {
         wire(ORCH, MsgClass::Saga, &InterShardFlow::Saga(cmd))
@@ -3045,6 +3071,7 @@ mod tests {
             transfer: XFER,
             session: sid,
             new_fence: Fence(2),
+            subject: XFER_SUBJECT,
         })]);
         assert_eq!(
             acks_to_orch(&sent),
@@ -3073,6 +3100,7 @@ mod tests {
             transfer: XFER,
             session: sid,
             new_fence: Fence(2),
+            subject: XFER_SUBJECT,
         })]);
         // A realm-stamped frame at the carried fence is forwarded to the client.
         let sent = rig.tick(vec![wire(
@@ -3114,6 +3142,7 @@ mod tests {
             transfer: XFER,
             session: sid,
             new_fence: Fence(2),
+            subject: XFER_SUBJECT,
         })]);
         assert_eq!(acks_to_orch(&sent), vec![], "no ack -> the saga pins");
         assert_eq!(route_state(&rig, sid).authority, SHARD, "route untouched");
@@ -3135,6 +3164,7 @@ mod tests {
             transfer: XFER,
             session: sid,
             new_fence: Fence(2),
+            subject: XFER_SUBJECT,
         })]);
         assert_eq!(acks_to_orch(&sent), vec![]);
         assert_eq!(rig.stats().transfer_unroutable, 1);
@@ -3155,6 +3185,7 @@ mod tests {
                 transfer: XFER,
                 session: sid,
                 new_fence: Fence(2),
+                subject: XFER_SUBJECT,
             })
         };
         let first = rig.tick(vec![commit()]);
@@ -3221,6 +3252,20 @@ mod tests {
             .collect()
     }
 
+    /// The `subject`s of `OpenInputSlot` frames the gateway sent to `dest` (1c.8): proves the
+    /// CommitAuthority subject is forwarded VERBATIM into the dest's adopt slot.
+    fn open_slot_subjects(sent: &[(NodeId, MsgClass, Vec<u8>)], dest: NodeId) -> Vec<DirectoryKey> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == dest)
+            .filter_map(|(_, _, bytes)| {
+                match postcard::from_bytes::<GatewayToShard>(bytes).expect("gateway sends valid") {
+                    GatewayToShard::OpenInputSlot { subject, .. } => Some(subject),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     fn dest_buffer_len(rig: &Rig, sid: SessionId) -> usize {
         rig.world
             .resource::<GatewaySessions>()
@@ -3280,6 +3325,7 @@ mod tests {
             transfer: XFER,
             session: sid,
             new_fence: Fence(2),
+            subject: XFER_SUBJECT,
         })]);
         assert_eq!(
             shard_input_seqs(&sent, DEST),
@@ -3298,9 +3344,12 @@ mod tests {
             transfer: XFER,
             session: sid,
             new_fence: Fence(2),
+            subject: XFER_SUBJECT,
         })]);
         // The authoritative OpenInputSlot carries resume_from_seq == marker_seq.
         assert_eq!(open_slot_watermarks(&sent, DEST), vec![10]);
+        // 1c.8: it also carries the transfer subject VERBATIM (the dest adopts this avatar).
+        assert_eq!(open_slot_subjects(&sent, DEST), vec![XFER_SUBJECT]);
         // The buffer drained to the dest, in seq order.
         assert_eq!(shard_input_seqs(&sent, DEST), vec![11, 12, 13]);
         assert_eq!(dest_buffer_len(&rig, sid), 0, "buffer emptied by the drain");
@@ -3321,6 +3370,7 @@ mod tests {
                 transfer: XFER,
                 session: sid,
                 new_fence: Fence(2),
+                subject: XFER_SUBJECT,
             })
         };
         let first = rig.tick(vec![commit()]);
@@ -3427,10 +3477,20 @@ mod tests {
         assert_eq!(acks_to_orch(&c), confirmed);
     }
 
+    fn session_transfer_is_none(rig: &Rig, sid: SessionId) -> bool {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session")
+            .transfer
+            .is_none()
+    }
+
     #[test]
-    fn release_subscribe_parks_loudly_without_acking() {
-        // After 1c.4, only ReleaseSubscribe (the demote tail) still parks; FreezeSource (1c.3)
-        // and CommitAuthority (1c.4) are LIVE.
+    fn release_subscribe_acks_released() {
+        // 1c.8: ReleaseSubscribe is the LAST phase flipped from PARK to LIVE — it acks Released
+        // (so the saga reaches Done) and clears session.transfer (the last post-commit remnant).
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
         let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
@@ -3443,8 +3503,38 @@ mod tests {
             session: sid,
             src: SHARD,
         })]);
-        assert_eq!(acks_to_orch(&sent), vec![], "a parked phase sends no ack");
-        assert_eq!(rig.stats().transfer_control_parked, 1);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Released { transfer: XFER }],
+            "ReleaseSubscribe now acks Released (no longer parks)"
+        );
+        assert_eq!(
+            rig.stats().transfer_control_parked,
+            0,
+            "nothing parks anymore"
+        );
+        // The in-flight transfer is pruned (the source subscription closed).
+        assert!(
+            session_transfer_is_none(&rig, sid),
+            "session.transfer cleared on release"
+        );
+        // Idempotent redelivery: a stray re-ack of the now-absent transfer is a clean
+        // no-op-and-ack (still Released, transfer_unroutable stays 0).
+        let again = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: SHARD,
+        })]);
+        assert_eq!(
+            acks_to_orch(&again),
+            vec![TransferControlAck::Released { transfer: XFER }],
+            "a redelivered Release is a clean no-op-and-ack"
+        );
+        assert_eq!(
+            rig.stats().transfer_unroutable,
+            0,
+            "a release re-ack is not a routing failure"
+        );
     }
 
     #[test]
@@ -3543,6 +3633,36 @@ mod tests {
         assert!(
             transfer_in_flight(&rig, sid),
             "in-flight transfer A survives an abort aimed at transfer B"
+        );
+    }
+
+    #[test]
+    fn release_of_a_different_transfer_does_not_clobber_the_in_flight_one() {
+        // TAIL-1 (mirrors the abort no-clobber case): a ReleaseSubscribe for transfer B must NOT
+        // prune in-flight transfer A — `apply_release` prunes ONLY the matching transfer; a stray
+        // re-ack of an absent/foreign transfer is a clean ack-and-no-op.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let other = TransferId(0x777);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: SHARD,
+        })]);
+        assert!(transfer_in_flight(&rig, sid));
+        let sent = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: other,
+            session: sid,
+            src: SHARD,
+        })]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Released { transfer: other }],
+            "the foreign release still acks idempotently"
+        );
+        assert!(
+            transfer_in_flight(&rig, sid),
+            "in-flight transfer A survives a release aimed at transfer B"
         );
     }
 

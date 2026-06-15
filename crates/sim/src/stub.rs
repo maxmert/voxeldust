@@ -80,6 +80,20 @@ pub struct Dot {
     /// `Authority` attach + render + ghost is 1d (D-27), which sets `granted`. A regular
     /// attach sets `granted` (and `input_active` stays false; `granted` alone permits input).
     pub input_active: bool,
+    /// This dot is a TRANSFER-DESTINATION ADOPT (1c.8, set by `OpenInputSlot` carrying the
+    /// transfer subject): its `entity` is already the SUBJECT id (not a fresh mint), and it
+    /// ADOPTS the existing directory record (a `HeadRead`, never a `LeaseGrant` which the CAS
+    /// fence would Refuse) rather than minting a new entity authority. Cleared on the grant
+    /// flip. An adopt grant sets `granted` (authority-held) WITHOUT `render_ready` (no pose is
+    /// carried in 1c.8 — the dest renders NOTHING; 1d flips render_ready with the real pose) and
+    /// WITHOUT a `SessionAttached` push (the source still owns the client connection — R2).
+    pub adopting: bool,
+    /// AUTHORITY-held (`granted`) is split from RENDER-ready (1c.8, D-2/D-27 user_decision): a
+    /// login attach sets BOTH (it carries a real pose); a transfer-dest ADOPT sets `granted`
+    /// (so the oracle/directory-record-owner sees it held) but leaves `render_ready=false` — the
+    /// dot renders NOTHING (no origin-teleport, and the single-shard gateway never sees an
+    /// unroutable dest frame). `emit_frames` gates on THIS, never on `granted`. 1d flips it.
+    pub render_ready: bool,
     /// The mirror on release: a detached dot stays HELD (authoritative) until
     /// the directory confirms its revoke — authority is released AT the
     /// directory, never by local despawn.
@@ -225,6 +239,10 @@ pub struct StubStats {
     /// partitioned old gateway; dropped + counted, input never re-armed (the day-one
     /// stale-gateway-drop rule, `wire::session_flow`). 0 in a healthy run.
     pub input_slots_stale: u64,
+    /// `OpenInputSlot` carrying a NON-Entity transfer subject (1c.8): the dest only ADOPTS an
+    /// `Entity` transfer, so a Realm/Session/Ship subject is a counted no-op (no extraction
+    /// panic, no adopt). 0 in a healthy Entity-transfer run.
+    pub input_slots_malformed: u64,
     /// The `resume_from_seq` of the most recent HONORED `OpenInputSlot` — the watermark this
     /// shard last opened a transfer-dest input slot at. Observability latch (NOT a counter): it
     /// makes the gateway-EMITTED resume value visible to the cross-cut conservation gate (the
@@ -294,35 +312,69 @@ fn request_pending_grants(
         }
         Some(_) => {}
     }
+    // The SOURCE granted-key poll fires on the SAME cadence as the realm recheck (1c.8): a
+    // granted dot periodically HeadReads its Entity key so a foreign takeover (a transfer that
+    // moved the entity to the dest) is OBSERVED and self-fenced. Computed once, monomorphically.
+    let poll_granted_keys =
+        granted_key_poll_tick(config.realm_recheck_interval, clock.local_tick.0);
     for dot in dots.0.values() {
-        if !dot.granted {
-            // A provisional entity is always requested at the genesis-next fence (a
-            // never-recorded entity); the RECORDED fence (entity_fence) is what the
-            // revoke uses, which is the FENCE-1/5/8 fix.
-            let op = DirectoryOp::LeaseGrant {
-                key: DirectoryKey::Entity(dot.entity),
-                owner: AuthorityRef::Shard(identity.node_id),
-                fence: Fence::GENESIS.next(),
-            };
-            outbox.push_flow(
-                config.orchestrator,
-                MsgClass::Saga,
-                &InterShardFlow::Directory(op),
-            );
-        } else if dot.departing {
-            // Revoke at the RECORDED fence (FENCE-1/5/8): a hardcoded literal would
-            // be Refused once any transfer advanced the entity's fence, stranding the
-            // logout forever.
-            let op = DirectoryOp::LeaseRevoke {
-                key: DirectoryKey::Entity(dot.entity),
-                fence: dot.entity_fence,
-            };
+        if let Some(op) = pending_grant_op(dot, identity.node_id, poll_granted_keys) {
             outbox.push_flow(
                 config.orchestrator,
                 MsgClass::Saga,
                 &InterShardFlow::Directory(op),
             );
         }
+    }
+}
+
+/// Whether this is a SOURCE granted-key poll tick (1c.8): a disabled interval (0) never polls;
+/// otherwise the poll fires on the same `is_multiple_of(interval)` cadence as the realm recheck.
+/// Monomorphic so the `&&`-short-circuit lives in ONE covered helper (HR5), not the system body.
+///
+/// ⚠️ INTERIM, OWED-FOR-REMOVAL (DEFERRED D-2): this poll is how the SOURCE DISCOVERS a foreign
+/// takeover to self-demote — a cooperative, best-effort directory poll, NOT the binding fence-first
+/// saga-pushed `Demote`. 1d/the band-ghost slice RIPS IT OUT (see `self_fence_foreign_entity`).
+#[must_use]
+fn granted_key_poll_tick(interval: u64, local_tick: u64) -> bool {
+    interval > 0 && local_tick.is_multiple_of(interval)
+}
+
+/// The per-dot directory op `request_pending_grants` should (re)issue, as a monomorphic 3-way
+/// (+ the source granted-key poll) so the system loop stays a branchless shim (HR5):
+/// - adopting + !granted → `HeadRead{Entity}` (1c.8): ADOPT the record the transfer CAS moved
+///   here; a `LeaseGrant` at `GENESIS.next` would be Refused (the record is past genesis).
+/// - !adopting + !granted → `LeaseGrant{Entity}` at `GENESIS.next` (the login fresh-mint path).
+/// - departing → `LeaseRevoke{Entity}` at the RECORDED fence (FENCE-1/5/8; a literal would be
+///   Refused once a transfer advanced the fence, stranding the logout).
+/// - granted, non-departing, non-adopting, AND it is a poll tick → `HeadRead{Entity}` (1c.8 the
+///   SOURCE granted-key poll): the source observes a foreign takeover of its held entity and
+///   self-fences (the Entity-key analogue of the realm recheck).
+#[must_use]
+fn pending_grant_op(dot: &Dot, node: NodeId, poll_granted_keys: bool) -> Option<DirectoryOp> {
+    if !dot.granted {
+        if dot.adopting {
+            Some(DirectoryOp::HeadRead {
+                key: DirectoryKey::Entity(dot.entity),
+            })
+        } else {
+            Some(DirectoryOp::LeaseGrant {
+                key: DirectoryKey::Entity(dot.entity),
+                owner: AuthorityRef::Shard(node),
+                fence: Fence::GENESIS.next(),
+            })
+        }
+    } else if dot.departing {
+        Some(DirectoryOp::LeaseRevoke {
+            key: DirectoryKey::Entity(dot.entity),
+            fence: dot.entity_fence,
+        })
+    } else if poll_granted_keys {
+        Some(DirectoryOp::HeadRead {
+            key: DirectoryKey::Entity(dot.entity),
+        })
+    } else {
+        None
     }
 }
 
@@ -427,6 +479,8 @@ fn on_gateway_msg(
                     gateway: from,
                     granted: false,
                     input_active: false,
+                    adopting: false,
+                    render_ready: false,
                     departing: false,
                     entity_fence: Fence::GENESIS,
                     pose: StampedPose::at_rest(
@@ -512,14 +566,17 @@ fn on_gateway_msg(
             fence,
             account,
             resume_from_seq,
+            subject,
         } => {
             // A transfer-DESTINATION input slot. The gateway sends this only AFTER the
             // directory committed authority to this shard (the saga's `commit_cas`), so the
             // shard may APPLY this session's input even before its own per-entity grant
-            // records (1d): the post-marker cut buffer the gateway held drains here. The dot
-            // is `input_active` but NOT `granted` — it renders nowhere and holds no directory
-            // record until 1d promotes it (D-27). No `SessionAttached` reply (the source still
-            // owns the client connection — R2).
+            // records: the post-marker cut buffer the gateway held drains here. The dot is
+            // `input_active` and ADOPTS the transfer subject (1c.8): its entity becomes the
+            // SUBJECT id (the record the CAS moved here), so the adopt HeadRead lands on that
+            // record and flips `granted` (authority-held). It is NOT `render_ready` — it renders
+            // nowhere (no pose carried; 1d) — and gets no `SessionAttached` reply (the source
+            // still owns the client connection — R2).
             let Some(_realm_fence) = ctx.realm_fence else {
                 // No realm lease yet: drop + count. NO re-drive in 1c.5 (the gateway already
                 // take-drained the buffer; OpenInputSlot is emitted once, the saga is
@@ -527,15 +584,28 @@ fn on_gateway_msg(
                 stats.input_slots_deferred += 1;
                 return;
             };
+            // Extract the SUBJECT EntityId to ADOPT. A non-Entity subject (e.g. a Realm-subject
+            // saga, which the FSM proptests drive through CommitAuthority) is a COUNTED no-op —
+            // never an extraction panic: the dest only adopts an Entity transfer.
+            let Some(subject_entity) = subject_entity(subject) else {
+                stats.input_slots_malformed += 1;
+                tracing::warn!(
+                    ?subject,
+                    "OpenInputSlot carried a non-Entity subject — no adopt (counted no-op)"
+                );
+                return;
+            };
             let dot = dots.0.entry(session).or_insert_with(|| Dot {
-                entity: mint_entity(mint, ctx.identity.node_id), // provisional; 1d swaps the transferred entity
+                entity: subject_entity, // 1c.8 ADOPT: the transferred subject id, not a fresh mint
                 account,
                 session_fence: fence,
                 gateway: from,
                 granted: false,
                 input_active: false,
+                adopting: true,
+                render_ready: false,
                 departing: false,
-                entity_fence: Fence::GENESIS,
+                entity_fence: Fence::GENESIS, // the adopt HeadRead fills the real CAS fence
                 pose: StampedPose::at_rest(ctx.config.frame, DVec3::ZERO, ctx.clock.universe_tick),
                 yaw: 0.0,
                 pitch: 0.0,
@@ -572,6 +642,17 @@ fn on_gateway_msg(
                 }
             }
         }
+    }
+}
+
+/// The transfer SUBJECT's `EntityId` for an ADOPT, or `None` for a non-Entity subject (the
+/// counted no-op). Monomorphic so the `OpenInputSlot` arm + the directory reply arms stay
+/// branchless shims (HR5): the ONE `DirectoryKey → EntityId` extraction in the dest.
+#[must_use]
+fn subject_entity(subject: DirectoryKey) -> Option<EntityId> {
+    match subject {
+        DirectoryKey::Entity(entity) => Some(entity),
+        DirectoryKey::Session(_) | DirectoryKey::Realm(_) | DirectoryKey::Ship(_) => None,
     }
 }
 
@@ -672,6 +753,100 @@ impl Dot {
     }
 }
 
+/// A `SessionAttached` reply plus the gateway it routes to (the grant-flip's optional egress).
+struct AttachEgress {
+    gateway: NodeId,
+    reply: ShardToGateway,
+}
+
+/// Flip the matching provisional dot to `granted` at the recorded fence, returning a
+/// `SessionAttached` egress IFF this is a login attach (NOT a transfer-dest adopt). Monomorphic
+/// (the loop + the adopt branching live here) so the reply arm stays a branchless shim (HR5).
+///
+/// - login (`!adopting`): granted := true, render_ready := true, push SessionAttached.
+/// - adopt (`adopting`, 1c.8): granted := true, render_ready := false, adopting cleared, NO
+///   SessionAttached (R2 — the source owns the client; 1d re-homes), so returns `None`.
+///
+/// Guarded by `!dot.granted` so a duplicate grant head is idempotent (no second flip/reply).
+fn flip_grant(
+    dots: &mut BTreeMap<SessionId, Dot>,
+    entity: EntityId,
+    fence: Fence,
+    config: &StubConfig,
+    realm_fence: Fence,
+) -> Option<AttachEgress> {
+    for (session, dot) in dots.iter_mut() {
+        if !dot_grant_target(dot, entity) {
+            continue;
+        }
+        dot.granted = true;
+        dot.entity_fence = fence; // the recorded authority fence (== the CAS new_fence)
+        if dot.adopting {
+            // Transfer-dest adopt: held but not rendered, no re-home (1c.8). Clear the adopt
+            // marker so the source granted-key poll engages on this now-granted dot at the dest.
+            dot.adopting = false;
+            return None;
+        }
+        dot.render_ready = true;
+        return Some(AttachEgress {
+            gateway: dot.gateway,
+            reply: ShardToGateway::SessionAttached {
+                session: *session,
+                entity,
+                frame: config.frame,
+                realm_fence,
+            },
+        });
+    }
+    None
+}
+
+/// Whether a dot is the (single) ungranted holder of `entity` awaiting its grant flip.
+/// Monomorphic predicate (the `&&` short-circuit is covered once here, not in the loop body).
+#[must_use]
+fn dot_grant_target(dot: &Dot, entity: EntityId) -> bool {
+    (dot.entity == entity) & !dot.granted
+}
+
+/// The SOURCE self-fence (1c.8): a directory head naming a FOREIGN owner of an entity this shard
+/// holds means the transfer CAS moved the record to the dest — DROP the local granted,
+/// non-departing dot for it (NO directory write; the record is the dest's now). Idempotent: a
+/// second foreign-owner reply for an already-dropped entity finds no matching dot. Monomorphic
+/// (the find + remove is hoisted out of the reply arm — HR5 branchless shim).
+///
+/// ⚠️ INTERIM, OWED-FOR-REMOVAL (DEFERRED D-2): this is a COOPERATIVE IN-MEMORY drop discovered by
+/// the granted-key poll — NOT the binding ordered, FENCE-enforced demote-before-promote
+/// (`transfer_protocol.md` §2.4: "the freeze is enforced by the fence, not by cooperative in-memory
+/// state"). The dest already promoted (`flip_grant`) off its own post-CAS HeadRead, so there is a
+/// transient two-holder window (masked only by `render_ready=false` + the single-shard gateway),
+/// and a crash before the next poll strands a stale source grant. 1d/the band-ghost slice RIPS THIS
+/// OUT: a saga-pushed `Demote`/`DemoteAck` flips the source to a RETAINED ghost-as-collider via
+/// `authority.rs` `Owned→Frozen→Ghost` demote-BEFORE-promote — a tear-out, not a predicate swap.
+fn self_fence_foreign_entity(
+    dots: &mut BTreeMap<SessionId, Dot>,
+    entity: EntityId,
+    foreign: AuthorityRef,
+) {
+    let Some(session) = dots
+        .iter()
+        .find(|(_, d)| foreign_takeover_target(d, entity))
+        .map(|(session, _)| *session)
+    else {
+        return; // no matching dot: already dropped (or never held here) — a clean no-op
+    };
+    tracing::warn!(
+        "entity {entity} now held by {foreign:?} — self-demoting the transferred dot (local drop)"
+    );
+    dots.remove(&session);
+}
+
+/// Whether a dot is the local granted, non-departing holder of `entity` (the self-fence target).
+/// Monomorphic predicate so the chained `&&`s are covered in one helper, not the reply arm.
+#[must_use]
+fn foreign_takeover_target(dot: &Dot, entity: EntityId) -> bool {
+    (dot.entity == entity) & dot.granted & !dot.departing
+}
+
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
 #[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
@@ -729,26 +904,24 @@ fn on_directory_reply(
             let Some(realm_fence) = authority.0 else {
                 return; // grant raced ahead of the realm lease: retry resolves it
             };
-            let ours = record.authority == AuthorityRef::Shard(identity.node_id);
-            if !ours {
-                tracing::error!(
-                    "entity {entity} granted to {:?}, not this shard",
-                    record.authority
-                );
-                return;
-            }
-            for (session, dot) in &mut dots.0 {
-                if dot.entity == entity && !dot.granted {
-                    dot.granted = true;
-                    dot.entity_fence = record.fence; // the recorded authority fence
-                    let reply = ShardToGateway::SessionAttached {
-                        session: *session,
-                        entity,
-                        frame: config.frame,
-                        realm_fence,
-                    };
-                    push_session_reply(outbox, dot.gateway, &reply);
+            if record.authority == AuthorityRef::Shard(identity.node_id) {
+                // OURS: flip granted + stamp the recorded fence. A login attach pushes
+                // SessionAttached and becomes render-ready; a transfer-dest ADOPT (1c.8) suppresses
+                // the attach (R2 — source owns the client) and stays NOT render-ready (no pose
+                // carried; 1d). The login-vs-adopt branching is hoisted into `flip_grant`, which
+                // returns the optional `SessionAttached` egress (Some for a login, None for an adopt).
+                if let Some(reply) =
+                    flip_grant(&mut dots.0, entity, record.fence, config, realm_fence)
+                {
+                    push_session_reply(outbox, reply.gateway, &reply.reply);
                 }
+            } else {
+                // FOREIGN owner of an entity this shard holds (1c.8 the SOURCE self-fence, the
+                // Entity-key analogue of the realm self-fence): the transfer CAS moved the record
+                // to the dest, so the source DROPS its dot LOCALLY — NO LeaseRevoke (a revoke at the
+                // stale entity_fence is Refused; a revoke at new_fence would delete the dest's
+                // record), NO `departing`. Idempotent: no matching dot → no-op.
+                self_fence_foreign_entity(&mut dots.0, entity, record.authority);
             }
         }
         DirectoryReply::Head {
@@ -790,10 +963,14 @@ fn emit_frames(
     let Some(realm_fence) = authority.0 else {
         return;
     };
+    // Gate on RENDER-ready, not authority-held (1c.8 split): a transfer-dest ADOPT is granted
+    // (authority-held, oracle-visible) but renders NOTHING until 1d carries a pose + flips
+    // render_ready — so it never emits an origin-teleport frame, and the single-shard gateway
+    // never sees an unroutable dest frame.
     let mut gateways: Vec<NodeId> = dots
         .0
         .values()
-        .filter(|d| d.granted)
+        .filter(|d| d.render_ready)
         .map(|d| d.gateway)
         .collect();
     gateways.sort_unstable();
@@ -804,7 +981,7 @@ fn emit_frames(
     let entities: Vec<EntitySnap> = dots
         .0
         .values()
-        .filter(|d| d.granted)
+        .filter(|d| d.render_ready)
         .map(|d| EntitySnap {
             entity: d.entity,
             pose: d.pose,
@@ -1761,6 +1938,8 @@ mod tests {
                         gateway: GATEWAY,
                         granted: true,
                         input_active: false,
+                        adopting: false,
+                        render_ready: true,
                         departing: false,
                         entity_fence: Fence(1),
                         pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(100)),
@@ -1871,11 +2050,15 @@ mod tests {
 
     // ---- Slice 1c.5: the dest-side OpenInputSlot (transfer-destination input slot) ------
 
-    fn open_input_slot_f(
+    /// The transfer subject the OpenInputSlot test helpers carry (the avatar the dest adopts).
+    const SUBJECT: EntityId = EntityId(0xBEEF);
+
+    fn open_input_slot_subj(
         session: SessionId,
         gateway: NodeId,
         resume_from_seq: u64,
         fence: Fence,
+        subject: DirectoryKey,
     ) -> Inbound {
         wire_msg(
             gateway,
@@ -1885,7 +2068,23 @@ mod tests {
                 fence,
                 account: AccountId(5),
                 resume_from_seq,
+                subject,
             },
+        )
+    }
+
+    fn open_input_slot_f(
+        session: SessionId,
+        gateway: NodeId,
+        resume_from_seq: u64,
+        fence: Fence,
+    ) -> Inbound {
+        open_input_slot_subj(
+            session,
+            gateway,
+            resume_from_seq,
+            fence,
+            DirectoryKey::Entity(SUBJECT),
         )
     }
 
@@ -1914,15 +2113,28 @@ mod tests {
     }
 
     #[test]
-    fn open_input_slot_mints_an_input_active_provisional_dot_without_attaching() {
+    fn open_input_slot_adopts_the_subject_input_active_without_attaching() {
         let mut rig = Rig::new();
         rig.grant_realm();
         let sent = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert!(dot.input_active, "the slot is input-active");
+        // 1c.8: the dot ADOPTS the subject — its entity IS the subject id (not a fresh mint),
+        // it is `adopting`, NOT granted (the adopt HeadRead flips that), and NOT render-ready.
+        assert_eq!(dot.entity, SUBJECT, "the dot adopted the transfer subject");
+        assert!(dot.adopting, "the dot is a transfer-dest adopt");
         assert!(
             !dot.granted,
-            "but NOT granted — not rendered, no directory record (1d)"
+            "the adopt HeadRead has not flipped granted yet"
+        );
+        assert!(
+            !dot.render_ready,
+            "the adopt carries no pose — renders nothing"
+        );
+        assert_eq!(
+            dot.entity_fence,
+            Fence::GENESIS,
+            "the adopt HeadRead fills the real fence"
         );
         assert_eq!(
             dot.last_applied_seq,
@@ -1936,8 +2148,189 @@ mod tests {
         );
         // The slot is a SILENT inbound state change: it emits NOTHING — no SessionAttached,
         // no re-home (the source still owns the client connection — R2), and the provisional
-        // dot is not granted so it renders no snapshot frame either.
+        // dot is not render-ready so it renders no snapshot frame either.
         assert!(sent.is_empty(), "the input slot emits nothing back");
+    }
+
+    #[test]
+    fn an_adopting_dot_head_reads_the_record_never_lease_grants() {
+        // 1c.8 HR5: the request_pending_grants 3-way ADOPT arm — an adopting !granted dot emits
+        // HeadRead{Entity} (to adopt the record the CAS moved here), NEVER a LeaseGrant (which
+        // the directory would Refuse at the post-genesis CAS fence).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let sent = rig.tick(vec![]);
+        let to_orch: Vec<InterShardFlow> = sent
+            .iter()
+            .filter(|(to, _, _)| *to == ORCH)
+            .map(|(_, _, bytes)| postcard::from_bytes(bytes).expect("flow decodes"))
+            .collect();
+        assert!(
+            to_orch.contains(&InterShardFlow::Directory(DirectoryOp::HeadRead {
+                key: DirectoryKey::Entity(SUBJECT),
+            })),
+            "the adopting dot HeadReads its subject: {to_orch:?}"
+        );
+        // Value-compare (NOT matches!, whose match-success arm would be an uncoverable region):
+        // the EXACT LeaseGrant an adopting dot must NEVER send (it adopts via HeadRead instead).
+        assert!(
+            !to_orch.contains(&InterShardFlow::Directory(DirectoryOp::LeaseGrant {
+                key: DirectoryKey::Entity(SUBJECT),
+                owner: AuthorityRef::Shard(SHARD),
+                fence: Fence::GENESIS.next(),
+            })),
+            "an adopting dot NEVER LeaseGrants its entity: {to_orch:?}"
+        );
+    }
+
+    #[test]
+    fn the_adopt_grant_flip_holds_authority_without_render_or_attach() {
+        // 1c.8: the grant-flip on the adopted record sets granted (authority-held) AND stamps
+        // entity_fence = the recorded CAS fence, but leaves render_ready FALSE and pushes NO
+        // SessionAttached (R2 — the source owns the client). adopting is cleared on the flip.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        // The directory record the CAS moved here: SUBJECT @ this shard @ a NON-genesis fence.
+        let adopted = DirectoryReply::Head {
+            key: DirectoryKey::Entity(SUBJECT),
+            record: Some(vd_wire::seams::directory::OwnerRecord {
+                authority: AuthorityRef::Shard(SHARD),
+                fence: Fence(2),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(adopted),
+        )]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        // Split asserts (each &&-short-circuit false arm is uncoverable — HR5).
+        assert!(dot.granted, "the adopt flips granted (authority-held)");
+        assert_eq!(dot.entity_fence, Fence(2), "stamped the recorded CAS fence");
+        assert!(!dot.render_ready, "an adopt renders NOTHING (no pose; 1d)");
+        assert!(!dot.adopting, "adopting is cleared on the flip");
+        // No SessionAttached push (suppressed when adopting) and no frame (not render-ready).
+        let attach_replies = sent
+            .iter()
+            .filter(|(_, class, _)| *class == MsgClass::Control)
+            .count();
+        assert_eq!(attach_replies, 0, "no SessionAttached on an adopt (R2)");
+        assert_eq!(
+            decode_frames(&sent).len(),
+            0,
+            "an adopted dot renders nothing"
+        );
+    }
+
+    #[test]
+    fn a_non_entity_subject_open_input_slot_is_a_counted_noop() {
+        // 1c.8 HR5: the subject_entity else arm — a non-Entity subject (e.g. a Realm saga driven
+        // through CommitAuthority) does NOT adopt; it is a counted no-op, never an extraction panic.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let sent = rig.tick(vec![open_input_slot_subj(
+            SESSION,
+            GATEWAY,
+            5,
+            Fence(1),
+            DirectoryKey::Realm(RealmId::System(99)),
+        )]);
+        assert!(
+            !rig.world.resource::<Dots>().0.contains_key(&SESSION),
+            "a non-Entity subject mints no dot"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().input_slots_malformed, 1);
+        assert!(sent.is_empty(), "the no-op emits nothing");
+    }
+
+    #[test]
+    fn the_source_self_fences_a_foreign_owned_entity_without_revoking() {
+        // 1c.8 SOURCE self-fence: a granted dot whose directory head names a FOREIGN owner (the
+        // transfer CAS moved it to the dest) is DROPPED LOCALLY — NO LeaseRevoke (which would be
+        // Refused at the stale fence, or delete the dest's record at the new fence).
+        //
+        // ⚠️ EXISTS-TO-BE-FLIPPED (DEFERRED D-2 ordering inversion): this asserts the INTERIM
+        // local DROP (`dots.remove`). The proper fence-first, saga-pushed demote (post-1d
+        // band/ghost slice) instead flips the source to a RETAINED ghost-as-collider
+        // (`authority.rs` Owned→Frozen→Ghost) demote-BEFORE-promote — so when that lands the dot
+        // must NOT vanish (it becomes a ghost), and this assertion + `self_fence_foreign_entity`
+        // + the granted-key poll are RIPPED OUT (a tear-out, not a predicate body-swap).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach(); // a granted, locally-owned dot
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        let foreign = DirectoryReply::Head {
+            key: DirectoryKey::Entity(entity),
+            record: Some(vd_wire::seams::directory::OwnerRecord {
+                authority: AuthorityRef::Shard(NodeId(99)), // the transfer DEST
+                fence: Fence(2),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(foreign),
+        )]);
+        assert!(
+            !rig.world.resource::<Dots>().0.contains_key(&SESSION),
+            "the source self-demotes (drops) the transferred dot"
+        );
+        // The drop is LOCAL and IMMEDIATE: the dot is gone in the SAME tick as the foreign-owner
+        // reply (asserted above). A revoke-based removal (the logout two-phase path) would instead
+        // set `departing` and KEEP the dot until the directory confirms a LeaseRevoke a round-trip
+        // later — so single-tick removal IS the proof that NO directory write (no LeaseRevoke) was
+        // issued; revoking the record (now the dest's) would orphan the player.
+        assert!(
+            sent.is_empty(),
+            "the self-fence drop is purely local — no directory write at all: {sent:?}"
+        );
+        // Idempotent: a second foreign-owner reply finds no matching dot — a clean no-op.
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(foreign),
+        )]);
+        assert!(!rig.world.resource::<Dots>().0.contains_key(&SESSION));
+    }
+
+    #[test]
+    fn a_granted_source_polls_its_entity_keys_on_the_recheck_cadence() {
+        // 1c.8 SOURCE granted-key poll: with a non-zero recheck interval, a granted dot emits a
+        // HeadRead{Entity} on the cadence so a foreign takeover is OBSERVED (otherwise the source
+        // self-fence is unreachable). The OFF arm (non-multiple tick) sends no entity HeadRead.
+        let mut rig = Rig::with_config(StubConfig {
+            realm_recheck_interval: 2,
+            ..config()
+        });
+        rig.grant_realm();
+        let _ = rig.attach();
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        let entity_head_read = |sent: &[(NodeId, MsgClass, Vec<u8>)]| {
+            sent.iter()
+                .filter(|(to, _, _)| *to == ORCH)
+                .any(|(_, _, bytes)| {
+                    postcard::from_bytes::<InterShardFlow>(bytes).expect("decode")
+                        == InterShardFlow::Directory(DirectoryOp::HeadRead {
+                            key: DirectoryKey::Entity(entity),
+                        })
+                })
+        };
+        rig.set_local_tick(2);
+        assert!(
+            entity_head_read(&rig.tick(vec![])),
+            "an on-cadence tick polls the entity key"
+        );
+        rig.set_local_tick(3);
+        assert!(
+            !entity_head_read(&rig.tick(vec![])),
+            "an off-cadence tick does not"
+        );
     }
 
     #[test]

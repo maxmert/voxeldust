@@ -8,17 +8,21 @@
 //! `OpenInputSlot`/`apply_input` (sim) — in one scenario over the real fabric, driven by the
 //! REAL saga producer (never hand-fed acks).
 //!
-//! SCOPE (D-28, focused): the transfer commits authority to the dest (directory CAS lands) and
-//! the saga PARKS in `Demoting` — the demote/release tail (source release, authority-settled)
-//! is 1c.8+ (DEFERRED D-28/D-29). This gate proves INPUT conservation across the cut, not the
-//! final authority settle.
+//! SCOPE (D-28 + 1c.8): the transfer commits authority to the dest (directory CAS lands) AND the
+//! demote/release tail now CLOSES — the dest ADOPTS the subject, the source self-fences its dot,
+//! and the saga drives Demoting → Releasing → Done (via the bandless interim + the gateway's
+//! Released ack). So this gate proves BOTH input conservation across the cut AND the final
+//! authority settle: `verify_authority_unique` + `verify_authority_settled` after a full transfer
+//! (the D-28(b) graduation). FIDELITY (pose/render/ghost) still defers to 1d (D-27 back half).
 
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::RealmId;
 use vd_core::{AccountId, EntityId, NodeId, SessionId, TransferId};
 use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::FaultFabric;
-use vd_harness::oracle::verify_input_conservation;
+use vd_harness::oracle::{
+    verify_authority_settled, verify_authority_unique, verify_input_conservation,
+};
 use vd_harness::topology::{InspectReport, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
@@ -112,17 +116,33 @@ fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64
     // so they BUFFER and are drained to the dest at commit — the buffer/drain path under test.
     with_client(&mut topo, ScriptedClient::resume_input);
 
-    // The saga commits (directory CAS to DEST) and parks in `Demoting` (the demote/release
-    // tail has no producer at 1c.7 — D-28 scope).
-    step_until(&mut topo, 40, |t| {
-        saga_states(t).iter().any(|s| s.starts_with("Demoting"))
-    });
+    // The saga commits (directory CAS to DEST) and the 1c.8 tail drives it the rest of the way:
+    // the bandless interim fires DemoteComplete → Releasing, the gateway acks Released → Done →
+    // Tombstone, so the saga reaches `live() == 0` (no longer parks in Demoting).
+    step_until(&mut topo, 40, |t| live_sagas(t) == 0);
 
-    // QUIESCE: stop emitting and let every in-flight post-marker input settle at the dest.
+    // QUIESCE: stop emitting and let every in-flight post-marker input settle at the dest AND
+    // the source's Entity-key self-fence drop land (the source HeadReads on the recheck cadence).
     with_client(&mut topo, ScriptedClient::pause_input);
     for _ in 0..8 {
         topo.step();
     }
+
+    // TWO-WINDOW GUARD (1c.8): wait until the transient demote/promote windows are both resolved
+    // — the SOURCE reports NOTHING for the subject (its dot self-fenced away) AND the DEST holds
+    // it — BEFORE the authority oracle is sampled. The promote-then-demote ordering means there
+    // is a transient two-holder / pending-toward-owner window; the gate samples only after both
+    // sides reach steady state (exactly as input-conservation is asserted only post-quiesce).
+    step_until(&mut topo, 40, |t| {
+        let r = t.inspect_all();
+        let src = report(&r, SHARD);
+        let dst = report(&r, DEST);
+        let source_clear = !src.held_entities.iter().any(|(e, _)| *e == entity)
+            && !src.pending_entities.contains(&entity)
+            && !src.departing_entities.contains(&entity);
+        let dest_holds = dst.held_entities.iter().any(|(e, _)| *e == entity);
+        source_clear && dest_holds
+    });
 
     let marker = with_client(&mut topo, |c| c.marker_seq()).expect("the client stamped a marker");
     (topo, session, entity, marker)
@@ -198,37 +218,138 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
     assert_eq!(src.input_window_evictions, 0, "source log lost nothing");
     assert_eq!(dst.input_window_evictions, 0, "dest log lost nothing");
 
-    // (7) THE COMMIT LANDED authority at DEST in the directory, and the saga PARKED post-commit
-    // (the demote/release tail is 1c.8+; asserting Done here would be impossible — D-28).
-    let entity_owner = orch
+    // (7) THE FULL TRANSFER SETTLED (1c.8 — the demote/release tail closed). The directory holds
+    // exactly ONE Entity(SUBJECT) record, at DEST, at the CAS new_fence; the saga reached Done.
+    let entity_record = orch
         .directory
         .iter()
-        .find_map(|(k, r)| (*k == DirectoryKey::Entity(entity)).then_some(r.authority))
+        .find_map(|(k, r)| (*k == DirectoryKey::Entity(entity)).then_some(*r))
         .expect("the transferred avatar is recorded");
     assert_eq!(
-        entity_owner,
+        entity_record.authority,
         AuthorityRef::Shard(DEST),
         "authority committed to the dest shard",
     );
+    let new_fence = entity_record.fence;
+    let entity_records = orch
+        .directory
+        .iter()
+        .filter(|(k, _)| *k == DirectoryKey::Entity(entity))
+        .count();
+    assert_eq!(
+        entity_records, 1,
+        "exactly one Entity record for the subject"
+    );
     assert_eq!(
         live_sagas(&mut topo),
-        1,
-        "the saga parks in Demoting after the commit (demote tail is 1c.8+)",
+        0,
+        "the demote/release tail reached Done (no parked saga)",
+    );
+
+    // (8) THE HR2 AUTHORITY-CONSERVATION ORACLES, now assertable after a FULL transfer (the
+    // D-28(b) graduation): exactly one holder fence-matching the directory, and NOTHING pending
+    // or departing anywhere. Kind-generic — the same backstop settles any TransferableKind.
+    verify_authority_unique(&reports)
+        .expect("exactly one holder of the transferred entity, fence-matching the directory");
+    verify_authority_settled(&reports)
+        .expect("no lingering pending/departing anywhere after the tail");
+
+    // (9) THE EXACT END STATE: DEST holds (SUBJECT, new_fence) once, nothing pending/departing
+    // for it; SOURCE reports nothing for the subject (its dot self-fenced away).
+    assert_eq!(
+        dst.held_entities
+            .iter()
+            .filter(|(e, _)| *e == entity)
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(entity, new_fence)],
+        "DEST holds the subject exactly once at the CAS new_fence",
+    );
+    assert!(
+        !dst.pending_entities.contains(&entity),
+        "DEST has nothing pending for the subject",
+    );
+    assert!(
+        !dst.departing_entities.contains(&entity),
+        "DEST has nothing departing for the subject",
+    );
+    assert!(
+        !src.held_entities.iter().any(|(e, _)| *e == entity),
+        "SOURCE holds nothing for the subject (self-fenced)",
+    );
+    assert!(
+        !src.pending_entities.contains(&entity),
+        "SOURCE has nothing pending for the subject",
+    );
+    assert!(
+        !src.departing_entities.contains(&entity),
+        "SOURCE has nothing departing for the subject",
     );
 }
 
+/// 1c.8 ROBUSTNESS: the settled end state is STABLE under continued operation. After the tail
+/// closes, the source keeps polling its Entity keys on the recheck cadence and the dest keeps
+/// holding — many more ticks must NOT resurrect the source's dot, double-grant, or unsettle the
+/// oracles. This exercises the source self-fence's idempotent no-op arm end-to-end (every later
+/// poll for the now-absent subject dot finds nothing) and the dest's stable hold. (The explicit
+/// REDELIVERY idempotency — a re-acked `Released` and a re-delivered foreign-owner HeadRead — is
+/// pinned at the unit level in `vd_connection_plane::gateway::release_subscribe_acks_released` and
+/// `vd_sim::stub::the_source_self_fences_a_foreign_owned_entity_without_revoking`.)
+#[test]
+fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
+    let fabric = FaultFabric::new(909, 2);
+    let (mut topo, _session, entity, _m) = run_cut_transfer(&fabric);
+
+    // The tail closed: assert it once, then keep the cluster running.
+    assert_eq!(
+        live_sagas(&mut topo),
+        0,
+        "the tail reached Done before the stability soak"
+    );
+    for _ in 0..40 {
+        topo.step();
+    }
+
+    let reports = topo.inspect_all();
+    let src = report(&reports, SHARD);
+    let dst = report(&reports, DEST);
+    // The source never re-acquires the transferred dot (its self-fence is a stable, idempotent
+    // drop — repeated foreign-owner polls keep finding nothing).
+    assert!(
+        !src.held_entities.iter().any(|(e, _)| *e == entity),
+        "the source dot stays dropped under continued polling",
+    );
+    assert!(
+        !src.pending_entities.contains(&entity),
+        "the source never re-pends the transferred subject",
+    );
+    // The dest keeps its single hold; the directory still names exactly one owner.
+    assert!(
+        dst.held_entities.iter().any(|(e, _)| *e == entity),
+        "the dest keeps holding the transferred subject",
+    );
+    // The HR2 oracles still hold after the soak — no split-brain, no orphan, nothing unsettled.
+    verify_authority_unique(&reports).expect("still exactly one holder after the soak");
+    verify_authority_settled(&reports).expect("still settled after the soak");
+    // And the cross-cut input conservation never regressed.
+    verify_input_conservation(&reports).expect("input conservation holds after the soak");
+}
+
 /// The transfer run is fully deterministic under one seed — the standing in-process replay gate
-/// (cross-process parity is P3 chaos scope). It compares not just `inspect_all` ground truth but
-/// the harness TRACE (the purpose-built byte-comparable per-node step/sent/drain artifact) AND
-/// the saga-FSM phase the choreography polls on — so a divergence in the transfer machinery PAST
-/// the commit point (the saga's post-CAS phases and the gateway's route/buffer mutate NO
-/// directory state, hence are invisible to `inspect_all` alone) cannot hide.
+/// (cross-process parity is P3 chaos scope). It compares `inspect_all` ground truth, the harness
+/// TRACE (the purpose-built byte-comparable per-node step/sent/drain artifact — this is what
+/// catches divergence in the transfer machinery PAST the commit point: the saga's post-CAS phases
+/// and the gateway's route/buffer mutate NO directory state, so they are invisible to `inspect_all`
+/// alone but show in the trace), the gateway buffer-fill count, and the threaded marker. (NOTE:
+/// 1c.8 now drives to `live()==0`, so `saga`/`live` are the terminal sentinels — `[]`/`0` — not a
+/// mid-flight phase; they pin "the run reached Done", while the TRACE carries the per-tick FSM
+/// ordering across the whole run.)
 #[test]
 fn p2_dod_cross_cut_transfer_is_byte_identical_under_same_seed() {
     let run = || {
         let (mut topo, _, _, marker) = run_cut_transfer(&FaultFabric::new(909, 2));
-        let saga = saga_states(&mut topo);
-        let live = live_sagas(&mut topo);
+        let saga = saga_states(&mut topo); // terminal sentinel ([] — the run drove to Done)
+        let live = live_sagas(&mut topo); // terminal sentinel (0)
         // The gateway's cut-buffer fill count, compared DIRECTLY (not merely inferred from the
         // trace's per-tick send deferral) — so a divergence in the gateway's route/buffer
         // decision cannot hide behind an identical trace+reports+saga.
@@ -240,7 +361,7 @@ fn p2_dod_cross_cut_transfer_is_byte_identical_under_same_seed() {
     assert_eq!(
         run(),
         run(),
-        "identical seed ⇒ identical ground truth, trace, saga FSM phase, buffer fill, and marker",
+        "identical seed ⇒ identical ground truth, trace, terminal sentinels, buffer fill, and marker",
     );
 }
 

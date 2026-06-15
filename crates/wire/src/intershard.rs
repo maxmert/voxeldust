@@ -404,6 +404,7 @@ mod tests {
                 transfer: TransferId(11),
                 session: vd_core::SessionId(3),
                 new_fence: Fence(4),
+                subject: crate::seams::directory::DirectoryKey::Entity(eid(EntityKind::Player)),
             }),
             InterShardFlow::SagaAck(TransferControlAck::Committed {
                 transfer: TransferId(11),
