@@ -121,6 +121,18 @@ const _: () = assert!(
     "DEV.tick_dt must equal 1/DEV.tick_hz (one tick period, two encodings)",
 );
 
+/// DRAIN-BURST (compile-time): the gateway cut-buffer drain (`apply_commit`) pushes up to
+/// `max_buffered_inputs` frames to the dest in ONE tick; it MUST stay within the dest
+/// `BoundedInbox` floor or a full drain plus any co-arriving frame sheds a conserved (unreliable)
+/// input (1c.5 / DEFERRED D-8). The floor formula lives ONCE in `vd_io_prod::mesh`; this asserts
+/// the shipped DEV config honors it (enforce, don't just document — the only previously
+/// convention-only half of the invariant). A retune that violates it fails the BUILD.
+const _: () = assert!(
+    DEV.max_buffered_inputs as usize
+        <= vd_io_prod::mesh::inbound_capacity_for(DEV.outbound_cap as usize),
+    "DEV.max_buffered_inputs must stay within the dest inbox floor inbound_capacity_for(outbound_cap) — the drain-burst invariant (D-8)",
+);
+
 // ---- the env contract --------------------------------------------------------
 
 /// The bind addresses of the three fixed cluster nodes (admin is the orchestrator's

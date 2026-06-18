@@ -1,7 +1,8 @@
-//! Gateway M0: ONE subscription, ONE authority, NO transfer
-//! (`docs/design/connection_plane.md` §M0). The client holds exactly one logical
-//! connection; everything server-side routes by in-frame `SessionId` + `Fence`,
-//! NEVER by source address (R2).
+//! Gateway: the client's single-connection terminus + the P2 transfer-control CONSUMER.
+//! (M0 ORIGIN — ONE subscription, ONE authority, `docs/design/connection_plane.md` §M0; the
+//! transfer machinery — cut partition, route swap, commit drain, `OpenInputSlot`, release — landed
+//! ON that base across P2 Slices 1c.0–1c.8.) The client holds exactly one logical connection;
+//! everything server-side routes by in-frame `SessionId` + `Fence`, NEVER by source address (R2).
 //!
 //! Binding shapes that exist NOW because P2 cannot retrofit them:
 //! - `RouteSnapshot { authority, fence, cut }` behind `ArcSwap`; `route.store` is

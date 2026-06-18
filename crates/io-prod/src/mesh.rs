@@ -52,6 +52,16 @@ pub struct MeshConfig {
     pub redial_backoff_max: Duration,
 }
 
+/// The dest node's `BoundedInbox` capacity for a given per-peer outbound depth — the SINGLE
+/// source of truth for the inbox floor (`outbound × 8`, never below 256). It is `const` so a
+/// compile-time invariant (the gateway cut-buffer drain-burst bound, `bins` D-8) can assert
+/// against it without duplicating the formula.
+#[must_use]
+pub const fn inbound_capacity_for(outbound_capacity: usize) -> usize {
+    let scaled = outbound_capacity.saturating_mul(8);
+    if scaled > 256 { scaled } else { 256 }
+}
+
 impl MeshConfig {
     /// Sane defaults for the operational fields (capacities/timeouts); the caller
     /// supplies topology (`local`/`bind`/`peers`).
@@ -67,7 +77,7 @@ impl MeshConfig {
             bind,
             peers,
             outbound_capacity,
-            inbound_capacity: outbound_capacity.saturating_mul(8).max(256),
+            inbound_capacity: inbound_capacity_for(outbound_capacity),
             max_inbound_connections: 256,
             redial_backoff_min: Duration::from_millis(50),
             redial_backoff_max: Duration::from_secs(5),
