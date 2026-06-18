@@ -25,6 +25,23 @@ pub enum DirectoryKey {
     Ship(EntityId),
 }
 
+impl DirectoryKey {
+    /// The `EntityId` a transfer-DEST shard ADOPTS for this subject — the ONE home for the
+    /// `DirectoryKey → adopt-target` policy (was duplicated byte-for-byte in `vd-sim` and `vd-node`,
+    /// a lockstep-edit hazard; audit DRY-finding). `Some` ONLY for the per-entity `Entity` key:
+    /// `Session`/`Realm` carry no adoptable entity, and `Ship` exterior-authority is a DISTINCT
+    /// adopt path (the hull host, P8) deliberately `None` here so the per-entity crossing can never
+    /// mis-adopt a ship hull — when P8 lands it consumes `Ship` explicitly; this stays the
+    /// per-entity extraction.
+    #[must_use]
+    pub fn transfer_subject_entity(self) -> Option<EntityId> {
+        match self {
+            DirectoryKey::Entity(entity) => Some(entity),
+            DirectoryKey::Session(_) | DirectoryKey::Realm(_) | DirectoryKey::Ship(_) => None,
+        }
+    }
+}
+
 /// Who holds authority for a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthorityRef {
@@ -161,6 +178,29 @@ mod tests {
             DirectoryKey::Realm(RealmId::Planet(4)),
             DirectoryKey::Ship(EntityId::pack(EntityKind::Ship, 1, 5, 6)),
         ]
+    }
+
+    #[test]
+    fn transfer_subject_entity_is_some_only_for_the_entity_key() {
+        // The ONE adopt-target policy: Entity → Some; Session/Realm/Ship → None (Ship is the
+        // distinct hull-host adopt path, P8). Covers both arms.
+        let entity = EntityId::pack(EntityKind::Player, 1, 2, 3);
+        assert_eq!(
+            DirectoryKey::Entity(entity).transfer_subject_entity(),
+            Some(entity)
+        );
+        assert_eq!(
+            DirectoryKey::Session(SessionId(1)).transfer_subject_entity(),
+            None
+        );
+        assert_eq!(
+            DirectoryKey::Realm(RealmId::Planet(4)).transfer_subject_entity(),
+            None
+        );
+        assert_eq!(
+            DirectoryKey::Ship(EntityId::pack(EntityKind::Ship, 1, 5, 6)).transfer_subject_entity(),
+            None
+        );
     }
 
     #[test]

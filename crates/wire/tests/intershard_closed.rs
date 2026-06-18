@@ -15,7 +15,8 @@ use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
 use vd_wire::intershard::{
-    EffectClass, GhostFlow, IdempotencyKey, InterShardFlow, TransferEnvelope, TransitionPayload,
+    EffectClass, FLUSH_SOURCE_STEP, FlushSource, GhostFlow, IdempotencyKey, InterShardFlow,
+    STUB_CROSSING_STEP, TransferAck, TransferEnvelope, TransferStepRejectReason, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
@@ -122,6 +123,31 @@ fn every_arm() -> Vec<InterShardFlow> {
             key: DirectoryKey::Realm(RealmId::System(1)),
             record: None,
         }),
+        // 1d.1 arms: the pose-flush request + the entity-state ack family (SIDE-EFFECTING,
+        // TransferStep-keyed by their step phase).
+        InterShardFlow::FlushSource(FlushSource {
+            transfer: TransferId(9),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            step_id: FLUSH_SOURCE_STEP,
+        }),
+        InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+            transfer_id: TransferId(10),
+            step_id: FLUSH_SOURCE_STEP,
+            pose: pose(),
+            drained_seq: 5,
+        }),
+        // ALL three TransferAck inner arms ride the per-release surface gate (so a new inner variant
+        // is forced through the InterShardFlow postcard roundtrip + effect-class classification, not
+        // just the outer arm). Rejected has no producer yet (reserved, D-21) but is sealed here.
+        InterShardFlow::TransferAck(TransferAck::Accepted {
+            transfer_id: TransferId(10),
+            step_id: STUB_CROSSING_STEP,
+        }),
+        InterShardFlow::TransferAck(TransferAck::Rejected {
+            transfer_id: TransferId(10),
+            step_id: STUB_CROSSING_STEP,
+            reason: TransferStepRejectReason::SpatialPrecondition,
+        }),
     ]
 }
 
@@ -137,7 +163,9 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::Directory(_)
         | InterShardFlow::Saga(_)
         | InterShardFlow::SagaAck(_)
-        | InterShardFlow::DirectoryReply(_) => {}
+        | InterShardFlow::DirectoryReply(_)
+        | InterShardFlow::FlushSource(_)
+        | InterShardFlow::TransferAck(_) => {}
     }
 }
 

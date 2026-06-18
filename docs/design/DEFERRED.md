@@ -86,6 +86,17 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     emitting because of the **fence** (lease-epoch pushed to the gateway), demote-before-promote, BEFORE the dest
     promotes. This introduces the source ghost (the interim has NONE — it drops), attaches `authority.rs`, and
     rips out the stub poll. The **reshape-free promise (`wf_0ed2dc0c`) covers ONLY (a)** — (b) is a re-architecture.
+- **⚠️ 1d.1 LAYERING (stated honestly so the tear-out is not under-budgeted):** the 1d.1 pose crossing adds
+  machinery BESIDE this interim, NOT a migration of it. (i) The source pose flush (`FlushSource`→`SourceFlushed`)
+  is NET-NEW and read-only — it does NOT replace the cooperative `granted_key_poll_tick`/`self_fence_foreign_entity`
+  drop, which STILL fires independently to demote the source. (ii) Because the dest adopts LATE under
+  promote-before-demote (the crossing, emitted at CAS, races ahead of the dest's `OpenInputSlot`→`HeadRead`→flip),
+  the dest BUFFERS the crossing (`PendingCrossings`) and drains it at the adopt flip — a 1c.8-model workaround for
+  the adopt-ordering race, not the permanent design. (iii) The crossing is NOT gated on its dest ack: the saga
+  reaches `Done` whether or not the crossing landed (the source self-fence is independent of the crossing). The
+  proper tear-out (b) SUBSUMES all three: the saga-pushed ordered `Demote` retains the source as a ghost until the
+  dest is fully ready (pose INCLUDED, gated on the crossing ack), at which point the dest buffer AND the
+  cooperative poll AND the net-new flush-beside-poll layering all retire into one fence-enforced handoff.
 - **When / proper:** the **post-1d band/ghost P2 slice** (it owns the ghost + band + observer-watermark + the
   per-entity `Authority` attach). Pinned exists-to-be-flipped in `crates/sim/src/stub.rs` (the
   `granted_key_poll_tick`/`self_fence_foreign_entity` interim doc-comments) + a test that the source demote is
@@ -261,6 +272,12 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   `TransferAck` receiver) and **P3** (saga WAL) — keyed by the SAME `IdempotencyKey::TransferStep` (the ONE
   shared anchor; HR3 one machinery, many STORES). No rewrite: durability is a different backing for the same
   key + the consult-before-effect / record-after-effect discipline.
+- **1d.1 update:** the dest shard's `AppliedSteps` (1d.0) now has its FIRST consumer — `on_transfer_envelope`
+  consults-then-records by `(transfer, STUB_CROSSING_STEP)` before applying a crossing. It remains IN-MEMORY (the
+  durable redb backing is still P3, this entry's point). **Two bounds are now OWED** (both need terminal-awareness
+  the dest shard lacks, so both land with the journal-retention slice — neither grows per-tick in a healthy run):
+  (1) `AppliedSteps` retention (drop a transfer's steps on its terminal, as 1d.0 flagged); (2) `PendingCrossings`
+  cleanup (an entry whose entity NEVER adopts — a misrouted crossing — would linger). Recorded on the resources.
 - **Source:** Slice 1c.2 design `wf_726a51bc`. The shared element is the KEY (`IdempotencyKey::TransferStep`),
   not a forwarding fn: the ceremonial `recorded_step` shim was REMOVED and the gateway's two journal sites
   unified behind `TransferProgress::recorded`/`journal` — corrected by audits `wwk1uh5k9` (DRY-1/F1, the dead
@@ -283,19 +300,29 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   correlation streams over one session — the signal-readiness prerequisite the audit flagged).
 - **Source:** whole-codebase audit `wwk1uh5k9` (RACE-1 / WEDGE-1, pinned; masked by D-1).
 
-### D-21 🟧 `TransferAck` / `TransferStepRejectReason` are RESERVED wire vocabulary (no consumer yet)
-- **Missing:** the shard-bound `Transfer(TransferEnvelope)`-arm RECEIVER. The dest shard's
-  ack of a transferred entity-state step (`TransferAck{Accepted|Rejected{reason}}`) is frozen
-  in the wire contract but has no producer/consumer — the 1b/1c saga uses the gateway↔saga
-  `TransferControlAck` vocabulary, not this shard→orchestrator envelope ack.
-- **Where:** `crates/wire/src/intershard.rs` — `TransferAck` + `TransferStepRejectReason`
-  (RESERVED doc on each; roundtrip-tested but unconsumed). Renamed from `TransferRejectReason`
-  to end the name collision with the live CLIENT-facing `channels::TransferRejectReason` (DRY-1).
-- **When / proper:** **Slice 1d** — the shard-bound `StubCrossing` transfer receiver journals
-  each step idempotently by `(transfer_id, step_id)` and replies `TransferAck`; that is its
-  first consumer (the "freeze arms WITH their first consumer" rule). Reconcile then whether the
-  shard step-reject reasons should fold into / map cleanly onto the client-facing reasons.
-- **Source:** whole-codebase convergence audit `wf_8d81c753` (DRY-1).
+### D-21 🟩 `TransferAck` got its first consumer (Slice 1d.1): the `StubCrossing` receiver + the source pose flush
+- **Landed (1d.1):** the shard-bound `Transfer(TransferEnvelope)`-arm RECEIVER now exists. The DEST consults the
+  1d.0 `AppliedSteps` journal by `(transfer_id, STUB_CROSSING_STEP)`, applies the sanitized pose to the adopted
+  dot (FirstApply), and replies `TransferAck::Accepted` (re-ack only on redelivery). The SOURCE replies a NEW
+  `TransferAck::SourceFlushed` arm (carrying its pose + drain watermark) to the orchestrator's new `FlushSource`
+  request. All of `FlushSource`, `TransferAck::Accepted`, and `TransferAck::SourceFlushed` are produced AND
+  consumed end-to-end — proven by `p2_dod_cross_cut_input_is_conserved_exactly_once`, whose load-bearing
+  discriminator is the dest pose's FRAME (the crossing carries the SOURCE realm frame seed-7, which the dest's
+  own input integration can never produce — its adopt-default is the DEST frame seed-8), so the gate goes RED if
+  the crossing is dropped (verified by mutation; a `pos != ZERO` check could not — the dest's own drained input
+  also moves it off origin).
+- **Residual (one reserved sub-variant):** `TransferAck::Rejected{reason}` has NO producer yet. A `StubCrossing`
+  is emitted POST-commit / forward-only, so spatial admissibility is gated PRE-commit at `PrepareSubscribe`
+  (`PrepareResult::Rejected{Spatial}`) — the dest never rejects a committed crossing on spatial grounds (it would
+  STRAND the entity). `sanitized()` is the post-commit network-trust chokepoint; a below-fence crossing is a
+  silent counted drop (`crossings_stale`, fence rule 1), not a `Rejected`. `Rejected` awaits a non-spatial
+  producer (version-floor / epoch / unknown-kind on the TLV blob — a later slice, with the kind registry +
+  version-floor handshake). Reconcile then whether the shard step-reject reasons fold onto the client-facing ones.
+- **Where:** `crates/wire/src/intershard.rs` (`FlushSource`, `TransferAck::SourceFlushed`, the two new
+  `InterShardFlow` arms, `FLUSH_SOURCE_STEP`/`STUB_CROSSING_STEP`); `crates/node/src/saga_runtime.rs`
+  (`emit_crossing`/`build_crossing`, the `SourceFlushed` stash+decode); `crates/sim/src/stub.rs`
+  (`on_flush_source`, `on_transfer_envelope`, `apply_crossing`, `PendingCrossings`).
+- **Source:** whole-codebase convergence audit `wf_8d81c753` (DRY-1); CONSUMED in Slice 1d.1.
 
 ---
 
@@ -383,14 +410,27 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   WITHOUT `SessionAttached` (the source still owns the client — R2). A non-`Entity` subject is a counted no-op
   (`StubStats.input_slots_malformed`), never an extraction panic. This GRADUATES `verify_authority_settled`/
   `verify_authority_unique` after a full transfer (D-28(b) below).
-- **Still owed (1d — the BACK half):** flip `render_ready` with the real CARRIED pose (the entity-STATE crossing
-  — `StubCrossing`/`Transfer` envelope + durable `applied_steps`, D-21/D-22); the real ghost-as-collider (players
-  collide across the boundary; the per-entity `authority.rs` `Authority` FSM stays unattached — the 1c.8 lever is
-  the stub `Dot`); the dest spatial `PrepareResult::Rejected`; the `AbortTransfer`-tears-down-the-dest-slot
-  teardown; and **DEST FRAME ROUTING** — the gateway is single-shard-aware (`GatewayConfig.shard`, routes only
-  `from == config.shard`), so a render-ready dest would emit frames the gateway cannot route; 1c.8 keeps
-  `render_ready: false` so the dest emits NOTHING, sidestepping this — multi-shard gateway routing is a HARD 1d
-  prerequisite for render.
+- **Landed (1d.1 — the POSE crossing, the first BACK-half piece):** the entity STATE now crosses. The saga
+  flushes the source pose (`FlushSource`→`SourceFlushed`, behind the pose-before-promote FSM gate so a lost flush
+  blocks the commit, never ships a poseless crossing), emits a `StubCrossing` envelope at commit, and the dest
+  STORES the sanitized pose on the adopted dot — journaled exactly-once by `(transfer, STUB_CROSSING_STEP)` (1d.0
+  `AppliedSteps`, D-21/D-22). The held-poses crossing gate proves the crossing via the dest pose's FRAME (the
+  SOURCE realm frame seed-7, unreachable by the dest's own input — RED-on-drop verified by mutation; see D-21).
+  `render_ready` STAYS false (the dot still renders nothing) — the VISIBLE flip is 1d.3.
+- **Still owed (1d.3+ — the rest of the BACK half):** flip `render_ready` (the visible/in-client proof, 1d.3,
+  REALM-fence-supersession double-vision-safe); the real ghost-as-collider (players collide across the boundary;
+  the per-entity `authority.rs` `Authority` FSM stays unattached — the 1c.8/1d.1 lever is the stub `Dot`); the
+  `AbortTransfer`-tears-down-the-dest-slot teardown; and **DEST FRAME ROUTING** — the gateway is single-shard-aware
+  (`GatewayConfig.shard`, routes only `from == config.shard`), so a render-ready dest would emit frames the gateway
+  cannot route; keeping `render_ready: false` sidesteps this — multi-shard gateway routing (Track R / 1d.2) is a
+  HARD prerequisite for render. The dest spatial admissibility check stays PRE-commit at `PrepareSubscribe` (D-21).
+  **FRAME-REBINDING (audit finding 5):** 1d.1 stores the crossed pose's `FrameRef` VERBATIM — it stays the SOURCE
+  realm's frame (e.g. `SystemSpace{system_seed: 7}`) on a dot owned by the DEST realm. Inert in 1d.1 (render_ready
+  false → nothing reads the frame; and the gate USES this as the crossing discriminator). But render (1d.3) /
+  ghost / client compositing MUST re-express the pose into the dest realm's frame (or carry an explicit
+  cross-frame transform) before it is rendered or fed to physics — owed with `render_ready` + the real frame seam
+  (`FrameSpace`, P4/P5). Pinned RED-to-flip: the gate asserts seed-7 today and flips to the dest frame when
+  rebinding lands.
 - **Also owed:** the EARLY (prepare-time) `OpenInputSlot` for the gateway-adoption-mid-cut race is a **P3**
   resilience item (the gateway re-drives the slot before the buffer drain); inert in 1c (single process, commit
   emits the slot in the same handler before the drain).
@@ -451,7 +491,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   durable seq-range interval map (D-8) as the authoritative conservation mechanism (reload-from-directory on
   reconnect; integration.json #1's rare-failure-only `InputGap` becomes the honest signal). Closes WITH D-28's
   end-to-end gate.
-- **Source:** the 1c.5 audit `wf_e3397eb2` (openinputslot-deferred-loses-buffer-no-redrive).
+- **1d.1 sibling (same class):** the entity-STATE crossing (`StubCrossing`) shares this no-re-drive posture — the
+  saga emits it ONCE in the `CasWon` batch (`emit_crossing`), with re-emission ONLY on the (not-yet-runtime-fired)
+  `Swapping`/post-commit `Timeout` retry. The dest `PendingCrossings` buffer handles the ADOPT-ORDERING race
+  within a single delivery (decoupling arrival from the late adopt), but a genuinely LOST crossing delivery has no
+  recovery in 1d.1 — its at-least-once rides the SAME Slice-2 adaptive-deadline machinery as every post-CAS
+  command (`CommitAuthority`/`ReleaseSubscribe`), and the proper retain-source-until-crossing-acked gating is the
+  D-2 (b) tear-out. Same recovery hook as this entry.
+- **Source:** the 1c.5 audit `wf_e3397eb2` (openinputslot-deferred-loses-buffer-no-redrive); the 1d.1 crossing
+  sibling added in Slice 1d.1.
 
 ### D-14 🟥 `rendered()` recomputed ~3×/display-frame on the client
 - **Missing:** the windowed/headless render path recomputes the composited view 2–3× per frame.

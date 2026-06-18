@@ -43,11 +43,10 @@ use vd_sim::io::{Bytes, Inbound, MsgClass, SendError, Transport};
 
 use crate::trust::{ClusterTrust, TrustError};
 
-/// Maximum frame size accepted on a stream. Operational constant: migrates into
-/// `TransportTuning` when that struct lands (connection-plane work, P1).
-pub(crate) const MAX_FRAME_BYTES: u32 = 1 << 20;
-
-/// The on-stream frame: 4-byte BE length prefix, then postcard of this struct.
+/// The on-stream frame payload: a postcard of this struct, carried inside the `wire::framing`
+/// stream frame (`[u32_be total_len][u8 codec_flags][payload]`). io-prod routes ALL stream framing
+/// through `wire::framing` (the ONE codec/framing home — HR3 + the `codec_flags` reserved-bit
+/// forward-compat path); the cap is `wire::framing::MAX_STREAM_FRAME_BYTES`.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct WireFrame {
     from: NodeId,
@@ -315,6 +314,44 @@ fn spawn_writer(
         .expect("spawn writer thread");
 }
 
+/// Frame + write ONE `WireFrame` on a reliable uni stream — the SHARED stream-write for BOTH the
+/// bridge and the mesh transport, routed through `wire::framing::frame_payload` so the
+/// `codec_flags` discipline + cap live in ONE home (HR3). The framed bytes already include the
+/// length prefix, so it is a single `write_all`.
+pub(crate) async fn write_wireframe(
+    send: &mut quinn::SendStream,
+    local: NodeId,
+    class: MsgClass,
+    bytes: &[u8],
+) -> Result<(), ()> {
+    let payload = postcard::to_allocvec(&WireFrame {
+        from: local,
+        class,
+        bytes: bytes.to_vec(),
+    })
+    .map_err(|_| ())?;
+    let framed = vd_wire::framing::frame_payload(Ok(payload)).map_err(|_| ())?;
+    send.write_all(&framed).await.map_err(|_| ())
+}
+
+/// Read ONE `wire::framing` stream frame off a uni stream and decode its `WireFrame` — the SHARED
+/// stream-read for the bridge AND the mesh transport (collapsing the previously-duplicated read
+/// loops). Returns `None` on clean EOF OR any framing / decode error (the caller stops reading the
+/// stream, exactly as before). The cap is checked on `total_len` BEFORE the body is allocated, so a
+/// forged oversize header cannot OOM; `frame_body_payload` then applies the reserved-bit reject.
+async fn read_one_wireframe(recv: &mut quinn::RecvStream) -> Option<WireFrame> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await.ok()?;
+    let total_len = u32::from_be_bytes(len_buf);
+    if total_len == 0 || total_len > vd_wire::framing::MAX_STREAM_FRAME_BYTES {
+        return None;
+    }
+    let mut body = vec![0u8; total_len as usize];
+    recv.read_exact(&mut body).await.ok()?;
+    let payload = vd_wire::framing::frame_body_payload(&body).ok()?;
+    postcard::from_bytes::<WireFrame>(payload).ok()
+}
+
 async fn write_frame(
     conn: &quinn::Connection,
     stream: &mut Option<quinn::SendStream>,
@@ -327,89 +364,43 @@ async fn write_frame(
     let Some(send) = stream.as_mut() else {
         return Err(());
     };
-    let payload = postcard::to_allocvec(&WireFrame {
-        from: local,
-        class: frame.class,
-        bytes: frame.bytes.to_vec(),
-    })
-    .map_err(|_| ())?;
-    let len = u32::try_from(payload.len()).map_err(|_| ())?;
-    if len > MAX_FRAME_BYTES {
-        return Err(());
-    }
-    send.write_all(&len.to_be_bytes()).await.map_err(|_| ())?;
-    send.write_all(&payload).await.map_err(|_| ())?;
-    Ok(())
+    write_wireframe(send, local, frame.class, &frame.bytes).await
 }
 
 pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<Inbound>) {
-    loop {
-        let mut len_buf = [0u8; 4];
-        if recv.read_exact(&mut len_buf).await.is_err() {
+    while let Some(frame) = read_one_wireframe(&mut recv).await {
+        if inbound_tx
+            .send(Inbound::Wire {
+                from: frame.from,
+                class: frame.class,
+                bytes: vd_sim::io::bytes(frame.bytes),
+            })
+            .is_err()
+        {
             return;
-        }
-        let len = u32::from_be_bytes(len_buf);
-        if len > MAX_FRAME_BYTES {
-            return;
-        }
-        let mut buf = vec![0u8; len as usize];
-        if recv.read_exact(&mut buf).await.is_err() {
-            return;
-        }
-        match postcard::from_bytes::<WireFrame>(&buf) {
-            Ok(frame) => {
-                if inbound_tx
-                    .send(Inbound::Wire {
-                        from: frame.from,
-                        class: frame.class,
-                        bytes: vd_sim::io::bytes(frame.bytes),
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            Err(_) => return,
         }
     }
 }
 
-/// Read length-prefixed reliable frames off a uni stream into a shared bounded
-/// inbox (the mesh transport's receive path; bounding makes a slow consumer drop
-/// stale frames rather than OOM).
+/// Read reliable frames off a uni stream into a shared bounded inbox (the mesh transport's receive
+/// path; bounding makes a slow consumer drop stale frames rather than OOM). Same `wire::framing`
+/// read as [`read_frames`], surfacing through the bounded-inbox chokepoint.
 pub(crate) async fn read_frames_into(
     mut recv: quinn::RecvStream,
     inbox: &std::sync::Arc<std::sync::Mutex<vd_sim::io::BoundedInbox>>,
     stats: &mesh::MeshStats,
 ) {
-    loop {
-        let mut len_buf = [0u8; 4];
-        if recv.read_exact(&mut len_buf).await.is_err() {
-            return;
-        }
-        let len = u32::from_be_bytes(len_buf);
-        if len > MAX_FRAME_BYTES {
-            return;
-        }
-        let mut buf = vec![0u8; len as usize];
-        if recv.read_exact(&mut buf).await.is_err() {
-            return;
-        }
-        match postcard::from_bytes::<WireFrame>(&buf) {
-            Ok(frame) => {
-                // Through the ONE surfacing chokepoint (a dropped RELIABLE frame here is
-                // the loudest case of all — this is the reliable-stream reader).
-                mesh::push_inbox(
-                    inbox,
-                    stats,
-                    Inbound::Wire {
-                        from: frame.from,
-                        class: frame.class,
-                        bytes: vd_sim::io::bytes(frame.bytes),
-                    },
-                );
-            }
-            Err(_) => return,
-        }
+    while let Some(frame) = read_one_wireframe(&mut recv).await {
+        // Through the ONE surfacing chokepoint (a dropped RELIABLE frame here is the loudest case
+        // of all — this is the reliable-stream reader).
+        mesh::push_inbox(
+            inbox,
+            stats,
+            Inbound::Wire {
+                from: frame.from,
+                class: frame.class,
+                bytes: vd_sim::io::bytes(frame.bytes),
+            },
+        );
     }
 }

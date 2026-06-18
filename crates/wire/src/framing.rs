@@ -86,6 +86,23 @@ pub fn split_frame(buf: &[u8]) -> Result<(&[u8], usize), FrameError> {
     Ok((&buf[5..4 + total], 4 + total))
 }
 
+/// Validate + strip the `codec_flags` byte off a stream-frame BODY — the `total_len` bytes that
+/// follow the 4-byte length prefix a STREAMING reader has already consumed off the wire. A QUIC
+/// reader reads length-then-body, so it cannot use [`split_frame`] (which works on a buffer that
+/// still carries the prefix); this is the streaming counterpart, with the SAME reserved-bit
+/// hard-reject — so io-prod's stream transports route through this ONE codec-flags home instead of
+/// hand-rolling the discipline (HR3). The cap is enforced by the reader on `total_len` before it
+/// allocates the body.
+pub fn frame_body_payload(body: &[u8]) -> Result<&[u8], FrameError> {
+    let &codec_flags = body
+        .first()
+        .ok_or(FrameError::Truncated { have: 0, need: 1 })?;
+    if codec_flags != CODEC_FLAGS_V1 {
+        return Err(FrameError::ReservedCodecFlags(codec_flags));
+    }
+    Ok(&body[1..])
+}
+
 /// Decode one frame's payload as `T`.
 pub fn decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<(T, usize), FrameError> {
     split_frame(buf).and_then(decode_split())
@@ -149,6 +166,27 @@ mod tests {
         frame[4] = 0b0000_0001; // claim bitcode: reserved in v1
         assert_eq!(
             split_frame(&frame).expect_err("flags"),
+            FrameError::ReservedCodecFlags(1)
+        );
+    }
+
+    #[test]
+    fn frame_body_payload_strips_flags_and_rejects_reserved() {
+        // The body is the `total_len` bytes a streaming reader reads AFTER the 4-byte prefix:
+        // [codec_flags][payload]. `frame_body_payload` is `split_frame`'s streaming counterpart.
+        let payload = postcard::to_allocvec(&("x", 9u32)).expect("postcard");
+        let frame = frame_payload(Ok(payload.clone())).expect("frame");
+        let body = &frame[4..];
+        assert_eq!(frame_body_payload(body).expect("ok"), payload.as_slice());
+        // An empty body (zero-length frame) and a reserved codec flag are both hard errors.
+        assert_eq!(
+            frame_body_payload(&[]).expect_err("empty"),
+            FrameError::Truncated { have: 0, need: 1 }
+        );
+        let mut bad = body.to_vec();
+        bad[0] = 0b0000_0001; // claim bitcode: reserved in v1
+        assert_eq!(
+            frame_body_payload(&bad).expect_err("flag"),
             FrameError::ReservedCodecFlags(1)
         );
     }

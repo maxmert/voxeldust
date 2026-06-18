@@ -28,7 +28,7 @@ use vd_core::{MsgId, NodeId};
 use vd_sim::io::{BoundedInbox, Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
 
 use crate::trust::ClusterTrust;
-use crate::{MAX_FRAME_BYTES, ProdIoError, WireFrame};
+use crate::{ProdIoError, WireFrame, write_wireframe};
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -417,30 +417,27 @@ async fn write_frame(
         *reliable_stream = None;
     }
     let conn = connection.as_ref().ok_or(())?;
-    let payload = postcard::to_allocvec(&WireFrame {
-        from: local,
-        class: frame.class,
-        bytes: frame.bytes.to_vec(),
-    })
-    .map_err(|_| ())?;
 
     match frame.class.reliability() {
         Reliability::Reliable => {
+            // Reliable frames ride a persistent uni stream, framed through the ONE wire::framing
+            // home (codec_flags + cap) via the shared writer — never hand-rolled here (HR3).
             if reliable_stream.is_none() {
                 *reliable_stream = Some(conn.open_uni().await.map_err(|_| ())?);
             }
             let send = reliable_stream.as_mut().ok_or(())?;
-            let len = u32::try_from(payload.len()).map_err(|_| ())?;
-            if len > MAX_FRAME_BYTES {
-                return Err(());
-            }
-            send.write_all(&len.to_be_bytes()).await.map_err(|_| ())?;
-            send.write_all(&payload).await.map_err(|_| ())?;
-            Ok(())
+            write_wireframe(send, local, frame.class, &frame.bytes).await
         }
         Reliability::Unreliable => {
-            // Datagrams are message-bounded (no length prefix). TooLarge is a loud
-            // failure of the caller's framing, not a transport error to bounce.
+            // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a
+            // stream concept). TooLarge is a loud failure of the caller's framing, not a transport
+            // error to bounce.
+            let payload = postcard::to_allocvec(&WireFrame {
+                from: local,
+                class: frame.class,
+                bytes: frame.bytes.to_vec(),
+            })
+            .map_err(|_| ())?;
             if conn
                 .max_datagram_size()
                 .is_none_or(|max| payload.len() > max)
@@ -707,7 +704,7 @@ mod tests {
         let rt = runtime();
         let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
         let (mut nodes, controls) = cluster(rt.handle(), &trust, 2, 64);
-        // A payload far above any datagram MTU (well under MAX_FRAME_BYTES so the
+        // A payload far above any datagram MTU (well under the wire::framing stream cap so the
         // length guard doesn't reject it first).
         let huge = vd_sim::io::bytes(vec![7u8; 64 * 1024]);
         nodes[0]

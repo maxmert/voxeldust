@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use vd_core::pose::RealmId;
+use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{EntityId, Fence, NodeId, SessionId, TickId};
 use vd_node::TickReport;
 use vd_sim::stub::DiscardReason;
@@ -27,6 +27,10 @@ pub struct InspectReport {
     /// Entities this node holds authoritatively, with the directory-recorded fence
     /// it holds them at (shards fill this; FENCE-9 asserts the fence matches).
     pub held_entities: Vec<(EntityId, Fence)>,
+    /// The held entities' POSES (shards fill this; 1d.1). The cross-shard crossing gate asserts a
+    /// transferred entity's dest pose equals its sanitized source pose (and is non-origin) — proof
+    /// the entity STATE crossed, not just authority. Aligned 1:1 with `held_entities` by entity.
+    pub held_poses: Vec<(EntityId, StampedPose)>,
     /// Realms this node holds authoritatively, with their fence (shards fill this;
     /// extends AUTHORITY-UNIQUE to realm keys — FENCE-3).
     pub held_realms: Vec<(RealmId, Fence)>,
@@ -106,6 +110,12 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .values()
             .filter(|d| d.granted)
             .map(|d| (d.entity, d.entity_fence))
+            .collect();
+        report.held_poses = dots
+            .0
+            .values()
+            .filter(|d| d.granted)
+            .map(|d| (d.entity, d.pose))
             .collect();
         report.pending_entities = dots
             .0

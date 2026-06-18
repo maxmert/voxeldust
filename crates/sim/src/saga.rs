@@ -22,6 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
+use vd_core::pose::RealmId;
 use vd_core::{Fence, NodeId, SessionId, TransferId};
 use vd_wire::seams::directory::DirectoryKey;
 use vd_wire::seams::transfer_control::{PrepareReject, PrepareResult, TransferControl};
@@ -44,6 +45,11 @@ pub struct SagaCtx {
     pub class: DurabilityClass,
     /// Warp-class transfers must await destination provisioning first.
     pub needs_provision: bool,
+    /// The realms the subject crosses BETWEEN (1d.1): stamped onto the `StubCrossing` envelope the
+    /// saga emits to the dest at commit. Carried VERBATIM (the saga never matches on realm — HR3);
+    /// the dest finds the adopted dot by entity, so these are faithful provenance, not a key.
+    pub from_realm: RealmId,
+    pub to_realm: RealmId,
 }
 
 /// The saga's phase. Serializable: the two durable checkpoints persist it.
@@ -55,8 +61,16 @@ pub enum SagaState {
     Preparing,
     /// `RequestCut` issued; awaiting the client's confirmed CUT_MARKER seq.
     Cutting,
-    /// `FreezeSource` issued; the source applies input through `marker_seq`.
-    Freezing { marker_seq: u64 },
+    /// `FreezeSource` + `FlushSource` issued. The POSE-BEFORE-PROMOTE gate: the commit (CAS) is
+    /// reachable only once BOTH conditions land, in either order — `frozen_drained` (the gateway's
+    /// `SourceFrozen` input-drain watermark) AND `flushed` (the source shipped its pose via
+    /// `SourceFlushed`). A lost flush therefore BLOCKS the commit; the machine can never emit a
+    /// poseless crossing (closing the silent-pose-loss hole). 1d.1.
+    Freezing {
+        marker_seq: u64,
+        frozen_drained: Option<u64>,
+        flushed: bool,
+    },
     /// The directory CAS is in flight — THE commit point.
     CommittingCas { marker_seq: u64, drained_seq: u64 },
     /// CAS won: the gateway route swap (`CommitAuthority`) is in flight.
@@ -109,6 +123,13 @@ pub enum SagaEvent {
     SourceFrozen {
         drained_seq: u64,
     },
+    /// The SOURCE shipped its authoritative pose (the reply to `FlushSource`). The pose itself
+    /// rides the runtime wrapper (`LiveSaga.flushed_pose`), NOT this event — the FSM stays
+    /// pose-free; `drained_seq` is the source's own drain watermark (carried for observability /
+    /// a future cross-check, never the CAS watermark).
+    SourceFlushed {
+        drained_seq: u64,
+    },
     CasWon {
         new_fence: Fence,
     },
@@ -131,6 +152,20 @@ pub enum SagaEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SagaAction {
     Send(TransferControl),
+    /// Tell the SOURCE shard to ship the subject's authoritative pose (1d.1). Emitted alongside
+    /// `Send(FreezeSource)` on entering `Freezing`. UNIT: the wrapper resolves the target
+    /// (`SagaCtx.source`) and the step phase (`FLUSH_SOURCE_STEP`); the FSM holds no transport
+    /// detail. Read-only at the source ⇒ no compensator (the abort `ThawSource` is the only undo).
+    FlushSource,
+    /// Emit the entity-STATE crossing (`StubCrossing`) to the DEST (1d.1), carrying the stored
+    /// flushed pose at the post-CAS authority `fence`. Emitted in the `CasWon` batch (forward-only)
+    /// and re-emitted on a post-commit `Swapping` timeout — the dest journal dedups by
+    /// `(transfer, STUB_CROSSING_STEP)`. Carries `fence` (the new authority fence) so a receiver
+    /// can reject a stale crossing (fence rule 1); the wrapper fills pose/realms/entity from the
+    /// stored flush + `SagaCtx`.
+    EmitCrossing {
+        fence: Fence,
+    },
     /// Issue the directory CAS (commit point for a DURABLE subject). Carries the
     /// expectation; the wrapper fills `transfer`/`new_owner` from the `SagaCtx`.
     IssueCommitCas {
@@ -227,26 +262,45 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
 
         // ---- cut ------------------------------------------------------------------
         (S::Cutting, E::CutConfirmed { marker_seq }) => (
-            S::Freezing { marker_seq },
-            vec![A::Send(TransferControl::FreezeSource {
-                transfer: ctx.transfer,
-                session: ctx.session,
+            S::Freezing {
                 marker_seq,
-                dest: ctx.dest,
-            })],
+                frozen_drained: None,
+                flushed: false,
+            },
+            vec![
+                A::Send(TransferControl::FreezeSource {
+                    transfer: ctx.transfer,
+                    session: ctx.session,
+                    marker_seq,
+                    dest: ctx.dest,
+                }),
+                A::FlushSource,
+            ],
         ),
         (S::Cutting, E::Timeout) => abort_from_pre_freeze(ctx, AbortReason::CutTimeout),
         (S::Cutting, E::Cancel) => abort_from_pre_freeze(ctx, AbortReason::Cancelled),
 
-        // ---- freeze ----------------------------------------------------------------
-        (S::Freezing { marker_seq }, E::SourceFrozen { drained_seq }) => (
-            S::CommittingCas {
+        // ---- freeze (the pose-before-promote gate) ---------------------------------------
+        // Both arms record their condition and defer the COMMIT decision to `freezing_advance`,
+        // which fires the CAS only when BOTH conditions have landed (in any order).
+        (
+            S::Freezing {
                 marker_seq,
-                drained_seq,
+                flushed,
+                ..
             },
-            vec![commit_action(ctx)],
-        ),
-        // Freeze failed/timed out: the source MUST be thawed (the compensator).
+            E::SourceFrozen { drained_seq },
+        ) => freezing_advance(ctx, marker_seq, Some(drained_seq), flushed),
+        (
+            S::Freezing {
+                marker_seq,
+                frozen_drained,
+                ..
+            },
+            E::SourceFlushed { .. },
+        ) => freezing_advance(ctx, marker_seq, frozen_drained, true),
+        // Freeze failed/timed out: the source MUST be thawed (the compensator). A pending flush
+        // needs no undo (it is a read on the source).
         (S::Freezing { .. }, E::Timeout) => abort_with_thaw(ctx, AbortReason::FreezeTimeout),
         (S::Freezing { .. }, E::Cancel) => abort_with_thaw(ctx, AbortReason::Cancelled),
 
@@ -261,6 +315,9 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                     new_fence,
                     subject: ctx.subject, // carried VERBATIM (Realm or Entity); the dest adopts the Entity
                 }),
+                // The entity-STATE crossing rides the SAME post-CAS batch (forward-only). The gate
+                // above guarantees a pose was flushed, so the wrapper always has one to ship.
+                A::EmitCrossing { fence: new_fence },
             ],
         ),
         // The CAS lost: someone else moved the fence. This saga no-ops and unwinds
@@ -277,12 +334,17 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         // the directory already says the dest owns the subject.
         (S::Swapping { new_fence }, E::Timeout) => (
             S::Swapping { new_fence },
-            vec![A::Send(TransferControl::CommitAuthority {
-                transfer: ctx.transfer,
-                session: ctx.session,
-                new_fence,
-                subject: ctx.subject, // idempotent re-send carries the same subject
-            })],
+            vec![
+                A::Send(TransferControl::CommitAuthority {
+                    transfer: ctx.transfer,
+                    session: ctx.session,
+                    new_fence,
+                    subject: ctx.subject, // idempotent re-send carries the same subject
+                }),
+                // Re-emit the crossing too (at-least-once for the entity state, same window as the
+                // route-swap retry); the dest journal dedups a redelivery.
+                A::EmitCrossing { fence: new_fence },
+            ],
         ),
         (S::Demoting { new_fence }, E::DemoteComplete) => (
             S::Releasing { new_fence },
@@ -317,6 +379,37 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         // duplicates or stale deliveries under at-least-once — never errors.
         (terminal @ (S::Done { .. } | S::Aborted { .. }), _) => (terminal, vec![]),
         (state, _) => (state, vec![]),
+    }
+}
+
+/// The pose-before-promote gate's decision (1d.1), hoisted out of the two `Freezing` arms so the
+/// branch is covered ONCE: the CAS (commit) fires only when BOTH the gateway freeze
+/// (`frozen_drained`) AND the source flush (`flushed`) have landed — otherwise the saga stays in
+/// `Freezing`, recording the condition that just arrived. The watermark threaded into
+/// `CommittingCas` is the GATEWAY's `drained_seq` (the input-conservation seq), never the source
+/// flush watermark.
+fn freezing_advance(
+    ctx: &SagaCtx,
+    marker_seq: u64,
+    frozen_drained: Option<u64>,
+    flushed: bool,
+) -> (SagaState, Vec<SagaAction>) {
+    match (frozen_drained, flushed) {
+        (Some(drained_seq), true) => (
+            SagaState::CommittingCas {
+                marker_seq,
+                drained_seq,
+            },
+            vec![commit_action(ctx)],
+        ),
+        _ => (
+            SagaState::Freezing {
+                marker_seq,
+                frozen_drained,
+                flushed,
+            },
+            vec![],
+        ),
     }
 }
 
@@ -410,6 +503,8 @@ mod tests {
             dest: NodeId(20),
             class,
             needs_provision,
+            from_realm: RealmId::System(3),
+            to_realm: RealmId::System(4),
         }
     }
 
@@ -469,7 +564,9 @@ mod tests {
         );
     }
 
-    /// Drive a fresh saga to the commit-issue point and return (state, actions there).
+    /// Drive a fresh saga to the commit-issue point and return (state, actions there). The
+    /// pose-before-promote gate needs BOTH the freeze and the flush; the SECOND (here the flush)
+    /// is where the commit action is emitted.
     fn drive_from_freeze(c: &SagaCtx) -> (SagaState, Vec<SagaAction>) {
         let (state, _) = drive(
             c,
@@ -477,10 +574,10 @@ mod tests {
             &[
                 SagaEvent::Prepared(PrepareResult::Ready),
                 SagaEvent::CutConfirmed { marker_seq: 9 },
+                SagaEvent::SourceFrozen { drained_seq: 9 },
             ],
         );
-        // The SourceFrozen step is where the commit action is emitted.
-        step(c, state, SagaEvent::SourceFrozen { drained_seq: 9 })
+        step(c, state, SagaEvent::SourceFlushed { drained_seq: 9 })
     }
 
     #[test]
@@ -495,6 +592,7 @@ mod tests {
                 SagaEvent::Prepared(PrepareResult::Ready),
                 SagaEvent::CutConfirmed { marker_seq: 17 },
                 SagaEvent::SourceFrozen { drained_seq: 17 },
+                SagaEvent::SourceFlushed { drained_seq: 17 },
                 SagaEvent::CasWon {
                     new_fence: Fence(6),
                 },
@@ -520,6 +618,17 @@ mod tests {
             "exactly two durable points on the happy path"
         );
         assert_eq!(actions.last(), Some(&SagaAction::Tombstone));
+
+        // 1d.1: the source is told to flush its pose on entering Freezing, and the entity-state
+        // crossing is emitted at commit, stamped with the new authority fence.
+        assert!(
+            actions.contains(&SagaAction::FlushSource),
+            "the source is told to flush its pose: {actions:?}"
+        );
+        assert!(
+            actions.contains(&SagaAction::EmitCrossing { fence: Fence(6) }),
+            "the crossing is emitted at the new authority fence: {actions:?}"
+        );
 
         // The full command sequence, in order.
         let sends: Vec<TransferControl> = actions
@@ -643,7 +752,14 @@ mod tests {
                 SagaEvent::CutConfirmed { marker_seq: 5 },
             ],
         );
-        assert_eq!(state, SagaState::Freezing { marker_seq: 5 });
+        assert_eq!(
+            state,
+            SagaState::Freezing {
+                marker_seq: 5,
+                frozen_drained: None,
+                flushed: false,
+            }
+        );
         let (state, actions) = step(&c, state, SagaEvent::Timeout);
         let thaw = SagaAction::Send(TransferControl::ThawSource {
             transfer: c.transfer,
@@ -691,6 +807,115 @@ mod tests {
     }
 
     #[test]
+    fn cut_confirmed_issues_freeze_and_flush() {
+        // 1d.1: entering Freezing issues BOTH FreezeSource (to the gateway) and FlushSource (to
+        // the source), and the state carries the two ungated sub-flags.
+        let c = ctx(false);
+        let (state, _) = drive(
+            &c,
+            start(&c).0,
+            &[SagaEvent::Prepared(PrepareResult::Ready)],
+        );
+        let (next, acts) = step(&c, state, SagaEvent::CutConfirmed { marker_seq: 5 });
+        assert_eq!(
+            next,
+            SagaState::Freezing {
+                marker_seq: 5,
+                frozen_drained: None,
+                flushed: false,
+            }
+        );
+        assert!(
+            acts.contains(&SagaAction::Send(TransferControl::FreezeSource {
+                transfer: c.transfer,
+                session: c.session,
+                marker_seq: 5,
+                dest: c.dest,
+            }))
+        );
+        assert!(acts.contains(&SagaAction::FlushSource));
+    }
+
+    #[test]
+    fn pose_before_promote_gate_requires_both_freeze_and_flush() {
+        // The CAS fires ONLY once BOTH the gateway freeze and the source flush land — in either
+        // order — so a poseless crossing is unrepresentable. Both stay-arms and both advance-paths
+        // are exercised here (deterministically, not by proptest draw).
+        let c = ctx(false);
+        let (in_freezing, _) = drive(
+            &c,
+            start(&c).0,
+            &[
+                SagaEvent::Prepared(PrepareResult::Ready),
+                SagaEvent::CutConfirmed { marker_seq: 5 },
+            ],
+        );
+
+        // ORDER A — freeze first stays; the flush completes the commit.
+        let (after_frozen, acts) =
+            step(&c, in_freezing, SagaEvent::SourceFrozen { drained_seq: 5 });
+        assert_eq!(
+            after_frozen,
+            SagaState::Freezing {
+                marker_seq: 5,
+                frozen_drained: Some(5),
+                flushed: false,
+            }
+        );
+        assert!(acts.is_empty(), "freeze alone issues no commit");
+        let (committed_a, acts) = step(
+            &c,
+            after_frozen,
+            SagaEvent::SourceFlushed { drained_seq: 5 },
+        );
+        assert_eq!(
+            committed_a,
+            SagaState::CommittingCas {
+                marker_seq: 5,
+                drained_seq: 5,
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::IssueCommitCas {
+                expected: c.expected_fence
+            }]
+        );
+
+        // ORDER B — flush first stays; the freeze completes, and the GATEWAY watermark (7) is the
+        // one threaded into CommittingCas, NOT the source flush watermark (99).
+        let (after_flush, acts) = step(
+            &c,
+            in_freezing,
+            SagaEvent::SourceFlushed { drained_seq: 99 },
+        );
+        assert_eq!(
+            after_flush,
+            SagaState::Freezing {
+                marker_seq: 5,
+                frozen_drained: None,
+                flushed: true,
+            }
+        );
+        assert!(acts.is_empty(), "flush alone issues no commit");
+        let (committed_b, acts) = step(&c, after_flush, SagaEvent::SourceFrozen { drained_seq: 7 });
+        assert_eq!(
+            committed_b,
+            SagaState::CommittingCas {
+                marker_seq: 5,
+                drained_seq: 7,
+            },
+            "the gateway drained_seq wins, not the source flush watermark"
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::IssueCommitCas {
+                expected: c.expected_fence
+            }]
+        );
+    }
+
+    #[test]
     fn cas_loser_unwinds_with_thaw() {
         let c = ctx(false);
         let (state, _) = drive(
@@ -700,6 +925,7 @@ mod tests {
                 SagaEvent::Prepared(PrepareResult::Ready),
                 SagaEvent::CutConfirmed { marker_seq: 9 },
                 SagaEvent::SourceFrozen { drained_seq: 9 },
+                SagaEvent::SourceFlushed { drained_seq: 9 }, // gate: both, to reach CommittingCas
             ],
         );
         let (state, actions) = step(&c, state, SagaEvent::CasLost { current: Fence(99) });
@@ -751,12 +977,16 @@ mod tests {
         assert_eq!(next, state);
         assert_eq!(
             actions,
-            vec![SagaAction::Send(TransferControl::CommitAuthority {
-                transfer: c.transfer,
-                session: c.session,
-                new_fence: Fence(7),
-                subject: c.subject,
-            })]
+            vec![
+                SagaAction::Send(TransferControl::CommitAuthority {
+                    transfer: c.transfer,
+                    session: c.session,
+                    new_fence: Fence(7),
+                    subject: c.subject,
+                }),
+                // 1d.1: the crossing is re-emitted alongside the route-swap retry (at-least-once).
+                SagaAction::EmitCrossing { fence: Fence(7) },
+            ]
         );
         let state = SagaState::Releasing {
             new_fence: Fence(7),
@@ -801,6 +1031,7 @@ mod tests {
             ))),
             (0u64..100).prop_map(|s| SagaEvent::CutConfirmed { marker_seq: s }),
             (0u64..100).prop_map(|s| SagaEvent::SourceFrozen { drained_seq: s }),
+            (0u64..100).prop_map(|s| SagaEvent::SourceFlushed { drained_seq: s }),
             (0u64..10).prop_map(|f| SagaEvent::CasWon {
                 new_fence: Fence(f)
             }),
@@ -854,6 +1085,11 @@ mod tests {
                     SagaState::AwaitProvision => SagaEvent::ProvisionReady,
                     SagaState::Preparing => SagaEvent::Prepared(PrepareResult::Ready),
                     SagaState::Cutting => SagaEvent::CutConfirmed { marker_seq: 1 },
+                    // The pose-before-promote gate needs BOTH conditions: feed the flush first
+                    // (stays Freezing), then the freeze advances to the commit.
+                    SagaState::Freezing { flushed: false, .. } => {
+                        SagaEvent::SourceFlushed { drained_seq: 1 }
+                    }
                     SagaState::Freezing { .. } => SagaEvent::SourceFrozen { drained_seq: 1 },
                     SagaState::CommittingCas { .. } => SagaEvent::CasWon { new_fence: Fence(9) },
                     SagaState::Swapping { .. } => SagaEvent::RouteSwapped,

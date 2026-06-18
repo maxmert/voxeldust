@@ -25,7 +25,9 @@ use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
-use vd_wire::intershard::InterShardFlow;
+use vd_wire::intershard::{
+    FlushSource, InterShardFlow, TransferAck, TransferEnvelope, TransitionPayload,
+};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::session_flow::{GatewayToShard, ShardToGateway};
 
@@ -250,6 +252,19 @@ pub struct StubStats {
     /// D-28), and is the operational answer to "what seq did this shard resume a handed-off
     /// session at". `None` until the first honored slot.
     pub last_input_slot_resume: Option<u64>,
+    /// 1d.1 entity-state crossings APPLIED (`StubCrossing` pose stored on the adopted dot, first
+    /// delivery of a `(transfer, step)`). The headline 1d.1 counter.
+    pub crossings_applied: u64,
+    /// Crossings BUFFERED because the adopt grant had not flipped yet — drained + applied at the
+    /// flip (the crossing, emitted at CAS, races ahead of the dest's adopt under the 1c.8
+    /// promote-before-demote model). 0 only if every crossing arrived after adopt.
+    pub crossings_buffered: u64,
+    /// Crossings DROPPED for a fence below the dot's recorded authority fence (fence rule 1 — a
+    /// stale leftover from a superseded transfer). 0 in a healthy single-transfer run.
+    pub crossings_stale: u64,
+    /// `Transfer` envelopes whose payload kind 1d.1 does not consume (`InitialSpawn` /
+    /// `TransientBatch`) — a counted no-op, never a panic. 0 in a 1d.1 crossing run.
+    pub crossings_unhandled: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -296,6 +311,30 @@ impl AppliedSteps {
     }
 }
 
+/// One entity-state crossing held until its dot is adopted (1d.1). The `StubCrossing`, emitted by
+/// the saga at the CAS, races AHEAD of the dest's adopt (which is gated behind
+/// `OpenInputSlot`→`HeadRead`→grant-flip under the 1c.8 promote-before-demote model), so a
+/// crossing that arrives before the grant flips is BUFFERED here and drained at the flip — the
+/// arrival/adopt ordering is decoupled within a SINGLE delivery (no re-emit needed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PendingCrossing {
+    transfer: TransferId,
+    step_id: u32,
+    fence: Fence,
+    pose: StampedPose,
+}
+
+/// Crossings buffered awaiting their dot's adopt grant-flip, keyed by the subject entity (1d.1).
+/// Drained by `drain_pending_crossing` on the flip. In normal operation it holds ≤(concurrent
+/// inbound transfers) entries transiently — the adopt lands within a few ticks.
+///
+/// OWED (alongside the 1d.0 `AppliedSteps` retention bound, D-22): a cleanup for an entry whose
+/// entity NEVER adopts (a misrouted crossing). Both need terminal-awareness the dest shard does
+/// not yet have, so both land with the journal-retention slice; neither grows per-tick in a
+/// healthy run.
+#[derive(Resource, Debug, Default)]
+pub struct PendingCrossings(BTreeMap<EntityId, PendingCrossing>);
+
 /// Install the stub-shard systems and resources onto a node's world + schedule.
 /// Called by the node composer for `NodeKind::StubShard` (never by feature code).
 pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: StubConfig) {
@@ -310,6 +349,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(FrameCounter::default());
     world.insert_resource(StubStats::default());
     world.insert_resource(AppliedSteps::default());
+    world.insert_resource(PendingCrossings::default());
     schedule.add_systems((request_pending_grants, process_inbound, emit_frames).chain());
 }
 
@@ -435,6 +475,8 @@ fn process_inbound(
     mut mint: ResMut<EntityMint>,
     mut log: ResMut<InputLog>,
     mut stats: ResMut<StubStats>,
+    mut applied: ResMut<AppliedSteps>,
+    mut pending: ResMut<PendingCrossings>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     for msg in &inbox.0 {
@@ -468,6 +510,8 @@ fn process_inbound(
                 &config,
                 &mut authority,
                 &mut dots,
+                &mut applied,
+                &mut pending,
                 &mut stats,
                 &mut outbox,
             ),
@@ -632,7 +676,7 @@ fn on_gateway_msg(
             // Extract the SUBJECT EntityId to ADOPT. A non-Entity subject (e.g. a Realm-subject
             // saga, which the FSM proptests drive through CommitAuthority) is a COUNTED no-op —
             // never an extraction panic: the dest only adopts an Entity transfer.
-            let Some(subject_entity) = subject_entity(subject) else {
+            let Some(subject_entity) = subject.transfer_subject_entity() else {
                 stats.input_slots_malformed += 1;
                 tracing::warn!(
                     ?subject,
@@ -687,17 +731,6 @@ fn on_gateway_msg(
                 }
             }
         }
-    }
-}
-
-/// The transfer SUBJECT's `EntityId` for an ADOPT, or `None` for a non-Entity subject (the
-/// counted no-op). Monomorphic so the `OpenInputSlot` arm + the directory reply arms stay
-/// branchless shims (HR5): the ONE `DirectoryKey → EntityId` extraction in the dest.
-#[must_use]
-fn subject_entity(subject: DirectoryKey) -> Option<EntityId> {
-    match subject {
-        DirectoryKey::Entity(entity) => Some(entity),
-        DirectoryKey::Session(_) | DirectoryKey::Realm(_) | DirectoryKey::Ship(_) => None,
     }
 }
 
@@ -798,28 +831,38 @@ impl Dot {
     }
 }
 
-/// A `SessionAttached` reply plus the gateway it routes to (the grant-flip's optional egress).
+/// A `SessionAttached` reply plus the gateway it routes to (the login grant-flip's egress).
 struct AttachEgress {
     gateway: NodeId,
     reply: ShardToGateway,
 }
 
-/// Flip the matching provisional dot to `granted` at the recorded fence, returning a
-/// `SessionAttached` egress IFF this is a login attach (NOT a transfer-dest adopt). Monomorphic
-/// (the loop + the adopt branching live here) so the reply arm stays a branchless shim (HR5).
+/// The outcome of a grant-flip — three mutually-exclusive caller obligations (1d.1).
+enum GrantFlip {
+    /// A LOGIN attach flipped: push the `SessionAttached` egress.
+    LoggedIn(AttachEgress),
+    /// A transfer-dest ADOPT flipped (R2 — no re-home): the caller drains the flipped session's
+    /// buffered crossing (if any). Carries the session so the drain needs no second lookup.
+    Adopted { session: SessionId },
+    /// No ungranted dot matched (a duplicate grant head): idempotent no-op.
+    NoOp,
+}
+
+/// Flip the matching provisional dot to `granted` at the recorded fence. Monomorphic (the loop +
+/// the login/adopt branching live here) so the reply arm stays a branchless dispatch (HR5).
 ///
-/// - login (`!adopting`): granted := true, render_ready := true, push SessionAttached.
+/// - login (`!adopting`): granted := true, render_ready := true → `LoggedIn` (push SessionAttached).
 /// - adopt (`adopting`, 1c.8): granted := true, render_ready := false, adopting cleared, NO
-///   SessionAttached (R2 — the source owns the client; 1d re-homes), so returns `None`.
+///   SessionAttached (R2 — the source owns the client) → `Adopted` (the caller drains the crossing).
 ///
-/// Guarded by `!dot.granted` so a duplicate grant head is idempotent (no second flip/reply).
+/// Guarded by `!dot.granted` so a duplicate grant head is idempotent (`NoOp`, no second flip).
 fn flip_grant(
     dots: &mut BTreeMap<SessionId, Dot>,
     entity: EntityId,
     fence: Fence,
     config: &StubConfig,
     realm_fence: Fence,
-) -> Option<AttachEgress> {
+) -> GrantFlip {
     for (session, dot) in dots.iter_mut() {
         if !dot_grant_target(dot, entity) {
             continue;
@@ -830,10 +873,10 @@ fn flip_grant(
             // Transfer-dest adopt: held but not rendered, no re-home (1c.8). Clear the adopt
             // marker so the source granted-key poll engages on this now-granted dot at the dest.
             dot.adopting = false;
-            return None;
+            return GrantFlip::Adopted { session: *session };
         }
         dot.render_ready = true;
-        return Some(AttachEgress {
+        return GrantFlip::LoggedIn(AttachEgress {
             gateway: dot.gateway,
             reply: ShardToGateway::SessionAttached {
                 session: *session,
@@ -843,7 +886,7 @@ fn flip_grant(
             },
         });
     }
-    None
+    GrantFlip::NoOp
 }
 
 /// Whether a dot is the (single) ungranted holder of `entity` awaiting its grant flip.
@@ -892,6 +935,182 @@ fn foreign_takeover_target(dot: &Dot, entity: EntityId) -> bool {
     (dot.entity == entity) & dot.granted & !dot.departing
 }
 
+/// SOURCE side of the 1d.1 pose flush: ship the authoritative pose of the held subject dot back to
+/// the orchestrator (`TransferAck::SourceFlushed`), so the saga can stamp the crossing. Read-only —
+/// authority is unchanged (the abort-path `ThawSource` is the only stateful source undo). Three
+/// total paths, all covered: a non-Entity subject → no-op; the subject not held here → counted
+/// no-op (a stale/misrouted flush); held → ship. Monomorphic (the finder + ship are hoisted out of
+/// the decode arm — HR5 branchless shim).
+fn on_flush_source(flush: FlushSource, config: &StubConfig, dots: &Dots, outbox: &mut OutboundBox) {
+    let Some(entity) = flush.subject.transfer_subject_entity() else {
+        return; // a non-Entity subject is not a per-entity pose flush
+    };
+    let Some(dot) = dots.0.values().find(|d| flush_target(d, entity)) else {
+        tracing::warn!(%entity, "FlushSource for an entity this shard does not hold — no pose to ship");
+        return;
+    };
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+            transfer_id: flush.transfer,
+            step_id: flush.step_id,
+            pose: dot.pose,
+            // The source's own input drain watermark (observability; the saga's CAS watermark is
+            // the GATEWAY's SourceFrozen seq, not this).
+            drained_seq: dot.last_applied_seq.unwrap_or(0),
+        }),
+    );
+}
+
+/// Whether a dot is the local held holder of `entity` whose pose the source flushes. Monomorphic
+/// (the `&`s are covered once here, not the decode arm).
+#[must_use]
+fn flush_target(dot: &Dot, entity: EntityId) -> bool {
+    (dot.entity == entity) & dot.granted & !dot.departing
+}
+
+/// DEST side of the 1d.1 crossing: adopt the crossed entity STATE (pose only in 1d.1). Consumes
+/// only `StubCrossing` (other payload kinds are a counted no-op). If the adopt grant has not
+/// flipped yet (the crossing, emitted at CAS, races ahead of the dest's adopt under the 1c.8
+/// promote-before-demote model), BUFFER it for the flip to drain — do NOT journal/ack until the
+/// pose is actually applied.
+#[allow(clippy::too_many_arguments)]
+fn on_transfer_envelope(
+    env: TransferEnvelope,
+    config: &StubConfig,
+    dots: &mut Dots,
+    applied: &mut AppliedSteps,
+    pending: &mut PendingCrossings,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let (entity, pose) = match env.payload {
+        TransitionPayload::StubCrossing { entity, pose, .. } => (entity, pose),
+        TransitionPayload::InitialSpawn { .. } | TransitionPayload::TransientBatch { .. } => {
+            stats.crossings_unhandled += 1;
+            return;
+        }
+    };
+    match dots
+        .0
+        .iter()
+        .find(|(_, d)| crossing_target(d, entity))
+        .map(|(s, _)| *s)
+    {
+        Some(session) => {
+            let dot = dots.0.get_mut(&session).expect("just found");
+            apply_crossing(
+                dot,
+                env.transfer_id,
+                env.step_id,
+                env.fence,
+                pose,
+                applied,
+                config,
+                stats,
+                outbox,
+            );
+        }
+        None => {
+            // The adopt grant has not flipped yet: buffer for the flip to drain (no journal/ack).
+            // Count a genuine FIRST buffering only — the saga re-emits the crossing at-least-once
+            // (saga.rs Swapping timeout), and each redelivery while still-buffered overwrites the
+            // SAME key (bounded), so an unconditional bump would inflate the counter for ONE
+            // crossing. `insert` returning `None` is the first-insert signal (the same
+            // FirstApply-vs-AlreadyApplied shape as `journal_step`).
+            let first = pending
+                .0
+                .insert(
+                    entity,
+                    PendingCrossing {
+                        transfer: env.transfer_id,
+                        step_id: env.step_id,
+                        fence: env.fence,
+                        pose,
+                    },
+                )
+                .is_none();
+            if first {
+                stats.crossings_buffered += 1;
+            }
+        }
+    }
+}
+
+/// Whether a dot is the ADOPTED dest dot for `entity`: authority-held (`granted`), not yet
+/// render-ready (1d.1 stores the pose, 1d.3 flips render), not departing. Monomorphic predicate.
+#[must_use]
+fn crossing_target(dot: &Dot, entity: EntityId) -> bool {
+    (dot.entity == entity) & dot.granted & !dot.render_ready & !dot.departing
+}
+
+/// Apply one crossing to its adopted dot (the shared immediate + drained path). Fence rule 1: a
+/// crossing below the dot's recorded authority fence is a stale leftover (counted, dropped, NOT
+/// acked). Otherwise consult-before-effect via the 1d.0 journal (FirstApply ⇒ sanitize + store;
+/// redelivery ⇒ re-ack only), then ack the step either way.
+#[allow(clippy::too_many_arguments)]
+fn apply_crossing(
+    dot: &mut Dot,
+    transfer: TransferId,
+    step_id: u32,
+    fence: Fence,
+    pose: StampedPose,
+    applied: &mut AppliedSteps,
+    config: &StubConfig,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    if fence.is_stale_against(dot.entity_fence) {
+        stats.crossings_stale += 1;
+        return;
+    }
+    if applied.journal_step(transfer, step_id) == StepOutcome::FirstApply {
+        // Never trust the network: sanitize to finite at this ingress before storing.
+        dot.pose = pose.sanitized();
+        stats.crossings_applied += 1;
+    }
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::TransferAck(TransferAck::Accepted {
+            transfer_id: transfer,
+            step_id,
+        }),
+    );
+}
+
+/// Drain a crossing buffered before its dot adopted (1d.1): on the adopt grant-flip, apply the
+/// stored pose to the now-granted dot. No buffered crossing for the entity ⇒ no-op (an adopt with
+/// nothing pending — e.g. a crossing that arrived after adopt, or none at all).
+#[allow(clippy::too_many_arguments)]
+fn drain_pending_crossing(
+    dots: &mut BTreeMap<SessionId, Dot>,
+    session: SessionId,
+    entity: EntityId,
+    applied: &mut AppliedSteps,
+    pending: &mut PendingCrossings,
+    config: &StubConfig,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let Some(crossing) = pending.0.remove(&entity) else {
+        return;
+    };
+    let dot = dots.get_mut(&session).expect("the just-adopted dot");
+    apply_crossing(
+        dot,
+        crossing.transfer,
+        crossing.step_id,
+        crossing.fence,
+        crossing.pose,
+        applied,
+        config,
+        stats,
+        outbox,
+    );
+}
+
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
 #[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
@@ -900,14 +1119,27 @@ fn on_directory_reply(
     config: &StubConfig,
     authority: &mut RealmAuthority,
     dots: &mut Dots,
+    applied: &mut AppliedSteps,
+    pending: &mut PendingCrossings,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
-    // The orchestrator wraps every reply in InterShardFlow::DirectoryReply (the dispatch
-    // split); decode the envelope once and route the inner reply. Any other Saga-class arm
-    // to a stub (none today; the Transfer arm to a dest shard lands at 1d) is ignored.
+    // Decode the Saga-class envelope once and dispatch by arm. The orchestrator wraps a directory
+    // answer in DirectoryReply; the 1d.1 transfer machinery adds the SOURCE's FlushSource request
+    // and the DEST's Transfer (StubCrossing) envelope. Other arms (Ghost/Directory/Saga/SagaAck/
+    // TransferAck) never target a stub inbound and are ignored.
     let reply = match postcard::from_bytes::<InterShardFlow>(bytes) {
         Ok(InterShardFlow::DirectoryReply(reply)) => reply,
+        // SOURCE: ship the held subject's pose (1d.1).
+        Ok(InterShardFlow::FlushSource(flush)) => {
+            on_flush_source(flush, config, dots, outbox);
+            return;
+        }
+        // DEST: adopt the crossed entity state (1d.1).
+        Ok(InterShardFlow::Transfer(env)) => {
+            on_transfer_envelope(env, config, dots, applied, pending, stats, outbox);
+            return;
+        }
         Ok(_) => return,
         Err(_) => {
             stats.undecodable += 1;
@@ -953,12 +1185,25 @@ fn on_directory_reply(
                 // OURS: flip granted + stamp the recorded fence. A login attach pushes
                 // SessionAttached and becomes render-ready; a transfer-dest ADOPT (1c.8) suppresses
                 // the attach (R2 — source owns the client) and stays NOT render-ready (no pose
-                // carried; 1d). The login-vs-adopt branching is hoisted into `flip_grant`, which
-                // returns the optional `SessionAttached` egress (Some for a login, None for an adopt).
-                if let Some(reply) =
-                    flip_grant(&mut dots.0, entity, record.fence, config, realm_fence)
-                {
-                    push_session_reply(outbox, reply.gateway, &reply.reply);
+                // carried; 1d.1 stores the crossed pose but does NOT flip render_ready — that is
+                // 1d.3). The branching is hoisted into `flip_grant` → `GrantFlip`: LoggedIn pushes
+                // SessionAttached; Adopted drains the buffered crossing (if any) NOW; NoOp is a
+                // duplicate-grant idempotent no-op.
+                match flip_grant(&mut dots.0, entity, record.fence, config, realm_fence) {
+                    GrantFlip::LoggedIn(egress) => {
+                        push_session_reply(outbox, egress.gateway, &egress.reply);
+                    }
+                    GrantFlip::Adopted { session } => drain_pending_crossing(
+                        &mut dots.0,
+                        session,
+                        entity,
+                        applied,
+                        pending,
+                        config,
+                        stats,
+                        outbox,
+                    ),
+                    GrantFlip::NoOp => {}
                 }
             } else {
                 // FOREIGN owner of an entity this shard holds (1c.8 the SOURCE self-fence, the
@@ -1073,6 +1318,7 @@ mod tests {
     use super::*;
     use crate::capability::NodeKind;
     use vd_core::{MsgId, UniverseTick};
+    use vd_wire::intershard::{FLUSH_SOURCE_STEP, STUB_CROSSING_STEP};
 
     const SHARD: NodeId = NodeId(10);
     const GATEWAY: NodeId = NodeId(20);
@@ -2273,8 +2519,8 @@ mod tests {
 
     #[test]
     fn a_non_entity_subject_open_input_slot_is_a_counted_noop() {
-        // 1c.8 HR5: the subject_entity else arm — a non-Entity subject (e.g. a Realm saga driven
-        // through CommitAuthority) does NOT adopt; it is a counted no-op, never an extraction panic.
+        // 1c.8 HR5: the DirectoryKey::transfer_subject_entity None arm — a non-Entity subject (e.g.
+        // a Realm saga driven through CommitAuthority) does NOT adopt; counted no-op, never a panic.
         let mut rig = Rig::new();
         rig.grant_realm();
         let sent = rig.tick(vec![open_input_slot_subj(
@@ -2505,5 +2751,309 @@ mod tests {
             Some(7),
             "granted dot's watermark untouched"
         );
+    }
+
+    // ---- Slice 1d.1: the pose-only entity-state crossing (source flush + dest adopt) ---------
+
+    const FROM_REALM: RealmId = RealmId::System(7);
+    const TO_REALM: RealmId = RealmId::System(8);
+
+    /// A non-origin crossing pose (so a test can tell an applied crossing from the origin-adopt).
+    fn crossing_pose() -> StampedPose {
+        StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 8 },
+            DVec3::new(4.0, -5.0, 6.0),
+            UniverseTick(200),
+        )
+    }
+
+    /// The directory head that flips the adopted dot to `granted` at `fence` (dest-owned record).
+    fn adopted_head(fence: Fence) -> Inbound {
+        wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(DirectoryReply::Head {
+                key: DirectoryKey::Entity(SUBJECT),
+                record: Some(vd_wire::seams::directory::OwnerRecord {
+                    authority: AuthorityRef::Shard(SHARD),
+                    fence,
+                    lease_expires: UniverseTick(1_000),
+                    in_transfer: None,
+                }),
+            }),
+        )
+    }
+
+    /// A `StubCrossing` envelope for `SUBJECT` at `fence` carrying `pose`.
+    fn crossing_msg(transfer: TransferId, fence: Fence, pose: StampedPose) -> Inbound {
+        wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::Transfer(TransferEnvelope {
+                transfer_id: transfer,
+                universe_epoch: vd_core::EpochId(1),
+                schema_version: vd_wire::intershard::TRANSFER_SCHEMA_VERSION,
+                fence,
+                step_id: STUB_CROSSING_STEP,
+                class: vd_core::entity_kind::DurabilityClass::Durable,
+                payload: TransitionPayload::StubCrossing {
+                    entity: SUBJECT,
+                    from_realm: FROM_REALM,
+                    to_realm: TO_REALM,
+                    pose,
+                    state: vec![],
+                },
+            }),
+        )
+    }
+
+    fn flush_msg(entity: EntityId) -> Inbound {
+        wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::FlushSource(FlushSource {
+                transfer: TransferId(7),
+                subject: DirectoryKey::Entity(entity),
+                step_id: FLUSH_SOURCE_STEP,
+            }),
+        )
+    }
+
+    /// The flows the shard sent to the orchestrator this tick.
+    fn to_orch(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<InterShardFlow> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == ORCH)
+            .map(|(_, _, b)| postcard::from_bytes(b).expect("flow decodes"))
+            .collect()
+    }
+
+    /// Whether the shard acked a crossing step (value-compare, never `matches!` — HR5).
+    fn acked(sent: &[(NodeId, MsgClass, Vec<u8>)], transfer: TransferId) -> bool {
+        to_orch(sent).contains(&InterShardFlow::TransferAck(TransferAck::Accepted {
+            transfer_id: transfer,
+            step_id: STUB_CROSSING_STEP,
+        }))
+    }
+
+    #[test]
+    fn flush_source_ships_the_held_dots_pose() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach(); // a granted login dot for SESSION
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+
+        // (a) BEFORE any input: the dot is at origin with NO applied seq → drained_seq defaults 0.
+        let dot0 = rig.world.resource::<Dots>().0[&SESSION];
+        let sent0 = rig.tick(vec![flush_msg(entity)]);
+        assert_eq!(
+            to_orch(&sent0),
+            vec![InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+                transfer_id: TransferId(7),
+                step_id: FLUSH_SOURCE_STEP,
+                pose: dot0.pose,
+                drained_seq: 0,
+            })],
+            "ships the held dot's pose; an unset watermark defaults to 0"
+        );
+
+        // (b) AFTER applying seq 1: the pose moved and the watermark is Some(1).
+        let _ = rig.tick(vec![input_for(SESSION, 1, GATEWAY)]);
+        let dot1 = rig.world.resource::<Dots>().0[&SESSION];
+        assert_ne!(dot1.pose.pos, DVec3::ZERO, "the dot moved on input");
+        let sent1 = rig.tick(vec![flush_msg(entity)]);
+        assert_eq!(
+            to_orch(&sent1),
+            vec![InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+                transfer_id: TransferId(7),
+                step_id: FLUSH_SOURCE_STEP,
+                pose: dot1.pose,
+                drained_seq: 1,
+            })],
+            "ships the moved pose + the real drain watermark"
+        );
+    }
+
+    #[test]
+    fn flush_source_for_an_unheld_or_non_entity_subject_ships_nothing() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach();
+        // An entity this shard does not hold → no ship (counted no-op).
+        let sent = rig.tick(vec![flush_msg(EntityId(0xDEAD))]);
+        assert!(to_orch(&sent).is_empty(), "no pose for an unheld entity");
+        // A non-Entity subject → no ship.
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::FlushSource(FlushSource {
+                transfer: TransferId(7),
+                subject: DirectoryKey::Realm(RealmId::System(9)),
+                step_id: FLUSH_SOURCE_STEP,
+            }),
+        )]);
+        assert!(
+            to_orch(&sent).is_empty(),
+            "no pose for a non-Entity subject"
+        );
+    }
+
+    #[test]
+    fn a_crossing_to_an_adopted_dot_applies_immediately_and_dedups_redelivery() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]); // adopting dot
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // flip → granted, !render_ready
+        let pose = crossing_pose();
+
+        let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(
+            dot.pose,
+            pose.sanitized(),
+            "the crossed pose applied to the adopted dot"
+        );
+        assert!(
+            !dot.render_ready,
+            "1d.1 stores the pose but does NOT flip render_ready (1d.3 does)"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
+        assert!(acked(&sent, TransferId(7)), "the crossing step is acked");
+
+        // REDELIVERY: a second identical crossing re-acks but does NOT re-apply (journal dedups).
+        let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_applied,
+            1,
+            "no re-apply on redelivery"
+        );
+        assert!(acked(&sent, TransferId(7)), "a redelivery still re-acks");
+    }
+
+    #[test]
+    fn a_crossing_before_adopt_is_buffered_then_applied_on_the_grant_flip() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]); // adopting dot, NOT granted
+        let pose = crossing_pose();
+
+        // The crossing arrives BEFORE the adopt flip → BUFFERED (no ack, dot unchanged).
+        let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
+        assert!(
+            !acked(&sent, TransferId(7)),
+            "a buffered crossing is not acked yet"
+        );
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(
+            dot.pose.pos,
+            DVec3::ZERO,
+            "buffered, not applied (still adopting)"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_buffered, 1);
+        assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
+
+        // A redelivery WHILE STILL BUFFERED (the saga re-emits at-least-once) overwrites the same
+        // key and must NOT inflate the buffered count (audit F-3 — the counter is per-crossing, not
+        // per-redelivery).
+        let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
+        assert!(
+            !acked(&sent, TransferId(7)),
+            "still buffered, still not acked"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_buffered,
+            1,
+            "a still-buffered redelivery does not inflate the buffered count"
+        );
+
+        // The adopt grant-flip DRAINS the buffer → applies the pose + acks.
+        let sent = rig.tick(vec![adopted_head(Fence(2))]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(
+            dot.pose,
+            pose.sanitized(),
+            "the buffered crossing applied on the flip"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
+        assert!(acked(&sent, TransferId(7)), "the drained crossing is acked");
+
+        // COMPOSED (audit finding 2): a redelivery AFTER the buffered crossing was drained+journaled
+        // hits the IMMEDIATE path (the dot is now adopted) and the journal dedups it ACROSS the
+        // buffer→drain→redeliver boundary — re-ack only, NO second apply.
+        let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_applied,
+            1,
+            "a redelivery after a DRAINED crossing does not re-apply (journal spans the boundary)"
+        );
+        assert!(
+            acked(&sent, TransferId(7)),
+            "the post-drain redelivery still re-acks"
+        );
+    }
+
+    #[test]
+    fn a_stale_fence_crossing_is_dropped() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // adopted at Fence(2)
+        // A crossing at Fence(1) is BELOW the dot's recorded authority fence → stale (fence rule 1).
+        let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(1), crossing_pose())]);
+        assert_eq!(rig.world.resource::<StubStats>().crossings_stale, 1);
+        assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(
+            dot.pose.pos,
+            DVec3::ZERO,
+            "a stale crossing does not move the dot"
+        );
+        assert!(
+            !acked(&sent, TransferId(7)),
+            "a stale crossing is not acked"
+        );
+    }
+
+    #[test]
+    fn a_non_crossing_transfer_payload_is_a_counted_noop() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]);
+        // An InitialSpawn payload is not a 1d.1 dest concern → counted no-op (no apply, no ack).
+        let env = InterShardFlow::Transfer(TransferEnvelope {
+            transfer_id: TransferId(7),
+            universe_epoch: vd_core::EpochId(1),
+            schema_version: vd_wire::intershard::TRANSFER_SCHEMA_VERSION,
+            fence: Fence(2),
+            step_id: STUB_CROSSING_STEP,
+            class: vd_core::entity_kind::DurabilityClass::Durable,
+            payload: TransitionPayload::InitialSpawn {
+                entity: SUBJECT,
+                to_realm: TO_REALM,
+                pose: crossing_pose(),
+                state: vec![],
+            },
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &env)]);
+        assert_eq!(rig.world.resource::<StubStats>().crossings_unhandled, 1);
+        assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
+        assert!(
+            !acked(&sent, TransferId(7)),
+            "an unhandled payload is not acked"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_entity_grant_head_is_an_idempotent_noop() {
+        // GrantFlip::NoOp: a SECOND grant head for an already-granted dot flips nothing.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // first flip → granted
+        let before = rig.world.resource::<Dots>().0[&SESSION];
+        let sent = rig.tick(vec![adopted_head(Fence(2))]); // duplicate → NoOp
+        let after = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(after, before, "a duplicate grant head changes nothing");
+        assert!(!acked(&sent, TransferId(7)), "no ack on a duplicate grant");
     }
 }

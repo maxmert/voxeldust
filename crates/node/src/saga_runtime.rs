@@ -34,12 +34,16 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
-use vd_core::{NodeId, TransferId, UniverseTick};
+use vd_core::pose::StampedPose;
+use vd_core::{EpochId, Fence, NodeId, TransferId, UniverseTick};
 use vd_sim::directory::DirectoryCore;
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState};
-use vd_wire::intershard::InterShardFlow;
+use vd_wire::intershard::{
+    FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION,
+    TransferAck, TransferEnvelope, TransitionPayload,
+};
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome};
 use vd_wire::seams::transfer_control::TransferControlAck;
 
@@ -58,6 +62,11 @@ struct LiveSaga {
     /// exactly when it entered its current (stuck) state. The admin view reports
     /// `now - since` as staleness so a 2am operator sees how long a saga has been wedged.
     since: UniverseTick,
+    /// The source's authoritative pose, stashed when its `SourceFlushed` reply arrives (1d.1) and
+    /// read by the `EmitCrossing` executor at/after commit. The pose-before-promote gate guarantees
+    /// it is `Some` before the CAS for an Entity subject, so `EmitCrossing` never ships a None pose.
+    /// (The TLV state blob joins this at 1d.6; pose-only now.)
+    flushed_pose: Option<StampedPose>,
 }
 
 /// A pending create-on-trigger. Enqueued by [`SagaRuntimeRes::start_transfer`] and processed
@@ -147,16 +156,79 @@ fn ack_to_event(ack: TransferControlAck) -> SagaEvent {
     }
 }
 
+/// Build the `StubCrossing` envelope the saga ships to the dest at/after commit (1d.1). Returns
+/// `None` (a no-op) for a non-Entity subject or a missing flushed pose — the pose-before-promote
+/// gate makes the latter unreachable for an Entity subject. The `fence` is the post-CAS authority
+/// fence (fence rule 1: the receiver rejects a stale crossing); `state` is empty (the TLV blob
+/// lands at 1d.6). Monomorphic helper so the executor arm stays a branchless dispatch (HR5).
+fn build_crossing(
+    ctx: &SagaCtx,
+    fence: Fence,
+    flush_pose: Option<StampedPose>,
+    epoch: EpochId,
+) -> Option<InterShardFlow> {
+    let entity = ctx.subject.transfer_subject_entity()?;
+    let pose = flush_pose?;
+    Some(InterShardFlow::Transfer(TransferEnvelope {
+        transfer_id: ctx.transfer,
+        universe_epoch: epoch,
+        schema_version: TRANSFER_SCHEMA_VERSION,
+        fence,
+        step_id: STUB_CROSSING_STEP,
+        class: ctx.class,
+        payload: TransitionPayload::StubCrossing {
+            entity,
+            from_realm: ctx.from_realm,
+            to_realm: ctx.to_realm,
+            pose,
+            state: vec![],
+        },
+    }))
+}
+
+/// Stash the source's flushed pose onto its live saga, BEFORE the `SourceFlushed` event is
+/// stepped — so an `EmitCrossing` reachable on the same tick reads it. A flush for an unknown /
+/// GC'd saga is a stale reply: dropped (the event deliver is also a no-op).
+fn stash_flush(runtime: &mut SagaRuntimeRes, transfer: TransferId, pose: StampedPose) {
+    if let Some(live) = runtime.sagas.get_mut(&transfer) {
+        live.flushed_pose = Some(pose);
+    }
+}
+
+/// Push the crossing to the dest if one can be built (Entity subject + a stashed pose), else a
+/// LOUD no-op. Holds the Some/None branch (covered both ways by unit tests) so the executor arm
+/// stays branchless (HR5). For an Entity subject the pose-before-promote gate guarantees a pose,
+/// so the None arm is reached only by the non-Entity subjects the FSM proptests drive.
+fn emit_crossing(
+    ctx: &SagaCtx,
+    fence: Fence,
+    flush_pose: Option<StampedPose>,
+    epoch: EpochId,
+    outbox: &mut OutboundBox,
+) {
+    match build_crossing(ctx, fence, flush_pose, epoch) {
+        Some(crossing) => outbox.push_flow(ctx.dest, MsgClass::Saga, &crossing),
+        None => tracing::warn!(
+            transfer = ctx.transfer.0,
+            "EmitCrossing skipped: non-Entity subject or no flushed pose"
+        ),
+    }
+}
+
 /// The action executor: run a saga from `(state, actions)` to quiescence, executing each
 /// action and feeding any SYNCHRONOUS follow-up event (the direct CAS outcome) back into the
 /// FSM. Returns the final state, whether it tombstoned (terminal), and any client rejections.
 ///
 /// ORDERING CONTRACT (audit FF-1): a batch's actions execute IN EMITTED ORDER and the WHOLE
 /// batch completes before the next queued event is stepped — so when `CasWon` produces
-/// `[PersistCheckpoint, Send(CommitAuthority)]`, the send happens before any later event is
-/// processed. The FSM emits at most ONE synchronous-feedback action (the commit) per batch,
-/// so the loop depth is bounded (it cannot ping-pong); a second feedback source added later
-/// must preserve both properties.
+/// `[PersistCheckpoint, Send(CommitAuthority), EmitCrossing]`, the sends happen before any later
+/// event is processed. The FSM still emits at most ONE synchronous-feedback action (the commit)
+/// per batch — `FlushSource`/`EmitCrossing` are pure egress (no event fed back) — so the loop
+/// depth stays bounded (1d.1 preserves the FF-1 second-feedback-source bound).
+///
+/// `flush_pose` is the saga's stashed source pose (`Some` once `SourceFlushed` arrived); the
+/// `EmitCrossing` arm reads it. `epoch` stamps the emitted crossing envelope.
+#[allow(clippy::too_many_arguments)]
 fn run_to_quiescence(
     ctx: &SagaCtx,
     gateway: NodeId,
@@ -164,7 +236,9 @@ fn run_to_quiescence(
     mut actions: Vec<SagaAction>,
     dir: &mut DirectoryCore,
     outbox: &mut OutboundBox,
+    epoch: EpochId,
     now: UniverseTick,
+    flush_pose: Option<StampedPose>,
 ) -> (SagaState, bool, Vec<(TransferId, AbortReason)>) {
     let mut events: VecDeque<SagaEvent> = VecDeque::new();
     let mut tombstone = false;
@@ -174,6 +248,25 @@ fn run_to_quiescence(
             match action {
                 SagaAction::Send(cmd) => {
                     outbox.push_flow(gateway, MsgClass::Saga, &InterShardFlow::Saga(cmd));
+                }
+                // Tell the SOURCE to ship the subject's pose (1d.1). Pure egress to ctx.source —
+                // no synchronous feedback (FF-1 preserved).
+                SagaAction::FlushSource => {
+                    outbox.push_flow(
+                        ctx.source,
+                        MsgClass::Saga,
+                        &InterShardFlow::FlushSource(FlushSource {
+                            transfer: ctx.transfer,
+                            subject: ctx.subject,
+                            step_id: FLUSH_SOURCE_STEP,
+                        }),
+                    );
+                }
+                // Emit the entity-STATE crossing to the DEST (1d.1) from the stashed pose. The
+                // Some/None branch lives in `emit_crossing` (a monomorphic helper, unit-tested both
+                // ways), so this arm stays a branchless dispatch (HR5).
+                SagaAction::EmitCrossing { fence } => {
+                    emit_crossing(ctx, fence, flush_pose, epoch, outbox);
                 }
                 // THE single commit point, called DIRECTLY (this thread owns the directory).
                 // The outcome re-enters the FSM immediately — no wire round-trip, no tick split.
@@ -240,6 +333,7 @@ fn interim_demote_complete(
     runtime: &mut SagaRuntimeRes,
     dir: &mut DirectoryCore,
     outbox: &mut OutboundBox,
+    epoch: EpochId,
     now: UniverseTick,
 ) {
     // Snapshot the transfers in `Demoting` FIRST (immutable borrow), then `deliver` each (a
@@ -263,6 +357,7 @@ fn interim_demote_complete(
             runtime,
             dir,
             outbox,
+            epoch,
             now,
             transfer,
             SagaEvent::DemoteComplete,
@@ -276,6 +371,7 @@ fn deliver(
     runtime: &mut SagaRuntimeRes,
     dir: &mut DirectoryCore,
     outbox: &mut OutboundBox,
+    epoch: EpochId,
     now: UniverseTick,
     transfer: TransferId,
     event: SagaEvent,
@@ -285,9 +381,11 @@ fn deliver(
     };
     let ctx = live.ctx;
     let gateway = live.gateway;
+    let flush_pose = live.flushed_pose; // Copy; the EmitCrossing executor reads it
     let (state, actions) = saga::step(&ctx, live.state, event);
-    let (final_state, tombstone, rejected) =
-        run_to_quiescence(&ctx, gateway, state, actions, dir, outbox, now);
+    let (final_state, tombstone, rejected) = run_to_quiescence(
+        &ctx, gateway, state, actions, dir, outbox, epoch, now, flush_pose,
+    );
     commit_result(runtime, transfer, final_state, tombstone, rejected, now);
 }
 
@@ -350,6 +448,7 @@ fn process_starts(
     runtime: &mut SagaRuntimeRes,
     dir: &mut DirectoryCore,
     outbox: &mut OutboundBox,
+    epoch: EpochId,
     now: UniverseTick,
 ) {
     for PendingStart { ctx, gateway } in std::mem::take(&mut runtime.pending) {
@@ -367,10 +466,12 @@ fn process_starts(
                 state,
                 gateway,
                 since: now,
+                flushed_pose: None, // filled when the source flushes (after Freezing)
             },
         );
+        // The start actions are PrepareSubscribe only — no EmitCrossing yet, so `None` is correct.
         let (final_state, tombstone, rejected) =
-            run_to_quiescence(&ctx, gateway, state, actions, dir, outbox, now);
+            run_to_quiescence(&ctx, gateway, state, actions, dir, outbox, epoch, now, None);
         commit_result(runtime, ctx.transfer, final_state, tombstone, rejected, now);
     }
 }
@@ -386,7 +487,8 @@ pub fn drive_sagas(
     mut outbox: ResMut<OutboundBox>,
 ) {
     let now = clock.universe_tick;
-    process_starts(&mut runtime, &mut dir.0, &mut outbox, now);
+    let epoch = clock.epoch;
+    process_starts(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
     for msg in &inbox.0 {
         let Inbound::Wire { class, bytes, .. } = msg else {
             continue;
@@ -394,25 +496,56 @@ pub fn drive_sagas(
         if *class != MsgClass::Saga {
             continue;
         }
-        // Only the SagaAck arm drives the saga here; Directory ops are `serve_directory`'s,
-        // and Saga commands flow OUT to the gateway, never in. A non-SagaAck Saga-class
-        // message is left for its handler (decode-fail is `serve_directory`'s to log).
-        let Ok(InterShardFlow::SagaAck(ack)) = postcard::from_bytes::<InterShardFlow>(bytes) else {
-            continue;
-        };
-        deliver(
-            &mut runtime,
-            &mut dir.0,
-            &mut outbox,
-            now,
-            ack.transfer(),
-            ack_to_event(ack),
-        );
+        // Two saga-driving inbound arms ride MsgClass::Saga to the orchestrator: the gateway's
+        // SagaAck (route-swap phases) and the SOURCE's TransferAck::SourceFlushed (the pose). The
+        // DEST's crossing ack is decoded-and-dropped (1d.1 — see below). Directory ops are
+        // `serve_directory`'s; Saga commands / FlushSource flow OUT, never in.
+        match postcard::from_bytes::<InterShardFlow>(bytes) {
+            Ok(InterShardFlow::SagaAck(ack)) => {
+                deliver(
+                    &mut runtime,
+                    &mut dir.0,
+                    &mut outbox,
+                    epoch,
+                    now,
+                    ack.transfer(),
+                    ack_to_event(ack),
+                );
+            }
+            Ok(InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+                transfer_id,
+                drained_seq,
+                pose,
+                ..
+            })) => {
+                // STASH the pose BEFORE stepping the event, so an EmitCrossing reachable on this
+                // same tick (once both freeze + flush have landed) reads it.
+                stash_flush(&mut runtime, transfer_id, pose);
+                deliver(
+                    &mut runtime,
+                    &mut dir.0,
+                    &mut outbox,
+                    epoch,
+                    now,
+                    transfer_id,
+                    SagaEvent::SourceFlushed { drained_seq },
+                );
+            }
+            // The DEST's crossing ack: the dest journal is the exactly-once dedup; the saga does
+            // not yet gate release on it (release-gated-on-crossing-ack lands with the ordered
+            // demote, D-2). Decoded + dropped — never a phase transition.
+            Ok(InterShardFlow::TransferAck(
+                TransferAck::Accepted { .. } | TransferAck::Rejected { .. },
+            )) => {}
+            // Everything else (Ghost / Directory / Saga commands / DirectoryReply / FlushSource)
+            // and any decode failure: not a saga-driving inbound here.
+            _ => {}
+        }
     }
     // AFTER the ack loop: drive the demote tail. The bandless interim (D-2) delivers
     // DemoteComplete to every saga in `Demoting`, advancing it to `Releasing` (which emits
     // ReleaseSubscribe; the gateway acks Released → Done → Tombstone next tick).
-    interim_demote_complete(&mut runtime, &mut dir.0, &mut outbox, now);
+    interim_demote_complete(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
 }
 
 #[cfg(test)]
@@ -421,7 +554,9 @@ mod tests {
     use crate::app::{NodeConfig, build_app};
     use crate::orchestrator::{OrchestratorConfig, register_orchestrator};
     use vd_core::entity_kind::{DurabilityClass, EntityKind};
-    use vd_core::{EntityId, EpochId, Fence, SessionId};
+    use vd_core::glam::DVec3;
+    use vd_core::pose::{FrameRef, RealmId};
+    use vd_core::{EntityId, EpochId, Fence, SessionId, UniverseTick};
     use vd_sim::capability::NodeKind;
     use vd_sim::directory::DirectoryTuning;
     use vd_sim::io::Transport;
@@ -431,6 +566,19 @@ mod tests {
         PrepareReject, PrepareResult, SpatialReject, TransferControl,
     };
 
+    const FROM_REALM: RealmId = RealmId::System(7);
+    const TO_REALM: RealmId = RealmId::System(8);
+
+    /// A non-origin pose the source "flushes" — distinct components so a test can confirm the
+    /// EmitCrossing carried THIS pose (not a default).
+    fn flushed_pose() -> StampedPose {
+        StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            DVec3::new(1.0, 2.0, 3.0),
+            UniverseTick(5),
+        )
+    }
+
     const ORCH: NodeId = NodeId(1);
     const SOURCE: NodeId = NodeId(2);
     const DEST: NodeId = NodeId(3);
@@ -438,8 +586,12 @@ mod tests {
     const XFER: TransferId = TransferId(77);
     const SESSION: SessionId = SessionId(5);
 
+    fn subject_eid() -> EntityId {
+        EntityId::pack(EntityKind::Player, 1, 7, 3)
+    }
+
     fn subject() -> DirectoryKey {
-        DirectoryKey::Entity(EntityId::pack(EntityKind::Player, 1, 7, 3))
+        DirectoryKey::Entity(subject_eid())
     }
 
     /// The wire form of one `TransferControl` command as the gateway receives it from the
@@ -464,14 +616,20 @@ mod tests {
             dest: DEST,
             class,
             needs_provision: false,
+            from_realm: FROM_REALM,
+            to_realm: TO_REALM,
         }
     }
 
-    /// A stepped orchestrator + a hub the test drives the saga through.
+    /// A stepped orchestrator + a hub the test drives the saga through. The `source`/`dest`
+    /// endpoints receive the 1d.1 `FlushSource`/`StubCrossing` egress and let the source inject
+    /// its `SourceFlushed` pose reply.
     struct Rig {
         hub: MemHub,
         orch: crate::app::ShardNode<vd_sim::io::mem::MemTransport>,
         gateway: vd_sim::io::mem::MemTransport,
+        source: vd_sim::io::mem::MemTransport,
+        dest: vd_sim::io::mem::MemTransport,
     }
 
     impl Rig {
@@ -498,7 +656,15 @@ mod tests {
                 },
             );
             let gateway = hub.register(GATEWAY, 64);
-            Rig { hub, orch, gateway }
+            let source = hub.register(SOURCE, 64);
+            let dest = hub.register(DEST, 64);
+            Rig {
+                hub,
+                orch,
+                gateway,
+                source,
+                dest,
+            }
         }
 
         /// Deliver pending sends to the orchestrator, run one tick, then deliver its outbound
@@ -512,8 +678,7 @@ mod tests {
         /// Grant a directory record for the subject at `fence` (so `lock_transfer` + the CAS
         /// have something to act on), owned by the source shard.
         fn grant_subject(&mut self, fence: Fence) {
-            let mut shard = self.hub.register(SOURCE, 8);
-            shard
+            self.source
                 .send(
                     ORCH,
                     MsgClass::Saga,
@@ -530,6 +695,35 @@ mod tests {
                 )
                 .expect("sent");
             self.settle();
+        }
+
+        /// The SOURCE ships its pose (the reply to `FlushSource`) — the second half of the
+        /// pose-before-promote gate.
+        fn flush(&mut self) {
+            self.source
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::TransferAck(
+                            TransferAck::SourceFlushed {
+                                transfer_id: XFER,
+                                step_id: FLUSH_SOURCE_STEP,
+                                pose: flushed_pose(),
+                                drained_seq: 0,
+                            },
+                        ))
+                        .expect("encode"),
+                    ),
+                )
+                .expect("sent");
+            self.settle();
+        }
+
+        /// Everything the orchestrator has sent the DEST since the last drain (the `StubCrossing`
+        /// crossing egress).
+        fn drain_dest(&mut self) -> Vec<Inbound> {
+            self.dest.drain_inbound()
         }
 
         fn trigger(&mut self, ctx: SagaCtx) {
@@ -615,12 +809,18 @@ mod tests {
             })]
         );
 
-        // SourceFrozen → the DIRECT commit_cas wins in-process → CommitAuthority is sent with
-        // the NEW fence, all in ONE tick (no wire round-trip for the CAS).
+        // The pose-before-promote gate: SourceFrozen alone leaves the saga in Freezing (no CAS).
         rig.ack(TransferControlAck::SourceFrozen {
             transfer: XFER,
             drained_seq: 42,
         });
+        assert!(
+            rig.drain_gateway().is_empty(),
+            "SourceFrozen alone does not commit — the gate awaits the source flush"
+        );
+        // The SOURCE flushes its pose → BOTH gate conditions met → the DIRECT commit_cas wins
+        // in-process → CommitAuthority is sent with the NEW fence, all in ONE tick.
+        rig.flush();
         let new_fence = Fence(1).next();
         assert_eq!(
             rig.drain_gateway(),
@@ -630,6 +830,33 @@ mod tests {
                 new_fence,
                 subject: subject(),
             })]
+        );
+        // The entity-STATE crossing rode the SAME commit batch to the DEST, carrying the flushed
+        // pose at the new authority fence (the 1d.1 deliverable, asserted end-to-end).
+        assert_eq!(
+            rig.drain_dest(),
+            vec![Inbound::Wire {
+                from: ORCH,
+                class: MsgClass::Saga,
+                bytes: postcard::to_allocvec(&InterShardFlow::Transfer(TransferEnvelope {
+                    transfer_id: XFER,
+                    universe_epoch: EpochId(1),
+                    schema_version: TRANSFER_SCHEMA_VERSION,
+                    fence: new_fence,
+                    step_id: STUB_CROSSING_STEP,
+                    class: DurabilityClass::Durable,
+                    payload: TransitionPayload::StubCrossing {
+                        entity: subject_eid(),
+                        from_realm: FROM_REALM,
+                        to_realm: TO_REALM,
+                        pose: flushed_pose(),
+                        state: vec![],
+                    },
+                }))
+                .expect("encode")
+                .into(),
+            }],
+            "the crossing reached the dest with the flushed pose at the new fence"
         );
         // The directory CAS committed: the dest now owns the subject at the new fence.
         let head = rig.subject_head();
@@ -678,6 +905,7 @@ mod tests {
                     state: SagaState::Demoting { new_fence },
                     gateway: GATEWAY,
                     since: UniverseTick(0),
+                    flushed_pose: None,
                 },
             );
         }
@@ -783,6 +1011,7 @@ mod tests {
             transfer: XFER,
             drained_seq: 9,
         });
+        rig.flush(); // gate: both freeze + flush, so the CAS actually runs (and loses)
         // A lost CAS unwinds with the compensator chain: ThawSource then AbortTransfer.
         assert_eq!(
             rig.drain_gateway(),
@@ -834,6 +1063,7 @@ mod tests {
             transfer: XFER,
             drained_seq: 3,
         });
+        rig.flush(); // gate: both, so the commit action (the go-token stub) is reached
         // No CommitAuthority (the go-token stub didn't produce a CasWon), no fence bump.
         assert!(
             rig.drain_gateway().is_empty(),
@@ -882,7 +1112,8 @@ mod tests {
         rig.ack(TransferControlAck::SourceFrozen {
             transfer: XFER,
             drained_seq: 3,
-        }); // parks in CommittingCas (the IssueTransientGo stub yields no CasWon)
+        });
+        rig.flush(); // both gate conditions → parks in CommittingCas (the IssueTransientGo stub yields no CasWon)
         let since_parked = crate::orchestrator::admin_snapshot(rig.orch.world_mut()).sagas[0].since;
 
         // Two duplicate SourceFrozen acks (at-least-once redelivery). The FSM absorbs each
@@ -1000,6 +1231,110 @@ mod tests {
             runtime.rejected.first().expect("non-empty").0,
             TransferId(5),
             "the 5 OLDEST were shed; the newest survive"
+        );
+    }
+
+    #[test]
+    fn emit_crossing_builds_for_an_entity_subject_and_skips_otherwise() {
+        let c = ctx(DurabilityClass::Durable, Fence(1));
+
+        // Entity subject + a flushed pose → the crossing is pushed to the DEST, stamped with the
+        // given fence, STUB_CROSSING_STEP, and an empty (1d.1) state blob.
+        let mut outbox = OutboundBox::default();
+        emit_crossing(&c, Fence(2), Some(flushed_pose()), EpochId(1), &mut outbox);
+        assert_eq!(
+            outbox.0.len(),
+            1,
+            "an Entity subject with a pose emits a crossing"
+        );
+        let (to, class, bytes) = &outbox.0[0];
+        assert_eq!(*to, DEST);
+        assert_eq!(*class, MsgClass::Saga);
+        assert_eq!(
+            postcard::from_bytes::<InterShardFlow>(bytes).expect("decode"),
+            InterShardFlow::Transfer(TransferEnvelope {
+                transfer_id: XFER,
+                universe_epoch: EpochId(1),
+                schema_version: TRANSFER_SCHEMA_VERSION,
+                fence: Fence(2),
+                step_id: STUB_CROSSING_STEP,
+                class: DurabilityClass::Durable,
+                payload: TransitionPayload::StubCrossing {
+                    entity: subject_eid(),
+                    from_realm: FROM_REALM,
+                    to_realm: TO_REALM,
+                    pose: flushed_pose(),
+                    state: vec![],
+                },
+            })
+        );
+
+        // No stashed pose → no-op (the gate makes this unreachable for an Entity subject, but the
+        // helper is total — this covers the missing-pose None arm).
+        let mut no_pose = OutboundBox::default();
+        emit_crossing(&c, Fence(2), None, EpochId(1), &mut no_pose);
+        assert!(no_pose.0.is_empty(), "no pose → no crossing");
+
+        // Non-Entity subject (the Realm-subject FSM proptests) → no-op.
+        let realm_ctx = SagaCtx {
+            subject: DirectoryKey::Realm(RealmId::System(9)),
+            ..c
+        };
+        let mut realm_out = OutboundBox::default();
+        emit_crossing(
+            &realm_ctx,
+            Fence(2),
+            Some(flushed_pose()),
+            EpochId(1),
+            &mut realm_out,
+        );
+        assert!(
+            realm_out.0.is_empty(),
+            "a non-Entity subject emits no crossing"
+        );
+    }
+
+    #[test]
+    fn a_flush_for_an_unknown_saga_is_a_noop() {
+        // stash_flush's None arm: a SourceFlushed for an unknown / GC'd transfer mutates nothing.
+        let mut runtime = SagaRuntimeRes::default();
+        stash_flush(&mut runtime, TransferId(999), flushed_pose());
+        assert_eq!(runtime.live(), 0, "a stray flush creates/mutates no saga");
+    }
+
+    #[test]
+    fn a_dest_crossing_ack_and_a_non_saga_arm_are_dropped() {
+        // drive_sagas decodes but DROPS the DEST's crossing ack (Accepted) and any non-saga-driving
+        // arm (here a Saga command, which the orchestrator only ever SENDS): no saga starts,
+        // nothing is emitted.
+        let mut rig = Rig::new();
+        for flow in [
+            InterShardFlow::TransferAck(TransferAck::Accepted {
+                transfer_id: XFER,
+                step_id: STUB_CROSSING_STEP,
+            }),
+            InterShardFlow::Saga(TransferControl::RequestCut {
+                transfer: XFER,
+                session: SESSION,
+            }),
+        ] {
+            rig.gateway
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(postcard::to_allocvec(&flow).expect("encode")),
+                )
+                .expect("sent");
+        }
+        rig.settle();
+        assert_eq!(
+            rig.live(),
+            0,
+            "neither a crossing ack nor a stray arm starts a saga"
+        );
+        assert!(
+            rig.drain_gateway().is_empty(),
+            "nothing is emitted in response"
         );
     }
 }

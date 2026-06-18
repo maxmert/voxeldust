@@ -24,8 +24,26 @@ use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, TickId, TransferId};
 
-use crate::seams::directory::{DirectoryOp, DirectoryReply};
+use crate::seams::directory::{DirectoryKey, DirectoryOp, DirectoryReply};
 use crate::seams::transfer_control::{TransferControl, TransferControlAck};
+
+/// The two `Transfer`-machinery step ids that sit ABOVE the 0–6 `TransferControl` route-swap
+/// phases (`seams::transfer_control::step_id`). They key the `(transfer, step_id)` idempotency of
+/// the entity-STATE half of a transfer — disjoint from the route-swap phases so a state step can
+/// never alias a route-swap phase in any `applied_steps` journal (asserted in tests).
+///
+/// - [`FLUSH_SOURCE_STEP`] (7): the orchestrator→source pose-flush request AND its source→orch
+///   `TransferAck::SourceFlushed` reply (request + ack share a phase, like FreezeSource/SourceFrozen).
+/// - [`STUB_CROSSING_STEP`] (8): the orchestrator→dest `StubCrossing` envelope AND its dest→orch
+///   `TransferAck::Accepted` reply.
+pub const FLUSH_SOURCE_STEP: u32 = 7;
+/// See [`FLUSH_SOURCE_STEP`].
+pub const STUB_CROSSING_STEP: u32 = 8;
+
+/// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
+/// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
+/// version-floor handshake that reads it lands with the TLV blob, P-later).
+pub const TRANSFER_SCHEMA_VERSION: u16 = 1;
 
 /// The closed taxonomy. Compiler-forced exhaustive handling everywhere.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -49,6 +67,18 @@ pub enum InterShardFlow {
     /// directory reply both ride orchestrator→peer on `MsgClass::Saga`, and postcard is
     /// non-self-describing, so without this they would mis-decode into each other.
     DirectoryReply(DirectoryReply),
+    /// Orchestrator → SOURCE shard (Slice 1d.1): "ship the subject's authoritative pose so the
+    /// dest can adopt it." Read-only at the source (it ships a copy; authority is unchanged), so
+    /// it needs NO compensator — the abort path's `ThawSource` is the only stateful source undo.
+    /// Side-effecting + ack-driven by `(transfer, FLUSH_SOURCE_STEP)`; the reply is
+    /// `TransferAck::SourceFlushed`.
+    FlushSource(FlushSource),
+    /// SHARD → orchestrator ack of a `Transfer`-machinery step (Slice 1d.1 gives the long-RESERVED
+    /// `TransferAck` its first consumer): the SOURCE's `SourceFlushed` pose reply (phase
+    /// `FLUSH_SOURCE_STEP`) and the DEST's `Accepted`/`Rejected` of a `StubCrossing` envelope
+    /// (phase `STUB_CROSSING_STEP`). Distinct from `SagaAck` (the gateway↔saga route-swap
+    /// vocabulary): this is the entity-STATE ack family, keyed by `(transfer_id, step_id)`.
+    TransferAck(TransferAck),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -120,8 +150,34 @@ impl InterShardFlow {
             // is re-derivable + loss-tolerated = FireAndForget; it carries no transfer
             // trigger and is never the authority of record (the CAS at the directory is).
             InterShardFlow::DirectoryReply(_) => EffectClass::FireAndForget,
+            // The pose-flush request + the entity-state ack family are side-effecting + ack-driven
+            // by the universal `(transfer, step_id)` key (the source/dest journal a redelivery as
+            // a no-op at the same step).
+            InterShardFlow::FlushSource(f) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: f.transfer,
+                    step_id: f.step_id,
+                },
+            },
+            InterShardFlow::TransferAck(ack) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: ack.transfer_id(),
+                    step_id: ack.step_id(),
+                },
+            },
         }
     }
+}
+
+/// Orchestrator → SOURCE shard pose-flush request (Slice 1d.1). The source finds the held dot for
+/// `subject` and replies [`TransferAck::SourceFlushed`] with the dot's authoritative pose. The
+/// `step_id` is always [`FLUSH_SOURCE_STEP`]; it is carried (not a bare const at the use site) so
+/// `effect_class` keys uniformly across every arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlushSource {
+    pub transfer: TransferId,
+    pub subject: DirectoryKey,
+    pub step_id: u32,
 }
 
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
@@ -212,21 +268,30 @@ pub struct TransientItem {
     pub state: Vec<u8>,
 }
 
-/// RESERVED (frozen ahead of its consumer; lands WITH the shard-bound `Transfer`-arm
-/// receiver at Slice 1d — see DEFERRED.md D-21). The dest shard's ack of a
-/// side-effecting `Transfer(TransferEnvelope)` step, delivered via the same flow
-/// channel. NOT the gateway↔saga vocabulary: that is
-/// `seams::transfer_control::TransferControlAck` (the route-swap saga). This is the
-/// shard→orchestrator ack of the entity-state envelope, keyed by `(transfer_id,
-/// step_id)` for idempotent journaling.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The SHARD → orchestrator ack family for the entity-STATE half of a transfer (Slice 1d.1 gives
+/// this long-RESERVED type its first consumer — DEFERRED.md D-21). NOT the gateway↔saga route-swap
+/// vocabulary: that is `seams::transfer_control::TransferControlAck`. Every arm is keyed by
+/// `(transfer_id, step_id)` for idempotent journaling. The direction (shard→orch) is permanent.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransferAck {
-    /// Destination accepted and durably journaled the step.
+    /// SOURCE → orch (phase [`FLUSH_SOURCE_STEP`]): the reply to [`FlushSource`], carrying the
+    /// subject's authoritative pose + the source's input drain watermark so the saga can stamp the
+    /// crossing. The pose-before-promote gate makes a missing flush block the commit (it never
+    /// silently emits a poseless crossing).
+    SourceFlushed {
+        transfer_id: TransferId,
+        step_id: u32,
+        pose: StampedPose,
+        drained_seq: u64,
+    },
+    /// DEST → orch (phase [`STUB_CROSSING_STEP`]): accepted and journaled the `StubCrossing` step.
     Accepted {
         transfer_id: TransferId,
         step_id: u32,
     },
-    /// Destination refused; the entity stays authoritative on the source.
+    /// DEST → orch: refused; the entity stays authoritative on the source. (A `StubCrossing` is
+    /// emitted POST-commit/forward-only, so spatial admissibility is gated PRE-commit at
+    /// `PrepareSubscribe`; this arm carries the typed refusal for the non-spatial step rejections.)
     Rejected {
         transfer_id: TransferId,
         step_id: u32,
@@ -234,11 +299,33 @@ pub enum TransferAck {
     },
 }
 
+impl TransferAck {
+    /// The transfer this ack belongs to (the `(transfer, step)` idempotency key's first half).
+    #[must_use]
+    pub fn transfer_id(&self) -> TransferId {
+        match self {
+            TransferAck::SourceFlushed { transfer_id, .. }
+            | TransferAck::Accepted { transfer_id, .. }
+            | TransferAck::Rejected { transfer_id, .. } => *transfer_id,
+        }
+    }
+
+    /// The step phase this ack belongs to (the key's second half).
+    #[must_use]
+    pub fn step_id(&self) -> u32 {
+        match self {
+            TransferAck::SourceFlushed { step_id, .. }
+            | TransferAck::Accepted { step_id, .. }
+            | TransferAck::Rejected { step_id, .. } => *step_id,
+        }
+    }
+}
+
 /// Typed causes a dest shard refuses a `Transfer`-arm STEP (never a stringly-typed
 /// warn-and-drop). Distinct from the CLIENT-facing `channels::TransferRejectReason`
 /// (which explains a refusal to the player) — this is the shard-internal step-ack
 /// reason, paired with [`TransferAck`] and keyed by `step_id`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferStepRejectReason {
     SpatialPrecondition,
     StaleFence,
@@ -395,6 +482,63 @@ mod tests {
             record: None,
         });
         assert_eq!(reply.effect_class(), EffectClass::FireAndForget);
+
+        // 1d.1: the pose-flush request + the entity-state ack family are side-effecting, keyed by
+        // their step phase (7 for the source flush + its reply; 8 for the dest crossing + its ack).
+        let flush = InterShardFlow::FlushSource(FlushSource {
+            transfer: TransferId(11),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            step_id: FLUSH_SOURCE_STEP,
+        });
+        assert_eq!(
+            flush.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: FLUSH_SOURCE_STEP,
+                }
+            }
+        );
+        let flushed = InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+            transfer_id: TransferId(11),
+            step_id: FLUSH_SOURCE_STEP,
+            pose: pose(),
+            drained_seq: 17,
+        });
+        assert_eq!(
+            flushed.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: FLUSH_SOURCE_STEP,
+                }
+            }
+        );
+        let accepted = InterShardFlow::TransferAck(TransferAck::Accepted {
+            transfer_id: TransferId(11),
+            step_id: STUB_CROSSING_STEP,
+        });
+        assert_eq!(
+            accepted.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: STUB_CROSSING_STEP,
+                }
+            }
+        );
+    }
+
+    /// The entity-STATE step ids are DISJOINT from the 0–6 route-swap phases — so a state step can
+    /// never alias a route-swap phase in any `(transfer, step_id)` journal.
+    #[test]
+    fn transfer_state_step_ids_are_disjoint_from_route_swap_phases() {
+        for phase in 0u32..=6 {
+            assert_ne!(phase, FLUSH_SOURCE_STEP);
+            assert_ne!(phase, STUB_CROSSING_STEP);
+        }
+        assert_ne!(FLUSH_SOURCE_STEP, STUB_CROSSING_STEP);
+        assert_eq!(TRANSFER_SCHEMA_VERSION, 1);
     }
 
     #[test]
@@ -476,20 +620,56 @@ mod tests {
         );
 
         for ack in [
+            TransferAck::SourceFlushed {
+                transfer_id: TransferId(1),
+                step_id: FLUSH_SOURCE_STEP,
+                pose: pose(),
+                drained_seq: 42,
+            },
             TransferAck::Accepted {
                 transfer_id: TransferId(1),
-                step_id: 2,
+                step_id: STUB_CROSSING_STEP,
             },
             TransferAck::Rejected {
                 transfer_id: TransferId(1),
-                step_id: 2,
+                step_id: STUB_CROSSING_STEP,
                 reason: TransferStepRejectReason::SpatialPrecondition,
             },
         ] {
+            // The accessors agree with the constructed key, over every arm.
             let bytes = postcard::to_allocvec(&ack).expect("encode");
             assert_eq!(
                 postcard::from_bytes::<TransferAck>(&bytes).expect("decode"),
                 ack
+            );
+            assert_eq!(ack.transfer_id(), TransferId(1));
+            // Exercise `step_id()` over EVERY arm (incl. Rejected): every entity-state ack carries
+            // a transfer-state step phase (≥ FLUSH_SOURCE_STEP, disjoint from the 0–6 route-swap).
+            assert!(
+                ack.step_id() >= FLUSH_SOURCE_STEP,
+                "every ack carries an entity-state step phase: {ack:?}"
+            );
+        }
+
+        // The two new InterShardFlow arms roundtrip distinctly (the dispatch split depends on the
+        // tag discriminating them from the route-swap arms).
+        for flow in [
+            InterShardFlow::FlushSource(FlushSource {
+                transfer: TransferId(1),
+                subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+                step_id: FLUSH_SOURCE_STEP,
+            }),
+            InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+                transfer_id: TransferId(1),
+                step_id: FLUSH_SOURCE_STEP,
+                pose: pose(),
+                drained_seq: 42,
+            }),
+        ] {
+            let bytes = postcard::to_allocvec(&flow).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
+                flow
             );
         }
     }

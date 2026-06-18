@@ -16,7 +16,8 @@
 //! (the D-28(b) graduation). FIDELITY (pose/render/ghost) still defers to 1d (D-27 back half).
 
 use vd_core::entity_kind::DurabilityClass;
-use vd_core::pose::RealmId;
+use vd_core::glam::DVec3;
+use vd_core::pose::{FrameRef, RealmId};
 use vd_core::{AccountId, EntityId, NodeId, SessionId, TransferId};
 use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::FaultFabric;
@@ -102,6 +103,10 @@ fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64
             dest: DEST,
             class: DurabilityClass::Durable,
             needs_provision: false,
+            // The realms the player crosses BETWEEN (source SHARD = System(7), dest = System(8)) —
+            // stamped onto the StubCrossing the saga emits at commit (1d.1).
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::System(8),
         },
     );
 
@@ -284,6 +289,42 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
     assert!(
         !src.departing_entities.contains(&entity),
         "SOURCE has nothing departing for the subject",
+    );
+
+    // (10) THE ENTITY STATE CROSSED (1d.1, the pose-only crossing): the DEST holds the transferred
+    // entity at the source's flushed pose. This is the first proof that entity STATE (not just
+    // authority) survives the handoff. render_ready stays false in 1d.1 — the VISIBLE flip (and the
+    // in-client proof) is 1d.3.
+    //
+    // The LOAD-BEARING discriminator is the pose's FRAME, NOT its position. The dest's OWN input
+    // integration (`integrate`) moves `pos` but NEVER changes `frame`, and a dropped crossing would
+    // leave the dest's adopt-default dot in the DEST realm's frame (`SystemSpace{system_seed: 8}` —
+    // `dest_stub_config`). The crossing carries the SOURCE realm's frame (`system_seed: 7`) and
+    // overwrites the dot's pose with it. So a dest frame of seed-7 can ONLY come from a landed
+    // crossing — making this assertion go RED if the crossing is dropped (a `pos != ZERO` check
+    // could NOT: the dest's own drained post-marker input also moves it off origin). This also pins
+    // the 1d.1 interim that the source frame is stored VERBATIM (frame-rebinding into the dest realm
+    // is OWED for 1d.2/1d.3 — DEFERRED D-27); the assertion flips to seed-8 when rebinding lands.
+    let dest_pose = dst
+        .held_poses
+        .iter()
+        .find(|(e, _)| *e == entity)
+        .map(|(_, p)| *p)
+        .expect("the dest holds a pose for the transferred entity");
+    assert_eq!(
+        dest_pose.frame,
+        FrameRef::SystemSpace { system_seed: 7 },
+        "the dest holds the SOURCE realm's frame (seed 7), proving the crossing overwrote the dot's \
+         adopt-default DEST frame (seed 8) — a dropped crossing would leave seed 8: {dest_pose:?}",
+    );
+    assert!(
+        dest_pose.pos.is_finite(),
+        "the crossed pose is finite (sanitized at the dest ingress): {dest_pose:?}",
+    );
+    assert_ne!(
+        dest_pose.pos,
+        DVec3::ZERO,
+        "the crossed pose is the walked source pose, not the origin-adopt default",
     );
 }
 
