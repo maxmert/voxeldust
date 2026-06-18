@@ -15,7 +15,7 @@
 //! - Frames are emitted only while the shard HOLDS its realm authority (fence
 //!   granted via the Directory seam), stamped with that fence.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::entity_kind::EntityKind;
@@ -23,7 +23,7 @@ use vd_core::glam::DVec3;
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::rng::SplitMix64;
-use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId};
+use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
@@ -252,6 +252,50 @@ pub struct StubStats {
     pub last_input_slot_resume: Option<u64>,
 }
 
+/// The outcome of journaling one transferred-entity-state step (1d.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepOutcome {
+    /// This `(transfer, step_id)` was not yet applied — the caller MUST apply the effect.
+    FirstApply,
+    /// A redelivery of an already-applied step — the caller MUST NOT re-apply (re-ack only).
+    AlreadyApplied,
+}
+
+/// The dest shard's idempotency journal for transferred-entity-STATE steps (1d.0): the IN-MEMORY
+/// backing of the frozen `IdempotencyKey::TransferStep{transfer, step_id}` dedup. It keys on the
+/// `(TransferId, step_id)` tuple — the SAME key the gateway's per-session RAM journal uses
+/// (`gateway.rs` `recorded`/`journal`) and the durable redb `applied_steps` table will use at P3
+/// (HR3 ONE machinery, many stores; the store differs per altitude, the KEY and the
+/// consult-before-effect / record-after-effect discipline do not — DEFERRED D-22). It is NEVER a
+/// dest-local key.
+///
+/// 1d.0 lands ONLY this primitive (NO Transfer-arm receiver yet). The 1d.1 receiver consults it
+/// BEFORE applying a `StubCrossing` step and records AFTER — the ordering-discipline gate is 1d.1;
+/// here we only prove the primitive is idempotent. (An in-mem backing cannot crash mid-step — the
+/// durable crash window is a P3 concern, D-22.)
+///
+/// OWED (1d.1, when the receiver feeds this): a RETENTION BOUND — drop a transfer's steps on its
+/// terminal (as the gateway RAM journal does, dropped-whole on terminal/`Bye`), so a long-lived
+/// dest shard does not accumulate one entry per `(transfer, step)` forever. The set cannot grow in
+/// 1d.0 (nothing journals into it yet); the bound belongs with the receiver that knows terminality.
+#[derive(Resource, Debug, Default)]
+pub struct AppliedSteps(BTreeSet<(TransferId, u32)>);
+
+impl AppliedSteps {
+    /// Journal one transfer step by its `IdempotencyKey::TransferStep` components (passed as the
+    /// canonical `(transfer, step_id)`, never a dest-local id). Idempotent: the FIRST call records
+    /// and returns [`StepOutcome::FirstApply`]; every redelivery of the same key returns
+    /// [`StepOutcome::AlreadyApplied`] WITHOUT re-effect. A distinct `step_id` or `transfer` is
+    /// independent.
+    pub fn journal_step(&mut self, transfer: TransferId, step_id: u32) -> StepOutcome {
+        if self.0.insert((transfer, step_id)) {
+            StepOutcome::FirstApply
+        } else {
+            StepOutcome::AlreadyApplied
+        }
+    }
+}
+
 /// Install the stub-shard systems and resources onto a node's world + schedule.
 /// Called by the node composer for `NodeKind::StubShard` (never by feature code).
 pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: StubConfig) {
@@ -265,6 +309,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(InputLog::new(config.input_log_capacity));
     world.insert_resource(FrameCounter::default());
     world.insert_resource(StubStats::default());
+    world.insert_resource(AppliedSteps::default());
     schedule.add_systems((request_pending_grants, process_inbound, emit_frames).chain());
 }
 
@@ -2245,6 +2290,32 @@ mod tests {
         );
         assert_eq!(rig.world.resource::<StubStats>().input_slots_malformed, 1);
         assert!(sent.is_empty(), "the no-op emits nothing");
+    }
+
+    #[test]
+    fn applied_step_redelivery_is_idempotent() {
+        // 1d.0 PERMANENT GATE: the dest applied_steps journal dedups by the frozen
+        // IdempotencyKey::TransferStep (transfer, step_id). The FIRST apply records + returns
+        // FirstApply; every redelivery of the SAME key returns AlreadyApplied with no re-effect;
+        // a distinct step_id OR transfer is independent.
+        let mut steps = AppliedSteps::default();
+        let t = TransferId(1);
+        assert_eq!(steps.journal_step(t, 0), StepOutcome::FirstApply);
+        assert_eq!(
+            steps.journal_step(t, 0),
+            StepOutcome::AlreadyApplied,
+            "a redelivered (transfer, step_id) is a no-op — never a second effect"
+        );
+        assert_eq!(
+            steps.journal_step(t, 1),
+            StepOutcome::FirstApply,
+            "a distinct step_id is journaled independently"
+        );
+        assert_eq!(
+            steps.journal_step(TransferId(2), 0),
+            StepOutcome::FirstApply,
+            "a distinct transfer is journaled independently"
+        );
     }
 
     #[test]
