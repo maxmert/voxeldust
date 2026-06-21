@@ -52,15 +52,19 @@ pub struct DeliveredView {
 impl DeliveredView {
     /// Fold one delivered snapshot in, through the shared §6.3 gate
     /// ([`classify_snapshot`]): apply the entities (feeding their per-sub tracks) or
-    /// count the drop. `held_sub` is the subscription the client currently holds.
+    /// count the drop. `held_subs` is the SET of subscriptions the client currently holds
+    /// (Track R / 1d.2d): during a cross-shard transfer overlap the client holds BOTH the
+    /// source and dest subs, so a frame on either is admitted — the composited render pass
+    /// ([`DeliveredView::render`]) still picks ONE authoritative sub per entity (via
+    /// `AuthorityChanged`/`set_authority`), so the avatar is rendered exactly once.
     /// Returns the verdict so the caller anchors the render clock only on `Apply`.
     pub fn on_snapshot(
         &mut self,
-        held_sub: Option<SubId>,
+        held_subs: &std::collections::BTreeSet<SubId>,
         snap: SnapshotDatagram,
     ) -> SnapshotVerdict {
         let high_water = self.high_water.get(&snap.sub).copied();
-        let verdict = classify_snapshot(held_sub, high_water, snap.sub, snap.frame_id);
+        let verdict = classify_snapshot(held_subs, high_water, snap.sub, snap.frame_id);
         match verdict {
             SnapshotVerdict::Apply => {
                 self.high_water.insert(snap.sub, snap.frame_id);
@@ -157,6 +161,21 @@ impl DeliveredView {
         self.own_entity
     }
 
+    /// The subs that currently hold a delivered TRACK for `entity` (ascending). A pure read-only
+    /// diagnosis surface (it touches NO render/eviction state) — the dev-control + transfer-gate
+    /// anti-vacuity probe: during a cross-shard overlap the avatar has a track on BOTH the source
+    /// AND the dest sub here, even though [`DeliveredView::rendered`] composites it to ONE. So a gate
+    /// can prove the two-holder window was REAL (both tracks live) before asserting it still rendered
+    /// exactly once — otherwise "rendered once" is vacuously true because no overlap ever occurred.
+    #[must_use]
+    pub fn subs_holding(&self, entity: EntityId) -> Vec<SubId> {
+        self.tracks
+            .keys()
+            .filter(|(_, e)| *e == entity)
+            .map(|(sub, _)| *sub)
+            .collect()
+    }
+
     /// The frame the OWN entity is currently in — its authoritative track's leading
     /// edge — i.e. the player's LOCATION (realm), the basis for the player-stats HUD and
     /// the `vdctl` location readout. `None` until the own entity is known AND has a
@@ -222,10 +241,16 @@ impl DeliveredView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use vd_core::entity_kind::EntityKind;
     use vd_core::pose::{FrameRef, StampedPose};
     use vd_core::{TickId, UniverseTick};
     use vd_wire::channels::EntitySnap;
+
+    /// A single-element held-sub set (the common single-subscription case).
+    fn s(sub: SubId) -> BTreeSet<SubId> {
+        BTreeSet::from([sub])
+    }
 
     fn ent(seq: u64) -> EntityId {
         EntityId::pack(EntityKind::Player, 1, seq, seq as u32)
@@ -259,13 +284,13 @@ mod tests {
     #[test]
     fn applied_snapshots_build_tracks_and_render_once_per_entity() {
         let mut view = DeliveredView::default();
-        let held = Some(SubId(0));
+        let held = s(SubId(0));
         view.on_snapshot(
-            held,
+            &held,
             snap(SubId(0), 1, 10, vec![(ent(1), 0.0), (ent(2), 100.0)]),
         );
         view.on_snapshot(
-            held,
+            &held,
             snap(SubId(0), 2, 12, vec![(ent(1), 10.0), (ent(2), 110.0)]),
         );
         let rendered = view.render(11.0); // tick-11 cursor → window midpoint
@@ -285,8 +310,8 @@ mod tests {
         // Two entities through two subs; closing sub 0 evicts ONLY its tracks + authority,
         // leaving sub 1 intact — the reliable per-sub eviction that bounds the view.
         let mut view = DeliveredView::default();
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
-        view.on_snapshot(Some(SubId(1)), snap(SubId(1), 1, 10, vec![(ent(2), 2.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
+        view.on_snapshot(&s(SubId(1)), snap(SubId(1), 1, 10, vec![(ent(2), 2.0)]));
         view.set_authority(ent(1), SubId(0));
         assert_eq!(view.render(10.0).len(), 2);
 
@@ -296,7 +321,7 @@ mod tests {
         assert!(r.contains_key(&ent(2)));
         // high-water for the dropped sub is gone, so a fresh frame_id on a re-opened sub 0
         // is not rejected as stale.
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 12, vec![(ent(3), 3.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 12, vec![(ent(3), 3.0)]));
         assert!(view.render(12.0).contains_key(&ent(3)));
         // Dropping a sub that was never delivered is a harmless no-op.
         view.drop_sub(SubId(7));
@@ -308,7 +333,7 @@ mod tests {
         use vd_core::pose::StampedPose;
         let mut view = DeliveredView::default();
         // System-frame entity → identity.
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 7.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 7.0)]));
         let r = view.render(10.0);
         assert_eq!(view.world_pos(&r[&ent(1)], 10.0), DVec3::new(7.0, 0.0, 0.0));
 
@@ -316,9 +341,9 @@ mod tests {
         // local x=5 → composes to world x=105 (hull orient identity).
         let hull = ent(1);
         let interior = ent(2);
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 2, 11, vec![(hull, 100.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 2, 11, vec![(hull, 100.0)]));
         view.on_snapshot(
-            Some(SubId(0)),
+            &s(SubId(0)),
             SnapshotDatagram {
                 sub: SubId(0),
                 frame_id: 3,
@@ -396,7 +421,7 @@ mod tests {
         );
         hull_pose.orient = DQuat::from_rotation_y(PI); // 180° about Y
         view.on_snapshot(
-            Some(SubId(0)),
+            &s(SubId(0)),
             SnapshotDatagram {
                 sub: SubId(0),
                 frame_id: 1,
@@ -409,7 +434,7 @@ mod tests {
             },
         );
         view.on_snapshot(
-            Some(SubId(0)),
+            &s(SubId(0)),
             SnapshotDatagram {
                 sub: SubId(0),
                 frame_id: 2,
@@ -436,12 +461,12 @@ mod tests {
     #[test]
     fn foreign_sub_and_stale_frames_are_dropped_and_counted() {
         let mut view = DeliveredView::default();
-        let held = Some(SubId(0));
-        view.on_snapshot(held, snap(SubId(0), 5, 10, vec![(ent(1), 1.0)]));
+        let held = s(SubId(0));
+        view.on_snapshot(&held, snap(SubId(0), 5, 10, vec![(ent(1), 1.0)]));
         // Foreign sub: dropped.
-        view.on_snapshot(held, snap(SubId(3), 6, 11, vec![(ent(1), 9.0)]));
+        view.on_snapshot(&held, snap(SubId(3), 6, 11, vec![(ent(1), 9.0)]));
         // Strictly-older frame on the held sub: dropped.
-        view.on_snapshot(held, snap(SubId(0), 4, 9, vec![(ent(1), 9.0)]));
+        view.on_snapshot(&held, snap(SubId(0), 4, 9, vec![(ent(1), 9.0)]));
         assert_eq!(view.stale_frames_dropped(), 2);
         // Only the first frame applied: one track, frozen at its sole pose.
         assert_eq!(view.render(10.0)[&ent(1)].pos, DVec3::new(1.0, 0.0, 0.0));
@@ -459,7 +484,7 @@ mod tests {
         );
         pose.pos.z = f64::INFINITY;
         view.on_snapshot(
-            Some(SubId(0)),
+            &s(SubId(0)),
             SnapshotDatagram {
                 sub: SubId(0),
                 frame_id: 1,
@@ -478,7 +503,7 @@ mod tests {
         // The corruption is COUNTED, not silently fixed (the "never silent" rule).
         assert_eq!(view.nonfinite_poses(), 1);
         // A subsequent FINITE pose does NOT bump the fault counter.
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 2, 11, vec![(ent(1), 3.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 2, 11, vec![(ent(1), 3.0)]));
         assert_eq!(view.nonfinite_poses(), 1, "a clean pose is not a fault");
     }
 
@@ -492,23 +517,37 @@ mod tests {
 
     #[test]
     fn an_entity_seen_through_two_subs_renders_once_from_its_authoritative_sub() {
-        // P2 overlap: entity 1 arrives on BOTH sub 0 and sub 1. Without authority it
-        // renders from the lowest sub; AuthorityChanged moves it to the named sub —
-        // either way it renders EXACTLY ONCE (no duplicate).
+        // 1d.2d overlap: with BOTH subs in the held SET, a frame on EITHER is admitted, so
+        // entity 1 arrives on BOTH sub 0 and sub 1. Without authority it renders from the
+        // lowest sub; AuthorityChanged moves it to the named sub — either way it renders
+        // EXACTLY ONCE (the source copy is composited-suppressed — the FORK 0a guarantee).
         let mut view = DeliveredView::default();
-        // (held_sub only gates the foreign-sub drop; here both subs are "held" for
-        // the test by passing the snapshot's own sub.)
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
-        view.on_snapshot(Some(SubId(1)), snap(SubId(1), 1, 10, vec![(ent(1), 50.0)]));
+        let both = BTreeSet::from([SubId(0), SubId(1)]); // the transfer-overlap held set
+        view.on_snapshot(&both, snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
+        view.on_snapshot(&both, snap(SubId(1), 1, 10, vec![(ent(1), 50.0)]));
+        assert_eq!(
+            view.stale_frames_dropped(),
+            0,
+            "BOTH subs admitted from the held set (no foreign-sub drop in the overlap)"
+        );
         // No authority yet → lowest sub (0).
         let r = view.render(10.0);
         assert_eq!(r.len(), 1, "rendered exactly once");
         assert_eq!(r[&ent(1)].pos, DVec3::new(0.0, 0.0, 0.0), "from sub 0");
-        // AuthorityChanged moves render authority to sub 1.
+        // AuthorityChanged moves render authority to sub 1 (the dest — FORK 0a re-point).
         view.set_authority(ent(1), SubId(1));
         let r = view.render(10.0);
         assert_eq!(r.len(), 1, "still exactly once");
-        assert_eq!(r[&ent(1)].pos, DVec3::new(50.0, 0.0, 0.0), "now from sub 1");
+        assert_eq!(r[&ent(1)].pos, DVec3::new(50.0, 0.0, 0.0), "now from sub 1 (the dest)");
+        // The anti-vacuity probe SEES both tracks even though render composites to one: the
+        // two-holder overlap was REAL at the wire.
+        assert_eq!(
+            view.subs_holding(ent(1)),
+            vec![SubId(0), SubId(1)],
+            "both the source and dest subs hold a track during the overlap"
+        );
+        // An entity with no delivered track at all → empty (no panic).
+        assert!(view.subs_holding(ent(2)).is_empty());
     }
 
     #[test]
@@ -521,7 +560,7 @@ mod tests {
         view.set_authority(ent(1), SubId(0));
         assert_eq!(view.own_location_frame(), None);
         // (c) A snapshot delivers the own entity → its frame IS the player's location.
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
         assert_eq!(
             view.own_location_frame(),
             Some(FrameRef::SystemSpace { system_seed: 1 })
@@ -537,7 +576,7 @@ mod tests {
         // Defensive: authority names a sub the entity has not appeared on → the
         // entity is simply not rendered (no panic, no stale pose from another sub).
         let mut view = DeliveredView::default();
-        view.on_snapshot(Some(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
         view.set_authority(ent(1), SubId(9)); // a sub with no track for ent(1)
         assert!(view.render(10.0).is_empty());
     }

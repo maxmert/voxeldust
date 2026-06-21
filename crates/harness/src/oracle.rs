@@ -6,7 +6,10 @@
 
 use std::collections::BTreeMap;
 
-use vd_core::{EntityId, Fence, NodeId, SessionId};
+use vd_core::glam::{DQuat, DVec3};
+use vd_core::pose::FrameRef;
+use vd_core::{EntityId, Fence, NodeId, SessionId, TickId};
+use vd_wire::channels::SubId;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 
 use crate::topology::InspectReport;
@@ -332,6 +335,234 @@ pub fn verify_input_conservation(
                 seq: *seq,
             });
         }
+    }
+    Ok(())
+}
+
+// =================================================================================================
+// THE RENDER-TRACE ORACLES (WireMonitor §5b): NO-VANISH + POSE-CONTINUITY — what a real client
+// actually drew, tick-by-tick, NEVER a node's internal hope (`test_harness.md` §5b). They consume a
+// captured per-tick RENDER trace (one composited sample per held entity, from the client's REAL
+// `DeliveredView`), so a fabric that delays the dest's first frame past K produces a real
+// client-visible vanish the oracle DOES see, and a wrong frame-eval comparator passes a teleport.
+// =================================================================================================
+
+/// One entity's composited render sample at one tick: the sub it was rendered FROM, its frame, its
+/// WORLD-evaluated position (the `DeliveredView::world_pos` of its render pose — NOT the raw
+/// frame-local `pos`, which silently diverges from world space for a `ShipLocal` interior), and its
+/// orientation. POSE-CONTINUITY compares `world_pos` so it survives D-27 frame-rebind and P8
+/// ship-interior frames; carrying `raw_pos` alongside lets the oracle's meta-test PROVE it ignores
+/// the raw component.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderSample {
+    /// The authoritative sub the entity was composited from (the source→dest flip is a change here).
+    pub sub: SubId,
+    /// The delivered frame (the load-bearing crossing discriminator; never interpolated).
+    pub frame: FrameRef,
+    /// The frame-LOCAL render position, BEFORE world-evaluation (carried only so the meta-test can
+    /// prove the oracle reads `world_pos`, not this). The oracles MUST NOT read this for continuity.
+    pub raw_pos: DVec3,
+    /// The world-space position (`DeliveredView::world_pos` of the render pose). The continuity basis.
+    pub world_pos: DVec3,
+    /// The render orientation (for the rotation-continuity arm).
+    pub orient: DQuat,
+}
+
+/// A captured per-tick render trace for ONE subject entity: at each topology tick, the composited
+/// sample the client rendered for the subject (`None` ⇒ the subject rendered NOTHING that tick — a
+/// vanish candidate). Built from delivered bytes only (the `DeliveredView`), mirroring how
+/// `verify_input_conservation` consumes captured logs — the oracle never touches node internals.
+pub type RenderTrace = Vec<(TickId, Option<RenderSample>)>;
+
+/// The tolerances NO-VANISH / POSE-CONTINUITY are checked against — every value DERIVED, never
+/// magic (`test_harness.md` §5b: K and ε are derived, not magic). Built with [`RenderTolerances::derive`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderTolerances {
+    /// NO-VANISH K: the max consecutive ticks the subject may be absent while a transfer is
+    /// in-flight. Derived `K < band − delay`; in the zero-fault lockstep gate the dest's
+    /// `SubscriptionReady`→`AuthorityChanged` and its first data frame land in the SAME client step
+    /// (the §2 fabric-ordering chain), so `delay == 0`, `band` is unbounded (the source never
+    /// drops before authority re-points), and the tight K=0 (present EVERY tick) is correct.
+    pub max_absent_ticks: u64,
+    /// POSE-CONTINUITY ε_pos (metres): `max_velocity·dt·(1 + stagger_offset) + slack`. The largest
+    /// world-space step one tick of authoritative motion can produce at the source→dest flip, plus
+    /// a coordinate-conversion slack — so genuine motion passes but a teleport (the failure mode) does
+    /// not. Lockstep ⇒ `stagger_offset == 0`.
+    pub epsilon_pos: f64,
+    /// POSE-CONTINUITY ε_rot (radians): the max angular step in one tick. A look-rate × dt + slack;
+    /// for a non-rotating-during-transfer avatar it is the slack alone (a teleport-rotation tripwire).
+    pub epsilon_rot: f64,
+}
+
+impl RenderTolerances {
+    /// Derive the tolerances from the world params + fabric timing — no magic literals.
+    ///
+    /// * `max_velocity_mps` / `tick_dt_s` — the shard's own motion params (`StubConfig`).
+    /// * `stagger_offset_ticks` — the max per-tick stagger between the two shards' frames (0 in the
+    ///   lockstep gate); it widens ε_pos because a staggered source/dest can be one extra tick apart.
+    /// * `max_fabric_delay_ticks` — the max extra delivery delay on the saga/snapshot class; with the
+    ///   §2 ordering chain it is 0 in the zero-fault gate, so `K = 0`. Under chaos it is `> 0` and `K`
+    ///   relaxes to `band − delay` (the caller passes `band`).
+    /// * `band_ticks` — the overlap-band length (the ticks BOTH subs are live); `K < band − delay`.
+    /// * `pos_slack_m` / `rot_slack_rad` — the coordinate-conversion slack (derived from the f64 → wire
+    ///   round-trip + sanitize, NOT zero per §5b); the caller supplies the measured round-trip bound.
+    /// * `look_rate_rad_per_s` — the max angular rate the avatar can turn (0 if it does not rotate
+    ///   during the transfer); ε_rot = `look_rate·dt + rot_slack`.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn derive(
+        max_velocity_mps: f64,
+        tick_dt_s: f64,
+        stagger_offset_ticks: u64,
+        max_fabric_delay_ticks: u64,
+        band_ticks: u64,
+        pos_slack_m: f64,
+        look_rate_rad_per_s: f64,
+        rot_slack_rad: f64,
+    ) -> RenderTolerances {
+        // K < band − delay (a SATURATING subtraction: a band shorter than the delay floors K at 0,
+        // never wraps). The strict `<` means we take `(band − delay) − 1` when positive, else 0.
+        let band_minus_delay = band_ticks.saturating_sub(max_fabric_delay_ticks);
+        let max_absent_ticks = band_minus_delay.saturating_sub(1);
+        // ε_pos = max_velocity·dt·(1 + stagger) + slack. The stagger widens the window by one extra
+        // tick per offset (the source and dest frames can be `stagger` ticks apart).
+        let stagger_factor = 1.0 + stagger_offset_ticks as f64;
+        let epsilon_pos = max_velocity_mps * tick_dt_s * stagger_factor + pos_slack_m;
+        let epsilon_rot = look_rate_rad_per_s * tick_dt_s + rot_slack_rad;
+        RenderTolerances {
+            max_absent_ticks,
+            epsilon_pos,
+            epsilon_rot,
+        }
+    }
+}
+
+/// NO-VANISH failed: the subject rendered nowhere for too long across the transfer window.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[error(
+    "NO-VANISH: subject absent from the render for {absent_run} consecutive ticks ending at \
+     {last_absent} — exceeds K={max_absent_ticks}"
+)]
+pub struct VanishViolation {
+    pub last_absent: TickId,
+    pub absent_run: u64,
+    pub max_absent_ticks: u64,
+}
+
+/// POSE-CONTINUITY failed: at the source→dest authoritative-sub flip the world pose jumped.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+pub enum ContinuityViolation {
+    #[error(
+        "POSE-CONTINUITY: world position jumped {delta} m at the {from:?}→{to:?} sub flip \
+         ({tick}) — exceeds ε_pos={epsilon_pos}"
+    )]
+    Position {
+        tick: TickId,
+        from: SubId,
+        to: SubId,
+        delta: f64,
+        epsilon_pos: f64,
+    },
+    #[error(
+        "POSE-CONTINUITY: orientation jumped {delta} rad at the {from:?}→{to:?} sub flip \
+         ({tick}) — exceeds ε_rot={epsilon_rot}"
+    )]
+    Rotation {
+        tick: TickId,
+        from: SubId,
+        to: SubId,
+        delta: f64,
+        epsilon_rot: f64,
+    },
+}
+
+/// NO-VANISH (WireMonitor §5b): across the captured window the subject must render on SOME held sub
+/// every tick (no run of `> K` absent ticks). A fabric that delays the dest's first frame past K, or
+/// a source-track-drop before the authority re-points, produces a client-visible vanish this oracle
+/// catches — because it reads DELIVERED render samples, not node internals.
+///
+/// # Errors
+/// [`VanishViolation`] for the first absent run that exceeds `tol.max_absent_ticks`.
+pub fn verify_no_vanish(
+    trace: &RenderTrace,
+    tol: RenderTolerances,
+) -> Result<(), VanishViolation> {
+    let mut absent_run = 0u64;
+    for (tick, sample) in trace {
+        match sample {
+            Some(_) => absent_run = 0,
+            None => {
+                absent_run += 1;
+                if absent_run > tol.max_absent_ticks {
+                    return Err(VanishViolation {
+                        last_absent: *tick,
+                        absent_run,
+                        max_absent_ticks: tol.max_absent_ticks,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// POSE-CONTINUITY (WireMonitor §5b): at every tick the subject's authoritative SUB changes (a
+/// source→dest flip), the WORLD-space pose must move `< ε_pos` and rotate `< ε_rot` from the LAST
+/// sample on the old sub to the FIRST on the new — genuine one-tick motion passes, a teleport does
+/// not. Compares `world_pos` (NOT `raw_pos`), so it survives ship-interior / rebind frames; the
+/// meta-test proves the `raw_pos` field is ignored.
+///
+/// # Errors
+/// The first [`ContinuityViolation`] at a sub flip whose world Δpos or Δrot exceeds the tolerance.
+pub fn verify_pose_continuity(
+    trace: &RenderTrace,
+    tol: RenderTolerances,
+) -> Result<(), ContinuityViolation> {
+    // Walk the rendered samples (skipping absent ticks — NO-VANISH owns those); compare each
+    // adjacent rendered pair, but only ACT when the authoritative sub changed (the A→B flip §5b).
+    let mut prev: Option<(TickId, RenderSample)> = None;
+    for (tick, sample) in trace {
+        let Some(curr) = sample else { continue };
+        if let Some((_, last)) = prev
+            && last.sub != curr.sub
+        {
+            check_flip(*tick, last, *curr, tol)?;
+        }
+        prev = Some((*tick, *curr));
+    }
+    Ok(())
+}
+
+/// The monomorphic continuity check at ONE sub flip (HR5: the `?`/comparisons live here, not in the
+/// `verify_pose_continuity` walk). Reads `world_pos` (the continuity basis) and the orientation;
+/// `last.raw_pos`/`curr.raw_pos` are deliberately UNUSED.
+fn check_flip(
+    tick: TickId,
+    last: RenderSample,
+    curr: RenderSample,
+    tol: RenderTolerances,
+) -> Result<(), ContinuityViolation> {
+    let delta_pos = (curr.world_pos - last.world_pos).length();
+    if delta_pos > tol.epsilon_pos {
+        return Err(ContinuityViolation::Position {
+            tick,
+            from: last.sub,
+            to: curr.sub,
+            delta: delta_pos,
+            epsilon_pos: tol.epsilon_pos,
+        });
+    }
+    // Quaternion angular distance: 2·acos(|dot|), clamped (a tiny float overshoot past 1.0 must not
+    // NaN the acos). `abs()` folds the double-cover (q and −q are the same rotation).
+    let delta_rot = 2.0 * last.orient.dot(curr.orient).abs().clamp(-1.0, 1.0).acos();
+    if delta_rot > tol.epsilon_rot {
+        return Err(ContinuityViolation::Rotation {
+            tick,
+            from: last.sub,
+            to: curr.sub,
+            delta: delta_rot,
+            epsilon_rot: tol.epsilon_rot,
+        });
     }
     Ok(())
 }
@@ -828,6 +1059,268 @@ mod tests {
                 "sent input (session {SESSION}, seq 4) is unaccounted: neither applied \
                  nor discarded-with-reason"
             )
+        );
+    }
+
+    // ===================== THE RENDER-TRACE ORACLE META-TESTS (5b negative control) ==============
+    // The oracle ships WITH its falsifier (test_harness.md §5b/§8.1): hand-built traces that FAIL
+    // (a vanish, a teleport) prove the oracle catches the divergence class, and a frame-eval
+    // divergence proves it reads `world_pos`, not the raw frame-local pos.
+
+    const SRC: SubId = SubId(0);
+    const DST: SubId = SubId(1);
+
+    fn sys7() -> FrameRef {
+        FrameRef::SystemSpace { system_seed: 7 }
+    }
+
+    /// A rendered sample whose world_pos == raw_pos (a world frame), no rotation.
+    fn sample(sub: SubId, x: f64) -> RenderSample {
+        RenderSample {
+            sub,
+            frame: sys7(),
+            raw_pos: DVec3::new(x, 0.0, 0.0),
+            world_pos: DVec3::new(x, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        }
+    }
+
+    /// The zero-fault lockstep tolerances actually used by the capstone: move_speed 2 m/s, dt 0.05 s,
+    /// lockstep (stagger 0), in-step delivery (delay 0), a generous band, derived slacks.
+    fn lockstep_tol() -> RenderTolerances {
+        RenderTolerances::derive(
+            2.0,   // max_velocity_mps (StubConfig.move_speed_mps)
+            0.05,  // tick_dt_s
+            0,     // stagger_offset_ticks (lockstep)
+            0,     // max_fabric_delay_ticks (in-step ordering chain)
+            8,     // band_ticks
+            1e-9,  // pos_slack_m (f64 round-trip)
+            0.0,   // look_rate_rad_per_s (avatar does not turn during the transfer)
+            1e-9,  // rot_slack_rad
+        )
+    }
+
+    #[test]
+    fn tolerances_derive_from_params_with_no_magic_and_saturate_safely() {
+        let tol = lockstep_tol();
+        // K = (band − delay) − 1 = (8 − 0) − 1 = 7 with a band of 8; ε_pos = 2·0.05·1 + 1e-9.
+        assert_eq!(tol.max_absent_ticks, 7);
+        assert!((tol.epsilon_pos - (0.1 + 1e-9)).abs() < 1e-15);
+        assert!((tol.epsilon_rot - 1e-9).abs() < 1e-15);
+        // The capstone's tight gate: a band of exactly 1 with delay 0 ⇒ K = 0 (present every tick).
+        let tight = RenderTolerances::derive(2.0, 0.05, 0, 0, 1, 1e-9, 0.0, 1e-9);
+        assert_eq!(tight.max_absent_ticks, 0);
+        // SATURATION: a band SHORTER than the delay floors K at 0 (never wraps). Stagger widens ε_pos.
+        let starved = RenderTolerances::derive(2.0, 0.05, 1, 5, 2, 1e-9, 1.0, 1e-9);
+        assert_eq!(starved.max_absent_ticks, 0, "band(2) − delay(5) saturates to 0, then −1 to 0");
+        assert!(
+            (starved.epsilon_pos - (2.0 * 0.05 * 2.0 + 1e-9)).abs() < 1e-15,
+            "stagger 1 widens ε_pos by the (1 + stagger) factor"
+        );
+        assert!(
+            (starved.epsilon_rot - (1.0 * 0.05 + 1e-9)).abs() < 1e-15,
+            "a non-zero look rate contributes to ε_rot"
+        );
+    }
+
+    #[test]
+    fn no_vanish_passes_a_continuous_trace_and_catches_a_one_tick_vanish() {
+        // (a) PASS: present every tick across an overlap (the source then the dest sub).
+        let good: RenderTrace = vec![
+            (TickId(1), Some(sample(SRC, 0.0))),
+            (TickId(2), Some(sample(SRC, 0.1))),
+            (TickId(3), Some(sample(DST, 0.2))),
+            (TickId(4), Some(sample(DST, 0.3))),
+        ];
+        // Tight K=0 gate (the capstone's): still passes (no absent tick at all).
+        let tight = RenderTolerances::derive(2.0, 0.05, 0, 0, 1, 1e-9, 0.0, 1e-9);
+        assert_eq!(verify_no_vanish(&good, tight), Ok(()));
+
+        // (b) NO-VANISH RED: one absent tick in the middle, against K=0 ⇒ a vanish.
+        let vanish: RenderTrace = vec![
+            (TickId(1), Some(sample(SRC, 0.0))),
+            (TickId(2), None), // the avatar rendered NOWHERE this tick
+            (TickId(3), Some(sample(DST, 0.2))),
+        ];
+        assert_eq!(
+            verify_no_vanish(&vanish, tight),
+            Err(VanishViolation {
+                last_absent: TickId(2),
+                absent_run: 1,
+                max_absent_ticks: 0,
+            })
+        );
+
+        // (c) A SHORT absent run UNDER a relaxed K passes (proves the K bound, not absence==fail):
+        // one absent tick against the band-8 K=7 is tolerated, and a later present tick resets the
+        // run (exercises the Some-reset arm after a None).
+        let blip: RenderTrace = vec![
+            (TickId(1), Some(sample(SRC, 0.0))),
+            (TickId(2), None),
+            (TickId(3), Some(sample(DST, 0.2))),
+        ];
+        assert_eq!(verify_no_vanish(&blip, lockstep_tol()), Ok(()));
+    }
+
+    #[test]
+    fn pose_continuity_passes_a_smooth_flip_and_catches_a_teleport() {
+        // (a) PASS: a source→dest flip where the world pose moves < ε_pos (one tick of walk).
+        let smooth: RenderTrace = vec![
+            (TickId(1), Some(sample(SRC, 0.00))),
+            (TickId(2), Some(sample(SRC, 0.05))),
+            (TickId(3), Some(sample(DST, 0.09))), // Δ 0.04 m at the flip < ε_pos 0.1
+            (TickId(4), Some(sample(DST, 0.13))),
+        ];
+        assert_eq!(verify_pose_continuity(&smooth, lockstep_tol()), Ok(()));
+
+        // (b) POSE-CONTINUITY RED (position): the dest's first pose is a teleport away.
+        let teleport: RenderTrace = vec![
+            (TickId(1), Some(sample(SRC, 0.0))),
+            (TickId(2), Some(sample(DST, 100.0))), // Δ 100 m at the flip ≫ ε_pos
+        ];
+        assert_eq!(
+            verify_pose_continuity(&teleport, lockstep_tol()),
+            Err(ContinuityViolation::Position {
+                tick: TickId(2),
+                from: SRC,
+                to: DST,
+                delta: 100.0,
+                epsilon_pos: lockstep_tol().epsilon_pos,
+            })
+        );
+
+        // (c) POSE-CONTINUITY RED (rotation): same world pos, but a 180° flip in orientation, against
+        // the zero-look-rate ε_rot ⇒ a rotation teleport.
+        use std::f64::consts::PI;
+        let mut spun = sample(DST, 0.0);
+        spun.orient = DQuat::from_rotation_y(PI);
+        let rot: RenderTrace = vec![(TickId(1), Some(sample(SRC, 0.0))), (TickId(2), Some(spun))];
+        assert_eq!(
+            verify_pose_continuity(&rot, lockstep_tol()),
+            Err(ContinuityViolation::Rotation {
+                tick: TickId(2),
+                from: SRC,
+                to: DST,
+                delta: PI,
+                epsilon_rot: lockstep_tol().epsilon_rot,
+            })
+        );
+    }
+
+    #[test]
+    fn pose_continuity_skips_absent_ticks_and_same_sub_pairs() {
+        // An absent tick (None) between two rendered samples is SKIPPED (NO-VANISH owns it), and
+        // adjacent SAME-sub samples are NOT a flip — a big same-sub jump (the dest's own input
+        // integration) must NOT trip continuity (only the A→B sub change does). This exercises the
+        // `continue` arm, the `prev == None` first-sample arm, and the same-sub no-check arm.
+        let trace: RenderTrace = vec![
+            (TickId(1), Some(sample(SRC, 0.0))),
+            (TickId(2), None), // skipped
+            (TickId(3), Some(sample(SRC, 50.0))), // same sub, huge jump — NOT checked
+            (TickId(4), Some(sample(DST, 50.04))), // the only flip: Δ 0.04 < ε
+        ];
+        assert_eq!(verify_pose_continuity(&trace, lockstep_tol()), Ok(()));
+    }
+
+    #[test]
+    fn the_oracle_reads_world_pos_not_the_raw_frame_local_pos() {
+        // THE C3 FRAME-EVAL DIVERGENCE control: a `ShipLocal` interior whose raw frame-local pos and
+        // its world_pos DIVERGE. If the oracle (wrongly) compared `raw_pos`, the two cases below
+        // would give the OPPOSITE verdict. Proving it reads `world_pos` catches the wrong comparator
+        // NOW (P1.5), not at P8 when ship interiors land.
+        let interior = FrameRef::ShipLocal {
+            ship: EntityId(900),
+        };
+
+        // (a) raw_pos CONTINUOUS but world_pos a TELEPORT (the hull jumped) ⇒ must FAIL on world.
+        let last = RenderSample {
+            sub: SRC,
+            frame: interior,
+            raw_pos: DVec3::new(1.0, 0.0, 0.0), // same local seat both ticks
+            world_pos: DVec3::new(1.0, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        let curr = RenderSample {
+            sub: DST,
+            frame: interior,
+            raw_pos: DVec3::new(1.0, 0.0, 0.0), // raw is UNCHANGED — a raw comparator would PASS
+            world_pos: DVec3::new(80.0, 0.0, 0.0), // world TELEPORTED (hull moved 79 m)
+            orient: DQuat::IDENTITY,
+        };
+        let raw_continuous: RenderTrace =
+            vec![(TickId(1), Some(last)), (TickId(2), Some(curr))];
+        assert_eq!(
+            verify_pose_continuity(&raw_continuous, lockstep_tol()),
+            Err(ContinuityViolation::Position {
+                tick: TickId(2),
+                from: SRC,
+                to: DST,
+                delta: 79.0,
+                epsilon_pos: lockstep_tol().epsilon_pos,
+            }),
+            "the oracle compared world_pos (Δ79 m), NOT the unchanged raw_pos"
+        );
+
+        // (b) the INVERSE: raw_pos a TELEPORT but world_pos CONTINUOUS (the interior offset changed
+        // but the hull moved to cancel it) ⇒ must PASS on world. A raw comparator would FAIL here.
+        let last2 = RenderSample {
+            sub: SRC,
+            frame: interior,
+            raw_pos: DVec3::new(0.0, 0.0, 0.0),
+            world_pos: DVec3::new(10.0, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        let curr2 = RenderSample {
+            sub: DST,
+            frame: interior,
+            raw_pos: DVec3::new(60.0, 0.0, 0.0), // raw JUMPED 60 m — a raw comparator would FAIL
+            world_pos: DVec3::new(10.04, 0.0, 0.0), // world moved 0.04 m < ε
+            orient: DQuat::IDENTITY,
+        };
+        let world_continuous: RenderTrace =
+            vec![(TickId(1), Some(last2)), (TickId(2), Some(curr2))];
+        assert_eq!(
+            verify_pose_continuity(&world_continuous, lockstep_tol()),
+            Ok(()),
+            "the oracle passed on the continuous world_pos despite the raw_pos teleport"
+        );
+    }
+
+    #[test]
+    fn render_oracle_violations_display_for_failure_messages() {
+        assert_eq!(
+            VanishViolation {
+                last_absent: TickId(5),
+                absent_run: 3,
+                max_absent_ticks: 1,
+            }
+            .to_string(),
+            "NO-VANISH: subject absent from the render for 3 consecutive ticks ending at \
+             tick-5 — exceeds K=1"
+        );
+        assert_eq!(
+            ContinuityViolation::Position {
+                tick: TickId(2),
+                from: SRC,
+                to: DST,
+                delta: 5.0,
+                epsilon_pos: 0.1,
+            }
+            .to_string(),
+            "POSE-CONTINUITY: world position jumped 5 m at the SubId(0)→SubId(1) sub flip \
+             (tick-2) — exceeds ε_pos=0.1"
+        );
+        assert_eq!(
+            ContinuityViolation::Rotation {
+                tick: TickId(3),
+                from: SRC,
+                to: DST,
+                delta: 3.0,
+                epsilon_rot: 0.01,
+            }
+            .to_string(),
+            "POSE-CONTINUITY: orientation jumped 3 rad at the SubId(0)→SubId(1) sub flip \
+             (tick-3) — exceeds ε_rot=0.01"
         );
     }
 }

@@ -5,23 +5,28 @@
 //! everything server-side routes by in-frame `SessionId` + `Fence`, NEVER by source address (R2).
 //!
 //! Binding shapes that exist NOW because P2 cannot retrofit them:
-//! - `RouteSnapshot { authority, fence, cut }` behind `ArcSwap`; `route.store` is
-//!   the gateway's SOLE route-mutation primitive (P2's `CommitAuthority` drives it).
-//! - The 20 Hz hot paths ([`route_input`], [`forward_frame`]) touch ONLY the
-//!   `ArcSwap` load, one `AtomicU64`, and a byte-level header re-tag — no lock any
-//!   control path takes (SPIKE-2a benches exactly these functions).
-//! - Every forwarded frame's fence is compared against the route's accepted fence;
-//!   stale frames are dropped and counted (fence rule 5 — inert with one authority,
-//!   load-bearing the moment P2 swaps routes).
+//! - WRITE plane: `RouteSnapshot { authority, fence, cut }` behind `ArcSwap`; `route.store` is
+//!   the gateway's SOLE route-mutation primitive (P2's `CommitAuthority` drives it). READ plane
+//!   (1d.2): per-session `subs: ArcSwap<SubTable>`, with `publish_subs` the SOLE writer.
+//! - The 20 Hz hot paths are [`route_input`] (write: one `route` `ArcSwap` load + one `AtomicU64`)
+//!   and the read fan [`on_shard_frame`] (per subscribed shard: one `subs` load + a ≤4 `lookup` +
+//!   a per-sub fence compare + a once-per-`SubId` byte-level re-tag) — no lock any control path
+//!   takes. ([`forward_frame`]/[`frame_passes_fence`] are the SPIKE-2a ROUTE-SWAP-mechanic bench
+//!   helpers: they load `route.fence` to measure the swap's wait-free read under contention, which
+//!   is DISTINCT from the live read-plane per-sub `SubEntry::accepted` fence the fan checks.)
+//! - Every forwarded frame's fence is compared against the per-shard `SubEntry::accepted` fence
+//!   (in [`on_shard_frame`]); stale frames are dropped and counted (fence rule 5 — load-bearing the
+//!   moment a session subscribes to more than one shard, e.g. across a transfer).
 //! - The gateway is the SOLE ticket validator; the session mint COMMITS at the
 //!   orchestrator's directory insert (the gateway only proposes entropy).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
+use vd_core::pose::FrameRef;
 use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
@@ -77,11 +82,19 @@ impl TransportTuning {
 }
 
 /// Gateway configuration (composer-provided).
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub struct GatewayConfig {
     pub orchestrator: NodeId,
-    /// P1: the single stub shard every session lands on.
+    /// P1: the single stub shard every session lands on (the login shard).
     pub shard: NodeId,
+    /// The STABLE set of routable shard `NodeId`s (node-class dispatch — FORK 5). Seeded
+    /// from config (the cluster's shard roster is statically known, exactly as `shard` is);
+    /// for 1d.2 it is `{shard, the transfer dest}`. It governs ONLY node-class dispatch
+    /// (`is_known_shard`) — provably disjoint from client NodeIds — so a per-session
+    /// subscription-refcount slip can NEVER mis-class a client datagram as a shard frame.
+    /// (DISTINCT from the per-session `subscribed_shards` reverse index, which governs
+    /// fan-out only.) `shard` is always a member.
+    pub known_shards: BTreeSet<NodeId>,
     /// The auth service's Ed25519 verifying key (login validation).
     pub auth_verifying_key: [u8; tickets::ED25519_KEY_BYTES],
     /// Seed for session-id proposal entropy (the directory insert is the mint).
@@ -93,12 +106,35 @@ pub struct GatewayConfig {
     pub tuning: TransportTuning,
 }
 
-/// The route a session's input follows and the fence its frames are accepted at.
-/// P2's transfer commit swaps BOTH atomically via one `route.store`.
+impl GatewayConfig {
+    /// Is `from` a routable shard (STABLE node-class dispatch — FORK 5)? Seeded from the
+    /// cluster's shard roster, provably disjoint from client NodeIds, so it can never
+    /// mis-class a client datagram as a shard frame regardless of subscription churn.
+    #[must_use]
+    fn is_known_shard(&self, from: NodeId) -> bool {
+        self.known_shards.contains(&from)
+    }
+}
+
+/// The WRITE-plane route a session's input follows (authority + the transfer cut).
+///
+/// **Two independent atomic publishes (1d.2):** `route` (THIS, the input plane) and
+/// `subs` (the read plane, [`SubTable`]) are now SEPARATE `ArcSwap`s on [`SessionHot`].
+/// The forwarder reads them for orthogonal purposes — `route_input` reads ONLY `route`
+/// (never `subs`), the frame-fan reads ONLY `subs` (never `route`) — so any interleaving
+/// is tolerated: no consumer needs `route` and `subs` mutually consistent at an instant.
+/// (Consequence, NOT a bug given no client prediction: there is a brief window where
+/// `route.authority == dest` but the dest sub isn't open yet — its `SubscriptionReady` is
+/// a round-trip later — absorbed by the cut buffer; the seamless claim's honest footnote.)
+///
+/// `fence` is now WRITE-PLANE-ONLY: the read-plane accepted fence moved to
+/// [`SubEntry::accepted`] (per-shard), but `fence` stays the WRITE route's fence so the
+/// sole-`store_route`-literal (and `store_commit`'s carry) never reshapes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteSnapshot {
     pub authority: NodeId,
-    /// The accepted frame fence (frames below it are dropped).
+    /// The WRITE route's fence (carried by commit; the per-shard READ fence is
+    /// [`SubEntry::accepted`]).
     pub fence: Fence,
     /// The input seq cut during a transfer — ALWAYS `None` in P1.
     pub cut: Option<SeqCut>,
@@ -129,8 +165,14 @@ struct TransferProgress {
     /// issuing command (the saga FSM also gates `CutConfirmed` by state; this is the
     /// gateway-side half of that guard).
     cut_requested: bool,
-    // (`dest` from `PrepareSubscribe` returns at 1c.3 WITH its consumer — `FreezeSource`
-    // installs the `SeqCut.dest`. Per the freeze-with-consumer rule, it is not stored yet.)
+    /// The transfer's DEST shard, captured from `PrepareSubscribe` (the first command, which
+    /// always carries it). Its consumer (1d.2): the PRECISE abort-time read-sub close — on
+    /// `AbortTransfer` (which carries no dest of its own) the gateway closes EXACTLY this transfer's
+    /// dest sub, mirroring `ReleaseSubscribe`'s precise `src`. NEVER an "any sub != config.shard"
+    /// heuristic, which would close the player's CURRENT live sub on a chained transfer and ALL
+    /// composited subs (ship/host/planet) in the N-shard end goal. `close_sub` no-ops if the dest
+    /// sub is not (yet) open (abort normally runs pre-CAS, before the dest sub exists).
+    dest: NodeId,
     /// The applied-steps idempotency journal: `(transfer, step_id) -> the recorded ack`,
     /// re-sent VERBATIM on an at-least-once redelivery (never re-applies the effect),
     /// reached ONLY through [`TransferProgress::recorded`] / [`TransferProgress::journal`]
@@ -174,10 +216,51 @@ impl TransferProgress {
 
 /// The lock-free per-session hot state shared with the (future, threaded) 20 Hz
 /// forwarding path. The cold session record owns an `Arc` of this.
+///
+/// **Per-session, NOT shared (M1):** each session has its OWN `subs` `ArcSwap`. There is
+/// NO shared cross-session `SubTable` — an implementer must not "optimize" the per-session
+/// `subs.load()` into a shared table, which would re-introduce a cross-session lock.
 #[derive(Debug)]
 pub struct SessionHot {
+    /// WRITE plane (input route) — `route_input` reads ONLY this.
     pub route: ArcSwap<RouteSnapshot>,
     pub last_input_seq: AtomicU64,
+    /// READ plane (per-shard accepted subscriptions) — the frame-fan reads ONLY this,
+    /// wait-free. Published whole by `publish_subs` (the sole writer); HR1: it holds ONLY
+    /// `{shard, sub, accepted}` — never any transfer state (that stays cold on [`Session`]).
+    pub subs: ArcSwap<SubTable>,
+}
+
+/// An immutable per-session snapshot of the accepted subscriptions, published WHOLE on
+/// every membership change and read WAIT-FREE by the forwarder (FORK 3: a boxed sorted
+/// slice — ≤ ~4 entries — gives a branch-predictable linear/binary scan with no alloc on
+/// the read, and lets a sub be added/removed without a lock, which a map of atomics cannot).
+#[derive(Debug, Default)]
+pub struct SubTable {
+    /// Sorted by shard `NodeId` (so `lookup` can binary-search); ≤ ~4 entries.
+    by_shard: Box<[SubEntry]>,
+}
+
+impl SubTable {
+    /// The accepted subscription THIS session tagged for `shard`, or `None` if the session
+    /// does not subscribe to it. Binary search over the ≤4 sorted entries.
+    #[must_use]
+    fn lookup(&self, shard: NodeId) -> Option<&SubEntry> {
+        self.by_shard
+            .binary_search_by_key(&shard, |e| e.shard)
+            .ok()
+            .map(|i| &self.by_shard[i])
+    }
+}
+
+/// One accepted subscription on the READ plane: which `sub` id this session tagged a
+/// `shard`'s frames with, and the fence at which it accepts them. HR1: no transfer state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubEntry {
+    pub shard: NodeId,
+    pub sub: SubId,
+    /// The per-shard accepted frame fence (frames below it are dropped — fence rule 5).
+    pub accepted: Fence,
 }
 
 /// Where one session is in its login lifecycle.
@@ -188,8 +271,31 @@ enum SessionPhase {
     AwaitingDirectory,
     /// Directory granted; attach sent to the shard (retried until attached).
     AwaitingAttach,
-    /// Live: input routes shard-ward, frames flow client-ward.
-    Active { sub: SubId, entity: EntityId },
+    /// Live: input routes shard-ward, frames flow client-ward. The subscription set
+    /// lives on `Session.subs` (the cold authority) + `SessionHot.subs` (the hot
+    /// projection) — NOT here (1d.2a).
+    Active { entity: EntityId },
+}
+
+/// The cold authoritative record of ONE accepted subscription (the lifecycle truth; the
+/// hot `SubTable` is the forwarding projection — spec's `SessionCold.subscriptions`,
+/// `connection_plane.md` §2.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SubRecord {
+    sub: SubId,
+    frame: FrameRef,
+    /// The per-shard accepted frame fence (mirrored into [`SubEntry::accepted`]).
+    accepted: Fence,
+    state: SubState,
+}
+
+/// A subscription's lifecycle state. `Draining` = `SubscriptionClosing` sent; it stays in
+/// the `SubTable` + reverse index for ONE more tick so an in-flight straggler frame is
+/// still routed (drained), then the cold drain-sweep removes it (C2 — never a silent drop).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubState {
+    Active,
+    Draining,
 }
 
 /// One session's cold record (the hot part is the shared `Arc<SessionHot>`).
@@ -206,6 +312,11 @@ struct Session {
     /// COLD transfer state, `None` until a saga's `PrepareSubscribe` opens one (1c.2).
     /// Dropped whole on the in-flight terminal (`AbortTransfer`) or when the session ends.
     transfer: Option<TransferProgress>,
+    /// The COLD authoritative subscription set, keyed by shard `NodeId` (1d.2a; ≤ ~4).
+    /// Mutated ONLY through `open_sub`/`close_sub`/the drain-sweep, each followed by
+    /// `publish_subs` (the sole `SubTable` writer — HR3). The hot `SubTable` is its
+    /// forwarding projection.
+    subs: BTreeMap<NodeId, SubRecord>,
     hot: Arc<SessionHot>,
 }
 
@@ -215,6 +326,13 @@ struct Session {
 pub struct GatewaySessions {
     by_session: BTreeMap<SessionId, Session>,
     by_client: BTreeMap<NodeId, SessionId>,
+    /// The per-session fan-out reverse index `shard -> {sessions subscribing to it}` (FORK 5
+    /// / H2), cold-maintained by `open_sub`/`close_sub`/the drain-sweep alongside the hot
+    /// `SubTable`. It makes `on_shard_frame` iterate ONLY subscribers-of-`from`, not all
+    /// sessions. It governs FAN-OUT only — NEVER node-class dispatch (that is the stable
+    /// `config.known_shards`), so a refcount slip cannot mis-route a client. A `Draining`
+    /// sub stays indexed for one tick (its straggler is drained), then removed.
+    subscribed_shards: BTreeMap<NodeId, BTreeSet<SessionId>>,
 }
 
 impl GatewaySessions {
@@ -239,6 +357,116 @@ impl GatewaySessions {
             SessionPhase::AwaitingDirectory | SessionPhase::AwaitingAttach => None,
         })
     }
+
+    /// The sessions subscribing to `shard` (the H2 reverse-index read the frame-fan iterates).
+    /// Empty when no session subscribes to it. Returns owned ids so the caller can mutate the
+    /// outbox while iterating; the set is ≤ S and only the subscribers, never all sessions.
+    fn subscribers_of(&self, shard: NodeId) -> Vec<SessionId> {
+        self.subscribed_shards
+            .get(&shard)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// THE one open primitive (HR3): allocate a never-reused `sub` id, insert the cold
+    /// `SubRecord` (Active), push `SubscriptionOpened` BEFORE publishing the hot table (X1 —
+    /// a forwarder can never route a frame for the sub ahead of its opener), publish the sole
+    /// `SubTable`, and index the reverse fan-out. The transfer is the FIRST extra caller;
+    /// login is the first. Returns the allocated sub id.
+    fn open_sub(
+        &mut self,
+        session_id: SessionId,
+        shard: NodeId,
+        frame: FrameRef,
+        accepted: Fence,
+        outbox: &mut OutboundBox,
+    ) -> Option<SubId> {
+        let session = self.by_session.get_mut(&session_id)?;
+        let sub = SubId(session.next_sub);
+        session.next_sub += 1;
+        session.subs.insert(
+            shard,
+            SubRecord {
+                sub,
+                frame,
+                accepted,
+                state: SubState::Active,
+            },
+        );
+        // X1: SubscriptionOpened strictly precedes any data for the sub.
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::SubscriptionOpened { sub, frame },
+        );
+        publish_subs(&session.hot, &session.subs); // sole SubTable writer (HR3)
+        self.subscribed_shards
+            .entry(shard)
+            .or_default()
+            .insert(session_id);
+        Some(sub)
+    }
+
+    /// THE one close primitive (HR3): mark the cold `SubRecord` `Draining` and send
+    /// `SubscriptionClosing`. It STAYS in the `SubTable` + index for ONE more tick (C2 drain
+    /// grace) so an in-flight straggler frame is still routed; the cold drain-sweep removes it
+    /// next tick. A close of a shard this session does not subscribe to is a no-op. Called by
+    /// `on_transfer_control` at `ReleaseSubscribe` (close the source sub) and defensively at
+    /// `AbortTransfer` (close any dest sub).
+    fn close_sub(&mut self, session_id: SessionId, shard: NodeId, outbox: &mut OutboundBox) {
+        let Some(session) = self.by_session.get_mut(&session_id) else {
+            return;
+        };
+        let Some(rec) = session.subs.get_mut(&shard) else {
+            return;
+        };
+        if rec.state == SubState::Draining {
+            return; // already draining (idempotent — never a second SubscriptionClosing)
+        }
+        rec.state = SubState::Draining;
+        let sub = rec.sub;
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::SubscriptionClosing { sub },
+        );
+        // NOTE: left in `subs` + `subscribed_shards` until the next-tick drain-sweep so a
+        // straggler frame from `shard` is drained, not dropped (the hot table still resolves
+        // it). No `publish_subs` here — the hot projection keeps the Draining entry routable.
+    }
+
+    /// The cold drain-sweep (off the hot path): remove every `Draining` sub, republish the
+    /// session's `SubTable`, and drop the reverse-index entry. Runs once per control tick, so a
+    /// `Draining` sub lives for exactly one tick (its straggler drained), then is gone.
+    fn sweep_draining(&mut self) {
+        // Collect first (one mutable borrow at a time): which (session, shard) pairs drained.
+        let mut drained: Vec<(SessionId, NodeId)> = Vec::new();
+        for (session_id, session) in &mut self.by_session {
+            let draining: Vec<NodeId> = session
+                .subs
+                .iter()
+                .filter(|(_, r)| r.state == SubState::Draining)
+                .map(|(shard, _)| *shard)
+                .collect();
+            if draining.is_empty() {
+                continue;
+            }
+            for shard in &draining {
+                session.subs.remove(shard);
+                drained.push((*session_id, *shard));
+            }
+            publish_subs(&session.hot, &session.subs);
+        }
+        // Then drop each drained session from its shard's reverse-index entry.
+        for (session_id, shard) in drained {
+            if let Some(set) = self.subscribed_shards.get_mut(&shard) {
+                set.remove(&session_id);
+                if set.is_empty() {
+                    self.subscribed_shards.remove(&shard);
+                }
+            }
+        }
+    }
 }
 
 /// Session-id proposal entropy (the directory insert is the authoritative mint).
@@ -258,9 +486,15 @@ pub struct GatewayStats {
     pub inputs_malformed: u64,
     pub stale_frames_dropped: u64,
     pub undecodable: u64,
-    /// A `TransferControl` command (or cut marker) for an unknown/absent session, or a
-    /// phase command whose `TransferProgress` prerequisite is missing — dropped + counted,
-    /// never panicked (mirrors `inputs_unroutable`).
+    /// A session in the `subscribed_shards` reverse index for `from` had NO matching
+    /// `SubEntry` in its hot `SubTable` (an index/table desync — an invariant breach the
+    /// `publish_subs` co-republish makes impossible by construction). Counted, never a silent
+    /// `continue` (C2 honesty floor). A straggler from a just-closed source is NOT this — that
+    /// is the one-tick `Draining` grace, drained not dropped.
+    pub frame_sub_desync: u64,
+    /// A `TransferControl` command (or cut marker, or a `SubscriptionReady` read-plane
+    /// notice) for an unknown/absent session, or a phase command whose `TransferProgress`
+    /// prerequisite is missing — dropped + counted, never panicked (mirrors `inputs_unroutable`).
     pub transfer_unroutable: u64,
     /// A still-parked route phase (after 1c.4: `ReleaseSubscribe`, the demote tail).
     /// Counted + warned, no ack (the saga correctly pins until its handler exists),
@@ -283,9 +517,10 @@ pub struct GatewayStats {
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
 pub fn register_gateway(world: &mut World, schedule: &mut Schedule, config: GatewayConfig) {
+    let session_seed = config.session_seed;
     world.insert_resource(config);
     world.insert_resource(GatewaySessions::default());
-    world.insert_resource(SessionMint(SplitMix64::new(config.session_seed)));
+    world.insert_resource(SessionMint(SplitMix64::new(session_seed)));
     world.insert_resource(GatewayStats::default());
     schedule.add_systems((process_gateway_inbound, drive_pending_sessions).chain());
 }
@@ -343,17 +578,20 @@ pub enum InputRouting {
     Malformed,
 }
 
-/// Does this session ACCEPT a frame at `frame_fence`? (Stale-fence frames from a
-/// demoted old owner are dropped — fence rule 5.) The cheap per-session half of
-/// the fan-out; the expensive re-tag is shared per sub-id (SCALE-1).
+/// SPIKE-2a ROUTE-SWAP-mechanic bench helper — NOT the live read-plane fence check. It loads the
+/// WRITE `route.fence` so the bench can measure the route swap's wait-free read under contention
+/// (publisher `route.store` vs reader `route.load`). The LIVE read fan ([`on_shard_frame`]) checks
+/// the PER-SUB [`SubEntry::accepted`] fence instead (the 1d.2 read/write split) — do NOT confuse
+/// the two: this is the swap microbench, that is the production frame-acceptance.
 #[must_use]
 pub fn frame_passes_fence(hot: &SessionHot, frame_fence: Fence) -> bool {
     !frame_fence.is_stale_against(hot.route.load().fence)
 }
 
-/// Forward one shard frame to one session: fence-compare then byte-level sub re-tag.
-/// Returns the client-bound bytes, or `None` if the frame is stale (counted by the
-/// caller). Retained for the SPIKE-2a microbench (single-session hot path).
+/// SPIKE-2a microbench helper (route-swap mechanic): fence-compare against the WRITE route then a
+/// byte-level sub re-tag — the single-session forward SHAPE under route-swap contention. NOT the
+/// live forwarder: production fans per subscribed shard in [`on_shard_frame`] at the per-sub
+/// [`SubEntry::accepted`] fence, sharing the re-tag once-per-`SubId` (SCALE-1).
 #[must_use]
 pub fn forward_frame(
     hot: &SessionHot,
@@ -381,22 +619,22 @@ fn process_gateway_inbound(
     mut stats: ResMut<GatewayStats>,
     mut outbox: ResMut<OutboundBox>,
 ) {
+    // Cold drain-sweep FIRST (off the hot path): remove subs that were marked `Draining` in a
+    // PRIOR tick. A sub closed (marked Draining) while processing this tick's inbound stays
+    // routable through the rest of this tick's batch (its straggler is drained), then is swept
+    // at the START of the next tick — the one-tick grace (C2 / X1).
+    sessions.sweep_draining();
     for msg in &inbox.0 {
         let Inbound::Wire { from, class, bytes } = msg else {
             continue;
         };
         let from = *from;
-        if from == config.shard {
-            match class {
-                MsgClass::Control => {
-                    on_shard_control(bytes, &mut sessions, &mut stats, &mut outbox)
-                }
-                MsgClass::Snapshot => {
-                    on_shard_frame(bytes, &sessions, &mut stats, &mut outbox);
-                }
-                _ => stats.undecodable += 1,
-            }
-        } else if from == config.orchestrator {
+        // Node-class dispatch (FORK 5): orchestrator → known-shard (STABLE roster) →
+        // client-fallthrough. The orderING (orchestrator first) keeps a shard NodeId from ever
+        // colliding with the orchestrator role; node roles are disjoint by construction. The
+        // shard test is the STABLE `config.known_shards`, NEVER the mutable per-session
+        // `subscribed_shards` — so a subscription refcount slip cannot mis-class a client.
+        if from == config.orchestrator {
             match class {
                 // The orchestrator→gateway Saga class carries an InterShardFlow envelope:
                 // a DirectoryReply (session-grant head) OR a Saga(TransferControl) command.
@@ -422,6 +660,16 @@ fn process_gateway_inbound(
                 },
                 // Membership (clock sync) is consumed by the follower system.
                 MsgClass::Membership => {}
+                _ => stats.undecodable += 1,
+            }
+        } else if config.is_known_shard(from) {
+            match class {
+                MsgClass::Control => {
+                    on_shard_control(from, bytes, &config, &mut sessions, &mut stats, &mut outbox)
+                }
+                MsgClass::Snapshot => {
+                    on_shard_frame(from, bytes, &sessions, &mut stats, &mut outbox);
+                }
                 _ => stats.undecodable += 1,
             }
         } else {
@@ -544,6 +792,7 @@ fn on_client_control(
                     next_sub: 0,
                     negotiated_minor: negotiated.minor,
                     transfer: None,
+                    subs: BTreeMap::new(),
                     hot: Arc::new(SessionHot {
                         route: ArcSwap::from_pointee(RouteSnapshot {
                             authority: config.shard,
@@ -551,6 +800,7 @@ fn on_client_control(
                             cut: None,
                         }),
                         last_input_seq: AtomicU64::new(0),
+                        subs: ArcSwap::from_pointee(SubTable::default()),
                     }),
                 },
             );
@@ -731,9 +981,20 @@ fn on_transfer_control(
         reply_ack(outbox, config.orchestrator, prior);
         return;
     }
+    // The READ-plane subs to close AFTER the ack/journal (the `&mut Session` borrow must end
+    // before `GatewaySessions::close_sub` — the sole sub-close primitive — can run).
+    // ReleaseSubscribe closes the SOURCE sub (`src` from the command); AbortTransfer closes
+    // EXACTLY this transfer's DEST sub (`tp.dest`, captured at PrepareSubscribe) — never an "any
+    // sub != config.shard" heuristic (which would close the player's CURRENT live sub on a chained
+    // transfer and ALL composited subs in the N-shard end goal). Inert in the 1d.2 happy path
+    // (abort runs pre-CAS, before the dest sub exists; `close_sub` no-ops then) but PRECISE for the
+    // commit/flip-window-open ordering and the N-shard future.
+    let mut subs_to_close: Vec<NodeId> = Vec::new();
     // Compute the ack (or None for deferred/parked phases), then record-then-send below.
     let ack: Option<TransferControlAck> = match cmd {
-        TransferControl::PrepareSubscribe { .. } => apply_prepare(session, transfer, stats),
+        TransferControl::PrepareSubscribe { dest, .. } => {
+            apply_prepare(session, transfer, dest, stats)
+        }
         TransferControl::RequestCut { .. } => {
             apply_request_cut(session, outbox, transfer, stats);
             None // the ack (CutConfirmed) is deferred to the cut-marker observer
@@ -742,13 +1003,36 @@ fn on_transfer_control(
             marker_seq, dest, ..
         } => apply_freeze(session, transfer, marker_seq, dest, stats),
         TransferControl::ThawSource { .. } => apply_thaw(session, transfer, stats),
-        TransferControl::AbortTransfer { .. } => apply_abort(session, transfer),
+        TransferControl::AbortTransfer { .. } => {
+            // Close EXACTLY this transfer's dest sub (`tp.dest`), mirroring ReleaseSubscribe's
+            // precise `src`; a foreign/absent abort matches no `tp` and closes nothing. `close_sub`
+            // no-ops if the dest sub is not (yet) open — the normal pre-CAS abort case.
+            if let Some(tp) = session
+                .transfer
+                .as_ref()
+                .filter(|tp| tp.transfer == transfer)
+            {
+                subs_to_close.push(tp.dest);
+            }
+            apply_abort(session, transfer)
+        }
         TransferControl::CommitAuthority {
             new_fence, subject, ..
         } => apply_commit(
             session, transfer, new_fence, subject, session_id, stats, outbox,
         ),
-        TransferControl::ReleaseSubscribe { .. } => apply_release(session, transfer),
+        TransferControl::ReleaseSubscribe { src, .. } => {
+            // Close the SOURCE sub ONLY for the matching in-flight transfer (mirroring
+            // `apply_release`'s prune); a foreign/absent release closes nothing.
+            if session
+                .transfer
+                .as_ref()
+                .is_some_and(|tp| tp.transfer == transfer)
+            {
+                subs_to_close.push(src);
+            }
+            apply_release(session, transfer)
+        }
     };
     // RECORD-then-SEND for the LIVE acking phases. The journal write is GUARDED to the
     // IN-FLIGHT transfer (`tp.transfer == transfer`): an idempotent re-ack of a phase for a
@@ -763,6 +1047,12 @@ fn on_transfer_control(
             tp.journal(step, ack);
         }
         reply_ack(outbox, config.orchestrator, ack);
+    }
+    // The `&mut Session` borrow has ended: close the collected subs through the sole close
+    // primitive (Draining grace; the next-tick sweep removes them). `close_sub` is idempotent
+    // and a no-op for a shard this session does not subscribe to.
+    for shard in subs_to_close {
+        sessions.close_sub(session_id, shard, outbox);
     }
 }
 
@@ -782,6 +1072,7 @@ fn on_transfer_control(
 fn apply_prepare(
     session: &mut Session,
     transfer: TransferId,
+    dest: NodeId,
     stats: &mut GatewayStats,
 ) -> Option<TransferControlAck> {
     if !matches!(session.phase, SessionPhase::Active { .. }) {
@@ -805,6 +1096,7 @@ fn apply_prepare(
     session.transfer = Some(TransferProgress {
         transfer,
         cut_requested: false,
+        dest, // captured here for the precise abort-time dest-sub close (1d.2)
         applied: BTreeMap::new(),
         dest_buffer: VecDeque::new(),
     });
@@ -910,6 +1202,25 @@ fn store_route(hot: &SessionHot, authority: NodeId, fence: Fence, cut: Option<Se
     }));
 }
 
+/// THE sole `SubTable` (READ plane) writer — the read-plane analog of `store_route`: project
+/// the cold `subs` map into the immutable hot `SubTable` and publish it whole via one
+/// `ArcSwap::store`. The exhaustive no-`..rest` `SubEntry` literal lives in EXACTLY one place
+/// (HR3), so a future `SubEntry` field is a single compile-fix every caller inherits. Both
+/// `Active` AND `Draining` records are projected (a `Draining` sub stays routable for its
+/// one-tick drain grace); the cold map is already sorted by shard `NodeId` (`BTreeMap`), so
+/// the boxed slice is sorted for `SubTable::lookup`'s binary search by construction.
+fn publish_subs(hot: &SessionHot, subs: &BTreeMap<NodeId, SubRecord>) {
+    let by_shard: Box<[SubEntry]> = subs
+        .iter()
+        .map(|(shard, rec)| SubEntry {
+            shard: *shard,
+            sub: rec.sub,
+            accepted: rec.accepted,
+        })
+        .collect();
+    hot.subs.store(Arc::new(SubTable { by_shard }));
+}
+
 /// Carry the route's `authority` + `fence` forward and swap ONLY the `cut` — the cut
 /// install/clear policy (`apply_freeze` `Some`, `apply_thaw`/`apply_abort` `None`). Its
 /// mirror image is `store_commit`; both go through the lone `store_route` literal.
@@ -939,9 +1250,10 @@ fn store_commit(hot: &SessionHot, dest: NodeId) {
 /// `Committed` for a session this gateway no longer holds (WEDGE-1) — pin instead.
 ///
 /// **R-FENCE (DEFERRED D-25): `new_fence` is CARRIED, NOT installed as `route.fence`.** Frames
-/// stamp the REALM fence (route attaches `realm_fence`; checked at `frame_passes_fence`),
-/// whereas `new_fence` is the per-ENTITY CAS fence (`DirectoryKey::Entity`). Installing the
-/// Entity fence here would make the dest's OWN realm-stamped frames stale
+/// stamp the REALM fence (each sub accepts at its per-shard `SubEntry::accepted` realm fence,
+/// checked in `on_shard_frame`), whereas `new_fence` is the per-ENTITY CAS fence
+/// (`DirectoryKey::Entity`). Installing the Entity fence here would make the dest's OWN
+/// realm-stamped frames stale
 /// (`realm_fence.is_stale_against(new_fence) == true`) — a black screen. Fence rule 5 (fence
 /// out a demoted REMOTE owner) activates by REALM-fence movement at 1d/mesh when source/dest
 /// are distinct realm leases; intra-shard (one realm lease) it correctly does NOT fire.
@@ -1147,9 +1459,11 @@ fn on_cut_marker(
     reply_ack(outbox, orchestrator, ack);
 }
 
-/// Handle a shard control reply (attach/detach lifecycle).
+/// Handle a shard control reply (attach/detach lifecycle), from shard `from`.
 fn on_shard_control(
+    from: NodeId,
     bytes: &[u8],
+    config: &GatewayConfig,
     sessions: &mut GatewaySessions,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
@@ -1165,29 +1479,32 @@ fn on_shard_control(
             frame,
             realm_fence,
         } => {
-            let Some(session) = sessions.by_session.get_mut(&session_id) else {
-                // Attach reply for a session that left meanwhile: ignore (the
-                // detach path already ran).
-                return;
-            };
-            if matches!(session.phase, SessionPhase::Active { .. }) {
-                return; // duplicate attach reply (at-least-once): idempotent
+            {
+                let Some(session) = sessions.by_session.get_mut(&session_id) else {
+                    // Attach reply for a session that left meanwhile: ignore (the
+                    // detach path already ran).
+                    return;
+                };
+                if matches!(session.phase, SessionPhase::Active { .. }) {
+                    return; // duplicate attach reply (at-least-once): idempotent
+                }
+                // THE sole route-mutation primitive: one atomic store (P2 NOW drives this same
+                // `store_route` from `CommitAuthority`'s `store_commit`). Attach SETS a fresh
+                // realm fence (its distinct carry policy); commit/cut CARRY it.
+                let authority = session.hot.route.load().authority;
+                store_route(&session.hot, authority, realm_fence, None);
+                session.phase = SessionPhase::Active { entity };
             }
-            // sub ids come from the per-session monotonic allocator — NEVER reused.
-            let sub = SubId(session.next_sub);
-            session.next_sub += 1;
-            // THE sole route-mutation primitive: one atomic store (P2 NOW drives this same
-            // `store_route` from `CommitAuthority`'s `store_commit`). Attach SETS a fresh
-            // realm fence (its distinct carry policy); commit/cut CARRY it.
-            let authority = session.hot.route.load().authority;
-            store_route(&session.hot, authority, realm_fence, None);
-            session.phase = SessionPhase::Active { sub, entity };
-            // X1: SubscriptionOpened strictly precedes any data for the sub.
-            push_control(
-                outbox,
-                session.client,
-                &ServerControlMsg::SubscriptionOpened { sub, frame },
-            );
+            // Open the login sub on `config.shard` at the realm fence — the FIRST `open_sub`
+            // caller (the transfer dest is the second, 1d.2b). `open_sub` pushes
+            // SubscriptionOpened BEFORE publishing the SubTable (X1) and indexes the fan-out.
+            let sub = sessions
+                .open_sub(session_id, config.shard, frame, realm_fence, outbox)
+                .expect("session present (we just held it above this tick)");
+            let session = sessions
+                .by_session
+                .get(&session_id)
+                .expect("session present");
             push_control(
                 outbox,
                 session.client,
@@ -1197,6 +1514,37 @@ fn on_shard_control(
         ShardToGateway::SessionDetached { .. } => {
             // The session was already removed on Bye; the confirmation closes the loop.
         }
+        ShardToGateway::SubscriptionReady {
+            session: session_id,
+            entity,
+            frame,
+            realm_fence,
+        } => {
+            // FORK 0a (Track R / 1d.2b): the dest (`from`) adopted the crossing entity and is
+            // readable. Open a SECOND per-session sub on `from` at the DEST realm fence and
+            // RE-POINT the avatar's render authority to it — the read-plane analog of the
+            // write-plane `CommitAuthority`. The client then composites the source copy as
+            // non-authoritative (renders the avatar ONCE, from the dest sub — invariant A1).
+            let Some(session) = sessions.by_session.get(&session_id) else {
+                stats.transfer_unroutable += 1; // absent session: counted, never a panic
+                return;
+            };
+            if session.subs.contains_key(&from) {
+                return; // duplicate SubscriptionReady (at-least-once): idempotent no-op
+            }
+            let sub = sessions
+                .open_sub(session_id, from, frame, realm_fence, outbox)
+                .expect("session present (held immutably just above this tick)");
+            let session = sessions
+                .by_session
+                .get(&session_id)
+                .expect("session present");
+            push_control(
+                outbox,
+                session.client,
+                &ServerControlMsg::AuthorityChanged { entity, sub },
+            );
+        }
         ShardToGateway::Frame { .. } => {
             // Frames ride the Snapshot class; one on Control is a peer bug.
             stats.undecodable += 1;
@@ -1204,8 +1552,12 @@ fn on_shard_control(
     }
 }
 
-/// Fan one shard frame out to every ACTIVE session (fence-checked, re-tagged).
+/// Fan one shard frame (from shard `from`) out to that shard's subscribers, each at ITS sub
+/// id and ITS per-shard accepted fence. The READ-plane heart (1d.2a): iterate ONLY
+/// subscribers-of-`from` (H2 reverse index, O(subscribers) not O(all sessions)) and resolve
+/// each session's `SubEntry` for `from` off the wait-free hot `SubTable`.
 fn on_shard_frame(
+    from: NodeId,
     bytes: &[u8],
     sessions: &GatewaySessions,
     stats: &mut GatewayStats,
@@ -1225,18 +1577,33 @@ fn on_shard_frame(
     // never an O(entities) re-allocation per subscriber. The gateway therefore
     // holds ONE body per sub-id regardless of how many sessions subscribe to it.
     let mut retagged: BTreeMap<SubId, vd_sim::io::Bytes> = BTreeMap::new();
-    for session in sessions.by_session.values() {
-        let SessionPhase::Active { sub, .. } = session.phase else {
+    for session_id in sessions.subscribers_of(from) {
+        let Some(session) = sessions.by_session.get(&session_id) else {
+            // The reverse index and `by_session` are kept in sync by `open_sub`/the
+            // drain-sweep; a missing session is an index/table desync (counted, never silent).
+            stats.frame_sub_desync += 1;
             continue;
         };
-        if !frame_passes_fence(&session.hot, realm_fence) {
+        // Resolve which sub THIS session tagged `from`'s frames with (and at what fence) off
+        // the wait-free hot `SubTable`. The index and the table are republished together by
+        // `publish_subs`, so a subscriber-in-index ALWAYS has a `SubEntry` — a `None` here is
+        // an invariant breach, counted (C2 honesty floor), never a silent `continue`.
+        let table = session.hot.subs.load();
+        let Some(entry) = table.lookup(from) else {
+            stats.frame_sub_desync += 1;
+            continue;
+        };
+        // Per-shard fence (NOT the session-global route fence): the source sub accepts source
+        // frames at the source realm fence; the dest sub accepts dest frames at the dest realm
+        // fence. A demoted old owner's stale frame is dropped + counted (fence rule 5).
+        if realm_fence.is_stale_against(entry.accepted) {
             stats.stale_frames_dropped += 1;
             continue;
         }
-        let body = match retagged.entry(sub) {
+        let body = match retagged.entry(entry.sub) {
             std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::btree_map::Entry::Vacant(e) => {
-                match retag_snapshot_sub(&snapshot_bytes, sub) {
+                match retag_snapshot_sub(&snapshot_bytes, entry.sub) {
                     Ok(b) => e.insert(vd_sim::io::bytes(b)),
                     Err(_) => {
                         // A corrupt snapshot body re-tags for no sub: count once and
@@ -1398,6 +1765,11 @@ mod tests {
         GatewayConfig {
             orchestrator: ORCH,
             shard: SHARD,
+            // The STABLE routable-shard roster (FORK 5): the login shard AND the transfer
+            // dest, so a render-ready dest's frames are node-class-dispatchable (1d.2c). DEST
+            // is recognized as a shard; whether a SESSION receives its frames is governed
+            // separately by the per-session `subscribed_shards` reverse index.
+            known_shards: BTreeSet::from([SHARD, DEST]),
             auth_verifying_key: verifying_key(),
             session_seed: 7,
             tick_hz: 50,
@@ -2316,6 +2688,7 @@ mod tests {
                 cut: None,
             }),
             last_input_seq: AtomicU64::new(0),
+            subs: ArcSwap::from_pointee(SubTable::default()),
         };
         let snapshot_bytes = frame_msg(Fence(1), 1)
             .into_snapshot_bytes()
@@ -2348,6 +2721,7 @@ mod tests {
                 }),
             }),
             last_input_seq: AtomicU64::new(0),
+            subs: ArcSwap::from_pointee(SubTable::default()),
         };
         let (mut to_source, mut to_buffer) = (0u64, 0u64);
         for seq in 1..=50_000u64 {
@@ -2434,6 +2808,7 @@ mod tests {
         let hot = Arc::new(SessionHot {
             route: ArcSwap::from_pointee(routes[0]),
             last_input_seq: AtomicU64::new(0),
+            subs: ArcSwap::from_pointee(SubTable::default()),
         });
         let frame = frame_msg(Fence(9), 1)
             .into_snapshot_bytes()
@@ -2604,6 +2979,7 @@ mod tests {
                 cut: None,
             }),
             last_input_seq: AtomicU64::new(10),
+            subs: ArcSwap::from_pointee(SubTable::default()),
         };
         assert_eq!(route_input(&hot, &input_bytes(10)), InputRouting::Deduped);
         assert_eq!(route_input(&hot, &input_bytes(5)), InputRouting::Deduped);
@@ -2643,6 +3019,7 @@ mod tests {
                 cut: None,
             }),
             last_input_seq: AtomicU64::new(0),
+            subs: ArcSwap::from_pointee(SubTable::default()),
         };
         let forwards = AtomicUsize::new(0);
         let barrier = Barrier::new(THREADS);
@@ -2900,6 +3277,7 @@ mod tests {
                 }),
             }),
             last_input_seq: AtomicU64::new(0),
+            subs: ArcSwap::from_pointee(SubTable::default()),
         };
         // seq <= marker (and past the dedup high-water) → Forward to the SOURCE authority.
         assert_eq!(
@@ -2918,6 +3296,7 @@ mod tests {
                 cut: None,
             }),
             last_input_seq: AtomicU64::new(0),
+            subs: ArcSwap::from_pointee(SubTable::default()),
         };
         assert_eq!(
             route_input(&no_cut, &input_bytes(100)),
@@ -3826,6 +4205,771 @@ mod tests {
                 result: PrepareResult::Ready,
             }],
             "the different transfer is handled fresh, not re-sent from the XFER journal"
+        );
+    }
+
+    // ---- Slice 1d.2a: the route-table reshape (sub registry + reverse index) ----
+
+    /// Build a bare `GatewaySessions` with ONE Active session whose only sub is on `SHARD`,
+    /// exactly as a real login would leave it — the substrate for the primitive unit tests.
+    fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
+        let mut sessions = GatewaySessions::default();
+        let sid = SessionId(0xA11A);
+        sessions.by_session.insert(
+            sid,
+            Session {
+                client: CLIENT,
+                account: AccountId(5),
+                fence: Fence(1),
+                phase: SessionPhase::Active {
+                    entity: EntityId(77),
+                },
+                next_sub: 0,
+                negotiated_minor: 1,
+                transfer: None,
+                subs: BTreeMap::new(),
+                hot: Arc::new(SessionHot {
+                    route: ArcSwap::from_pointee(RouteSnapshot {
+                        authority: SHARD,
+                        fence: Fence(1),
+                        cut: None,
+                    }),
+                    last_input_seq: AtomicU64::new(0),
+                    subs: ArcSwap::from_pointee(SubTable::default()),
+                }),
+            },
+        );
+        sessions.by_client.insert(CLIENT, sid);
+        let mut outbox = OutboundBox::default();
+        // Open the login sub (the FIRST open_sub caller), exactly as on_shard_control does.
+        let sub = sessions
+            .open_sub(
+                sid,
+                SHARD,
+                FrameRef::SystemSpace { system_seed: 7 },
+                Fence(1),
+                &mut outbox,
+            )
+            .expect("session present");
+        assert_eq!(sub, SubId(0));
+        (sessions, sid, outbox)
+    }
+
+    /// Decode the control messages a captured `OutboundBox` sent to a client.
+    fn controls_in(outbox: &OutboundBox, to: NodeId) -> Vec<ServerControlMsg> {
+        let owned: Vec<(NodeId, MsgClass, Vec<u8>)> = outbox
+            .0
+            .iter()
+            .map(|(t, c, b)| (*t, *c, b.to_vec()))
+            .collect();
+        decode_controls(&owned, to)
+    }
+
+    #[test]
+    fn open_sub_indexes_publishes_and_emits_opened_before_the_table() {
+        // open_sub: X1 (SubscriptionOpened pushed BEFORE the hot table is readable), the cold
+        // SubRecord installed, the reverse index populated, and the hot SubTable carries the
+        // accepted fence. A second open on a DISTINCT shard yields a fresh never-reused sub.
+        let (mut sessions, sid, outbox) = one_active_session();
+        assert_eq!(
+            controls_in(&outbox, CLIENT),
+            vec![ServerControlMsg::SubscriptionOpened {
+                sub: SubId(0),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+            }]
+        );
+        // The reverse index now lists this session under SHARD (and nothing under DEST).
+        assert_eq!(sessions.subscribers_of(SHARD), vec![sid]);
+        assert_eq!(sessions.subscribers_of(DEST), Vec::<SessionId>::new());
+        // The hot SubTable resolves SHARD to (SubId(0), Fence(1)).
+        let table = sessions.by_session[&sid].hot.subs.load();
+        assert_eq!(
+            table.lookup(SHARD),
+            Some(&SubEntry {
+                shard: SHARD,
+                sub: SubId(0),
+                accepted: Fence(1),
+            })
+        );
+        assert_eq!(table.lookup(DEST), None, "no sub for an unsubscribed shard");
+        // A second open on DEST allocates the next monotonic, never-reused sub id.
+        let mut outbox2 = OutboundBox::default();
+        let sub1 = sessions
+            .open_sub(
+                sid,
+                DEST,
+                FrameRef::SystemSpace { system_seed: 8 },
+                Fence(3),
+                &mut outbox2,
+            )
+            .expect("session present");
+        assert_eq!(sub1, SubId(1), "monotonic, never reused");
+        assert_eq!(sessions.subscribers_of(DEST), vec![sid]);
+        let table = sessions.by_session[&sid].hot.subs.load();
+        assert_eq!(table.lookup(DEST).map(|e| e.sub), Some(SubId(1)));
+        assert_eq!(table.lookup(DEST).map(|e| e.accepted), Some(Fence(3)));
+    }
+
+    #[test]
+    fn open_sub_for_an_absent_session_is_a_counted_free_none() {
+        // The `?` arm: open_sub on an unknown session returns None and touches nothing.
+        let mut sessions = GatewaySessions::default();
+        let mut outbox = OutboundBox::default();
+        assert_eq!(
+            sessions.open_sub(
+                SessionId(0xDEAD),
+                SHARD,
+                FrameRef::SystemSpace { system_seed: 7 },
+                Fence(1),
+                &mut outbox,
+            ),
+            None
+        );
+        assert!(outbox.0.is_empty());
+        assert!(sessions.subscribers_of(SHARD).is_empty());
+    }
+
+    #[test]
+    fn close_sub_drains_for_one_tick_then_the_sweep_removes_it() {
+        // close_sub marks Draining + emits SubscriptionClosing but KEEPS the sub in the table +
+        // index for one tick (a straggler is still routable); the next sweep removes it.
+        let (mut sessions, sid, _) = one_active_session();
+        let mut outbox = OutboundBox::default();
+        sessions.close_sub(sid, SHARD, &mut outbox);
+        assert_eq!(
+            controls_in(&outbox, CLIENT),
+            vec![ServerControlMsg::SubscriptionClosing { sub: SubId(0) }]
+        );
+        // Still routable this tick (the drain grace): index + hot table both still resolve it.
+        assert_eq!(sessions.subscribers_of(SHARD), vec![sid]);
+        assert_eq!(
+            sessions.by_session[&sid]
+                .hot
+                .subs
+                .load()
+                .lookup(SHARD)
+                .map(|e| e.sub),
+            Some(SubId(0)),
+            "Draining sub stays in the hot table for its one-tick grace"
+        );
+        // A SECOND close is idempotent — no second SubscriptionClosing.
+        let mut outbox2 = OutboundBox::default();
+        sessions.close_sub(sid, SHARD, &mut outbox2);
+        assert!(outbox2.0.is_empty(), "already Draining: no second close");
+        // The next-tick sweep removes it from BOTH the table and the index.
+        sessions.sweep_draining();
+        assert_eq!(sessions.subscribers_of(SHARD), Vec::<SessionId>::new());
+        assert_eq!(
+            sessions.by_session[&sid].hot.subs.load().lookup(SHARD),
+            None,
+            "swept out of the hot table"
+        );
+        assert!(
+            sessions.subscribed_shards.is_empty(),
+            "the emptied reverse-index entry is removed"
+        );
+    }
+
+    #[test]
+    fn close_sub_for_an_absent_session_or_unsubscribed_shard_is_a_no_op() {
+        // Both early-return arms: an unknown session, and a known session that does not
+        // subscribe to the named shard.
+        let (mut sessions, sid, _) = one_active_session();
+        let mut outbox = OutboundBox::default();
+        sessions.close_sub(SessionId(0xDEAD), SHARD, &mut outbox); // unknown session
+        sessions.close_sub(sid, DEST, &mut outbox); // session does not subscribe to DEST
+        assert!(outbox.0.is_empty(), "neither path emits a close");
+        // The original SHARD sub is untouched.
+        assert_eq!(sessions.subscribers_of(SHARD), vec![sid]);
+    }
+
+    #[test]
+    fn sweep_with_no_draining_subs_is_a_no_op() {
+        // The sweep's empty-`draining` continue arm: a session with only Active subs is left
+        // byte-identical.
+        let (mut sessions, sid, _) = one_active_session();
+        sessions.sweep_draining();
+        assert_eq!(sessions.subscribers_of(SHARD), vec![sid]);
+        assert_eq!(
+            sessions.by_session[&sid]
+                .hot
+                .subs
+                .load()
+                .lookup(SHARD)
+                .map(|e| e.sub),
+            Some(SubId(0))
+        );
+    }
+
+    #[test]
+    fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
+        // The `set.is_empty()` FALSE arm: two sessions subscribe to SHARD; closing+sweeping ONE
+        // leaves the reverse-index entry alive for the other (the entry is not removed).
+        let (mut sessions, sid_a, _) = one_active_session();
+        // A second session on the same SHARD sub.
+        let sid_b = SessionId(0xB22B);
+        sessions.by_session.insert(
+            sid_b,
+            Session {
+                client: NodeId(101),
+                account: AccountId(6),
+                fence: Fence(1),
+                phase: SessionPhase::Active {
+                    entity: EntityId(88),
+                },
+                next_sub: 0,
+                negotiated_minor: 1,
+                transfer: None,
+                subs: BTreeMap::new(),
+                hot: Arc::new(SessionHot {
+                    route: ArcSwap::from_pointee(RouteSnapshot {
+                        authority: SHARD,
+                        fence: Fence(1),
+                        cut: None,
+                    }),
+                    last_input_seq: AtomicU64::new(0),
+                    subs: ArcSwap::from_pointee(SubTable::default()),
+                }),
+            },
+        );
+        sessions.by_client.insert(NodeId(101), sid_b);
+        let mut ob = OutboundBox::default();
+        sessions
+            .open_sub(
+                sid_b,
+                SHARD,
+                FrameRef::SystemSpace { system_seed: 7 },
+                Fence(1),
+                &mut ob,
+            )
+            .expect("present");
+        let mut both = sessions.subscribers_of(SHARD);
+        both.sort_unstable();
+        assert_eq!(both, vec![sid_a, sid_b]);
+        // Close + sweep ONLY session A.
+        let mut ob = OutboundBox::default();
+        sessions.close_sub(sid_a, SHARD, &mut ob);
+        sessions.sweep_draining();
+        assert_eq!(
+            sessions.subscribers_of(SHARD),
+            vec![sid_b],
+            "B's entry survives A's drain (the reverse-index entry is not removed)"
+        );
+    }
+
+    #[test]
+    fn sweep_tolerates_a_drained_shard_missing_from_the_reverse_index() {
+        // The `if let Some(set) = ..` None arm (a defensive desync guard): a cold Draining sub
+        // whose shard is ABSENT from `subscribed_shards` (a forced index breach) is swept from
+        // the table without panic — the index update is a no-op, never an index-out-of-bounds.
+        let (mut sessions, sid, _) = one_active_session();
+        // Mark the SHARD sub Draining in the COLD map directly...
+        sessions
+            .by_session
+            .get_mut(&sid)
+            .expect("present")
+            .subs
+            .get_mut(&SHARD)
+            .expect("sub present")
+            .state = SubState::Draining;
+        // ...and forcibly clear the reverse index so the drained shard has no entry.
+        sessions.subscribed_shards.clear();
+        sessions.sweep_draining(); // must not panic on the missing-entry None arm
+        assert_eq!(
+            sessions.by_session[&sid].hot.subs.load().lookup(SHARD),
+            None,
+            "the cold Draining sub was still swept from the hot table"
+        );
+        assert!(sessions.subscribed_shards.is_empty());
+    }
+
+    #[test]
+    fn a_frame_from_an_unsubscribed_known_shard_fans_to_nobody() {
+        // The `subscribers_of` empty path: a DEST frame (DEST is a known shard) reaches
+        // on_shard_frame, but no session subscribes to DEST, so it fans to nobody — and the
+        // desync counter is untouched (an empty subscriber set is NOT a desync).
+        let mut rig = Rig::new();
+        let (_, _) = rig.login(); // subscribes only to SHARD
+        let sent = rig.tick(vec![wire(DEST, MsgClass::Snapshot, &frame_msg(Fence(1), 9))]);
+        assert_eq!(
+            sent,
+            Vec::new(),
+            "a frame from an unsubscribed shard reaches no client (and nothing else is sent)"
+        );
+        assert_eq!(rig.stats().frame_sub_desync, 0, "an empty fan is not a desync");
+        assert_eq!(rig.stats().stale_frames_dropped, 0);
+    }
+
+    #[test]
+    fn a_forced_index_table_desync_hits_the_counter_never_a_silent_drop() {
+        // C2 dead-branch trap: a session in the reverse index for SHARD whose hot SubTable has
+        // NO SubEntry for SHARD (an invariant breach `publish_subs` makes impossible by
+        // construction) is COUNTED (`frame_sub_desync`), never a silent continue. BOTH desync
+        // arms are exercised: (a) the index references a session absent from `by_session`;
+        // (b) a present session whose hot table was corrupted to empty.
+        let frame = postcard::to_allocvec(&frame_msg(Fence(1), 1)).expect("encode");
+
+        // (a) index points at a session that does not exist in by_session.
+        let mut sessions = GatewaySessions::default();
+        sessions
+            .subscribed_shards
+            .entry(SHARD)
+            .or_default()
+            .insert(SessionId(0xC0DE));
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_shard_frame(SHARD, &frame, &sessions, &mut stats, &mut outbox);
+        assert_eq!(stats.frame_sub_desync, 1, "(a) missing session is counted");
+        assert!(outbox.0.is_empty());
+
+        // (b) a present session indexed under SHARD but with an EMPTY hot SubTable.
+        let (sessions, sid, _) = one_active_session();
+        sessions.by_session[&sid]
+            .hot
+            .subs
+            .store(Arc::new(SubTable::default()));
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_shard_frame(SHARD, &frame, &sessions, &mut stats, &mut outbox);
+        assert_eq!(stats.frame_sub_desync, 1, "(b) lookup None is counted");
+        assert!(outbox.0.is_empty(), "no frame forwarded on a desync");
+    }
+
+    // ---- Slice 1d.2b: SubscriptionReady + the source-sub close primitives -------
+
+    /// A `SubscriptionReady` from shard `from` (the dest), as the dest emits it at adopt.
+    fn subscription_ready(from: NodeId, session: SessionId) -> Inbound {
+        wire(
+            from,
+            MsgClass::Control,
+            &ShardToGateway::SubscriptionReady {
+                session,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 8 },
+                realm_fence: Fence(5),
+            },
+        )
+    }
+
+    /// The full route+sub snapshot a session holds (for the dest-sub assertions).
+    fn sub_for(rig: &Rig, sid: SessionId, shard: NodeId) -> Option<SubEntry> {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session present")
+            .hot
+            .subs
+            .load()
+            .lookup(shard)
+            .copied()
+    }
+
+    #[test]
+    fn subscription_ready_opens_the_dest_sub_and_repoints_authority() {
+        // FORK 0a: a SubscriptionReady from DEST opens a SECOND sub (SubId(1)) at the DEST realm
+        // fence, emits SubscriptionOpened{1} (X1, before any frame) THEN AuthorityChanged{entity,
+        // 1} — re-pointing the avatar's render authority to the dest sub. The source SubId(0)
+        // stays open (the two-sub overlap).
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login(); // SubId(0) on SHARD
+        let sent = rig.tick(vec![subscription_ready(DEST, sid)]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![
+                ServerControlMsg::SubscriptionOpened {
+                    sub: SubId(1),
+                    frame: FrameRef::SystemSpace { system_seed: 8 },
+                },
+                ServerControlMsg::AuthorityChanged {
+                    entity: EntityId(77),
+                    sub: SubId(1),
+                },
+            ],
+            "SubscriptionOpened(1) strictly precedes AuthorityChanged(entity,1) (X1 + A1 re-point)"
+        );
+        // BOTH subs now resolve: source SubId(0) on SHARD, dest SubId(1) on DEST at Fence(5).
+        assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)));
+        assert_eq!(
+            sub_for(&rig, sid, DEST),
+            Some(SubEntry {
+                shard: DEST,
+                sub: SubId(1),
+                accepted: Fence(5),
+            })
+        );
+        // The reverse index lists this session under BOTH shards.
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().subscribers_of(DEST),
+            vec![sid]
+        );
+    }
+
+    #[test]
+    fn a_duplicate_subscription_ready_is_an_idempotent_no_op() {
+        // At-least-once: a second SubscriptionReady for an already-open dest sub opens nothing
+        // and emits nothing (the sub id is never re-allocated, A1 not re-emitted).
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![subscription_ready(DEST, sid)]);
+        let sent = rig.tick(vec![subscription_ready(DEST, sid)]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![],
+            "a duplicate SubscriptionReady emits nothing"
+        );
+        assert_eq!(sub_for(&rig, sid, DEST).map(|e| e.sub), Some(SubId(1)));
+        assert_eq!(rig.stats().transfer_unroutable, 0, "a duplicate is not unroutable");
+    }
+
+    #[test]
+    fn subscription_ready_for_an_absent_session_is_counted_and_emits_nothing() {
+        // An absent session: counted (transfer_unroutable), never a panic, nothing opened.
+        let mut rig = Rig::new();
+        let sent = rig.tick(vec![subscription_ready(DEST, SessionId(0xDEAD))]);
+        assert_eq!(decode_controls(&sent, CLIENT), vec![]);
+        assert_eq!(rig.stats().transfer_unroutable, 1);
+    }
+
+    #[test]
+    fn release_subscribe_closes_the_source_sub_with_a_drain_grace() {
+        // 1d.2b: ReleaseSubscribe(src: SHARD) closes the SOURCE sub — SubscriptionClosing{0} is
+        // emitted, the sub goes Draining (still routable THIS tick), and the NEXT tick's sweep
+        // removes it. The dest sub (opened by SubscriptionReady) survives.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![subscription_ready(DEST, sid)]); // SubId(1) on DEST
+        // Open a transfer progress so ReleaseSubscribe is bound.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: SHARD,
+        })]);
+        // The source sub close went to the client; Released acked to the orchestrator.
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![ServerControlMsg::SubscriptionClosing { sub: SubId(0) }]
+        );
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Released { transfer: XFER }]
+        );
+        // THIS tick (the close tick) the source sub is still in the hot table (drain grace).
+        assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)));
+        // The NEXT tick's sweep removes it; the dest sub survives.
+        let _ = rig.tick(vec![]);
+        assert_eq!(sub_for(&rig, sid, SHARD), None, "source sub swept after the grace");
+        assert_eq!(sub_for(&rig, sid, DEST).map(|e| e.sub), Some(SubId(1)), "dest sub survives");
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().subscribers_of(SHARD),
+            Vec::<SessionId>::new()
+        );
+    }
+
+    #[test]
+    fn a_straggler_source_frame_in_the_drain_grace_tick_is_still_routed() {
+        // C2 drain grace: a source frame arriving in the SAME batch as the ReleaseSubscribe
+        // close is still routed to the client (drained, not silently dropped); only the
+        // next-tick sweep stops routing.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        // Release + a co-arriving source frame in ONE tick batch: the close marks Draining, the
+        // frame still fans (the sub is routable through the rest of the batch).
+        let sent = rig.tick(vec![
+            saga_cmd(TransferControl::ReleaseSubscribe {
+                transfer: XFER,
+                session: sid,
+                src: SHARD,
+            }),
+            wire(SHARD, MsgClass::Snapshot, &frame_msg(Fence(1), 9)),
+        ]);
+        let snaps = sent
+            .iter()
+            .filter(|(to, c, _)| (*to == CLIENT) & (*c == MsgClass::Snapshot))
+            .count();
+        assert_eq!(snaps, 1, "the straggler is drained (routed) during the grace tick");
+        // After the next-tick sweep, a further source frame routes to nobody — and (the session
+        // being Active with no pending retries) nothing else is sent, so the whole tick is empty.
+        let sent = rig.tick(vec![wire(SHARD, MsgClass::Snapshot, &frame_msg(Fence(1), 10))]);
+        assert_eq!(
+            sent,
+            Vec::new(),
+            "after the sweep the source sub no longer routes (nothing reaches the client)"
+        );
+    }
+
+    #[test]
+    fn abort_defensively_closes_an_opened_dest_sub() {
+        // apply_abort's defensive close (a sub on a shard != the source): drive a dest sub open
+        // (SubscriptionReady) WITH a live in-flight transfer, then abort — the dest sub is
+        // closed (SubscriptionClosing{1}) and swept, while the source sub stays.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        let _ = rig.tick(vec![subscription_ready(DEST, sid)]); // SubId(1) on DEST
+        assert_eq!(sub_for(&rig, sid, DEST).map(|e| e.sub), Some(SubId(1)));
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![ServerControlMsg::SubscriptionClosing { sub: SubId(1) }],
+            "abort defensively closes the dest sub"
+        );
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Aborted { transfer: XFER }]
+        );
+        // The dest sub is swept next tick; the source sub stays open.
+        let _ = rig.tick(vec![]);
+        assert_eq!(sub_for(&rig, sid, DEST), None, "dest sub closed + swept on abort");
+        assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)), "source sub stays");
+    }
+
+    #[test]
+    fn abort_without_a_dest_sub_closes_nothing_extra() {
+        // The happy-path abort (no dest sub yet): the defensive close collects no shard, so no
+        // SubscriptionClosing is emitted — only the Aborted ack.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![],
+            "no dest sub to close: no SubscriptionClosing"
+        );
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Aborted { transfer: XFER }]
+        );
+        // The source sub is untouched (abort never closes the source).
+        assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)));
+    }
+
+    #[test]
+    fn abort_closes_only_its_own_dest_never_a_prior_transfers_live_sub() {
+        // F1 REGRESSION (audit `wf_93d8e84f`): once a transfer's dest sub is live (a sub on a shard
+        // != the login shard), a LATER, UNRELATED transfer's abort must close ONLY its OWN dest —
+        // never that live sub. The old "any sub != config.shard" heuristic closed the player's
+        // CURRENT live sub (a chained-transfer black screen) and, in the N-shard end goal, EVERY
+        // composited sub (ship/host/planet). The fix closes exactly `tp.dest`.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login(); // login sub SubId(0) on config.shard (SHARD)
+
+        // A first transfer opens the DEST sub (SubId(1)) — a live, non-login-shard sub.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        let _ = rig.tick(vec![subscription_ready(DEST, sid)]);
+        assert_eq!(
+            sub_for(&rig, sid, DEST).map(|e| e.sub),
+            Some(SubId(1)),
+            "the prior transfer's DEST sub is live"
+        );
+
+        // A SECOND transfer to a DIFFERENT dest, then aborted. Its dest sub was never opened, so the
+        // precise abort close is a no-op — and it must NOT touch the prior transfer's live DEST sub.
+        let xfer2 = TransferId(0x1c3);
+        let dest2 = NodeId(43);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: xfer2,
+            session: sid,
+            dest: dest2,
+        })]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: xfer2,
+            session: sid,
+        })]);
+        // No SubscriptionClosing on the client: the abort closed only its own (unopened) dest2.
+        // (The OLD heuristic would have emitted SubscriptionClosing{SubId(1)} here — closing the
+        // live DEST sub of the unrelated prior transfer.)
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![],
+            "the unrelated abort closes no live sub"
+        );
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Aborted { transfer: xfer2 }]
+        );
+        let _ = rig.tick(vec![]); // a sweep tick changes nothing
+        assert_eq!(
+            sub_for(&rig, sid, DEST).map(|e| e.sub),
+            Some(SubId(1)),
+            "the prior transfer's live DEST sub SURVIVES the unrelated abort"
+        );
+    }
+
+    #[test]
+    fn release_of_a_foreign_transfer_closes_no_sub() {
+        // The collect-guard FALSE arm: a ReleaseSubscribe for a transfer NOT in flight collects
+        // no source sub to close (the source sub stays open), still acks Released idempotently.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: TransferId(0x999),
+            session: sid,
+            src: SHARD,
+        })]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![],
+            "a foreign release closes no sub"
+        );
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![TransferControlAck::Released {
+                transfer: TransferId(0x999)
+            }]
+        );
+        assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)), "source sub intact");
+    }
+
+    // ---- Slice 1d.2c: the 2-shard transfer CAPSTONE (gateway read-plane half) ----
+
+    /// The subs that the client-bound snapshots in `sent` are tagged with (decoded).
+    fn delivered_snapshot_subs(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<SubId> {
+        sent.iter()
+            .filter(|(to, class, _)| (*to == CLIENT) & (*class == MsgClass::Snapshot))
+            .map(|(_, _, bytes)| {
+                postcard::from_bytes::<SnapshotDatagram>(bytes)
+                    .expect("a delivered snapshot decodes")
+                    .sub
+            })
+            .collect()
+    }
+
+    #[test]
+    fn capstone_two_sub_overlap_routes_both_frames_and_repoints_the_avatar_to_the_dest() {
+        // 1d.2c CAPSTONE (the gateway read-plane half of the 2-shard transfer): during the
+        // post-commit/pre-release window the gateway holds TWO subs for one session; the dest's
+        // `SubscriptionReady` (the stub emits it at adopt, 1d.2c) opened SubId(1) and emitted
+        // `AuthorityChanged{entity, SubId(1)}` — re-pointing the avatar's render authority to the
+        // dest. A synthetic SOURCE frame fans to SubId(0) and a synthetic DEST frame fans to
+        // SubId(1), EACH fence-checked against its OWN realm fence and retagged to its own sub.
+        // The client thus receives the avatar on BOTH subs but with `AuthorityChanged` naming
+        // SubId(1) authoritative — so a compositing client (`DeliveredView`, suppression proven
+        // in `vd_client::view`) renders the avatar EXACTLY ONCE, from the DEST sub. Then
+        // `ReleaseSubscribe` closes the SOURCE sub.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login(); // login sub SubId(0) on SHARD, AuthorityChanged{77, SubId(0)}
+        // The transfer reaches commit: the dest adopts and announces its read-sub.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        // SubscriptionReady from DEST opens SubId(1) (at the DEST realm fence) + re-points
+        // authority to SubId(1).
+        let ready_sent = rig.tick(vec![subscription_ready(DEST, sid)]);
+        assert_eq!(
+            decode_controls(&ready_sent, CLIENT),
+            vec![
+                ServerControlMsg::SubscriptionOpened {
+                    sub: SubId(1),
+                    frame: FrameRef::SystemSpace { system_seed: 8 },
+                },
+                ServerControlMsg::AuthorityChanged {
+                    entity: EntityId(77), // the login avatar (SUBJECT id at the gateway is the dot's entity)
+                    sub: SubId(1),
+                },
+            ],
+            "the dest sub opens (X1) and authority re-points to SubId(1) (FORK 0a / A1)"
+        );
+        // Both subs are held (the two-sub overlap), at their OWN realm fences:
+        // SubId(0) on SHARD @ Fence(1) (login), SubId(1) on DEST @ Fence(5) (SubscriptionReady).
+        assert_eq!(
+            sub_for(&rig, sid, SHARD),
+            Some(SubEntry {
+                shard: SHARD,
+                sub: SubId(0),
+                accepted: Fence(1),
+            })
+        );
+        assert_eq!(
+            sub_for(&rig, sid, DEST),
+            Some(SubEntry {
+                shard: DEST,
+                sub: SubId(1),
+                accepted: Fence(5),
+            })
+        );
+
+        // A synthetic SOURCE frame (from SHARD @ the source realm fence) fans to SubId(0); a
+        // synthetic DEST frame (from DEST @ the dest realm fence) fans to SubId(1). Each is
+        // checked against ITS OWN accepted fence and retagged to ITS OWN sub.
+        let sent = rig.tick(vec![
+            wire(SHARD, MsgClass::Snapshot, &frame_msg(Fence(1), 9)),
+            wire(DEST, MsgClass::Snapshot, &frame_msg(Fence(5), 9)),
+        ]);
+        let mut subs = delivered_snapshot_subs(&sent);
+        subs.sort_unstable();
+        assert_eq!(
+            subs,
+            vec![SubId(0), SubId(1)],
+            "the avatar rides BOTH subs (source→SubId(0), dest→SubId(1)) — the overlap"
+        );
+        // A dest frame BELOW the dest's accepted fence (Fence(5)) is stale-dropped — proving the
+        // PER-SHARD fence (not the session-global route fence) governs the dest sub.
+        let sent = rig.tick(vec![wire(DEST, MsgClass::Snapshot, &frame_msg(Fence(4), 10))]);
+        assert_eq!(
+            delivered_snapshot_subs(&sent),
+            Vec::<SubId>::new(),
+            "a dest frame below the dest's own accepted fence is dropped"
+        );
+        assert_eq!(rig.stats().stale_frames_dropped, 1);
+
+        // ReleaseSubscribe closes the SOURCE sub: SubscriptionClosing{0}, then swept next tick;
+        // afterward only the DEST sub (SubId(1)) routes — the crossing is complete.
+        let sent = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: SHARD,
+        })]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![ServerControlMsg::SubscriptionClosing { sub: SubId(0) }]
+        );
+        let _ = rig.tick(vec![]); // the sweep removes the drained source sub
+        assert_eq!(sub_for(&rig, sid, SHARD), None, "source sub closed + swept");
+        let sent = rig.tick(vec![
+            wire(SHARD, MsgClass::Snapshot, &frame_msg(Fence(1), 11)),
+            wire(DEST, MsgClass::Snapshot, &frame_msg(Fence(5), 11)),
+        ]);
+        assert_eq!(
+            delivered_snapshot_subs(&sent),
+            vec![SubId(1)],
+            "post-release only the DEST sub routes — the avatar is single-sub on the dest"
         );
     }
 }

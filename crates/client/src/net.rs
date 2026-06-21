@@ -58,7 +58,11 @@ pub struct ClientState {
     ticket: LoginTicket,
     phase: ClientPhase,
     session: Option<SessionId>,
-    sub: Option<vd_wire::channels::SubId>,
+    /// The SET of subscriptions held (Track R / 1d.2d): grown on `SubscriptionOpened`,
+    /// shrunk on `SubscriptionClosing`. Holds BOTH subs during a transfer overlap so a frame
+    /// on either is admitted; the render layer composites the avatar to ONE sub via
+    /// `AuthorityChanged`.
+    held_subs: std::collections::BTreeSet<vd_wire::channels::SubId>,
     view: DeliveredView,
     render_clock: RenderClock,
     input: InputState,
@@ -91,7 +95,7 @@ impl ClientState {
             ticket,
             phase: ClientPhase::Connecting,
             session: None,
-            sub: None,
+            held_subs: std::collections::BTreeSet::new(),
             view: DeliveredView::default(),
             render_clock: RenderClock::new(tuning),
             input: InputState::default(),
@@ -174,19 +178,18 @@ impl ClientState {
                 }
             }
             ServerControlMsg::SubscriptionOpened { sub, .. } => {
-                self.sub = Some(sub);
+                self.held_subs.insert(sub);
                 if self.phase == ClientPhase::AwaitingSubscription {
                     self.phase = ClientPhase::Active;
                 }
             }
             // The reliable per-sub teardown: drop that sub's tracks so the view stays
-            // bounded to the live set (vs swallowing it as `ignored` and leaking tracks).
-            // If it was the held sub, clear it — a later SubscriptionOpened re-arms.
+            // bounded to the live set (vs swallowing it as `ignored` and leaking tracks), and
+            // remove it from the held SET — any OTHER held sub (the dest sub of an overlap)
+            // keeps routing; a later SubscriptionOpened re-arms a fresh sub id.
             ServerControlMsg::SubscriptionClosing { sub } => {
                 self.view.drop_sub(sub);
-                if self.sub == Some(sub) {
-                    self.sub = None;
-                }
+                self.held_subs.remove(&sub);
             }
             ServerControlMsg::AuthorityChanged { entity, sub } => {
                 self.view.set_authority(entity, sub);
@@ -208,8 +211,8 @@ impl ClientState {
             return;
         };
         let tick = snap.universe_tick;
-        // Anchor the render cursor only on an APPLIED frame (our sub, fresh).
-        if self.view.on_snapshot(self.sub, snap) == SnapshotVerdict::Apply {
+        // Anchor the render cursor only on an APPLIED frame (a held sub, fresh).
+        if self.view.on_snapshot(&self.held_subs, snap) == SnapshotVerdict::Apply {
             self.render_clock.observe(tick, now_s);
             self.snapshots_applied += 1;
             self.latest_universe_tick = Some(tick.0);
@@ -329,11 +332,11 @@ impl ClientState {
     pub fn view(&self) -> &DeliveredView {
         &self.view
     }
-    /// The subscription the client currently holds (`None` before the first
-    /// `SubscriptionOpened` or after a `SubscriptionClosing`).
+    /// The SET of subscriptions the client currently holds (empty before the first
+    /// `SubscriptionOpened`; holds BOTH subs during a transfer overlap — Track R / 1d.2d).
     #[must_use]
-    pub fn sub(&self) -> Option<vd_wire::channels::SubId> {
-        self.sub
+    pub fn held_subs(&self) -> &std::collections::BTreeSet<vd_wire::channels::SubId> {
+        &self.held_subs
     }
     /// The render cursor at wall-time `now_s` (`None` until the first snapshot).
     #[must_use]
@@ -715,7 +718,11 @@ mod tests {
                 .expect("fixture");
         c.transport.deliver(GATEWAY, MsgClass::Control, foreign);
         c.step(10.0);
-        assert_eq!(c.state().sub(), Some(SubId(0)), "held sub unchanged");
+        assert_eq!(
+            c.state().held_subs(),
+            &std::collections::BTreeSet::from([SubId(0)]),
+            "held set unchanged"
+        );
         assert_eq!(
             c.state().view().render(10.0).len(),
             1,
@@ -731,7 +738,7 @@ mod tests {
             c.state().view().render(10.0).is_empty(),
             "the closed sub's track is evicted"
         );
-        assert_eq!(c.state().sub(), None, "held sub cleared");
+        assert!(c.state().held_subs().is_empty(), "held set cleared");
         // It is NOT counted as an ignored drop — it was handled.
         assert_eq!(c.state().dropped_counts().1, 0, "closing is not 'ignored'");
     }

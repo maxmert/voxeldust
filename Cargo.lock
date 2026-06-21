@@ -6313,6 +6313,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "tracing",
+ "vd-client",
  "vd-core",
  "vd-node",
  "vd-sim",

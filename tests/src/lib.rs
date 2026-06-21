@@ -117,6 +117,11 @@ fn build_cluster(
         },
         fabric.register(GATEWAY),
     );
+    // The STABLE routable-shard roster (FORK 5 / 1d.2): EVERY shard in the cluster, so a
+    // (render-ready) dest's frames are node-class-dispatchable. The login shard `SHARD` is
+    // always a member.
+    let known_shards: std::collections::BTreeSet<NodeId> =
+        shards.iter().map(|(id, _)| *id).collect();
     let (world, schedule) = gateway.parts_mut();
     register_clock_follower(world, schedule);
     register_gateway(
@@ -125,6 +130,7 @@ fn build_cluster(
         GatewayConfig {
             orchestrator: ORCH,
             shard: SHARD,
+            known_shards,
             auth_verifying_key: auth_verifying_key(),
             session_seed: 23,
             tick_hz: 50,

@@ -37,12 +37,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let (world, schedule) = node.parts_mut();
     register_clock_follower(world, schedule);
+    let shard = env.node_id("VD_SHARD")?;
     register_gateway(
         world,
         schedule,
         GatewayConfig {
             orchestrator: env.node_id("VD_ORCH")?,
-            shard: env.node_id("VD_SHARD")?,
+            shard,
+            // P1 single-shard roster: the one login shard is the only routable shard
+            // (Track R / 1d.2 multi-shard cluster rosters extend this set).
+            known_shards: std::collections::BTreeSet::from([shard]),
             auth_verifying_key: env.hex32("VD_AUTH_PUBKEY")?,
             session_seed: env.parse("VD_SESSION_SEED")?,
             // The SAME VD_TICK_HZ that paces this node — relayed to clients via

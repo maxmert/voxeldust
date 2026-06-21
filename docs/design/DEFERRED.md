@@ -54,6 +54,25 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
      It is MASKED today (not prevented): `render_ready=false` (D-27) means neither emits client frames, and the
      single-shard gateway routes only to the dest post-swap — so there is no client double-vision, but the
      AUTHORITY-level double-hold is live.
+     **⚠️ 1d.3 EMPIRICAL FINDING (the flip UNMASKED the window — and it is a VANISH, not an overlap):** Slice 1d.3
+     flipped `render_ready=true` on the dest crossing-apply, so the dest now emits frames. The expected payoff was a
+     SEAMLESS two-holder overlap (source still rendering while the dest comes up, composited to one). Measured
+     against the code (zero-fault lockstep, `p2_transfer_gates`), the OPPOSITE happens: the SOURCE sub closes
+     ~3 ticks BEFORE the DEST sub opens at the client, so the avatar renders NOWHERE for those ticks — a real
+     client-visible VANISH, NOT an overlap. Root cause: the source-sub close is the saga's `ReleaseSubscribe`, fired
+     by the **unconditional** bandless `interim_demote_complete` (it is NOT gated on the dest being adopted /
+     delivered-to-observers), and so it wins the race against the dest's slower multi-round-trip adopt
+     (`SubscriptionReady`→`open_sub`). The proper (a)-predicate (dest **delivered to all observers** before
+     `DemoteComplete`) is EXACTLY the gate that closes this — i.e. the seamless no-vanish visible-crossing gate is
+     BLOCKED on D-2(a)+(b), not on anything in 1d.3's render-only scope. 1d.3 DID land the visible crossing (the dest
+     renders the crossed seed-7 pose from the dest sub); it did NOT — and structurally cannot, pre-D-2 — land the
+     seamless overlap. **PINNED tripwires (flip when D-2 lands):** the gate
+     `p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose` (in `tests/tests/p2_transfer_gates.rs`)
+     asserts the visible crossing NOW and pins the interim with `overlap_ticks == 0` (no seamless two-holder overlap)
+     + `vanish_gap > 0` (the avatar renders nowhere for a bounded run). When (a) retains the source until the dest is
+     delivered-to-observers, BOTH flip — `overlap_ticks >= 1` and `vanish_gap == 0` — and the gate switches to
+     asserting the ALREADY-BUILT `verify_no_vanish` + `verify_pose_continuity` render oracles (`harness::oracle`,
+     with their hand-built failing meta-tests). The oracles + their tolerances are done; only the demote ordering is owed.
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
      by the **fence**, not by cooperative in-memory state." The interim's source freeze IS cooperative in-memory
      (`self_fence_foreign_entity` does a local `dots.remove` with NO fence pushed to the gateway to drop stale
@@ -97,10 +116,23 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   proper tear-out (b) SUBSUMES all three: the saga-pushed ordered `Demote` retains the source as a ghost until the
   dest is fully ready (pose INCLUDED, gated on the crossing ack), at which point the dest buffer AND the
   cooperative poll AND the net-new flush-beside-poll layering all retire into one fence-enforced handoff.
+- **⚠️ 1d.3 AUDIT FOLLOW-UP (the e2e render-origin variant — `wf_c3e4f1b7` Finding 1):** the 1d.3 capstone
+  `p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose` ASSERTS the dest renders the crossed
+  seed-7 pose (never the seed-8 origin-adopt default), but it CANNOT catch the render-flip being MISplaced to the
+  adopt grant arm (`stub.rs` flip_grant Adopted) instead of `apply_crossing`: this fixture buffers the crossing and
+  drains+flips it in the SAME tick BEFORE `emit_frames`, so a misplaced flip never emits a seed-8 frame. That
+  property is held at the UNIT tier (`stub.rs::the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach`)
+  and the capstone now documents this honestly (negative-control (f) + docstring). The genuine e2e coverage — a
+  capstone variant that DELAYS the crossing envelope past the adopt handshake (the crossing-AFTER-adopt ordering,
+  where the misplaced flip WOULD emit the origin frame) — needs the D-2 reorder machinery and lands WITH the
+  `verify_no_vanish`/`verify_pose_continuity` wiring here. Until then the unit test holds the line (a real
+  render-origin regression still turns `cargo test --workspace` RED — vd-sim is a workspace member).
 - **When / proper:** the **post-1d band/ghost P2 slice** (it owns the ghost + band + observer-watermark + the
   per-entity `Authority` attach). Pinned exists-to-be-flipped in `crates/sim/src/stub.rs` (the
   `granted_key_poll_tick`/`self_fence_foreign_entity` interim doc-comments) + a test that the source demote is
-  poll-dependent (not fence-driven), which flips when the saga-pushed `Demote` lands.
+  poll-dependent (not fence-driven), which flips when the saga-pushed `Demote` lands. The 1d.3 capstone pins the
+  interim BOTH-SIDED — `overlap_ticks == 0` + `0 < vanish_gap <= MAX_INTERIM_VANISH_TICKS` (the adopt-handshake
+  budget) — so the render-lag failure class is caught NOW and the whole branch flips to `verify_no_vanish` at D-2.
 - **Dependency:** Slice 1d (per-entity `Authority` attach so the dest owns + emits the post-commit entity) +
   the ghost-as-collider + band-instance + observer-delivery-watermark machinery (the band/ghost slice).
 - **Source:** 1c design `wf_f3eae69e` + the demote refinement `wf_0ed2dc0c`; interim landed in Slice 1c.8;
@@ -417,13 +449,24 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   `AppliedSteps`, D-21/D-22). The held-poses crossing gate proves the crossing via the dest pose's FRAME (the
   SOURCE realm frame seed-7, unreachable by the dest's own input — RED-on-drop verified by mutation; see D-21).
   `render_ready` STAYS false (the dot still renders nothing) — the VISIBLE flip is 1d.3.
-- **Still owed (1d.3+ — the rest of the BACK half):** flip `render_ready` (the visible/in-client proof, 1d.3,
-  REALM-fence-supersession double-vision-safe); the real ghost-as-collider (players collide across the boundary;
-  the per-entity `authority.rs` `Authority` FSM stays unattached — the 1c.8/1d.1 lever is the stub `Dot`); the
-  `AbortTransfer`-tears-down-the-dest-slot teardown; and **DEST FRAME ROUTING** — the gateway is single-shard-aware
-  (`GatewayConfig.shard`, routes only `from == config.shard`), so a render-ready dest would emit frames the gateway
-  cannot route; keeping `render_ready: false` sidesteps this — multi-shard gateway routing (Track R / 1d.2) is a
-  HARD prerequisite for render. The dest spatial admissibility check stays PRE-commit at `PrepareSubscribe` (D-21).
+- **Landed (Track R / 1d.2 — DEST FRAME ROUTING + the avatar re-point):** the gateway now routes N shards into N
+  per-session subs (a lock-free `SubTable` on `Arc<SessionHot>` + the `subscribed_shards` reverse index; node-class
+  dispatch is the STABLE `GatewayConfig.known_shards`, fan-out is the mutable per-session index). At adopt the dest
+  emits the ADDITIVE `ShardToGateway::SubscriptionReady`; the gateway opens a SECOND per-session sub on the dest at
+  the dest realm fence and RE-POINTS the avatar's render authority to it (`AuthorityChanged{entity, dest_sub}` —
+  FORK 0a, the read-plane analog of the write-plane `CommitAuthority`), so the client renders the avatar EXACTLY
+  ONCE (the source copy is composited-suppressed by `DeliveredView`, double-vision-safe). `ReleaseSubscribe` closes
+  the source sub (one-tick `Draining` grace, then swept); `AbortTransfer` defensively closes any dest sub. The
+  client admits the held-sub SET (1d.2d). The 2-shard capstone (`gateway::tests::capstone_two_sub_overlap_…`)
+  proves both subs route at their OWN realm fences and the avatar resolves to one sub. `render_ready` STAYS false —
+  the dest sub is OPEN + ROUTABLE but emits no frames; the VISIBLE flip is the only remaining gating piece (1d.3).
+- **Still owed (1d.3+ — the rest of the BACK half):** flip `render_ready` (the visible/in-client proof, 1d.3, now
+  on a gateway-routed + client-admitted + authority-re-pointed dest — no further gateway/client change needed, a
+  clean render-flip); the real ghost-as-collider (players collide across the boundary; the per-entity
+  `authority.rs` `Authority` FSM stays unattached — the 1c.8/1d.1 lever is the stub `Dot`); the
+  `AbortTransfer`-tears-down-the-dest-INPUT-SLOT teardown on the STUB side (1d.2b closed the gateway dest SUB on
+  abort, but the dest's provisional `input_active` `Dot` is not yet despawned on abort). The dest spatial
+  admissibility check stays PRE-commit at `PrepareSubscribe` (D-21).
   **FRAME-REBINDING (audit finding 5):** 1d.1 stores the crossed pose's `FrameRef` VERBATIM — it stays the SOURCE
   realm's frame (e.g. `SystemSpace{system_seed: 7}`) on a dot owned by the DEST realm. Inert in 1d.1 (render_ready
   false → nothing reads the frame; and the gate USES this as the crossing discriminator). But render (1d.3) /
@@ -434,10 +477,17 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Also owed:** the EARLY (prepare-time) `OpenInputSlot` for the gateway-adoption-mid-cut race is a **P3**
   resilience item (the gateway re-drives the slot before the buffer drain); inert in 1c (single process, commit
   emits the slot in the same handler before the drain).
-- **Where:** `crates/wire/src/session_flow.rs` (`OpenInputSlot.subject`); `crates/connection-plane/src/gateway.rs`
-  (`apply_commit` forwards `subject`); `crates/sim/src/stub.rs` (the adopt mint, `subject_entity`, the 3-way
-  `pending_grant_op`, `flip_grant`, `Dot.adopting`/`Dot.render_ready`, `emit_frames` on `render_ready`).
-- **Source:** Slice 1c.5 design `wf_9679f7c7`; the front-half adopt landed in Slice 1c.8.
+- **Where:** `crates/wire/src/session_flow.rs` (`OpenInputSlot.subject`; the additive
+  `ShardToGateway::SubscriptionReady` arm — 1d.2b); `crates/connection-plane/src/gateway.rs` (`apply_commit`
+  forwards `subject`; the `SubTable`/`SubEntry`/`SubRecord` registry + `subscribed_shards` reverse index +
+  `open_sub`/`close_sub`/`publish_subs`/`sweep_draining`, the `SubscriptionReady` handler, `apply_release`/
+  `apply_abort` sub-close — 1d.2a/b/c); `crates/sim/src/stub.rs` (the adopt mint, `subject_entity`, the 3-way
+  `pending_grant_op`, `flip_grant` → `GrantFlip::Adopted` carrying the `SubscriptionReady` egress — 1d.2c,
+  `Dot.adopting`/`Dot.render_ready`, `emit_frames` on `render_ready`); `crates/harness/src/client.rs`
+  (`SubscriptionClosing` handling; the held-sub SET — 1d.2d); `crates/client/src/view.rs` +
+  `crates/wire/src/channels.rs` (`classify_snapshot(held_subs)` — 1d.2d).
+- **Source:** Slice 1c.5 design `wf_9679f7c7`; the front-half adopt landed in Slice 1c.8; DEST FRAME ROUTING +
+  the avatar re-point + client multi-sub admission landed in Track R / Slice 1d.2 (a/b/c/d).
 
 ### D-28 🟧 Cross-cut INPUT-CONSERVATION: the durable-player zero-fault instance is CLOSED (1c.7); the tail forms are owed
 - **Landed (1c.7):** the end-to-end gate `tests/tests/p2_transfer_gates.rs ::
@@ -529,6 +579,31 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Where:** `crates/bins/tests/render_smoke.rs`.
 - **When / proper:** **P4** (terrain).
 - **Source:** Slice-3 T7 sign-off.
+
+### D-30 🟥 The PAIRED wgpu visual (client2 watches client1 cross a boundary) — the HR6 consumer of the visible crossing
+- **Landed (1d.3):** the dest now RENDERS the crossed entity (`render_ready` flipped on the dest crossing-apply;
+  the dest emits the crossed seed-7 pose; the client composites it from the dest sub on the REAL `vd_client`
+  `DeliveredView`, wired into the harness `ScriptedClient`). The 1d.3b WireMonitor render oracles
+  (`verify_no_vanish` / `verify_pose_continuity`, `world_pos`-evaluated, derived ε/K, with their negative-control
+  meta-test) and the per-tick observer refactor of `run_cut_transfer` (sampling DURING the window, byte-identical
+  under one seed) are landed. Zero GPU, zero gateway/`view.rs`-render-logic/`emit_frames`/snapshot-fan change.
+- **Missing — the SEAMLESS in-process gate (blocked on D-2, NOT on 1d.3):** the headline "renders exactly once
+  DURING a two-holder overlap, NO-VANISH (K=0), pose-continuous through the source drop" gate is NOT assertable
+  today: in the zero-fault path the SOURCE sub closes ~3 ticks BEFORE the DEST sub opens at the client (a real
+  vanish, no overlap) because the source release fires on the **unconditional** bandless `interim_demote_complete`.
+  The seamless overlap requires the proper observer-watermark-gated demote — **D-2(a)+(b)**. So this gate lands with
+  the D-2 band/ghost slice (1d.4/1d.5), reusing the 1d.3 oracle + observer + REAL-view machinery already in place.
+- **Missing — the wgpu paired-client visual:** the real two-client wgpu scenario (client2 screenshots client1
+  crossing the source→dest boundary, per `PLAN.md:186/212`). Blocked on: (i) a 2-shard local-process cluster
+  (`crates/bins/src/bin/vd-devcluster.rs` spawns ONE `vd-shard`); (ii) a second capture client + cross-boundary
+  `vdctl` driving; (iii) **D-15** (`WalkTo`/`LookAt` wired). The render crate is real and `G-RENDER-SMOKE` is live,
+  but single-shard/single-client.
+- **Where:** `crates/bins/src/bin/vd-devcluster.rs` (dual-shard spawn), `crates/bins/tests/render_smoke.rs` (the
+  paired scenario sibling), `crates/bins/src/bin/client.rs` (D-15), `justfile` (a new `render-cross` recipe);
+  the seamless in-process gate in `tests/tests/p2_transfer_gates.rs` (reusing `vd_harness::oracle` render oracles).
+- **When / proper:** the seamless in-process gate at the **D-2 band/ghost P2 slice**; the wgpu paired visual at the
+  **P2 client-track slice** that lands D-15. Sibling to D-16/D-17 (the existing G-RENDER-SMOKE GPU/terrain limits).
+- **Source:** Slice 1d.3 design + the 1d.3 implementation finding (the unmasked window is a vanish, not an overlap).
 
 ---
 

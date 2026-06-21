@@ -18,11 +18,11 @@
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::glam::DVec3;
 use vd_core::pose::{FrameRef, RealmId};
-use vd_core::{AccountId, EntityId, NodeId, SessionId, TransferId};
+use vd_core::{AccountId, EntityId, NodeId, SessionId, TickId, TransferId};
 use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::FaultFabric;
 use vd_harness::oracle::{
-    verify_authority_settled, verify_authority_unique, verify_input_conservation,
+    RenderSample, verify_authority_settled, verify_authority_unique, verify_input_conservation,
 };
 use vd_harness::topology::{InspectReport, Topology};
 use vd_sim::saga::SagaCtx;
@@ -30,9 +30,55 @@ use vd_tests::{
     DEST, ORCH, SHARD, gateway_buffered_count, live_sagas, p1_client, p2_cluster, read_subject,
     saga_states, trigger_transfer, walk_forward,
 };
+use vd_wire::channels::SubId;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 
 const CLIENT: NodeId = NodeId(100);
+
+/// The render-trace cursor: a large finite value so `DeliveredView::rendered` clamps to (freezes
+/// at) the FRESHEST delivered pose every tick — the actual last-delivered crossing pose, sampled
+/// deterministically (no interpolation ambiguity in the capture).
+const TRACE_CURSOR: f64 = 1.0e9;
+
+/// One captured tick of the subject's composited render: its sample (`None` ⇒ rendered nowhere)
+/// and the SUBS that hold a track for it (the anti-vacuity overlap probe — both source + dest live).
+#[derive(Clone, Debug, PartialEq)]
+struct CapturedTick {
+    tick: TickId,
+    sample: Option<RenderSample>,
+    subs_holding: Vec<SubId>,
+}
+
+/// Capture the subject's composited render sample + held-subs from the client's REAL `DeliveredView`
+/// this tick. The subject is the client's OWN entity (set by the login `AuthorityChanged`). Built
+/// from delivered bytes only — never node internals.
+fn capture_subject(topo: &mut Topology) -> CapturedTick {
+    let tick = topo.tick();
+    with_client(topo, |c| {
+        let view = &c.delivered_view;
+        let sample = view.own_entity().and_then(|own| {
+            view.rendered(TRACE_CURSOR)
+                .into_iter()
+                .find(|(e, _, _)| *e == own)
+                .map(|(_, sub, pose)| RenderSample {
+                    sub,
+                    frame: pose.frame,
+                    raw_pos: pose.pos,
+                    world_pos: view.world_pos(&pose, TRACE_CURSOR),
+                    orient: pose.orient,
+                })
+        });
+        let subs_holding = view
+            .own_entity()
+            .map(|own| view.subs_holding(own))
+            .unwrap_or_default();
+        CapturedTick {
+            tick,
+            sample,
+            subs_holding,
+        }
+    })
+}
 
 fn report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
     &reports
@@ -55,9 +101,17 @@ fn with_client<R>(topo: &mut Topology, f: impl FnOnce(&mut ScriptedClient) -> R)
 /// Step (at most `max` ticks) until `cond` holds — a BOUNDED, deterministic poll on
 /// deterministic state. Robust to unrelated timing shifts (unlike a hardcoded absolute tick);
 /// the determinism sibling proves two runs poll byte-identically. Panics if never reached.
-fn step_until(topo: &mut Topology, max: u64, mut cond: impl FnMut(&mut Topology) -> bool) {
+/// `observe` runs after EVERY step (the per-tick render-trace sampler — `&mut |_| {}` for the
+/// gates that capture no trace), so the capstone samples DURING the overlap, not post-quiesce.
+fn step_until(
+    topo: &mut Topology,
+    max: u64,
+    observe: &mut dyn FnMut(&mut Topology),
+    mut cond: impl FnMut(&mut Topology) -> bool,
+) {
     for _ in 0..max {
         topo.step();
+        observe(topo);
         if cond(topo) {
             return;
         }
@@ -68,7 +122,17 @@ fn step_until(topo: &mut Topology, max: u64, mut cond: impl FnMut(&mut Topology)
 /// Drive ONE full cross-shard transfer of a logged-in player from [`SHARD`] to [`DEST`] over
 /// the real fabric, returning the quiesced topology plus the session, transferred entity, and
 /// the marker seq the run threaded (all observed LIVE, never hardcoded).
-fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64) {
+///
+/// `observe` is invoked after EVERY `topo.step()` — the per-tick observer (skeptic D2): the
+/// function deliberately quiesces to single-holder steady state before returning, so a trace
+/// sampled from the RETURNED topology renders "exactly once from the dest" TRIVIALLY (the source is
+/// already gone). The capstone passes an observer that captures the subject's composited render
+/// sample each tick, so it can assert exactly-once DURING the two-holder overlap. Gates that need no
+/// trace pass `&mut |_| {}` (via [`run_cut_transfer_quiesced`]).
+fn run_cut_transfer(
+    fabric: &FaultFabric,
+    observe: &mut dyn FnMut(&mut Topology),
+) -> (Topology, SessionId, EntityId, u64) {
     let mut topo = p2_cluster(fabric, 8);
     topo.add_node(Box::new(p1_client(
         fabric,
@@ -80,7 +144,7 @@ fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64
     // WARMUP: the player logs in and walks; the SOURCE grants its avatar and the DEST wins its
     // own realm lease (so `OpenInputSlot` will not be deferred). The client is emitting a
     // contiguous seq stream that the source applies.
-    step_until(&mut topo, 80, |t| {
+    step_until(&mut topo, 80, observe, |t| {
         let r = t.inspect_all();
         !report(&r, SHARD).held_entities.is_empty()
             && report(&r, DEST)
@@ -113,7 +177,7 @@ fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64
     // The saga reaches `Freezing`: `FreezeSource` is in flight and the cut installs on the
     // gateway next tick. The client has already stamped the CUT_MARKER (in response to the
     // gateway's `RequestCut`) and PAUSED, so no seq > marker has leaked to the source.
-    step_until(&mut topo, 40, |t| {
+    step_until(&mut topo, 40, observe, |t| {
         saga_states(t).iter().any(|s| s.starts_with("Freezing"))
     });
 
@@ -124,13 +188,14 @@ fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64
     // The saga commits (directory CAS to DEST) and the 1c.8 tail drives it the rest of the way:
     // the bandless interim fires DemoteComplete → Releasing, the gateway acks Released → Done →
     // Tombstone, so the saga reaches `live() == 0` (no longer parks in Demoting).
-    step_until(&mut topo, 40, |t| live_sagas(t) == 0);
+    step_until(&mut topo, 40, observe, |t| live_sagas(t) == 0);
 
     // QUIESCE: stop emitting and let every in-flight post-marker input settle at the dest AND
     // the source's Entity-key self-fence drop land (the source HeadReads on the recheck cadence).
     with_client(&mut topo, ScriptedClient::pause_input);
     for _ in 0..8 {
         topo.step();
+        observe(&mut topo);
     }
 
     // TWO-WINDOW GUARD (1c.8): wait until the transient demote/promote windows are both resolved
@@ -138,7 +203,7 @@ fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64
     // it — BEFORE the authority oracle is sampled. The promote-then-demote ordering means there
     // is a transient two-holder / pending-toward-owner window; the gate samples only after both
     // sides reach steady state (exactly as input-conservation is asserted only post-quiesce).
-    step_until(&mut topo, 40, |t| {
+    step_until(&mut topo, 40, observe, |t| {
         let r = t.inspect_all();
         let src = report(&r, SHARD);
         let dst = report(&r, DEST);
@@ -153,10 +218,16 @@ fn run_cut_transfer(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64
     (topo, session, entity, marker)
 }
 
+/// `run_cut_transfer` with no per-tick observer — for the gates that read only the quiesced end
+/// state (conservation, settle, stability).
+fn run_cut_transfer_quiesced(fabric: &FaultFabric) -> (Topology, SessionId, EntityId, u64) {
+    run_cut_transfer(fabric, &mut |_| {})
+}
+
 #[test]
 fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
     let fabric = FaultFabric::new(909, 2);
-    let (mut topo, session, entity, m) = run_cut_transfer(&fabric);
+    let (mut topo, session, entity, m) = run_cut_transfer_quiesced(&fabric);
 
     // `inspect_all` yields nodes in NodeId order, so SOURCE (NodeId 3) precedes DEST (NodeId 4)
     // — a BINDING fixture invariant: the conservation oracle concatenates per-session applied
@@ -293,8 +364,8 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
 
     // (10) THE ENTITY STATE CROSSED (1d.1, the pose-only crossing): the DEST holds the transferred
     // entity at the source's flushed pose. This is the first proof that entity STATE (not just
-    // authority) survives the handoff. render_ready stays false in 1d.1 — the VISIBLE flip (and the
-    // in-client proof) is 1d.3.
+    // authority) survives the handoff. (The VISIBLE in-client render of that crossed pose is proven
+    // by the 1d.3 capstone `p2_dod_visible_crossing_*` below, on the REAL DeliveredView.)
     //
     // The LOAD-BEARING discriminator is the pose's FRAME, NOT its position. The dest's OWN input
     // integration (`integrate`) moves `pos` but NEVER changes `frame`, and a dropped crossing would
@@ -339,7 +410,7 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
 #[test]
 fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
     let fabric = FaultFabric::new(909, 2);
-    let (mut topo, _session, entity, _m) = run_cut_transfer(&fabric);
+    let (mut topo, _session, entity, _m) = run_cut_transfer_quiesced(&fabric);
 
     // The tail closed: assert it once, then keep the cluster running.
     assert_eq!(
@@ -388,7 +459,12 @@ fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
 #[test]
 fn p2_dod_cross_cut_transfer_is_byte_identical_under_same_seed() {
     let run = || {
-        let (mut topo, _, _, marker) = run_cut_transfer(&FaultFabric::new(909, 2));
+        // FOLD IN the per-tick RENDER trace (1d.3): the visible-crossing capture is also proven
+        // deterministic — the composited sub flip + the crossed pose render byte-identically under
+        // one seed, so the headline visibility proof cannot be flaky on delivery ordering.
+        let mut caps: Vec<CapturedTick> = Vec::new();
+        let (mut topo, _, _, marker) =
+            run_cut_transfer(&FaultFabric::new(909, 2), &mut |t| caps.push(capture_subject(t)));
         let saga = saga_states(&mut topo); // terminal sentinel ([] — the run drove to Done)
         let live = live_sagas(&mut topo); // terminal sentinel (0)
         // The gateway's cut-buffer fill count, compared DIRECTLY (not merely inferred from the
@@ -397,12 +473,129 @@ fn p2_dod_cross_cut_transfer_is_byte_identical_under_same_seed() {
         let buffered = gateway_buffered_count(&mut topo);
         let reports = topo.inspect_all();
         let trace = topo.trace_bytes();
-        (reports, trace, saga, live, buffered, marker)
+        (reports, trace, saga, live, buffered, marker, caps)
     };
     assert_eq!(
         run(),
         run(),
-        "identical seed ⇒ identical ground truth, trace, terminal sentinels, buffer fill, and marker",
+        "identical seed ⇒ identical ground truth, trace, terminal sentinels, buffer fill, marker, \
+         AND the per-tick render trace (the visible-crossing capture is deterministic)",
+    );
+}
+
+/// The CEILING on the 1c.8-interim vanish gap (D-2), DERIVED from the dest adopt-render latency — NOT a
+/// free tunable. The gap is bounded by the dest's adopt handshake, one one-tick fabric hop per step:
+/// `PrepareSubscribe → SubscriptionReady → open_sub → HeadRead → Adopted → drain+flip` (5 protocol hops)
+/// plus the `(request_pending_grants, process_inbound, emit_frames).chain()` intra-tick schedule slack
+/// (a few ticks). A render-lag regression that leaves saga/authority timing intact (so the `step_until`
+/// saga-settle panics stay green) but stalls the dest render BALLOONS this gap past the handshake budget
+/// — and turns the ceiling assertion RED. When D-2's ordered demote lands, the source is retained until
+/// the dest renders, the gap collapses to 0, and this whole branch flips to `verify_no_vanish`.
+const MAX_INTERIM_VANISH_TICKS: usize = 8;
+
+/// The longest run of consecutive ticks the subject rendered NOWHERE, BETWEEN its first and last
+/// rendered tick (ignoring the leading pre-login absence) — the 1c.8-interim VANISH gap (D-2).
+fn max_absent_run(caps: &[CapturedTick]) -> usize {
+    let (Some(first), Some(last)) = (
+        caps.iter().position(|c| c.sample.is_some()),
+        caps.iter().rposition(|c| c.sample.is_some()),
+    ) else {
+        return 0;
+    };
+    let mut run = 0usize;
+    let mut max = 0usize;
+    for c in &caps[first..=last] {
+        run = if c.sample.is_none() { run + 1 } else { 0 };
+        max = max.max(run);
+    }
+    max
+}
+
+/// 1d.3 DoD — THE CROSS-SHARD CROSSING BECOMES VISIBLE. The client's OWN avatar, captured EVERY tick
+/// across the full transfer, REAPPEARS at the dest rendering the CROSSED pose (the SOURCE-realm seed-7
+/// pose, NOT the origin-adopt default), and the authoritative rendered sub FLIPS source→dest. Proven
+/// at the render-decision layer — the REAL `DeliveredView` the production client uses, driven from the
+/// harness `ScriptedClient`. Mutation-RED-verified at THIS e2e tier against drop-flip + suppress-dest.
+/// (render-origin — the render flip MISplaced to the adopt grant arm — is enforced at the UNIT tier by
+/// `stub.rs::the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach`, NOT here:
+/// this fixture buffers the crossing and drains+flips it in the SAME tick BEFORE `emit_frames`, so a
+/// misplaced flip never emits a seed-8 origin frame — the e2e variant that forces the crossing-AFTER-
+/// adopt ordering, where it would, is the D-2 follow-up. Documented honestly in the negative controls.)
+///
+/// ⚠️ INTERIM (1c.8 promote-before-demote, DEFERRED D-2) — PINNED exists-to-be-flipped: the source sub
+/// closes at the FAST unconditional saga `ReleaseSubscribe` BEFORE the dest's late
+/// adopt+crossing-drain renders, so there is NO seamless two-holder overlap yet — the avatar VANISHES
+/// for a bounded gap (measured) between the source release and the dest render. SEAMLESSNESS (the
+/// source RETAINED as a ghost until the dest renders ⇒ a true two-holder overlap the client de-dups
+/// via `AuthorityChanged`, ZERO vanish) is the D-2 ordered demote-before-promote, owed at 1d.4/1d.5.
+/// The NO-VANISH + POSE-CONTINUITY oracles + meta-tests are ALREADY built (`harness::oracle`); this
+/// gate ASSERTS the visible crossing now and PINS `overlap_ticks == 0` + `vanish_gap > 0` so that when
+/// D-2 lands they FLIP to `overlap_ticks >= 1` + `verify_no_vanish`/`verify_pose_continuity` (never
+/// silently relied on, never forgotten).
+#[test]
+fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
+    let fabric = FaultFabric::new(909, 2);
+    let mut caps: Vec<CapturedTick> = Vec::new();
+    let _ = run_cut_transfer(&fabric, &mut |t| caps.push(capture_subject(t)));
+
+    // The subject's rendered samples in order (skipping pre-login + the interim vanish ticks).
+    let rendered: Vec<RenderSample> = caps.iter().filter_map(|c| c.sample).collect();
+    let source_sub = rendered.first().expect("the subject renders at some tick").sub;
+    let dest_sample = *rendered.last().expect("the subject renders at some tick");
+
+    // (1) THE VISIBLE CROSSING: the authoritative rendered sub flips source→dest EXACTLY ONCE (the
+    // crossing becomes visible from the dest; the de-dup is structural — `chosen_subs` is one sub per
+    // entity, so the captured sample is already at-most-one). suppress-dest leaves source==dest → RED.
+    assert_ne!(
+        source_sub, dest_sample.sub,
+        "the rendered sub flipped source→dest — the crossing is visible from the dest",
+    );
+    let flips = rendered.windows(2).filter(|w| w[0].sub != w[1].sub).count();
+    assert_eq!(flips, 1, "exactly one source→dest authority flip (no flapping)");
+
+    // (2) THE DEST RENDERS THE CROSSED POSE, not the origin-adopt default — the load-bearing
+    // discriminator (drop-flip turns THIS red): the SOURCE realm's `SystemSpace{seed:7}` at a
+    // non-origin, finite world position, NEVER the dest's own seed-8 origin default at ZERO.
+    // (render-origin — the flip misplaced to the adopt grant arm — is UNIT-covered and moot here, per
+    // the docstring; the e2e variant forcing crossing-after-adopt is the D-2 follow-up.)
+    assert_eq!(
+        dest_sample.frame,
+        FrameRef::SystemSpace { system_seed: 7 },
+        "the dest renders the crossed SOURCE-realm pose (seed 7), not the origin-adopt default (seed 8): {dest_sample:?}",
+    );
+    assert!(
+        dest_sample.world_pos.is_finite(),
+        "the rendered world pose is finite (sanitized): {dest_sample:?}",
+    );
+    assert_ne!(
+        dest_sample.world_pos,
+        DVec3::ZERO,
+        "the rendered pose is the walked crossed pose, not the origin-adopt default",
+    );
+
+    // (3) THE 1c.8-INTERIM VANISH — PINNED exists-to-be-flipped (D-2). The source sub closes before
+    // the dest renders, so the two-holder overlap NEVER occurs and the avatar vanishes for a bounded
+    // gap. When the D-2 ordered demote retains the source until the dest renders, BOTH flip:
+    // overlap_ticks ⇒ ≥1, vanish_gap ⇒ 0 (then assert verify_no_vanish/verify_pose_continuity here).
+    let overlap_ticks = caps.iter().filter(|c| c.subs_holding.len() >= 2).count();
+    assert_eq!(
+        overlap_ticks, 0,
+        "INTERIM (D-2): no seamless two-holder overlap yet — flips to ≥1 when the ordered demote retains the source",
+    );
+    let vanish_gap = max_absent_run(&caps);
+    assert!(
+        vanish_gap > 0,
+        "INTERIM (D-2): the avatar vanishes for a bounded gap (source released before the dest renders) — \
+         flips to 0 (verify_no_vanish) when the ordered demote lands; measured gap = {vanish_gap}",
+    );
+    // ...but the gap is BOUNDED by the dest adopt-render handshake (DERIVED, not a free tunable). A
+    // render-lag regression that stalls the dest render — saga timing intact, so the `step_until`
+    // saga-settle panics stay green — balloons this past the handshake budget and turns THIS red. So
+    // the interim vanish is pinned BOTH-SIDED: it exists (> 0) AND it never silently worsens (<= budget).
+    assert!(
+        vanish_gap <= MAX_INTERIM_VANISH_TICKS,
+        "INTERIM (D-2): the vanish gap stays within the dest adopt-render handshake budget \
+         ({MAX_INTERIM_VANISH_TICKS} ticks) — a render-lag regression balloons it; measured gap = {vanish_gap}",
     );
 }
 
@@ -432,4 +625,16 @@ fn p2_dod_cross_cut_transfer_is_byte_identical_under_same_seed() {
 //                              swaps), so reversing a 1-element buffer is a no-op. Multi-frame
 //                              drain ORDER is gated by the connection-plane unit test
 //                              `commit_opens_the_dest_slot_then_drains_the_buffer_in_seq_order`.
+//   (f) RENDER-ORIGIN       — flipping `render_ready` in the adopt grant arm (`stub.rs` flip_grant
+//                              Adopted) instead of `apply_crossing` would emit a seed-8 origin ZERO
+//                              frame ONLY if the crossing arrives AFTER the adopt. THIS fixture
+//                              buffers the crossing and drains+flips it in the same tick BEFORE
+//                              `emit_frames` (`stub.rs` schedule `(request_pending_grants,
+//                              process_inbound, emit_frames).chain()`), so the misplaced flip is
+//                              structurally unobservable here. It is caught at the unit tier by
+//                              `stub.rs::the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach`.
+//                              The e2e variant that DELAYS the crossing past the adopt (where this
+//                              gate WOULD see the origin frame) lands with the D-2 reorder machinery
+//                              + the `verify_no_vanish`/`verify_pose_continuity` wiring — recorded in
+//                              DEFERRED.md D-2. [audit wf_c3e4f1b7 Finding 1]
 // ---------------------------------------------------------------------------------------------

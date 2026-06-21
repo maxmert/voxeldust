@@ -14,8 +14,9 @@
 //!   same-tick chunk is never lost.
 //! - Every sent input lands in the sent-log the INPUT-CONSERVATION oracle audits.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use vd_client::view::DeliveredView;
 use vd_core::pose::StampedPose;
 use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_node::TickReport;
@@ -79,8 +80,19 @@ pub struct ScriptedClient {
     script: ClientScript,
     phase: ClientPhase,
     session: Option<SessionId>,
-    sub: Option<SubId>,
+    /// The SET of subscriptions the client currently holds (Track R / 1d.2d): grown on
+    /// `SubscriptionOpened`, shrunk on `SubscriptionClosing`. During a cross-shard transfer
+    /// overlap it holds BOTH the source and dest subs, so a frame on EITHER is admitted (the
+    /// avatar is then composited to ONE sub via `AuthorityChanged` on the render layer).
+    held_subs: BTreeSet<SubId>,
     pub view: DeliveredWorldView,
+    /// The REAL composited render view (1d.3c) — the SAME `vd_client::view::DeliveredView` the
+    /// production client renders. Fed from the SINGLE shared decode below (two sinks, never two
+    /// decodes, so the flat `view` and this cannot diverge in what they admit). Per-`(sub, entity)`
+    /// tracks survive the cross-shard overlap, so the capstone can prove the avatar renders EXACTLY
+    /// ONCE from the dest sub during the two-holder window — which the flat last-writer-wins `view`
+    /// physically cannot represent. The flat `view` stays for the D-28 conservation gate.
+    pub delivered_view: DeliveredView,
     next_input_seq: u64,
     sent_inputs: Vec<(SessionId, u64)>,
     close_reason: Option<String>,
@@ -111,8 +123,9 @@ impl ScriptedClient {
             script: Box::new(script),
             phase: ClientPhase::Connecting,
             session: None,
-            sub: None,
+            held_subs: BTreeSet::new(),
             view: DeliveredWorldView::default(),
+            delivered_view: DeliveredView::default(),
             next_input_seq: 0,
             sent_inputs: Vec::new(),
             close_reason: None,
@@ -180,13 +193,25 @@ impl ScriptedClient {
                 }
             }
             ServerControlMsg::SubscriptionOpened { sub, .. } => {
-                self.sub = Some(sub);
+                self.held_subs.insert(sub);
                 if self.phase == ClientPhase::AwaitingSubscription {
                     self.phase = ClientPhase::Active;
                 }
             }
-            ServerControlMsg::AuthorityChanged { entity, .. } => {
+            // The gateway RELIABLY closed a subscription (a transfer's source-sub release, Track
+            // R / 1d.2). Remove it from the held SET so its now-foreign datagrams stop being
+            // admitted; any OTHER held sub (e.g. the dest sub of the overlap) keeps routing. Drop
+            // the closed sub's tracks from the REAL view too — the SOUND per-sub eviction.
+            ServerControlMsg::SubscriptionClosing { sub } => {
+                self.held_subs.remove(&sub);
+                self.delivered_view.drop_sub(sub);
+            }
+            // STOP discarding the sub (1d.3c): the REAL view records render authority per entity, so
+            // the avatar composites to the named (dest) sub during the overlap — the flat view only
+            // ever learns the entity id.
+            ServerControlMsg::AuthorityChanged { entity, sub } => {
                 self.view.own_entity = Some(entity);
+                self.delivered_view.set_authority(entity, sub);
             }
             ServerControlMsg::Close { reason } => {
                 self.close_reason = Some(reason);
@@ -209,12 +234,19 @@ impl ScriptedClient {
         let Ok(snap) = postcard::from_bytes::<SnapshotDatagram>(bytes) else {
             panic!("client received undecodable snapshot bytes from its gateway");
         };
+        // SINGLE shared decode, TWO sinks (1d.3c): feed the SAME decoded `snap` into the REAL
+        // composited `DeliveredView` AND the flat conservation `view`, so they cannot diverge in
+        // what they admit (both run the SAME §6.3 `classify_snapshot` gate over the SAME held set).
+        // The real view keeps per-(sub, entity) tracks (the cross-shard overlap shape); the flat
+        // view is last-writer-wins (the D-28 conservation surface).
+        self.delivered_view.on_snapshot(&self.held_subs, snap.clone());
+
         // THE §6.3 gate (shared with the real client via vd_wire, so they cannot
         // drift): a strictly-older frame_id is stale; an EQUAL frame_id is a sibling
         // chunk of the current tick and is applied — each chunk self-contained
         // latest-wins, so reordered same-tick chunks all land.
         let high_water = self.view.last_frame.get(&snap.sub).copied();
-        match classify_snapshot(self.sub, high_water, snap.sub, snap.frame_id) {
+        match classify_snapshot(&self.held_subs, high_water, snap.sub, snap.frame_id) {
             SnapshotVerdict::Apply => {
                 self.view.last_frame.insert(snap.sub, snap.frame_id);
                 for entity in snap.entities {
@@ -600,6 +632,112 @@ mod tests {
             client.marker_seq(),
             Some(m),
             "the marker seq does not change on resume"
+        );
+    }
+
+    #[test]
+    fn subscription_closing_drops_the_held_sub_and_ignores_a_foreign_one() {
+        // 1d.2: SubscriptionClosing removes the sub from the held SET (its datagrams then stop
+        // being admitted); a Closing for a sub the client does NOT hold is a no-op.
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client); // holds SubId(0)
+        assert_eq!(client.held_subs, BTreeSet::from([SubId(0)]));
+        // A Closing for a DIFFERENT sub: the held set is untouched.
+        send_control(&mut gw, &ServerControlMsg::SubscriptionClosing { sub: SubId(9) });
+        fabric.pump(TickId(3));
+        let _ = client.step();
+        assert_eq!(
+            client.held_subs,
+            BTreeSet::from([SubId(0)]),
+            "a foreign Closing is a no-op"
+        );
+        // A subsequent snapshot on the held sub still applies (still admitted).
+        send_snapshot(&mut gw, &snapshot(SubId(0), 1, 1.0));
+        fabric.pump(TickId(4));
+        let _ = client.step();
+        assert_eq!(client.view.poses[&EntityId(7)].pos.x, 1.0);
+        // Now close the HELD sub: it leaves the set, and a later same-sub datagram is no longer
+        // admitted (a foreign sub now).
+        send_control(&mut gw, &ServerControlMsg::SubscriptionClosing { sub: SubId(0) });
+        fabric.pump(TickId(5));
+        let _ = client.step();
+        assert!(client.held_subs.is_empty(), "the held sub was dropped from the set");
+        send_snapshot(&mut gw, &snapshot(SubId(0), 2, 9.0));
+        fabric.pump(TickId(6));
+        let _ = client.step();
+        assert_eq!(
+            client.view.poses[&EntityId(7)].pos.x, 1.0,
+            "a datagram on the closed sub is dropped (no longer admitted)"
+        );
+        assert_eq!(client.view.stale_frames_dropped, 1, "the closed-sub datagram dropped foreign");
+    }
+
+    #[test]
+    fn the_client_admits_frames_on_both_held_subs_during_a_transfer_overlap() {
+        // 1d.2d: after a second SubscriptionOpened (the dest sub of a transfer overlap) the
+        // client holds BOTH subs, so a frame on EITHER is admitted (neither dropped as foreign).
+        // AuthorityChanged re-points the avatar to the dest sub.
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client); // SubId(0) held
+        send_control(
+            &mut gw,
+            &ServerControlMsg::SubscriptionOpened {
+                sub: SubId(1),
+                frame: FrameRef::SystemSpace { system_seed: 8 },
+            },
+        );
+        send_control(
+            &mut gw,
+            &ServerControlMsg::AuthorityChanged {
+                entity: EntityId(7),
+                sub: SubId(1),
+            },
+        );
+        fabric.pump(TickId(3));
+        let _ = client.step();
+        assert_eq!(client.held_subs, BTreeSet::from([SubId(0), SubId(1)]));
+        // A frame on the SOURCE sub (0) AND a frame on the DEST sub (1) are BOTH admitted.
+        send_snapshot(&mut gw, &snapshot_of(SubId(0), 1, EntityId(7), 1.0));
+        send_snapshot(&mut gw, &snapshot_of(SubId(1), 1, EntityId(7), 2.0));
+        fabric.pump(TickId(4));
+        let _ = client.step();
+        assert_eq!(
+            client.view.stale_frames_dropped, 0,
+            "both held subs admitted — neither frame dropped as foreign"
+        );
+        // The avatar's authoritative sub is the dest (the AuthorityChanged re-point).
+        assert_eq!(client.view.own_entity, Some(EntityId(7)));
+
+        // 1d.3c: the REAL composited view received the SAME bytes (single shared decode). Both
+        // subs hold a track for the avatar, but it renders EXACTLY ONCE — from the dest sub (1),
+        // the AuthorityChanged re-point — at the dest's x=2.0. The flat view physically cannot
+        // show this (last-writer-wins), which is why the capstone reads the REAL view.
+        let rendered = client.delivered_view.rendered(10.0);
+        assert_eq!(rendered.len(), 1, "the avatar composites to exactly one copy");
+        let (rid, rsub, rpose) = rendered[0];
+        assert_eq!(rid, EntityId(7));
+        assert_eq!(rsub, SubId(1), "rendered from the dest sub (the AuthorityChanged re-point)");
+        assert_eq!(rpose.pos.x, 2.0, "the dest-sub pose, not the source copy");
+    }
+
+    #[test]
+    fn closing_a_sub_evicts_its_tracks_from_the_real_view_too() {
+        // 1d.3c: a reliable SubscriptionClosing drops the closed sub's tracks from the REAL
+        // composited view (the SOUND per-sub eviction), not just the held SET — so the avatar's
+        // dest-sub copy is the one that survives a source-sub release during a transfer.
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client); // holds SubId(0), authority on SubId(0)
+        send_snapshot(&mut gw, &snapshot_of(SubId(0), 1, EntityId(7), 5.0));
+        fabric.pump(TickId(3));
+        let _ = client.step();
+        assert_eq!(client.delivered_view.rendered(10.0).len(), 1, "rendered on sub 0");
+        // Close sub 0: its track is evicted from the real view, so the avatar renders nowhere.
+        send_control(&mut gw, &ServerControlMsg::SubscriptionClosing { sub: SubId(0) });
+        fabric.pump(TickId(4));
+        let _ = client.step();
+        assert!(
+            client.delivered_view.rendered(10.0).is_empty(),
+            "the closed sub's track was evicted from the real composited view",
         );
     }
 

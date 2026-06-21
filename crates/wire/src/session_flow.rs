@@ -96,6 +96,21 @@ pub enum ShardToGateway {
     },
     /// The avatar is gone (detach completed).
     SessionDetached { session: SessionId },
+    /// A transfer-DESTINATION shard has ADOPTED the crossing entity and is ready to be
+    /// READ by this session (Track R / 1d.2b). The gateway opens a SECOND per-session sub on
+    /// the dest at `realm_fence` and re-points the avatar's render authority to it
+    /// (`AuthorityChanged{entity, dest_sub}`) — the read-plane analog of the write-plane
+    /// `CommitAuthority`. APPENDED variant (the only postcard-safe additive shape — postcard
+    /// is non-self-describing): a prior arm's discriminant/framing is unchanged. Emitted by the
+    /// dest at its grant-flip→`Adopted` (where `realm_fence`/`frame` are first legitimately
+    /// owned), NOT a new `InterShardFlow` arm (HR1 — it rides this already-reviewed seam).
+    /// `realm_fence` is the DEST realm fence (NOT the per-entity CAS `new_fence`).
+    SubscriptionReady {
+        session: SessionId,
+        entity: EntityId,
+        frame: FrameRef,
+        realm_fence: Fence,
+    },
 }
 
 impl ShardToGateway {
@@ -105,7 +120,9 @@ impl ShardToGateway {
     pub fn into_snapshot_bytes(self) -> Option<Vec<u8>> {
         match self {
             ShardToGateway::Frame { snapshot_bytes, .. } => Some(snapshot_bytes),
-            ShardToGateway::SessionAttached { .. } | ShardToGateway::SessionDetached { .. } => None,
+            ShardToGateway::SessionAttached { .. }
+            | ShardToGateway::SessionDetached { .. }
+            | ShardToGateway::SubscriptionReady { .. } => None,
         }
     }
 }
@@ -299,6 +316,12 @@ mod tests {
             ShardToGateway::SessionDetached {
                 session: SessionId(1),
             },
+            ShardToGateway::SubscriptionReady {
+                session: SessionId(1),
+                entity: EntityId(9),
+                frame: FrameRef::SystemSpace { system_seed: 8 },
+                realm_fence: Fence(2),
+            },
         ];
         for msg in s2g {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -328,6 +351,13 @@ mod tests {
             session: SessionId(1),
         };
         assert_eq!(detached.into_snapshot_bytes(), None);
+        let ready = ShardToGateway::SubscriptionReady {
+            session: SessionId(1),
+            entity: EntityId(2),
+            frame: FrameRef::SystemSpace { system_seed: 3 },
+            realm_fence: Fence(2),
+        };
+        assert_eq!(ready.into_snapshot_bytes(), None);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! quinn handshakes, the mesh bridge semantics, the bins' wiring, and the
 //! admin endpoint — everything the VirtualClock tier cannot see.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -36,7 +36,7 @@ const DEADLINE: Duration = Duration::from_secs(30);
 struct ProcessClient {
     transport: MeshTransport,
     session: Option<SessionId>,
-    sub: Option<SubId>,
+    held_subs: BTreeSet<SubId>,
     own_entity: Option<EntityId>,
     poses: BTreeMap<EntityId, StampedPose>,
     last_frame: Option<u64>,
@@ -49,7 +49,7 @@ impl ProcessClient {
         ProcessClient {
             transport,
             session: None,
-            sub: None,
+            held_subs: BTreeSet::new(),
             own_entity: None,
             poses: BTreeMap::new(),
             last_frame: None,
@@ -93,7 +93,7 @@ impl ProcessClient {
             }
         }
         self.tick += 1;
-        if walk && self.sub.is_some() {
+        if walk && !self.held_subs.is_empty() {
             self.next_seq += 1;
             let input = InputDatagram {
                 seq: self.next_seq,
@@ -111,7 +111,7 @@ impl ProcessClient {
     fn on_control(&mut self, bytes: &[u8]) {
         match postcard::from_bytes::<ServerControlMsg>(bytes).expect("decode control") {
             ServerControlMsg::Welcome { session, .. } => self.session = Some(session),
-            ServerControlMsg::SubscriptionOpened { sub, .. } => self.sub = Some(sub),
+            ServerControlMsg::SubscriptionOpened { sub, .. } => { self.held_subs.insert(sub); }
             ServerControlMsg::AuthorityChanged { entity, .. } => self.own_entity = Some(entity),
             ServerControlMsg::Close { reason } => panic!("gateway closed the session: {reason}"),
             // The cluster tick rate (minor 1) — this minimal parity client does not
@@ -126,7 +126,7 @@ impl ProcessClient {
         // THE shared §6.3 gate — the SAME vd_wire fn the production client and the
         // in-process ScriptedClient call (no third hand-inlined copy to drift), so
         // the real-binary parity gate is held to the very SSOT it validates.
-        match classify_snapshot(self.sub, self.last_frame, snap.sub, snap.frame_id) {
+        match classify_snapshot(&self.held_subs, self.last_frame, snap.sub, snap.frame_id) {
             SnapshotVerdict::Apply => {
                 self.last_frame = Some(snap.frame_id);
                 for entity in snap.entities {
@@ -247,10 +247,10 @@ fn p1_parity_real_binaries_over_quic() {
         }
         assert!(
             started.elapsed() < DEADLINE,
-            "parity scenario did not converge: walker(session={:?} sub={:?} poses={} moved={:?}) \
+            "parity scenario did not converge: walker(session={:?} subs={:?} poses={} moved={:?}) \
              idle(session={:?} poses={})",
             walker.session,
-            walker.sub,
+            walker.held_subs,
             walker.poses.len(),
             walker
                 .own_entity
@@ -266,7 +266,7 @@ fn p1_parity_real_binaries_over_quic() {
     assert!(walker.session.is_some(), "walker logged in");
     assert!(idle.session.is_some(), "idle logged in");
     assert_ne!(walker.session, idle.session, "distinct sessions");
-    assert_eq!(walker.sub, Some(SubId(0)), "M0: the one subscription");
+    assert_eq!(walker.held_subs, BTreeSet::from([SubId(0)]), "M0: the one subscription");
     let idle_own = idle
         .own_entity
         .expect("authority announced to the idle dot");

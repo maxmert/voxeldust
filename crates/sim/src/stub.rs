@@ -837,13 +837,19 @@ struct AttachEgress {
     reply: ShardToGateway,
 }
 
-/// The outcome of a grant-flip — three mutually-exclusive caller obligations (1d.1).
+/// The outcome of a grant-flip — three mutually-exclusive caller obligations (1d.1/1d.2c).
 enum GrantFlip {
     /// A LOGIN attach flipped: push the `SessionAttached` egress.
     LoggedIn(AttachEgress),
-    /// A transfer-dest ADOPT flipped (R2 — no re-home): the caller drains the flipped session's
-    /// buffered crossing (if any). Carries the session so the drain needs no second lookup.
-    Adopted { session: SessionId },
+    /// A transfer-dest ADOPT flipped (R2 — no re-home): the caller (a) pushes the
+    /// `SubscriptionReady` egress so the gateway opens the dest read-sub + re-points the avatar's
+    /// render authority (Track R / 1d.2c — `render_ready` STAYS false, the dest emits no frames
+    /// until 1d.3), and (b) drains the flipped session's buffered crossing (if any). Carries the
+    /// session so the drain needs no second lookup, mirroring `LoggedIn`'s egress shape.
+    Adopted {
+        session: SessionId,
+        egress: AttachEgress,
+    },
     /// No ungranted dot matched (a duplicate grant head): idempotent no-op.
     NoOp,
 }
@@ -873,7 +879,23 @@ fn flip_grant(
             // Transfer-dest adopt: held but not rendered, no re-home (1c.8). Clear the adopt
             // marker so the source granted-key poll engages on this now-granted dot at the dest.
             dot.adopting = false;
-            return GrantFlip::Adopted { session: *session };
+            // Track R / 1d.2c: announce the dest read-sub to the gateway via `SubscriptionReady`
+            // (riding the already-reviewed ShardToGateway seam — HR1). `realm_fence` + `frame`
+            // are the dest's, in scope HERE (the first instant the dest legitimately owns the
+            // entity), the IDENTICAL tuple login packs into `SessionAttached`. `render_ready`
+            // STAYS false — the sub is OPEN + ROUTABLE but the dest emits NO frames until 1d.3.
+            return GrantFlip::Adopted {
+                session: *session,
+                egress: AttachEgress {
+                    gateway: dot.gateway,
+                    reply: ShardToGateway::SubscriptionReady {
+                        session: *session,
+                        entity,
+                        frame: config.frame,
+                        realm_fence,
+                    },
+                },
+            };
         }
         dot.render_ready = true;
         return GrantFlip::LoggedIn(AttachEgress {
@@ -930,6 +952,11 @@ fn self_fence_foreign_entity(
 
 /// Whether a dot is the local granted, non-departing holder of `entity` (the self-fence target).
 /// Monomorphic predicate so the chained `&&`s are covered in one helper, not the reply arm.
+///
+/// ⚠️ INTENTIONALLY identical-bodied to [`crossing_target`] (DO NOT merge them — D1). The NAMES
+/// carry the opposite intents: this finds the SOURCE's local holder to DROP on a foreign takeover;
+/// that finds the DEST dot to APPLY a crossing. Different call sites, different shards, never the
+/// same dot — see [`crossing_target`] for the full reconciliation.
 #[must_use]
 fn foreign_takeover_target(dot: &Dot, entity: EntityId) -> bool {
     (dot.entity == entity) & dot.granted & !dot.departing
@@ -1038,11 +1065,27 @@ fn on_transfer_envelope(
     }
 }
 
-/// Whether a dot is the ADOPTED dest dot for `entity`: authority-held (`granted`), not yet
-/// render-ready (1d.1 stores the pose, 1d.3 flips render), not departing. Monomorphic predicate.
+/// Whether a dot is the ADOPTED dest dot for `entity`: authority-held (`granted`), not departing.
+/// Monomorphic predicate.
+///
+/// 1d.3 dropped the former `!dot.render_ready` term. Reason: 1d.3 flips `render_ready` on the
+/// FIRST crossing-apply, so a `!render_ready` guard would make a saga REDELIVERY (the at-least-once
+/// re-emit) miss this predicate, fall to `on_transfer_envelope`'s `None` arm, and re-buffer into
+/// `PendingCrossings` FOREVER (the dot is already adopted; no future grant-flip drains it) — a
+/// permanent strand + `crossings_buffered` inflation. Widened, a post-flip redelivery hits
+/// `apply_crossing`, the journal returns `AlreadyApplied`, and it re-acks WITHOUT re-applying.
+/// Sound because AUTHORITY-UNIQUE guarantees at most one granted non-departing dot per entity here,
+/// AND the saga addresses the crossing envelope (`InterShardFlow::Transfer`) to the DEST node only,
+/// so a widened predicate can never misland on the SOURCE's render-ready dot.
+///
+/// ⚠️ INTENTIONALLY identical-bodied to [`foreign_takeover_target`] (DO NOT merge them — D1). The
+/// NAMES are the documentation of intent: this finds the DEST dot to APPLY a crossing; that finds
+/// the local holder to DROP it on a foreign takeover. They serve OPPOSITE call sites on DIFFERENT
+/// shards (crossing → dest only; takeover reply → source only) and never fire on the same dot, so
+/// the shared body is safe — but a "DRY" merge would break one call site's legibility.
 #[must_use]
 fn crossing_target(dot: &Dot, entity: EntityId) -> bool {
-    (dot.entity == entity) & dot.granted & !dot.render_ready & !dot.departing
+    (dot.entity == entity) & dot.granted & !dot.departing
 }
 
 /// Apply one crossing to its adopted dot (the shared immediate + drained path). Fence rule 1: a
@@ -1068,6 +1111,13 @@ fn apply_crossing(
     if applied.journal_step(transfer, step_id) == StepOutcome::FirstApply {
         // Never trust the network: sanitize to finite at this ingress before storing.
         dot.pose = pose.sanitized();
+        // 1d.3 — the FIRST visible cross-shard transfer: the crossed pose is now stored, so flip
+        // render so `emit_frames` emits it (from the dest sub). ATOMIC-WITH the pose store by
+        // construction — never at the `flip_grant` Adopted arm (`:887`), which under the
+        // buffered-crossing case fires BEFORE the pose exists and would emit an origin-default
+        // (`SystemSpace{seed:8}`) ZERO frame for the gap ticks. Flipping here makes that
+        // origin-default frame structurally unreachable.
+        dot.render_ready = true;
         stats.crossings_applied += 1;
     }
     outbox.push_flow(
@@ -1193,16 +1243,21 @@ fn on_directory_reply(
                     GrantFlip::LoggedIn(egress) => {
                         push_session_reply(outbox, egress.gateway, &egress.reply);
                     }
-                    GrantFlip::Adopted { session } => drain_pending_crossing(
-                        &mut dots.0,
-                        session,
-                        entity,
-                        applied,
-                        pending,
-                        config,
-                        stats,
-                        outbox,
-                    ),
+                    GrantFlip::Adopted { session, egress } => {
+                        // 1d.2c: announce the dest read-sub to the gateway (SubscriptionReady),
+                        // THEN drain any buffered crossing onto the now-adopted dot.
+                        push_session_reply(outbox, egress.gateway, &egress.reply);
+                        drain_pending_crossing(
+                            &mut dots.0,
+                            session,
+                            entity,
+                            applied,
+                            pending,
+                            config,
+                            stats,
+                            outbox,
+                        );
+                    }
                     GrantFlip::NoOp => {}
                 }
             } else {
@@ -2476,10 +2531,11 @@ mod tests {
     }
 
     #[test]
-    fn the_adopt_grant_flip_holds_authority_without_render_or_attach() {
-        // 1c.8: the grant-flip on the adopted record sets granted (authority-held) AND stamps
-        // entity_fence = the recorded CAS fence, but leaves render_ready FALSE and pushes NO
-        // SessionAttached (R2 — the source owns the client). adopting is cleared on the flip.
+    fn the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach() {
+        // 1c.8 + 1d.2c: the grant-flip on the adopted record sets granted (authority-held) AND
+        // stamps entity_fence = the recorded CAS fence, but leaves render_ready FALSE. It pushes
+        // NO SessionAttached (R2 — the source owns the client) but DOES push a SubscriptionReady
+        // (Track R / 1d.2c: the gateway opens the dest read-sub + re-points authority).
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
@@ -2502,18 +2558,29 @@ mod tests {
         // Split asserts (each &&-short-circuit false arm is uncoverable — HR5).
         assert!(dot.granted, "the adopt flips granted (authority-held)");
         assert_eq!(dot.entity_fence, Fence(2), "stamped the recorded CAS fence");
-        assert!(!dot.render_ready, "an adopt renders NOTHING (no pose; 1d)");
+        assert!(!dot.render_ready, "an adopt renders NOTHING (no pose; 1d.3 flips it)");
         assert!(!dot.adopting, "adopting is cleared on the flip");
-        // No SessionAttached push (suppressed when adopting) and no frame (not render-ready).
-        let attach_replies = sent
+        // EXACTLY one Control-class reply to the gateway: a SubscriptionReady carrying the DEST
+        // frame + realm fence (NOT a SessionAttached — that is suppressed on an adopt, R2).
+        let to_gateway: Vec<ShardToGateway> = sent
             .iter()
-            .filter(|(_, class, _)| *class == MsgClass::Control)
-            .count();
-        assert_eq!(attach_replies, 0, "no SessionAttached on an adopt (R2)");
+            .filter(|(to, class, _)| (*to == GATEWAY) & (*class == MsgClass::Control))
+            .map(|(_, _, bytes)| postcard::from_bytes(bytes).expect("decode"))
+            .collect();
+        assert_eq!(
+            to_gateway,
+            vec![ShardToGateway::SubscriptionReady {
+                session: SESSION,
+                entity: SUBJECT,
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1), // the DEST realm fence (grant_realm set Fence(1))
+            }],
+            "the adopt announces exactly one SubscriptionReady, never a SessionAttached"
+        );
         assert_eq!(
             decode_frames(&sent).len(),
             0,
-            "an adopted dot renders nothing"
+            "an adopted dot renders nothing (render_ready false)"
         );
     }
 
@@ -2913,20 +2980,30 @@ mod tests {
             "the crossed pose applied to the adopted dot"
         );
         assert!(
-            !dot.render_ready,
-            "1d.1 stores the pose but does NOT flip render_ready (1d.3 does)"
+            dot.render_ready,
+            "1d.3 flips render_ready atomically with the crossed-pose store (the VISIBLE flip)"
         );
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
         assert!(acked(&sent, TransferId(7)), "the crossing step is acked");
 
-        // REDELIVERY: a second identical crossing re-acks but does NOT re-apply (journal dedups).
+        // REDELIVERY AFTER THE FLIP (the widened-`crossing_target` arm, DEFECT-3): now that
+        // `render_ready` is true, the redelivery still matches `crossing_target` (the dropped
+        // `!render_ready` term), so it reaches `apply_crossing`, the journal returns
+        // `AlreadyApplied`, and it re-acks WITHOUT re-applying — it does NOT fall to the `None` arm
+        // and re-buffer (which the old `!render_ready` predicate would have, stranding it forever).
+        let buffered_before = rig.world.resource::<StubStats>().crossings_buffered;
         let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
         assert_eq!(
             rig.world.resource::<StubStats>().crossings_applied,
             1,
-            "no re-apply on redelivery"
+            "no re-apply on a post-flip redelivery"
         );
-        assert!(acked(&sent, TransferId(7)), "a redelivery still re-acks");
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_buffered,
+            buffered_before,
+            "a post-flip redelivery re-acks via the journal — it is NOT re-buffered (no strand)"
+        );
+        assert!(acked(&sent, TransferId(7)), "a post-flip redelivery still re-acks");
     }
 
     #[test]
@@ -2965,7 +3042,8 @@ mod tests {
             "a still-buffered redelivery does not inflate the buffered count"
         );
 
-        // The adopt grant-flip DRAINS the buffer → applies the pose + acks.
+        // The adopt grant-flip DRAINS the buffer → applies the pose + acks AND flips render_ready
+        // (1d.3 — the drained path shares `apply_crossing`, so the VISIBLE flip lands here too).
         let sent = rig.tick(vec![adopted_head(Fence(2))]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
@@ -2973,17 +3051,29 @@ mod tests {
             pose.sanitized(),
             "the buffered crossing applied on the flip"
         );
+        assert!(
+            dot.render_ready,
+            "the drained crossing flips render_ready (the VISIBLE flip on the buffered path)"
+        );
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
         assert!(acked(&sent, TransferId(7)), "the drained crossing is acked");
 
-        // COMPOSED (audit finding 2): a redelivery AFTER the buffered crossing was drained+journaled
-        // hits the IMMEDIATE path (the dot is now adopted) and the journal dedups it ACROSS the
-        // buffer→drain→redeliver boundary — re-ack only, NO second apply.
+        // COMPOSED (audit finding 2 + DEFECT-3): a redelivery AFTER the buffered crossing was
+        // drained+journaled AND render_ready flipped hits the IMMEDIATE path (the dot is now
+        // adopted + render-ready, still matched by the WIDENED `crossing_target`) and the journal
+        // dedups it ACROSS the buffer→drain→redeliver boundary — re-ack only, NO second apply, and
+        // crucially NO re-buffer (the buffered count does not move).
+        let buffered_before = rig.world.resource::<StubStats>().crossings_buffered;
         let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
         assert_eq!(
             rig.world.resource::<StubStats>().crossings_applied,
             1,
             "a redelivery after a DRAINED crossing does not re-apply (journal spans the boundary)"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_buffered,
+            buffered_before,
+            "a post-drain redelivery re-acks via the journal — it is NOT re-buffered",
         );
         assert!(
             acked(&sent, TransferId(7)),

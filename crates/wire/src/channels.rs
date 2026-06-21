@@ -249,15 +249,21 @@ pub enum SnapshotVerdict {
 /// in-process `ScriptedClient` and the real client) so they cannot drift: a
 /// strictly-older `frame_id` is stale, but an EQUAL `frame_id` is a sibling chunk
 /// of the current tick (a partitioned multi-datagram snapshot) and is APPLIED —
-/// each chunk self-contained, latest-wins. A foreign sub drops.
+/// each chunk self-contained, latest-wins. A sub the client does not hold drops.
+///
+/// `held_subs` is the SET of subscriptions the client currently holds (Track R / 1d.2d):
+/// during a cross-shard transfer the client holds BOTH the source and dest subs for the
+/// overlap window, so a frame on EITHER is admitted (the render layer composites the avatar
+/// to ONE sub via `AuthorityChanged`/`DeliveredView`). A frame on a sub NOT in the set is a
+/// stale in-flight datagram for a closed/never-opened sub and drops.
 #[must_use]
 pub fn classify_snapshot(
-    held_sub: Option<SubId>,
+    held_subs: &std::collections::BTreeSet<SubId>,
     high_water: Option<u64>,
     snap_sub: SubId,
     snap_frame_id: u64,
 ) -> SnapshotVerdict {
-    if held_sub != Some(snap_sub) {
+    if !held_subs.contains(&snap_sub) {
         return SnapshotVerdict::DropForeignSub;
     }
     if high_water.is_some_and(|hw| snap_frame_id < hw) {
@@ -278,35 +284,54 @@ mod tests {
 
     #[test]
     fn classify_snapshot_applies_siblings_and_drops_stale_or_foreign() {
+        use std::collections::BTreeSet;
         let held = SubId(0);
-        // No sub held yet, or a different sub: foreign.
+        let none: BTreeSet<SubId> = BTreeSet::new();
+        let one: BTreeSet<SubId> = BTreeSet::from([held]);
+        let other: BTreeSet<SubId> = BTreeSet::from([SubId(9)]);
+        // No sub held yet, or a set without this sub: foreign.
         assert_eq!(
-            classify_snapshot(None, None, held, 5),
+            classify_snapshot(&none, None, held, 5),
             SnapshotVerdict::DropForeignSub
         );
         assert_eq!(
-            classify_snapshot(Some(SubId(9)), Some(5), held, 5),
+            classify_snapshot(&other, Some(5), held, 5),
             SnapshotVerdict::DropForeignSub
         );
         // Held sub, no high-water yet: apply.
         assert_eq!(
-            classify_snapshot(Some(held), None, held, 5),
+            classify_snapshot(&one, None, held, 5),
             SnapshotVerdict::Apply
         );
         // Newer frame: apply (advances the tick).
         assert_eq!(
-            classify_snapshot(Some(held), Some(5), held, 6),
+            classify_snapshot(&one, Some(5), held, 6),
             SnapshotVerdict::Apply
         );
         // EQUAL frame: a sibling chunk of the current tick — apply (latest-wins).
         assert_eq!(
-            classify_snapshot(Some(held), Some(5), held, 5),
+            classify_snapshot(&one, Some(5), held, 5),
             SnapshotVerdict::Apply
         );
         // Strictly older: stale.
         assert_eq!(
-            classify_snapshot(Some(held), Some(5), held, 4),
+            classify_snapshot(&one, Some(5), held, 4),
             SnapshotVerdict::DropStale
+        );
+        // TWO held subs (the transfer overlap): a frame on EITHER is admitted.
+        let two: BTreeSet<SubId> = BTreeSet::from([SubId(0), SubId(1)]);
+        assert_eq!(
+            classify_snapshot(&two, None, SubId(0), 1),
+            SnapshotVerdict::Apply
+        );
+        assert_eq!(
+            classify_snapshot(&two, None, SubId(1), 1),
+            SnapshotVerdict::Apply
+        );
+        // A third sub not in the held set still drops.
+        assert_eq!(
+            classify_snapshot(&two, None, SubId(2), 1),
+            SnapshotVerdict::DropForeignSub
         );
     }
 

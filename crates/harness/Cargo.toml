@@ -10,6 +10,11 @@ vd-core = { workspace = true }
 vd-wire = { workspace = true }
 vd-sim = { workspace = true }
 vd-node = { workspace = true }
+# 1d.3c: the harness ScriptedClient drives the REAL composited DeliveredView (the flat
+# DeliveredWorldView is sub-blind and cannot prove the two-sub transfer overlap). Cycle-free:
+# vd-client deps = core/devproto/wire/sim, never harness/node. A documented extension of the
+# CLAUDE.md `harness → node + sim::io::mem` rule — the composite engine belongs on the client.
+vd-client = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
