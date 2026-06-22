@@ -217,7 +217,9 @@ pub struct FlushSource {
 /// for `subject`, applies `Owned→Frozen→Ghost` at `new_owner_fence` (the dest's post-CAS fence — the
 /// per-entity `Authority::apply` gates on `is_stale_against`), retains it as the ghost, and acks
 /// `DemoteAck`. The `step_id` is always [`DEMOTE_STEP`] (carried, not inline — `effect_class` keys
-/// uniformly; the source journals `(transfer, DEMOTE_STEP)` consult-before-effect for redelivery).
+/// the orchestrator's `applied_steps` idempotency uniformly by `(transfer, DEMOTE_STEP)`); a SHARD
+/// consumer realizes the same step idempotency via its per-entity authority state — an already-Ghost
+/// dot re-acks WITHOUT re-flipping (`!simulates()` guard), equivalent to a journal for one transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DemoteCmd {
     pub transfer: TransferId,
@@ -226,9 +228,13 @@ pub struct DemoteCmd {
     pub step_id: u32,
 }
 
-/// Orchestrator → DEST shard ORDERED-promote command (Slice 1d.5b). The dest finds its Ghost dot for
-/// `subject` and flips `Ghost→Owned` at `new_fence`, then acks `PromoteAck`. Reachable in the saga
-/// ONLY after `DemoteAck` (demote-before-promote). `step_id` is always [`PROMOTE_STEP`].
+/// Orchestrator → DEST shard ORDERED-promote command (Slice 1d.5b). The dest holds the subject
+/// `Owned` at `new_fence` and acks `PromoteAck`. Reachable in the saga ONLY after `DemoteAck`
+/// (demote-before-promote). `step_id` is always [`PROMOTE_STEP`]. ⚠️ In 1d.5b.1 the dest consumer
+/// is a fence-idempotent CONFIRMER (journals `PROMOTE_STEP` + acks) — the real `Ghost→Owned` flip
+/// stays in the dest's autonomous adopt-promote (`apply_crossing`), RETAINED so the dest's
+/// first-Owned moment is not delayed by this round-trip; the flip RELOCATES into the consumer in
+/// 1d.5b.3, co-landed with the source-Ghost collider feed that keeps the later promote seamless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromoteCmd {
     pub transfer: TransferId,
@@ -631,7 +637,10 @@ mod tests {
             PROMOTE_STEP,
         ];
         for phase in 0u32..=6 {
-            assert!(!state_steps.contains(&phase), "state step aliases phase {phase}");
+            assert!(
+                !state_steps.contains(&phase),
+                "state step aliases phase {phase}"
+            );
         }
         assert_eq!(
             state_steps.iter().collect::<BTreeSet<_>>().len(),

@@ -113,14 +113,18 @@ pub enum TransferControlAck {
     DemoteAck {
         transfer: TransferId,
     },
-    /// 1d.4/1d.5 (D-2) — the dest acks it flipped `Ghost→Owned` at the new fence.
+    /// 1d.4/1d.5 (D-2) — the dest acks it holds the subject `Owned` at the new fence (the reply to the
+    /// ordered `Promote`). ⚠️ In 1d.5b.1 the dest consumer is a CONFIRMER — the real `Ghost→Owned`
+    /// flip stays in `apply_crossing`; this ack confirms+drives the release gate. One half of the
+    /// `Promoting → Releasing` gate (with `DeliveredToObservers`).
     PromoteAck {
         transfer: TransferId,
     },
     /// 1d.4/1d.5 (D-2) — the STANDING server-side delivery watermark: the gateway reports the dest sub
     /// has delivered ≥1 frame to EVERY current observer (recomputed, never latched — an observer
-    /// opening mid-demote re-blocks it). This is the (a)-predicate input that, with band-exit, gates
-    /// `DemoteComplete`. NOT a client ack (HR1 / no client prediction): a server-side fan-out measure.
+    /// opening mid-demote re-blocks it). Maps to `SagaEvent::DestDelivered`: the other half of the
+    /// `Promoting → Releasing` release gate (with `PromoteAck`), latched early in `Demoting` if it
+    /// arrives before `DemoteAck`. NOT a client ack (HR1 / no client prediction): a server-side measure.
     DeliveredToObservers {
         transfer: TransferId,
     },

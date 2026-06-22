@@ -92,10 +92,19 @@
 - **Band machinery (OverlapBand/BandMembership, the CI band inequality) → 1d.5b** (where the Ghost moves).
 
 ### 1d.5b — the (b) tear-out + the seamless close (flips the headline)
-- **Saga ordering gate:** `Swapping→Demoting` emits `Demote`; new **`Promoting`** state entered on BOTH
-  `DemoteAcked` AND `DemoteComplete`, emitting `Promote`; `Promoting→Releasing` on `PromoteAcked`. The
-  autonomous dest adopt-flip (`adopting→HeadRead→flip_grant`) is **deleted**; the dest flips `Ghost→Owned`
-  only on the saga's `Promote` (`AuthorityCmd::Promote{new_fence}`, built-in `is_stale_against` gate).
+> **⚠️ SUPERSEDED — see `DEFERRED.md` D-2 "✅ LANDED 1d.5b.1" for the as-built design (the main-thread R1
+> refinement).** The §1d.5b sketch below was REVISED during implementation: (1) `Promoting` is entered on
+> `DemoteAcked` ALONE (NOT `DemoteAcked AND DemoteComplete`) — gating it on delivery would DEADLOCK (delivery
+> needs the promote, the promote needs the demote); `DemoteComplete` was DELETED entirely. (2) the release gate
+> `Promoting→Releasing` is `PromoteAcked` **AND** `DeliveredToObservers` (the seamless no-vanish gate), not
+> `PromoteAcked` alone; an early `DestDelivered` is latched in `Demoting`. (3) the autonomous dest adopt-flip
+> (`apply_crossing`'s `Ghost→Owned`) is **RETAINED in 1d.5b.1** — relocating it would DELAY the dest's
+> first-Owned moment by the round-trip and re-open the vanish; `on_saga_promote` is a 1d.5b.1 CONFIRMER, and the
+> relocation + the source-Ghost collider feed land TOGETHER in 1d.5b.3. The 1d.5b split is .1 (this FSM/egress/
+> consumers, poll live) → .2 (poll tear-out + R2 oracle) → .3 (GhostFlow feed + flip relocation + band-exit).
+- **Saga ordering gate (as-built, 1d.5b.1):** `Swapping→Demoting` emits `Demote`; **`Promoting`** entered on
+  `DemoteAcked` alone, emitting `Promote`; `Promoting→Releasing` on `PromoteAcked` AND `DestDelivered`. The dest's
+  real `Ghost→Owned` flip stays in `apply_crossing` (RETAINED until 1d.5b.3); `on_saga_promote` confirms + acks.
 - **Crash recovery:** `(Demoting,Timeout)→re-emit Demote` + `(Promoting,Timeout)→re-emit Promote`
   (idempotent, forward-only). A duplicate Demote on an already-Ghost dot is a typed no-op that re-acks
   (in the stub wrapper, not `authority.rs::apply` — keep the FSM pure).

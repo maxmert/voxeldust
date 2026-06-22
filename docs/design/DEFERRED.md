@@ -221,10 +221,32 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
      which is still owed (the source still poll-demotes its authority, the dest still autonomously promotes — no
      fence-enforced demote-before-promote yet). So 1d.5a delivered seamless RENDER; (b) delivers authority-ordering
      ROBUSTNESS + the GhostFlow collider feed + the band-exit Despawn.
+  **✅ LANDED 1d.5b.1 (the WRITE-plane ordering MACHINERY — `0218dc8` wire arms + this slice):** the saga FSM now
+  carries the ORDERED tail `Swapping → Demoting{dest_delivered} → Promoting{promote_acked,dest_delivered} →
+  Releasing` (`crates/sim/src/saga.rs`): RouteSwapped pushes the saga `Demote` to the source; the source's
+  `DemoteAcked` ALONE (the R1-deadlock fix — NOT gated on delivery) advances to `Promoting` + pushes the `Promote`
+  to the dest; the source sub releases only once BOTH `PromoteAcked` AND `DestDelivered` land (`promoting_advance`,
+  the seamless gate; an early `DestDelivered` is latched in `Demoting` and carried forward so it is never lost — no
+  park). The runtime (`saga_runtime.rs`) routes `Demote`→`ctx.source` / `Promote`→`ctx.dest` as pure egress and the
+  1d.5a interim `DemoteComplete` delivery-pass + its `LiveSaga.dest_delivered` latch are DELETED (the single release
+  path is now the `Promoting` gate — the capstone can no longer shortcut, so it HONESTLY exercises the round-trips).
+  The source consumer `on_saga_demote` (`stub.rs`) does the REAL `Owned→Frozen→Ghost` (reusing
+  `self_fence_foreign_entity` at the real `cmd.transfer`/`new_owner_fence`), fence-idempotent with the still-live
+  poll, acking `DemoteAck` UNCONDITIONALLY (never wedge). **STILL OWED — split across 1d.5b.2/.3:** (i) the source
+  granted-key POLL is NOT torn out yet (it coexists idempotently); → 1d.5b.2 (poll tear-out + the R2 mid-flight
+  `verify_authority_unique` oracle excuse). (ii) the dest's REAL `Ghost→Owned` flip is STILL `apply_crossing`'s
+  autonomous promote (RETAINED — relocating it into `on_saga_promote` would DELAY the dest's first-Owned moment by
+  the multi-tick round-trip and re-open the vanish); `on_saga_promote` is a fence-idempotent CONFIRMER (journals
+  `PROMOTE_STEP` + acks `PromoteAck`) in 1d.5b.1; → 1d.5b.3 relocates the flip INTO `on_saga_promote` co-landed with
+  the GhostFlow source-Ghost collider FEED that keeps the consequent later-promote window seamless, + the band-exit
+  Despawn. So the strict demote-before-promote ORDERING invariant (dest-Owned only AFTER source-DemoteAck) is NOT
+  yet enforced (apply_crossing promotes the dest early); it lands in 1d.5b.3 with its own gate.
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
-     by the **fence**, not by cooperative in-memory state." The interim's source freeze IS cooperative in-memory
-     (`self_fence_foreign_entity` does a local `dots.remove` with NO fence pushed to the gateway to drop stale
-     source frames).
+     by the **fence**, not by cooperative in-memory state." The source freeze IS still cooperative in-memory
+     (`self_fence_foreign_entity` does a local `Authority` flip to a RETAINED Ghost — since 1d.4b it KEEPS the dot,
+     no `dots.remove` — with NO fence pushed to the gateway to drop stale source frames). 1d.5b.1's saga-pushed
+     `Demote` drives the SAME in-memory flip via `on_saga_demote`; the fence-enforced (gateway frame-drop) freeze
+     remains the owed item.
   3. **Crash double-hold** — an orchestrator/source crash AFTER `CasWon`+`OpenInputSlot` but BEFORE the source's
      next poll leaves a PERSISTENT stale source grant. The Tier-3 "abort to last-known directory owner" recovery
      CANNOT un-stick it (last-known owner is already the DEST). Within the already-deferred saga-durability gap
@@ -241,13 +263,17 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
      structurally blind to a foreign takeover and can strand. Inert today (no 1c.8 scenario issues `DetachSession`
      mid-transfer); owed a unit test once the second (logout) producer lands.
 - **STILL OWED (proper, post-1d band/ghost slice) — TWO distinct pieces, NOT one predicate body-swap:**
-  - **(a) the demote PREDICATE — ✅ LANDED IN 1d.5a (delivery half):** `interim_demote_complete` →
-    `demote_when_delivered_and_exited`, gating `DemoteComplete` on a STANDING server-side delivery watermark
-    (`gateway.rs` `Session.delivered: BTreeMap<SubId, frame_id>` advanced in `on_shard_frame`, the recomputed
-    `every_observer_delivered` conjunction over the current dest observers (sessions with an open dest sub —
-    the same set `subscribers_of(dest)` indexes, scanned directly off `by_session.subs`) — NON-EMPTY required, anti-vacuous;
-    emitted as `DeliveredToObservers`, latched as `LiveSaga.dest_delivered`; HR1 gateway-internal, never a client ack).
-    This ALONE closed the render vanish (above). A `(Demoting, Timeout)` self-re-emit arm was pulled forward as the
+  - **(a) the demote PREDICATE — ✅ LANDED IN 1d.5a, then SUPERSEDED by 1d.5b.1's single Promoting gate:** the
+    1d.5a interim was a delivery-pass (`interim_demote_complete` → `demote_when_delivered_and_exited`) synthesizing
+    a `DemoteComplete` when a STANDING server-side delivery watermark latched `LiveSaga.dest_delivered`. **1d.5b.1
+    DELETED that pass + the `DemoteComplete` event + the `LiveSaga.dest_delivered` latch:** the SAME standing
+    watermark (`gateway.rs` `Session.delivered: BTreeMap<SubId, frame_id>` advanced in `on_shard_frame`, the
+    recomputed `every_observer_delivered` conjunction over the current dest observers — the set
+    `subscribers_of(dest)` indexes off `by_session.subs`, NON-EMPTY required, anti-vacuous) now emits
+    `DeliveredToObservers` → `SagaEvent::DestDelivered`, fed DIRECTLY into the FSM's `Promoting` release gate
+    (`promoting_advance`, with `PromoteAck`); an early `DestDelivered` is latched in the FSM's `Demoting.dest_delivered`
+    field and carried forward (never lost). HR1 gateway-internal, never a client ack. This delivery-gating is what
+    closed the render vanish (above). A `(Promoting, Timeout)` / `(Demoting, Timeout)` self-re-emit arm is the
     re-drive LANDING PAD — but ⚠️ there is NO production `SagaEvent::Timeout` PRODUCER yet (no `now - since` deadline
     scan in the orchestrator; owed at Slice-2 — see the D-3/lease + saga-timeout items). So a production never-delivered
     Demoting saga currently PARKS (emits nothing), visible ONLY as growing `now - since` in the admin staleness view;

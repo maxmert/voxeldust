@@ -13,7 +13,7 @@
 //! Pipeline (integration resolution of the 3-way COMMIT conflict):
 //! ```text
 //! [AwaitProvision →] Preparing → Cutting → Freezing → CommittingCas → Swapping
-//!        → Demoting → Releasing → Done
+//!        → Demoting → Promoting → Releasing → Done
 //! any pre-CAS failure → Aborting (thaw if frozen, abort the dest) → Aborted
 //! ```
 //! The directory CAS is the commit point; everything after it is forward-only.
@@ -75,10 +75,27 @@ pub enum SagaState {
     CommittingCas { marker_seq: u64, drained_seq: u64 },
     /// CAS won: the gateway route swap (`CommitAuthority`) is in flight.
     Swapping { new_fence: Fence },
-    /// Authority flipped; the source ghost persists until the destination acks
-    /// delivered-to-all-observers AND the entity leaves the overlap band
-    /// (event-driven demotion — never a tick count).
-    Demoting { new_fence: Fence },
+    /// Authority flipped; the saga has pushed the ORDERED `Demote` to the source — the
+    /// fence-enforced `Owned→Frozen→Ghost` that REPLACES the 1c.8 cooperative poll (D-2).
+    /// Awaiting the source's `DemoteAcked` (proof-of-freeze) BEFORE the dest is promoted — the
+    /// binding demote-before-promote ordering. `dest_delivered` LATCHES an early `DestDelivered`:
+    /// the gateway's standing delivery watermark can fire while still here (the dest is already
+    /// delivering from its autonomous adopt-promote, retained in 1d.5b.1), so it is captured now
+    /// and carried into `Promoting` — the release gate can never lose it (no park). 1d.5b.1.
+    Demoting {
+        new_fence: Fence,
+        dest_delivered: bool,
+    },
+    /// `DemoteAcked` landed: the saga pushed the ordered `Promote` to the dest. The source
+    /// subscription is RELEASED only once BOTH the dest acked the promote (`promote_acked`) AND
+    /// delivered ≥1 frame to every observer (`dest_delivered`) — the seamless no-vanish gate (the
+    /// FORK-0a overlap held through the dest's first frame). The two conditions land in either
+    /// order; `promoting_advance` fires `ReleaseSubscribe` only when both are true. 1d.5b.1.
+    Promoting {
+        new_fence: Fence,
+        promote_acked: bool,
+        dest_delivered: bool,
+    },
     /// `ReleaseSubscribe` issued for the source subscription.
     Releasing { new_fence: Fence },
     /// Terminal success.
@@ -137,17 +154,17 @@ pub enum SagaEvent {
         current: Fence,
     },
     RouteSwapped,
-    /// Dest acked observer delivery AND the entity left the overlap band.
-    DemoteComplete,
-    /// 1d.4/1d.5 (D-2) — the source acked it demoted to `Ghost` and stopped emitting (proof-of-freeze).
-    /// Consumed by the FSM's `Promoting` gate in 1d.5b (with `DemoteComplete`); a no-op in the current
-    /// FSM (no `Promoting` state yet) — the catch-all absorbs it.
+    /// 1d.5b.1 (D-2) — the source acked it demoted `Owned→Frozen→Ghost` and stopped simulating
+    /// (proof-of-freeze, the reply to the ordered `Demote`). Drives `Demoting → Promoting` (the
+    /// dest promote is reachable ONLY after this — demote-before-promote).
     DemoteAcked,
-    /// 1d.4/1d.5 (D-2) — the dest acked it flipped `Ghost→Owned`. Drives `Promoting→Releasing` in 1d.5b.
+    /// 1d.5b.1 (D-2) — the dest acked it holds the promote (the reply to the ordered `Promote`).
+    /// One half of the `Promoting → Releasing` gate (with `DestDelivered`).
     PromoteAcked,
-    /// 1d.4/1d.5 (D-2) — the gateway's STANDING delivery watermark: the dest delivered ≥1 frame to every
-    /// current observer. An input to the `DemoteComplete` predicate in 1d.5a (not consumed directly by
-    /// the FSM until then) — a no-op in the current FSM.
+    /// 1d.5b.1 (D-2) — the gateway's STANDING delivery watermark: the dest delivered ≥1 frame to
+    /// every current observer. Latched in `Demoting` (it can arrive before `DemoteAcked`) and the
+    /// other half of the `Promoting → Releasing` gate — the source sub releases only AFTER the dest
+    /// is delivered+rendered (the seamless no-vanish property).
     DestDelivered,
     Released,
     SourceThawed,
@@ -175,6 +192,21 @@ pub enum SagaAction {
     /// stored flush + `SagaCtx`.
     EmitCrossing {
         fence: Fence,
+    },
+    /// Push the ORDERED `Demote` to the SOURCE shard (1d.5b.1, D-2): demote the subject
+    /// `Owned→Frozen→Ghost` at the post-CAS `new_owner_fence`. UNIT: the wrapper resolves the
+    /// target (`SagaCtx.source`) + the step (`DEMOTE_STEP`); the FSM holds no transport detail.
+    /// Pure egress to the source (its `DemoteAck` is the synchronous-free reply) — no compensator
+    /// (post-commit, forward-only). Re-emitted on a `Demoting` timeout (idempotent at the source).
+    Demote {
+        new_owner_fence: Fence,
+    },
+    /// Push the ORDERED `Promote` to the DEST shard (1d.5b.1, D-2): confirm the subject
+    /// `Ghost→Owned` at `new_fence`. Emitted ONLY after `DemoteAcked` (demote-before-promote).
+    /// UNIT: the wrapper resolves the target (`SagaCtx.dest`) + the step (`PROMOTE_STEP`). Pure
+    /// egress (its `PromoteAck` is the reply). Re-emitted on a `Promoting` timeout (idempotent).
+    Promote {
+        new_fence: Fence,
     },
     /// Issue the directory CAS (commit point for a DURABLE subject). Carries the
     /// expectation; the wrapper fills `transfer`/`new_owner` from the `SagaCtx`.
@@ -339,7 +371,17 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         (S::CommittingCas { .. }, E::Timeout) => (state, vec![commit_action(ctx)]),
 
         // ---- post-commit: forward-only -------------------------------------------------
-        (S::Swapping { new_fence }, E::RouteSwapped) => (S::Demoting { new_fence }, vec![]),
+        // The route swapped: push the ORDERED `Demote` to the source (the fence-enforced
+        // `Owned→Frozen→Ghost` that REPLACES the 1c.8 poll). `dest_delivered` starts false.
+        (S::Swapping { new_fence }, E::RouteSwapped) => (
+            S::Demoting {
+                new_fence,
+                dest_delivered: false,
+            },
+            vec![A::Demote {
+                new_owner_fence: new_fence,
+            }],
+        ),
         // Post-commit timeouts retry the same command (idempotent), never abort:
         // the directory already says the dest owns the subject.
         (S::Swapping { new_fence }, E::Timeout) => (
@@ -356,23 +398,88 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 A::EmitCrossing { fence: new_fence },
             ],
         ),
-        (S::Demoting { new_fence }, E::DemoteComplete) => (
-            S::Releasing { new_fence },
-            vec![A::Send(TransferControl::ReleaseSubscribe {
-                transfer: ctx.transfer,
-                session: ctx.session,
-                src: ctx.source,
-            })],
+        // The dest's standing delivery watermark can fire while the source demote is still in
+        // flight (the dest is already delivering from its autonomous adopt-promote): LATCH it here
+        // so the `Promoting` release gate never loses it. Monotone (idempotent re-arrival).
+        (S::Demoting { new_fence, .. }, E::DestDelivered) => (
+            S::Demoting {
+                new_fence,
+                dest_delivered: true,
+            },
+            vec![],
         ),
-        // 1d.5a: a timeout in Demoting is a self-re-emit no-op (post-commit is forward-only —
-        // never an abort), mirroring Swapping/Releasing — the correct LANDING PAD for a re-drive.
-        // ⚠️ HONEST SCOPE: there is NO production `SagaEvent::Timeout` PRODUCER yet (the orchestrator
-        // schedule has no `now - since` deadline scan — DEFERRED Slice-2). So today this arm fires
-        // ONLY in unit tests / the harness `step_until` cap; a production never-delivered Demoting
-        // saga PARKS (emits nothing), surfaced only as growing `now - since` in the admin staleness
-        // view, until the Slice-2 timeout producer injects `Timeout` on a deadline. 1d.5b upgrades
-        // this arm to re-emit the saga-pushed Demote.
-        (S::Demoting { new_fence }, E::Timeout) => (S::Demoting { new_fence }, vec![]),
+        // DemoteAcked (proof-of-freeze) — the ONLY exit from Demoting: the source is now Ghost, so
+        // push the ordered `Promote` to the dest (demote-BEFORE-promote). Carry the latched
+        // `dest_delivered` forward so an early delivery still counts toward the release gate.
+        (
+            S::Demoting {
+                new_fence,
+                dest_delivered,
+            },
+            E::DemoteAcked,
+        ) => (
+            S::Promoting {
+                new_fence,
+                promote_acked: false,
+                dest_delivered,
+            },
+            vec![A::Promote { new_fence }],
+        ),
+        // A Demoting timeout RE-EMITS the ordered Demote (idempotent at the source), never aborts —
+        // post-commit is forward-only. ⚠️ HONEST SCOPE: there is NO production `Timeout` PRODUCER
+        // yet (no `now - since` deadline scan — DEFERRED Slice-2); today this arm fires ONLY in unit
+        // tests / the harness `step_until` cap. A production never-acked Demoting saga PARKS (emits
+        // nothing), surfaced only as growing `now - since` in the admin staleness view, until the
+        // Slice-2 timeout producer injects `Timeout`.
+        (
+            S::Demoting {
+                new_fence,
+                dest_delivered,
+            },
+            E::Timeout,
+        ) => (
+            S::Demoting {
+                new_fence,
+                dest_delivered,
+            },
+            vec![A::Demote {
+                new_owner_fence: new_fence,
+            }],
+        ),
+        // ---- promoting: the seamless no-vanish release gate (PromoteAcked AND DestDelivered) ----
+        (
+            S::Promoting {
+                new_fence,
+                dest_delivered,
+                ..
+            },
+            E::PromoteAcked,
+        ) => promoting_advance(ctx, new_fence, true, dest_delivered),
+        (
+            S::Promoting {
+                new_fence,
+                promote_acked,
+                ..
+            },
+            E::DestDelivered,
+        ) => promoting_advance(ctx, new_fence, promote_acked, true),
+        // A Promoting timeout RE-EMITS the ordered Promote (idempotent at the dest), never aborts.
+        // Same HONEST SCOPE as the Demoting timeout: no production producer yet (Slice-2).
+        (
+            S::Promoting {
+                new_fence,
+                promote_acked,
+                dest_delivered,
+            },
+            E::Timeout,
+        ) => (
+            S::Promoting {
+                new_fence,
+                promote_acked,
+                dest_delivered,
+            },
+            vec![A::Promote { new_fence }],
+        ),
         (S::Releasing { new_fence }, E::Released) => (S::Done { new_fence }, vec![A::Tombstone]),
         (S::Releasing { new_fence }, E::Timeout) => (
             S::Releasing { new_fence },
@@ -426,6 +533,38 @@ fn freezing_advance(
                 marker_seq,
                 frozen_drained,
                 flushed,
+            },
+            vec![],
+        ),
+    }
+}
+
+/// The seamless-release gate's decision (1d.5b.1), hoisted out of the two `Promoting` arms so the
+/// branch is covered ONCE (mirroring `freezing_advance`): `ReleaseSubscribe` fires only when BOTH
+/// the dest acked the ordered promote (`promote_acked`) AND the gateway reported the dest delivered
+/// to every observer (`dest_delivered`) — otherwise the saga stays in `Promoting`, recording the
+/// condition that just arrived. Releasing the source sub only after the dest is delivered+rendered
+/// is the seamless no-vanish property (the FORK-0a overlap held through the dest's first frame).
+fn promoting_advance(
+    ctx: &SagaCtx,
+    new_fence: Fence,
+    promote_acked: bool,
+    dest_delivered: bool,
+) -> (SagaState, Vec<SagaAction>) {
+    match (promote_acked, dest_delivered) {
+        (true, true) => (
+            SagaState::Releasing { new_fence },
+            vec![SagaAction::Send(TransferControl::ReleaseSubscribe {
+                transfer: ctx.transfer,
+                session: ctx.session,
+                src: ctx.source,
+            })],
+        ),
+        _ => (
+            SagaState::Promoting {
+                new_fence,
+                promote_acked,
+                dest_delivered,
             },
             vec![],
         ),
@@ -616,7 +755,11 @@ mod tests {
                     new_fence: Fence(6),
                 },
                 SagaEvent::RouteSwapped,
-                SagaEvent::DemoteComplete,
+                // The ordered demote-before-promote tail (1d.5b.1): source demote-ack, then the
+                // dest promote-ack + the delivery watermark gate the source-sub release.
+                SagaEvent::DemoteAcked,
+                SagaEvent::PromoteAcked,
+                SagaEvent::DestDelivered,
                 SagaEvent::Released,
             ],
         );
@@ -1038,6 +1181,193 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ordered_demote_before_promote_gates_release_on_both_acks() {
+        // 1d.5b.1: the binding ordered demote-before-promote tail. RouteSwapped pushes the Demote;
+        // DemoteAcked (proof-of-freeze) ALONE advances to Promoting + pushes the Promote; the source
+        // sub releases ONLY after BOTH PromoteAcked AND DestDelivered (here PromoteAcked first).
+        let c = ctx(false);
+        let (state, acts) = step(
+            &c,
+            SagaState::Swapping {
+                new_fence: Fence(6),
+            },
+            SagaEvent::RouteSwapped,
+        );
+        assert_eq!(
+            state,
+            SagaState::Demoting {
+                new_fence: Fence(6),
+                dest_delivered: false,
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::Demote {
+                new_owner_fence: Fence(6)
+            }],
+            "entering Demoting pushes the ordered Demote to the source"
+        );
+
+        let (state, acts) = step(&c, state, SagaEvent::DemoteAcked);
+        assert_eq!(
+            state,
+            SagaState::Promoting {
+                new_fence: Fence(6),
+                promote_acked: false,
+                dest_delivered: false,
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::Promote {
+                new_fence: Fence(6)
+            }],
+            "the demote-ack ALONE advances to Promoting + pushes the Promote (demote-before-promote)"
+        );
+
+        // PromoteAcked alone does NOT release — the delivery half is still pending.
+        let (state, acts) = step(&c, state, SagaEvent::PromoteAcked);
+        assert_eq!(
+            state,
+            SagaState::Promoting {
+                new_fence: Fence(6),
+                promote_acked: true,
+                dest_delivered: false,
+            }
+        );
+        assert!(acts.is_empty(), "promote-ack alone holds the source sub");
+
+        // DestDelivered completes the gate → ReleaseSubscribe.
+        let (state, acts) = step(&c, state, SagaEvent::DestDelivered);
+        assert_eq!(
+            state,
+            SagaState::Releasing {
+                new_fence: Fence(6)
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::Send(TransferControl::ReleaseSubscribe {
+                transfer: c.transfer,
+                session: c.session,
+                src: c.source,
+            })]
+        );
+    }
+
+    #[test]
+    fn promoting_gate_completes_in_either_arrival_order() {
+        // The reverse order (DestDelivered before PromoteAcked) — covers the OTHER promoting_advance
+        // arm, so the two-condition gate is exercised both ways (mirrors the freeze/flush gate).
+        let c = ctx(false);
+        let promoting = SagaState::Promoting {
+            new_fence: Fence(6),
+            promote_acked: false,
+            dest_delivered: false,
+        };
+        let (state, acts) = step(&c, promoting, SagaEvent::DestDelivered);
+        assert_eq!(
+            state,
+            SagaState::Promoting {
+                new_fence: Fence(6),
+                promote_acked: false,
+                dest_delivered: true,
+            }
+        );
+        assert!(acts.is_empty(), "delivery alone holds the source sub");
+        let (state, acts) = step(&c, state, SagaEvent::PromoteAcked);
+        assert_eq!(
+            state,
+            SagaState::Releasing {
+                new_fence: Fence(6)
+            }
+        );
+        assert_eq!(acts.len(), 1, "the second condition fires ReleaseSubscribe");
+    }
+
+    #[test]
+    fn an_early_delivery_in_demoting_is_latched_and_carried_into_promoting() {
+        // The standing watermark can fire BEFORE the demote-ack (the dest is already delivering from
+        // its autonomous adopt-promote): Demoting latches it, and DemoteAcked carries it forward so
+        // a single later PromoteAcked completes the gate — no lost-delivery park.
+        let c = ctx(false);
+        let demoting = SagaState::Demoting {
+            new_fence: Fence(6),
+            dest_delivered: false,
+        };
+        let (state, acts) = step(&c, demoting, SagaEvent::DestDelivered);
+        assert_eq!(
+            state,
+            SagaState::Demoting {
+                new_fence: Fence(6),
+                dest_delivered: true,
+            },
+            "early delivery is latched in Demoting"
+        );
+        assert!(acts.is_empty());
+        let (state, acts) = step(&c, state, SagaEvent::DemoteAcked);
+        assert_eq!(
+            state,
+            SagaState::Promoting {
+                new_fence: Fence(6),
+                promote_acked: false,
+                dest_delivered: true,
+            },
+            "the latched delivery is carried into Promoting"
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::Promote {
+                new_fence: Fence(6)
+            }]
+        );
+        // PromoteAcked ALONE now completes the gate (delivery already counted) → ReleaseSubscribe.
+        let (state, _) = step(&c, state, SagaEvent::PromoteAcked);
+        assert_eq!(
+            state,
+            SagaState::Releasing {
+                new_fence: Fence(6)
+            }
+        );
+    }
+
+    #[test]
+    fn ordered_tail_timeouts_re_emit_forward_only() {
+        // A Demoting timeout re-emits the Demote; a Promoting timeout re-emits the Promote — both
+        // idempotent re-drives, never aborts (post-commit is forward-only). No production producer
+        // yet (Slice-2) — these are the re-drive landing pads.
+        let c = ctx(false);
+        let demoting = SagaState::Demoting {
+            new_fence: Fence(6),
+            dest_delivered: true,
+        };
+        let (state, acts) = step(&c, demoting, SagaEvent::Timeout);
+        assert_eq!(
+            state, demoting,
+            "the latched delivery survives the re-drive"
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::Demote {
+                new_owner_fence: Fence(6)
+            }]
+        );
+        let promoting = SagaState::Promoting {
+            new_fence: Fence(6),
+            promote_acked: true,
+            dest_delivered: false,
+        };
+        let (state, acts) = step(&c, promoting, SagaEvent::Timeout);
+        assert_eq!(state, promoting, "the acked flags survive the re-drive");
+        assert_eq!(
+            acts,
+            vec![SagaAction::Promote {
+                new_fence: Fence(6)
+            }]
+        );
+    }
+
     // ---- proptests over the whole machine -------------------------------------------
 
     fn arb_event() -> impl Strategy<Value = SagaEvent> {
@@ -1056,7 +1386,9 @@ mod tests {
             }),
             (0u64..10).prop_map(|f| SagaEvent::CasLost { current: Fence(f) }),
             Just(SagaEvent::RouteSwapped),
-            Just(SagaEvent::DemoteComplete),
+            Just(SagaEvent::DemoteAcked),
+            Just(SagaEvent::PromoteAcked),
+            Just(SagaEvent::DestDelivered),
             Just(SagaEvent::Released),
             Just(SagaEvent::SourceThawed),
             Just(SagaEvent::DestAborted),
@@ -1112,7 +1444,14 @@ mod tests {
                     SagaState::Freezing { .. } => SagaEvent::SourceFrozen { drained_seq: 1 },
                     SagaState::CommittingCas { .. } => SagaEvent::CasWon { new_fence: Fence(9) },
                     SagaState::Swapping { .. } => SagaEvent::RouteSwapped,
-                    SagaState::Demoting { .. } => SagaEvent::DemoteComplete,
+                    // The ordered tail: DemoteAcked leaves Demoting → Promoting; then the two-flag
+                    // gate (PromoteAcked then DestDelivered) reaches Releasing (mirrors Freezing).
+                    SagaState::Demoting { .. } => SagaEvent::DemoteAcked,
+                    SagaState::Promoting {
+                        promote_acked: false,
+                        ..
+                    } => SagaEvent::PromoteAcked,
+                    SagaState::Promoting { .. } => SagaEvent::DestDelivered,
                     SagaState::Releasing { .. } => SagaEvent::Released,
                     SagaState::Aborting { awaiting_thaw: true, .. } => SagaEvent::SourceThawed,
                     SagaState::Aborting { .. } => SagaEvent::DestAborted,

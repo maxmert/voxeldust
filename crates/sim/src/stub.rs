@@ -26,9 +26,11 @@ use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
-    FlushSource, InterShardFlow, TransferAck, TransferEnvelope, TransitionPayload,
+    DemoteCmd, FlushSource, InterShardFlow, PROMOTE_STEP, PromoteCmd, TransferAck,
+    TransferEnvelope, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
+use vd_wire::seams::transfer_control::TransferControlAck;
 use vd_wire::session_flow::{GatewayToShard, ShardToGateway};
 
 use crate::authority::{Authority, AuthorityCmd};
@@ -279,6 +281,18 @@ pub struct StubStats {
     /// no-op (the idempotency guard's taken arm). 1d.4b retains the source as a Ghost instead of
     /// `dots.remove`, so a second foreign-owner reply must NOT re-demote; this proves the guard.
     pub self_fence_skipped: u64,
+    /// SOURCE saga-pushed `Demote` (1d.5b.1) received for a NON-Entity subject (Realm/Session/Ship)
+    /// — there is no local Entity dot to demote, so the flip is skipped (the `DemoteAck` is still
+    /// sent). 0 in a healthy Entity-transfer run (the stub's transfer subject is always an Entity).
+    pub saga_demote_no_entity: u64,
+    /// DEST saga-pushed `Promote` (1d.5b.1) received and CONFIRMED for the first time — the headline
+    /// ordered-promote counter. In 1d.5b.1 the real `Ghost→Owned` flip is still `apply_crossing`'s
+    /// (RETAINED — the relocation lands in 1d.5b.3 with the ghost feed); this handler is the
+    /// fence-idempotent confirmer that journals the step + acks `PromoteAck`.
+    pub promotes_confirmed: u64,
+    /// DEST saga-pushed `Promote` REDELIVERIES (already-journaled `(transfer, PROMOTE_STEP)`) — a
+    /// counted re-ack-only no-op (at-least-once delivery). 0 in a healthy single-delivery run.
+    pub promotes_redelivered: u64,
 }
 
 /// The inert Freeze `TransferId` for the poll-discovered source self-fence (1d.4b): the directory
@@ -944,7 +958,9 @@ fn flip_grant(
         dot.authority = dot
             .authority
             .apply(AuthorityCmd::Promote { new_fence: fence })
-            .expect("login Ghost{GENESIS} promotes at the recorded grant fence (strictly > GENESIS)");
+            .expect(
+                "login Ghost{GENESIS} promotes at the recorded grant fence (strictly > GENESIS)",
+            );
         return GrantFlip::LoggedIn(AttachEgress {
             gateway: dot.gateway,
             reply: ShardToGateway::SessionAttached {
@@ -973,13 +989,15 @@ fn dot_grant_target(dot: &Dot, entity: EntityId) -> bool {
 /// survives for the 1d.5b ghost-as-collider. Idempotent WITHOUT IllegalTransition-as-control-flow:
 /// an already-Ghost redelivery is a counted no-op via the `simulates()` guard. Monomorphic.
 ///
-/// ⚠️ INTERIM, OWED-FOR-REMOVAL (DEFERRED D-2): the demote is still DISCOVERED by the granted-key
-/// poll — NOT the binding ordered, FENCE-enforced demote-before-promote (`transfer_protocol.md`
-/// §2.4). The dest already promoted (`flip_grant`) off its own post-CAS HeadRead, so a transient
-/// two-holder window remains (the retained source Ghost no longer EMITS — `simulates()==false` —
-/// and the oracle excludes it, so it is masked, not prevented), and a crash before the next poll
-/// strands a stale source grant. 1d.5b RIPS THIS OUT: a saga-pushed `Demote`/`DemoteAck` drives the
-/// SAME `Owned→Frozen→Ghost` transition demote-BEFORE-promote — a poll tear-out, not a logic swap.
+/// ⚠️ SHARED MACHINERY (1d.5b.1, DEFERRED D-2): this `Owned→Frozen→Ghost` transition is now driven
+/// by BOTH the saga-pushed ordered `Demote` ([`on_saga_demote`], the binding fence-enforced
+/// demote-before-promote) AND — still, in 1d.5b.1 — the granted-key poll (`on_directory_reply`'s
+/// foreign-owner arm). They are fence-idempotent: whichever fires first wins, the other is the
+/// `!simulates()` counted no-op (`self_fence_skipped`). The poll is the OWED-FOR-REMOVAL half — torn
+/// out in 1d.5b.2 so the saga `Demote` is the SOLE driver. The dest still autonomously promotes
+/// (`apply_crossing`, RETAINED until 1d.5b.3), so a transient two-holder window remains (the retained
+/// source Ghost no longer EMITS — `simulates()==false` — and the oracle excludes it, masked not
+/// prevented); the strict ordering + the source-Ghost collider feed that closes it land in 1d.5b.3.
 fn self_fence_foreign_entity(
     dots: &mut BTreeMap<SessionId, Dot>,
     entity: EntityId,
@@ -1022,6 +1040,75 @@ fn self_fence_foreign_entity(
         "entity {entity} now held at fence {new_owner_fence} — source self-demoted to a retained Ghost"
     );
     // KEEP the dot (no remove) and KEEP `granted` == true (FG-2: the poll still discovers it).
+}
+
+/// SOURCE consumer of the saga-pushed ordered `Demote` (1d.5b.1, D-2): the binding fence-enforced
+/// `Owned→Frozen→Ghost` demote, the FIRST half of demote-before-promote. It REUSES
+/// [`self_fence_foreign_entity`]'s exact machinery (Freeze at the real `cmd.transfer`, then Demote
+/// at `cmd.new_owner_fence` — the post-CAS owner fence) so the saga path and the still-live poll
+/// drive the IDENTICAL transition; whichever fires first wins and the other is the `!simulates()`
+/// counted no-op (`self_fence_skipped`) — fence-idempotent coexistence until the poll is torn out in
+/// 1d.5b.2. The `DemoteAck` is sent UNCONDITIONALLY (outside the flip guard): even when the poll
+/// already demoted the dot, the saga MUST still get its ack or it would wedge in `Demoting`.
+/// Monomorphic. (A non-Entity subject has no local Entity dot here — counted + skipped, still acked.)
+fn on_saga_demote(
+    cmd: DemoteCmd,
+    config: &StubConfig,
+    clock: &ClockSample,
+    dots: &mut Dots,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    match cmd.subject.transfer_subject_entity() {
+        Some(entity) => self_fence_foreign_entity(
+            &mut dots.0,
+            entity,
+            cmd.new_owner_fence,
+            Some(cmd.transfer),
+            clock.local_tick,
+            stats,
+        ),
+        None => stats.saga_demote_no_entity += 1,
+    }
+    // Ack DemoteAck UNCONDITIONALLY — the saga's demote-before-promote ordering gates the dest
+    // Promote on THIS ack; a missing ack (e.g. on the poll-already-demoted path) would wedge it.
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::SagaAck(TransferControlAck::DemoteAck {
+            transfer: cmd.transfer,
+        }),
+    );
+}
+
+/// DEST consumer of the saga-pushed ordered `Promote` (1d.5b.1, D-2): the SECOND half of
+/// demote-before-promote, reachable in the saga ONLY after `DemoteAck`. In 1d.5b.1 this is a
+/// fence-idempotent CONFIRMER, NOT the dest's first-Owned driver: the real `Ghost→Owned` flip still
+/// happens autonomously in [`apply_crossing`] (RETAINED here — relocating it into this handler would
+/// DELAY the dest's first-Owned moment by the multi-tick `Demote`/`Promote` round-trip and re-open
+/// the seamless vanish). By the saga's causal order the crossing (hence the autonomous promote) has
+/// already landed before this `Promote` can arrive, so the dest is Owned; this handler journals the
+/// step (redelivery dedup) and acks `PromoteAck` to drive the release gate. The flip RELOCATES into
+/// this handler in 1d.5b.3, co-landed with the GhostFlow source-ghost feed that keeps the resulting
+/// later-promote window seamless. Monomorphic.
+fn on_saga_promote(
+    cmd: PromoteCmd,
+    config: &StubConfig,
+    applied: &mut AppliedSteps,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    match applied.journal_step(cmd.transfer, PROMOTE_STEP) {
+        StepOutcome::FirstApply => stats.promotes_confirmed += 1,
+        StepOutcome::AlreadyApplied => stats.promotes_redelivered += 1,
+    }
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::SagaAck(TransferControlAck::PromoteAck {
+            transfer: cmd.transfer,
+        }),
+    );
 }
 
 /// Whether a dot is the local granted, non-departing holder of `entity` (the self-fence target).
@@ -1189,7 +1276,12 @@ fn apply_crossing(
         // Promote the dest Ghost→Owned (now `simulates()` → `emit_frames` emits it from the dest
         // sub). ATOMIC-WITH the pose store — NEVER at the `flip_grant` Adopted arm, which under the
         // buffered-crossing case fires BEFORE the pose exists and would emit a poseless origin-
-        // default (`SystemSpace{seed:8}`) ZERO frame. The Promote keys on `dot.entity_fence` (the
+        // default (`SystemSpace{seed:8}`) ZERO frame. ⚠️ RETAINED through 1d.5b.1 (the dest's
+        // first-Owned moment): the saga's ordered `Promote` ([`on_saga_promote`]) is a CONFIRMER in
+        // 1d.5b.1, NOT this flip's replacement — relocating the flip into that handler would DELAY
+        // the promote by the `Demote`/`Promote` round-trip and re-open the seamless vanish. The
+        // relocation lands in 1d.5b.3, co-landed with the source-Ghost collider feed that keeps the
+        // consequent later-promote window seamless. The Promote keys on `dot.entity_fence` (the
         // directory-recorded CAS fence `flip_grant` stamped), the IDENTICAL fence the stale gate
         // above checked — so it is strictly newer than the Ghost's GENESIS `source_fence` (the
         // stale gate already dropped any crossing below `entity_fence`), hence infallible.
@@ -1270,6 +1362,16 @@ fn on_directory_reply(
         // DEST: adopt the crossed entity state (1d.1).
         Ok(InterShardFlow::Transfer(env)) => {
             on_transfer_envelope(env, config, dots, applied, pending, stats, outbox);
+            return;
+        }
+        // SOURCE: the saga-pushed ordered Demote (1d.5b.1) — Owned→Frozen→Ghost + DemoteAck.
+        Ok(InterShardFlow::Demote(cmd)) => {
+            on_saga_demote(cmd, config, clock, dots, stats, outbox);
+            return;
+        }
+        // DEST: the saga-pushed ordered Promote (1d.5b.1) — the .1 confirmer + PromoteAck.
+        Ok(InterShardFlow::Promote(cmd)) => {
+            on_saga_promote(cmd, config, applied, stats, outbox);
             return;
         }
         Ok(_) => return,
@@ -1464,7 +1566,7 @@ mod tests {
     use super::*;
     use crate::capability::NodeKind;
     use vd_core::{MsgId, UniverseTick};
-    use vd_wire::intershard::{FLUSH_SOURCE_STEP, STUB_CROSSING_STEP};
+    use vd_wire::intershard::{DEMOTE_STEP, FLUSH_SOURCE_STEP, STUB_CROSSING_STEP};
 
     const SHARD: NodeId = NodeId(10);
     const GATEWAY: NodeId = NodeId(20);
@@ -2808,6 +2910,134 @@ mod tests {
         );
     }
 
+    /// Whether the orchestrator-bound egress carries a specific `SagaAck` (value-compare; the
+    /// `*to == ORCH` filter restricts decode to ack/directory traffic — frames go to gateways).
+    fn saga_ack_to_orch(sent: &[(NodeId, MsgClass, Vec<u8>)], ack: TransferControlAck) -> bool {
+        sent.iter()
+            .filter(|(to, _, _)| *to == ORCH)
+            .any(|(_, _, bytes)| {
+                postcard::from_bytes::<InterShardFlow>(bytes).ok()
+                    == Some(InterShardFlow::SagaAck(ack))
+            })
+    }
+
+    #[test]
+    fn the_saga_demote_flips_the_source_to_ghost_and_acks_unconditionally() {
+        // 1d.5b.1 SOURCE consumer of the ordered Demote: drive the SAME Owned→Frozen→Ghost as the
+        // poll (REUSING self_fence_foreign_entity) at the new owner fence, then ack DemoteAck. A
+        // redelivery (or the poll having raced ahead) finds an already-Ghost dot → the !simulates()
+        // counted no-op — but STILL acks (the unconditional ack: never wedge the saga in Demoting).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach(); // a granted, locally-owned dot at Fence(1)
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        let demote = InterShardFlow::Demote(DemoteCmd {
+            transfer: TransferId(7),
+            subject: DirectoryKey::Entity(entity),
+            new_owner_fence: Fence(2),
+            step_id: DEMOTE_STEP,
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &demote)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].authority,
+            Authority::Ghost {
+                source_fence: Fence(2),
+                since_tick: TickId(1),
+            },
+            "the ordered Demote drives Owned{{1}}→Frozen→Ghost at the new owner fence (2)"
+        );
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::DemoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "DemoteAck is sent to the orchestrator: {sent:?}"
+        );
+        // Redelivery on the already-Ghost dot: counted skip, but STILL acks.
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &demote)]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().self_fence_skipped,
+            1,
+            "the already-Ghost redelivery is the !simulates() counted no-op"
+        );
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::DemoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "the redelivery STILL acks DemoteAck (never wedge the saga)"
+        );
+    }
+
+    #[test]
+    fn the_saga_demote_on_a_non_entity_subject_is_a_counted_noop_but_acks() {
+        // The None arm of subject→entity: a Realm/Session/Ship subject has no local Entity dot to
+        // demote — counted (`saga_demote_no_entity`), no flip, but the DemoteAck is STILL sent.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let demote = InterShardFlow::Demote(DemoteCmd {
+            transfer: TransferId(7),
+            subject: DirectoryKey::Realm(config().realm),
+            new_owner_fence: Fence(2),
+            step_id: DEMOTE_STEP,
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &demote)]);
+        assert_eq!(rig.world.resource::<StubStats>().saga_demote_no_entity, 1);
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::DemoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "a non-Entity Demote still acks: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn the_saga_promote_confirms_acks_and_dedups_redelivery() {
+        // 1d.5b.1 DEST consumer of the ordered Promote (the .1 CONFIRMER — apply_crossing still does
+        // the real flip): journal (transfer, PROMOTE_STEP) + ack PromoteAck. A redelivery re-acks
+        // only (counted). The dot is untouched here (the confirmer does NOT flip in 1d.5b.1).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach();
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        let promote = InterShardFlow::Promote(PromoteCmd {
+            transfer: TransferId(7),
+            subject: DirectoryKey::Entity(entity),
+            new_fence: Fence(2),
+            step_id: PROMOTE_STEP,
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &promote)]);
+        assert_eq!(rig.world.resource::<StubStats>().promotes_confirmed, 1);
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::PromoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "PromoteAck is sent to the orchestrator: {sent:?}"
+        );
+        // Redelivery: re-ack only, counted as redelivered (the journal's AlreadyApplied arm).
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &promote)]);
+        assert_eq!(rig.world.resource::<StubStats>().promotes_redelivered, 1);
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::PromoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "the redelivery STILL re-acks PromoteAck"
+        );
+    }
+
     #[test]
     fn a_granted_source_polls_its_entity_keys_on_the_recheck_cadence() {
         // 1c.8 SOURCE granted-key poll: with a non-zero recheck interval, a granted dot emits a
@@ -3133,7 +3363,10 @@ mod tests {
             buffered_before,
             "a post-flip redelivery re-acks via the journal — it is NOT re-buffered (no strand)"
         );
-        assert!(acked(&sent, TransferId(7)), "a post-flip redelivery still re-acks");
+        assert!(
+            acked(&sent, TransferId(7)),
+            "a post-flip redelivery still re-acks"
+        );
     }
 
     #[test]

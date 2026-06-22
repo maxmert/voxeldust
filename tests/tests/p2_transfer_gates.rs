@@ -8,12 +8,14 @@
 //! `OpenInputSlot`/`apply_input` (sim) — in one scenario over the real fabric, driven by the
 //! REAL saga producer (never hand-fed acks).
 //!
-//! SCOPE (D-28 + 1c.8): the transfer commits authority to the dest (directory CAS lands) AND the
-//! demote/release tail now CLOSES — the dest ADOPTS the subject, the source self-fences its dot,
-//! and the saga drives Demoting → Releasing → Done (via the bandless interim + the gateway's
-//! Released ack). So this gate proves BOTH input conservation across the cut AND the final
-//! authority settle: `verify_authority_unique` + `verify_authority_settled` after a full transfer
-//! (the D-28(b) graduation). FIDELITY (pose/render/ghost) still defers to 1d (D-27 back half).
+//! SCOPE (D-28 + 1d.5b.1): the transfer commits authority to the dest (directory CAS lands) AND the
+//! ORDERED demote/release tail now CLOSES — the saga drives Swapping → Demoting → Promoting →
+//! Releasing → Done: RouteSwapped pushes the saga `Demote` to the source; `DemoteAck` advances to
+//! Promoting + pushes the `Promote` to the dest; `PromoteAck` AND `DeliveredToObservers` (the
+//! Promoting gate) emit `ReleaseSubscribe` → `Released` → Done. So this gate proves BOTH input
+//! conservation across the cut AND the final authority settle: `verify_authority_unique` +
+//! `verify_authority_settled` after a full transfer (the D-28(b) graduation). FIDELITY
+//! (pose/render/ghost) still defers to 1d (D-27 back half).
 
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::glam::DVec3;
@@ -186,9 +188,10 @@ fn run_cut_transfer(
     // so they BUFFER and are drained to the dest at commit — the buffer/drain path under test.
     with_client(&mut topo, ScriptedClient::resume_input);
 
-    // The saga commits (directory CAS to DEST) and the 1c.8 tail drives it the rest of the way:
-    // the bandless interim fires DemoteComplete → Releasing, the gateway acks Released → Done →
-    // Tombstone, so the saga reaches `live() == 0` (no longer parks in Demoting).
+    // The saga commits (directory CAS to DEST) and the ORDERED demote-before-promote tail (1d.5b.1)
+    // drives it the rest of the way: Demote→DemoteAck advances Demoting→Promoting + pushes Promote;
+    // PromoteAck AND DeliveredToObservers (the Promoting gate) emit ReleaseSubscribe, the gateway
+    // acks Released → Done → Tombstone, so the saga reaches `live() == 0` (no longer parks).
     step_until(&mut topo, 40, observe, |t| live_sagas(t) == 0);
 
     // QUIESCE: stop emitting and let every in-flight post-marker input settle at the dest AND
@@ -468,8 +471,9 @@ fn p2_dod_cross_cut_transfer_is_byte_identical_under_same_seed() {
         // deterministic — the composited sub flip + the crossed pose render byte-identically under
         // one seed, so the headline visibility proof cannot be flaky on delivery ordering.
         let mut caps: Vec<CapturedTick> = Vec::new();
-        let (mut topo, _, _, marker) =
-            run_cut_transfer(&FaultFabric::new(909, 2), &mut |t| caps.push(capture_subject(t)));
+        let (mut topo, _, _, marker) = run_cut_transfer(&FaultFabric::new(909, 2), &mut |t| {
+            caps.push(capture_subject(t))
+        });
         let saga = saga_states(&mut topo); // terminal sentinel ([] — the run drove to Done)
         let live = live_sagas(&mut topo); // terminal sentinel (0)
         // The gateway's cut-buffer fill count, compared DIRECTLY (not merely inferred from the
@@ -535,7 +539,10 @@ fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
 
     // The subject's rendered samples in order (skipping the pre-login ticks; there is no vanish now).
     let rendered: Vec<RenderSample> = caps.iter().filter_map(|c| c.sample).collect();
-    let source_sub = rendered.first().expect("the subject renders at some tick").sub;
+    let source_sub = rendered
+        .first()
+        .expect("the subject renders at some tick")
+        .sub;
     let dest_sample = *rendered.last().expect("the subject renders at some tick");
 
     // (1) THE VISIBLE CROSSING: the authoritative rendered sub flips source→dest EXACTLY ONCE (the
@@ -546,7 +553,10 @@ fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
         "the rendered sub flipped source→dest — the crossing is visible from the dest",
     );
     let flips = rendered.windows(2).filter(|w| w[0].sub != w[1].sub).count();
-    assert_eq!(flips, 1, "exactly one source→dest authority flip (no flapping)");
+    assert_eq!(
+        flips, 1,
+        "exactly one source→dest authority flip (no flapping)"
+    );
 
     // (2) THE DEST RENDERS THE CROSSED POSE, not the origin-adopt default — the load-bearing
     // discriminator (drop-flip turns THIS red): the SOURCE realm's `SystemSpace{seed:7}` at a
