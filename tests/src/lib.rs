@@ -54,10 +54,10 @@ pub fn stub_config() -> StubConfig {
         mint_seed: 11,
         // Large window: the oracle must see a whole short test run.
         input_log_capacity: 1_000_000,
-        // 1c.8: a small NON-ZERO recheck interval (the EXISTING knob, not a new magic number) so
-        // the SOURCE periodically HeadReads its held Entity keys and self-fences when a transfer
-        // moves the avatar to the dest — closing the demote tail. (The interim per-entity poll
-        // retires when the proper observer-watermark demote predicate lands post-1d.)
+        // A small NON-ZERO recheck interval (the EXISTING knob, not a new magic number) so the
+        // SOURCE periodically re-reads its REALM-lease head and self-fences the whole shard on a
+        // lease revocation. The 1c.8 per-entity granted-key poll is GONE (1d.5b.2): the source
+        // ENTITY self-fence is now driven by the saga-pushed ordered `Demote`, not a directory poll.
         realm_recheck_interval: 4,
         snapshot_datagram_budget: 1100,
     }

@@ -194,19 +194,23 @@ fn run_cut_transfer(
     // acks Released → Done → Tombstone, so the saga reaches `live() == 0` (no longer parks).
     step_until(&mut topo, 40, observe, |t| live_sagas(t) == 0);
 
-    // QUIESCE: stop emitting and let every in-flight post-marker input settle at the dest AND
-    // the source's Entity-key self-fence drop land (the source HeadReads on the recheck cadence).
+    // QUIESCE: stop emitting and let every in-flight post-marker input settle at the dest AND the
+    // source's saga-driven Entity self-fence (`on_saga_demote`) land — the source dot demotes to a
+    // retained Ghost (no longer simulating).
     with_client(&mut topo, ScriptedClient::pause_input);
     for _ in 0..8 {
         topo.step();
         observe(&mut topo);
     }
 
-    // TWO-WINDOW GUARD (1c.8): wait until the transient demote/promote windows are both resolved
-    // — the SOURCE reports NOTHING for the subject (its dot self-fenced away) AND the DEST holds
-    // it — BEFORE the authority oracle is sampled. The promote-then-demote ordering means there
-    // is a transient two-holder / pending-toward-owner window; the gate samples only after both
-    // sides reach steady state (exactly as input-conservation is asserted only post-quiesce).
+    // STEADY-STATE GUARD: wait until the transient transfer windows are resolved — the SOURCE
+    // reports NOTHING for the subject (its dot self-fenced away via the saga `Demote`) AND the DEST
+    // holds it — BEFORE the authority oracle (`verify_authority_unique`) is sampled. The ordered
+    // demote-before-promote leaves a transient post-CAS window (the source holds at the old fence
+    // until its `Demote`, then a brief zero-Owned handoff gap before the dest's adopt-promote — both
+    // LEGAL mid-flight); the strict `== 1` oracle samples only after steady state, exactly as
+    // input-conservation is asserted post-quiesce. (The per-tick mid-flight uniqueness gate, with
+    // the transfer-window excuses, lands in 1d.5b.3 — see DEFERRED.md D-2.)
     step_until(&mut topo, 40, observe, |t| {
         let r = t.inspect_all();
         let src = report(&r, SHARD);
@@ -403,17 +407,15 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
     );
 }
 
-/// 1c.8/1d.4b ROBUSTNESS: the settled end state is STABLE under continued operation. After the tail
-/// closes, the source keeps polling its Entity keys on the recheck cadence and the dest keeps
-/// holding — many more ticks must NOT re-promote the source's RETAINED Ghost, double-grant, or
-/// unsettle the oracles. This exercises the source self-fence's idempotent skip arm end-to-end: the
-/// source dot is RETAINED as a Ghost (1d.4b — `simulates()==false`, so EXCLUDED from the oracle
-/// held-set), and every later foreign-owner poll RE-DISCOVERS the still-granted Ghost and is a
-/// counted no-op (`self_fence_skipped`), never a re-promote. (The explicit REDELIVERY idempotency —
-/// a re-acked `Released`, and a re-delivered foreign-owner HeadRead asserting the dot survives +
-/// `self_fence_skipped == 1` — is pinned at the unit level in
-/// `vd_connection_plane::gateway::release_subscribe_acks_released` and
-/// `vd_sim::stub::the_source_self_fences_a_foreign_owned_entity_without_revoking`.)
+/// 1d.5b.2 ROBUSTNESS: the settled end state is STABLE under continued operation. After the tail
+/// closes, the source's dot is a RETAINED Ghost (1d.4b — `simulates()==false`, EXCLUDED from the
+/// oracle held-set) and the dest holds the subject; many more ticks must NOT re-promote the source
+/// Ghost, double-grant, or unsettle the oracles. With the 1c.8 granted-key poll TORN OUT (1d.5b.2)
+/// there is no per-entity directory poll to (re)discover anything — the source self-fenced ONCE via
+/// the saga-pushed `Demote`, and nothing re-promotes it. (The REDELIVERY idempotency — a re-acked
+/// `Released`, and a re-delivered `Demote` finding the dot already a Ghost → `self_fence_skipped` —
+/// is pinned at the unit level in `vd_connection_plane::gateway::release_subscribe_acks_released`
+/// and `vd_sim::stub::the_saga_demote_flips_the_source_to_ghost_and_acks_unconditionally`.)
 #[test]
 fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
     let fabric = FaultFabric::new(909, 2);
@@ -433,11 +435,11 @@ fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
     let src = report(&reports, SHARD);
     let dst = report(&reports, DEST);
     // The source never re-acquires the transferred dot: it is RETAINED as a Ghost (1d.4b) but
-    // EXCLUDED from the held-set via the `simulates()` oracle filter — repeated foreign-owner polls
-    // re-discover the still-granted Ghost and are counted no-ops, never a re-promote.
+    // EXCLUDED from the held-set via the `simulates()` oracle filter. With the poll torn out
+    // (1d.5b.2), nothing re-discovers or re-promotes it.
     assert!(
         !src.held_entities.iter().any(|(e, _)| *e == entity),
-        "the retained source Ghost stays excluded from the held-set (does not simulate) under continued polling",
+        "the retained source Ghost stays excluded from the held-set (does not simulate) under continued operation",
     );
     assert!(
         !src.pending_entities.contains(&entity),

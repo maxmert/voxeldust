@@ -109,12 +109,13 @@ pub struct Dot {
     /// the directory confirms its revoke — authority is released AT the
     /// directory, never by local despawn.
     pub departing: bool,
-    /// The directory-RECORDED PREDICATE fence for this entity (FENCE-1/5/8, the LeaseRevoke key):
-    /// every grant/revoke uses THIS, never a hardcoded literal, so a transfer that advanced the
-    /// fence past genesis cannot wedge a logout forever. NOT kept in sync with `authority.fence()`:
-    /// on a retained source Ghost they intentionally diverge (`entity_fence` = the dot's OWN old
-    /// grant fence; `authority.fence()` = the new owner's). `authority.fence()` is the FSM truth;
-    /// `entity_fence` is poll bookkeeping torn out in 1d.5b.
+    /// The directory-RECORDED PREDICATE fence for this entity (FENCE-1/5/8, the LeaseRevoke key + the
+    /// crossing/grant fence): every grant/revoke uses THIS, never a hardcoded literal, so a transfer
+    /// that advanced the fence past genesis cannot wedge a logout forever. NOT kept in sync with
+    /// `authority.fence()`: on a retained source Ghost they intentionally diverge (`entity_fence` =
+    /// the dot's OWN old grant fence; `authority.fence()` = the new owner's). `authority.fence()` is
+    /// the FSM truth; `entity_fence` is the recorded-predicate fence (RETAINED — only the 1c.8 poll
+    /// that read it for the granted-key HeadRead was torn out in 1d.5b.2).
     pub entity_fence: Fence,
     pub pose: StampedPose,
     pub yaw: f64,
@@ -295,13 +296,6 @@ pub struct StubStats {
     pub promotes_redelivered: u64,
 }
 
-/// The inert Freeze `TransferId` for the poll-discovered source self-fence (1d.4b): the directory
-/// head names a foreign owner with `in_transfer == None` (the CAS already cleared the lock), so the
-/// `Owned→Frozen` step has no real transfer to carry. The `Frozen.transfer` is never read in 1d.4b
-/// (only `Thaw` checks it, and the poll path never thaws); 1d.5b's saga-pushed `Demote` carries the
-/// real `TransferId` and deletes this. Named (not an inline literal) per the no-magic-numbers rule.
-const SELF_FENCE_TRANSFER: TransferId = TransferId(0);
-
 /// The outcome of journaling one transferred-entity-state step (1d.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -432,13 +426,12 @@ fn request_pending_grants(
         }
         Some(_) => {}
     }
-    // The SOURCE granted-key poll fires on the SAME cadence as the realm recheck (1c.8): a
-    // granted dot periodically HeadReads its Entity key so a foreign takeover (a transfer that
-    // moved the entity to the dest) is OBSERVED and self-fenced. Computed once, monomorphically.
-    let poll_granted_keys =
-        granted_key_poll_tick(config.realm_recheck_interval, clock.local_tick.0);
+    // Per-dot grant/revoke requests (login LeaseGrant, adopt HeadRead, logout LeaseRevoke). The
+    // 1c.8 SOURCE granted-key poll is GONE (1d.5b.2): the saga-pushed `Demote` (on_saga_demote) is
+    // now the SOLE source-demote driver — the source no longer polls the directory to DISCOVER a
+    // foreign takeover.
     for dot in dots.0.values() {
-        if let Some(op) = pending_grant_op(dot, identity.node_id, poll_granted_keys) {
+        if let Some(op) = pending_grant_op(dot, identity.node_id) {
             outbox.push_flow(
                 config.orchestrator,
                 MsgClass::Saga,
@@ -448,30 +441,17 @@ fn request_pending_grants(
     }
 }
 
-/// Whether this is a SOURCE granted-key poll tick (1c.8): a disabled interval (0) never polls;
-/// otherwise the poll fires on the same `is_multiple_of(interval)` cadence as the realm recheck.
-/// Monomorphic so the `&&`-short-circuit lives in ONE covered helper (HR5), not the system body.
-///
-/// ⚠️ INTERIM, OWED-FOR-REMOVAL (DEFERRED D-2): this poll is how the SOURCE DISCOVERS a foreign
-/// takeover to self-demote — a cooperative, best-effort directory poll, NOT the binding fence-first
-/// saga-pushed `Demote`. 1d/the band-ghost slice RIPS IT OUT (see `self_fence_foreign_entity`).
-#[must_use]
-fn granted_key_poll_tick(interval: u64, local_tick: u64) -> bool {
-    interval > 0 && local_tick.is_multiple_of(interval)
-}
-
-/// The per-dot directory op `request_pending_grants` should (re)issue, as a monomorphic 3-way
-/// (+ the source granted-key poll) so the system loop stays a branchless shim (HR5):
+/// The per-dot directory op `request_pending_grants` should (re)issue, as a monomorphic 3-way so
+/// the system loop stays a branchless shim (HR5):
 /// - adopting + !granted → `HeadRead{Entity}` (1c.8): ADOPT the record the transfer CAS moved
 ///   here; a `LeaseGrant` at `GENESIS.next` would be Refused (the record is past genesis).
 /// - !adopting + !granted → `LeaseGrant{Entity}` at `GENESIS.next` (the login fresh-mint path).
 /// - departing → `LeaseRevoke{Entity}` at the RECORDED fence (FENCE-1/5/8; a literal would be
 ///   Refused once a transfer advanced the fence, stranding the logout).
-/// - granted, non-departing, non-adopting, AND it is a poll tick → `HeadRead{Entity}` (1c.8 the
-///   SOURCE granted-key poll): the source observes a foreign takeover of its held entity and
-///   self-fences (the Entity-key analogue of the realm recheck).
+/// - otherwise (granted, non-departing) → `None`. The 1c.8 source granted-key poll branch is GONE
+///   (1d.5b.2): the source self-fence is driven by the saga-pushed `Demote`, not a directory poll.
 #[must_use]
-fn pending_grant_op(dot: &Dot, node: NodeId, poll_granted_keys: bool) -> Option<DirectoryOp> {
+fn pending_grant_op(dot: &Dot, node: NodeId) -> Option<DirectoryOp> {
     if !dot.granted {
         if dot.adopting {
             Some(DirectoryOp::HeadRead {
@@ -488,10 +468,6 @@ fn pending_grant_op(dot: &Dot, node: NodeId, poll_granted_keys: bool) -> Option<
         Some(DirectoryOp::LeaseRevoke {
             key: DirectoryKey::Entity(dot.entity),
             fence: dot.entity_fence,
-        })
-    } else if poll_granted_keys {
-        Some(DirectoryOp::HeadRead {
-            key: DirectoryKey::Entity(dot.entity),
         })
     } else {
         None
@@ -930,8 +906,9 @@ fn flip_grant(
         dot.granted = true;
         dot.entity_fence = fence; // the recorded authority fence (== the CAS new_fence)
         if dot.adopting {
-            // Transfer-dest adopt: held but not rendered, no re-home (1c.8). Clear the adopt
-            // marker so the source granted-key poll engages on this now-granted dot at the dest.
+            // Transfer-dest adopt: held but not rendered, no re-home (1c.8). Clear the adopt marker
+            // so the dot becomes a normal granted holder (the dest dot; `apply_crossing` promotes it
+            // Ghost→Owned when the crossing lands).
             dot.adopting = false;
             // Track R / 1d.2c: announce the dest read-sub to the gateway via `SubscriptionReady`
             // (riding the already-reviewed ShardToGateway seam — HR1). `realm_fence` + `frame`
@@ -981,28 +958,27 @@ fn dot_grant_target(dot: &Dot, entity: EntityId) -> bool {
     (dot.entity == entity) & !dot.granted
 }
 
-/// The SOURCE self-fence (1c.8/1d.4b): a directory head naming a FOREIGN owner of an entity this
-/// shard holds means the transfer CAS moved the record to the dest — DEMOTE the local granted,
-/// non-departing dot to a RETAINED Ghost (`Owned→Frozen→Ghost`), NO directory write (the record is
-/// the dest's now), `granted` KEPT (FG-2: the poll still discovers it). 1d.4b RETAINS the dot (the
+/// The SOURCE self-fence machinery (1c.8/1d.4b): DEMOTE the local granted, non-departing holder of
+/// `entity` to a RETAINED Ghost (`Owned→Frozen→Ghost`) at `new_owner_fence` (the post-CAS owner
+/// fence, strictly newer than the source's own grant fence — the directory CAS is fence-monotone),
+/// NO directory write (the record is the dest's now), `granted` KEPT. 1d.4b RETAINS the dot (the
 /// first ghost) instead of `dots.remove`-ing it, so it stops emitting (`simulates()==false`) but
 /// survives for the 1d.5b ghost-as-collider. Idempotent WITHOUT IllegalTransition-as-control-flow:
-/// an already-Ghost redelivery is a counted no-op via the `simulates()` guard. Monomorphic.
+/// an already-Ghost redelivery is a counted no-op via the `simulates()` guard; a no-match (the
+/// entity is not held here) is a clean no-op. Monomorphic.
 ///
-/// ⚠️ SHARED MACHINERY (1d.5b.1, DEFERRED D-2): this `Owned→Frozen→Ghost` transition is now driven
-/// by BOTH the saga-pushed ordered `Demote` ([`on_saga_demote`], the binding fence-enforced
-/// demote-before-promote) AND — still, in 1d.5b.1 — the granted-key poll (`on_directory_reply`'s
-/// foreign-owner arm). They are fence-idempotent: whichever fires first wins, the other is the
-/// `!simulates()` counted no-op (`self_fence_skipped`). The poll is the OWED-FOR-REMOVAL half — torn
-/// out in 1d.5b.2 so the saga `Demote` is the SOLE driver. The dest still autonomously promotes
-/// (`apply_crossing`, RETAINED until 1d.5b.3), so a transient two-holder window remains (the retained
-/// source Ghost no longer EMITS — `simulates()==false` — and the oracle excludes it, masked not
-/// prevented); the strict ordering + the source-Ghost collider feed that closes it land in 1d.5b.3.
+/// 1d.5b.2 — the saga-pushed ordered `Demote` ([`on_saga_demote`]) is now the SOLE driver of this
+/// transition; the 1c.8 cooperative granted-key poll (which DISCOVERED a foreign takeover from a
+/// directory head) is TORN OUT, so `transfer` is always the real `Demote` transfer (no inert
+/// fallback). The dest still autonomously promotes (`apply_crossing`, RETAINED until 1d.5b.3), so a
+/// transient two-holder window remains (the retained source Ghost no longer EMITS — the oracle
+/// excludes it, masked not prevented); the strict demote-before-promote ordering + the source-Ghost
+/// collider feed that close it land in 1d.5b.3.
 fn self_fence_foreign_entity(
     dots: &mut BTreeMap<SessionId, Dot>,
     entity: EntityId,
     new_owner_fence: Fence,
-    in_transfer: Option<TransferId>,
+    transfer: TransferId,
     at_tick: TickId,
     stats: &mut StubStats,
 ) {
@@ -1022,7 +998,6 @@ fn self_fence_foreign_entity(
         stats.self_fence_skipped += 1;
         return;
     }
-    let transfer = in_transfer.unwrap_or(SELF_FENCE_TRANSFER);
     // Owned → Frozen (always legal) → Ghost (the foreign CAS fence is strictly newer than the
     // source's own grant fence — the directory CAS is fence-monotone). An Err here is a real
     // invariant break, so panic; the refusal arms are proptested in `authority.rs`.
@@ -1039,17 +1014,16 @@ fn self_fence_foreign_entity(
     tracing::warn!(
         "entity {entity} now held at fence {new_owner_fence} — source self-demoted to a retained Ghost"
     );
-    // KEEP the dot (no remove) and KEEP `granted` == true (FG-2: the poll still discovers it).
+    // KEEP the dot (no remove) and KEEP `granted` == true — it survives as the retained Ghost.
 }
 
 /// SOURCE consumer of the saga-pushed ordered `Demote` (1d.5b.1, D-2): the binding fence-enforced
-/// `Owned→Frozen→Ghost` demote, the FIRST half of demote-before-promote. It REUSES
-/// [`self_fence_foreign_entity`]'s exact machinery (Freeze at the real `cmd.transfer`, then Demote
-/// at `cmd.new_owner_fence` — the post-CAS owner fence) so the saga path and the still-live poll
-/// drive the IDENTICAL transition; whichever fires first wins and the other is the `!simulates()`
-/// counted no-op (`self_fence_skipped`) — fence-idempotent coexistence until the poll is torn out in
-/// 1d.5b.2. The `DemoteAck` is sent UNCONDITIONALLY (outside the flip guard): even when the poll
-/// already demoted the dot, the saga MUST still get its ack or it would wedge in `Demoting`.
+/// `Owned→Frozen→Ghost` demote, the FIRST half of demote-before-promote, and (since 1d.5b.2) the
+/// SOLE driver of the source self-fence. It REUSES [`self_fence_foreign_entity`]'s machinery (Freeze
+/// at the real `cmd.transfer`, then Demote at `cmd.new_owner_fence` — the post-CAS owner fence). An
+/// already-Ghost dot (a redelivery) is the `!simulates()` counted no-op (`self_fence_skipped`); an
+/// unheld entity is a clean no-match no-op. The `DemoteAck` is sent UNCONDITIONALLY (outside the flip
+/// guard): even on those no-op paths the saga MUST still get its ack or it would wedge in `Demoting`.
 /// Monomorphic. (A non-Entity subject has no local Entity dot here — counted + skipped, still acked.)
 fn on_saga_demote(
     cmd: DemoteCmd,
@@ -1064,14 +1038,14 @@ fn on_saga_demote(
             &mut dots.0,
             entity,
             cmd.new_owner_fence,
-            Some(cmd.transfer),
+            cmd.transfer,
             clock.local_tick,
             stats,
         ),
         None => stats.saga_demote_no_entity += 1,
     }
     // Ack DemoteAck UNCONDITIONALLY — the saga's demote-before-promote ordering gates the dest
-    // Promote on THIS ack; a missing ack (e.g. on the poll-already-demoted path) would wedge it.
+    // Promote on THIS ack; a missing ack on a no-op path (already-Ghost / unheld) would wedge it.
     outbox.push_flow(
         config.orchestrator,
         MsgClass::Saga,
@@ -1445,21 +1419,13 @@ fn on_directory_reply(
                     GrantFlip::NoOp => {}
                 }
             } else {
-                // FOREIGN owner of an entity this shard holds (1c.8/1d.4b the SOURCE self-fence, the
-                // Entity-key analogue of the realm self-fence): the transfer CAS moved the record to
-                // the dest, so the source DEMOTES its dot to a RETAINED Ghost LOCALLY — NO LeaseRevoke
-                // (a revoke at the stale entity_fence is Refused; a revoke at new_fence would delete
-                // the dest's record), NO `departing`. The Demote keys on the foreign record's fence
-                // (the new owner's, strictly newer) at the current tick. Idempotent: an already-Ghost
-                // redelivery is a counted no-op.
-                self_fence_foreign_entity(
-                    &mut dots.0,
-                    entity,
-                    record.fence,
-                    record.in_transfer,
-                    clock.local_tick,
-                    stats,
-                );
+                // FOREIGN owner of an entity this shard holds: IGNORED here (1d.5b.2). The source
+                // self-fence is now driven SOLELY by the saga-pushed ordered `Demote`
+                // (`on_saga_demote`) — the 1c.8 cooperative poll that DISCOVERED a foreign takeover
+                // from a directory head is gone. The EXPLICIT else keeps the outer `if`'s FALSE arm
+                // a covered branch (a pre-grant race still surfaces a foreign-owner head, exercised by
+                // `foreign_entity_grants_and_pregrant_races_are_survived`) — never an implicit
+                // uncovered else.
             }
         }
         DirectoryReply::Head {
@@ -2837,79 +2803,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_source_self_fences_a_foreign_owned_entity_without_revoking() {
-        // 1c.8/1d.4b SOURCE self-fence: a granted dot whose directory head names a FOREIGN owner
-        // (the transfer CAS moved it to the dest) is DEMOTED to a RETAINED Ghost
-        // (`authority.rs` Owned→Frozen→Ghost) — NO `dots.remove`, NO LeaseRevoke (which would be
-        // Refused at the stale fence, or delete the dest's record at the new fence). The retained
-        // Ghost stops emitting (`simulates()==false`) but survives for the 1d.5b ghost-as-collider.
-        //
-        // ⚠️ EXISTS-TO-BE-FLIPPED (DEFERRED D-2 ordering inversion): the demote is still DISCOVERED
-        // by the granted-key POLL (not yet the saga-pushed, fence-first `Demote`/`DemoteAck`). 1d.5b
-        // drives the SAME Owned→Frozen→Ghost transition demote-BEFORE-promote and RIPS OUT the poll
-        // + `self_fence_foreign_entity` (a tear-out, not a predicate body-swap).
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        let _ = rig.attach(); // a granted, locally-owned dot
-        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
-        let foreign = DirectoryReply::Head {
-            key: DirectoryKey::Entity(entity),
-            record: Some(vd_wire::seams::directory::OwnerRecord {
-                authority: AuthorityRef::Shard(NodeId(99)), // the transfer DEST
-                fence: Fence(2),
-                lease_expires: UniverseTick(1_000),
-                in_transfer: None,
-            }),
-        };
-        let sent = rig.tick(vec![wire_msg(
-            ORCH,
-            MsgClass::Saga,
-            &InterShardFlow::DirectoryReply(foreign),
-        )]);
-        let dot = rig.world.resource::<Dots>().0[&SESSION];
-        assert!(
-            !dot.authority.simulates(),
-            "the source self-demoted — a retained Ghost does not simulate (stops emitting, no vanish)"
-        );
-        assert_eq!(
-            dot.authority,
-            Authority::Ghost {
-                source_fence: Fence(2),
-                since_tick: TickId(1),
-            },
-            "Owned{{1}} → Frozen → Ghost at the foreign CAS fence (2), retained (NOT dots.remove)"
-        );
-        assert_eq!(
-            dot.entity_fence,
-            Fence(1),
-            "entity_fence is NOT touched by the demote — it stays the dot's OWN old grant fence \
-             (poll bookkeeping); only authority.fence() advances to the new owner's"
-        );
-        // The demote is LOCAL: NO directory write (no LeaseRevoke at the stale fence, no delete of
-        // the dest's record at the new fence). The dot is RETAINED as a Ghost (no orphan, no vanish).
-        assert!(
-            sent.is_empty(),
-            "the self-fence demote is purely local — no directory write at all: {sent:?}"
-        );
-        // Idempotent WITHOUT IllegalTransition-as-control-flow: a second foreign-owner reply finds
-        // the dot ALREADY a Ghost → the `simulates()` guard counts a skip and no-ops (the covered arm).
-        let _ = rig.tick(vec![wire_msg(
-            ORCH,
-            MsgClass::Saga,
-            &InterShardFlow::DirectoryReply(foreign),
-        )]);
-        assert!(
-            rig.world.resource::<Dots>().0.contains_key(&SESSION),
-            "the retained Ghost survives the redelivery"
-        );
-        assert_eq!(
-            rig.world.resource::<StubStats>().self_fence_skipped,
-            1,
-            "the redelivery on the already-Ghost source is a counted no-op (the guard's taken arm)"
-        );
-    }
-
     /// Whether the orchestrator-bound egress carries a specific `SagaAck` (value-compare; the
     /// `*to == ORCH` filter restricts decode to ack/directory traffic — frames go to gateways).
     fn saga_ack_to_orch(sent: &[(NodeId, MsgClass, Vec<u8>)], ack: TransferControlAck) -> bool {
@@ -2923,10 +2816,10 @@ mod tests {
 
     #[test]
     fn the_saga_demote_flips_the_source_to_ghost_and_acks_unconditionally() {
-        // 1d.5b.1 SOURCE consumer of the ordered Demote: drive the SAME Owned→Frozen→Ghost as the
-        // poll (REUSING self_fence_foreign_entity) at the new owner fence, then ack DemoteAck. A
-        // redelivery (or the poll having raced ahead) finds an already-Ghost dot → the !simulates()
-        // counted no-op — but STILL acks (the unconditional ack: never wedge the saga in Demoting).
+        // 1d.5b.2 SOURCE consumer of the ordered Demote (the SOLE source-demote driver): drive
+        // Owned→Frozen→Ghost (REUSING self_fence_foreign_entity) at the new owner fence, then ack
+        // DemoteAck. A redelivered Demote finds an already-Ghost dot → the !simulates() counted no-op
+        // — but STILL acks (the unconditional ack: never wedge the saga in Demoting).
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.attach(); // a granted, locally-owned dot at Fence(1)
@@ -2946,6 +2839,13 @@ mod tests {
             },
             "the ordered Demote drives Owned{{1}}→Frozen→Ghost at the new owner fence (2)"
         );
+        // The demote keys `authority.fence()` to the new owner (2) but does NOT touch `entity_fence`
+        // — it stays the dot's OWN old grant fence (1); the intended divergence on a retained Ghost.
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].entity_fence,
+            Fence(1),
+            "the demote leaves entity_fence at the dot's own grant fence (authority.fence() diverges)"
+        );
         assert!(
             saga_ack_to_orch(
                 &sent,
@@ -2954,6 +2854,14 @@ mod tests {
                 }
             ),
             "DemoteAck is sent to the orchestrator: {sent:?}"
+        );
+        // The self-fence is purely LOCAL — no directory write (no LeaseRevoke at the stale fence,
+        // no delete of the dest's record): the saga demote's ONLY orch-bound emission is the
+        // DemoteAck. (Preserves the deleted poll-era test's no-directory-write guard.)
+        assert_eq!(
+            sent.iter().filter(|(to, _, _)| *to == ORCH).count(),
+            1,
+            "the saga demote writes nothing to the directory — only the DemoteAck: {sent:?}"
         );
         // Redelivery on the already-Ghost dot: counted skip, but STILL acks.
         let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &demote)]);
@@ -2970,6 +2878,42 @@ mod tests {
                 }
             ),
             "the redelivery STILL acks DemoteAck (never wedge the saga)"
+        );
+    }
+
+    #[test]
+    fn the_saga_demote_on_an_unheld_entity_is_a_clean_noop_but_acks() {
+        // The no-match arm of self_fence_foreign_entity (`foreign_takeover_target` finds no dot) —
+        // now reachable ONLY via on_saga_demote, since the poll that used to drive it is torn out
+        // (1d.5b.2). A Demote for an Entity this shard does not hold is a clean no-op (no flip, no
+        // panic) but STILL acks DemoteAck (never wedge the saga in Demoting).
+        let mut rig = Rig::new();
+        rig.grant_realm(); // realm held, but NO dot attached → this shard holds no entity
+        let unheld = EntityId::pack(EntityKind::Player, 99, 99, 99);
+        let demote = InterShardFlow::Demote(DemoteCmd {
+            transfer: TransferId(7),
+            subject: DirectoryKey::Entity(unheld),
+            new_owner_fence: Fence(2),
+            step_id: DEMOTE_STEP,
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &demote)]);
+        assert!(
+            rig.world.resource::<Dots>().0.is_empty(),
+            "an unheld-entity Demote creates or mutates no dot"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().self_fence_skipped,
+            0,
+            "the no-match arm is distinct from the already-Ghost skip arm"
+        );
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::DemoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "an unheld-entity Demote STILL acks DemoteAck: {sent:?}"
         );
     }
 
@@ -3035,40 +2979,6 @@ mod tests {
                 }
             ),
             "the redelivery STILL re-acks PromoteAck"
-        );
-    }
-
-    #[test]
-    fn a_granted_source_polls_its_entity_keys_on_the_recheck_cadence() {
-        // 1c.8 SOURCE granted-key poll: with a non-zero recheck interval, a granted dot emits a
-        // HeadRead{Entity} on the cadence so a foreign takeover is OBSERVED (otherwise the source
-        // self-fence is unreachable). The OFF arm (non-multiple tick) sends no entity HeadRead.
-        let mut rig = Rig::with_config(StubConfig {
-            realm_recheck_interval: 2,
-            ..config()
-        });
-        rig.grant_realm();
-        let _ = rig.attach();
-        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
-        let entity_head_read = |sent: &[(NodeId, MsgClass, Vec<u8>)]| {
-            sent.iter()
-                .filter(|(to, _, _)| *to == ORCH)
-                .any(|(_, _, bytes)| {
-                    postcard::from_bytes::<InterShardFlow>(bytes).expect("decode")
-                        == InterShardFlow::Directory(DirectoryOp::HeadRead {
-                            key: DirectoryKey::Entity(entity),
-                        })
-                })
-        };
-        rig.set_local_tick(2);
-        assert!(
-            entity_head_read(&rig.tick(vec![])),
-            "an on-cadence tick polls the entity key"
-        );
-        rig.set_local_tick(3);
-        assert!(
-            !entity_head_read(&rig.tick(vec![])),
-            "an off-cadence tick does not"
         );
     }
 

@@ -170,6 +170,16 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Source:** Slice-1b audit `wf_34ef74d1` (CPO-1/CPO-2).
 
 ### D-2 🟧 Demote→Release tail: the bandless INTERIM landed (1c.8); the proper ORDERED, fence-enforced demote-before-promote is still owed
+
+> **⚠️ READER NOTE — current state (post-1d.5b.2):** the two **✅ LANDED** blocks below (1d.5b.1, 1d.5b.2) are the
+> CURRENT truth. 1d.5b.1 landed the saga-pushed ordered demote-before-promote FSM + consumers; 1d.5b.2 TORE OUT the
+> 1c.8 source granted-key poll, so the saga-pushed `Demote` (`on_saga_demote`) is now the **SOLE** source-demote
+> driver — `granted_key_poll_tick` and the per-entity poll no longer exist. The historical-interim descriptions in
+> the numbered consequences (1–5) and the 1d.1-layering note below describe the NOW-REMOVED 1c.8
+> promote-before-demote poll model; they are RETAINED as the why-it-was-broken record, **not** the current state.
+> STILL OWED (1d.5b.3): the strict demote-before-promote ORDERING enforcement (relocate `apply_crossing`'s autonomous
+> dest promote into `on_saga_promote`), the GhostFlow source-Ghost collider FEED, the band-exit Despawn, and the
+> per-tick mid-flight authority oracle (with the post-CAS-`DirectoryDisagrees` + zero-Owned-gap excuses).
 - **LANDED (1c.8 — interim):** `interim_demote_complete` now exists in `crates/node/src/saga_runtime.rs` — an
   UNCONDITIONAL bandless stand-in, invoked from `drive_sagas` AFTER the ack loop, that for every live saga in
   `Demoting` calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the existing sink — NOT a magic
@@ -241,6 +251,32 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   the GhostFlow source-Ghost collider FEED that keeps the consequent later-promote window seamless, + the band-exit
   Despawn. So the strict demote-before-promote ORDERING invariant (dest-Owned only AFTER source-DemoteAck) is NOT
   yet enforced (apply_crossing promotes the dest early); it lands in 1d.5b.3 with its own gate.
+  **✅ LANDED 1d.5b.2 (poll TEAR-OUT — the saga `Demote` is the SOLE source-demote driver):** the 1c.8 source
+  granted-key poll is GONE (`stub.rs`): `granted_key_poll_tick`, the `poll_granted_keys` arg + the `pending_grant_op`
+  poll-HeadRead branch, the `on_directory_reply` FOREIGN-owner self-fence reaction, and the inert `SELF_FENCE_TRANSFER`
+  const are all DELETED; `self_fence_foreign_entity` now takes a real `TransferId` (no `Option`/fallback) and is called
+  ONLY by `on_saga_demote`. The realm-lease recheck (`realm_recheck_interval`) is KEPT (realm-key self-fence only).
+  Coverage-preserving: the deleted poll tests' coverage moved to the saga-demote tests + a NEW `the_saga_demote_on_an_
+  unheld_entity_is_a_clean_noop_but_acks` (the no-match arm, whose only producer was the poll reply).
+  **⚠️ EMPIRICAL FINDING (probe vs the capstone, `realm_recheck_interval=4`) — the design's two-Owned assumption was
+  REFUTED, the mid-flight authority oracle is genuinely 1d.5b.3 work:** the avatar's Owned-holder timeline is
+  `[SHARD] t7..t18 → [] t19..t20 → [DEST] t21..`. There is NO two-Owned overlap at the AUTHORITY layer (the dest's
+  adopt is SLOWER than the source's saga `Demote`, so it promotes at t21 AFTER the source demotes at t19); the handoff
+  is a 2-tick ZERO-Owned window (t19–t20) — the demote-before-promote gap, INVISIBLE to the client (the render gates
+  stay seamless via last-frame hold + the dest's t21 frame; this gap is pre-existing from 1d.5b.1, just unmeasured).
+  Consequence: a `verify_authority_covered` (`>= 1` Owned) mid-flight gate was DESIGNED then REJECTED — it forbids the
+  intrinsic zero-Owned handoff gap. A strict `verify_authority_unique` (`== 1`) mid-flight gate must EXCUSE THREE legal
+  transfer windows (post-CAS source-still-Owned `DirectoryDisagrees`; the zero-Owned gap via dest-pending; any overlap)
+  — that excuse logic + the per-tick wiring land in 1d.5b.3 (co-landing with the apply_crossing relocation that makes
+  the ordering strict). 1d.5b.2 adds NO new authority oracle; the capstone's RENDER gates carry the player-visible
+  seamless guarantee (which is the property that matters), and `verify_authority_unique` stays the post-quiesce gate.
+  **⚠️ LOSS OF AUTONOMOUS RECOVERY (disclosed, P3/Slice-2 scope):** the torn-out poll was ALSO an independent recovery
+  path — it would self-fence a stranded source on the next recheck tick even if the saga `Demote` never arrived. The
+  saga `Demote` is now the SOLE driver with NO self-heal, and there is NO production `Timeout` PRODUCER yet (`saga.rs`
+  HONEST SCOPE), so a lost/never-acked `Demote` strands the source `Owned` (a two-holder split-brain with the
+  autonomously-promoted dest), surfaced only as a parked saga in the admin staleness view. Correctly P3/Slice-2 scope
+  (the at-least-once / adaptive-timeout / re-drive machinery) — only the disclosure is owed here; the parking itself is
+  already documented honestly at `saga.rs` (the `Demoting`/`Promoting` timeout re-emit arms).
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
      by the **fence**, not by cooperative in-memory state." The source freeze IS still cooperative in-memory
      (`self_fence_foreign_entity` does a local `Authority` flip to a RETAINED Ghost — since 1d.4b it KEEPS the dot,
@@ -293,15 +329,17 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     (lease-epoch pushed to the gateway), demote-before-promote, BEFORE the dest promotes.
     **⚠️ 1d.4b PROGRESS (part of (b) landed):** the `authority.rs` FSM is now ATTACHED and the source self-fence
     RETAINS the dot as a Ghost via `Owned→Frozen→Ghost` (no more `dots.remove`) — so the source ghost now EXISTS and
-    STOPS emitting (`simulates()==false`). What (b) STILL owes: the SAGA-PUSH (the demote is still POLL-discovered by
-    `granted_key_poll_tick`, not the saga's `Demote`/`DemoteAck`), the ORDERING (demote-before-promote — the dest
-    still autonomously promotes off its own poll), the **fence**-enforced freeze (still cooperative — no lease-epoch
-    pushed to the gateway), and the GhostFlow collider FEED (the ghost exists but emits no delta). 1d.5b rips out the
-    poll + adds the saga push/ordering/feed. The **reshape-free promise (`wf_0ed2dc0c`) covers ONLY (a)** — (b)'s remainder is a re-architecture.
+    STOPS emitting (`simulates()==false`). What (b) owed (UPDATED post-1d.5b.2): the SAGA-PUSH ✅ DONE (the demote is
+    now driven by the saga's `Demote`/`DemoteAck` via `on_saga_demote`, 1d.5b.1; the poll `granted_key_poll_tick` is
+    DELETED, 1d.5b.2); the ORDERING ⏳ owed-1d.5b.3 (the dest STILL autonomously promotes off `apply_crossing` — the
+    strict relocation lands in .3); the **fence**-enforced freeze ⏳ still cooperative (no lease-epoch pushed to the
+    gateway — P3); the GhostFlow collider FEED ⏳ owed-1d.5b.3 (the ghost exists but emits no delta). The **reshape-free
+    promise (`wf_0ed2dc0c`) covers ONLY (a)** — (b)'s remainder is a re-architecture.
 - **⚠️ 1d.1 LAYERING (stated honestly so the tear-out is not under-budgeted):** the 1d.1 pose crossing adds
   machinery BESIDE this interim, NOT a migration of it. (i) The source pose flush (`FlushSource`→`SourceFlushed`)
-  is NET-NEW and read-only — it does NOT replace the cooperative `granted_key_poll_tick`/`self_fence_foreign_entity`
-  drop, which STILL fires independently to demote the source. (ii) Because the dest adopts LATE under
+  is NET-NEW and read-only — it does NOT replace the source self-fence drop (in the 1c.8 interim that drop was
+  POLL-discovered; post-1d.5b.2 it is the saga `Demote` driving `self_fence_foreign_entity` via `on_saga_demote`, the
+  poll torn out). (ii) Because the dest adopts LATE under
   promote-before-demote (the crossing, emitted at CAS, races ahead of the dest's `OpenInputSlot`→`HeadRead`→flip),
   the dest BUFFERS the crossing (`PendingCrossings`) and drains it at the adopt flip — a 1c.8-model workaround for
   the adopt-ordering race, not the permanent design. (iii) The crossing is NOT gated on its dest ack: the saga
@@ -320,12 +358,12 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   where the misplaced flip WOULD emit the origin frame) — needs the D-2 reorder machinery and lands WITH the
   `verify_no_vanish`/`verify_pose_continuity` wiring here. Until then the unit test holds the line (a real
   render-origin regression still turns `cargo test --workspace` RED — vd-sim is a workspace member).
-- **When / proper:** the **post-1d band/ghost P2 slice** (it owns the ghost + band + observer-watermark + the
-  per-entity `Authority` attach). Pinned exists-to-be-flipped in `crates/sim/src/stub.rs` (the
-  `granted_key_poll_tick`/`self_fence_foreign_entity` interim doc-comments) + a test that the source demote is
-  poll-dependent (not fence-driven), which flips when the saga-pushed `Demote` lands. The 1d.3 capstone pins the
-  interim BOTH-SIDED — `overlap_ticks == 0` + `0 < vanish_gap <= MAX_INTERIM_VANISH_TICKS` (the adopt-handshake
-  budget) — so the render-lag failure class is caught NOW and the whole branch flips to `verify_no_vanish` at D-2.
+- **When / proper (UPDATED — substantially LANDED 1d.5a/1d.5b.1/1d.5b.2; see the LANDED blocks + the READER NOTE):**
+  the source demote is now FENCE/SAGA-driven (the poll-dependent test was flipped — DELETED — in 1d.5b.2 when the saga
+  `Demote` became the sole driver). The capstone flipped from the interim BOTH-SIDED pin (`overlap_ticks == 0` +
+  `0 < vanish_gap <= MAX_INTERIM_VANISH_TICKS`) to the SEAMLESS gate (`verify_no_vanish`/`verify_pose_continuity` +
+  `overlap_ticks >= 1` + `max_absent_run == 0`) at 1d.5a. What remains owed is the 1d.5b.3 back-half (strict ordering
+  relocation + GhostFlow feed + band-exit + the mid-flight authority oracle).
 - **Dependency:** Slice 1d (per-entity `Authority` attach so the dest owns + emits the post-commit entity) +
   the ghost-as-collider + band-instance + observer-delivery-watermark machinery (the band/ghost slice).
 - **Source:** 1c design `wf_f3eae69e` + the demote refinement `wf_0ed2dc0c`; interim landed in Slice 1c.8;

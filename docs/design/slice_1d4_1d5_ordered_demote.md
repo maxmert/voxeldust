@@ -3,6 +3,15 @@
 > Status: **LOCKED** (planned via `wf_f780b04c`, adversarially verified — 3/3 skeptics rejected the
 > draft, 7 blocking + 7 major folded in). Closes DEFERRED **D-2** (the 1c.8 promote-before-demote
 > interim + the 3-tick vanish). This is the implementation decomposition behind the D-2 registry entry.
+>
+> **⚠️ AS-BUILT STATE: `DEFERRED.md` D-2 is AUTHORITATIVE, not this doc.** During implementation the
+> decomposition was revised (the main-thread R1 refinement + empirical findings). Known divergences from
+> the sketch below: (1) `Promoting` is entered on `DemoteAcked` ALONE (release gated on `PromoteAcked`
+> AND `DestDelivered`); `DemoteComplete` was deleted — see the §1d.5b SUPERSEDED note. (2) `apply_crossing`'s
+> autonomous dest promote is RETAINED until 1d.5b.3; `foreign_takeover_target` is KEPT (reused by
+> `self_fence_foreign_entity` ← `on_saga_demote`), NOT deleted. (3) there is NO mid-flight single-Owner
+> invariant in 1d.5b.2 — the empirical probe found a 2-tick ZERO-Owned handoff window (no two-Owned
+> overlap), so the strict mid-flight `verify_authority_unique` lands in 1d.5b.3; D-2 stays 🟧 (split .1/.2/.3).
 
 ## Locked decisions
 
