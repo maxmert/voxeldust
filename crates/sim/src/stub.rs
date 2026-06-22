@@ -528,8 +528,12 @@ fn process_inbound(
                 &mut outbox,
             ),
             // Membership (clock sync) is consumed by the node-level follower system;
-            // Snapshot never targets a shard.
-            MsgClass::Membership | MsgClass::Snapshot => {}
+            // Snapshot never targets a shard. The Ghost classes are UNROUTED in 1d.5b.3a (no
+            // emitter/consumer yet) — the source-ghost feed consumer (GhostDelta) lands at 1d.5b.3b.
+            MsgClass::Membership
+            | MsgClass::Snapshot
+            | MsgClass::GhostReliable
+            | MsgClass::GhostDelta => {}
         }
     }
 }

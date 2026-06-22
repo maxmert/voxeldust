@@ -277,6 +277,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   autonomously-promoted dest), surfaced only as a parked saga in the admin staleness view. Correctly P3/Slice-2 scope
   (the at-least-once / adaptive-timeout / re-drive machinery) — only the disclosure is owed here; the parking itself is
   already documented honestly at `saga.rs` (the `Demoting`/`Promoting` timeout re-emit arms).
+  **✅ LANDED 1d.5b.3a (carrier prereq, render-neutral):** `MsgClass` gains `GhostReliable` (Spawn/Despawn,
+  Reliable) + `GhostDelta` (Delta, Unreliable latest-wins) (`sim/io/mod.rs`). UNROUTED — no emitter/consumer yet
+  (the source-ghost feed lands at 1d.5b.3b), so zero render-timing change (the capstone trace is byte-identical).
+  The remaining 1d.5b.3 back-half: **.3b** the COUPLED CORE (relocate `apply_crossing`'s autonomous promote into
+  `on_saga_promote` for strict ordering + the GhostFlow source-ghost collider FEED + re-point the dest
+  `SubscriptionReady`/`AuthorityChanged` from adopt→promote so the client renders the source sub until the dest is
+  ready — these co-land or the render goes RED), **.3c** band-exit Despawn, **.3d** the per-tick mid-flight
+  `verify_authority_unique` + the two transfer-window excuses keyed on the orchestrator LIVE-SAGA set (the directory
+  `in_transfer` is DEAD — cleared at CAS) → flips **D-2 🟩**.
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
      by the **fence**, not by cooperative in-memory state." The source freeze IS still cooperative in-memory
      (`self_fence_foreign_entity` does a local `Authority` flip to a RETAINED Ghost — since 1d.4b it KEEPS the dot,

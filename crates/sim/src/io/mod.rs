@@ -51,6 +51,16 @@ pub enum MsgClass {
     Input,
     /// Liveness / lease / membership traffic.
     Membership,
+    /// Ghost LIFECYCLE (`InterShardFlow::Ghost(GhostFlow::Spawn|Despawn)`, `wire/intershard.rs`):
+    /// the reliable+acked spawn/despawn of a cross-shard collider ghost. RELIABLE — a dropped
+    /// Spawn would strand a never-spawned collider; a dropped Despawn would leak a ghost forever.
+    /// (Producer/consumer land at 1d.5b.3b; the variant is UNROUTED until then.)
+    GhostReliable,
+    /// Ghost POSE FEED (`InterShardFlow::Ghost(GhostFlow::Delta)`): the 20Hz latest-wins kinematic
+    /// pose stream that keeps a fed source-ghost a live collider. UNRELIABLE — a fresh ghost pose
+    /// must never head-of-line-block behind a stale one (identical contract to `Snapshot`/`Input`).
+    /// (Producer/consumer land at 1d.5b.3b; the variant is UNROUTED until then.)
+    GhostDelta,
 }
 
 /// Carrier reliability: whether a class rides a reliable ordered stream or a
@@ -70,8 +80,10 @@ impl MsgClass {
     #[must_use]
     pub fn reliability(self) -> Reliability {
         match self {
-            MsgClass::Snapshot | MsgClass::Input => Reliability::Unreliable,
-            MsgClass::Control | MsgClass::Saga | MsgClass::Membership => Reliability::Reliable,
+            MsgClass::Snapshot | MsgClass::Input | MsgClass::GhostDelta => Reliability::Unreliable,
+            MsgClass::Control | MsgClass::Saga | MsgClass::Membership | MsgClass::GhostReliable => {
+                Reliability::Reliable
+            }
         }
     }
 }
@@ -280,6 +292,10 @@ mod tests {
         assert_eq!(MsgClass::Control.reliability(), Reliability::Reliable);
         assert_eq!(MsgClass::Saga.reliability(), Reliability::Reliable);
         assert_eq!(MsgClass::Membership.reliability(), Reliability::Reliable);
+        // 1d.5b.3a: ghost lifecycle is reliable (a lost Spawn/Despawn strands/leaks a collider);
+        // the ghost pose feed is unreliable latest-wins (a fresh pose must never HOL-block).
+        assert_eq!(MsgClass::GhostReliable.reliability(), Reliability::Reliable);
+        assert_eq!(MsgClass::GhostDelta.reliability(), Reliability::Unreliable);
         // A NodeUnreachable notice is reliable feedback regardless of failed class.
         assert_eq!(
             Inbound::NodeUnreachable {
