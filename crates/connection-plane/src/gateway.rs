@@ -36,7 +36,8 @@ use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
 use vd_wire::session_flow::{
-    GatewayToShard, ShardToGateway, peek_input_seq, peek_is_cut_marker, retag_snapshot_sub,
+    GatewayToShard, ShardToGateway, peek_input_seq, peek_is_cut_marker, peek_snapshot_frame_id,
+    retag_snapshot_sub,
 };
 use vd_wire::version::ProtoVersion;
 
@@ -317,6 +318,12 @@ struct Session {
     /// `publish_subs` (the sole `SubTable` writer — HR3). The hot `SubTable` is its
     /// forwarding projection.
     subs: BTreeMap<NodeId, SubRecord>,
+    /// 1d.5a — the per-observer-sub delivery high-water: `SubId -> highest delivered frame_id`.
+    /// COLD (off the wait-free `SubTable` — HR1), written in `on_shard_frame` at the push instant
+    /// (only ACCEPTED, past-fence dest frames advance it), removed when the sub is swept (no leak).
+    /// The (a) demote predicate's input: the standing "every current dest observer got >=1 frame"
+    /// watermark. Absent ≡ watermark 0 ≡ re-blocks (an observer opening mid-demote is undelivered).
+    delivered: BTreeMap<SubId, u64>,
     hot: Arc<SessionHot>,
 }
 
@@ -442,17 +449,23 @@ impl GatewaySessions {
         // Collect first (one mutable borrow at a time): which (session, shard) pairs drained.
         let mut drained: Vec<(SessionId, NodeId)> = Vec::new();
         for (session_id, session) in &mut self.by_session {
-            let draining: Vec<NodeId> = session
+            // Capture (shard, sub) up front so the watermark cleanup needs no fallible re-lookup
+            // (a `subs.remove` here is always Some — the shard came from this very filter).
+            let draining: Vec<(NodeId, SubId)> = session
                 .subs
                 .iter()
                 .filter(|(_, r)| r.state == SubState::Draining)
-                .map(|(shard, _)| *shard)
+                .map(|(shard, r)| (*shard, r.sub))
                 .collect();
             if draining.is_empty() {
                 continue;
             }
-            for shard in &draining {
+            for (shard, sub) in &draining {
                 session.subs.remove(shard);
+                // 1d.5a: the delivery watermark dies WITH its sub (no leak; a swept observer
+                // leaves the conjunction). Removed at the sweep — not at `close_sub` — so a
+                // one-tick-Draining sub still counts its delivered frames until it is truly gone.
+                session.delivered.remove(sub);
                 drained.push((*session_id, *shard));
             }
             publish_subs(&session.hot, &session.subs);
@@ -668,7 +681,7 @@ fn process_gateway_inbound(
                     on_shard_control(from, bytes, &config, &mut sessions, &mut stats, &mut outbox)
                 }
                 MsgClass::Snapshot => {
-                    on_shard_frame(from, bytes, &sessions, &mut stats, &mut outbox);
+                    on_shard_frame(from, bytes, &mut sessions, &mut stats, &mut outbox);
                 }
                 _ => stats.undecodable += 1,
             }
@@ -692,6 +705,58 @@ fn process_gateway_inbound(
             }
         }
     }
+    // 1d.5a: after draining the tick's inbound, recompute the STANDING delivery watermark for each
+    // in-flight transfer and emit `DeliveredToObservers` when satisfied (the (a) demote-predicate
+    // input). Run once per tick, NOT per frame — no 20Hz regression (D-24).
+    recompute_delivery_watermarks(&sessions, &config, &mut outbox);
+}
+
+/// 1d.5a — the STANDING per-observer delivery watermark pass. For each in-flight transfer, emit
+/// `DeliveredToObservers` iff the dest observer set is NON-EMPTY (an empty set is NEVER vacuously
+/// satisfied — in the window before the dest sub opens the saga must NOT be told delivery is done)
+/// AND every current dest observer has received >=1 dest frame. RECOMPUTED each tick (never latched
+/// here): an observer opening mid-demote inherits watermark 0 and RE-BLOCKS. Idempotent re-emit
+/// while true (the saga latches `dest_delivered` and the FSM absorbs the repeat) — a STANDING
+/// per-TICK (not per-frame; no 20Hz regression — D-24) reliable ack for the demote-tail duration;
+/// bounded by the tail, rising-edge gating deferred. HR1: the watermark is gateway-internal; only
+/// the boolean `DeliveredToObservers` crosses, on the existing SagaAck arm.
+fn recompute_delivery_watermarks(
+    sessions: &GatewaySessions,
+    config: &GatewayConfig,
+    outbox: &mut OutboundBox,
+) {
+    for session in sessions.by_session.values() {
+        let Some(progress) = session.transfer.as_ref() else {
+            continue;
+        };
+        if every_observer_delivered(sessions, progress.dest) {
+            reply_ack(
+                outbox,
+                config.orchestrator,
+                TransferControlAck::DeliveredToObservers {
+                    transfer: progress.transfer,
+                },
+            );
+        }
+    }
+}
+
+/// Whether the dest observer set is NON-EMPTY AND every observer has delivered >=1 frame on its
+/// dest sub. Iterates sessions directly (the `subs.get(&dest)` Some/None is the observer /
+/// non-observer split — a domain case, never a cross-lookup desync). Bitwise `&` so neither the
+/// found-nor-all arm is a short-circuit-uncoverable region (HR5). Empty observer set ⇒ false.
+#[must_use]
+fn every_observer_delivered(sessions: &GatewaySessions, dest: NodeId) -> bool {
+    let mut found = false;
+    let mut all = true;
+    for session in sessions.by_session.values() {
+        let Some(rec) = session.subs.get(&dest) else {
+            continue;
+        };
+        found = true;
+        all &= session.delivered.get(&rec.sub).copied().unwrap_or(0) >= 1;
+    }
+    found & all
 }
 
 fn push_control(outbox: &mut OutboundBox, to: NodeId, msg: &ServerControlMsg) {
@@ -793,6 +858,7 @@ fn on_client_control(
                     negotiated_minor: negotiated.minor,
                     transfer: None,
                     subs: BTreeMap::new(),
+                    delivered: BTreeMap::new(),
                     hot: Arc::new(SessionHot {
                         route: ArcSwap::from_pointee(RouteSnapshot {
                             authority: config.shard,
@@ -1565,7 +1631,7 @@ fn on_shard_control(
 fn on_shard_frame(
     from: NodeId,
     bytes: &[u8],
-    sessions: &GatewaySessions,
+    sessions: &mut GatewaySessions,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
 ) {
@@ -1578,51 +1644,60 @@ fn on_shard_frame(
         stats.undecodable += 1;
         return;
     };
-    // SCALE-1: re-tag the snapshot body ONCE per distinct sub-id into a SHARED
-    // `Arc`; the per-session fan-out is then a cheap fence check + refcount bump,
-    // never an O(entities) re-allocation per subscriber. The gateway therefore
-    // holds ONE body per sub-id regardless of how many sessions subscribe to it.
+    // 1d.5a: peek the `frame_id` ONCE off the wire (the per-observer delivery watermark advances
+    // by it). A malformed body fails HERE and the whole frame is abandoned (counted once) — and
+    // because the peek validates the leading `sub` varint, the per-session `retag_snapshot_sub`
+    // below is then INFALLIBLE (`.expect()`), so there is no second decode-error region.
+    let Ok(frame_id) = peek_snapshot_frame_id(&snapshot_bytes) else {
+        stats.undecodable += 1;
+        return;
+    };
+    // SCALE-1: re-tag the snapshot body ONCE per distinct sub-id into a SHARED `Arc`; the
+    // per-session fan-out is then a cheap fence check + refcount bump, never an O(entities)
+    // re-allocation per subscriber.
     let mut retagged: BTreeMap<SubId, vd_sim::io::Bytes> = BTreeMap::new();
     for session_id in sessions.subscribers_of(from) {
-        let Some(session) = sessions.by_session.get(&session_id) else {
+        let Some(session) = sessions.by_session.get_mut(&session_id) else {
             // The reverse index and `by_session` are kept in sync by `open_sub`/the
             // drain-sweep; a missing session is an index/table desync (counted, never silent).
             stats.frame_sub_desync += 1;
             continue;
         };
-        // Resolve which sub THIS session tagged `from`'s frames with (and at what fence) off
-        // the wait-free hot `SubTable`. The index and the table are republished together by
-        // `publish_subs`, so a subscriber-in-index ALWAYS has a `SubEntry` — a `None` here is
-        // an invariant breach, counted (C2 honesty floor), never a silent `continue`.
+        // Resolve THIS session's sub + per-shard accepted fence off the wait-free hot `SubTable`,
+        // then RELEASE that borrow (the values are `Copy`) so we may advance the cold watermark.
+        // A subscriber-in-index ALWAYS has a `SubEntry` (republished together by `publish_subs`);
+        // a `None` is an invariant breach, counted (C2 honesty floor), never silent.
         let table = session.hot.subs.load();
         let Some(entry) = table.lookup(from) else {
             stats.frame_sub_desync += 1;
             continue;
         };
+        let sub = entry.sub;
+        let accepted = entry.accepted;
+        let client = session.client;
+        drop(table);
         // Per-shard fence (NOT the session-global route fence): the source sub accepts source
         // frames at the source realm fence; the dest sub accepts dest frames at the dest realm
         // fence. A demoted old owner's stale frame is dropped + counted (fence rule 5).
-        if realm_fence.is_stale_against(entry.accepted) {
+        if realm_fence.is_stale_against(accepted) {
             stats.stale_frames_dropped += 1;
             continue;
         }
-        let body = match retagged.entry(entry.sub) {
-            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::btree_map::Entry::Vacant(e) => {
-                match retag_snapshot_sub(&snapshot_bytes, entry.sub) {
-                    Ok(b) => e.insert(vd_sim::io::bytes(b)),
-                    Err(_) => {
-                        // A corrupt snapshot body re-tags for no sub: count once and
-                        // abandon the whole frame (every sub would fail identically).
-                        stats.undecodable += 1;
-                        return;
-                    }
-                }
-            }
-        };
-        outbox
-            .0
-            .push((session.client, MsgClass::Snapshot, body.clone()));
+        // 1d.5a: an ACCEPTED, past-fence frame ADVANCES this observer-sub's delivery high-water —
+        // the standing (a) demote-predicate input. Only delivered (forwarded) frames count; a
+        // stale-dropped frame (above) does NOT advance it.
+        session
+            .delivered
+            .entry(sub)
+            .and_modify(|w| *w = (*w).max(frame_id))
+            .or_insert(frame_id);
+        let body = retagged.entry(sub).or_insert_with(|| {
+            vd_sim::io::bytes(
+                retag_snapshot_sub(&snapshot_bytes, sub)
+                    .expect("the frame_id peek validated the sub varint, so the re-tag is infallible"),
+            )
+        });
+        outbox.0.push((client, MsgClass::Snapshot, body.clone()));
     }
 }
 
@@ -4234,6 +4309,7 @@ mod tests {
                 negotiated_minor: 1,
                 transfer: None,
                 subs: BTreeMap::new(),
+                delivered: BTreeMap::new(),
                 hot: Arc::new(SessionHot {
                     route: ArcSwap::from_pointee(RouteSnapshot {
                         authority: SHARD,
@@ -4427,6 +4503,7 @@ mod tests {
                 negotiated_minor: 1,
                 transfer: None,
                 subs: BTreeMap::new(),
+                delivered: BTreeMap::new(),
                 hot: Arc::new(SessionHot {
                     route: ArcSwap::from_pointee(RouteSnapshot {
                         authority: SHARD,
@@ -4524,21 +4601,100 @@ mod tests {
             .insert(SessionId(0xC0DE));
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        on_shard_frame(SHARD, &frame, &sessions, &mut stats, &mut outbox);
+        on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
         assert_eq!(stats.frame_sub_desync, 1, "(a) missing session is counted");
         assert!(outbox.0.is_empty());
 
         // (b) a present session indexed under SHARD but with an EMPTY hot SubTable.
-        let (sessions, sid, _) = one_active_session();
+        let (mut sessions, sid, _) = one_active_session();
         sessions.by_session[&sid]
             .hot
             .subs
             .store(Arc::new(SubTable::default()));
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        on_shard_frame(SHARD, &frame, &sessions, &mut stats, &mut outbox);
+        on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
         assert_eq!(stats.frame_sub_desync, 1, "(b) lookup None is counted");
         assert!(outbox.0.is_empty(), "no frame forwarded on a desync");
+    }
+
+    #[test]
+    fn a_frame_with_a_malformed_snapshot_body_is_counted_undecodable_not_forwarded() {
+        // 1d.5a: on_shard_frame peeks the frame_id off the body BEFORE the fan (to advance the
+        // delivery watermark). A body that fails the peek — a corrupt/buggy shard — is counted
+        // (`undecodable`) and the WHOLE frame abandoned once, never forwarded. (The peek validating
+        // the sub varint is also what makes the per-session retag below infallible.)
+        let bad = postcard::to_allocvec(&ShardToGateway::Frame {
+            realm_fence: Fence(1),
+            source_tick: TickId(5),
+            snapshot_bytes: vec![0x80], // a truncated varint — peek_snapshot_frame_id errors
+        })
+        .expect("encode");
+        let (mut sessions, _sid, _) = one_active_session();
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_shard_frame(SHARD, &bad, &mut sessions, &mut stats, &mut outbox);
+        assert_eq!(stats.undecodable, 1, "a malformed snapshot body is counted undecodable");
+        assert!(outbox.0.is_empty(), "nothing forwarded on a malformed body");
+    }
+
+    #[test]
+    fn every_observer_delivered_requires_a_non_empty_all_delivered_observer_set() {
+        // The 1d.5a (a) predicate's three load-bearing properties, asserted directly (the p2
+        // capstone proves them end-to-end — a vacuous fire would release the source early and
+        // re-open the vanish — this pins them as a unit gate). `one_active_session` subscribes the
+        // session to SHARD as sub 0.
+        let (mut sessions, sid, _) = one_active_session();
+        // (1) ANTI-VACUOUS: no session subscribes to DEST → the EMPTY observer set is NOT satisfied
+        // (never a vacuous true — the saga must not be told "delivered" before the dest sub opens).
+        assert!(
+            !every_observer_delivered(&sessions, DEST),
+            "an empty dest-observer set never vacuously fires the demote",
+        );
+        // (2) NOT DELIVERED: the SHARD observer exists but its watermark is absent (0) → blocked.
+        assert!(
+            !every_observer_delivered(&sessions, SHARD),
+            "an observer with no delivered frame (watermark 0) blocks the predicate",
+        );
+        // (3) DELIVERED: advance the observer's sub-0 watermark to >=1 → satisfied.
+        sessions
+            .by_session
+            .get_mut(&sid)
+            .expect("session present")
+            .delivered
+            .insert(SubId(0), 1);
+        assert!(
+            every_observer_delivered(&sessions, SHARD),
+            "every (here: the one) dest observer delivered >=1 frame -> satisfied",
+        );
+    }
+
+    #[test]
+    fn on_shard_frame_advances_the_delivery_watermark_max_wins_and_stale_does_not() {
+        // 1d.5a: the delivery watermark advances through the REAL `on_shard_frame` path (not a
+        // manual insert): an accepted past-fence frame sets `delivered[sub] = frame_id`; a LOWER
+        // frame_id does NOT regress it (`.max`); a fence-STALE frame does NOT advance it (dropped
+        // before the advance). `one_active_session` = SubId(0) on SHARD @ accepted Fence(1).
+        let (mut sessions, sid, _) = one_active_session();
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        let wm = |s: &GatewaySessions| s.by_session[&sid].delivered.get(&SubId(0)).copied();
+
+        // (a) an accepted frame (Fence(1), frame_id 9) advances the watermark to 9.
+        let f9 = postcard::to_allocvec(&frame_msg(Fence(1), 9)).expect("encode");
+        on_shard_frame(SHARD, &f9, &mut sessions, &mut stats, &mut outbox);
+        assert_eq!(wm(&sessions), Some(9), "an accepted frame advances delivered[sub] to its frame_id");
+
+        // (b) a LOWER frame_id (5) does NOT regress the high-water (`.max`).
+        let f5 = postcard::to_allocvec(&frame_msg(Fence(1), 5)).expect("encode");
+        on_shard_frame(SHARD, &f5, &mut sessions, &mut stats, &mut outbox);
+        assert_eq!(wm(&sessions), Some(9), "a lower frame_id never lowers the watermark (.max)");
+
+        // (c) a fence-STALE frame (Fence(0) < accepted Fence(1)) is dropped — no advance.
+        let stale = postcard::to_allocvec(&frame_msg(Fence(0), 99)).expect("encode");
+        on_shard_frame(SHARD, &stale, &mut sessions, &mut stats, &mut outbox);
+        assert_eq!(wm(&sessions), Some(9), "a fence-stale frame does not advance the watermark");
+        assert_eq!(stats.stale_frames_dropped, 1);
     }
 
     // ---- Slice 1d.2b: SubscriptionReady + the source-sub close primitives -------
@@ -4912,6 +5068,13 @@ mod tests {
             ],
             "the dest sub opens (X1) and authority re-points to SubId(1) (FORK 0a / A1)"
         );
+        // 1d.5a: the dest sub is OPEN but NO dest frame is delivered yet → the standing delivery
+        // predicate is NOT satisfied → no premature DeliveredToObservers to the saga (anti-vacuous).
+        assert!(
+            !acks_to_orch(&ready_sent)
+                .contains(&TransferControlAck::DeliveredToObservers { transfer: XFER }),
+            "no DeliveredToObservers before the dest delivers a frame",
+        );
         // Both subs are held (the two-sub overlap), at their OWN realm fences:
         // SubId(0) on SHARD @ Fence(1) (login), SubId(1) on DEST @ Fence(5) (SubscriptionReady).
         assert_eq!(
@@ -4944,6 +5107,14 @@ mod tests {
             subs,
             vec![SubId(0), SubId(1)],
             "the avatar rides BOTH subs (source→SubId(0), dest→SubId(1)) — the overlap"
+        );
+        // 1d.5a: that dest frame ADVANCED the dest observer's watermark, so the standing predicate
+        // now holds → the gateway emits DeliveredToObservers{XFER} to the saga (the demote-predicate
+        // input). Value-asserted (not incidental): a wrong-transfer / silent / unconditional emit
+        // turns THIS red.
+        assert!(
+            acks_to_orch(&sent).contains(&TransferControlAck::DeliveredToObservers { transfer: XFER }),
+            "the delivered dest frame drives DeliveredToObservers{{XFER}} to the saga",
         );
         // A dest frame BELOW the dest's accepted fence (Fence(5)) is stale-dropped — proving the
         // PER-SHARD fence (not the session-global route fence) governs the dest sub.

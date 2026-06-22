@@ -22,13 +22,14 @@ use vd_core::{AccountId, EntityId, NodeId, SessionId, TickId, TransferId};
 use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::FaultFabric;
 use vd_harness::oracle::{
-    RenderSample, verify_authority_settled, verify_authority_unique, verify_input_conservation,
+    RenderSample, RenderTolerances, RenderTrace, verify_authority_settled, verify_authority_unique,
+    verify_input_conservation, verify_no_vanish, verify_pose_continuity,
 };
 use vd_harness::topology::{InspectReport, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
     DEST, ORCH, SHARD, gateway_buffered_count, live_sagas, p1_client, p2_cluster, read_subject,
-    saga_states, trigger_transfer, walk_forward,
+    saga_states, stub_config, trigger_transfer, walk_forward,
 };
 use vd_wire::channels::SubId;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
@@ -487,18 +488,10 @@ fn p2_dod_cross_cut_transfer_is_byte_identical_under_same_seed() {
     );
 }
 
-/// The CEILING on the 1c.8-interim vanish gap (D-2), DERIVED from the dest adopt-render latency — NOT a
-/// free tunable. The gap is bounded by the dest's adopt handshake, one one-tick fabric hop per step:
-/// `PrepareSubscribe → SubscriptionReady → open_sub → HeadRead → Adopted → drain+flip` (5 protocol hops)
-/// plus the `(request_pending_grants, process_inbound, emit_frames).chain()` intra-tick schedule slack
-/// (a few ticks). A render-lag regression that leaves saga/authority timing intact (so the `step_until`
-/// saga-settle panics stay green) but stalls the dest render BALLOONS this gap past the handshake budget
-/// — and turns the ceiling assertion RED. When D-2's ordered demote lands, the source is retained until
-/// the dest renders, the gap collapses to 0, and this whole branch flips to `verify_no_vanish`.
-const MAX_INTERIM_VANISH_TICKS: usize = 8;
-
 /// The longest run of consecutive ticks the subject rendered NOWHERE, BETWEEN its first and last
-/// rendered tick (ignoring the leading pre-login absence) — the 1c.8-interim VANISH gap (D-2).
+/// rendered tick (ignoring the leading pre-login absence). 1d.5a's delivery-gated source-sub release
+/// closes the former interim gap to ZERO (the seamless transition); a render-lag regression that
+/// re-opens a gap turns the capstone's `== 0` assertion (and `verify_no_vanish`) RED.
 fn max_absent_run(caps: &[CapturedTick]) -> usize {
     let (Some(first), Some(last)) = (
         caps.iter().position(|c| c.sample.is_some()),
@@ -515,34 +508,32 @@ fn max_absent_run(caps: &[CapturedTick]) -> usize {
     max
 }
 
-/// 1d.3 DoD — THE CROSS-SHARD CROSSING BECOMES VISIBLE. The client's OWN avatar, captured EVERY tick
-/// across the full transfer, REAPPEARS at the dest rendering the CROSSED pose (the SOURCE-realm seed-7
-/// pose, NOT the origin-adopt default), and the authoritative rendered sub FLIPS source→dest. Proven
-/// at the render-decision layer — the REAL `DeliveredView` the production client uses, driven from the
-/// harness `ScriptedClient`. Mutation-RED-verified at THIS e2e tier against drop-flip + suppress-dest.
-/// (render-origin — the render flip MISplaced to the adopt grant arm — is enforced at the UNIT tier by
+/// 1d.3/1d.5a DoD — THE SEAMLESS CROSS-SHARD CROSSING. The client's OWN avatar, captured EVERY tick
+/// across the full transfer, FLIPS source→dest rendering the CROSSED pose (the SOURCE-realm seed-7
+/// pose, NOT the origin-adopt default) with NO vanish — a true two-holder overlap the client de-dups
+/// to ONE render via `AuthorityChanged`. Proven at the render-decision layer (the REAL `DeliveredView`
+/// the production client uses, driven from the harness `ScriptedClient`) by the WireMonitor render
+/// oracles `verify_no_vanish` + `verify_pose_continuity` (world_pos basis; motion-derived ε, tightest K=0). Mutation-RED-
+/// verified at THIS e2e tier against drop-flip + suppress-dest. (render-origin — the render flip
+/// MISplaced to the adopt grant arm — is enforced at the UNIT tier by
 /// `stub.rs::the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach`, NOT here:
 /// this fixture buffers the crossing and drains+flips it in the SAME tick BEFORE `emit_frames`, so a
-/// misplaced flip never emits a seed-8 origin frame — the e2e variant that forces the crossing-AFTER-
-/// adopt ordering, where it would, is the D-2 follow-up. Documented honestly in the negative controls.)
+/// misplaced flip never emits a seed-8 origin frame — the e2e crossing-AFTER-adopt variant is the
+/// follow-up. Documented in the negative controls.)
 ///
-/// ⚠️ INTERIM (1c.8 promote-before-demote, DEFERRED D-2) — PINNED exists-to-be-flipped: the source sub
-/// closes at the FAST unconditional saga `ReleaseSubscribe` BEFORE the dest's late
-/// adopt+crossing-drain renders, so there is NO seamless two-holder overlap yet — the avatar VANISHES
-/// for a bounded gap (measured) between the source release and the dest render. SEAMLESSNESS (the
-/// source RETAINED as a ghost until the dest renders ⇒ a true two-holder overlap the client de-dups
-/// via `AuthorityChanged`, ZERO vanish) is the D-2 ordered demote-before-promote, owed at 1d.4/1d.5.
-/// The NO-VANISH + POSE-CONTINUITY oracles + meta-tests are ALREADY built (`harness::oracle`); this
-/// gate ASSERTS the visible crossing now and PINS `overlap_ticks == 0` + `vanish_gap > 0` so that when
-/// D-2 lands they FLIP to `overlap_ticks >= 1` + `verify_no_vanish`/`verify_pose_continuity` (never
-/// silently relied on, never forgotten).
+/// ✅ SEAMLESS LANDED IN 1d.5a (earlier than the D-2 plan predicted): delivery-gating holds the source
+/// sub OPEN until the dest is delivered to its observer, so the FORK-0a two-sub overlap (designed in
+/// 1d.2) finally manifests — `overlap_ticks >= 1`, `vanish_gap == 0`, the no-vanish/pose-continuity
+/// oracles GREEN. This is the READ-plane seam; the WRITE-plane fence-enforced ordered
+/// demote-before-promote + the `GhostFlow` collider feed + the band-exit `Despawn` are still the
+/// D-2/1d.5b tear-out (authority-ordering robustness + cross-boundary collision, NOT the render).
 #[test]
 fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
     let fabric = FaultFabric::new(909, 2);
     let mut caps: Vec<CapturedTick> = Vec::new();
     let _ = run_cut_transfer(&fabric, &mut |t| caps.push(capture_subject(t)));
 
-    // The subject's rendered samples in order (skipping pre-login + the interim vanish ticks).
+    // The subject's rendered samples in order (skipping the pre-login ticks; there is no vanish now).
     let rendered: Vec<RenderSample> = caps.iter().filter_map(|c| c.sample).collect();
     let source_sub = rendered.first().expect("the subject renders at some tick").sub;
     let dest_sample = *rendered.last().expect("the subject renders at some tick");
@@ -577,29 +568,39 @@ fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
         "the rendered pose is the walked crossed pose, not the origin-adopt default",
     );
 
-    // (3) THE 1c.8-INTERIM VANISH — PINNED exists-to-be-flipped (D-2). The source sub closes before
-    // the dest renders, so the two-holder overlap NEVER occurs and the avatar vanishes for a bounded
-    // gap. When the D-2 ordered demote retains the source until the dest renders, BOTH flip:
-    // overlap_ticks ⇒ ≥1, vanish_gap ⇒ 0 (then assert verify_no_vanish/verify_pose_continuity here).
+    // (3) SEAMLESS — the interim vanish is CLOSED (1d.5a). Delivery-gating now holds the source sub
+    // OPEN until the dest is delivered to the observer, so the FORK-0a two-sub overlap finally
+    // manifests: the source sub still holds its track AT the tick the dest sub goes live, the client
+    // renders the dest (chosen_subs de-dups to ONE — no double-vision), and the avatar renders
+    // CONTINUOUSLY across the flip — NO vanish. The WireMonitor render oracles (built 1d.3b, world_pos
+    // basis) gate it, from the subject's FIRST render (the client draws nothing before its own login)
+    // through quiesce. NO MAGIC: ε_pos/ε_rot are DERIVED from the shard's motion params
+    // (move_speed·dt + slack); the no-vanish K is 0 — it follows from band_ticks=1 (the single-tick
+    // FORK-0a overlap) and delay=0 (zero-fault lockstep), the intentionally tightest bound (present
+    // EVERY tick), NOT from motion params. So verify_no_vanish(K=0) is the oracle form of the explicit
+    // `max_absent_run == 0` below; both gate the seamless no-vanish.
+    let first = caps
+        .iter()
+        .position(|c| c.sample.is_some())
+        .expect("the subject renders at some tick");
+    let trace: RenderTrace = caps[first..].iter().map(|c| (c.tick, c.sample)).collect();
+    let cfg = stub_config();
+    let tol = RenderTolerances::derive(cfg.move_speed_mps, cfg.tick_dt_s, 0, 0, 1, 1e-9, 0.0, 1e-9);
+    verify_no_vanish(&trace, tol).expect("the avatar never vanishes across the seamless crossing");
+    verify_pose_continuity(&trace, tol)
+        .expect("the avatar's world pose is continuous across the source→dest flip (no teleport)");
+    // ANTI-VACUITY: the two-holder OVERLAP actually happened — at ≥1 tick BOTH the source sub AND
+    // the dest sub held a track for the subject (the seamless window the no-vanish rides on). Without
+    // it, "no vanish" could pass with the source never dropping (a degenerate single-sub render).
     let overlap_ticks = caps.iter().filter(|c| c.subs_holding.len() >= 2).count();
+    assert!(
+        overlap_ticks >= 1,
+        "the source + dest subs OVERLAP (both emit the avatar) — the seamless two-holder window",
+    );
     assert_eq!(
-        overlap_ticks, 0,
-        "INTERIM (D-2): no seamless two-holder overlap yet — flips to ≥1 when the ordered demote retains the source",
-    );
-    let vanish_gap = max_absent_run(&caps);
-    assert!(
-        vanish_gap > 0,
-        "INTERIM (D-2): the avatar vanishes for a bounded gap (source released before the dest renders) — \
-         flips to 0 (verify_no_vanish) when the ordered demote lands; measured gap = {vanish_gap}",
-    );
-    // ...but the gap is BOUNDED by the dest adopt-render handshake (DERIVED, not a free tunable). A
-    // render-lag regression that stalls the dest render — saga timing intact, so the `step_until`
-    // saga-settle panics stay green — balloons this past the handshake budget and turns THIS red. So
-    // the interim vanish is pinned BOTH-SIDED: it exists (> 0) AND it never silently worsens (<= budget).
-    assert!(
-        vanish_gap <= MAX_INTERIM_VANISH_TICKS,
-        "INTERIM (D-2): the vanish gap stays within the dest adopt-render handshake budget \
-         ({MAX_INTERIM_VANISH_TICKS} ticks) — a render-lag regression balloons it; measured gap = {vanish_gap}",
+        max_absent_run(&caps),
+        0,
+        "ZERO vanish: the source sub holds until the dest is delivered (the seamless transition)",
     );
 }
 

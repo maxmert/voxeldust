@@ -67,6 +67,13 @@ struct LiveSaga {
     /// it is `Some` before the CAS for an Entity subject, so `EmitCrossing` never ships a None pose.
     /// (The TLV state blob joins this at 1d.6; pose-only now.)
     flushed_pose: Option<StampedPose>,
+    /// 1d.5a — the (a) demote predicate's latch: set true when the gateway reports
+    /// `DeliveredToObservers` (the dest delivered >=1 frame to every current observer). The demote
+    /// pass fires `DemoteComplete` only for a `Demoting` saga whose `dest_delivered` is true, so the
+    /// source releases AFTER the dest is delivered+rendered (shrinking the interim vanish). NOTE
+    /// (1d.5b owes): this orchestrator latch is monotone — the gateway-side watermark is the
+    /// standing/re-blockable half; full standing semantics is a 1d.5b refinement (DEFERRED note).
+    dest_delivered: bool,
 }
 
 /// A pending create-on-trigger. Enqueued by [`SagaRuntimeRes::start_transfer`] and processed
@@ -324,45 +331,43 @@ fn run_to_quiescence(
     (state, tombstone, rejected)
 }
 
-/// INTERIM (D-2, LANDED-interim): the bandless stand-in for the post-1d demote predicate.
+/// 1d.5a — the (a) demote predicate: fire `DemoteComplete` for a `Demoting` saga ONLY when the dest
+/// has been DELIVERED to every current observer (the standing gateway watermark, latched as
+/// `LiveSaga.dest_delivered` from `DeliveredToObservers`). This REPLACES the bandless unconditional
+/// interim. Gating on delivery delays `ReleaseSubscribe` until after the dest is delivered+rendered,
+/// SHRINKING the interim vanish — it does NOT reach 0 (the source is still poll-demoted, never a
+/// rendering two-holder; that is 1d.5b).
 ///
-/// The PROPER `DemoteComplete` fires only when (a) the dest acked delivered-to-ALL-observers
-/// (a server-side watermark) AND (b) the entity left the OverlapBand (K_SAFETY-gated,
-/// integration.json Issue 15) — neither machinery exists yet. So this UNCONDITIONALLY delivers
-/// `DemoteComplete` to every live saga sitting in `Demoting`, the EXACT D-2-mandated shape: a
-/// new CALLER of the existing `deliver` sink, NOT a magic tick and NOT an in-flight-queue
-/// injection. It is body-swappable to the proper predicate post-1d with ZERO FSM change
-/// (wf_0ed2dc0c). It fires at most once per saga (the next tick the saga is in `Releasing`, not
-/// `Demoting`); a redelivery to a saga already past `Demoting` is the FSM's catch-all no-op.
+/// (b) band-exit is DEFERRED to 1d.5b (D-2): the stub fixture has no entity that moves across a
+/// velocity-safe SOI band (both source + dest cap at ~0.4 m from origin vs a forced ≥2.1 m band
+/// edge), so gating on band-exit here would PARK the saga forever. Band-exit lands in 1d.5b as the
+/// retained Ghost's `Despawn` trigger, where `GhostFlow::Delta` gives it a moving pose. The
+/// `(Demoting, Timeout)` arm (saga.rs) is the LANDING PAD for a re-drive, but there is NO production
+/// `Timeout` PRODUCER yet (Slice-2): today a never-delivered Demoting saga PARKS (visible only as
+/// growing `now - since` in the admin staleness view); the loud-fail-via-step-cap is a TEST-tier
+/// property (the harness `step_until`). Slice-2's saga-timeout producer closes that.
 ///
-/// FF-1 (loop-depth bound): the resulting `Demoting + DemoteComplete → Releasing +
-/// Send(ReleaseSubscribe)` emits NO synchronous-feedback action (no CAS), so `run_to_quiescence`
-/// processes a single action with an empty event queue — loop depth stays at 1, preserving the
-/// FF-1 second-feedback-source bound. This runs as a SEPARATE pass OUTSIDE the per-ack loop.
-fn interim_demote_complete(
+/// FF-1 (loop-depth bound): `Demoting + DemoteComplete → Releasing + Send(ReleaseSubscribe)` emits
+/// NO synchronous-feedback action, so `run_to_quiescence` processes a single action with an empty
+/// event queue — loop depth stays 1. This runs as a SEPARATE pass OUTSIDE the per-ack loop.
+fn demote_when_delivered_and_exited(
     runtime: &mut SagaRuntimeRes,
     dir: &mut DirectoryCore,
     outbox: &mut OutboundBox,
     epoch: EpochId,
     now: UniverseTick,
 ) {
-    // Snapshot the transfers in `Demoting` FIRST (immutable borrow), then `deliver` each (a
-    // mutable borrow per call). The two-arm filter — Demoting → collect, not-Demoting → skip —
-    // is a straight monomorphic predicate; both arms are covered by the unit test.
-    let demoting: Vec<TransferId> = runtime
+    // Snapshot the SATISFIED transfers FIRST (immutable borrow): in `Demoting` AND delivered. Then
+    // `deliver` each (a mutable borrow per call). Bitwise `&` (codebase convention) — neither the
+    // state-match nor the `delivered` read is a short-circuit-uncoverable region (HR5). Both filter
+    // outcomes (fire / skip-not-delivered / skip-not-Demoting) are covered by unit twins.
+    let ready: Vec<TransferId> = runtime
         .sagas
         .iter()
-        .filter(|(_, live)| matches!(live.state, SagaState::Demoting { .. }))
+        .filter(|(_, live)| matches!(live.state, SagaState::Demoting { .. }) & delivered(live))
         .map(|(transfer, _)| *transfer)
         .collect();
-    for transfer in demoting {
-        tracing::warn!(
-            transfer = transfer.0,
-            "interim_demote_complete: BANDLESS interim stand-in firing DemoteComplete \
-             unconditionally — the proper (observer-watermark && OverlapBand-exit) predicate \
-             is owed post-1d (D-2 stays partially open); never let this read as if the proper \
-             demote signal exists"
-        );
+    for transfer in ready {
         deliver(
             runtime,
             dir,
@@ -373,6 +378,14 @@ fn interim_demote_complete(
             SagaEvent::DemoteComplete,
         );
     }
+}
+
+/// The (a) predicate: the dest delivered >=1 frame to every current observer (latched from the
+/// standing gateway watermark). A branchless monomorphic shim — single bool read, single region.
+/// (1d.5b adds the `& band_exited` conjunct, bitwise per the codebase convention.)
+#[must_use]
+fn delivered(live: &LiveSaga) -> bool {
+    live.dest_delivered
 }
 
 /// Apply one event to an existing saga, then run it to quiescence + persist the result. A
@@ -386,9 +399,15 @@ fn deliver(
     transfer: TransferId,
     event: SagaEvent,
 ) {
-    let Some(live) = runtime.sagas.get(&transfer) else {
+    let Some(live) = runtime.sagas.get_mut(&transfer) else {
         return;
     };
+    // 1d.5a: latch the (a) delivery predicate from the standing watermark signal. The FSM does NOT
+    // act on `DestDelivered` (its catch-all absorbs it — no state change); the demote pass reads
+    // THIS latch to decide when to fire `DemoteComplete`. Value-compare (not `matches!`).
+    if event == SagaEvent::DestDelivered {
+        live.dest_delivered = true;
+    }
     let ctx = live.ctx;
     let gateway = live.gateway;
     let flush_pose = live.flushed_pose; // Copy; the EmitCrossing executor reads it
@@ -477,6 +496,7 @@ fn process_starts(
                 gateway,
                 since: now,
                 flushed_pose: None, // filled when the source flushes (after Freezing)
+                dest_delivered: false, // latched when the gateway reports DeliveredToObservers (1d.5a)
             },
         );
         // The start actions are PrepareSubscribe only — no EmitCrossing yet, so `None` is correct.
@@ -552,10 +572,11 @@ pub fn drive_sagas(
             _ => {}
         }
     }
-    // AFTER the ack loop: drive the demote tail. The bandless interim (D-2) delivers
-    // DemoteComplete to every saga in `Demoting`, advancing it to `Releasing` (which emits
-    // ReleaseSubscribe; the gateway acks Released → Done → Tombstone next tick).
-    interim_demote_complete(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
+    // AFTER the ack loop: drive the demote tail. The (a) predicate (1d.5a) delivers DemoteComplete
+    // to every `Demoting` saga whose dest is DELIVERED to all current observers, advancing it to
+    // `Releasing` (which emits ReleaseSubscribe; the gateway acks Released → Done → Tombstone next
+    // tick). Band-exit (the (b) conjunct) is owed at 1d.5b (D-2).
+    demote_when_delivered_and_exited(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
 }
 
 #[cfg(test)]
@@ -873,11 +894,18 @@ mod tests {
         assert_eq!(head.authority, AuthorityRef::Shard(DEST));
         assert_eq!(head.fence, new_fence);
 
-        // Committed (the route swapped) advances to Demoting; in the SAME tick the bandless
-        // interim (1c.8 `interim_demote_complete`, run after the ack loop) fires DemoteComplete
-        // → Releasing, emitting ReleaseSubscribe to close the source subscription. The saga is
-        // still live (Releasing is not terminal).
+        // Committed (the route swapped) advances to Demoting. With the 1d.5a (a) predicate the
+        // demote does NOT fire yet — the dest is not yet delivered to its observers — so NO
+        // ReleaseSubscribe (the source release WAITS for delivery, shrinking the interim vanish).
         rig.ack(TransferControlAck::Committed { transfer: XFER });
+        assert!(
+            rig.drain_gateway().is_empty(),
+            "Demoting waits for delivery — no premature ReleaseSubscribe"
+        );
+        assert_eq!(rig.live(), 1, "still live in Demoting, awaiting delivery");
+        // DeliveredToObservers (the standing gateway watermark) latches dest_delivered; the
+        // same-tick demote pass then fires DemoteComplete → Releasing, emitting ReleaseSubscribe.
+        rig.ack(TransferControlAck::DeliveredToObservers { transfer: XFER });
         assert_eq!(
             rig.drain_gateway(),
             vec![saga_wire(TransferControl::ReleaseSubscribe {
@@ -885,7 +913,7 @@ mod tests {
                 session: SESSION,
                 src: SOURCE,
             })],
-            "the interim demote drives Demoting → Releasing in the same tick"
+            "delivery drives Demoting → Releasing"
         );
         assert_eq!(rig.live(), 1);
 
@@ -895,12 +923,10 @@ mod tests {
     }
 
     #[test]
-    fn interim_demote_complete_drives_a_demoting_saga_to_done() {
-        // D-2 exists-to-be-flipped: a saga manually placed in `Demoting` advances
-        // Demoting → Releasing (emitting ReleaseSubscribe) → Done across drive_sagas ticks,
-        // driven SOLELY by the unconditional bandless interim (no DemoteComplete ack exists).
-        // This pins the interim caller; when the proper observer-watermark predicate lands
-        // post-1d, this test's DRIVER changes but the FSM tail it exercises does not.
+    fn demote_fires_when_a_demoting_saga_is_delivered() {
+        // 1d.5a (a) predicate FIRES: a saga in `Demoting` with `dest_delivered == true` advances
+        // Demoting → Releasing (emitting ReleaseSubscribe) → Done across drive_sagas ticks, driven
+        // by the delivery predicate (no DemoteComplete ack exists — the demote pass synthesizes it).
         let mut rig = Rig::new();
         rig.grant_subject(Fence(1));
         let new_fence = Fence(1).next();
@@ -916,11 +942,12 @@ mod tests {
                     gateway: GATEWAY,
                     since: UniverseTick(0),
                     flushed_pose: None,
+                    dest_delivered: true, // 1d.5a: the (a) predicate satisfied → the demote fires
                 },
             );
         }
-        // One tick: drive_sagas runs interim_demote_complete → DemoteComplete → Releasing →
-        // ReleaseSubscribe emitted (the warn path is exercised; verified by the saga advancing).
+        // One tick: drive_sagas runs demote_when_delivered_and_exited → (delivered) DemoteComplete →
+        // Releasing → ReleaseSubscribe emitted (verified by the saga advancing).
         rig.settle();
         assert_eq!(
             rig.drain_gateway(),
@@ -929,7 +956,7 @@ mod tests {
                 session: SESSION,
                 src: SOURCE,
             })],
-            "the interim fires DemoteComplete and the FSM emits ReleaseSubscribe"
+            "the predicate fires DemoteComplete and the FSM emits ReleaseSubscribe"
         );
         assert_eq!(rig.live(), 1, "Releasing is not terminal");
         // Released closes the tail: Done → Tombstone → live()→0.
@@ -938,20 +965,51 @@ mod tests {
     }
 
     #[test]
-    fn interim_demote_complete_skips_a_non_demoting_saga() {
-        // The two-arm filter's SKIP arm: a saga NOT in Demoting (here Preparing) is untouched
-        // by the interim — it emits no ReleaseSubscribe and stays in its current phase.
+    fn demote_skips_a_demoting_saga_that_is_not_delivered() {
+        // 1d.5a (a) predicate's SKIP arm (`& delivered` false): a saga IN `Demoting` but with
+        // `dest_delivered == false` is NOT fired — it emits no ReleaseSubscribe and stays in
+        // Demoting (the source release waits for the dest to be delivered to all observers).
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        let new_fence = Fence(1).next();
+        {
+            let c = ctx(DurabilityClass::Durable, Fence(1));
+            let mut runtime = rig.orch.world_mut().resource_mut::<super::SagaRuntimeRes>();
+            runtime.sagas.insert(
+                XFER,
+                LiveSaga {
+                    ctx: c,
+                    state: SagaState::Demoting { new_fence },
+                    gateway: GATEWAY,
+                    since: UniverseTick(0),
+                    flushed_pose: None,
+                    dest_delivered: false, // NOT delivered → the demote must NOT fire
+                },
+            );
+        }
+        rig.settle();
+        assert!(
+            rig.drain_gateway().is_empty(),
+            "an undelivered Demoting saga is NOT released — it waits for delivery"
+        );
+        assert_eq!(rig.live(), 1, "still live, still in Demoting");
+    }
+
+    #[test]
+    fn demote_skips_a_non_demoting_saga() {
+        // The state-match SKIP arm: a saga NOT in Demoting (here Preparing) is untouched by the
+        // demote pass — it emits no ReleaseSubscribe and stays in its current phase.
         let mut rig = Rig::new();
         rig.grant_subject(Fence(1));
         rig.trigger(ctx(DurabilityClass::Durable, Fence(1)));
         rig.settle(); // process the start → Preparing (PrepareSubscribe emitted)
         let _ = rig.drain_gateway();
-        // Another tick with no acks: drive_sagas runs interim_demote_complete, which finds the
-        // saga in Preparing (not Demoting) and skips it — nothing new is sent.
+        // Another tick with no acks: drive_sagas runs the demote pass, which finds the saga in
+        // Preparing (not Demoting) and skips it — nothing new is sent.
         rig.settle();
         assert!(
             rig.drain_gateway().is_empty(),
-            "a non-Demoting saga is skipped by the interim"
+            "a non-Demoting saga is skipped by the demote pass"
         );
         assert_eq!(rig.live(), 1, "still live in Preparing");
     }

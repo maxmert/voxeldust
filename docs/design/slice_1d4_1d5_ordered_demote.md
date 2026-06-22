@@ -73,21 +73,23 @@
 - **Gates:** Ghost emits nothing; Ghost retained in `Dots` after the poll; Ghost excluded from
   `held_entities`; `Authority::apply` re-exercised at new call sites. The capstone pins do NOT flip yet.
 
-### 1d.5a — the (a) reshape-free predicate body-swap (standing watermark + band exit)
-- **Observer watermark (server-side, cold):** sibling cold map on `Session` keyed `SubId → frame_id`,
-  written in `on_shard_frame` at the `outbox.push` instant (the only HR1-legal delivery point). Off the
-  wait-free SubTable.
-- **Standing predicate (NOT a latched bool):** `dest_delivered` recomputed each tick over the *current*
-  `subscribers_of(dest)` — every current observer has watermark ≥ 1 dest frame. An observer opening
-  mid-demote inherits watermark 0 and re-blocks. ("No vanish, period," not "no vanish for a transient set.")
-- **Band:** per-boundary `OverlapBand::for_planet_soi`/`for_system_soi` + per-entity `BandMembership` via
-  `update_membership` on the swept `segment_shell_crossing` (reuses the proptested geometry + hysteresis).
-- `interim_demote_complete` → `demote_when_delivered_and_exited`: fire `DemoteComplete` only when
-  delivered-to-all-current-observers AND entity-left-band. Branching hoisted into a monomorphic
-  `delivered_and_exited(saga) -> bool` (tlv.rs shape).
-- **Gates:** per-observer watermark advance; an observer opening after threshold re-blocks; both predicate
-  arms covered; band hysteresis; CI band inequality `overlap_band_ticks > max_fabric_delay >=
-  demote_latency`. `vanish_gap` SHRINKS (still > 0; `overlap_ticks` still 0). D-2 (a) lands.
+### 1d.5a — the (a) predicate (DELIVERY-ONLY) — ✅ DONE, and it landed SEAMLESS early
+> RE-LOCK (USER-confirmed, plan `wf_1b64b75e`): 1d.5a is the DELIVERY watermark ONLY. The "+ band exit"
+> conjunct moved to 1d.5b — a probe proved it UNSATISFIABLE in the stub (source + dest cap at 0.4 m vs a
+> velocity-safety-forced ≥2.1 m band edge → would PARK the saga). Band-exit lands in 1d.5b on a moving Ghost.
+- **Observer watermark (server-side, cold):** `Session.delivered: BTreeMap<SubId, frame_id>`, written in
+  `on_shard_frame` at the push instant (peeked via `peek_snapshot_frame_id`; only ACCEPTED, past-fence frames
+  advance it; removed at the drain-sweep). Off the wait-free SubTable (HR1).
+- **Standing predicate (NOT a latched gateway signal):** `every_observer_delivered` recomputes each tick over
+  the CURRENT `subscribers_of(dest)` — NON-EMPTY required (anti-vacuous) AND every observer watermark ≥ 1.
+  Emitted as `DeliveredToObservers`, latched orchestrator-side as `LiveSaga.dest_delivered`.
+- `interim_demote_complete` → `demote_when_delivered_and_exited`: fires `DemoteComplete` when `delivered(live)`
+  (single-bool shim; 1d.5b adds `& band_exited`). Plus a `(Demoting, Timeout)` loud-fail arm (pulled forward).
+- **✅ SEAMLESS LANDED HERE (earlier than predicted):** delivery-gating delays the source-SUB `ReleaseSubscribe`
+  until the dest is delivered, so the source sub HOLDS through the dest's first frame → the FORK-0a two-sub
+  overlap manifests → the capstone flipped to `overlap_ticks >= 1` + `vanish_gap == 0` + `verify_no_vanish`/
+  `verify_pose_continuity` (GREEN). This is the READ-plane seam; the WRITE-plane ordering is still 1d.5b.
+- **Band machinery (OverlapBand/BandMembership, the CI band inequality) → 1d.5b** (where the Ghost moves).
 
 ### 1d.5b — the (b) tear-out + the seamless close (flips the headline)
 - **Saga ordering gate:** `Swapping→Demoting` emits `Demote`; new **`Promoting`** state entered on BOTH

@@ -229,6 +229,20 @@ pub fn retag_snapshot_sub(bytes: &[u8], sub: SubId) -> Result<Vec<u8>, HeaderErr
     Ok(out)
 }
 
+/// Peek the `frame_id: u64` of a postcard-encoded [`crate::channels::SnapshotDatagram`] WITHOUT
+/// decoding the rest — it is the SECOND field, right after `sub: SubId(u32)`. The gateway's
+/// per-observer delivery watermark (1d.5a) reads this off each forwarded dest frame to advance the
+/// `delivered` high-water (the body `sub` is irrelevant — the watermark keys on the gateway's own
+/// per-session `entry.sub`). Conformance is property-tested against the real codec.
+///
+/// # Errors
+/// [`HeaderError`] if the buffer is not a valid `sub` u32 varint followed by a `frame_id` u64 varint.
+pub fn peek_snapshot_frame_id(bytes: &[u8]) -> Result<u64, HeaderError> {
+    let (_, sub_len) = read_varint(bytes, 5)?; // skip the leading `sub: SubId(u32)`
+    let (frame_id, _) = read_varint(&bytes[sub_len..], 10)?;
+    Ok(frame_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +420,16 @@ mod tests {
             retag_snapshot_sub(&[], SubId(0)),
             Err(HeaderError::TruncatedVarint)
         );
+        // peek_snapshot_frame_id: empty, a sub then a truncated frame_id varint, and a too-wide sub.
+        assert_eq!(peek_snapshot_frame_id(&[]), Err(HeaderError::TruncatedVarint));
+        assert_eq!(
+            peek_snapshot_frame_id(&[0x01, 0x80]),
+            Err(HeaderError::TruncatedVarint)
+        );
+        assert_eq!(
+            peek_snapshot_frame_id(&[0x80; 6]),
+            Err(HeaderError::VarintTooWide)
+        );
     }
 
     #[test]
@@ -470,6 +494,16 @@ mod tests {
             snap.sub = SubId(new);
             let reference = postcard::to_allocvec(&snap).expect("encode reference");
             prop_assert_eq!(retagged, reference, "byte-identical to a full re-encode");
+        }
+
+        /// The frame-id peek reads the SAME `frame_id` a full decode would, for arbitrary `sub` +
+        /// `frame_id` (the 1d.5a watermark trusts the wire layout, never the body decode).
+        #[test]
+        fn peek_frame_id_agrees_with_postcard(sub in any::<u32>(), frame_id in any::<u64>()) {
+            let mut snap = snapshot(SubId(sub));
+            snap.frame_id = frame_id;
+            let bytes = postcard::to_allocvec(&snap).expect("encode");
+            prop_assert_eq!(peek_snapshot_frame_id(&bytes).expect("peek"), frame_id);
         }
     }
 }

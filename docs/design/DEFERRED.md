@@ -209,13 +209,18 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
      `DemoteComplete`) is EXACTLY the gate that closes this — i.e. the seamless no-vanish visible-crossing gate is
      BLOCKED on D-2(a)+(b), not on anything in 1d.3's render-only scope. 1d.3 DID land the visible crossing (the dest
      renders the crossed seed-7 pose from the dest sub); it did NOT — and structurally cannot, pre-D-2 — land the
-     seamless overlap. **PINNED tripwires (flip when D-2 lands):** the gate
-     `p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose` (in `tests/tests/p2_transfer_gates.rs`)
-     asserts the visible crossing NOW and pins the interim with `overlap_ticks == 0` (no seamless two-holder overlap)
-     + `vanish_gap > 0` (the avatar renders nowhere for a bounded run). When (a) retains the source until the dest is
-     delivered-to-observers, BOTH flip — `overlap_ticks >= 1` and `vanish_gap == 0` — and the gate switches to
-     asserting the ALREADY-BUILT `verify_no_vanish` + `verify_pose_continuity` render oracles (`harness::oracle`,
-     with their hand-built failing meta-tests). The oracles + their tolerances are done; only the demote ordering is owed.
+     seamless overlap. **✅ FLIPPED IN 1d.5a (EARLIER than this finding predicted — the prediction is corrected
+     here):** the (a) delivery predicate ALONE closed the render vanish. The finding above said the seamless overlap
+     was BLOCKED on (a)+(b); the reality is that gating `DemoteComplete` on dest delivery delays the saga's
+     `ReleaseSubscribe` (the source-SUB close) until AFTER the dest is delivered+rendered — so the source sub HOLDS
+     its track through the dest's first frame, the FORK-0a two-sub overlap (designed in 1d.2) finally manifests, and
+     the client de-dups to ONE render via `AuthorityChanged`. The capstone
+     `p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose` now asserts `overlap_ticks >= 1` +
+     `vanish_gap == 0` + the `verify_no_vanish`/`verify_pose_continuity` oracles (GREEN). The RENDER seamless is a
+     READ-plane property (the source-sub release TIMING); it is INDEPENDENT of the (b) WRITE-plane ordering tear-out,
+     which is still owed (the source still poll-demotes its authority, the dest still autonomously promotes — no
+     fence-enforced demote-before-promote yet). So 1d.5a delivered seamless RENDER; (b) delivers authority-ordering
+     ROBUSTNESS + the GhostFlow collider feed + the band-exit Despawn.
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
      by the **fence**, not by cooperative in-memory state." The interim's source freeze IS cooperative in-memory
      (`self_fence_foreign_entity` does a local `dots.remove` with NO fence pushed to the gateway to drop stale
@@ -236,11 +241,25 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
      structurally blind to a foreign takeover and can strand. Inert today (no 1c.8 scenario issues `DetachSession`
      mid-transfer); owed a unit test once the second (logout) producer lands.
 - **STILL OWED (proper, post-1d band/ghost slice) — TWO distinct pieces, NOT one predicate body-swap:**
-  - **(a) the demote PREDICATE (reshape-free, body-swap):** `interim_demote_complete`'s unconditional fire →
-    the EVENT-DRIVEN conjunction "dest **delivered to all observers** (server-side watermark, never a client ack —
-    HR1) **AND** entity **left the source overlap band** (`OverlapBand::update_membership` false on the swept
-    `segment_shell_crossing`, `width_safe_for`/`K_SAFETY` hysteresis — NO magic tick)". This ONE function's body
-    is genuinely reshape-free (`wf_0ed2dc0c`).
+  - **(a) the demote PREDICATE — ✅ LANDED IN 1d.5a (delivery half):** `interim_demote_complete` →
+    `demote_when_delivered_and_exited`, gating `DemoteComplete` on a STANDING server-side delivery watermark
+    (`gateway.rs` `Session.delivered: BTreeMap<SubId, frame_id>` advanced in `on_shard_frame`, the recomputed
+    `every_observer_delivered` conjunction over the current dest observers (sessions with an open dest sub —
+    the same set `subscribers_of(dest)` indexes, scanned directly off `by_session.subs`) — NON-EMPTY required, anti-vacuous;
+    emitted as `DeliveredToObservers`, latched as `LiveSaga.dest_delivered`; HR1 gateway-internal, never a client ack).
+    This ALONE closed the render vanish (above). A `(Demoting, Timeout)` self-re-emit arm was pulled forward as the
+    re-drive LANDING PAD — but ⚠️ there is NO production `SagaEvent::Timeout` PRODUCER yet (no `now - since` deadline
+    scan in the orchestrator; owed at Slice-2 — see the D-3/lease + saga-timeout items). So a production never-delivered
+    Demoting saga currently PARKS (emits nothing), visible ONLY as growing `now - since` in the admin staleness view;
+    the loud-fail-via-`step_until`-cap is a TEST-tier property, NOT a production guarantee. Do not read this arm as a
+    live safety net until Slice-2 injects `Timeout` on a deadline.
+    **⚠️ band-exit half DEFERRED to 1d.5b:** the conjunction's "entity **left the source overlap band**"
+    (`OverlapBand::update_membership` on the swept `segment_shell_crossing`, `K_SAFETY`-derived — geometry already
+    built in `core/src/geometry.rs`) is UNSATISFIABLE in the stub fixture (proven by probe `wf_1b64b75e`: source +
+    dest both cap at 0.4 m from origin vs a velocity-safety-forced ≥2.1 m band edge → would PARK the saga forever).
+    It lands in 1d.5b as the retained Ghost's `Despawn` trigger, evaluated on a Ghost that 1d.5b gives a moving
+    `GhostFlow::Delta` pose — where a relative-to-anchor shell crossing is real. The predicate then becomes
+    `dest_delivered & band_exited` (bitwise). The reshape-free promise (`wf_0ed2dc0c`) held for the delivery half.
   - **(b) the source-side ORDERED, fence-enforced demote (a TEAR-OUT, NOT a body-swap):** replace the `stub.rs`
     `granted_key_poll_tick`/`self_fence_foreign_entity` POLL with a SAGA-pushed `Demote`/`DemoteAck` driving the
     per-entity `authority.rs` `Owned→Frozen→Ghost` FSM — the source flips to a **retained ghost-as-collider** (so

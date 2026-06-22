@@ -364,6 +364,15 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 src: ctx.source,
             })],
         ),
+        // 1d.5a: a timeout in Demoting is a self-re-emit no-op (post-commit is forward-only —
+        // never an abort), mirroring Swapping/Releasing — the correct LANDING PAD for a re-drive.
+        // ⚠️ HONEST SCOPE: there is NO production `SagaEvent::Timeout` PRODUCER yet (the orchestrator
+        // schedule has no `now - since` deadline scan — DEFERRED Slice-2). So today this arm fires
+        // ONLY in unit tests / the harness `step_until` cap; a production never-delivered Demoting
+        // saga PARKS (emits nothing), surfaced only as growing `now - since` in the admin staleness
+        // view, until the Slice-2 timeout producer injects `Timeout` on a deadline. 1d.5b upgrades
+        // this arm to re-emit the saga-pushed Demote.
+        (S::Demoting { new_fence }, E::Timeout) => (S::Demoting { new_fence }, vec![]),
         (S::Releasing { new_fence }, E::Released) => (S::Done { new_fence }, vec![A::Tombstone]),
         (S::Releasing { new_fence }, E::Timeout) => (
             S::Releasing { new_fence },
