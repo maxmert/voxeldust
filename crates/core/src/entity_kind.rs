@@ -7,6 +7,16 @@
 //! of bevy_ecs), `register!`. A kind needing a NEW triple is first-class engineering
 //! and a crash-matrix multiplication — deliberately scheduled, never casual.
 //!
+//! ## ⚠️ INTERIM — only the STATIC half (this file) exists; the `TransferableKind` TRAIT is owed (DEFERRED D-31)
+//! `EntityKind` + `KindDef` (below) are real and tested. The behavioral half — the per-kind
+//! `serialize`/`spawn`/`precondition`/`rebind_refs` trait + the `register!` macro + the
+//! `kind_blob_evolution` gate — is NOT built yet: the transfer envelope carries an opaque
+//! `state: Vec<u8>` (a Player's pose crosses as a typed field, not through the trait). It is
+//! deliberately deferred to its first real consumer (serialize/spawn with the TLV blob at 1d.6;
+//! `rebind_refs` with the first compound kind at P6/P8) because the methods have nothing to do
+//! until per-kind state + child/frame refs exist — the retrofit is additive at the `state` field.
+//! See **DEFERRED.md D-31**. Flips green when a NON-Player kind crosses end-to-end via the trait.
+//!
 //! Day-one behavioral surface is capped to TWO triples (PLAN.md P0 delta):
 //! `{Durable, Frozen, Always}` (Player) and
 //! `{Transient, BallisticReadvance, NeverTransferOnly}` (Debris).

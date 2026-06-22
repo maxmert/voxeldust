@@ -210,9 +210,15 @@ impl DeliveredView {
     /// SAME `cursor` so interior and hull agree in time ("walk inside a flying ship", P8);
     /// until a hull is delivered (no ships pre-P8) the lookup is `None` and the interior
     /// renders at its frame origin. This is THE single chokepoint for that composition (and
-    /// the P10 galaxy ly-cell offset) — it now takes the view + cursor those need, so they
-    /// land here WITHOUT reshaping call sites. Never panics; always finite (poses sanitized
-    /// at ingress).
+    /// the P10 galaxy ly-cell offset). Never panics; always finite (poses sanitized at ingress).
+    ///
+    /// ⚠️ TIME-coherent only, NOT version-matched (DEFERRED D-35). When the ship rides its own
+    /// shard (P8), hull + interior arrive on DIFFERENT lossy subs; §8.1 (`transfer_protocol.md`,
+    /// `sealed_shards.md:132`) requires holding the newer stream until both match `(source_tick,
+    /// version)` or the passenger visibly JUMPS relative to the hull under datagram loss. That
+    /// needs a NEW `parent_version` wire field on `EntitySnap`/`SnapshotDatagram` + a hold-buffer
+    /// here — a snapshot-decode RESHAPE, NOT free. The chokepoint shape (one level) is right; only
+    /// the version gate is owed at P8.
     #[must_use]
     pub fn world_pos(&self, pose: &RenderPose, cursor: f64) -> DVec3 {
         match pose.frame {

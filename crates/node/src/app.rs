@@ -53,8 +53,17 @@ pub struct TickReport {
     /// Outbound frames SHED because the carried-over staging exceeded
     /// [`OutboundStagingCap`] (the loud overload-ALERT drop; oldest-first). Nonzero
     /// only under sustained, multi-tick congestion toward an effectively-unreachable
-    /// peer — never in healthy operation.
+    /// peer — never in healthy operation. This is the TOTAL shed (unreliable + reliable);
+    /// the reliable subset is broken out as [`Self::reliable_shed`].
     pub staging_shed: usize,
+    /// The RELIABLE subset of `staging_shed` — a catastrophic drop of a Saga/Control/
+    /// Membership frame (a lost transfer command, a stranded post-commit `OpenInputSlot`,
+    /// a dropped resume `SessionInput`), NOT a benign latest-wins Snapshot/Input shed.
+    /// Surfaced as its OWN machine-observable counter (matching `BoundedInbox`'s
+    /// `dropped_reliable`/`dropped_unreliable` split) so an oracle/admin can gate
+    /// `reliable_shed == 0` on any healthy run — a reliable post-commit shed must never
+    /// be indistinguishable from a dropped snapshot. MUST be 0 in zero-fault operation.
+    pub reliable_shed: usize,
     /// `NodeUnreachable` notices observed among the drained inbound.
     pub unreachable: usize,
 }
@@ -98,13 +107,15 @@ impl<T: Transport> ShardNode<T> {
         set_local_tick(&mut self.world, self.tick);
         let (drained, unreachable) = drain_phase(&mut self.transport, &mut self.world);
         self.schedule.run(&mut self.world);
-        let (sent, backpressured, staging_shed) = flush_phase(&mut self.transport, &mut self.world);
+        let (sent, backpressured, staging_shed, reliable_shed) =
+            flush_phase(&mut self.transport, &mut self.world);
         TickReport {
             tick: self.tick,
             drained,
             sent,
             backpressured,
             staging_shed,
+            reliable_shed,
             unreachable,
         }
     }
@@ -168,8 +179,10 @@ fn drain_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
 /// the cap the OLDEST staged frames are shed with a loud counted drop, so sustained
 /// congestion toward an unreachable peer can never grow the buffer without limit.
 ///
-/// Returns `(sent, backpressured, staging_shed)`.
-fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usize, usize) {
+/// Returns `(sent, backpressured, staging_shed, reliable_shed)` — `reliable_shed` is the
+/// reliable subset of `staging_shed`, surfaced distinctly so the loss of a transfer/control
+/// frame is machine-observable, never lumped with benign latest-wins snapshot shedding.
+fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usize, usize, usize) {
     let pending = std::mem::take(&mut world.resource_mut::<OutboundBox>().0);
     let cap = world.resource::<OutboundStagingCap>().0;
     let mut sent = 0usize;
@@ -189,10 +202,10 @@ fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
             }
         }
     }
-    let (staging_shed, _reliable_shed) = shed_over_cap(&mut requeued, cap);
+    let (staging_shed, reliable_shed) = shed_over_cap(&mut requeued, cap);
     let backpressured = requeued.len();
     world.resource_mut::<OutboundBox>().0 = requeued;
-    (sent, backpressured, staging_shed)
+    (sent, backpressured, staging_shed, reliable_shed)
 }
 
 /// Bound the carried-over staging to `cap`, shedding OLDEST-first but UNRELIABLE-FIRST
@@ -495,6 +508,10 @@ mod tests {
 
         assert_eq!(report.sent, 0); // cap-0 lane accepts nothing
         assert_eq!(report.staging_shed, 3); // 5 staged, cap 2 ⇒ 3 oldest shed
+        assert_eq!(
+            report.reliable_shed, 0,
+            "an all-unreliable shed surfaces ZERO reliable_shed — the disposable-class drop is NOT an alert",
+        );
         assert_eq!(report.backpressured, 2); // exactly the cap carries over
         // The OLDEST (0,1,2) are shed; the NEWEST (3,4) survive, in order.
         assert_eq!(
@@ -527,6 +544,10 @@ mod tests {
 
         assert_eq!(report.staging_shed, 3); // the three Inputs
         assert_eq!(
+            report.reliable_shed, 0,
+            "the reliable frames survived, so reliable_shed is 0 even though 3 frames were shed",
+        );
+        assert_eq!(
             node.world_mut().resource::<OutboundBox>().0,
             vec![
                 (X, MsgClass::Saga, vec![0].into()),
@@ -554,6 +575,11 @@ mod tests {
         let report = node.step_tick();
 
         assert_eq!(report.staging_shed, 2); // 3 reliable staged, cap 1 ⇒ 2 shed
+        assert_eq!(
+            report.reliable_shed, 2,
+            "the reliable shed is surfaced DISTINCTLY (== staging_shed here) — a transfer/control \
+             loss is machine-observable, an oracle/admin can gate reliable_shed == 0",
+        );
         assert_eq!(
             node.world_mut().resource::<OutboundBox>().0,
             vec![(X, MsgClass::Saga, vec![2].into())],

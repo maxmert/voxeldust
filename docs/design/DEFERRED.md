@@ -15,6 +15,149 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 
 ## P2 — THE TRANSFER (in progress)
 
+### D-31 🟧 HR2's `TransferableKind` trait (the per-kind serialize/spawn/precondition/rebind_refs seam) is unbuilt — only the static `KindDef` half landed
+- **LANDED (the static half):** `core/src/entity_kind.rs` has `EntityKind` + `KindDef` (DurabilityClass/GhostPolicy/
+  ContinuityModel/LossBudget/blob_schema) + the registry data, fully tested. This is HR2's data half.
+- **MISSING (the behavior half):** the `TransferableKind` TRAIT itself — the per-kind `serialize` / `spawn` /
+  `precondition` / `rebind_refs` methods (+ the `register!` macro + the `kind_blob_evolution` writer-N+1/reader-N CI
+  gate) — does NOT exist. `grep -rn TransferableKind crates/` returns only doc-comments. Consequently the transfer
+  envelope carries an OPAQUE `state: Vec<u8>` (`TransitionPayload::StubCrossing.state` / `InitialSpawn.state` /
+  `TransientItem.state` in `wire/src/intershard.rs`) that no registry trait produces or consumes — and in the live
+  path it is produced as `vec![]` (the pose crosses as a TYPED field on the crossing, not through the trait). There is
+  no kind-generic serialize, no spawn-from-tags reconstruction, no `precondition` spatial gate, and crucially no
+  `rebind_refs` (the method that re-homes a ship's `ChildOf` passengers and a block's frame anchor at the dest).
+- **WHY this is an INTERIM, not a defect (the deferral is sound):** the trait's methods have NOTHING to do yet. Only
+  single-dot Players cross today, and a Player's entire transferable state is its pose — already carried as a TYPED
+  `pose` field on the `StubCrossing` (never the opaque blob). `rebind_refs` has no refs to rebind until a COMPOUND kind
+  exists (a ship with `ChildOf` passengers — P8; a dropped block with a frame anchor — P6). `serialize`/`spawn` have no
+  per-kind state beyond the pose until the TLV blob format exists (1d.6). Building the full trait NOW would be
+  speculative scaffolding (the smallest-correct discipline forbids it). The retrofit is purely ADDITIVE: the
+  `state: Vec<u8>` field IS the exact insertion point — the blob will flow THROUGH the trait with zero envelope change.
+- **WHAT the audit actually caught (the honesty hole this entry closes):** `PLAN.md` schedules `TransferableKind` at
+  **P0**, yet it was absent from BOTH the code AND this ledger — invisible to the "a phase isn't done until its
+  DEFERRED entries flip green" gate. The DEFECT was the UNLEDGERED absence, not the deferral. This entry is the fix.
+- **When / proper (the trait lands incrementally with its first real consumer):**
+  - `serialize` + `spawn` (typed `Blob` assoc-type, total over `EntityKind::ALL`) + the `register!` macro + the
+    `kind_blob_evolution` CI gate — with the **TLV blob (Slice 1d.6)**, so `StubCrossing.state` flows through the trait.
+  - `rebind_refs` — with the first COMPOUND kind: `DroppedBlock`'s frame anchor at **P6**, the ship+`ChildOf` bundle at **P8**.
+  - `precondition` — with the typed spatial-precondition gate (`PrepareResult::Rejected{spatial_reason}`, the hull-trap
+    class) when real placement constraints exist (**P5/P8**).
+- **Pin (exists-to-be-flipped):** `core/src/entity_kind.rs` module doc names the missing trait + this entry; the
+  `state: Vec<u8>` field docs in `wire/src/intershard.rs` name 1d.6 as where it stops being opaque. Flips 🟩 when a
+  NON-Player kind crosses end-to-end via the registry trait (not a special-cased dot) under the `kind_blob_evolution` gate.
+- **Dependency:** the TLV blob (1d.6) for serialize/spawn; a compound kind (P6 block / P8 ship) for rebind_refs.
+- **Source:** the full-architecture audit `wf_65b95cbf` (Finding B, the one HR-load-bearing P0 deliverable absent from
+  both code and ledger).
+
+### D-32 🟥 Directory partition-by-region: the in-process DIRECT CAS + flat `config.orchestrator` addressing is the cross-region / N-orchestrator scaling blocker (unledgered until now)
+- **CURRENT (correct for P2):** ONE orchestrator owns the WHOLE keyspace; the commit CAS is a DIRECT in-process call
+  (`saga_runtime.rs` `IssueCommitCas` → `DirectoryCore::commit_cas(ctx.subject, …)` on the orchestrator's own
+  single-threaded schedule — documented at `saga_runtime.rs:10-11`). Every directory-op / saga-ack send site addresses
+  the single flat `config.orchestrator: NodeId` UNCONDITIONALLY, regardless of which `DirectoryKey`/`RealmId` it
+  concerns (`stub.rs` ~375/392/408/608/980/1124; `gateway.rs` ~87 + its push sites). There is NO `RegionId` /
+  `coordinator_of` / `resolve_coordinator` symbol anywhere — a cross-region transfer (subject key on coordinator A,
+  dest realm on coordinator B) has **no representation**: the DIRECT CAS is correct ONLY while one orchestrator owns
+  everything.
+- **WHY this is correct now, not a defect:** at P2 there is exactly one orchestrator; partitioning the directory by
+  region is the binding THOUSANDS-scale seam (`transfer_protocol.md:283`) that should NOT be built yet (premature —
+  the partition map, cross-coordinator routing, and 2-coordinator commit have no consumer until N-orchestrator scaling).
+  The DEFECT the audit caught is that the in-process DIRECT CAS was **invisible to the green-gate** — `transfer_protocol.md`
+  flags the seam but no DEFERRED entry named `commit_cas`'s in-process locality as the cross-region blocker (SCALE-CLOUD-1
+  under [[D-24]] is only about the admin-snapshot rebuild cost, NOT CAS locality). This entry closes that honesty hole.
+- **When / proper (additive — code at N-orchestrator scaling, NOT before):** (a) introduce ONE
+  `fn coordinator_of(key: &DirectoryKey) -> NodeId` resolver (returns `config.orchestrator` today) called at every
+  directory-op / saga-ack send site, so the future constant→key-lookup swap is ONE function, never a 13-site
+  scatter-rewrite (the scatter class that killed the old project); (b) the saga must ROUTE a `CommitCas` op to the
+  subject key's coordinator (not call `commit_cas` locally) once keys span coordinators — a cross-coordinator commit
+  (still ONE logical CAS, the directory partition owner is the single writer per region). Until then `config.orchestrator`
+  is the degenerate single-region case.
+- **Pin (exists-to-be-flipped):** `saga_runtime.rs` `IssueCommitCas` executor doc-comment names the in-process DIRECT
+  CAS + this entry. Flips 🟩 when the `coordinator_of` resolver + cross-coordinator commit routing land and a transfer
+  whose subject + dest span two coordinators commits correctly.
+- **Dependency:** N-orchestrator horizontal scaling (post-P3; the gateway adoption/ResumeTicket scaling is the sibling).
+- **Source:** the full-architecture audit `wf_7f83e6b3` (F1).
+
+### D-33 🟥 The Directory CAS is single-key only — no atomic N+1-key (ship + `ChildOf` passengers) commit primitive (the directory-side gap, distinct from D-31's blob-side `rebind_refs`)
+- **CURRENT (correct for P2):** `directory.rs` `commit_cas` is strictly SINGLE-key — one `key: DirectoryKey`, one
+  `records.get_mut(&key)`, one `Fence::cas_next`, flips ONE authority. `SagaCtx` carries exactly one `subject:
+  DirectoryKey` + one `expected_fence` (it is `Copy`, fixed at creation); `commit_action` issues exactly one
+  `IssueCommitCas`. No `ChildOf` / `bundle` / `reparent` / `Vec<DirectoryKey>` concept exists in the directory/saga/runtime.
+- **WHY this is correct now, not a defect:** only single, childless entities (Player dots) cross at P2 — a single-key CAS
+  is exactly right. The compound shape is owed only when ships exist (P8).
+- **The design requires the opposite shape at P8 (`transfer_protocol.md` §8 + :283):** the "walk inside a flying ship"
+  compound handoff must bump the `Ship(ShipId)` key AND re-parent every `ChildOf(ShipId)` `OwnerRecord` in ONE atomic
+  transaction — "one saga, one commit, N+1 keys" — so a passenger's authority can NEVER flip on a different tick than
+  its hull's during a host/dock crossing (the §8.1 passenger-split-brain-relative-to-hull class).
+- **The ledger gap this closes:** [[D-31]] tracks `rebind_refs` as the per-kind BLOB method (re-homes a passenger's
+  child/frame refs at the dest) — a DISTINCT change from the directory-side ATOMIC MULTI-KEY COMMIT primitive on the
+  commit seam. The blob re-home and the multi-key CAS are two different owed pieces; D-31 named only the first.
+- **When / proper (additive at P8, records never reshape):** grow the primitive to
+  `commit_cas_bundle(primary: DirectoryKey, slaved: &[DirectoryKey], expected, new_owner)` that CASes the ship key and
+  re-parents the `ChildOf` records under ONE lock; the single-key `commit_cas` stays as the degenerate N=0 case (HR3 —
+  ONE machinery, policy fan-out). `SagaCtx` grows an optional slaved-key set.
+- **Pin (exists-to-be-flipped):** `directory.rs` `commit_cas` doc names the single-key limit + this entry. Flips 🟩
+  when a ship + ≥1 `ChildOf` passenger transfer commits atomically (both authorities flip on the same fence/tick).
+- **Dependency:** P8 ships (the first compound kind); composes with [[D-31]] `rebind_refs` (blob side) for the full bundle.
+- **Source:** the full-architecture audit `wf_7f83e6b3` (F2).
+
+### D-34 🟥 Gateway has NO per-session home/authority field — login landing + `Bye` detach both hardwire `config.shard` (a multi-shard session leak + an unledgered inversion of the orchestrator-owned Spawn Resolver)
+- **CURRENT (correct for single-login-shard P2, WRONG for N-shard):** the `Session` struct carries `subs:
+  BTreeMap<NodeId, SubRecord>` (the shards it is *actually* subscribed to, EMPTY at creation — `gateway.rs` ~795 —
+  filled only by `open_sub` on SubscriptionReady) but NO per-session *home/authority* field. Every CONTROL-plane
+  decision reads the global flat `config.shard` scalar: route birth (~798), login sub (~1502), `AttachSession` on
+  grant (~1675) + retry (~1724), and the `Bye` `DetachSession` (~850). In single-login-shard P2 these coincide; in any
+  N-shard cluster they diverge.
+- **A1 — the `Bye` detach leak (the present-but-masked half):** on `Bye` the gateway sends `DetachSession` to
+  `config.shard` UNCONDITIONALLY. After even ONE transfer (player now homed on dest B, source A's sub closed — the
+  1d.2/1d.3 path), this detaches A and never tells B to free its saga-attested `SessionTable` entry → B leaks until
+  lease-TTL reap, and TTL enforcement is itself unbuilt ([[D-3]]), so on a real cluster the entry is immortal. This is
+  the INVERSE of the `"any sub != config.shard"` anti-pattern the abort path explicitly forbids (`gateway.rs` ~987-991).
+  MASKED today only because no test does Bye-AFTER-transfer and there is one login shard. **NOTE the cheap "iterate
+  `session.subs.keys()`" fix is WRONG:** `subs` is empty at login, so it would regress the basic login→Bye detach —
+  the fix genuinely needs the authority field below, not a sub-scan.
+- **A2 — the login landing inversion (the structural half):** the binding spec assigns the landing decision to the
+  ORCHESTRATOR — `integration.json` res #15 ("One owner: orchestrator … Spawn Resolver") + `connection_plane.md:190`
+  invariant B1 ("a stateless Spawn Resolver computes the initial InterestSet from the player's durable checkpoint
+  position"). The read plane (SubTable/`known_shards`) was split for N-shard fan-out; the *where-does-a-session-land*
+  axis was not. With one scalar, two players checkpointed on different planets via one gateway both attach to one shard.
+- **When / proper (ONE additive field closes BOTH, at first-multi-shard / P3):** add a per-session
+  `home_shard`/`authority: NodeId` field on `Session` that initializes from `config.shard` today but is SET by an
+  orchestrator reply (the stateless Spawn Resolver / Directory head at login) and UPDATED on every transfer commit;
+  route attach / detach / initial-route off THAT field. Then the P3 swap is one populate-the-field change, never a
+  call-site scatter (the scatter class that killed the old project). The `Bye` detach then targets the session's true
+  current authority (+ any composited subs), never `config.shard`.
+- **Pin (exists-to-be-flipped):** `gateway.rs` `Bye` `DetachSession` site + the session-creation site name the
+  `config.shard` assumption + this entry. Flips 🟩 when a session that transferred A→B is `Bye`'d and B frees its
+  `SessionTable` (a multi-shard Bye test: login A → transfer to B → Bye → assert B detached), AND login lands a session
+  on an orchestrator-computed home shard.
+- **Dependency:** P3 first-multi-shard cluster (the orchestrator Spawn Resolver round-trip); composes with the
+  [[D-32]] `coordinator_of` partition seam.
+- **Source:** the full-architecture audit `wf_b82d1a67` (A1 + A2, one root cause).
+
+### D-35 🟥 Client ship-interior compositing is TIME-coherent but NOT version-matched — the §8.1 "buffer the newer stream until both at a matching version" obligation is unbuilt (and the `world_pos` doc over-claims it is free)
+- **CURRENT (correct for P2 single-sub, WRONG for P8 ship-on-its-own-shard):** `view.rs::world_pos` composes a
+  `ShipLocal` interior through its hull as `hull.pos + hull.orient * interior.pos`, sampling the hull at the SAME
+  `cursor` (time-coherence). Benign today — interior + hull are one entity-set on one sub at one `frame_id`, trivially
+  same-version. But when the ship rides its OWN shard (P8), hull and interior arrive on DIFFERENT lossy datagram subs.
+- **MISSING (the binding §8.1 obligation — `transfer_protocol.md:382` + `sealed_shards.md:130-132` Finding #9):**
+  VERSION-MATCHED buffering — hold the newer stream until both are at a matching `(source_tick, version)`, or the
+  client renders "new hull pose + stale anchor" for a tick = the passenger-jumps-relative-to-hull bug §8.1 exists to
+  kill (the precise AAA-seamless defect). The wire carries NO correlation field: `EntitySnap` is `{entity, pose}`
+  (`channels.rs` ~173, no `parent_version`); `SnapshotDatagram` has only a per-sub `frame_id`.
+- **The doc over-claim corrected by this entry:** `view.rs` ~210-214 claimed the composition refinement "lands here
+  WITHOUT reshaping call sites" — FALSE: honoring §8.1 needs a NEW wire field (`parent_version` on `EntitySnap`/
+  `SnapshotDatagram`) AND a hold-buffer in the view, both reshaping the snapshot decode path. The doc is corrected to
+  say the wire reshape is REQUIRED, not free, so a P8 implementer does not under-budget it.
+- **When / proper (P8 — ships on their own shard + the multi-sub composited client):** (a) a `parent_version` /
+  matching `(source_tick, version)` field on `EntitySnap`/`SnapshotDatagram`; (b) a hold-buffer in `world_pos`
+  deferring compositing until hull + interior match version, asserting
+  `freeze_gap + InputGap + stagger_skew + parent_match_hold < interp_buffer_headroom` (`sealed_shards.md:132`). The
+  seam SHAPE is right (one `world_pos` chokepoint, one hull level — §8.2) — only the version gate + wire field are owed.
+- **Pin (exists-to-be-flipped):** `view.rs` `world_pos` doc names §8.1 + this entry. Flips 🟩 when a hull and its
+  interior delivered on two lossy subs composite without a passenger jump under hull-datagram loss (a harness drop test).
+- **Dependency:** P8 ships; composes with [[D-31]] `rebind_refs` + [[D-33]] atomic multi-key CAS (the server side of the same compound handoff).
+- **Source:** the full-architecture audit `wf_b82d1a67` (Theme B).
+
 ### D-1 🟧 Transfer abort never clears the directory lock (`in_transfer` leak)
 - **Missing:** on every abort path the saga leaves `OwnerRecord.in_transfer = Some(transfer)` forever, so the
   subject key can never transfer again (and ghost-despawn stays refused). R1 re-manifesting at the directory.
@@ -136,7 +279,11 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Dependency:** Slice 1d (per-entity `Authority` attach so the dest owns + emits the post-commit entity) +
   the ghost-as-collider + band-instance + observer-delivery-watermark machinery (the band/ghost slice).
 - **Source:** 1c design `wf_f3eae69e` + the demote refinement `wf_0ed2dc0c`; interim landed in Slice 1c.8;
-  ordering-inversion honesty + tear-out scoping from the 1c.8 audit `wf_13656136`.
+  ordering-inversion honesty + tear-out scoping from the 1c.8 audit `wf_13656136`. **The LOCKED 1d.4/1d.5
+  implementation decomposition (4 slices, adversarially verified `wf_f780b04c`) is
+  `docs/design/slice_1d4_1d5_ordered_demote.md`** — note the 3 corrections it folds in (freeze is
+  saga-gated not frame-fence-enforced; the dest promote is currently autonomous and needs a real saga
+  `Promoting` state; no collision system exists yet so 1d.5b lands the ghost FEED+registration, response @P5).
 
 ### D-3 🟥 Lease lifecycle: no renewal producer, no expiry reaper (TTL unenforced)
 - **Missing:** `OwnerRecord.lease_expires` is written on every grant/renew/commit, but NO node sends
@@ -394,10 +541,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   sessions including `Active` ones; (c) **SCALE-INPUT-COPY** — every forwarded client input is heap-copied
   (`input_bytes: bytes.to_vec()`) into a fresh `GatewayToShard::SessionInput` on the 20 Hz path. The fix mirrors
   the snapshot fan-out: carry the body as the already-available Arc-backed `vd_sim::io::Bytes` (`Arc<[u8]>`)
-  end-to-end instead of re-allocating per input/client/tick.
+  end-to-end instead of re-allocating per input/client/tick;
+  (d) **SCALE-FANOUT-COPY** — the read-plane snapshot fan `on_shard_frame` opens with
+  `for session_id in sessions.subscribers_of(from)`, and `subscribers_of` does `set.iter().copied().collect()`
+  into a FRESH `Vec<SessionId>` every shard frame (an S-element heap alloc 20×/sec per shard, S→1000 on a popular
+  planet) on the path otherwise hardened to "a fence check + a refcount bump". Fix: borrow the `BTreeSet` (split the
+  borrow / stage outbound NodeIds once) so the hot fan allocates no owned Vec.
 - **Where:** `crates/connection-plane/src/gateway.rs` (`drive_pending_sessions`; `on_client_input`'s
-  `bytes.to_vec()`); `crates/sim/src/io/mod.rs` (`BoundedInbox::push`); `crates/node/src/orchestrator.rs` +
-  `saga_runtime.rs` (`serve_directory` / `drive_sagas` inbound loops).
+  `bytes.to_vec()`; `subscribers_of`'s per-frame `collect`); `crates/sim/src/io/mod.rs` (`BoundedInbox::push`);
+  `crates/node/src/orchestrator.rs` + `saga_runtime.rs` (`serve_directory` / `drive_sagas` inbound loops).
 - **When / proper:** SCALE-INBOX / SCALE-5 / SCALE-INPUT-COPY
   / SCALE-CLOUD-1 → the **P1/P3 load-test + observability slice** (the load-tests-when-applicable standard): an
   index for active vs pending sessions + a ring/heap for the inbox + an Arc-carried input body + publish the
@@ -405,7 +557,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   the FULL directory + saga views every tick at `tick_hz` — `crates/bins/src/bin/orchestrator.rs`), each sized
   by a real bench, not before.
 - **Source:** whole-codebase audits `wwk1uh5k9` / `wo2gkj7t7` / `wg9gc765s` / `wdznr0x6i` / `wxwinv5no`
-  (SCALE-1C2-1 / SCALE-3-inbox / SCALE-5 / SCALE-CLOUD-1 / SCALE-3-input-copy).
+  (SCALE-1C2-1 / SCALE-3-inbox / SCALE-5 / SCALE-CLOUD-1 / SCALE-3-input-copy) + `wf_b82d1a67` (SCALE-FANOUT-COPY).
 
 ### D-25 🟥 Route swap CARRIES the realm fence; the per-Entity CAS `new_fence` is NOT installed (single-realm 1c)
 - **Missing:** `apply_commit` (the 1c.4 `CommitAuthority` route swap) carries `route.fence` UNCHANGED;

@@ -847,6 +847,12 @@ fn on_client_control(
                      pin until the Slice-2 timeout producer lands (D-23)"
                 );
             }
+            // ⚠️ SCALE (DEFERRED D-34): detaches the single `config.shard`, NOT the session's
+            // current authority. After a transfer (player homed on the dest), this leaks the
+            // dest's `SessionTable` entry. Correct only for single-login-shard P2; the proper fix
+            // is a per-session `home_shard`/`authority` field (set by the orchestrator Spawn
+            // Resolver, updated on commit) that this detach + the login landing both route off.
+            // NOT a `session.subs.keys()` scan — `subs` is empty at login (would regress login→Bye).
             push_to_shard(
                 outbox,
                 config.shard,

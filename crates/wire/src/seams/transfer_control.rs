@@ -70,6 +70,15 @@ pub enum TransferControl {
     },
 }
 
+// 1d.4/1d.5 (D-2) DESIGN NOTE — the ORDERED `Demote`/`Promote` COMMANDS are deliberately NOT
+// `TransferControl` variants. `TransferControl` is the saga⇄GATEWAY seam: every variant above is
+// gateway-consumed (the gateway matches them exhaustively in `apply_transfer_control`). Demote/Promote
+// are saga→SHARD commands (the source demotes its own entity; the dest promotes its own) — they follow
+// the `InterShardFlow::FlushSource` precedent (a dedicated arm pushed straight to `ctx.source`/`ctx.dest`,
+// never through the gateway). Their carrier + shard consumer + the FSM `Promoting` state land in 1d.5b
+// so the consumer arm is covered by its producer (HR5). Their ACKS, however, are orchestrator-side
+// (`ack_to_event`) and land here now (below) — fully covered by roundtrip + the `ack_to_event` test.
+
 /// Gateway → saga acks: one per command, each carrying what the next phase needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferControlAck {
@@ -96,6 +105,23 @@ pub enum TransferControlAck {
         transfer: TransferId,
     },
     Released {
+        transfer: TransferId,
+    },
+    /// 1d.4/1d.5 (D-2) — the source acks it demoted to `Ghost` and STOPPED emitting (proof-of-freeze).
+    /// The saga awaits this before `Promote`ing the dest (the cross-shard happens-before that makes
+    /// demote-before-promote inviolable).
+    DemoteAck {
+        transfer: TransferId,
+    },
+    /// 1d.4/1d.5 (D-2) — the dest acks it flipped `Ghost→Owned` at the new fence.
+    PromoteAck {
+        transfer: TransferId,
+    },
+    /// 1d.4/1d.5 (D-2) — the STANDING server-side delivery watermark: the gateway reports the dest sub
+    /// has delivered ≥1 frame to EVERY current observer (recomputed, never latched — an observer
+    /// opening mid-demote re-blocks it). This is the (a)-predicate input that, with band-exit, gates
+    /// `DemoteComplete`. NOT a client ack (HR1 / no client prediction): a server-side fan-out measure.
+    DeliveredToObservers {
         transfer: TransferId,
     },
 }
@@ -198,7 +224,10 @@ impl TransferControlAck {
             | TransferControlAck::Committed { transfer }
             | TransferControlAck::SourceThawed { transfer }
             | TransferControlAck::Aborted { transfer }
-            | TransferControlAck::Released { transfer } => transfer,
+            | TransferControlAck::Released { transfer }
+            | TransferControlAck::DemoteAck { transfer }
+            | TransferControlAck::PromoteAck { transfer }
+            | TransferControlAck::DeliveredToObservers { transfer } => transfer,
         }
     }
 
@@ -215,6 +244,12 @@ impl TransferControlAck {
             TransferControlAck::SourceThawed { .. } => 4,
             TransferControlAck::Aborted { .. } => 5,
             TransferControlAck::Released { .. } => 6,
+            // 1d.4/1d.5 (D-2): the ordered-demote acks continue the phase sequence. Their COMMANDS are
+            // the saga→shard `Demote`/`Promote` (NOT `TransferControl` — see the design note above), but
+            // the acks ride back orchestrator-side; 7/8/9 are their distinct idempotency-journal phases.
+            TransferControlAck::DemoteAck { .. } => 7,
+            TransferControlAck::PromoteAck { .. } => 8,
+            TransferControlAck::DeliveredToObservers { .. } => 9,
         }
     }
 }
@@ -231,7 +266,9 @@ pub fn compensator_of(cmd: TransferControl) -> Option<TransferControl> {
             transfer, session, ..
         } => Some(TransferControl::AbortTransfer { transfer, session }),
         // Cut requests need no compensation (an unused marker is inert), and the
-        // post-commit phases are forward-only (commit is the point of no return).
+        // post-commit phases are forward-only (commit is the point of no return) — Demote/Promote
+        // are post-CAS ordered sequencing of who-is-Owned, re-driven by saga Timeout arms (1d.5b),
+        // never compensated.
         TransferControl::RequestCut { .. }
         | TransferControl::CommitAuthority { .. }
         | TransferControl::ThawSource { .. }
@@ -305,6 +342,9 @@ mod tests {
             TransferControlAck::SourceThawed { transfer: T },
             TransferControlAck::Aborted { transfer: T },
             TransferControlAck::Released { transfer: T },
+            TransferControlAck::DemoteAck { transfer: T },
+            TransferControlAck::PromoteAck { transfer: T },
+            TransferControlAck::DeliveredToObservers { transfer: T },
         ]
     }
 

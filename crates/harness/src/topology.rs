@@ -189,6 +189,10 @@ pub enum TraceEvent {
         drained: u64,
         sent: u64,
         backpressured: u64,
+        /// The RELIABLE subset of this node's staging-cap shed this tick — a lost
+        /// transfer/control/membership frame (vs benign latest-wins snapshot shedding).
+        /// MUST stay 0 on a healthy run; [`Topology::verify_no_reliable_shed`] gates it.
+        reliable_shed: u64,
         unreachable: u64,
     },
     Skipped {
@@ -222,6 +226,18 @@ pub struct WireTruthViolation {
     pub claimed: u64,
     pub cleared_by_crash: u64,
     pub pending: u64,
+}
+
+/// A node shed a RELIABLE outbound frame at its staging cap — a lost transfer/control/
+/// membership frame (e.g. a post-commit `OpenInputSlot` or resume `SessionInput` that
+/// strands a transferred player's input), never a benign latest-wins snapshot drop.
+/// Must be 0 on any healthy/zero-fault run; nonzero is a distinct overload ALERT, not
+/// indistinguishable from a dropped snapshot (the observability hole the audit caught).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("reliable-shed violation at {node}: {reliable_shed} reliable frame(s) shed at the staging cap")]
+pub struct ReliableShedViolation {
+    pub node: NodeId,
+    pub reliable_shed: u64,
 }
 
 /// The deterministic multi-node driver.
@@ -344,6 +360,7 @@ impl Topology {
                 drained: report.drained as u64,
                 sent: report.sent as u64,
                 backpressured: report.backpressured as u64,
+                reliable_shed: report.reliable_shed as u64,
                 unreachable: report.unreachable as u64,
             });
         }
@@ -411,6 +428,35 @@ impl Topology {
         Ok(())
     }
 
+    /// NO RELIABLE SHED: no node shed a reliable (transfer/control/membership) frame at its
+    /// outbound staging cap across the whole run. A reliable shed silently strands a transfer
+    /// command or a post-commit input slot — and (pre the D-8 re-drive) there is no recovery —
+    /// so on any healthy/zero-fault scenario this MUST hold. Returns the FIRST offending node
+    /// (deterministic trace order). The metric is the node's own `TickReport.reliable_shed`,
+    /// summed from the trace — wire-truth, not internal hope (same discipline as
+    /// [`Self::verify_wire_truth`]).
+    pub fn verify_no_reliable_shed(&self) -> Result<(), ReliableShedViolation> {
+        for id in self.nodes.keys() {
+            let reliable_shed: u64 = self
+                .trace
+                .iter()
+                .filter_map(|e| match e {
+                    TraceEvent::Stepped {
+                        node, reliable_shed, ..
+                    } if node == id => Some(*reliable_shed),
+                    _ => None,
+                })
+                .sum();
+            if reliable_shed > 0 {
+                return Err(ReliableShedViolation {
+                    node: *id,
+                    reliable_shed,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// The byte-comparable artifact for the reproducibility gate.
     #[must_use]
     pub fn trace_bytes(&self) -> Vec<u8> {
@@ -422,7 +468,7 @@ impl Topology {
 mod tests {
     use super::*;
     use bevy_ecs::prelude::{Res, ResMut};
-    use vd_node::app::{InboundBox, NodeConfig, OutboundBox};
+    use vd_node::app::{InboundBox, NodeConfig, OutboundBox, OutboundStagingCap};
     use vd_sim::capability::NodeKind;
     use vd_sim::io::{Inbound, MsgClass, Transport};
 
@@ -857,5 +903,61 @@ mod tests {
             fabric2.register(A),
         );
         topo.add_node(Box::new(dup));
+    }
+
+    #[test]
+    fn verify_no_reliable_shed_passes_clean_and_catches_a_reliable_staging_shed() {
+        // OK arm: a healthy relay pair sends everything — nothing is ever shed.
+        let fabric = FaultFabric::new(5, 2);
+        let mut clean = seeded_topology(&fabric);
+        for _ in 0..20 {
+            clean.step();
+        }
+        clean
+            .verify_no_reliable_shed()
+            .expect("a healthy run sheds no reliable frame");
+
+        // ERR arm: a node flooding RELIABLE (Saga) frames toward a send-REJECTING peer over a
+        // tight staging cap sheds reliable frames every tick — the catastrophic class the audit
+        // flagged. The oracle reads the node's own `TickReport.reliable_shed` from the trace
+        // (wire-truth) and catches it, naming the offending node.
+        let fabric = FaultFabric::new(9, 2);
+        fabric.set_policy(
+            A,
+            B,
+            crate::fabric::LinkPolicy {
+                send_reject_p: 1.0, // every send to B refuses synchronously ⇒ frames stage
+                ..crate::fabric::LinkPolicy::default()
+            },
+        );
+        let mut topo = Topology::new(fabric.clone(), StaggerPlan::lockstep());
+        let mut flood = vd_node::build_app(
+            NodeConfig {
+                node_id: A,
+                kind: NodeKind::StubShard,
+            },
+            fabric.register(A),
+        );
+        flood.world_mut().insert_resource(OutboundStagingCap(1)); // tiny cap ⇒ shed over 1
+        flood.schedule_mut().add_systems(
+            move |mut outbox: ResMut<OutboundBox>| {
+                for n in 0..4u8 {
+                    outbox.0.push((B, MsgClass::Saga, vec![n].into()));
+                }
+            },
+        );
+        topo.add_node(Box::new(flood));
+        topo.add_node(build_relay_node(&fabric, B, A)); // a sink (receives nothing under the reject)
+        for _ in 0..3 {
+            topo.step();
+        }
+        let violation = topo
+            .verify_no_reliable_shed()
+            .expect_err("the reliable staging shed must be caught");
+        assert_eq!(violation.node, A);
+        assert!(
+            violation.reliable_shed > 0,
+            "a reliable frame was shed and surfaced distinctly: {violation:?}",
+        );
     }
 }

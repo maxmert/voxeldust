@@ -153,6 +153,12 @@ impl DirectoryCore {
     /// THE commit point: CAS on the fence. The winner flips authority to
     /// `new_owner`, bumps the fence, and clears the transfer lock; a loser (stale
     /// `expected`) observes `Lost` and MUST no-op (fence rule 3).
+    ///
+    /// SINGLE-KEY ONLY (correct for P2 — only childless dots cross). ⚠️ DEFERRED D-33: the
+    /// compound ship handoff (P8) needs an ATOMIC N+1-key commit — bump `Ship(ShipId)` AND
+    /// re-parent every `ChildOf` `OwnerRecord` under ONE lock so a passenger's authority can
+    /// never flip on a different tick than its hull's. That grows additively to a
+    /// `commit_cas_bundle(primary, slaved, …)`; this single-key form stays the N=0 case (HR3).
     pub fn commit_cas(
         &mut self,
         key: DirectoryKey,

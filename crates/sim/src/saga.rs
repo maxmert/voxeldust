@@ -139,6 +139,16 @@ pub enum SagaEvent {
     RouteSwapped,
     /// Dest acked observer delivery AND the entity left the overlap band.
     DemoteComplete,
+    /// 1d.4/1d.5 (D-2) — the source acked it demoted to `Ghost` and stopped emitting (proof-of-freeze).
+    /// Consumed by the FSM's `Promoting` gate in 1d.5b (with `DemoteComplete`); a no-op in the current
+    /// FSM (no `Promoting` state yet) — the catch-all absorbs it.
+    DemoteAcked,
+    /// 1d.4/1d.5 (D-2) — the dest acked it flipped `Ghost→Owned`. Drives `Promoting→Releasing` in 1d.5b.
+    PromoteAcked,
+    /// 1d.4/1d.5 (D-2) — the gateway's STANDING delivery watermark: the dest delivered ≥1 frame to every
+    /// current observer. An input to the `DemoteComplete` predicate in 1d.5a (not consumed directly by
+    /// the FSM until then) — a no-op in the current FSM.
+    DestDelivered,
     Released,
     SourceThawed,
     DestAborted,

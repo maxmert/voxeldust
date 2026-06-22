@@ -153,6 +153,12 @@ fn ack_to_event(ack: TransferControlAck) -> SagaEvent {
         TransferControlAck::SourceThawed { .. } => SagaEvent::SourceThawed,
         TransferControlAck::Aborted { .. } => SagaEvent::DestAborted,
         TransferControlAck::Released { .. } => SagaEvent::Released,
+        // 1d.4/1d.5 (D-2): the ordered demote/promote acks + the standing delivery watermark. The
+        // events land here now (forced by exhaustiveness); the FSM acts on them in 1d.5a/1d.5b — until
+        // then `saga::step`'s catch-all absorbs them as no-ops.
+        TransferControlAck::DemoteAck { .. } => SagaEvent::DemoteAcked,
+        TransferControlAck::PromoteAck { .. } => SagaEvent::PromoteAcked,
+        TransferControlAck::DeliveredToObservers { .. } => SagaEvent::DestDelivered,
     }
 }
 
@@ -270,6 +276,10 @@ fn run_to_quiescence(
                 }
                 // THE single commit point, called DIRECTLY (this thread owns the directory).
                 // The outcome re-enters the FSM immediately — no wire round-trip, no tick split.
+                // ⚠️ SCALE (DEFERRED D-32): this in-process DIRECT CAS is correct ONLY while ONE
+                // orchestrator owns the WHOLE keyspace. When the directory partitions by region
+                // (N-orchestrator scaling), this must ROUTE a CommitCas op to `ctx.subject`'s
+                // coordinator (`coordinator_of(key)`), not call `commit_cas` locally.
                 SagaAction::IssueCommitCas { expected } => {
                     let outcome =
                         dir.commit_cas(ctx.subject, expected, AuthorityRef::Shard(ctx.dest), now);
@@ -1170,7 +1180,7 @@ mod tests {
 
     #[test]
     fn ack_to_event_maps_every_ack_phase() {
-        let cases: [(TransferControlAck, SagaEvent); 7] = [
+        let cases: [(TransferControlAck, SagaEvent); 10] = [
             (
                 TransferControlAck::Prepared {
                     transfer: XFER,
@@ -1207,6 +1217,18 @@ mod tests {
             (
                 TransferControlAck::Released { transfer: XFER },
                 SagaEvent::Released,
+            ),
+            (
+                TransferControlAck::DemoteAck { transfer: XFER },
+                SagaEvent::DemoteAcked,
+            ),
+            (
+                TransferControlAck::PromoteAck { transfer: XFER },
+                SagaEvent::PromoteAcked,
+            ),
+            (
+                TransferControlAck::DeliveredToObservers { transfer: XFER },
+                SagaEvent::DestDelivered,
             ),
         ];
         for (ack, event) in cases {
