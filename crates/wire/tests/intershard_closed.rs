@@ -148,6 +148,20 @@ fn every_arm() -> Vec<InterShardFlow> {
             step_id: STUB_CROSSING_STEP,
             reason: TransferStepRejectReason::SpatialPrecondition,
         }),
+        // 1d.5b arms: the saga-pushed ordered demote/promote commands (SIDE-EFFECTING,
+        // TransferStep-keyed by DEMOTE_STEP/PROMOTE_STEP).
+        InterShardFlow::Demote(vd_wire::intershard::DemoteCmd {
+            transfer: TransferId(10),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            new_owner_fence: Fence(6),
+            step_id: vd_wire::intershard::DEMOTE_STEP,
+        }),
+        InterShardFlow::Promote(vd_wire::intershard::PromoteCmd {
+            transfer: TransferId(10),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            new_fence: Fence(6),
+            step_id: vd_wire::intershard::PROMOTE_STEP,
+        }),
     ]
 }
 
@@ -165,7 +179,9 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::SagaAck(_)
         | InterShardFlow::DirectoryReply(_)
         | InterShardFlow::FlushSource(_)
-        | InterShardFlow::TransferAck(_) => {}
+        | InterShardFlow::TransferAck(_)
+        | InterShardFlow::Demote(_)
+        | InterShardFlow::Promote(_) => {}
     }
 }
 

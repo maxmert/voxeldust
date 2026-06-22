@@ -36,9 +36,16 @@ use crate::seams::transfer_control::{TransferControl, TransferControlAck};
 ///   `TransferAck::SourceFlushed` reply (request + ack share a phase, like FreezeSource/SourceFrozen).
 /// - [`STUB_CROSSING_STEP`] (8): the orchestrator→dest `StubCrossing` envelope AND its dest→orch
 ///   `TransferAck::Accepted` reply.
+/// - [`DEMOTE_STEP`] (9) / [`PROMOTE_STEP`] (10): the Slice-1d.5b orchestrator→source `Demote` /
+///   orchestrator→dest `Promote` ordered-demote commands' idempotency steps (the source/dest journal
+///   a redelivery as a no-op at the same step). Their acks ride `SagaAck` (1d.4a `DemoteAck`/`PromoteAck`).
 pub const FLUSH_SOURCE_STEP: u32 = 7;
 /// See [`FLUSH_SOURCE_STEP`].
 pub const STUB_CROSSING_STEP: u32 = 8;
+/// See [`FLUSH_SOURCE_STEP`] — the saga-pushed ordered-demote (1d.5b).
+pub const DEMOTE_STEP: u32 = 9;
+/// See [`FLUSH_SOURCE_STEP`] — the saga-pushed ordered-promote (1d.5b).
+pub const PROMOTE_STEP: u32 = 10;
 
 /// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
 /// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
@@ -79,6 +86,18 @@ pub enum InterShardFlow {
     /// (phase `STUB_CROSSING_STEP`). Distinct from `SagaAck` (the gateway↔saga route-swap
     /// vocabulary): this is the entity-STATE ack family, keyed by `(transfer_id, step_id)`.
     TransferAck(TransferAck),
+    /// Orchestrator → SOURCE shard ORDERED demote command (Slice 1d.5b): the source demotes the
+    /// subject `Owned→Frozen→Ghost` at the post-CAS `new_owner_fence` and acks `DemoteAck` (via
+    /// `SagaAck`). The saga-pushed, FENCE-enforced demote that REPLACES the 1c.8 cooperative poll —
+    /// the `FlushSource` precedent (a dedicated saga→shard arm, not `TransferControl`). Side-effecting,
+    /// ack-driven by `(transfer, DEMOTE_STEP)`. APPENDED at the end (Ghost is discriminant 0; this
+    /// preserves every existing postcard discriminant).
+    Demote(DemoteCmd),
+    /// Orchestrator → DEST shard ORDERED promote command (Slice 1d.5b): the dest flips the subject
+    /// `Ghost→Owned` at `new_fence` and acks `PromoteAck`. Reachable in the saga ONLY after
+    /// `DemoteAck` (demote-before-promote) — REPLACES the 1c.8 autonomous adopt-flip. Side-effecting,
+    /// ack-driven by `(transfer, PROMOTE_STEP)`.
+    Promote(PromoteCmd),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -165,6 +184,20 @@ impl InterShardFlow {
                     step_id: ack.step_id(),
                 },
             },
+            // The saga-pushed ordered demote/promote (1d.5b): side-effecting authority moves at the
+            // source/dest, journaled by `(transfer, DEMOTE_STEP|PROMOTE_STEP)` (consult-before-effect).
+            InterShardFlow::Demote(cmd) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: cmd.transfer,
+                    step_id: cmd.step_id,
+                },
+            },
+            InterShardFlow::Promote(cmd) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: cmd.transfer,
+                    step_id: cmd.step_id,
+                },
+            },
         }
     }
 }
@@ -177,6 +210,30 @@ impl InterShardFlow {
 pub struct FlushSource {
     pub transfer: TransferId,
     pub subject: DirectoryKey,
+    pub step_id: u32,
+}
+
+/// Orchestrator → SOURCE shard ORDERED-demote command (Slice 1d.5b). The source finds the held dot
+/// for `subject`, applies `Owned→Frozen→Ghost` at `new_owner_fence` (the dest's post-CAS fence — the
+/// per-entity `Authority::apply` gates on `is_stale_against`), retains it as the ghost, and acks
+/// `DemoteAck`. The `step_id` is always [`DEMOTE_STEP`] (carried, not inline — `effect_class` keys
+/// uniformly; the source journals `(transfer, DEMOTE_STEP)` consult-before-effect for redelivery).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DemoteCmd {
+    pub transfer: TransferId,
+    pub subject: DirectoryKey,
+    pub new_owner_fence: Fence,
+    pub step_id: u32,
+}
+
+/// Orchestrator → DEST shard ORDERED-promote command (Slice 1d.5b). The dest finds its Ghost dot for
+/// `subject` and flips `Ghost→Owned` at `new_fence`, then acks `PromoteAck`. Reachable in the saga
+/// ONLY after `DemoteAck` (demote-before-promote). `step_id` is always [`PROMOTE_STEP`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromoteCmd {
+    pub transfer: TransferId,
+    pub subject: DirectoryKey,
+    pub new_fence: Fence,
     pub step_id: u32,
 }
 
@@ -527,17 +584,60 @@ mod tests {
                 }
             }
         );
+        // 1d.5b: the saga-pushed ordered demote/promote — side-effecting at (transfer, 9|10).
+        let demote = InterShardFlow::Demote(DemoteCmd {
+            transfer: TransferId(11),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            new_owner_fence: Fence(6),
+            step_id: DEMOTE_STEP,
+        });
+        assert_eq!(
+            demote.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: DEMOTE_STEP,
+                }
+            }
+        );
+        let promote = InterShardFlow::Promote(PromoteCmd {
+            transfer: TransferId(11),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            new_fence: Fence(6),
+            step_id: PROMOTE_STEP,
+        });
+        assert_eq!(
+            promote.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: PROMOTE_STEP,
+                }
+            }
+        );
     }
 
     /// The entity-STATE step ids are DISJOINT from the 0–6 route-swap phases — so a state step can
     /// never alias a route-swap phase in any `(transfer, step_id)` journal.
     #[test]
     fn transfer_state_step_ids_are_disjoint_from_route_swap_phases() {
+        use std::collections::BTreeSet;
+        // Every entity-STATE step (flush/crossing/demote/promote) is disjoint from the 0–6 route-swap
+        // phases AND from each other — so a state step can never alias a phase in any journal.
+        let state_steps = [
+            FLUSH_SOURCE_STEP,
+            STUB_CROSSING_STEP,
+            DEMOTE_STEP,
+            PROMOTE_STEP,
+        ];
         for phase in 0u32..=6 {
-            assert_ne!(phase, FLUSH_SOURCE_STEP);
-            assert_ne!(phase, STUB_CROSSING_STEP);
+            assert!(!state_steps.contains(&phase), "state step aliases phase {phase}");
         }
-        assert_ne!(FLUSH_SOURCE_STEP, STUB_CROSSING_STEP);
+        assert_eq!(
+            state_steps.iter().collect::<BTreeSet<_>>().len(),
+            state_steps.len(),
+            "the entity-state step ids are pairwise distinct",
+        );
         assert_eq!(TRANSFER_SCHEMA_VERSION, 1);
     }
 
@@ -560,6 +660,20 @@ mod tests {
                 outcome: crate::seams::directory::CasOutcome::Won {
                     new_fence: Fence(4),
                 },
+            }),
+            // 1d.5b: the saga-pushed ordered-demote command arms roundtrip distinctly (appended at
+            // the end — Ghost is discriminant 0, so existing discriminants are unshifted).
+            InterShardFlow::Demote(DemoteCmd {
+                transfer: TransferId(11),
+                subject: crate::seams::directory::DirectoryKey::Entity(eid(EntityKind::Player)),
+                new_owner_fence: Fence(6),
+                step_id: DEMOTE_STEP,
+            }),
+            InterShardFlow::Promote(PromoteCmd {
+                transfer: TransferId(11),
+                subject: crate::seams::directory::DirectoryKey::Entity(eid(EntityKind::Player)),
+                new_fence: Fence(6),
+                step_id: PROMOTE_STEP,
             }),
         ] {
             let bytes = postcard::to_allocvec(&flow).expect("encode");
