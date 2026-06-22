@@ -23,7 +23,7 @@ use vd_core::glam::DVec3;
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::rng::SplitMix64;
-use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TransferId};
+use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
     FlushSource, InterShardFlow, TransferAck, TransferEnvelope, TransitionPayload,
@@ -31,6 +31,7 @@ use vd_wire::intershard::{
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::session_flow::{GatewayToShard, ShardToGateway};
 
+use crate::authority::{Authority, AuthorityCmd};
 use crate::io::{Inbound, MsgClass};
 use crate::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 
@@ -69,9 +70,12 @@ pub struct Dot {
     pub session_fence: Fence,
     /// The gateway this session arrived through (reply route — NEVER an address).
     pub gateway: NodeId,
-    /// Authority is DERIVED FROM THE DIRECTORY (fence rule 2): a dot is held,
-    /// visible, and attachable only after its entity grant is recorded. Until
-    /// then it is provisional — it renders nowhere and applies nothing.
+    /// The directory-record PREDICATE truth (NOT the authority truth — `authority` is that):
+    /// `granted` answers "is this entity's grant recorded here / which directory op is owed",
+    /// keyed on by `pending_grant_op`/`foreign_takeover_target`/`crossing_target`/`flush_target`.
+    /// Strictly weaker poll-bookkeeping that 1d.5b's saga-pushed Promote/Demote DELETES; it never
+    /// re-decides emit/input/oracle (those are `authority.simulates()`). An adopted-but-not-crossed
+    /// dot and a retained source Ghost are both `granted==true && simulates()==false` (FG-2 interim).
     pub granted: bool,
     /// A TRANSFER-DESTINATION input slot may APPLY input before its full directory grant
     /// (1c.5): the gateway sends `OpenInputSlot` only AFTER the directory committed authority
@@ -82,27 +86,33 @@ pub struct Dot {
     /// `Authority` attach + render + ghost is 1d (D-27), which sets `granted`. A regular
     /// attach sets `granted` (and `input_active` stays false; `granted` alone permits input).
     pub input_active: bool,
-    /// This dot is a TRANSFER-DESTINATION ADOPT (1c.8, set by `OpenInputSlot` carrying the
-    /// transfer subject): its `entity` is already the SUBJECT id (not a fresh mint), and it
-    /// ADOPTS the existing directory record (a `HeadRead`, never a `LeaseGrant` which the CAS
-    /// fence would Refuse) rather than minting a new entity authority. Cleared on the grant
-    /// flip. An adopt grant sets `granted` (authority-held) WITHOUT `render_ready` (no pose is
-    /// carried in 1c.8 — the dest renders NOTHING; 1d flips render_ready with the real pose) and
-    /// WITHOUT a `SessionAttached` push (the source still owns the client connection — R2).
+    /// This dot is a TRANSFER-DESTINATION ADOPT (set by `OpenInputSlot` carrying the transfer
+    /// subject): its `entity` is the SUBJECT id (not a fresh mint), and it ADOPTS the existing
+    /// directory record (a `HeadRead`, never a `LeaseGrant` the CAS fence would Refuse). Cleared
+    /// on the grant flip. The adopt dot is born `Ghost` (the frozen ghost mirror) and STAYS Ghost
+    /// (renders NOTHING) until `apply_crossing` Promotes it `Ghost→Owned` atomically with the
+    /// crossed pose; the grant flip carries NO `SessionAttached` (the source still owns the client
+    /// connection — R2).
     pub adopting: bool,
-    /// AUTHORITY-held (`granted`) is split from RENDER-ready (1c.8, D-2/D-27 user_decision): a
-    /// login attach sets BOTH (it carries a real pose); a transfer-dest ADOPT sets `granted`
-    /// (so the oracle/directory-record-owner sees it held) but leaves `render_ready=false` — the
-    /// dot renders NOTHING (no origin-teleport, and the single-shard gateway never sees an
-    /// unroutable dest frame). `emit_frames` gates on THIS, never on `granted`. 1d flips it.
-    pub render_ready: bool,
+    /// The per-entity authority TRUTH (`authority.rs` FSM, attached 1d.4b/D-27): `Owned`
+    /// simulates+emits+holds, `Ghost` is a retained read-only mirror, `Frozen` is mid-transfer.
+    /// `authority.simulates()` is the SINGLE answer to "does this shard emit / accept-by-authority
+    /// / hold this entity" — the `emit_frames` gate, half the `apply_input` gate, and the oracle
+    /// held-set. Login AND the transfer-dest both mint `Ghost{GENESIS}` (simulate nothing
+    /// pre-grant) and Promote `Ghost→Owned` via the IDENTICAL machinery (login at the grant fence,
+    /// dest at the crossing fence) — kind-generic: a ship/block/signal entity uses the SAME states
+    /// (no per-kind fork). The source self-fence demotes `Owned→Frozen→Ghost` and RETAINS the dot.
+    pub authority: Authority,
     /// The mirror on release: a detached dot stays HELD (authoritative) until
     /// the directory confirms its revoke — authority is released AT the
     /// directory, never by local despawn.
     pub departing: bool,
-    /// The directory-RECORDED authority fence for this entity (FENCE-1/5/8): every
-    /// grant/revoke uses THIS, never a hardcoded literal, so a transfer that
-    /// advanced the fence past genesis cannot wedge a logout forever.
+    /// The directory-RECORDED PREDICATE fence for this entity (FENCE-1/5/8, the LeaseRevoke key):
+    /// every grant/revoke uses THIS, never a hardcoded literal, so a transfer that advanced the
+    /// fence past genesis cannot wedge a logout forever. NOT kept in sync with `authority.fence()`:
+    /// on a retained source Ghost they intentionally diverge (`entity_fence` = the dot's OWN old
+    /// grant fence; `authority.fence()` = the new owner's). `authority.fence()` is the FSM truth;
+    /// `entity_fence` is poll bookkeeping torn out in 1d.5b.
     pub entity_fence: Fence,
     pub pose: StampedPose,
     pub yaw: f64,
@@ -265,7 +275,18 @@ pub struct StubStats {
     /// `Transfer` envelopes whose payload kind 1d.1 does not consume (`InitialSpawn` /
     /// `TransientBatch`) — a counted no-op, never a panic. 0 in a 1d.1 crossing run.
     pub crossings_unhandled: u64,
+    /// SOURCE self-fence redeliveries that found the dot ALREADY demoted to a Ghost — a counted
+    /// no-op (the idempotency guard's taken arm). 1d.4b retains the source as a Ghost instead of
+    /// `dots.remove`, so a second foreign-owner reply must NOT re-demote; this proves the guard.
+    pub self_fence_skipped: u64,
 }
+
+/// The inert Freeze `TransferId` for the poll-discovered source self-fence (1d.4b): the directory
+/// head names a foreign owner with `in_transfer == None` (the CAS already cleared the lock), so the
+/// `Owned→Frozen` step has no real transfer to carry. The `Frozen.transfer` is never read in 1d.4b
+/// (only `Thaw` checks it, and the poll path never thaws); 1d.5b's saga-pushed `Demote` carries the
+/// real `TransferId` and deletes this. Named (not an inline literal) per the no-magic-numbers rule.
+const SELF_FENCE_TRANSFER: TransferId = TransferId(0);
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,6 +529,7 @@ fn process_inbound(
                 bytes,
                 &identity,
                 &config,
+                &clock,
                 &mut authority,
                 &mut dots,
                 &mut applied,
@@ -569,7 +591,13 @@ fn on_gateway_msg(
                     granted: false,
                     input_active: false,
                     adopting: false,
-                    render_ready: false,
+                    // Born a Ghost: a pre-grant login simulates NOTHING (`simulates()==false`),
+                    // so it emits no frame until the LoggedIn grant flip Promotes it Ghost→Owned
+                    // at the recorded grant fence (the IDENTICAL Promote the transfer-dest uses).
+                    authority: Authority::Ghost {
+                        source_fence: Fence::GENESIS,
+                        since_tick: ctx.clock.local_tick,
+                    },
                     departing: false,
                     entity_fence: Fence::GENESIS,
                     pose: StampedPose::at_rest(
@@ -663,9 +691,9 @@ fn on_gateway_msg(
             // records: the post-marker cut buffer the gateway held drains here. The dot is
             // `input_active` and ADOPTS the transfer subject (1c.8): its entity becomes the
             // SUBJECT id (the record the CAS moved here), so the adopt HeadRead lands on that
-            // record and flips `granted` (authority-held). It is NOT `render_ready` — it renders
-            // nowhere (no pose carried; 1d) — and gets no `SessionAttached` reply (the source
-            // still owns the client connection — R2).
+            // record and flips `granted` (authority-held). It STAYS a Ghost (`simulates()==false`)
+            // — it renders nowhere (no pose carried) until `apply_crossing` Promotes it — and gets
+            // no `SessionAttached` reply (the source still owns the client connection — R2).
             let Some(_realm_fence) = ctx.realm_fence else {
                 // No realm lease yet: drop + count. NO re-drive in 1c.5 (the gateway already
                 // take-drained the buffer; OpenInputSlot is emitted once, the saga is
@@ -692,7 +720,13 @@ fn on_gateway_msg(
                 granted: false,
                 input_active: false,
                 adopting: true,
-                render_ready: false,
+                // THE frozen ghost mirror, born Ghost (NOT Frozen) so the adopt is a legal
+                // Promote (Ghost→Owned); `source_fence: GENESIS` is strictly stale vs the CAS
+                // fence the crossing carries, so `apply_crossing`'s Promote succeeds.
+                authority: Authority::Ghost {
+                    source_fence: Fence::GENESIS,
+                    since_tick: ctx.clock.local_tick,
+                },
                 departing: false,
                 entity_fence: Fence::GENESIS, // the adopt HeadRead fills the real CAS fence
                 pose: StampedPose::at_rest(ctx.config.frame, DVec3::ZERO, ctx.clock.universe_tick),
@@ -767,11 +801,14 @@ fn apply_input(
         log.record_discarded(session, None, DiscardReason::UnknownSession);
         return;
     };
-    // A dot may apply input once it is the AUTHORITY for the session's input: either a fully
-    // granted attach (`granted`) OR a committed transfer-destination input slot
-    // (`input_active`, 1c.5 — the gateway opened it only post-directory-commit). A purely
-    // provisional dot (neither) drops input as PendingAuthority.
-    if !dot.granted && !dot.input_active {
+    // A dot may apply input once it is the AUTHORITY for the session's input: either it SIMULATES
+    // (`Authority::Owned`) OR a committed transfer-destination input slot (`input_active`, 1c.5 —
+    // the gateway opened it only post-directory-commit, so the post-marker cut buffer drains+
+    // integrates here even though the dest is still a Ghost; subtlety 4). A purely provisional dot
+    // (neither) drops input as PendingAuthority — incl. a RETAINED source Ghost (`simulates()==false`,
+    // `input_active==false`), which correctly drops late input (was UnknownSession under the old
+    // `dots.remove`; both record `seq=None` so they are INPUT-CONSERVATION-equivalent).
+    if !dot.authority.simulates() && !dot.input_active {
         log.record_discarded(session, None, DiscardReason::PendingAuthority);
         return;
     }
@@ -843,8 +880,9 @@ enum GrantFlip {
     LoggedIn(AttachEgress),
     /// A transfer-dest ADOPT flipped (R2 — no re-home): the caller (a) pushes the
     /// `SubscriptionReady` egress so the gateway opens the dest read-sub + re-points the avatar's
-    /// render authority (Track R / 1d.2c — `render_ready` STAYS false, the dest emits no frames
-    /// until 1d.3), and (b) drains the flipped session's buffered crossing (if any). Carries the
+    /// render authority (Track R / 1d.2c — the dot STAYS a Ghost, `simulates()==false`, so the dest
+    /// emits no frames until `apply_crossing` Promotes it), and (b) drains the flipped session's
+    /// buffered crossing (if any). Carries the
     /// session so the drain needs no second lookup, mirroring `LoggedIn`'s egress shape.
     Adopted {
         session: SessionId,
@@ -857,9 +895,11 @@ enum GrantFlip {
 /// Flip the matching provisional dot to `granted` at the recorded fence. Monomorphic (the loop +
 /// the login/adopt branching live here) so the reply arm stays a branchless dispatch (HR5).
 ///
-/// - login (`!adopting`): granted := true, render_ready := true → `LoggedIn` (push SessionAttached).
-/// - adopt (`adopting`, 1c.8): granted := true, render_ready := false, adopting cleared, NO
-///   SessionAttached (R2 — the source owns the client) → `Adopted` (the caller drains the crossing).
+/// - login (`!adopting`): granted := true, Promote Ghost→Owned (now `simulates()`) → `LoggedIn`
+///   (push SessionAttached).
+/// - adopt (`adopting`): granted := true, adopting cleared, the dot STAYS Ghost (NO Promote here —
+///   `apply_crossing` promotes it atomically with the pose), NO SessionAttached (R2 — the source
+///   owns the client) → `Adopted` (the caller drains the crossing).
 ///
 /// Guarded by `!dot.granted` so a duplicate grant head is idempotent (`NoOp`, no second flip).
 fn flip_grant(
@@ -882,8 +922,10 @@ fn flip_grant(
             // Track R / 1d.2c: announce the dest read-sub to the gateway via `SubscriptionReady`
             // (riding the already-reviewed ShardToGateway seam — HR1). `realm_fence` + `frame`
             // are the dest's, in scope HERE (the first instant the dest legitimately owns the
-            // entity), the IDENTICAL tuple login packs into `SessionAttached`. `render_ready`
-            // STAYS false — the sub is OPEN + ROUTABLE but the dest emits NO frames until 1d.3.
+            // entity), the IDENTICAL tuple login packs into `SessionAttached`. The dot STAYS Ghost
+            // (`simulates()==false`) — the sub is OPEN + ROUTABLE but the dest emits NO frames; the
+            // Promote to Owned happens in `apply_crossing` atomically with the crossed pose, NEVER
+            // here (a Promote here would emit a poseless seed-8 origin frame — capstone control (f)).
             return GrantFlip::Adopted {
                 session: *session,
                 egress: AttachEgress {
@@ -897,7 +939,12 @@ fn flip_grant(
                 },
             };
         }
-        dot.render_ready = true;
+        // Login Promote: Ghost{GENESIS} → Owned at the recorded grant fence (strictly > GENESIS,
+        // so infallible) — the IDENTICAL Ghost→Owned machinery the transfer-dest uses (kind-generic).
+        dot.authority = dot
+            .authority
+            .apply(AuthorityCmd::Promote { new_fence: fence })
+            .expect("login Ghost{GENESIS} promotes at the recorded grant fence (strictly > GENESIS)");
         return GrantFlip::LoggedIn(AttachEgress {
             gateway: dot.gateway,
             reply: ShardToGateway::SessionAttached {
@@ -918,36 +965,63 @@ fn dot_grant_target(dot: &Dot, entity: EntityId) -> bool {
     (dot.entity == entity) & !dot.granted
 }
 
-/// The SOURCE self-fence (1c.8): a directory head naming a FOREIGN owner of an entity this shard
-/// holds means the transfer CAS moved the record to the dest — DROP the local granted,
-/// non-departing dot for it (NO directory write; the record is the dest's now). Idempotent: a
-/// second foreign-owner reply for an already-dropped entity finds no matching dot. Monomorphic
-/// (the find + remove is hoisted out of the reply arm — HR5 branchless shim).
+/// The SOURCE self-fence (1c.8/1d.4b): a directory head naming a FOREIGN owner of an entity this
+/// shard holds means the transfer CAS moved the record to the dest — DEMOTE the local granted,
+/// non-departing dot to a RETAINED Ghost (`Owned→Frozen→Ghost`), NO directory write (the record is
+/// the dest's now), `granted` KEPT (FG-2: the poll still discovers it). 1d.4b RETAINS the dot (the
+/// first ghost) instead of `dots.remove`-ing it, so it stops emitting (`simulates()==false`) but
+/// survives for the 1d.5b ghost-as-collider. Idempotent WITHOUT IllegalTransition-as-control-flow:
+/// an already-Ghost redelivery is a counted no-op via the `simulates()` guard. Monomorphic.
 ///
-/// ⚠️ INTERIM, OWED-FOR-REMOVAL (DEFERRED D-2): this is a COOPERATIVE IN-MEMORY drop discovered by
-/// the granted-key poll — NOT the binding ordered, FENCE-enforced demote-before-promote
-/// (`transfer_protocol.md` §2.4: "the freeze is enforced by the fence, not by cooperative in-memory
-/// state"). The dest already promoted (`flip_grant`) off its own post-CAS HeadRead, so there is a
-/// transient two-holder window (masked only by `render_ready=false` + the single-shard gateway),
-/// and a crash before the next poll strands a stale source grant. 1d/the band-ghost slice RIPS THIS
-/// OUT: a saga-pushed `Demote`/`DemoteAck` flips the source to a RETAINED ghost-as-collider via
-/// `authority.rs` `Owned→Frozen→Ghost` demote-BEFORE-promote — a tear-out, not a predicate swap.
+/// ⚠️ INTERIM, OWED-FOR-REMOVAL (DEFERRED D-2): the demote is still DISCOVERED by the granted-key
+/// poll — NOT the binding ordered, FENCE-enforced demote-before-promote (`transfer_protocol.md`
+/// §2.4). The dest already promoted (`flip_grant`) off its own post-CAS HeadRead, so a transient
+/// two-holder window remains (the retained source Ghost no longer EMITS — `simulates()==false` —
+/// and the oracle excludes it, so it is masked, not prevented), and a crash before the next poll
+/// strands a stale source grant. 1d.5b RIPS THIS OUT: a saga-pushed `Demote`/`DemoteAck` drives the
+/// SAME `Owned→Frozen→Ghost` transition demote-BEFORE-promote — a poll tear-out, not a logic swap.
 fn self_fence_foreign_entity(
     dots: &mut BTreeMap<SessionId, Dot>,
     entity: EntityId,
-    foreign: AuthorityRef,
+    new_owner_fence: Fence,
+    in_transfer: Option<TransferId>,
+    at_tick: TickId,
+    stats: &mut StubStats,
 ) {
     let Some(session) = dots
         .iter()
         .find(|(_, d)| foreign_takeover_target(d, entity))
         .map(|(session, _)| *session)
     else {
-        return; // no matching dot: already dropped (or never held here) — a clean no-op
+        return; // no matching dot: never held here — a clean no-op
     };
+    let dot = dots
+        .get_mut(&session)
+        .expect("foreign_takeover_target just matched this session");
+    // Idempotency WITHOUT relying on IllegalTransition as control flow: only an Owned source
+    // demotes; an already-Ghost redelivery is a COUNTED no-op (the covered guard arm).
+    if !dot.authority.simulates() {
+        stats.self_fence_skipped += 1;
+        return;
+    }
+    let transfer = in_transfer.unwrap_or(SELF_FENCE_TRANSFER);
+    // Owned → Frozen (always legal) → Ghost (the foreign CAS fence is strictly newer than the
+    // source's own grant fence — the directory CAS is fence-monotone). An Err here is a real
+    // invariant break, so panic; the refusal arms are proptested in `authority.rs`.
+    dot.authority = dot
+        .authority
+        .apply(AuthorityCmd::Freeze { transfer })
+        .and_then(|frozen| {
+            frozen.apply(AuthorityCmd::Demote {
+                new_owner_fence,
+                at_tick,
+            })
+        })
+        .expect("an Owned source freezes infallibly and demotes at the strictly-newer CAS fence");
     tracing::warn!(
-        "entity {entity} now held by {foreign:?} — self-demoting the transferred dot (local drop)"
+        "entity {entity} now held at fence {new_owner_fence} — source self-demoted to a retained Ghost"
     );
-    dots.remove(&session);
+    // KEEP the dot (no remove) and KEEP `granted` == true (FG-2: the poll still discovers it).
 }
 
 /// Whether a dot is the local granted, non-departing holder of `entity` (the self-fence target).
@@ -1068,11 +1142,11 @@ fn on_transfer_envelope(
 /// Whether a dot is the ADOPTED dest dot for `entity`: authority-held (`granted`), not departing.
 /// Monomorphic predicate.
 ///
-/// 1d.3 dropped the former `!dot.render_ready` term. Reason: 1d.3 flips `render_ready` on the
-/// FIRST crossing-apply, so a `!render_ready` guard would make a saga REDELIVERY (the at-least-once
-/// re-emit) miss this predicate, fall to `on_transfer_envelope`'s `None` arm, and re-buffer into
-/// `PendingCrossings` FOREVER (the dot is already adopted; no future grant-flip drains it) — a
-/// permanent strand + `crossings_buffered` inflation. Widened, a post-flip redelivery hits
+/// 1d.3 dropped a former `simulates()`-style term. Reason: `apply_crossing` Promotes the dot
+/// Ghost→Owned on the FIRST crossing-apply, so a `!simulates()` guard would make a saga REDELIVERY
+/// (the at-least-once re-emit) miss this predicate, fall to `on_transfer_envelope`'s `None` arm, and
+/// re-buffer into `PendingCrossings` FOREVER (the dot is already adopted; no future grant-flip
+/// drains it) — a permanent strand + `crossings_buffered` inflation. Widened, a post-flip redelivery hits
 /// `apply_crossing`, the journal returns `AlreadyApplied`, and it re-acks WITHOUT re-applying.
 /// Sound because AUTHORITY-UNIQUE guarantees at most one granted non-departing dot per entity here,
 /// AND the saga addresses the crossing envelope (`InterShardFlow::Transfer`) to the DEST node only,
@@ -1111,13 +1185,20 @@ fn apply_crossing(
     if applied.journal_step(transfer, step_id) == StepOutcome::FirstApply {
         // Never trust the network: sanitize to finite at this ingress before storing.
         dot.pose = pose.sanitized();
-        // 1d.3 — the FIRST visible cross-shard transfer: the crossed pose is now stored, so flip
-        // render so `emit_frames` emits it (from the dest sub). ATOMIC-WITH the pose store by
-        // construction — never at the `flip_grant` Adopted arm (`:887`), which under the
-        // buffered-crossing case fires BEFORE the pose exists and would emit an origin-default
-        // (`SystemSpace{seed:8}`) ZERO frame for the gap ticks. Flipping here makes that
-        // origin-default frame structurally unreachable.
-        dot.render_ready = true;
+        // 1d.3/1d.4b — the FIRST visible cross-shard transfer: the crossed pose is now stored, so
+        // Promote the dest Ghost→Owned (now `simulates()` → `emit_frames` emits it from the dest
+        // sub). ATOMIC-WITH the pose store — NEVER at the `flip_grant` Adopted arm, which under the
+        // buffered-crossing case fires BEFORE the pose exists and would emit a poseless origin-
+        // default (`SystemSpace{seed:8}`) ZERO frame. The Promote keys on `dot.entity_fence` (the
+        // directory-recorded CAS fence `flip_grant` stamped), the IDENTICAL fence the stale gate
+        // above checked — so it is strictly newer than the Ghost's GENESIS `source_fence` (the
+        // stale gate already dropped any crossing below `entity_fence`), hence infallible.
+        dot.authority = dot
+            .authority
+            .apply(AuthorityCmd::Promote {
+                new_fence: dot.entity_fence,
+            })
+            .expect("dest Ghost promotes at the recorded CAS fence (the stale gate ensured it is strictly newer)");
         stats.crossings_applied += 1;
     }
     outbox.push_flow(
@@ -1167,6 +1248,7 @@ fn on_directory_reply(
     bytes: &[u8],
     identity: &NodeIdentity,
     config: &StubConfig,
+    clock: &ClockSample,
     authority: &mut RealmAuthority,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
@@ -1233,10 +1315,10 @@ fn on_directory_reply(
             };
             if record.authority == AuthorityRef::Shard(identity.node_id) {
                 // OURS: flip granted + stamp the recorded fence. A login attach pushes
-                // SessionAttached and becomes render-ready; a transfer-dest ADOPT (1c.8) suppresses
-                // the attach (R2 — source owns the client) and stays NOT render-ready (no pose
-                // carried; 1d.1 stores the crossed pose but does NOT flip render_ready — that is
-                // 1d.3). The branching is hoisted into `flip_grant` → `GrantFlip`: LoggedIn pushes
+                // SessionAttached and Promotes Ghost→Owned (now simulates); a transfer-dest ADOPT
+                // (1c.8) suppresses the attach (R2 — source owns the client) and STAYS a Ghost (no
+                // pose carried; `apply_crossing` Promotes it atomically with the crossed pose). The
+                // branching is hoisted into `flip_grant` → `GrantFlip`: LoggedIn pushes
                 // SessionAttached; Adopted drains the buffered crossing (if any) NOW; NoOp is a
                 // duplicate-grant idempotent no-op.
                 match flip_grant(&mut dots.0, entity, record.fence, config, realm_fence) {
@@ -1261,12 +1343,21 @@ fn on_directory_reply(
                     GrantFlip::NoOp => {}
                 }
             } else {
-                // FOREIGN owner of an entity this shard holds (1c.8 the SOURCE self-fence, the
-                // Entity-key analogue of the realm self-fence): the transfer CAS moved the record
-                // to the dest, so the source DROPS its dot LOCALLY — NO LeaseRevoke (a revoke at the
-                // stale entity_fence is Refused; a revoke at new_fence would delete the dest's
-                // record), NO `departing`. Idempotent: no matching dot → no-op.
-                self_fence_foreign_entity(&mut dots.0, entity, record.authority);
+                // FOREIGN owner of an entity this shard holds (1c.8/1d.4b the SOURCE self-fence, the
+                // Entity-key analogue of the realm self-fence): the transfer CAS moved the record to
+                // the dest, so the source DEMOTES its dot to a RETAINED Ghost LOCALLY — NO LeaseRevoke
+                // (a revoke at the stale entity_fence is Refused; a revoke at new_fence would delete
+                // the dest's record), NO `departing`. The Demote keys on the foreign record's fence
+                // (the new owner's, strictly newer) at the current tick. Idempotent: an already-Ghost
+                // redelivery is a counted no-op.
+                self_fence_foreign_entity(
+                    &mut dots.0,
+                    entity,
+                    record.fence,
+                    record.in_transfer,
+                    clock.local_tick,
+                    stats,
+                );
             }
         }
         DirectoryReply::Head {
@@ -1308,14 +1399,14 @@ fn emit_frames(
     let Some(realm_fence) = authority.0 else {
         return;
     };
-    // Gate on RENDER-ready, not authority-held (1c.8 split): a transfer-dest ADOPT is granted
-    // (authority-held, oracle-visible) but renders NOTHING until 1d carries a pose + flips
-    // render_ready — so it never emits an origin-teleport frame, and the single-shard gateway
-    // never sees an unroutable dest frame.
+    // Gate on whether the dot SIMULATES (`Authority::Owned`): a Ghost (a pre-promote dest, or a
+    // retained source) and a Frozen dot emit NOTHING — so the dest never emits a poseless
+    // origin-default frame and the single-shard gateway never sees an unroutable dest frame.
+    // `simulates()` is a branchless `matches!` on a `Copy` field, monomorphic at this call site.
     let mut gateways: Vec<NodeId> = dots
         .0
         .values()
-        .filter(|d| d.render_ready)
+        .filter(|d| d.authority.simulates())
         .map(|d| d.gateway)
         .collect();
     gateways.sort_unstable();
@@ -1326,7 +1417,7 @@ fn emit_frames(
     let entities: Vec<EntitySnap> = dots
         .0
         .values()
-        .filter(|d| d.render_ready)
+        .filter(|d| d.authority.simulates())
         .map(|d| EntitySnap {
             entity: d.entity,
             pose: d.pose,
@@ -2285,7 +2376,7 @@ mod tests {
                         granted: true,
                         input_active: false,
                         adopting: false,
-                        render_ready: true,
+                        authority: Authority::Owned { fence: Fence(1) },
                         departing: false,
                         entity_fence: Fence(1),
                         pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(100)),
@@ -2466,7 +2557,7 @@ mod tests {
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert!(dot.input_active, "the slot is input-active");
         // 1c.8: the dot ADOPTS the subject — its entity IS the subject id (not a fresh mint),
-        // it is `adopting`, NOT granted (the adopt HeadRead flips that), and NOT render-ready.
+        // it is `adopting`, NOT granted (the adopt HeadRead flips that), and a Ghost (no simulate).
         assert_eq!(dot.entity, SUBJECT, "the dot adopted the transfer subject");
         assert!(dot.adopting, "the dot is a transfer-dest adopt");
         assert!(
@@ -2474,8 +2565,16 @@ mod tests {
             "the adopt HeadRead has not flipped granted yet"
         );
         assert!(
-            !dot.render_ready,
-            "the adopt carries no pose — renders nothing"
+            !dot.authority.simulates(),
+            "the adopt is a Ghost (the frozen mirror) — does not simulate, renders nothing"
+        );
+        assert_eq!(
+            dot.authority,
+            Authority::Ghost {
+                source_fence: Fence::GENESIS,
+                since_tick: TickId(1),
+            },
+            "the dest adopt is born the GENESIS frozen ghost mirror (Promoted to Owned by the crossing)"
         );
         assert_eq!(
             dot.entity_fence,
@@ -2493,8 +2592,8 @@ mod tests {
             "the as-received resume watermark is latched for the conservation gate"
         );
         // The slot is a SILENT inbound state change: it emits NOTHING — no SessionAttached,
-        // no re-home (the source still owns the client connection — R2), and the provisional
-        // dot is not render-ready so it renders no snapshot frame either.
+        // no re-home (the source still owns the client connection — R2), and the Ghost adopt dot
+        // does not simulate so it renders no snapshot frame either.
         assert!(sent.is_empty(), "the input slot emits nothing back");
     }
 
@@ -2532,10 +2631,11 @@ mod tests {
 
     #[test]
     fn the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach() {
-        // 1c.8 + 1d.2c: the grant-flip on the adopted record sets granted (authority-held) AND
-        // stamps entity_fence = the recorded CAS fence, but leaves render_ready FALSE. It pushes
-        // NO SessionAttached (R2 — the source owns the client) but DOES push a SubscriptionReady
-        // (Track R / 1d.2c: the gateway opens the dest read-sub + re-points authority).
+        // 1c.8 + 1d.2c + 1d.4b: the grant-flip on the adopted record sets granted (authority-held)
+        // AND stamps entity_fence = the recorded CAS fence, but the dot STAYS Ghost
+        // (simulates()==false) — the Promote to Owned is `apply_crossing`'s, atomic with the pose.
+        // It pushes NO SessionAttached (R2 — the source owns the client) but DOES push a
+        // SubscriptionReady (Track R / 1d.2c: the gateway opens the dest read-sub + re-points authority).
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
@@ -2558,7 +2658,11 @@ mod tests {
         // Split asserts (each &&-short-circuit false arm is uncoverable — HR5).
         assert!(dot.granted, "the adopt flips granted (authority-held)");
         assert_eq!(dot.entity_fence, Fence(2), "stamped the recorded CAS fence");
-        assert!(!dot.render_ready, "an adopt renders NOTHING (no pose; 1d.3 flips it)");
+        assert!(
+            !dot.authority.simulates(),
+            "an adopt STAYS a Ghost until the crossing promotes it (no pose; renders nothing) — \
+             a Promote in this flip arm would emit a poseless seed-8 origin frame (capstone control (f))"
+        );
         assert!(!dot.adopting, "adopting is cleared on the flip");
         // EXACTLY one Control-class reply to the gateway: a SubscriptionReady carrying the DEST
         // frame + realm fence (NOT a SessionAttached — that is suppressed on an adopt, R2).
@@ -2580,7 +2684,7 @@ mod tests {
         assert_eq!(
             decode_frames(&sent).len(),
             0,
-            "an adopted dot renders nothing (render_ready false)"
+            "an adopted Ghost dot renders nothing (simulates()==false)"
         );
     }
 
@@ -2633,16 +2737,16 @@ mod tests {
 
     #[test]
     fn the_source_self_fences_a_foreign_owned_entity_without_revoking() {
-        // 1c.8 SOURCE self-fence: a granted dot whose directory head names a FOREIGN owner (the
-        // transfer CAS moved it to the dest) is DROPPED LOCALLY — NO LeaseRevoke (which would be
-        // Refused at the stale fence, or delete the dest's record at the new fence).
+        // 1c.8/1d.4b SOURCE self-fence: a granted dot whose directory head names a FOREIGN owner
+        // (the transfer CAS moved it to the dest) is DEMOTED to a RETAINED Ghost
+        // (`authority.rs` Owned→Frozen→Ghost) — NO `dots.remove`, NO LeaseRevoke (which would be
+        // Refused at the stale fence, or delete the dest's record at the new fence). The retained
+        // Ghost stops emitting (`simulates()==false`) but survives for the 1d.5b ghost-as-collider.
         //
-        // ⚠️ EXISTS-TO-BE-FLIPPED (DEFERRED D-2 ordering inversion): this asserts the INTERIM
-        // local DROP (`dots.remove`). The proper fence-first, saga-pushed demote (post-1d
-        // band/ghost slice) instead flips the source to a RETAINED ghost-as-collider
-        // (`authority.rs` Owned→Frozen→Ghost) demote-BEFORE-promote — so when that lands the dot
-        // must NOT vanish (it becomes a ghost), and this assertion + `self_fence_foreign_entity`
-        // + the granted-key poll are RIPPED OUT (a tear-out, not a predicate body-swap).
+        // ⚠️ EXISTS-TO-BE-FLIPPED (DEFERRED D-2 ordering inversion): the demote is still DISCOVERED
+        // by the granted-key POLL (not yet the saga-pushed, fence-first `Demote`/`DemoteAck`). 1d.5b
+        // drives the SAME Owned→Frozen→Ghost transition demote-BEFORE-promote and RIPS OUT the poll
+        // + `self_fence_foreign_entity` (a tear-out, not a predicate body-swap).
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.attach(); // a granted, locally-owned dot
@@ -2661,26 +2765,47 @@ mod tests {
             MsgClass::Saga,
             &InterShardFlow::DirectoryReply(foreign),
         )]);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert!(
-            !rig.world.resource::<Dots>().0.contains_key(&SESSION),
-            "the source self-demotes (drops) the transferred dot"
+            !dot.authority.simulates(),
+            "the source self-demoted — a retained Ghost does not simulate (stops emitting, no vanish)"
         );
-        // The drop is LOCAL and IMMEDIATE: the dot is gone in the SAME tick as the foreign-owner
-        // reply (asserted above). A revoke-based removal (the logout two-phase path) would instead
-        // set `departing` and KEEP the dot until the directory confirms a LeaseRevoke a round-trip
-        // later — so single-tick removal IS the proof that NO directory write (no LeaseRevoke) was
-        // issued; revoking the record (now the dest's) would orphan the player.
+        assert_eq!(
+            dot.authority,
+            Authority::Ghost {
+                source_fence: Fence(2),
+                since_tick: TickId(1),
+            },
+            "Owned{{1}} → Frozen → Ghost at the foreign CAS fence (2), retained (NOT dots.remove)"
+        );
+        assert_eq!(
+            dot.entity_fence,
+            Fence(1),
+            "entity_fence is NOT touched by the demote — it stays the dot's OWN old grant fence \
+             (poll bookkeeping); only authority.fence() advances to the new owner's"
+        );
+        // The demote is LOCAL: NO directory write (no LeaseRevoke at the stale fence, no delete of
+        // the dest's record at the new fence). The dot is RETAINED as a Ghost (no orphan, no vanish).
         assert!(
             sent.is_empty(),
-            "the self-fence drop is purely local — no directory write at all: {sent:?}"
+            "the self-fence demote is purely local — no directory write at all: {sent:?}"
         );
-        // Idempotent: a second foreign-owner reply finds no matching dot — a clean no-op.
+        // Idempotent WITHOUT IllegalTransition-as-control-flow: a second foreign-owner reply finds
+        // the dot ALREADY a Ghost → the `simulates()` guard counts a skip and no-ops (the covered arm).
         let _ = rig.tick(vec![wire_msg(
             ORCH,
             MsgClass::Saga,
             &InterShardFlow::DirectoryReply(foreign),
         )]);
-        assert!(!rig.world.resource::<Dots>().0.contains_key(&SESSION));
+        assert!(
+            rig.world.resource::<Dots>().0.contains_key(&SESSION),
+            "the retained Ghost survives the redelivery"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().self_fence_skipped,
+            1,
+            "the redelivery on the already-Ghost source is a counted no-op (the guard's taken arm)"
+        );
     }
 
     #[test]
@@ -2969,7 +3094,7 @@ mod tests {
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]); // adopting dot
-        let _ = rig.tick(vec![adopted_head(Fence(2))]); // flip → granted, !render_ready
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // flip → granted, still a Ghost (not simulating)
         let pose = crossing_pose();
 
         let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
@@ -2980,17 +3105,22 @@ mod tests {
             "the crossed pose applied to the adopted dot"
         );
         assert!(
-            dot.render_ready,
-            "1d.3 flips render_ready atomically with the crossed-pose store (the VISIBLE flip)"
+            dot.authority.simulates(),
+            "the crossing Promotes the dest Ghost→Owned atomically with the crossed-pose store (the VISIBLE flip)"
+        );
+        assert_eq!(
+            dot.authority,
+            Authority::Owned { fence: Fence(2) },
+            "promoted to the recorded CAS fence"
         );
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
         assert!(acked(&sent, TransferId(7)), "the crossing step is acked");
 
-        // REDELIVERY AFTER THE FLIP (the widened-`crossing_target` arm, DEFECT-3): now that
-        // `render_ready` is true, the redelivery still matches `crossing_target` (the dropped
-        // `!render_ready` term), so it reaches `apply_crossing`, the journal returns
-        // `AlreadyApplied`, and it re-acks WITHOUT re-applying — it does NOT fall to the `None` arm
-        // and re-buffer (which the old `!render_ready` predicate would have, stranding it forever).
+        // REDELIVERY AFTER THE FLIP (the widened-`crossing_target` arm, DEFECT-3): now that the dot
+        // is Owned (`simulates()`), the redelivery still matches `crossing_target` (the dropped
+        // simulate-state term), so it reaches `apply_crossing`, the journal returns `AlreadyApplied`,
+        // and it re-acks WITHOUT re-applying — it does NOT fall to the `None` arm and re-buffer
+        // (which a `!simulates()` predicate would have, stranding it forever).
         let buffered_before = rig.world.resource::<StubStats>().crossings_buffered;
         let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
         assert_eq!(
@@ -3042,8 +3172,8 @@ mod tests {
             "a still-buffered redelivery does not inflate the buffered count"
         );
 
-        // The adopt grant-flip DRAINS the buffer → applies the pose + acks AND flips render_ready
-        // (1d.3 — the drained path shares `apply_crossing`, so the VISIBLE flip lands here too).
+        // The adopt grant-flip DRAINS the buffer → applies the pose + acks AND Promotes Ghost→Owned
+        // (the drained path shares `apply_crossing`, so the VISIBLE flip lands here too).
         let sent = rig.tick(vec![adopted_head(Fence(2))]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
@@ -3052,15 +3182,20 @@ mod tests {
             "the buffered crossing applied on the flip"
         );
         assert!(
-            dot.render_ready,
-            "the drained crossing flips render_ready (the VISIBLE flip on the buffered path)"
+            dot.authority.simulates(),
+            "the drained crossing Promotes the dest Ghost→Owned (the VISIBLE flip on the buffered path)"
+        );
+        assert_eq!(
+            dot.authority,
+            Authority::Owned { fence: Fence(2) },
+            "promoted to the recorded CAS fence on the buffered-drain path"
         );
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
         assert!(acked(&sent, TransferId(7)), "the drained crossing is acked");
 
         // COMPOSED (audit finding 2 + DEFECT-3): a redelivery AFTER the buffered crossing was
-        // drained+journaled AND render_ready flipped hits the IMMEDIATE path (the dot is now
-        // adopted + render-ready, still matched by the WIDENED `crossing_target`) and the journal
+        // drained+journaled AND the dot Promoted to Owned hits the IMMEDIATE path (the dot is now
+        // adopted + simulating, still matched by the WIDENED `crossing_target`) and the journal
         // dedups it ACROSS the buffer→drain→redeliver boundary — re-ack only, NO second apply, and
         // crucially NO re-buffer (the buffered count does not move).
         let buffered_before = rig.world.resource::<StubStats>().crossings_buffered;

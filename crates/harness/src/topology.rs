@@ -103,18 +103,20 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         report.directory = dir.0.entries().map(|(k, r)| (*k, *r)).collect();
     }
     if let Some(dots) = world.get_resource::<vd_sim::stub::Dots>() {
-        // A dot is HELD only once its directory grant is recorded (fence rule 2);
-        // provisional dots are reported separately as pending.
+        // A dot is HELD only while it SIMULATES (`Authority::Owned`, 1d.4b): a Ghost (a retained
+        // self-fenced source, or a pre-promote dest) is EXCLUDED so a mid-flight retained Ghost
+        // cannot false-trip `verify_authority_unique` (WrongHolderCount). `granted` (the directory
+        // predicate) still drives pending/departing below — they are NOT the authority truth.
         report.held_entities = dots
             .0
             .values()
-            .filter(|d| d.granted)
+            .filter(|d| d.authority.simulates())
             .map(|d| (d.entity, d.entity_fence))
             .collect();
         report.held_poses = dots
             .0
             .values()
-            .filter(|d| d.granted)
+            .filter(|d| d.authority.simulates())
             .map(|d| (d.entity, d.pose))
             .collect();
         report.pending_entities = dots

@@ -12,15 +12,20 @@
 //! entities accept no input and no integration — the gateway fence makes the freeze
 //! enforced, not cooperative.
 //!
-//! ## NOT YET WIRED (P2 Slice 1d connects it)
-//! This FSM is fully built + proptested but has ZERO production consumers today: the
-//! LIVE authority mechanism in the stub world is the realm-level grant/self-fence in
-//! `stub.rs` (`granted` + `entity_fence`), NOT per-entity `Authority` states. Slice 1d
-//! attaches this FSM to the stub's entities (the dest frozen Ghost on PrepareSubscribe,
-//! Freeze/Promote/Demote/Thaw through the saga). Until then there is exactly ONE
-//! authority representation in effect — do not treat these states as live, and do not
-//! build a second mechanism beside them (split-brain hides where two representations
-//! that look like one disagree). (Audit FG-2.)
+//! ## WIRED (P2 Slice 1d.4b attached it)
+//! This FSM is now the per-entity authority TRUTH on the stub `Dot`: `simulates()` is the
+//! `emit_frames` gate, half the `apply_input` gate, and the `topology.rs` oracle held-set.
+//! Login AND the transfer-dest both mint `Ghost{GENESIS}` and Promote `Ghost→Owned` via the
+//! IDENTICAL machinery (`stub.rs` `flip_grant` for login, `apply_crossing` for the dest); the
+//! source self-fence demotes `Owned→Frozen→Ghost` and RETAINS the dot (the first ghost). It is
+//! KIND-GENERIC (keys only on Fence/TransferId/TickId — never `EntityKind`), so a future
+//! ship/block/signal entity uses the SAME states (no per-kind fork — HR2/HR3).
+//!
+//! FG-2 single-truth (honest interim): there is exactly ONE authority representation in effect
+//! (`simulates()`). The stub's `granted`/`entity_fence` are the strictly-weaker directory-record
+//! PREDICATE/poll bookkeeping (which directory op is owed) that 1d.5b's saga-pushed Promote/Demote
+//! DELETES — they never re-decide emit/input/oracle. Do NOT build a second authority mechanism
+//! beside this (split-brain hides where two representations that look like one disagree).
 
 use serde::{Deserialize, Serialize};
 use vd_core::{Fence, TickId, TransferId};

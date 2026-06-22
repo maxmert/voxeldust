@@ -242,12 +242,17 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     `segment_shell_crossing`, `width_safe_for`/`K_SAFETY` hysteresis — NO magic tick)". This ONE function's body
     is genuinely reshape-free (`wf_0ed2dc0c`).
   - **(b) the source-side ORDERED, fence-enforced demote (a TEAR-OUT, NOT a body-swap):** replace the `stub.rs`
-    `granted_key_poll_tick`/`self_fence_foreign_entity` POLL (which DROPS the dot) with a SAGA-pushed
-    `Demote`/`DemoteAck` driving the per-entity `authority.rs` `Owned→Frozen→Ghost` FSM — the source flips to a
-    **retained ghost-as-collider** (so players still collide across the boundary — a HARD requirement) and STOPS
-    emitting because of the **fence** (lease-epoch pushed to the gateway), demote-before-promote, BEFORE the dest
-    promotes. This introduces the source ghost (the interim has NONE — it drops), attaches `authority.rs`, and
-    rips out the stub poll. The **reshape-free promise (`wf_0ed2dc0c`) covers ONLY (a)** — (b) is a re-architecture.
+    `granted_key_poll_tick`/`self_fence_foreign_entity` POLL with a SAGA-pushed `Demote`/`DemoteAck` driving the
+    per-entity `authority.rs` `Owned→Frozen→Ghost` FSM — the source flips to a **retained ghost-as-collider** (so
+    players still collide across the boundary — a HARD requirement) and STOPS emitting because of the **fence**
+    (lease-epoch pushed to the gateway), demote-before-promote, BEFORE the dest promotes.
+    **⚠️ 1d.4b PROGRESS (part of (b) landed):** the `authority.rs` FSM is now ATTACHED and the source self-fence
+    RETAINS the dot as a Ghost via `Owned→Frozen→Ghost` (no more `dots.remove`) — so the source ghost now EXISTS and
+    STOPS emitting (`simulates()==false`). What (b) STILL owes: the SAGA-PUSH (the demote is still POLL-discovered by
+    `granted_key_poll_tick`, not the saga's `Demote`/`DemoteAck`), the ORDERING (demote-before-promote — the dest
+    still autonomously promotes off its own poll), the **fence**-enforced freeze (still cooperative — no lease-epoch
+    pushed to the gateway), and the GhostFlow collider FEED (the ghost exists but emits no delta). 1d.5b rips out the
+    poll + adds the saga push/ordering/feed. The **reshape-free promise (`wf_0ed2dc0c`) covers ONLY (a)** — (b)'s remainder is a re-architecture.
 - **⚠️ 1d.1 LAYERING (stated honestly so the tear-out is not under-budgeted):** the 1d.1 pose crossing adds
   machinery BESIDE this interim, NOT a migration of it. (i) The source pose flush (`FlushSource`→`SourceFlushed`)
   is NET-NEW and read-only — it does NOT replace the cooperative `granted_key_poll_tick`/`self_fence_foreign_entity`
@@ -612,13 +617,22 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   client admits the held-sub SET (1d.2d). The 2-shard capstone (`gateway::tests::capstone_two_sub_overlap_…`)
   proves both subs route at their OWN realm fences and the avatar resolves to one sub. `render_ready` STAYS false —
   the dest sub is OPEN + ROUTABLE but emits no frames; the VISIBLE flip is the only remaining gating piece (1d.3).
-- **Still owed (1d.3+ — the rest of the BACK half):** flip `render_ready` (the visible/in-client proof, 1d.3, now
-  on a gateway-routed + client-admitted + authority-re-pointed dest — no further gateway/client change needed, a
-  clean render-flip); the real ghost-as-collider (players collide across the boundary; the per-entity
-  `authority.rs` `Authority` FSM stays unattached — the 1c.8/1d.1 lever is the stub `Dot`); the
-  `AbortTransfer`-tears-down-the-dest-INPUT-SLOT teardown on the STUB side (1d.2b closed the gateway dest SUB on
-  abort, but the dest's provisional `input_active` `Dot` is not yet despawned on abort). The dest spatial
-  admissibility check stays PRE-commit at `PrepareSubscribe` (D-21).
+- **Landed (1d.3 — the VISIBLE flip):** the dest renders the crossed seed-7 pose; the capstone
+  `p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose` proves the source→dest flip
+  (overlap_ticks==0 + 0<vanish_gap<=budget, the interim vanish pinned exists-to-be-flipped → [[D-2]]).
+- **Landed (1d.4b — the per-entity Authority FSM ATTACHED):** `authority.rs`'s `Authority` (Owned/Frozen/Ghost) is
+  now the per-entity TRUTH on the stub `Dot` (`simulates()` is the `emit_frames` gate, half the `apply_input` gate,
+  and the oracle held-set). `render_ready` is REMOVED entirely. Login AND the transfer-dest both mint
+  `Ghost{GENESIS}` and Promote `Ghost→Owned` via the IDENTICAL machinery (kind-generic — HR2). The source
+  self-fence demotes `Owned→Frozen→Ghost` and RETAINS the dot (the FIRST ghost; no more `dots.remove`); the oracle
+  excludes the Ghost so it cannot false-trip `verify_authority_unique`. FG-2 honest single-truth: `granted`/
+  `entity_fence` stay the directory-record PREDICATE/poll bookkeeping until 1d.5b's poll tear-out.
+- **Still owed (1d.5b+ — the rest of the BACK half):** the real ghost-as-collider FEED + registration (`GhostFlow`
+  Spawn/Delta/Despawn + the dest `GhostColliderRegistration`; the retained source Ghost EXISTS now but emits no
+  collider feed yet — collision RESPONSE is P5, [[D-2]]/audit `wf_b82d1a67`); the `AbortTransfer`-tears-down-the-
+  dest-INPUT-SLOT teardown on the STUB side (1d.2b closed the gateway dest SUB on abort, but the dest's provisional
+  `input_active` `Dot` is not yet despawned on abort). The dest spatial admissibility check stays PRE-commit at
+  `PrepareSubscribe` (D-21).
   **FRAME-REBINDING (audit finding 5):** 1d.1 stores the crossed pose's `FrameRef` VERBATIM — it stays the SOURCE
   realm's frame (e.g. `SystemSpace{system_seed: 7}`) on a dot owned by the DEST realm. Inert in 1d.1 (render_ready
   false → nothing reads the frame; and the gate USES this as the crossing discriminator). But render (1d.3) /

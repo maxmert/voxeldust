@@ -399,13 +399,16 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
     );
 }
 
-/// 1c.8 ROBUSTNESS: the settled end state is STABLE under continued operation. After the tail
+/// 1c.8/1d.4b ROBUSTNESS: the settled end state is STABLE under continued operation. After the tail
 /// closes, the source keeps polling its Entity keys on the recheck cadence and the dest keeps
-/// holding — many more ticks must NOT resurrect the source's dot, double-grant, or unsettle the
-/// oracles. This exercises the source self-fence's idempotent no-op arm end-to-end (every later
-/// poll for the now-absent subject dot finds nothing) and the dest's stable hold. (The explicit
-/// REDELIVERY idempotency — a re-acked `Released` and a re-delivered foreign-owner HeadRead — is
-/// pinned at the unit level in `vd_connection_plane::gateway::release_subscribe_acks_released` and
+/// holding — many more ticks must NOT re-promote the source's RETAINED Ghost, double-grant, or
+/// unsettle the oracles. This exercises the source self-fence's idempotent skip arm end-to-end: the
+/// source dot is RETAINED as a Ghost (1d.4b — `simulates()==false`, so EXCLUDED from the oracle
+/// held-set), and every later foreign-owner poll RE-DISCOVERS the still-granted Ghost and is a
+/// counted no-op (`self_fence_skipped`), never a re-promote. (The explicit REDELIVERY idempotency —
+/// a re-acked `Released`, and a re-delivered foreign-owner HeadRead asserting the dot survives +
+/// `self_fence_skipped == 1` — is pinned at the unit level in
+/// `vd_connection_plane::gateway::release_subscribe_acks_released` and
 /// `vd_sim::stub::the_source_self_fences_a_foreign_owned_entity_without_revoking`.)
 #[test]
 fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
@@ -425,11 +428,12 @@ fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
     let reports = topo.inspect_all();
     let src = report(&reports, SHARD);
     let dst = report(&reports, DEST);
-    // The source never re-acquires the transferred dot (its self-fence is a stable, idempotent
-    // drop — repeated foreign-owner polls keep finding nothing).
+    // The source never re-acquires the transferred dot: it is RETAINED as a Ghost (1d.4b) but
+    // EXCLUDED from the held-set via the `simulates()` oracle filter — repeated foreign-owner polls
+    // re-discover the still-granted Ghost and are counted no-ops, never a re-promote.
     assert!(
         !src.held_entities.iter().any(|(e, _)| *e == entity),
-        "the source dot stays dropped under continued polling",
+        "the retained source Ghost stays excluded from the held-set (does not simulate) under continued polling",
     );
     assert!(
         !src.pending_entities.contains(&entity),
@@ -625,12 +629,12 @@ fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
 //                              swaps), so reversing a 1-element buffer is a no-op. Multi-frame
 //                              drain ORDER is gated by the connection-plane unit test
 //                              `commit_opens_the_dest_slot_then_drains_the_buffer_in_seq_order`.
-//   (f) RENDER-ORIGIN       — flipping `render_ready` in the adopt grant arm (`stub.rs` flip_grant
-//                              Adopted) instead of `apply_crossing` would emit a seed-8 origin ZERO
-//                              frame ONLY if the crossing arrives AFTER the adopt. THIS fixture
-//                              buffers the crossing and drains+flips it in the same tick BEFORE
-//                              `emit_frames` (`stub.rs` schedule `(request_pending_grants,
-//                              process_inbound, emit_frames).chain()`), so the misplaced flip is
+//   (f) RENDER-ORIGIN       — Promoting the dest Ghost→Owned in the adopt grant arm (`stub.rs`
+//                              flip_grant Adopted) instead of in `apply_crossing` would emit a seed-8
+//                              origin ZERO frame ONLY if the crossing arrives AFTER the adopt. THIS
+//                              fixture buffers the crossing and drains+promotes it in the same tick
+//                              BEFORE `emit_frames` (`stub.rs` schedule `(request_pending_grants,
+//                              process_inbound, emit_frames).chain()`), so the misplaced Promote is
 //                              structurally unobservable here. It is caught at the unit tier by
 //                              `stub.rs::the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach`.
 //                              The e2e variant that DELAYS the crossing past the adopt (where this
