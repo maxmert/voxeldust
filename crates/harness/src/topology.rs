@@ -236,7 +236,9 @@ pub struct WireTruthViolation {
 /// Must be 0 on any healthy/zero-fault run; nonzero is a distinct overload ALERT, not
 /// indistinguishable from a dropped snapshot (the observability hole the audit caught).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("reliable-shed violation at {node}: {reliable_shed} reliable frame(s) shed at the staging cap")]
+#[error(
+    "reliable-shed violation at {node}: {reliable_shed} reliable frame(s) shed at the staging cap"
+)]
 pub struct ReliableShedViolation {
     pub node: NodeId,
     pub reliable_shed: u64,
@@ -444,7 +446,9 @@ impl Topology {
                 .iter()
                 .filter_map(|e| match e {
                     TraceEvent::Stepped {
-                        node, reliable_shed, ..
+                        node,
+                        reliable_shed,
+                        ..
                     } if node == id => Some(*reliable_shed),
                     _ => None,
                 })
@@ -941,13 +945,13 @@ mod tests {
             fabric.register(A),
         );
         flood.world_mut().insert_resource(OutboundStagingCap(1)); // tiny cap ⇒ shed over 1
-        flood.schedule_mut().add_systems(
-            move |mut outbox: ResMut<OutboundBox>| {
+        flood
+            .schedule_mut()
+            .add_systems(move |mut outbox: ResMut<OutboundBox>| {
                 for n in 0..4u8 {
                     outbox.0.push((B, MsgClass::Saga, vec![n].into()));
                 }
-            },
-        );
+            });
         topo.add_node(Box::new(flood));
         topo.add_node(build_relay_node(&fabric, B, A)); // a sink (receives nothing under the reject)
         for _ in 0..3 {

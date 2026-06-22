@@ -239,7 +239,8 @@ impl ScriptedClient {
         // what they admit (both run the SAME §6.3 `classify_snapshot` gate over the SAME held set).
         // The real view keeps per-(sub, entity) tracks (the cross-shard overlap shape); the flat
         // view is last-writer-wins (the D-28 conservation surface).
-        self.delivered_view.on_snapshot(&self.held_subs, snap.clone());
+        self.delivered_view
+            .on_snapshot(&self.held_subs, snap.clone());
 
         // THE §6.3 gate (shared with the real client via vd_wire, so they cannot
         // drift): a strictly-older frame_id is stale; an EQUAL frame_id is a sibling
@@ -644,7 +645,10 @@ mod tests {
         activate(&fabric, &mut gw, &mut client); // holds SubId(0)
         assert_eq!(client.held_subs, BTreeSet::from([SubId(0)]));
         // A Closing for a DIFFERENT sub: the held set is untouched.
-        send_control(&mut gw, &ServerControlMsg::SubscriptionClosing { sub: SubId(9) });
+        send_control(
+            &mut gw,
+            &ServerControlMsg::SubscriptionClosing { sub: SubId(9) },
+        );
         fabric.pump(TickId(3));
         let _ = client.step();
         assert_eq!(
@@ -659,18 +663,28 @@ mod tests {
         assert_eq!(client.view.poses[&EntityId(7)].pos.x, 1.0);
         // Now close the HELD sub: it leaves the set, and a later same-sub datagram is no longer
         // admitted (a foreign sub now).
-        send_control(&mut gw, &ServerControlMsg::SubscriptionClosing { sub: SubId(0) });
+        send_control(
+            &mut gw,
+            &ServerControlMsg::SubscriptionClosing { sub: SubId(0) },
+        );
         fabric.pump(TickId(5));
         let _ = client.step();
-        assert!(client.held_subs.is_empty(), "the held sub was dropped from the set");
+        assert!(
+            client.held_subs.is_empty(),
+            "the held sub was dropped from the set"
+        );
         send_snapshot(&mut gw, &snapshot(SubId(0), 2, 9.0));
         fabric.pump(TickId(6));
         let _ = client.step();
         assert_eq!(
-            client.view.poses[&EntityId(7)].pos.x, 1.0,
+            client.view.poses[&EntityId(7)].pos.x,
+            1.0,
             "a datagram on the closed sub is dropped (no longer admitted)"
         );
-        assert_eq!(client.view.stale_frames_dropped, 1, "the closed-sub datagram dropped foreign");
+        assert_eq!(
+            client.view.stale_frames_dropped, 1,
+            "the closed-sub datagram dropped foreign"
+        );
     }
 
     #[test]
@@ -714,10 +728,18 @@ mod tests {
         // the AuthorityChanged re-point — at the dest's x=2.0. The flat view physically cannot
         // show this (last-writer-wins), which is why the capstone reads the REAL view.
         let rendered = client.delivered_view.rendered(10.0);
-        assert_eq!(rendered.len(), 1, "the avatar composites to exactly one copy");
+        assert_eq!(
+            rendered.len(),
+            1,
+            "the avatar composites to exactly one copy"
+        );
         let (rid, rsub, rpose) = rendered[0];
         assert_eq!(rid, EntityId(7));
-        assert_eq!(rsub, SubId(1), "rendered from the dest sub (the AuthorityChanged re-point)");
+        assert_eq!(
+            rsub,
+            SubId(1),
+            "rendered from the dest sub (the AuthorityChanged re-point)"
+        );
         assert_eq!(rpose.pos.x, 2.0, "the dest-sub pose, not the source copy");
     }
 
@@ -731,9 +753,16 @@ mod tests {
         send_snapshot(&mut gw, &snapshot_of(SubId(0), 1, EntityId(7), 5.0));
         fabric.pump(TickId(3));
         let _ = client.step();
-        assert_eq!(client.delivered_view.rendered(10.0).len(), 1, "rendered on sub 0");
+        assert_eq!(
+            client.delivered_view.rendered(10.0).len(),
+            1,
+            "rendered on sub 0"
+        );
         // Close sub 0: its track is evicted from the real view, so the avatar renders nowhere.
-        send_control(&mut gw, &ServerControlMsg::SubscriptionClosing { sub: SubId(0) });
+        send_control(
+            &mut gw,
+            &ServerControlMsg::SubscriptionClosing { sub: SubId(0) },
+        );
         fabric.pump(TickId(4));
         let _ = client.step();
         assert!(

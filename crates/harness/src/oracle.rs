@@ -483,10 +483,7 @@ pub enum ContinuityViolation {
 ///
 /// # Errors
 /// [`VanishViolation`] for the first absent run that exceeds `tol.max_absent_ticks`.
-pub fn verify_no_vanish(
-    trace: &RenderTrace,
-    tol: RenderTolerances,
-) -> Result<(), VanishViolation> {
+pub fn verify_no_vanish(trace: &RenderTrace, tol: RenderTolerances) -> Result<(), VanishViolation> {
     let mut absent_run = 0u64;
     for (tick, sample) in trace {
         match sample {
@@ -1089,14 +1086,14 @@ mod tests {
     /// lockstep (stagger 0), in-step delivery (delay 0), a generous band, derived slacks.
     fn lockstep_tol() -> RenderTolerances {
         RenderTolerances::derive(
-            2.0,   // max_velocity_mps (StubConfig.move_speed_mps)
-            0.05,  // tick_dt_s
-            0,     // stagger_offset_ticks (lockstep)
-            0,     // max_fabric_delay_ticks (in-step ordering chain)
-            8,     // band_ticks
-            1e-9,  // pos_slack_m (f64 round-trip)
-            0.0,   // look_rate_rad_per_s (avatar does not turn during the transfer)
-            1e-9,  // rot_slack_rad
+            2.0,  // max_velocity_mps (StubConfig.move_speed_mps)
+            0.05, // tick_dt_s
+            0,    // stagger_offset_ticks (lockstep)
+            0,    // max_fabric_delay_ticks (in-step ordering chain)
+            8,    // band_ticks
+            1e-9, // pos_slack_m (f64 round-trip)
+            0.0,  // look_rate_rad_per_s (avatar does not turn during the transfer)
+            1e-9, // rot_slack_rad
         )
     }
 
@@ -1112,7 +1109,10 @@ mod tests {
         assert_eq!(tight.max_absent_ticks, 0);
         // SATURATION: a band SHORTER than the delay floors K at 0 (never wraps). Stagger widens ε_pos.
         let starved = RenderTolerances::derive(2.0, 0.05, 1, 5, 2, 1e-9, 1.0, 1e-9);
-        assert_eq!(starved.max_absent_ticks, 0, "band(2) − delay(5) saturates to 0, then −1 to 0");
+        assert_eq!(
+            starved.max_absent_ticks, 0,
+            "band(2) − delay(5) saturates to 0, then −1 to 0"
+        );
         assert!(
             (starved.epsilon_pos - (2.0 * 0.05 * 2.0 + 1e-9)).abs() < 1e-15,
             "stagger 1 widens ε_pos by the (1 + stagger) factor"
@@ -1215,8 +1215,8 @@ mod tests {
         // `continue` arm, the `prev == None` first-sample arm, and the same-sub no-check arm.
         let trace: RenderTrace = vec![
             (TickId(1), Some(sample(SRC, 0.0))),
-            (TickId(2), None), // skipped
-            (TickId(3), Some(sample(SRC, 50.0))), // same sub, huge jump — NOT checked
+            (TickId(2), None),                     // skipped
+            (TickId(3), Some(sample(SRC, 50.0))),  // same sub, huge jump — NOT checked
             (TickId(4), Some(sample(DST, 50.04))), // the only flip: Δ 0.04 < ε
         ];
         assert_eq!(verify_pose_continuity(&trace, lockstep_tol()), Ok(()));
@@ -1247,8 +1247,7 @@ mod tests {
             world_pos: DVec3::new(80.0, 0.0, 0.0), // world TELEPORTED (hull moved 79 m)
             orient: DQuat::IDENTITY,
         };
-        let raw_continuous: RenderTrace =
-            vec![(TickId(1), Some(last)), (TickId(2), Some(curr))];
+        let raw_continuous: RenderTrace = vec![(TickId(1), Some(last)), (TickId(2), Some(curr))];
         assert_eq!(
             verify_pose_continuity(&raw_continuous, lockstep_tol()),
             Err(ContinuityViolation::Position {

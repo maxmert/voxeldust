@@ -1691,12 +1691,12 @@ fn on_shard_frame(
             .entry(sub)
             .and_modify(|w| *w = (*w).max(frame_id))
             .or_insert(frame_id);
-        let body = retagged.entry(sub).or_insert_with(|| {
-            vd_sim::io::bytes(
-                retag_snapshot_sub(&snapshot_bytes, sub)
-                    .expect("the frame_id peek validated the sub varint, so the re-tag is infallible"),
-            )
-        });
+        let body =
+            retagged.entry(sub).or_insert_with(|| {
+                vd_sim::io::bytes(retag_snapshot_sub(&snapshot_bytes, sub).expect(
+                    "the frame_id peek validated the sub varint, so the re-tag is infallible",
+                ))
+            });
         outbox.0.push((client, MsgClass::Snapshot, body.clone()));
     }
 }
@@ -4573,13 +4573,21 @@ mod tests {
         // desync counter is untouched (an empty subscriber set is NOT a desync).
         let mut rig = Rig::new();
         let (_, _) = rig.login(); // subscribes only to SHARD
-        let sent = rig.tick(vec![wire(DEST, MsgClass::Snapshot, &frame_msg(Fence(1), 9))]);
+        let sent = rig.tick(vec![wire(
+            DEST,
+            MsgClass::Snapshot,
+            &frame_msg(Fence(1), 9),
+        )]);
         assert_eq!(
             sent,
             Vec::new(),
             "a frame from an unsubscribed shard reaches no client (and nothing else is sent)"
         );
-        assert_eq!(rig.stats().frame_sub_desync, 0, "an empty fan is not a desync");
+        assert_eq!(
+            rig.stats().frame_sub_desync,
+            0,
+            "an empty fan is not a desync"
+        );
         assert_eq!(rig.stats().stale_frames_dropped, 0);
     }
 
@@ -4634,7 +4642,10 @@ mod tests {
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
         on_shard_frame(SHARD, &bad, &mut sessions, &mut stats, &mut outbox);
-        assert_eq!(stats.undecodable, 1, "a malformed snapshot body is counted undecodable");
+        assert_eq!(
+            stats.undecodable, 1,
+            "a malformed snapshot body is counted undecodable"
+        );
         assert!(outbox.0.is_empty(), "nothing forwarded on a malformed body");
     }
 
@@ -4683,17 +4694,29 @@ mod tests {
         // (a) an accepted frame (Fence(1), frame_id 9) advances the watermark to 9.
         let f9 = postcard::to_allocvec(&frame_msg(Fence(1), 9)).expect("encode");
         on_shard_frame(SHARD, &f9, &mut sessions, &mut stats, &mut outbox);
-        assert_eq!(wm(&sessions), Some(9), "an accepted frame advances delivered[sub] to its frame_id");
+        assert_eq!(
+            wm(&sessions),
+            Some(9),
+            "an accepted frame advances delivered[sub] to its frame_id"
+        );
 
         // (b) a LOWER frame_id (5) does NOT regress the high-water (`.max`).
         let f5 = postcard::to_allocvec(&frame_msg(Fence(1), 5)).expect("encode");
         on_shard_frame(SHARD, &f5, &mut sessions, &mut stats, &mut outbox);
-        assert_eq!(wm(&sessions), Some(9), "a lower frame_id never lowers the watermark (.max)");
+        assert_eq!(
+            wm(&sessions),
+            Some(9),
+            "a lower frame_id never lowers the watermark (.max)"
+        );
 
         // (c) a fence-STALE frame (Fence(0) < accepted Fence(1)) is dropped — no advance.
         let stale = postcard::to_allocvec(&frame_msg(Fence(0), 99)).expect("encode");
         on_shard_frame(SHARD, &stale, &mut sessions, &mut stats, &mut outbox);
-        assert_eq!(wm(&sessions), Some(9), "a fence-stale frame does not advance the watermark");
+        assert_eq!(
+            wm(&sessions),
+            Some(9),
+            "a fence-stale frame does not advance the watermark"
+        );
         assert_eq!(stats.stale_frames_dropped, 1);
     }
 
@@ -4781,7 +4804,11 @@ mod tests {
             "a duplicate SubscriptionReady emits nothing"
         );
         assert_eq!(sub_for(&rig, sid, DEST).map(|e| e.sub), Some(SubId(1)));
-        assert_eq!(rig.stats().transfer_unroutable, 0, "a duplicate is not unroutable");
+        assert_eq!(
+            rig.stats().transfer_unroutable,
+            0,
+            "a duplicate is not unroutable"
+        );
     }
 
     #[test]
@@ -4825,10 +4852,20 @@ mod tests {
         assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)));
         // The NEXT tick's sweep removes it; the dest sub survives.
         let _ = rig.tick(vec![]);
-        assert_eq!(sub_for(&rig, sid, SHARD), None, "source sub swept after the grace");
-        assert_eq!(sub_for(&rig, sid, DEST).map(|e| e.sub), Some(SubId(1)), "dest sub survives");
         assert_eq!(
-            rig.world.resource::<GatewaySessions>().subscribers_of(SHARD),
+            sub_for(&rig, sid, SHARD),
+            None,
+            "source sub swept after the grace"
+        );
+        assert_eq!(
+            sub_for(&rig, sid, DEST).map(|e| e.sub),
+            Some(SubId(1)),
+            "dest sub survives"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<GatewaySessions>()
+                .subscribers_of(SHARD),
             Vec::<SessionId>::new()
         );
     }
@@ -4859,10 +4896,17 @@ mod tests {
             .iter()
             .filter(|(to, c, _)| (*to == CLIENT) & (*c == MsgClass::Snapshot))
             .count();
-        assert_eq!(snaps, 1, "the straggler is drained (routed) during the grace tick");
+        assert_eq!(
+            snaps, 1,
+            "the straggler is drained (routed) during the grace tick"
+        );
         // After the next-tick sweep, a further source frame routes to nobody — and (the session
         // being Active with no pending retries) nothing else is sent, so the whole tick is empty.
-        let sent = rig.tick(vec![wire(SHARD, MsgClass::Snapshot, &frame_msg(Fence(1), 10))]);
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Snapshot,
+            &frame_msg(Fence(1), 10),
+        )]);
         assert_eq!(
             sent,
             Vec::new(),
@@ -4899,8 +4943,16 @@ mod tests {
         );
         // The dest sub is swept next tick; the source sub stays open.
         let _ = rig.tick(vec![]);
-        assert_eq!(sub_for(&rig, sid, DEST), None, "dest sub closed + swept on abort");
-        assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)), "source sub stays");
+        assert_eq!(
+            sub_for(&rig, sid, DEST),
+            None,
+            "dest sub closed + swept on abort"
+        );
+        assert_eq!(
+            sub_for(&rig, sid, SHARD).map(|e| e.sub),
+            Some(SubId(0)),
+            "source sub stays"
+        );
     }
 
     #[test]
@@ -5014,7 +5066,11 @@ mod tests {
                 transfer: TransferId(0x999)
             }]
         );
-        assert_eq!(sub_for(&rig, sid, SHARD).map(|e| e.sub), Some(SubId(0)), "source sub intact");
+        assert_eq!(
+            sub_for(&rig, sid, SHARD).map(|e| e.sub),
+            Some(SubId(0)),
+            "source sub intact"
+        );
     }
 
     // ---- Slice 1d.2c: the 2-shard transfer CAPSTONE (gateway read-plane half) ----
@@ -5113,12 +5169,17 @@ mod tests {
         // input). Value-asserted (not incidental): a wrong-transfer / silent / unconditional emit
         // turns THIS red.
         assert!(
-            acks_to_orch(&sent).contains(&TransferControlAck::DeliveredToObservers { transfer: XFER }),
+            acks_to_orch(&sent)
+                .contains(&TransferControlAck::DeliveredToObservers { transfer: XFER }),
             "the delivered dest frame drives DeliveredToObservers{{XFER}} to the saga",
         );
         // A dest frame BELOW the dest's accepted fence (Fence(5)) is stale-dropped — proving the
         // PER-SHARD fence (not the session-global route fence) governs the dest sub.
-        let sent = rig.tick(vec![wire(DEST, MsgClass::Snapshot, &frame_msg(Fence(4), 10))]);
+        let sent = rig.tick(vec![wire(
+            DEST,
+            MsgClass::Snapshot,
+            &frame_msg(Fence(4), 10),
+        )]);
         assert_eq!(
             delivered_snapshot_subs(&sent),
             Vec::<SubId>::new(),

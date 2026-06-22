@@ -421,7 +421,10 @@ mod tests {
             Err(HeaderError::TruncatedVarint)
         );
         // peek_snapshot_frame_id: empty, a sub then a truncated frame_id varint, and a too-wide sub.
-        assert_eq!(peek_snapshot_frame_id(&[]), Err(HeaderError::TruncatedVarint));
+        assert_eq!(
+            peek_snapshot_frame_id(&[]),
+            Err(HeaderError::TruncatedVarint)
+        );
         assert_eq!(
             peek_snapshot_frame_id(&[0x01, 0x80]),
             Err(HeaderError::TruncatedVarint)

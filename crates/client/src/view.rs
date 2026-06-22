@@ -544,7 +544,11 @@ mod tests {
         view.set_authority(ent(1), SubId(1));
         let r = view.render(10.0);
         assert_eq!(r.len(), 1, "still exactly once");
-        assert_eq!(r[&ent(1)].pos, DVec3::new(50.0, 0.0, 0.0), "now from sub 1 (the dest)");
+        assert_eq!(
+            r[&ent(1)].pos,
+            DVec3::new(50.0, 0.0, 0.0),
+            "now from sub 1 (the dest)"
+        );
         // The anti-vacuity probe SEES both tracks even though render composites to one: the
         // two-holder overlap was REAL at the wire.
         assert_eq!(

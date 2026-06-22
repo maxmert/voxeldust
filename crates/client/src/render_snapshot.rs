@@ -150,7 +150,10 @@ mod tests {
         // track but a clock that never observed a tick renders nothing — while own_entity
         // / location (cursor-independent) still read.
         let mut view = DeliveredView::default();
-        view.on_snapshot(&std::collections::BTreeSet::from([SubId(0)]), snap(1, 10, vec![(ent(1), 0.0)]));
+        view.on_snapshot(
+            &std::collections::BTreeSet::from([SubId(0)]),
+            snap(1, 10, vec![(ent(1), 0.0)]),
+        );
         view.set_authority(ent(1), SubId(0));
         let snap = RenderSnapshot::new(
             view,
@@ -169,7 +172,10 @@ mod tests {
     #[test]
     fn exposes_freshest_tick_and_world_pos_when_anchored() {
         let mut view = DeliveredView::default();
-        view.on_snapshot(&std::collections::BTreeSet::from([SubId(0)]), snap(1, 10, vec![(ent(1), 4.0)]));
+        view.on_snapshot(
+            &std::collections::BTreeSet::from([SubId(0)]),
+            snap(1, 10, vec![(ent(1), 4.0)]),
+        );
         view.set_authority(ent(1), SubId(0));
         let mut clock = RenderClock::new(ClientInterpTuning::DEFAULT);
         clock.observe(UniverseTick(10), 100.0);
@@ -205,8 +211,14 @@ mod tests {
         // Two snapshots a tick-window apart; the renderer samples at ITS display cursor,
         // not the core's — so motion is smooth at any refresh rate.
         let mut view = DeliveredView::default();
-        view.on_snapshot(&std::collections::BTreeSet::from([SubId(0)]), snap(1, 10, vec![(ent(1), 0.0)]));
-        view.on_snapshot(&std::collections::BTreeSet::from([SubId(0)]), snap(2, 12, vec![(ent(1), 10.0)]));
+        view.on_snapshot(
+            &std::collections::BTreeSet::from([SubId(0)]),
+            snap(1, 10, vec![(ent(1), 0.0)]),
+        );
+        view.on_snapshot(
+            &std::collections::BTreeSet::from([SubId(0)]),
+            snap(2, 12, vec![(ent(1), 10.0)]),
+        );
         view.set_authority(ent(1), SubId(0));
 
         // Anchor the clock at tick 12 (the freshest) at wall-time 100.0, default

@@ -111,7 +111,9 @@ impl ProcessClient {
     fn on_control(&mut self, bytes: &[u8]) {
         match postcard::from_bytes::<ServerControlMsg>(bytes).expect("decode control") {
             ServerControlMsg::Welcome { session, .. } => self.session = Some(session),
-            ServerControlMsg::SubscriptionOpened { sub, .. } => { self.held_subs.insert(sub); }
+            ServerControlMsg::SubscriptionOpened { sub, .. } => {
+                self.held_subs.insert(sub);
+            }
             ServerControlMsg::AuthorityChanged { entity, .. } => self.own_entity = Some(entity),
             ServerControlMsg::Close { reason } => panic!("gateway closed the session: {reason}"),
             // The cluster tick rate (minor 1) — this minimal parity client does not
@@ -266,7 +268,11 @@ fn p1_parity_real_binaries_over_quic() {
     assert!(walker.session.is_some(), "walker logged in");
     assert!(idle.session.is_some(), "idle logged in");
     assert_ne!(walker.session, idle.session, "distinct sessions");
-    assert_eq!(walker.held_subs, BTreeSet::from([SubId(0)]), "M0: the one subscription");
+    assert_eq!(
+        walker.held_subs,
+        BTreeSet::from([SubId(0)]),
+        "M0: the one subscription"
+    );
     let idle_own = idle
         .own_entity
         .expect("authority announced to the idle dot");
