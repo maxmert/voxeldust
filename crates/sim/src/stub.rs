@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::entity_kind::EntityKind;
+use vd_core::geometry::OverlapBand;
 use vd_core::glam::DVec3;
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
@@ -140,12 +141,19 @@ pub struct RealmAuthority(pub Option<Fence>);
 /// One ghost-neighbor this shard FEEDS (1d.5b.3b): the node hosting a kinematic ghost of an entity
 /// we OWN, plus the monotone egress `seq` stamped on each `GhostFlow::Delta`. Holds NO pose/authority
 /// — the fed pose is read LIVE from the owned `Dot` each tick (FG-2 single-truth).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GhostNeighbor {
     /// The node hosting the ghost (the transfer SOURCE in 1d.5b.3b; any band-neighbor at P-band).
     pub source: NodeId,
     /// The next `GhostFlow::Delta.seq` to stamp (monotone per neighbor — the lossy-stream cursor).
     pub seq: u64,
+    /// The boundary ANCHOR (1d.5b.3c): the fixed pose POSITION at which the entity crossed into this
+    /// realm, captured once at promote. The dest measures the owned entity's distance from here each
+    /// tick; when it exits the overlap band the dest Despawns the ghost (band-exit). IMMUTABLE
+    /// bookkeeping — a reference point, NEVER a live pose (FG-2: the live pose is read from the `Dot`).
+    /// Interim: a local-boundary approximation (the stub has no realm-center/SOI geometry); the real
+    /// SOI band anchors at the realm center (`for_planet_soi`/`for_system_soi`, P4/P5).
+    pub anchor: DVec3,
 }
 
 /// DEST-side ghost FEED registry (1d.5b.3b): for each entity this shard OWNS, the ghost-host
@@ -359,9 +367,19 @@ pub struct StubStats {
     /// SOURCE `GhostFlow::Delta` whose `source_fence` was STALE against the ghost dot (the
     /// `GhostRefresh` `is_stale_against` guard rejected it) — a counted no-op. 0 in a healthy run.
     pub ghost_refresh_stale: u64,
-    /// SOURCE `GhostFlow::Despawn` (1d.5b.3c band-exit) received — the fed-ghost emit latch cleared.
-    /// 0 in 1d.5b.3b (band-exit is unsatisfiable in the stub fixture until 1d.5b.3c).
+    /// SOURCE `GhostFlow::Despawn` (1d.5b.3c band-exit) received and TORN DOWN — the `SourceGhostMirror`
+    /// entry + the retained ghost `Dot` removed (the ghost lifecycle ENDS; the source stops self-emitting
+    /// + stops being a collider). The headline band-exit teardown counter.
     pub ghost_despawns: u64,
+    /// SOURCE `GhostFlow::Despawn` that tore down NOTHING (1d.5b.3c) — no mirror entry AND no retained
+    /// ghost dot to remove: an at-least-once REDELIVERY after teardown, or a stale Despawn for an entity
+    /// the source has since RE-OWNED (the `Owned` dot is structurally refused — only a retained Ghost is
+    /// torn down). A counted idempotent no-op, never a panic. 0 in a healthy single-delivery run.
+    pub ghost_despawn_no_host: u64,
+    /// DEST band-exit (1d.5b.3c): the owned entity left the overlap band, so the dest emitted
+    /// `GhostFlow::Despawn` to the ghost-host and DEREGISTERED the feed (`GhostColliderRegistration`).
+    /// The headline band-exit DETECTION counter (the dest half of the source's `ghost_despawns`).
+    pub ghost_band_exits: u64,
     /// DEST feed pass skipped a registration whose entity is NOT currently owned here (no dot, or a
     /// non-`simulates()` dot) — a counted no-op (only an Owned dot's live pose is fed). 0 steady-state.
     pub ghost_feed_skipped: u64,
@@ -1248,11 +1266,14 @@ fn promote_apply(
     // Register the transfer source as a ghost-neighbor + SPAWN the source ghost: the dest (owner)
     // now DRIVES the GhostFlow collider feed to the source (owner → ghost-host), keeping the retained
     // source ghost a live collider + the render seamless. `feed_source_ghosts` streams Delta after.
+    // The ANCHOR is THIS promote pose (= the crossed pose, the boundary the entity entered through):
+    // the dest measures band membership from here and Despawns the ghost on band-exit (1d.5b.3c).
     registration.0.insert(
         entity,
         GhostNeighbor {
             source: cmd.source,
             seq: 0,
+            anchor: pose.pos,
         },
     );
     outbox.push_flow(
@@ -1360,13 +1381,41 @@ fn on_ghost_flow(
             }
         }
         GhostFlow::Despawn { entity, .. } => {
-            // Band-exit (1d.5b.3c): clear the emit latch so the hosted ghost stops emitting.
-            if let Some(state) = mirror.0.get_mut(&entity) {
-                state.fed = false;
+            // Band-exit TEARDOWN (1d.5b.3c): the ghost lifecycle ENDS — remove the mirror bookkeeping
+            // AND the retained ghost DOT (the source stops self-emitting + stops being a collider).
+            // IDEMPOTENT: a reliable redelivery, or a stale Despawn for an entity the source has since
+            // RE-OWNED (the `Owned` dot is structurally refused by `remove_retained_ghost`), tears down
+            // nothing — a counted no-op (`ghost_despawn_no_host`), never a panic.
+            let had_mirror = mirror.0.remove(&entity).is_some();
+            let removed_dot = remove_retained_ghost(dots, entity);
+            if had_mirror | removed_dot {
                 stats.ghost_despawns += 1;
+            } else {
+                stats.ghost_despawn_no_host += 1;
             }
         }
     }
+}
+
+/// Remove the RETAINED source ghost dot for `entity` (1d.5b.3c band-exit teardown), if one is hosted
+/// here. Removes ONLY a dot whose authority is a `Ghost` (a retained source ghost); a dot the source
+/// has RE-OWNED (`Owned` — a re-acquisition transfer brought the entity back) is structurally REFUSED,
+/// so a stale Despawn from an earlier transfer can never tear out a live owner. This Ghost-only guard
+/// is the shard-LOCAL stand-in for the orchestrator's in-transfer refusal (a `vd-sim` shard cannot see
+/// the orchestrator live-saga set — `DEFERRED.md` D-2). Returns whether a dot was removed. Monomorphic
+/// (the find + the `matches!` false arm — a non-Ghost dot — are covered here, not in the decode arm).
+#[must_use]
+fn remove_retained_ghost(dots: &mut Dots, entity: EntityId) -> bool {
+    let Some(session) = dots
+        .0
+        .iter()
+        .find(|(_, d)| (d.entity == entity) & matches!(d.authority, Authority::Ghost { .. }))
+        .map(|(s, _)| *s)
+    else {
+        return false;
+    };
+    dots.0.remove(&session);
+    true
 }
 
 /// Whether a dot is the local granted, non-departing holder of `entity` (the self-fence target).
@@ -1759,12 +1808,19 @@ fn on_directory_reply(
 /// band-driven multi-neighbor owner fans Delta to every neighbor — the `seq` is per-neighbor in the
 /// body, so multi-neighbor breaks encode-once (a band-ghost-era optimization, DEFERRED).
 fn feed_source_ghosts(
+    config: Res<StubConfig>,
     clock: Res<ClockSample>,
     dots: Res<Dots>,
     mut registration: ResMut<GhostColliderRegistration>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
 ) {
+    // The overlap band, seed-derived from the shard's per-tick travel (no inline literal — the
+    // factors live in `core::geometry`). Velocity-safe by construction; its destroy edge is many
+    // per-tick steps out, so a ghost SPAWNED in-band at the crossing exits only after the entity has
+    // walked well past the demote→promote→release handoff (band-exit is strictly POST-release).
+    let band = OverlapBand::for_motion(config.move_speed_mps * config.tick_dt_s);
+    let mut exited: Vec<EntityId> = Vec::new();
     for (entity, neighbor) in registration.0.iter_mut() {
         let Some(dot) = dots.0.values().find(|d| d.entity == *entity) else {
             stats.ghost_feed_skipped += 1;
@@ -1774,19 +1830,50 @@ fn feed_source_ghosts(
             stats.ghost_feed_skipped += 1;
             continue;
         }
-        outbox.push_flow(
-            neighbor.source,
-            MsgClass::GhostDelta,
-            &InterShardFlow::Ghost(GhostFlow::Delta {
-                entity: *entity,
-                pose: dot.pose,
-                source_fence: dot.authority.fence(),
-                source_tick: clock.local_tick,
-                seq: neighbor.seq,
-            }),
-        );
-        neighbor.seq += 1;
+        if ghost_band_exited(&band, neighbor.anchor, &dot.pose) {
+            // BAND-EXIT (1d.5b.3c): the owned entity left the overlap band — DESPAWN the ghost on the
+            // RELIABLE carrier (a lost Despawn would leak the collider) + DEREGISTER the feed. The
+            // source tears the ghost down on receipt (`on_ghost_flow`). No vanish: the dest is the
+            // sole render source by now (the destroy edge is sized past the handoff window).
+            outbox.push_flow(
+                neighbor.source,
+                MsgClass::GhostReliable,
+                &InterShardFlow::Ghost(GhostFlow::Despawn {
+                    entity: *entity,
+                    source_fence: dot.authority.fence(),
+                }),
+            );
+            exited.push(*entity);
+            stats.ghost_band_exits += 1;
+        } else {
+            outbox.push_flow(
+                neighbor.source,
+                MsgClass::GhostDelta,
+                &InterShardFlow::Ghost(GhostFlow::Delta {
+                    entity: *entity,
+                    pose: dot.pose,
+                    source_fence: dot.authority.fence(),
+                    source_tick: clock.local_tick,
+                    seq: neighbor.seq,
+                }),
+            );
+            neighbor.seq += 1;
+        }
     }
+    // Deregister the exited ghosts (the feed stops; the source teardown is driven by the Despawn).
+    for entity in exited {
+        registration.0.remove(&entity);
+    }
+}
+
+/// Whether the owned entity has EXITED the overlap band anchored at its boundary crossing (1d.5b.3c):
+/// it is no longer a member — it has travelled past the band's destroy edge from `anchor`. A
+/// branchless monomorphic shim: the membership hysteresis lives in `OverlapBand::update_membership`
+/// (fully covered in `core`), so the dest's band-exit decision adds no uncovered branch here. The
+/// ghost was SPAWNED in-band at the crossing (distance 0 = a member), so `was_member` is always `true`.
+#[must_use]
+fn ghost_band_exited(band: &OverlapBand, anchor: DVec3, pose: &StampedPose) -> bool {
+    !band.update_membership(true, (pose.pos - anchor).length())
 }
 
 /// Whether a hosted ghost has a LIVE feed (1d.5b.3b): has-ever-been-fed-and-not-despawned (the
@@ -3421,7 +3508,14 @@ mod tests {
         rig.world
             .resource_mut::<GhostColliderRegistration>()
             .0
-            .insert(EntityId(0xABCD), GhostNeighbor { source, seq: 0 });
+            .insert(
+                EntityId(0xABCD),
+                GhostNeighbor {
+                    source,
+                    seq: 0,
+                    anchor: DVec3::ZERO,
+                },
+            );
         let skipped_before = rig.world.resource::<StubStats>().ghost_feed_skipped;
         let _ = rig.tick(vec![]);
         assert_eq!(
@@ -3445,6 +3539,7 @@ mod tests {
                 GhostNeighbor {
                     source: NodeId(88),
                     seq: 0,
+                    anchor: DVec3::ZERO,
                 },
             );
         let sent = rig.tick(vec![]);
@@ -3525,18 +3620,25 @@ mod tests {
             "a no-mirror Delta is dropped"
         );
 
-        // Despawn clears the fed latch.
+        // Despawn TEARS DOWN the hosted ghost (1d.5b.3c): the mirror entry AND the retained ghost dot
+        // are removed — the ghost lifecycle ENDS (the source stops self-emitting + being a collider).
         let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
             entity,
             source_fence: Fence(2),
         })]);
         assert!(
-            rig.world
+            !rig.world
                 .resource::<SourceGhostMirror>()
                 .0
-                .get(&entity)
-                .is_some_and(|s| !s.fed),
-            "Despawn clears the fed latch"
+                .contains_key(&entity),
+            "Despawn removes the mirror entry"
+        );
+        // The retained ghost dot (keyed by SESSION via `make_retained_ghost`) is GONE. A direct key
+        // check, NOT `.values().any(|d| ...)`: after teardown the map is empty, so an `any` closure
+        // would never run (an uncoverable region) — assert absence by the key that was removed.
+        assert!(
+            !rig.world.resource::<Dots>().0.contains_key(&SESSION),
+            "Despawn removes the retained ghost dot (the lifecycle ends)"
         );
         assert_eq!(rig.world.resource::<StubStats>().ghost_despawns, 1);
 
@@ -3556,16 +3658,23 @@ mod tests {
             "a Spawn with no hosted dot still records the mirror"
         );
 
-        // A Despawn for an entity with NO mirror is a clean no-op (the no-mirror arm).
+        // A Despawn for an entity with NO mirror AND no hosted dot tears down nothing — a counted
+        // idempotent no-op (`ghost_despawn_no_host`), never a panic, and never bumps the teardown count.
+        let no_host_before = rig.world.resource::<StubStats>().ghost_despawn_no_host;
         let despawns_before = rig.world.resource::<StubStats>().ghost_despawns;
         let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
             entity: EntityId(0x12345),
             source_fence: Fence(2),
         })]);
         assert_eq!(
+            rig.world.resource::<StubStats>().ghost_despawn_no_host,
+            no_host_before + 1,
+            "a Despawn for an unhosted entity is a counted no-op"
+        );
+        assert_eq!(
             rig.world.resource::<StubStats>().ghost_despawns,
             despawns_before,
-            "a Despawn for an unhosted entity is a clean no-op"
+            "...and does NOT bump the teardown counter"
         );
 
         // A malformed ghost body is counted undecodable, never mis-applied.
@@ -3579,6 +3688,121 @@ mod tests {
             rig.world.resource::<StubStats>().undecodable,
             undec_before + 1,
             "a malformed ghost body is counted undecodable"
+        );
+    }
+
+    #[test]
+    fn the_dest_feed_despawns_on_band_exit_and_deregisters() {
+        // 1d.5b.3c: the dest (owner) drives the source-ghost lifecycle END. While the owned entity is
+        // IN the overlap band (anchored at its crossing) the feed streams Delta; once it walks PAST the
+        // band's destroy edge the dest emits GhostFlow::Despawn (reliable) + DEREGISTERS the feed.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]);
+        let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
+        let source = NodeId(99);
+        // Owned + registered; the anchor is the crossed pose position (the boundary it entered through).
+        let _ = rig.tick(vec![promote_msg(Fence(2), source)]);
+
+        // IN-BAND (the dot is at the anchor, distance 0): the feed streams the next monotone Delta and
+        // KEEPS the registration — the `else` (feed) arm of the band-exit decision.
+        rig.set_local_tick(6);
+        let sent = rig.tick(vec![]);
+        assert!(
+            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Delta {
+                entity: SUBJECT,
+                pose: crossing_pose().sanitized(),
+                source_fence: Fence(2),
+                source_tick: vd_core::TickId(6),
+                seq: 1,
+            })),
+            "in-band: the feed streams a Delta (not a Despawn): {sent:?}"
+        );
+        assert!(
+            rig.world
+                .resource::<GhostColliderRegistration>()
+                .0
+                .contains_key(&SUBJECT),
+            "in-band: the registration is kept"
+        );
+        let exits_before = rig.world.resource::<StubStats>().ghost_band_exits;
+
+        // BAND-EXIT: move the owned dot well past the destroy edge from the crossing anchor. The band
+        // is `for_motion(move_speed*dt)` = `for_motion(0.1)`, destroy_above = 20*0.1 = 2.0 m; +3 m exits.
+        let exit_pos = crossing_pose().pos + DVec3::new(3.0, 0.0, 0.0);
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&SESSION)
+            .expect("the owned dot")
+            .pose
+            .pos = exit_pos;
+        let sent = rig.tick(vec![]);
+        assert!(
+            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Despawn {
+                entity: SUBJECT,
+                source_fence: Fence(2),
+            })),
+            "band-exit: the dest Despawns the ghost on the reliable carrier: {sent:?}"
+        );
+        assert!(
+            !rig.world
+                .resource::<GhostColliderRegistration>()
+                .0
+                .contains_key(&SUBJECT),
+            "band-exit: the feed is deregistered"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().ghost_band_exits,
+            exits_before + 1
+        );
+
+        // ...and the feed truly STOPS: a further tick sends nothing to the source (no Delta, no re-Despawn).
+        let sent = rig.tick(vec![]);
+        assert!(
+            flows_to(&sent, source).is_empty(),
+            "after deregistration the feed is silent: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_band_exit_despawn_refuses_to_remove_a_reowned_owned_dot() {
+        // 1d.5b.3c structural refusal — the shard-LOCAL stand-in for the orchestrator in-transfer gate
+        // (a `vd-sim` shard cannot see the live-saga set). A stale Despawn for an entity the source has
+        // since RE-OWNED removes nothing: only a retained Ghost is torn down, never a live `Owned` dot.
+        // Covers `remove_retained_ghost`'s `matches!(Ghost{..})` FALSE arm + the `no_host` counter.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach(); // SESSION's dot is granted + Owned (a re-acquisition would land here)
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        assert!(
+            rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "precondition: the dot is Owned"
+        );
+
+        let despawns_before = rig.world.resource::<StubStats>().ghost_despawns;
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+            entity,
+            source_fence: Fence(1),
+        })]);
+        assert!(
+            rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "the re-owned Owned dot is structurally refused (kept, still simulating)"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().ghost_despawn_no_host,
+            1,
+            "the stale Despawn is a counted no-op"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().ghost_despawns,
+            despawns_before,
+            "...and tears nothing down"
         );
     }
 

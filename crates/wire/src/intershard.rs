@@ -250,7 +250,9 @@ pub struct PromoteCmd {
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GhostFlow {
-    /// Reliable, acked: the neighbor inserts a kinematic ghost.
+    /// RELIABLE delivery ([`MsgClass::GhostReliable`]): the ghost-host inserts a kinematic ghost (a
+    /// lost Spawn would strand a never-spawned collider). EffectClass is `FireAndForget` (no
+    /// idempotency key); the receiver's insert is idempotent (a redelivery overwrites the same entry).
     Spawn {
         entity: EntityId,
         pose: StampedPose,
@@ -266,8 +268,15 @@ pub enum GhostFlow {
         source_tick: TickId,
         seq: u64,
     },
-    /// Reliable, acked; REFUSED by the receiver while the entity is `in_transfer`
-    /// (the directory field is enforced, not decorative).
+    /// RELIABLE delivery ([`MsgClass::GhostReliable`]): the owner emits this on BAND-EXIT (the entity
+    /// left the host's overlap band) and the host tears the ghost down (a lost Despawn would leak the
+    /// collider). EffectClass is `FireAndForget` (no idempotency key); the teardown is IDEMPOTENT —
+    /// a redelivery, or a stale Despawn for an entity the host has since re-owned, removes nothing
+    /// (the host only tears down a dot still held as a retained Ghost; `vd-sim` `remove_retained_ghost`).
+    /// The directory `in_transfer` field is DEAD (cleared at commit-CAS), so mid-transfer protection is
+    /// structural: the destroy edge is sized past the handoff window (band-exit is post-release) + the
+    /// orchestrator's one-saga-per-key lock. The proper orchestrator-side teardown gate is owed
+    /// (`docs/design/DEFERRED.md` D-2, Slice-2).
     Despawn {
         entity: EntityId,
         source_fence: Fence,

@@ -32,6 +32,20 @@ pub const PLANET_SOI_DESTROY_FACTOR: f64 = 1.30;
 pub const SYSTEM_SOI_CREATE_FACTOR: f64 = 0.95;
 pub const SYSTEM_SOI_DESTROY_FACTOR: f64 = 1.05;
 
+/// Motion-scaled band edges in units of per-tick travel (`v_rel · dt`), for a boundary that
+/// has NO sphere-of-influence geometry to scale off — the band is sized purely so a body moving
+/// `per_tick_travel` per tick cannot skip it (velocity-safe) and exits only after travelling a
+/// bounded multiple of its per-tick step. The destroy edge is set generously (`> ` the inner edge
+/// by well over [`K_SAFETY`]) so a ghost anchored AT a boundary crossing is torn down strictly
+/// AFTER the short handoff window the entity walks through — never during it.
+///
+/// This is the INTERIM band for the pre-spatial stub (and any future fine-grained boundary lacking
+/// an SOI radius); production realm bands use [`OverlapBand::for_planet_soi`] /
+/// [`OverlapBand::for_system_soi`], which derive their edges from `r_soi` and have no
+/// anchor-at-crossing artifact. (`docs/design/DEFERRED.md` D-2.)
+pub const MOTION_BAND_CREATE_TRAVELS: f64 = 16.0;
+pub const MOTION_BAND_DESTROY_TRAVELS: f64 = 20.0;
+
 /// Star-system sphere-of-influence radius in GALAXY UNITS:
 /// `BASE_SOI_RADIUS + luminosity · SOI_LUMINOSITY_SCALE`.
 ///
@@ -85,6 +99,20 @@ impl OverlapBand {
         OverlapBand {
             create_below: r_soi * SYSTEM_SOI_CREATE_FACTOR,
             destroy_above: r_soi * SYSTEM_SOI_DESTROY_FACTOR,
+        }
+    }
+
+    /// The motion-scaled band for a boundary with no SOI geometry: edges are multiples of the
+    /// per-tick travel `v_rel · dt` ([`MOTION_BAND_CREATE_TRAVELS`] / [`MOTION_BAND_DESTROY_TRAVELS`]).
+    /// Infallible (the factors are constant and ordered `0 < create < destroy`), velocity-safe by
+    /// construction (the gap exceeds [`K_SAFETY`] travels), and sized so the destroy edge is many
+    /// per-tick steps out — see the const docs. INTERIM for the pre-spatial stub; production realms
+    /// use [`OverlapBand::for_planet_soi`] / [`OverlapBand::for_system_soi`].
+    #[must_use]
+    pub fn for_motion(per_tick_travel: f64) -> OverlapBand {
+        OverlapBand {
+            create_below: per_tick_travel * MOTION_BAND_CREATE_TRAVELS,
+            destroy_above: per_tick_travel * MOTION_BAND_DESTROY_TRAVELS,
         }
     }
 
@@ -197,6 +225,34 @@ mod tests {
         assert_eq!((p.create_below(), p.destroy_above()), (1150.0, 1300.0));
         let s = OverlapBand::for_system_soi(1000.0);
         assert_eq!((s.create_below(), s.destroy_above()), (950.0, 1050.0));
+    }
+
+    #[test]
+    fn motion_band_is_velocity_safe_and_ordered() {
+        // The interim motion-scaled band for an entity travelling 0.1 m/tick: edges are the
+        // documented multiples of per-tick travel, ordered, and velocity-safe by construction
+        // (a body that cannot skip the gap in one tick cannot tunnel the band).
+        let travel = 0.1;
+        let band = OverlapBand::for_motion(travel);
+        assert_eq!(
+            (band.create_below(), band.destroy_above()),
+            (
+                travel * MOTION_BAND_CREATE_TRAVELS,
+                travel * MOTION_BAND_DESTROY_TRAVELS,
+            ),
+        );
+        // Constructible via the validating `new` (edges satisfy 0 < create < destroy).
+        assert!(OverlapBand::new(band.create_below(), band.destroy_above()).is_ok());
+        // Velocity-safe at exactly the travel that produced it (dt folded into `travel`, so the
+        // per-tick step is `travel` and the safety check uses dt = 1 tick).
+        assert!(
+            band.width_safe_for(travel, 1.0),
+            "the motion band tolerates the velocity it was sized for"
+        );
+        // A body starting AT the boundary (distance 0, a member) stays a member until it has
+        // travelled past the destroy edge — the post-handoff teardown guarantee.
+        assert!(band.update_membership(true, band.destroy_above()));
+        assert!(!band.update_membership(true, band.destroy_above() + travel));
     }
 
     #[test]

@@ -457,6 +457,61 @@ fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
     verify_input_conservation(&reports).expect("input conservation holds after the soak");
 }
 
+/// 1d.5b.3c DoD — THE SOURCE-GHOST LIFECYCLE END (band-exit). After the transfer settles, the SOURCE
+/// retains the avatar as a kinematic collider GHOST fed by the dest (`GhostFlow`). As the dest-owned
+/// avatar keeps walking AWAY from the boundary it crossed, it leaves the overlap band: the dest emits
+/// `GhostFlow::Despawn` + deregisters the feed, and the source TEARS THE GHOST DOWN (removes the dot).
+/// The teardown is strictly POST-release (the destroy edge is many per-tick steps out), so the source
+/// ghost is gone only once the dest is the sole render source — the avatar renders CONTINUOUSLY across
+/// the band-exit (NO vanish). The mechanics are unit-proven (`vd_sim::stub`); THIS gate is the
+/// integrated seamless proof over the real fabric.
+#[test]
+fn p2_dod_band_exit_tears_down_the_source_ghost_seamlessly() {
+    let fabric = FaultFabric::new(909, 2);
+    let mut caps: Vec<CapturedTick> = Vec::new();
+    let (mut topo, _session, entity, _m) =
+        run_cut_transfer(&fabric, &mut |t| caps.push(capture_subject(t)));
+
+    // PRECONDITION (anti-vacuity): the transfer settled with the SOURCE hosting the avatar as a
+    // retained collider ghost — the thing band-exit must tear down actually exists (else "torn down"
+    // is vacuously true). Empirically the dest's post-marker drain leaves it ~0.5 m from the crossing
+    // anchor, well inside the 2.0 m destroy edge, so the ghost survives the settle.
+    assert!(
+        report(&topo.inspect_all(), SHARD)
+            .ghost_dots
+            .contains(&entity),
+        "precondition: the source hosts the avatar as a retained collider ghost before band-exit",
+    );
+
+    // RESUME walking + keep sampling the render until the SOURCE tears the ghost down (bounded). The
+    // dest-owned avatar walks past the destroy edge, the dest Despawns + deregisters, the source
+    // removes the ghost dot — driven over the real fabric, not hand-fed.
+    with_client(&mut topo, ScriptedClient::resume_input);
+    step_until(&mut topo, 80, &mut |t| caps.push(capture_subject(t)), |t| {
+        !report(&t.inspect_all(), SHARD).ghost_dots.contains(&entity)
+    });
+
+    let reports = topo.inspect_all();
+    assert!(
+        !report(&reports, SHARD).ghost_dots.contains(&entity),
+        "the source ghost is torn down on band-exit",
+    );
+    assert!(
+        report(&reports, DEST)
+            .held_entities
+            .iter()
+            .any(|(e, _)| *e == entity),
+        "the dest still holds the avatar after band-exit",
+    );
+    assert_eq!(
+        max_absent_run(&caps),
+        0,
+        "ZERO vanish across the band-exit teardown (the dest is the sole render source by then)",
+    );
+    verify_authority_unique(&reports)
+        .expect("exactly one holder after band-exit (the source ghost is gone, the dest owns)");
+}
+
 /// The transfer run is fully deterministic under one seed — the standing in-process replay gate
 /// (cross-process parity is P3 chaos scope). It compares `inspect_all` ground truth, the harness
 /// TRACE (the purpose-built byte-comparable per-node step/sent/drain artifact — this is what

@@ -44,6 +44,12 @@ pub struct InspectReport {
     /// Entities this node is RELEASING (revoke in flight): still held, possibly
     /// already cleared from the directory — the legal release window.
     pub departing_entities: Vec<EntityId>,
+    /// Entities this node hosts a NON-SIMULATING dot for — a retained cross-shard collider GHOST
+    /// (`Authority::Ghost`, a source ghost fed by the new owner; or a transient Frozen). NOT held
+    /// authoritatively (excluded from `held_entities`). Band-exit teardown (1d.5b.3c) REMOVES the
+    /// dot, so a torn-down ghost drops out of this list — the oracle ground truth for the ghost
+    /// lifecycle END.
+    pub ghost_dots: Vec<EntityId>,
     /// Inputs this node APPLIED, in order (shards fill this).
     pub applied_inputs: Vec<(SessionId, u64)>,
     /// Inputs this node DISCARDED, with the typed reason (shards fill this).
@@ -129,6 +135,14 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .0
             .values()
             .filter(|d| d.granted & d.departing)
+            .map(|d| d.entity)
+            .collect();
+        // Retained cross-shard collider ghosts (1d.5b.3c): a dot present but NOT simulating. Band-exit
+        // teardown removes the dot, so it drops out here — the ghost-lifecycle-END ground truth.
+        report.ghost_dots = dots
+            .0
+            .values()
+            .filter(|d| !d.authority.simulates())
             .map(|d| d.entity)
             .collect();
     }

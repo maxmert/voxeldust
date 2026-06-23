@@ -294,10 +294,31 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   CANNOT fill it — nothing is Owned then), the feed fills the post-Promote window. **The capstone stays SEAMLESS
   (`verify_no_vanish`, `max_absent_run==0`, `overlap_ticks>=1`) across the lengthened strict handoff.** Routing is
   DIRECT shard↔shard mesh (`push_flow` by NodeId, no gateway hop); no new libraries.
-  **⚠️ OWED at 1d.5b.3c (per-tick leak):** `GhostColliderRegistration` (dest) + `SourceGhostMirror` (source) + the
-  retained ghost dot are NOT torn down within .3b — the band-exit `Despawn` (geometry-driven, unsatisfiable in the
-  stub fixture) lands at .3c. So the dest feed-pass + the source self-emit run EVERY tick indefinitely per committed
-  transfer (bounded per concurrent transfer, unbounded in time). **⚠️ saga `(Demoting, DestDelivered)` latch arm is
+  **✅ LANDED 1d.5b.3c (band-exit teardown — the source-ghost lifecycle END; the .3b per-tick leak CLOSED):** the dest
+  (owner) detects band-exit in `feed_source_ghosts` — the owned entity's distance from the crossing ANCHOR (captured at
+  promote on `GhostNeighbor.anchor`; immutable bookkeeping, FG-2-clean — the live pose is still read from the `Dot`)
+  leaves the seed-derived overlap band (`OverlapBand::for_motion(move_speed·dt)`, velocity-safe, NEW in
+  `core/geometry.rs`) — and emits `GhostFlow::Despawn` (RELIABLE carrier; a lost Despawn would leak the collider) +
+  DEREGISTERS the feed (`GhostColliderRegistration`). The source `on_ghost_flow` Despawn arm now TEARS DOWN: removes
+  the `SourceGhostMirror` entry AND the retained ghost DOT (the source stops self-emitting + being a collider) —
+  IDEMPOTENT + counted (`ghost_despawns` / `ghost_despawn_no_host` / dest `ghost_band_exits`). Strictly POST-release
+  (the destroy edge is many per-tick steps out, so the entity walks well past the demote→promote→release handoff before
+  exiting), so the source ghost is removed only once the dest is the SOLE render source — the capstone
+  `p2_dod_band_exit_tears_down_the_source_ghost_seamlessly` proves NO vanish across it (`max_absent_run==0`, on the
+  REAL `DeliveredView`). The .3b feed-forever (dest feed-pass + source self-emit every tick per committed transfer) is
+  CLOSED. Routing stays DIRECT shard↔shard mesh.
+  **⚠️ INTERIM (.3c) — the motion-scaled stub band:** `OverlapBand::for_motion` sizes the band off per-tick travel
+  (the stub has no realm-center/SOI geometry) and the anchor is the CROSSING pose (a local-boundary approximation).
+  Production realm bands use `for_planet_soi`/`for_system_soi` anchored at the realm center (P4/P5 spatial geometry) —
+  band-exit then has no anchor-at-crossing artifact. The teardown machinery is geometry-agnostic (only the band +
+  anchor source change), so the swap is additive.
+  **⚠️ OWED (.3c) — the orchestrator-side teardown gate:** the "refuse a Despawn that races a live saga" guard the spec
+  named on the directory `in_transfer` field (DEAD — cleared at commit-CAS) CANNOT live on a `vd-sim` shard (it cannot
+  see the orchestrator live-saga set; the dependency rule forbids sim→node — full-audit `wf_3fee0260` skeptics 4/4).
+  The shard-LOCAL stand-in is STRUCTURAL: the source tears down ONLY a retained `Ghost` dot (a RE-OWNED `Owned` dot is
+  refused — `remove_retained_ghost`), the destroy-edge sizing keeps band-exit post-release, and the orchestrator
+  one-saga-per-key lock prevents a concurrent same-key saga. The proper orchestrator-side gate + ghost-lifecycle crash
+  recovery are owed at **Slice-2** / **D-6**. **⚠️ saga `(Demoting, DestDelivered)` latch arm is
   now PRODUCTION-DEAD** (with the relocated SubscriptionReady the dest sub/frames cannot exist while the saga is in
   Demoting — `DestDelivered` can only arrive in Promoting+); kept as a defensive/harness-only arm (annotated in
   `saga.rs`; its `an_early_delivery_in_demoting` test injects the event directly, so HR5 coverage holds).
@@ -309,9 +330,10 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   realm move against an in-flight entity transfer). The proper recovery (the saga `Promoting`-timeout re-drive
   producer + serializing realm moves vs in-flight entity transfers) co-lands with **D-3** (lease lifecycle) +
   **Slice-2** (the timeout/re-drive machinery), before P8/P10 multi-realm mobility.
-  The remaining 1d.5b.3 back-half: **.3c** band-exit Despawn (`OverlapBand`, seed-derived) + the registration/mirror
-  teardown, **.3d** the per-tick mid-flight `verify_authority_unique` + the two transfer-window excuses keyed on the
-  orchestrator LIVE-SAGA set (the directory `in_transfer` is DEAD — cleared at CAS) → flips **D-2 🟩**.
+  The remaining 1d.5b.3 back-half: **.3c band-exit Despawn ✅ LANDED** (see the LANDED block above — registration +
+  mirror + retained-ghost-dot teardown). **.3d** is the only item left for **D-2 🟩**: the per-tick mid-flight
+  `verify_authority_unique` + the two transfer-window excuses keyed on the orchestrator LIVE-SAGA set
+  (`SagaRuntimeRes.sagas` — the directory `in_transfer` is DEAD, cleared at CAS).
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
      by the **fence**, not by cooperative in-memory state." The source freeze IS still cooperative in-memory
      (`self_fence_foreign_entity` does a local `Authority` flip to a RETAINED Ghost — since 1d.4b it KEEPS the dot,
@@ -350,13 +372,16 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     Demoting saga currently PARKS (emits nothing), visible ONLY as growing `now - since` in the admin staleness view;
     the loud-fail-via-`step_until`-cap is a TEST-tier property, NOT a production guarantee. Do not read this arm as a
     live safety net until Slice-2 injects `Timeout` on a deadline.
-    **⚠️ band-exit half DEFERRED to 1d.5b:** the conjunction's "entity **left the source overlap band**"
-    (`OverlapBand::update_membership` on the swept `segment_shell_crossing`, `K_SAFETY`-derived — geometry already
-    built in `core/src/geometry.rs`) is UNSATISFIABLE in the stub fixture (proven by probe `wf_1b64b75e`: source +
-    dest both cap at 0.4 m from origin vs a velocity-safety-forced ≥2.1 m band edge → would PARK the saga forever).
-    It lands in 1d.5b as the retained Ghost's `Despawn` trigger, evaluated on a Ghost that 1d.5b gives a moving
-    `GhostFlow::Delta` pose — where a relative-to-anchor shell crossing is real. The predicate then becomes
-    `dest_delivered & band_exited` (bitwise). The reshape-free promise (`wf_0ed2dc0c`) held for the delivery half.
+    **✅ band-exit RESOLVED at 1d.5b.3c — as a SEPARATE post-release ghost-lifecycle event, NOT a saga release-gate
+    term:** the earlier plan folded "entity left the source overlap band" into the demote/release predicate
+    (`dest_delivered & band_exited`). 1d.5b.1 instead made release = `PromoteAck & DeliveredToObservers` (NO band term —
+    gating release on band-exit would PARK the saga: an SOI-sized band is unsatisfiable in the stub, probe
+    `wf_1b64b75e`). Band-exit now drives the retained Ghost's `Despawn` (the COLLIDER lifecycle), DISTINCT from sub
+    release (the RENDER lifecycle): the sub releases fast on delivery; the ghost stays a collider until the entity
+    leaves the band (`.3c` above). The exit is measured by the DEST on its OWNED pose vs the crossing anchor
+    (`OverlapBand::update_membership`, hysteresis-only — NOT the swept `segment_shell_crossing`: the motion band is
+    velocity-safe, 0.1 m/tick < the 0.2 m gap, so a body cannot tunnel the band in one tick and hysteresis alone is
+    sufficient; the swept primitive stays covered in `core` for the future fast-body SOI case).
   - **(b) the source-side ORDERED, fence-enforced demote (a TEAR-OUT, NOT a body-swap):** replace the `stub.rs`
     `granted_key_poll_tick`/`self_fence_foreign_entity` POLL with a SAGA-pushed `Demote`/`DemoteAck` driving the
     per-entity `authority.rs` `Owned→Frozen→Ghost` FSM — the source flips to a **retained ghost-as-collider** (so
