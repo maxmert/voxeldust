@@ -22,16 +22,21 @@
 //! (on `DemoteAcked`) `Promote`→dest, and releases the source sub only once the dest both acked
 //! the promote AND delivered to every observer — the seamless no-vanish gate (`saga.rs` Promoting).
 //!
-//! ## KNOWN 1b LIMIT (binding Slice-2 work item — pinned by tests below)
-//! Every ABORT path currently leaves the subject's directory lock SET (`in_transfer =
-//! Some(transfer)` survives the terminal `Aborted`): the FSM emits no abort-CAS action and
-//! this runtime never calls `DirectoryCore::abort_cas`, so an aborted subject cannot start
-//! another transfer until Slice 2 lands "terminal abort clears the directory lock via
-//! `abort_cas`, including the stale-fence re-read" (a CAS-loser's `expected_fence` is stale
-//! by definition, so the clear needs the Slice-2 head re-read — it cannot be a naive
-//! `abort_cas(expected)` here). The abort tests ASSERT the lock is still set, so the Slice-2
-//! fix must deliberately flip those assertions — the leak can never be forgotten silently.
-//! (Caught by the Slice-1b audit, CPO-1/CPO-2.)
+//! ## Slice 2a — the RECOVERY MACHINERY (the R1 cure; closes D-1 + the post-commit park)
+//! [`scan_deadlines`] is the production TIMEOUT PRODUCER: a `now - since >= deadline_for(phase)`
+//! scan (two thresholds — cheap `redrive` for post-commit, large `abort` for the destructive
+//! pre-freeze/compensation phases) that injects `SagaEvent::Timeout`, so a lost saga-ack RE-DRIVES
+//! (post-commit) or ABORTS (pre-freeze) instead of PARKING forever. The terminal `Aborted` edge now
+//! emits `SagaAction::ClearTransferLock` → [`DirectoryCore::abort_clear`] (the stale-fence head
+//! re-read — a CAS-loser's `expected_fence` is stale by definition), so the directory lock CLEARS
+//! and an aborted subject can immediately re-transfer (D-1 CLOSED; the two pinned asserts FLIPPED
+//! to `None`). ⚠️ HONEST SCOPE: a fixed tick deadline is NOT a crash-vs-slow discriminator (only a
+//! permanent `kill` emits `NodeUnreachable`) — a mis-tuned `abort_deadline_ticks` below a deployment's
+//! worst-case healthy pre-freeze round-trip WILL false-abort a slow-but-alive saga (the real
+//! discriminator is lease-lapse liveness, D-3, owed). The producer cures lost SAGA-ACKS, not a starved
+//! standing delivery watermark (a `Promoting` saga whose dest frame delivery is blocked stays
+//! half-open — owed, P3) nor an orchestrator CRASH (no durable WAL, D-6). (Caught by Slice-1b audit
+//! CPO-1/CPO-2 + Slice-2a design `wf_9f22c70d`.)
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -41,7 +46,7 @@ use vd_core::{EpochId, Fence, NodeId, TransferId, UniverseTick};
 use vd_sim::directory::DirectoryCore;
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
-use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState};
+use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning};
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
     PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TransferAck, TransferEnvelope,
@@ -107,6 +112,10 @@ pub struct SagaRuntimeRes {
     /// Rejections shed because `rejected` reached `REJECTION_LEDGER_CAP` before the 1c.9
     /// consumer drained it — the loud overflow ALERT (0 in any healthy run).
     pub rejections_dropped: u64,
+    /// The deadline budget the `scan_deadlines` producer reads (Slice 2a). Set from
+    /// `OrchestratorConfig.saga` in `register_orchestrator`; `Default` is the dev/test value
+    /// ([`SagaTuning::default`]) for the in-process rigs.
+    tuning: SagaTuning,
 }
 
 /// Hard ceiling on the un-drained rejection ledger (operational param, ONE home — no inline
@@ -115,6 +124,16 @@ pub struct SagaRuntimeRes {
 const REJECTION_LEDGER_CAP: usize = 1024;
 
 impl SagaRuntimeRes {
+    /// Construct with the deadline budget from config (Slice 2a). The production path
+    /// (`register_orchestrator`) calls this with `cfg.saga`; `Default` is the dev/test value.
+    #[must_use]
+    pub fn with_tuning(tuning: SagaTuning) -> SagaRuntimeRes {
+        SagaRuntimeRes {
+            tuning,
+            ..SagaRuntimeRes::default()
+        }
+    }
+
     /// Trigger a new transfer (create-on-trigger). `ctx.subject` MUST already be a directory
     /// record — [`drive_sagas`] asserts `lock_transfer` succeeds (a missing/already-locked
     /// subject refuses the start). `gateway` is the session's gateway (the caller resolves it
@@ -373,6 +392,13 @@ fn run_to_quiescence(
                     );
                 }
                 SagaAction::NotifyRejected(reason) => rejected.push((ctx.transfer, reason)),
+                // Clear the directory lock at TERMINAL abort (Slice 2a, closes D-1), called DIRECTLY
+                // (this thread owns the directory — same as IssueCommitCas). The stale-fence re-read
+                // (`abort_clear`); the saga is already terminal so the outcome feeds nothing back into
+                // the FSM (Won on the first terminal, Lost on an idempotent re-driven terminal). FF-1.
+                SagaAction::ClearTransferLock => {
+                    let _ = dir.abort_clear(ctx.subject, ctx.transfer);
+                }
                 SagaAction::Tombstone => tombstone = true,
             }
         }
@@ -499,9 +525,67 @@ fn process_starts(
     }
 }
 
-/// The orchestrator saga-runtime system: process new triggers, then drive every live saga
-/// forward on the gateway acks delivered this tick. Runs on the orchestrator's single-threaded
-/// schedule; the directory CAS is a direct in-process call (no await, no lock across a send).
+/// The deadline a saga's CURRENT phase fires its `Timeout` at (Slice 2a). Pre-freeze/freeze/aborting
+/// phases use the LARGE `abort_deadline_ticks` (their Timeout is DESTRUCTIVE — an abort — or re-drives
+/// a compensator on the same slow latency profile); committing/post-commit phases use the small
+/// `redrive_deadline_ticks` (a cheap idempotent re-drive that may fire "early" at zero correctness
+/// cost); terminal phases return `u64::MAX` (never fire). A straight monomorphic match — the ONLY
+/// per-phase logic, hoisted out of the phase-agnostic producer scan (HR3).
+#[must_use]
+fn deadline_for(state: &SagaState, tuning: &SagaTuning) -> u64 {
+    match state {
+        SagaState::AwaitProvision
+        | SagaState::Preparing
+        | SagaState::Cutting
+        | SagaState::Freezing { .. }
+        | SagaState::Aborting { .. } => tuning.abort_deadline_ticks,
+        SagaState::CommittingCas { .. }
+        | SagaState::Swapping { .. }
+        | SagaState::Demoting { .. }
+        | SagaState::Promoting { .. }
+        | SagaState::Releasing { .. } => tuning.redrive_deadline_ticks,
+        SagaState::Done { .. } | SagaState::Aborted { .. } => u64::MAX,
+    }
+}
+
+/// THE Slice 2a TIMEOUT PRODUCER (the R1 cure): inject `SagaEvent::Timeout` into every live saga whose
+/// `now - since` reached its phase deadline, so a lost saga-ack RE-DRIVES (post-commit) or ABORTS
+/// (pre-freeze) instead of PARKING forever. Phase-agnostic — ONE scan, ONE injected event; the FSM's
+/// existing per-phase Timeout arms do all the work. `since` is REFRESHED on fire (BEFORE delivery), so
+/// a still-stale saga re-fires at most once per its deadline window, never every tick (no storm).
+/// O(live sagas)/tick — matches the existing `views()`/`active_transfers()` scans; a deadline-ordered
+/// structure (pop only the due) is a P3/MMO-scale optimization, not built now.
+fn scan_deadlines(
+    runtime: &mut SagaRuntimeRes,
+    dir: &mut DirectoryCore,
+    outbox: &mut OutboundBox,
+    epoch: EpochId,
+    now: UniverseTick,
+) {
+    let tuning = runtime.tuning;
+    let mut due: Vec<TransferId> = Vec::new();
+    for (transfer, live) in runtime.sagas.iter_mut() {
+        if now.0.saturating_sub(live.since.0) >= deadline_for(&live.state, &tuning) {
+            live.since = now; // re-arm BEFORE delivery — one fire per window, never a per-tick storm
+            due.push(*transfer);
+        }
+    }
+    for transfer in due {
+        deliver(
+            runtime,
+            dir,
+            outbox,
+            epoch,
+            now,
+            transfer,
+            SagaEvent::Timeout,
+        );
+    }
+}
+
+/// The orchestrator saga-runtime system: process new triggers, FIRE due deadlines (Slice 2a), then
+/// drive every live saga forward on the gateway acks delivered this tick. Runs on the orchestrator's
+/// single-threaded schedule; the directory CAS is a direct in-process call (no await, no lock across a send).
 pub fn drive_sagas(
     inbox: Res<InboundBox>,
     clock: Res<ClockSample>,
@@ -512,6 +596,9 @@ pub fn drive_sagas(
     let now = clock.universe_tick;
     let epoch = clock.epoch;
     process_starts(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
+    // Slice 2a: fire due deadlines BEFORE the ack loop — a saga that loses its ack this tick still
+    // gets its Timeout re-drive/abort next tick (the producer is the R1 backstop, never a wedge).
+    scan_deadlines(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
     for msg in &inbox.0 {
         let Inbound::Wire { class, bytes, .. } = msg else {
             continue;
@@ -707,6 +794,7 @@ mod tests {
                     directory: DirectoryTuning {
                         lease_ttl_ticks: 10_000,
                     },
+                    saga: SagaTuning::default(),
                 },
             );
             let gateway = hub.register(GATEWAY, 64);
@@ -1087,13 +1175,11 @@ mod tests {
         // The subject's authority never moved (the CAS never ran): source still owns it.
         let head = rig.subject_head();
         assert_eq!(head.authority, AuthorityRef::Shard(SOURCE));
-        // PINNED 1b LIMIT (audit CPO-1): the directory lock survives the abort — the subject
-        // is wedged until Slice 2's abort_cas clears it. This assertion EXISTS TO BE FLIPPED
-        // by that fix (to `None`); it must never pass silently in either direction.
+        // ✅ FLIPPED (Slice 2a, D-1): the terminal Aborted edge emits ClearTransferLock →
+        // abort_clear, so the lock CLEARS — the subject can immediately re-transfer (no wedge).
         assert_eq!(
-            head.in_transfer,
-            Some(XFER),
-            "Slice-2 abort_cas not yet wired: the abort leaves the lock set (see module doc)"
+            head.in_transfer, None,
+            "Slice 2a: terminal abort clears the directory lock (D-1 closed)"
         );
     }
 
@@ -1140,13 +1226,18 @@ mod tests {
         rig.ack(TransferControlAck::SourceThawed { transfer: XFER });
         rig.ack(TransferControlAck::Aborted { transfer: XFER });
         assert_eq!(rig.live(), 0);
-        // PINNED 1b LIMIT (audit CPO-2): the CAS-loser's abort also leaves the lock set —
-        // and clearing it NEEDS the Slice-2 head re-read (this saga's expected fence is
-        // stale, so a naive abort_cas(expected) would lose too). Flipped by the Slice-2 fix.
+        // ✅ FLIPPED (Slice 2a, D-1, audit CPO-2): even the CAS-LOSER's terminal abort clears the
+        // lock — `abort_clear` RE-READS the head (this saga's expected fence is stale by definition,
+        // so a naive `abort_cas(expected)` would lose too), bumping the fence + clearing the lock.
+        let head = rig.subject_head();
         assert_eq!(
-            rig.subject_head().in_transfer,
-            Some(XFER),
-            "Slice-2 abort_cas+re-read not yet wired (see module doc)"
+            head.in_transfer, None,
+            "Slice 2a: the CAS-loser's terminal abort clears the lock via the head re-read (D-1)"
+        );
+        assert_eq!(
+            head.fence,
+            Fence(6),
+            "abort_clear bumped the re-read head fence (5 → 6) to fence-out any stale crossing"
         );
     }
 
@@ -1282,6 +1373,212 @@ mod tests {
                 source: SOURCE,
                 dest: DEST,
             }],
+        );
+    }
+
+    #[test]
+    fn deadline_for_maps_every_phase_to_its_risk_class() {
+        // Slice 2a: pre-freeze/freeze/aborting → the LARGE destructive abort deadline; committing/
+        // post-commit → the cheap redrive deadline; terminal → u64::MAX (never fires).
+        let t = SagaTuning {
+            redrive_deadline_ticks: 8,
+            abort_deadline_ticks: 24,
+        };
+        for s in [
+            SagaState::AwaitProvision,
+            SagaState::Preparing,
+            SagaState::Cutting,
+            SagaState::Freezing {
+                marker_seq: 0,
+                frozen_drained: None,
+                flushed: false,
+            },
+            SagaState::Aborting {
+                reason: AbortReason::CutTimeout,
+                awaiting_thaw: true,
+                awaiting_abort_ack: true,
+            },
+        ] {
+            assert_eq!(deadline_for(&s, &t), 24, "{s:?} uses the abort deadline");
+        }
+        for s in [
+            SagaState::CommittingCas {
+                marker_seq: 0,
+                drained_seq: 0,
+            },
+            SagaState::Swapping {
+                new_fence: Fence(2),
+            },
+            SagaState::Demoting {
+                new_fence: Fence(2),
+                dest_delivered: false,
+            },
+            SagaState::Promoting {
+                new_fence: Fence(2),
+                promote_acked: false,
+                dest_delivered: false,
+            },
+            SagaState::Releasing {
+                new_fence: Fence(2),
+            },
+        ] {
+            assert_eq!(deadline_for(&s, &t), 8, "{s:?} uses the redrive deadline");
+        }
+        assert_eq!(
+            deadline_for(
+                &SagaState::Done {
+                    new_fence: Fence(2)
+                },
+                &t
+            ),
+            u64::MAX
+        );
+        assert_eq!(
+            deadline_for(
+                &SagaState::Aborted {
+                    reason: AbortReason::CutTimeout
+                },
+                &t
+            ),
+            u64::MAX
+        );
+    }
+
+    /// Inject a live saga directly (controlled state + `since`) for the producer tests.
+    fn inject_saga(runtime: &mut SagaRuntimeRes, state: SagaState, since: UniverseTick) {
+        runtime.sagas.insert(
+            XFER,
+            LiveSaga {
+                ctx: ctx(DurabilityClass::Durable, Fence(1)),
+                state,
+                gateway: GATEWAY,
+                since,
+                flushed_pose: None,
+            },
+        );
+    }
+
+    fn flows_to_node(outbox: &OutboundBox, node: NodeId) -> Vec<InterShardFlow> {
+        outbox
+            .0
+            .iter()
+            .filter(|(to, _, _)| *to == node)
+            .filter_map(|(_, _, b)| postcard::from_bytes(b).ok())
+            .collect()
+    }
+
+    #[test]
+    fn scan_deadlines_re_drives_a_due_saga_re_arms_it_and_skips_a_fresh_one() {
+        // THE R1 cure: a post-commit (Demoting) saga whose ack was lost re-drives at the redrive
+        // deadline (8); the re-arm (since←now) means it fires at most ONCE per window, never every tick.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive=8, abort=24
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+        });
+        inject_saga(
+            &mut runtime,
+            SagaState::Demoting {
+                new_fence: Fence(2),
+                dest_delivered: false,
+            },
+            UniverseTick(0),
+        );
+
+        // BELOW the deadline (now=7 < 8): nothing re-driven.
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(7),
+        );
+        assert!(outbox.0.is_empty(), "below the deadline: no re-drive");
+
+        // AT the deadline (now=8): Timeout → Demoting re-emits the Demote to the SOURCE.
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8),
+        );
+        let expected = InterShardFlow::Demote(DemoteCmd {
+            transfer: XFER,
+            subject: subject(),
+            new_owner_fence: Fence(2),
+            step_id: DEMOTE_STEP,
+        });
+        assert!(
+            flows_to_node(&outbox, SOURCE).contains(&expected),
+            "the deadline producer re-drove the Demote: {:?}",
+            outbox.0
+        );
+
+        // RE-ARM: `since` refreshed to 8, so the next scan within the window (now=9, 9-8=1 < 8) is silent.
+        let mut outbox2 = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox2,
+            EpochId(1),
+            UniverseTick(9),
+        );
+        assert!(
+            outbox2.0.is_empty(),
+            "within the re-armed window: no second re-drive (no per-tick storm)"
+        );
+    }
+
+    #[test]
+    fn scan_deadlines_re_drives_a_parked_aborting_saga() {
+        // finding #6: a saga PARKED in Aborting (a dropped compensator ack) is re-driven by the
+        // producer — at the LARGE abort deadline (24) — re-emitting BOTH outstanding compensators.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+        });
+        inject_saga(
+            &mut runtime,
+            SagaState::Aborting {
+                reason: AbortReason::FreezeTimeout,
+                awaiting_thaw: true,
+                awaiting_abort_ack: true,
+            },
+            UniverseTick(0),
+        );
+
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(23),
+        );
+        assert!(outbox.0.is_empty(), "below the abort deadline: no re-drive");
+
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(24),
+        );
+        let to_gateway = flows_to_node(&outbox, GATEWAY);
+        assert!(
+            to_gateway.contains(&InterShardFlow::Saga(TransferControl::ThawSource {
+                transfer: XFER,
+                session: SESSION,
+            })),
+            "the producer re-drove ThawSource: {to_gateway:?}"
+        );
+        assert!(
+            to_gateway.contains(&InterShardFlow::Saga(TransferControl::AbortTransfer {
+                transfer: XFER,
+                session: SESSION,
+            })),
+            "the producer re-drove AbortTransfer: {to_gateway:?}"
         );
     }
 

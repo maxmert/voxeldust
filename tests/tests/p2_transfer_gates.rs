@@ -22,7 +22,7 @@ use vd_core::glam::DVec3;
 use vd_core::pose::{FrameRef, RealmId};
 use vd_core::{AccountId, EntityId, NodeId, SessionId, TickId, TransferId};
 use vd_harness::client::ScriptedClient;
-use vd_harness::fabric::FaultFabric;
+use vd_harness::fabric::{FaultFabric, LinkPolicy};
 use vd_harness::oracle::{
     RenderSample, RenderTolerances, RenderTrace, verify_authority_settled, verify_authority_unique,
     verify_input_conservation, verify_no_vanish, verify_pose_continuity,
@@ -30,8 +30,8 @@ use vd_harness::oracle::{
 use vd_harness::topology::{InspectReport, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
-    DEST, ORCH, SHARD, gateway_buffered_count, live_sagas, p1_client, p2_cluster, read_subject,
-    saga_states, stub_config, trigger_transfer, walk_forward,
+    DEST, GATEWAY, ORCH, SHARD, gateway_buffered_count, live_sagas, p1_client, p2_cluster,
+    read_subject, saga_states, stub_config, trigger_transfer, walk_forward,
 };
 use vd_wire::channels::SubId;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
@@ -492,6 +492,95 @@ fn p2_dod_authority_is_unique_every_mid_flight_tick() {
     assert!(
         saw_w1,
         "the W1 mid-flight window (source-Owned + directory-DEST) actually occurred — the excuse was exercised, not vacuous",
+    );
+}
+
+/// Whether any saga passed through (or reached) an ABORT state during the run — sampled each tick
+/// (a terminal Aborted tombstones fast, so it is caught in-flight as `Aborting`). The Slice 2a
+/// false-timeout guard: a HEALTHY transfer must NEVER abort.
+fn observed_an_abort(topo: &mut Topology) -> bool {
+    saga_states(topo)
+        .iter()
+        .any(|s| s.starts_with("Aborting") || s.starts_with("Aborted"))
+}
+
+/// Slice 2a DoD — FALSE-TIMEOUT NEGATIVE CONTROL #1 (the catastrophic-risk guard). The deadline
+/// PRODUCER is LIVE in the capstone cluster, yet a HEALTHY lockstep transfer reaches Done with NO
+/// saga EVER entering Aborting (no false destructive abort) and COMMITS to the dest. Goes RED if a
+/// deadline drops below the worst healthy phase dwell (an abort storm on the happy path).
+#[test]
+fn p2_dod_a_healthy_transfer_never_false_aborts_with_the_producer_live() {
+    let fabric = FaultFabric::new(909, 2);
+    let mut saw_abort = false;
+    let (mut topo, _s, entity, _m) = run_cut_transfer(&fabric, &mut |t| {
+        saw_abort |= observed_an_abort(t);
+    });
+    assert!(
+        !saw_abort,
+        "a healthy transfer NEVER aborts — the producer did not false-fire the destructive abort",
+    );
+    assert_eq!(
+        live_sagas(&mut topo),
+        0,
+        "the transfer reached a terminal state"
+    );
+    let reports = topo.inspect_all();
+    assert!(
+        report(&reports, DEST)
+            .held_entities
+            .iter()
+            .any(|(e, _)| *e == entity),
+        "the transfer COMMITTED to the dest (not aborted back to the source) — terminal success, not failure",
+    );
+}
+
+/// Slice 2a DoD — FALSE-TIMEOUT NEGATIVE CONTROL #2 (slow-but-alive). With the saga-control links
+/// DELAYED (all nodes ALIVE, no drops/kills), the transfer is slower — the producer may harmlessly
+/// re-drive a post-commit step (cheap, idempotent) — but NO saga ever aborts (the destructive
+/// `abort_deadline_ticks=24` dominates the slow pre-freeze round-trip) and the transfer still
+/// COMMITS. This is the control the lockstep one cannot be: it pins the destructive threshold
+/// against a slow-but-healthy link. Goes RED if `abort_deadline_ticks` is tuned below the slow
+/// pre-freeze dwell.
+#[test]
+fn p2_dod_a_slow_but_alive_transfer_never_aborts() {
+    let fabric = FaultFabric::new(909, 2);
+    // Delay the saga-control plane (orchestrator ↔ gateway/source/dest), both directions. All nodes
+    // stay ALIVE — a slow link, not a crash. max_extra=4 keeps the worst pre-freeze dwell well under
+    // abort_deadline_ticks=24 (no flakiness) while exceeding redrive=8 (so a post-commit re-drive may
+    // harmlessly fire — proving the cheap arm is non-destructive).
+    let slow = LinkPolicy {
+        max_extra_delay_ticks: 4,
+        ..LinkPolicy::default()
+    };
+    for (a, b) in [
+        (ORCH, GATEWAY),
+        (GATEWAY, ORCH),
+        (ORCH, SHARD),
+        (SHARD, ORCH),
+        (ORCH, DEST),
+        (DEST, ORCH),
+    ] {
+        fabric.set_policy(a, b, slow);
+    }
+    let mut saw_abort = false;
+    let (mut topo, _s, entity, _m) = run_cut_transfer(&fabric, &mut |t| {
+        saw_abort |= observed_an_abort(t);
+    });
+    assert!(
+        !saw_abort,
+        "a SLOW-but-alive transfer never aborts — abort_deadline_ticks dominates the slow pre-freeze round-trip",
+    );
+    assert_eq!(
+        live_sagas(&mut topo),
+        0,
+        "the slow transfer still reached a terminal state"
+    );
+    assert!(
+        report(&topo.inspect_all(), DEST)
+            .held_entities
+            .iter()
+            .any(|(e, _)| *e == entity),
+        "the slow transfer COMMITTED to the dest (slowness delays, never aborts)",
     );
 }
 

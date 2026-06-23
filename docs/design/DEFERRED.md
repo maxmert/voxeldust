@@ -158,16 +158,32 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Dependency:** P8 ships; composes with [[D-31]] `rebind_refs` + [[D-33]] atomic multi-key CAS (the server side of the same compound handoff).
 - **Source:** the full-architecture audit `wf_b82d1a67` (Theme B).
 
-### D-1 🟧 Transfer abort never clears the directory lock (`in_transfer` leak)
-- **Missing:** on every abort path the saga leaves `OwnerRecord.in_transfer = Some(transfer)` forever, so the
-  subject key can never transfer again (and ghost-despawn stays refused). R1 re-manifesting at the directory.
-- **Where:** `crates/node/src/saga_runtime.rs` — no `abort_cas` call site anywhere; the abort tests pin
-  `assert_eq!(head.in_transfer, Some(XFER))` ("exists-to-be-flipped") + a `KNOWN 1b LIMIT` module-doc block.
-- **When / proper:** **Slice 2.** Terminal abort clears the lock via `DirectoryCore::abort_cas` — INCLUDING a
-  stale-fence re-read (a CAS-loser's `expected_fence` is stale by definition, so a naive `abort_cas(expected)`
-  also loses; the Slice-2 CAS-re-read loop re-derives the head first). The Slice-2 fix flips the pinned asserts.
-- **Dependency:** the Slice-2 at-least-once / adaptive-timeout / CAS-re-read machinery.
-- **Source:** Slice-1b audit `wf_34ef74d1` (CPO-1/CPO-2).
+### D-36 🟥 DestDelivered-starvation stall: the saga timeout producer cures lost saga-ACKS, not a starved delivery watermark
+- **Missing:** a `Promoting{promote_acked: true}` saga whose DEST frame-delivery PATH is blocked (the gateway's
+  standing `every_observer_delivered` watermark stays false) stays half-open FOREVER — the Slice-2a producer re-drives
+  the `Promote` (re-acking `PromoteAck`, `promotes_redelivered` climbs) but CANNOT re-arm `DeliveredToObservers`,
+  which `recompute_delivery_watermarks` derives per-tick from the observer frame set, INDEPENDENT of the saga
+  round-trip. So the producer's "R1 cured" claim is honestly NARROWED to lost SAGA-ACKS.
+- **Where:** `crates/connection-plane/src/gateway.rs` `recompute_delivery_watermarks`; the saga `Promoting` gate
+  (`saga.rs` `promoting_advance`). The stall is admin-visible (climbing `now - since`), NEVER silently wedged.
+- **When / proper:** **P3** — a re-poke of the delivery path / rising-edge watermark (the producer drives saga-ack
+  recovery; a starved delivery watermark needs a delivery-path nudge, a distinct mechanism).
+- **Source:** Slice-2a design `wf_9f22c70d` (finding #3); boundary-documented, not silently wedged.
+
+### D-1 🟩 Transfer abort clears the directory lock (Slice 2a)
+- **✅ CLOSED (Slice 2a):** the terminal `Aborted` edge now emits `SagaAction::ClearTransferLock` →
+  `DirectoryCore::abort_clear(subject, transfer)` — the STALE-FENCE re-read (a CAS-loser/aborter's `expected_fence`
+  is stale by definition, so a naive `abort_cas(expected)` would also Lose; `abort_clear` re-derives the head and
+  clears the lock IFF still held by THIS transfer, NEVER steals another saga's lock, bumping the fence to fence-out a
+  stale crossing). Authority is UNCHANGED (abort keeps the source owner). Idempotent (a re-driven terminal whose lock
+  already cleared = `Lost` no-op). The two pinned "exists-to-be-flipped" asserts
+  (`prepare_rejection_aborts_and_tombstones_with_typed_feedback`, `cas_loss_unwinds_with_a_thaw`) are FLIPPED from
+  `in_transfer == Some(XFER)` to `== None` (authority still `Shard(SOURCE)`, fence bumped). An aborted subject can
+  immediately re-transfer (R1's directory-side manifestation is cured).
+- **RACE-1/D-23 closed-without-unmasking:** `ClearTransferLock` fires at the TERMINAL edge (after BOTH compensator
+  acks), so the gateway's `apply_abort` has pruned the session journal before any re-transfer's `PrepareSubscribe`
+  could discard it — see D-23.
+- **Source:** Slice-1b audit `wf_34ef74d1` (CPO-1/CPO-2); closed by Slice-2a design `wf_9f22c70d` + audit.
 
 ### D-2 🟩 Demote→Release tail: the ORDERED, fence-enforced demote-before-promote tear-out is COMPLETE (1d.5b.1→.3d)
 
@@ -184,8 +200,9 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 > excuse (the existing `in_flight_to_owner` path already covers it; empirically `HeldNowhere` never fires mid-flight)
 > and the two-Owned overlap is UNREACHABLE under strict demote-before-promote (so NO uncoverable excuse was added).
 > Residuals are SEPARATE owed items, NOT D-2: the orchestrator-side teardown gate (Slice-2/D-6), the cooperative
-> in-memory freeze vs the fence-enforced freeze (`transfer_protocol` §2.4), the lost-`Demote`/`Promote` re-drive
-> producer (Slice-2 — no production `Timeout` producer yet), and the symmetric Realm/Ship-half mid-flight excuse (P8/P10).
+> in-memory freeze vs the fence-enforced freeze (`transfer_protocol` §2.4), and the symmetric Realm/Ship-half
+> mid-flight excuse (P8/P10). **✅ the lost-`Demote`/`Promote` re-drive producer LANDED in Slice 2a** (the
+> `scan_deadlines` `Timeout` producer re-drives a never-acked post-commit saga; closes D-1 too — see D-1 🟩).
 - **LANDED (1c.8 — interim):** `interim_demote_complete` now exists in `crates/node/src/saga_runtime.rs` — an
   UNCONDITIONAL bandless stand-in, invoked from `drive_sagas` AFTER the ack loop, that for every live saga in
   `Demoting` calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the existing sink — NOT a magic
@@ -636,10 +653,16 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Where:** `crates/connection-plane/src/gateway.rs` — `apply_prepare` (RACE-1, loud `tracing::warn` on a
   replaced different transfer) + the `Bye` handler (WEDGE-1, loud `tracing::warn` when a transfer was in flight).
   Both pinned in-code; the in-flight-survives-foreign-abort property has a test (CP-1).
-- **When / proper:** **Slice 2** — alongside the D-1 `abort_cas` lock-clear + the saga timeout producer. Revisit
-  whether `Option<TransferProgress>` must become a keyed map (it likely must once SIGNALS multiplex multiple
-  correlation streams over one session — the signal-readiness prerequisite the audit flagged).
-- **Source:** whole-codebase audit `wwk1uh5k9` (RACE-1 / WEDGE-1, pinned; masked by D-1).
+- **⚠️ PARTIAL (Slice 2a):** D-1's lock-clear is now LIVE, but RACE-1 is NOT unmasked — `ClearTransferLock` fires at
+  the TERMINAL `Aborted` edge (after BOTH compensator acks), by which point the gateway's `apply_abort` has pruned
+  `Session.transfer`, so an immediate re-transfer's `apply_prepare` finds NO stale journal to discard. WEDGE-1's
+  PRE-FREEZE case is now backstopped by the producer (a wedged pre-freeze saga times out → aborts → the lock clears).
+  STILL OWED: WEDGE-1's POST-COMMIT case (a `Bye` after commit drops the session+journal while the dest already owns
+  — abort is wrong + there is no session to ack; needs gateway re-adoption, P3) + the keyed-map `TransferProgress`
+  (the SIGNALS slice, once multiple correlation streams multiplex one session).
+- **When / proper:** the keyed map + WEDGE-1-post-commit at the SIGNALS slice / P3 (the producer + terminal-edge
+  lock-clear handled the Slice-2a-scoped halves).
+- **Source:** whole-codebase audit `wwk1uh5k9` (RACE-1 / WEDGE-1, pinned; masked by D-1); Slice 2a `wf_9f22c70d`.
 
 ### D-21 🟩 `TransferAck` got its first consumer (Slice 1d.1): the `StubCrossing` receiver + the source pose flush
 - **Landed (1d.1):** the shard-bound `Transfer(TransferEnvelope)`-arm RECEIVER now exists. The DEST consults the

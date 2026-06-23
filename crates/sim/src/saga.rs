@@ -52,6 +52,77 @@ pub struct SagaCtx {
     pub to_realm: RealmId,
 }
 
+/// The saga deadline budget (Slice 2a) — the ONE home for the two timeout thresholds (HR "no magic
+/// numbers"; never an inline literal in the producer). Two values because the FSM's `Timeout` splits
+/// by phase into two RISK CLASSES:
+/// - `redrive_deadline_ticks` — the CHEAP, idempotent re-drive of a POST-COMMIT step (re-emit a
+///   Demote/Promote/crossing the consumer re-acks WITHOUT re-effect). Firing "early" on a merely-slow
+///   saga costs nothing, so this can be tight (fast recovery from a lost saga-ack).
+/// - `abort_deadline_ticks` — the DESTRUCTIVE pre-freeze/freeze/compensation timeout (aborts a
+///   possibly-healthy player back to the source). MUST be sized FAR above the deployment's worst-case
+///   healthy pre-freeze round-trip, else a slow-but-alive link triggers an abort storm. ⚠️ INTERIM: a
+///   fixed tick deadline is NOT a crash-vs-slow discriminator (only a kill emits `NodeUnreachable`);
+///   the real trigger is lease-lapse liveness (D-3, owed). Sized per deployment as
+///   `ceil(MULT · (round_trip + retry_delay + 2·max_extra_delay + stagger))`, MULT ≥ 1.5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SagaTuning {
+    pub redrive_deadline_ticks: u64,
+    pub abort_deadline_ticks: u64,
+}
+
+/// DEV/test deadline defaults — the lockstep-capstone-safe values (worst healthy post-commit dwell
+/// ≈ 3 ticks ≪ 8; worst healthy pre-freeze dwell ≈ 3 ≪ 24). PRODUCTION sets both explicitly from
+/// config (`OrchestratorConfig.saga`, env-driven in the bin) per the false-timeout formula — NEVER a
+/// `0` (which would fire every tick = abort storm), which is why `SagaTuning` derives no zero Default.
+pub const DEFAULT_REDRIVE_DEADLINE_TICKS: u64 = 8;
+pub const DEFAULT_ABORT_DEADLINE_TICKS: u64 = 24;
+
+impl Default for SagaTuning {
+    fn default() -> SagaTuning {
+        SagaTuning {
+            redrive_deadline_ticks: DEFAULT_REDRIVE_DEADLINE_TICKS,
+            abort_deadline_ticks: DEFAULT_ABORT_DEADLINE_TICKS,
+        }
+    }
+}
+
+/// A mis-tuned [`SagaTuning`] — rejected LOUD at boot, never a silent abort storm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SagaTuningError {
+    #[error(
+        "saga deadline must be >= 1 tick (a 0-tick deadline fires EVERY scan = an abort storm)"
+    )]
+    ZeroDeadline,
+    #[error(
+        "abort_deadline_ticks ({abort}) must be >= redrive_deadline_ticks ({redrive}): the \
+         DESTRUCTIVE abort deadline must never be tighter than the cheap re-drive"
+    )]
+    AbortTighterThanRedrive { redrive: u64, abort: u64 },
+}
+
+impl SagaTuning {
+    /// Reject a mis-tuned budget at boot (the bin calls this after reading the env). Both deadlines
+    /// must be ≥ 1 (a 0 fires every scan tick — the catastrophic abort storm), and the DESTRUCTIVE
+    /// `abort_deadline_ticks` must be ≥ the cheap `redrive_deadline_ticks` (an abort tighter than the
+    /// re-drive would abort a healthy saga before it ever re-drove). The bitwise `|` keeps both
+    /// zero-check operands covered (HR5). The defaults + every in-process rig satisfy this trivially.
+    ///
+    /// # Errors
+    /// [`SagaTuningError`] for a 0 deadline or an abort-below-redrive ordering.
+    pub fn validate(&self) -> Result<(), SagaTuningError> {
+        if (self.redrive_deadline_ticks < 1) | (self.abort_deadline_ticks < 1) {
+            return Err(SagaTuningError::ZeroDeadline);
+        }
+        if self.abort_deadline_ticks < self.redrive_deadline_ticks {
+            return Err(SagaTuningError::AbortTighterThanRedrive {
+                redrive: self.redrive_deadline_ticks,
+                abort: self.abort_deadline_ticks,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The saga's phase. Serializable: the two durable checkpoints persist it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SagaState {
@@ -224,6 +295,14 @@ pub enum SagaAction {
     PersistCheckpoint,
     /// Surface a typed rejection to the client (cosmetic feedback).
     NotifyRejected(AbortReason),
+    /// Clear the directory transfer-lock for the subject (Slice 2a, closes D-1). Emitted ONLY at the
+    /// TERMINAL `Aborted` edge (after BOTH compensator acks — so the gateway's `apply_abort` has
+    /// pruned the session journal, closing RACE-1: a re-transfer's `PrepareSubscribe` finds no stale
+    /// journal to discard). The wrapper executes via `DirectoryCore::abort_clear` (the stale-fence
+    /// re-read — the aborter's `expected_fence` is stale by definition). Idempotent (a re-driven
+    /// terminal whose lock already cleared is a no-op). A successful COMMIT clears the lock at the CAS;
+    /// this is the ABORT counterpart, so an aborted subject can immediately re-transfer.
+    ClearTransferLock,
     /// The saga reached a terminal state; the wrapper may GC after tombstoning.
     Tombstone,
 }
@@ -428,12 +507,11 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             },
             vec![A::Promote { new_fence }],
         ),
-        // A Demoting timeout RE-EMITS the ordered Demote (idempotent at the source), never aborts —
-        // post-commit is forward-only. ⚠️ HONEST SCOPE: there is NO production `Timeout` PRODUCER
-        // yet (no `now - since` deadline scan — DEFERRED Slice-2); today this arm fires ONLY in unit
-        // tests / the harness `step_until` cap. A production never-acked Demoting saga PARKS (emits
-        // nothing), surfaced only as growing `now - since` in the admin staleness view, until the
-        // Slice-2 timeout producer injects `Timeout`.
+        // A Demoting timeout RE-EMITS the ordered Demote (idempotent at the source — `self_fence_skipped`),
+        // never aborts: post-commit is forward-only. ✅ Slice 2a: the production `Timeout` PRODUCER
+        // (`saga_runtime::scan_deadlines`, `now - since >= redrive_deadline_ticks`) now drives this in
+        // production — a never-acked Demoting saga RE-DRIVES within one redrive window, never PARKS
+        // (the R1 cure for lost saga-acks). A starved DELIVERY watermark is a different wedge (owed, P3).
         (
             S::Demoting {
                 new_fence,
@@ -466,8 +544,11 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             },
             E::DestDelivered,
         ) => promoting_advance(ctx, new_fence, promote_acked, true),
-        // A Promoting timeout RE-EMITS the ordered Promote (idempotent at the dest), never aborts.
-        // Same HONEST SCOPE as the Demoting timeout: no production producer yet (Slice-2).
+        // A Promoting timeout RE-EMITS the ordered Promote (idempotent at the dest — promotes_redelivered),
+        // never aborts. ✅ Slice 2a: `scan_deadlines` drives this in production (redrive_deadline_ticks).
+        // ⚠️ a STARVED delivery watermark (the dest never latches `DeliveredToObservers`) is a DIFFERENT
+        // wedge the producer cannot cure — re-driving Promote re-acks PromoteAck but cannot re-arm the
+        // standing watermark (owed, P3 — DEFERRED D-36); the producer cures lost saga-ACKS only.
         (
             S::Promoting {
                 new_fence,
@@ -501,7 +582,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 awaiting_abort_ack,
             },
             event,
-        ) => step_aborting(reason, awaiting_thaw, awaiting_abort_ack, event),
+        ) => step_aborting(ctx, reason, awaiting_thaw, awaiting_abort_ack, event),
 
         // ---- idempotent no-ops -------------------------------------------------------------
         // Terminal states absorb everything; unknown (state, event) pairs are
@@ -617,16 +698,44 @@ fn abort_with_thaw(ctx: &SagaCtx, reason: AbortReason) -> (SagaState, Vec<SagaAc
 /// Compensation bookkeeping: both acks must arrive (in any order, any number of
 /// times) before the saga is terminally `Aborted`.
 fn step_aborting(
+    ctx: &SagaCtx,
     reason: AbortReason,
     awaiting_thaw: bool,
     awaiting_abort_ack: bool,
     event: SagaEvent,
 ) -> (SagaState, Vec<SagaAction>) {
+    // TIMEOUT (Slice 2a): the deadline producer RE-DRIVES the still-outstanding compensator command(s)
+    // — a saga PARKED in Aborting (a dropped `ThawSource`/`AbortTransfer` ack) would otherwise never
+    // reach terminal (the FSM's landing pad was a no-op before 2a; the "wrapper's retry" never
+    // existed). State + awaiting flags UNCHANGED; `apply_thaw`/`apply_abort` re-ack idempotently. NO
+    // `ClearTransferLock` here — that fires only on the terminal edge below. The two `if`s are SPLIT
+    // (not `&&`) so each false arm stays a covered region (HR5).
+    if let SagaEvent::Timeout = event {
+        let mut actions = Vec::new();
+        if awaiting_thaw {
+            actions.push(SagaAction::Send(TransferControl::ThawSource {
+                transfer: ctx.transfer,
+                session: ctx.session,
+            }));
+        }
+        if awaiting_abort_ack {
+            actions.push(SagaAction::Send(TransferControl::AbortTransfer {
+                transfer: ctx.transfer,
+                session: ctx.session,
+            }));
+        }
+        return (
+            SagaState::Aborting {
+                reason,
+                awaiting_thaw,
+                awaiting_abort_ack,
+            },
+            actions,
+        );
+    }
     let (awaiting_thaw, awaiting_abort_ack) = match event {
         SagaEvent::SourceThawed => (false, awaiting_abort_ack),
         SagaEvent::DestAborted => (awaiting_thaw, false),
-        // Timeouts in compensation are handled by the wrapper's retry of the
-        // outstanding commands (idempotent); the FSM state is unchanged.
         _ => (awaiting_thaw, awaiting_abort_ack),
     };
     if awaiting_thaw || awaiting_abort_ack {
@@ -639,7 +748,12 @@ fn step_aborting(
             vec![],
         )
     } else {
-        (SagaState::Aborted { reason }, vec![SagaAction::Tombstone])
+        // TERMINAL: clear the directory lock (D-1) at the terminal edge — after BOTH compensator acks,
+        // so the gateway's `apply_abort` has pruned the session journal (RACE-1 closed), then tombstone.
+        (
+            SagaState::Aborted { reason },
+            vec![SagaAction::ClearTransferLock, SagaAction::Tombstone],
+        )
     }
 }
 
@@ -904,6 +1018,153 @@ mod tests {
                 reason: expected_reason
             }
         );
+    }
+
+    #[test]
+    fn terminal_abort_clears_the_transfer_lock_via_both_paths() {
+        // Slice 2a: the terminal Aborted edge emits ClearTransferLock (+ Tombstone) so the directory
+        // lock clears (D-1) — via BOTH the pre-freeze path (no thaw) and the freeze path (thaw first).
+        let c = ctx(false);
+        let reject = PrepareReject::Spatial(SpatialReject::Obstructed);
+        // (a) pre-freeze: Prepared-rejected → AbortTransfer; DestAborted → terminal.
+        let (state, _) = step(
+            &c,
+            start(&c).0,
+            SagaEvent::Prepared(PrepareResult::Rejected(reject)),
+        );
+        let (state, actions) = step(&c, state, SagaEvent::DestAborted);
+        assert_eq!(
+            state,
+            SagaState::Aborted {
+                reason: AbortReason::PrepareRejected(reject)
+            }
+        );
+        assert!(
+            actions.contains(&SagaAction::ClearTransferLock),
+            "pre-freeze terminal abort clears the lock: {actions:?}"
+        );
+        assert!(actions.contains(&SagaAction::Tombstone));
+
+        // (b) freeze path: freeze timeout → thaw + abort; SourceThawed then DestAborted → terminal.
+        let (state, _) = drive(
+            &c,
+            start(&c).0,
+            &[
+                SagaEvent::Prepared(PrepareResult::Ready),
+                SagaEvent::CutConfirmed { marker_seq: 5 },
+                SagaEvent::Timeout, // freeze timeout → abort_with_thaw
+                SagaEvent::SourceThawed,
+            ],
+        );
+        let (state, actions) = step(&c, state, SagaEvent::DestAborted);
+        assert_eq!(
+            state,
+            SagaState::Aborted {
+                reason: AbortReason::FreezeTimeout
+            }
+        );
+        assert!(
+            actions.contains(&SagaAction::ClearTransferLock),
+            "freeze-path terminal abort clears the lock too: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn aborting_timeout_re_emits_only_the_outstanding_compensators() {
+        // Slice 2a finding #6: a saga PARKED in Aborting (a dropped compensator ack) is re-driven by
+        // the deadline producer's Timeout — re-emitting ONLY the still-outstanding command(s), state
+        // and awaiting flags unchanged (apply_thaw/apply_abort re-ack idempotently).
+        let c = ctx(false);
+        let thaw = SagaAction::Send(TransferControl::ThawSource {
+            transfer: c.transfer,
+            session: c.session,
+        });
+        let abort = SagaAction::Send(TransferControl::AbortTransfer {
+            transfer: c.transfer,
+            session: c.session,
+        });
+        let r = AbortReason::FreezeTimeout;
+
+        // BOTH outstanding: Timeout re-emits both (thaw before abort).
+        let both = SagaState::Aborting {
+            reason: r,
+            awaiting_thaw: true,
+            awaiting_abort_ack: true,
+        };
+        let (state, actions) = step(&c, both, SagaEvent::Timeout);
+        assert_eq!(state, both);
+        assert_eq!(actions, vec![thaw, abort]);
+
+        // THAW-only (the abort ack already landed): re-emit ThawSource only.
+        let thaw_only = SagaState::Aborting {
+            reason: r,
+            awaiting_thaw: true,
+            awaiting_abort_ack: false,
+        };
+        let (state, actions) = step(&c, thaw_only, SagaEvent::Timeout);
+        assert_eq!(state, thaw_only);
+        assert_eq!(actions, vec![thaw]);
+
+        // ABORT-only (the thaw ack already landed): re-emit AbortTransfer only.
+        let abort_only = SagaState::Aborting {
+            reason: r,
+            awaiting_thaw: false,
+            awaiting_abort_ack: true,
+        };
+        let (state, actions) = step(&c, abort_only, SagaEvent::Timeout);
+        assert_eq!(state, abort_only);
+        assert_eq!(actions, vec![abort]);
+    }
+
+    #[test]
+    fn saga_tuning_validate_rejects_a_mistuned_budget() {
+        // Slice 2a hardening (audit wf_75a8d57d): a 0 deadline (the abort-storm trap) or an abort
+        // tighter than the re-drive is rejected LOUD at boot — never a silent abort storm.
+        assert_eq!(SagaTuning::default().validate(), Ok(()));
+        // ZeroDeadline — both operands of the bitwise `|`.
+        assert_eq!(
+            SagaTuning {
+                redrive_deadline_ticks: 0,
+                abort_deadline_ticks: 24,
+            }
+            .validate(),
+            Err(SagaTuningError::ZeroDeadline)
+        );
+        assert_eq!(
+            SagaTuning {
+                redrive_deadline_ticks: 8,
+                abort_deadline_ticks: 0,
+            }
+            .validate(),
+            Err(SagaTuningError::ZeroDeadline)
+        );
+        // The destructive abort deadline below the cheap re-drive is rejected.
+        assert_eq!(
+            SagaTuning {
+                redrive_deadline_ticks: 8,
+                abort_deadline_ticks: 4,
+            }
+            .validate(),
+            Err(SagaTuningError::AbortTighterThanRedrive {
+                redrive: 8,
+                abort: 4
+            })
+        );
+    }
+
+    #[test]
+    fn a_stray_non_timeout_event_in_aborting_is_a_noop() {
+        // The match's `_` arm: a stray event (neither SourceThawed/DestAborted nor Timeout) in
+        // Aborting leaves state + flags unchanged and emits nothing (an at-least-once duplicate).
+        let c = ctx(false);
+        let aborting = SagaState::Aborting {
+            reason: AbortReason::CutTimeout,
+            awaiting_thaw: false,
+            awaiting_abort_ack: true,
+        };
+        let (state, actions) = step(&c, aborting, SagaEvent::Prepared(PrepareResult::Ready));
+        assert_eq!(state, aborting);
+        assert!(actions.is_empty());
     }
 
     #[test]
@@ -1342,8 +1603,9 @@ mod tests {
     #[test]
     fn ordered_tail_timeouts_re_emit_forward_only() {
         // A Demoting timeout re-emits the Demote; a Promoting timeout re-emits the Promote — both
-        // idempotent re-drives, never aborts (post-commit is forward-only). No production producer
-        // yet (Slice-2) — these are the re-drive landing pads.
+        // idempotent re-drives, never aborts (post-commit is forward-only). ✅ Slice 2a: the
+        // `saga_runtime::scan_deadlines` producer drives these in production (the FSM arms here are
+        // the landing pads; the producer-driven path is covered in `saga_runtime`'s own tests).
         let c = ctx(false);
         let demoting = SagaState::Demoting {
             new_fence: Fence(6),

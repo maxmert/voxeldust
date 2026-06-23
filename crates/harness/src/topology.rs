@@ -797,6 +797,7 @@ mod tests {
                 directory: DirectoryTuning {
                     lease_ttl_ticks: 100,
                 },
+                saga: vd_sim::saga::SagaTuning::default(),
             },
         );
         topo.add_node(Box::new(orch));

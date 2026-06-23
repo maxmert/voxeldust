@@ -50,6 +50,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         transport,
     );
     let (world, schedule) = node.parts_mut();
+    // Slice 2a saga deadline budget: defaults to the documented dev values, overridable per
+    // deployment per the false-timeout formula (a present-but-bad value fails loud). `validate`
+    // rejects a 0 / abort-below-redrive override at boot — LOUD config error, never a silent
+    // production abort storm (audit wf_75a8d57d).
+    let saga = vd_sim::saga::SagaTuning {
+        redrive_deadline_ticks: env.parse_or(
+            "VD_SAGA_REDRIVE_DEADLINE",
+            vd_sim::saga::DEFAULT_REDRIVE_DEADLINE_TICKS,
+        )?,
+        abort_deadline_ticks: env.parse_or(
+            "VD_SAGA_ABORT_DEADLINE",
+            vd_sim::saga::DEFAULT_ABORT_DEADLINE_TICKS,
+        )?,
+    };
+    saga.validate()?;
     register_orchestrator(
         world,
         schedule,
@@ -60,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             directory: DirectoryTuning {
                 lease_ttl_ticks: env.parse("VD_LEASE_TTL")?,
             },
+            saga,
         },
     );
 

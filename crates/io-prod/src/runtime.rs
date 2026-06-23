@@ -63,6 +63,22 @@ impl EnvConfig {
         })
     }
 
+    /// A parseable value that DEFAULTS on absence but still ERRORS on a present-but-unparseable value
+    /// (a typo is never silently defaulted). For operational params with a sane built-in default
+    /// (Slice 2a saga deadlines) so a deployment works out-of-the-box yet a bad override fails loud.
+    ///
+    /// # Errors
+    /// [`ConfigError::Unparseable`] when the key is present but does not parse.
+    pub fn parse_or<T: std::str::FromStr>(&self, key: &str, default: T) -> Result<T, ConfigError> {
+        match self.raw(key) {
+            Ok(value) => value.parse().map_err(|_| ConfigError::Unparseable {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            }),
+            Err(_) => Ok(default),
+        }
+    }
+
     /// A `NodeId` (plain u64).
     ///
     /// # Errors
@@ -227,6 +243,31 @@ mod tests {
         );
         // The process-env constructor exists and snapshots SOMETHING.
         let _ = EnvConfig::from_process_env();
+    }
+
+    #[test]
+    fn parse_or_defaults_on_absence_but_errors_on_a_bad_value() {
+        // Slice 2a: the saga deadlines default on absence (the orchestrator works out-of-the-box)
+        // but a present-but-unparseable override fails LOUD (never silently defaulted).
+        let env = cfg(&[("GOOD", "42"), ("BAD", "xyz")]);
+        assert_eq!(
+            env.parse_or::<u64>("GOOD", 7),
+            Ok(42),
+            "present + parseable → the value"
+        );
+        assert_eq!(
+            env.parse_or::<u64>("MISSING", 7),
+            Ok(7),
+            "absent → the default"
+        );
+        assert_eq!(
+            env.parse_or::<u64>("BAD", 7),
+            Err(ConfigError::Unparseable {
+                key: "BAD".to_owned(),
+                value: "xyz".to_owned(),
+            }),
+            "present but unparseable → a loud error, not the default"
+        );
     }
 
     #[test]

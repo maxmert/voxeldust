@@ -106,6 +106,8 @@ fn build_cluster(
             directory: DirectoryTuning {
                 lease_ttl_ticks: 1_000,
             },
+            // Slice 2a: the deadline producer runs LIVE in the capstone cluster (dev values 8/24).
+            saga: vd_sim::saga::SagaTuning::default(),
         },
     );
     topo.add_node(Box::new(orch));

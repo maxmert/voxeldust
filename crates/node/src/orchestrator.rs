@@ -26,6 +26,9 @@ pub struct OrchestratorConfig {
     /// Nodes that receive the per-tick `ClockSync` broadcast (gateways + shards).
     pub clock_peers: Vec<NodeId>,
     pub directory: DirectoryTuning,
+    /// The saga deadline budget (Slice 2a) — the timeout producer's two thresholds. The bin reads
+    /// it from env; in-process rigs use `SagaTuning::default()`.
+    pub saga: vd_sim::saga::SagaTuning,
 }
 
 /// The directory, resource-wrapped (single writer: this node's schedule).
@@ -64,7 +67,7 @@ pub fn register_orchestrator(world: &mut World, schedule: &mut Schedule, cfg: &O
     world.insert_resource(DirectoryRes(DirectoryCore::new(cfg.directory)));
     world.insert_resource(ClockPeers(cfg.clock_peers.clone()));
     world.insert_resource(OrchestratorStats::default());
-    world.insert_resource(crate::saga_runtime::SagaRuntimeRes::default());
+    world.insert_resource(crate::saga_runtime::SagaRuntimeRes::with_tuning(cfg.saga));
     // serve_directory then drive_sagas: both read the Saga-class inbound (directory ops vs
     // gateway acks); the saga runtime's direct commit_cas runs after the directory service.
     schedule.add_systems(
@@ -263,6 +266,7 @@ mod tests {
             directory: DirectoryTuning {
                 lease_ttl_ticks: 100,
             },
+            saga: vd_sim::saga::SagaTuning::default(),
         }
     }
 

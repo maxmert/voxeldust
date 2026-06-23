@@ -208,6 +208,30 @@ impl DirectoryCore {
         }
     }
 
+    /// Clear the transfer lock at TERMINAL abort (Slice 2a, closes D-1), RE-READING the head. The
+    /// aborter's `expected_fence` (fixed at saga creation) is STALE by definition once any phase bumped
+    /// the head, so a fence-matched [`abort_cas`](Self::abort_cas) would also Lose. This re-derives the
+    /// current head and clears the lock IFF it is still held by THIS `transfer` — NEVER steals another
+    /// saga's lock — bumping the fence to fence-out any stale in-flight crossing. Authority is
+    /// UNCHANGED (abort keeps the source owner). Idempotent: a re-driven terminal whose lock already
+    /// cleared (`None`) or moved to another transfer (`Some(other)`) is a `Lost` no-op.
+    pub fn abort_clear(&mut self, key: DirectoryKey, transfer: TransferId) -> CasOutcome {
+        match self.records.get_mut(&key) {
+            Some(record) if record.in_transfer == Some(transfer) => {
+                let new_fence = record.fence.next();
+                record.fence = new_fence;
+                record.in_transfer = None;
+                CasOutcome::Won { new_fence }
+            }
+            Some(record) => CasOutcome::Lost {
+                current: record.fence,
+            },
+            None => CasOutcome::Lost {
+                current: Fence::GENESIS,
+            },
+        }
+    }
+
     /// Hint head-read (a mid-flip read never rejects).
     #[must_use]
     pub fn head(&self, key: DirectoryKey) -> Option<OwnerRecord> {
@@ -412,6 +436,70 @@ mod tests {
         assert_eq!(
             dir.commit_cas(key(), Fence(1), shard(2), NOW),
             CasOutcome::Lost { current: Fence(2) }
+        );
+    }
+
+    #[test]
+    fn abort_clear_clears_the_lock_by_re_reading_the_stale_head() {
+        // Slice 2a (D-1): the aborter's expected fence is STALE (the head advanced) — abort_clear
+        // re-reads + clears IFF still held by THIS transfer, keeping authority, bumping the fence.
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        assert!(dir.lock_transfer(key(), TransferId(5)));
+        // The aborter does NOT know the head fence — it just names its transfer.
+        let outcome = dir.abort_clear(key(), TransferId(5));
+        assert_eq!(
+            outcome,
+            CasOutcome::Won {
+                new_fence: Fence(2)
+            }
+        );
+        let record = dir.head(key()).expect("record");
+        assert_eq!(record.authority, shard(1), "abort retains the source owner");
+        assert_eq!(record.in_transfer, None, "the lock cleared");
+    }
+
+    #[test]
+    fn abort_clear_is_an_idempotent_noop_when_already_clear() {
+        // A re-driven terminal abort (the lock already cleared): Lost no-op, fence unchanged.
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        assert!(dir.lock_transfer(key(), TransferId(5)));
+        let _ = dir.abort_clear(key(), TransferId(5)); // clears (Fence 2)
+        assert_eq!(
+            dir.abort_clear(key(), TransferId(5)),
+            CasOutcome::Lost { current: Fence(2) },
+            "the second clear is a no-op (lock already None)"
+        );
+    }
+
+    #[test]
+    fn abort_clear_never_steals_another_sagas_lock() {
+        // The lock is held by a DIFFERENT transfer: abort_clear must NOT clear it (a stale abort of
+        // saga A cannot unlock a live saga B that re-acquired the key).
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        assert!(dir.lock_transfer(key(), TransferId(9)));
+        assert_eq!(
+            dir.abort_clear(key(), TransferId(5)),
+            CasOutcome::Lost { current: Fence(1) },
+            "a stale abort of transfer 5 leaves transfer 9's lock intact"
+        );
+        assert_eq!(
+            dir.head(key()).expect("record").in_transfer,
+            Some(TransferId(9)),
+            "the other saga's lock survives"
+        );
+    }
+
+    #[test]
+    fn abort_clear_on_an_unknown_key_is_a_genesis_loss() {
+        let mut dir = DirectoryCore::new(TUNING);
+        assert_eq!(
+            dir.abort_clear(key(), TransferId(5)),
+            CasOutcome::Lost {
+                current: Fence::GENESIS
+            },
         );
     }
 
