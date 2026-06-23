@@ -50,6 +50,12 @@ pub struct InspectReport {
     /// dot, so a torn-down ghost drops out of this list — the oracle ground truth for the ghost
     /// lifecycle END.
     pub ghost_dots: Vec<EntityId>,
+    /// LIVE (in-flight) transfers this node knows of — ORCHESTRATOR-ONLY (from `SagaRuntimeRes`);
+    /// empty on shards/clients and once every saga tombstones. The mid-flight AUTHORITY-UNIQUE oracle
+    /// (1d.5b.3d) keys its W1 transfer-window excuse on this: it excuses the post-CAS, pre-demote
+    /// window (source still `Owned` while the directory records the dest) ONLY for a listed subject of
+    /// the matching (source→dest) shape — so the per-tick gate never masks a real split-brain.
+    pub active_transfers: Vec<vd_node::saga_runtime::ActiveTransfer>,
     /// Inputs this node APPLIED, in order (shards fill this).
     pub applied_inputs: Vec<(SessionId, u64)>,
     /// Inputs this node DISCARDED, with the typed reason (shards fill this).
@@ -107,6 +113,10 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
     let mut report = InspectReport::default();
     if let Some(dir) = world.get_resource::<vd_node::orchestrator::DirectoryRes>() {
         report.directory = dir.0.entries().map(|(k, r)| (*k, *r)).collect();
+    }
+    if let Some(rt) = world.get_resource::<vd_node::saga_runtime::SagaRuntimeRes>() {
+        // Orchestrator-only: the live-saga set the mid-flight AUTHORITY-UNIQUE oracle excuses against.
+        report.active_transfers = rt.active_transfers();
     }
     if let Some(dots) = world.get_resource::<vd_sim::stub::Dots>() {
         // A dot is HELD only while it SIMULATES (`Authority::Owned`, 1d.4b): a Ghost (a retained

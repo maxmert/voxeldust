@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 use vd_core::glam::{DQuat, DVec3};
 use vd_core::pose::FrameRef;
 use vd_core::{EntityId, Fence, NodeId, SessionId, TickId};
+use vd_node::saga_runtime::ActiveTransfer;
 use vd_wire::channels::SubId;
-use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
+use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, OwnerRecord};
 
 use crate::topology::InspectReport;
 
@@ -34,6 +35,8 @@ pub enum AuthorityViolation {
     HeldNowhere { entity: EntityId, recorded: String },
     #[error("entity {entity} is still pending at {node} after the run settled")]
     UnsettledPending { entity: EntityId, node: NodeId },
+    #[error("transfer subject {subject} still has a live saga at {node} after the run settled")]
+    UnsettledTransfer { subject: String, node: NodeId },
     #[error("entity {entity} held at {held} but the directory records {recorded} (FENCE-9)")]
     FenceMismatch {
         entity: EntityId,
@@ -71,8 +74,12 @@ pub fn verify_authority_unique(
     // Who awaits a grant confirmation for each entity (the legal in-flight window).
     let mut pending: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
     // What the directory RECORDS for each entity key (authority + fence).
-    let mut recorded: BTreeMap<EntityId, vd_wire::seams::directory::OwnerRecord> = BTreeMap::new();
+    let mut recorded: BTreeMap<EntityId, OwnerRecord> = BTreeMap::new();
     let mut departing: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
+    // Live (in-flight) transfers, keyed by Entity subject (1d.5b.3d) — the W1 transfer-window
+    // excuse ground truth. Non-Entity (Realm/Ship) subjects are not entity-key transfers, so they
+    // never excuse an entity disagreement; their build arm is covered by a Realm-subject unit test.
+    let mut active: BTreeMap<EntityId, ActiveTransfer> = BTreeMap::new();
     for (node, report) in reports {
         for (entity, fence) in &report.held_entities {
             holders.entry(*entity).or_default().push(*node);
@@ -87,6 +94,11 @@ pub fn verify_authority_unique(
         for (key, record) in &report.directory {
             if let DirectoryKey::Entity(entity) = key {
                 recorded.insert(*entity, *record);
+            }
+        }
+        for at in &report.active_transfers {
+            if let DirectoryKey::Entity(entity) = at.subject {
+                active.insert(entity, *at);
             }
         }
     }
@@ -126,6 +138,13 @@ pub fn verify_authority_unique(
                 }
             }
             Some(record) => {
+                // W1 (1d.5b.3d): the LEGAL post-CAS, pre-demote transfer window — the source still
+                // holds the subject Owned at the old fence while the directory already records the
+                // dest. Excused ONLY for a live saga of the exact (source→dest) shape; this arm is
+                // reached AFTER the `len == 1` guard, so the excuse can NEVER mask a split-brain.
+                if excuse_w1(&active, *entity, holder, record, held_fence[entity]) {
+                    continue;
+                }
                 return Err(AuthorityViolation::DirectoryDisagrees {
                     entity: *entity,
                     holder,
@@ -160,6 +179,31 @@ pub fn verify_authority_unique(
     // double-grants must not pass green just because the oracle only looked at
     // entity keys. (Ship keys extend identically at P8.)
     verify_realm_authority(reports)
+}
+
+/// The 1d.5b.3d W1 transfer-window excuse: is this `DirectoryDisagrees` the LEGAL post-CAS,
+/// pre-demote window — the source still holds the subject `Owned` at the OLD fence while the directory
+/// already records the dest at the new fence? True ONLY when a LIVE saga for THIS entity has
+/// (a) an entry at all, (b) `source == holder` (the source is the one still holding), (c) the record
+/// names `Shard(dest)` (the directory moved to the saga's dest), and (d) the held fence is STALE
+/// versus the record fence (the holder is at the old fence). Reached only AFTER the `len == 1` guard,
+/// so it can NEVER excuse a split-brain (two holders); it never touches `FenceMismatch` (the
+/// record-names-the-holder arm) or `WrongHolderCount`. Monomorphic: the `let-else` and the three
+/// bitwise-`&` conjuncts keep every false arm coverable in THIS helper, not the audit loop (HR5).
+#[must_use]
+fn excuse_w1(
+    active: &BTreeMap<EntityId, ActiveTransfer>,
+    entity: EntityId,
+    holder: NodeId,
+    record: &OwnerRecord,
+    held: Fence,
+) -> bool {
+    let Some(at) = active.get(&entity) else {
+        return false;
+    };
+    (at.source == holder)
+        & (record.authority == AuthorityRef::Shard(at.dest))
+        & held.is_stale_against(record.fence)
 }
 
 /// The realm-key half of AUTHORITY-UNIQUE: every realm record has exactly one
@@ -240,6 +284,14 @@ pub fn verify_authority_settled(
         {
             return Err(AuthorityViolation::UnsettledPending {
                 entity: *entity,
+                node: *node,
+            });
+        }
+        // 1d.5b.3d: a still-LIVE saga post-quiesce means the transfer never settled — the W1 excuse
+        // is a MID-FLIGHT allowance only; once settled, NO transfer may be in flight.
+        if let Some(at) = report.active_transfers.first() {
+            return Err(AuthorityViolation::UnsettledTransfer {
+                subject: format!("{:?}", at.subject),
                 node: *node,
             });
         }
@@ -574,6 +626,7 @@ mod tests {
     const ORCH: NodeId = NodeId(1);
     const SHARD: NodeId = NodeId(2);
     const CLIENT: NodeId = NodeId(3);
+    const DEST: NodeId = NodeId(4);
     const SESSION: SessionId = SessionId(7);
 
     fn entity() -> EntityId {
@@ -855,6 +908,141 @@ mod tests {
             Err(AuthorityViolation::Unrecorded {
                 entity: entity(),
                 holder: SHARD,
+            })
+        );
+    }
+
+    /// The W1 mid-flight transfer window: SHARD (the saga SOURCE) still holds the subject Owned at
+    /// the OLD fence (1) while the directory already records the DEST at the NEW fence (2), with a
+    /// live saga SHARD→DEST in flight. The base case is EXCUSED (Ok) — the legal post-CAS, pre-demote
+    /// state the per-tick oracle must not RED on.
+    fn w1_window() -> Vec<(NodeId, InspectReport)> {
+        vec![
+            (
+                ORCH,
+                InspectReport {
+                    directory: vec![(DirectoryKey::Entity(entity()), record_at(DEST, Fence(2)))],
+                    active_transfers: vec![ActiveTransfer {
+                        subject: DirectoryKey::Entity(entity()),
+                        source: SHARD,
+                        dest: DEST,
+                    }],
+                    ..InspectReport::default()
+                },
+            ),
+            (
+                SHARD,
+                InspectReport {
+                    held_entities: vec![(entity(), Fence(1))],
+                    ..InspectReport::default()
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn w1_excuses_the_legal_window_but_each_conjunct_failing_re_reds() {
+        // (TRUE) the legal mid-flight window is excused.
+        assert_eq!(verify_authority_unique(&w1_window()), Ok(()));
+
+        let disagree = AuthorityViolation::DirectoryDisagrees {
+            entity: entity(),
+            holder: SHARD,
+            recorded: format!("{:?}", AuthorityRef::Shard(DEST)),
+        };
+
+        // (a FALSE) NO live saga for the entity → not excused.
+        let mut r = w1_window();
+        r[0].1.active_transfers.clear();
+        assert_eq!(verify_authority_unique(&r), Err(disagree.clone()));
+
+        // (b FALSE) the saga's SOURCE is not the holder → not excused.
+        let mut r = w1_window();
+        r[0].1.active_transfers[0].source = NodeId(99);
+        assert_eq!(verify_authority_unique(&r), Err(disagree.clone()));
+
+        // (c FALSE) the directory records someone OTHER than the saga's dest → not excused.
+        let mut r = w1_window();
+        r[0].1.directory = vec![(
+            DirectoryKey::Entity(entity()),
+            record_at(NodeId(77), Fence(2)),
+        )];
+        assert_eq!(
+            verify_authority_unique(&r),
+            Err(AuthorityViolation::DirectoryDisagrees {
+                entity: entity(),
+                holder: SHARD,
+                recorded: format!("{:?}", AuthorityRef::Shard(NodeId(77))),
+            })
+        );
+
+        // (d FALSE) the held fence is NOT stale vs the record (equal fences) → not excused.
+        let mut r = w1_window();
+        r[0].1.directory = vec![(DirectoryKey::Entity(entity()), record_at(DEST, Fence(1)))];
+        assert_eq!(verify_authority_unique(&r), Err(disagree));
+    }
+
+    #[test]
+    fn a_split_brain_during_a_live_saga_is_still_caught_never_excused() {
+        // MASKING-SAFETY: two shards hold the entity WHILE a saga is live — the `len == 1` guard fires
+        // BEFORE W1, so the split-brain is RED. The excuse can never swallow a real double-hold.
+        let mut r = w1_window();
+        r.push((
+            NodeId(5),
+            InspectReport {
+                held_entities: vec![(entity(), Fence(2))],
+                ..InspectReport::default()
+            },
+        ));
+        assert_eq!(
+            verify_authority_unique(&r),
+            Err(AuthorityViolation::WrongHolderCount {
+                entity: entity(),
+                holders: vec![SHARD, NodeId(5)],
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_entity_saga_subject_does_not_excuse_an_entity_disagreement() {
+        // A live saga whose subject is a REALM (not the entity) must NOT excuse the entity's
+        // disagreement — covers the non-Entity build arm + the no-entry excuse arm.
+        let mut r = w1_window();
+        r[0].1.active_transfers = vec![ActiveTransfer {
+            subject: DirectoryKey::Realm(realm()),
+            source: SHARD,
+            dest: DEST,
+        }];
+        assert_eq!(
+            verify_authority_unique(&r),
+            Err(AuthorityViolation::DirectoryDisagrees {
+                entity: entity(),
+                holder: SHARD,
+                recorded: format!("{:?}", AuthorityRef::Shard(DEST)),
+            })
+        );
+    }
+
+    #[test]
+    fn a_live_saga_post_quiesce_is_unsettled() {
+        // The W1 excuse is MID-FLIGHT only: verify_authority_settled rejects ANY in-flight saga (no
+        // pending/departing here, but a live transfer means the run has NOT settled).
+        let reports = vec![(
+            ORCH,
+            InspectReport {
+                active_transfers: vec![ActiveTransfer {
+                    subject: DirectoryKey::Entity(entity()),
+                    source: SHARD,
+                    dest: DEST,
+                }],
+                ..InspectReport::default()
+            },
+        )];
+        assert_eq!(
+            verify_authority_settled(&reports),
+            Err(AuthorityViolation::UnsettledTransfer {
+                subject: format!("{:?}", DirectoryKey::Entity(entity())),
+                node: ORCH,
             })
         );
     }

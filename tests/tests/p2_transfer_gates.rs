@@ -457,6 +457,44 @@ fn p2_dod_settled_transfer_is_stable_under_continued_operation() {
     verify_input_conservation(&reports).expect("input conservation holds after the soak");
 }
 
+/// 1d.5b.3d DoD — PER-TICK MID-FLIGHT AUTHORITY-UNIQUE (the final D-2 piece). verify_authority_unique
+/// holds EVERY tick across the full transfer (not only post-quiesce), with the W1 excuse covering the
+/// legal post-CAS, pre-demote window (the source still holds the subject Owned at the old fence while
+/// the directory already records the dest) and the existing in-flight-to-owner path covering the
+/// zero-Owned handoff gap. ANTI-VACUITY: the W1 window actually OCCURS on ≥1 sampled tick — so the
+/// per-tick green is the excuse working, not a window that never happened. A split-brain would still
+/// RED (the `len == 1` guard precedes the excuse — unit-proven in `oracle::tests`).
+#[test]
+fn p2_dod_authority_is_unique_every_mid_flight_tick() {
+    let fabric = FaultFabric::new(909, 2);
+    let mut per_tick: Vec<Vec<(NodeId, InspectReport)>> = Vec::new();
+    let (_topo, _session, entity, _m) = run_cut_transfer(&fabric, &mut |t| {
+        let reports = t.inspect_all();
+        verify_authority_unique(&reports).expect(
+            "AUTHORITY-UNIQUE holds EVERY mid-flight tick (W1 + in-flight-to-owner excuses)",
+        );
+        per_tick.push(reports);
+    });
+
+    // ANTI-VACUITY: the W1 window actually occurred — at >= 1 sampled tick the SOURCE held the subject
+    // Owned WHILE the directory already recorded the DEST. Without it, "unique every tick" could pass
+    // with the excuse never exercised (e.g. if the window sub-tick-collapsed).
+    let saw_w1 = per_tick.iter().any(|reports| {
+        let src_owns = report(reports, SHARD)
+            .held_entities
+            .iter()
+            .any(|(e, _)| *e == entity);
+        let dir_dest = report(reports, ORCH).directory.iter().any(|(k, rec)| {
+            (*k == DirectoryKey::Entity(entity)) & (rec.authority == AuthorityRef::Shard(DEST))
+        });
+        src_owns & dir_dest
+    });
+    assert!(
+        saw_w1,
+        "the W1 mid-flight window (source-Owned + directory-DEST) actually occurred — the excuse was exercised, not vacuous",
+    );
+}
+
 /// 1d.5b.3c DoD — THE SOURCE-GHOST LIFECYCLE END (band-exit). After the transfer settles, the SOURCE
 /// retains the avatar as a kinematic collider GHOST fed by the dest (`GhostFlow`). As the dest-owned
 /// avatar keeps walking AWAY from the boundary it crossed, it leaves the overlap band: the dest emits

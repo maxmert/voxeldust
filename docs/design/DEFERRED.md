@@ -169,7 +169,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Dependency:** the Slice-2 at-least-once / adaptive-timeout / CAS-re-read machinery.
 - **Source:** Slice-1b audit `wf_34ef74d1` (CPO-1/CPO-2).
 
-### D-2 🟧 Demote→Release tail: the bandless INTERIM landed (1c.8); the proper ORDERED, fence-enforced demote-before-promote is still owed
+### D-2 🟩 Demote→Release tail: the ORDERED, fence-enforced demote-before-promote tear-out is COMPLETE (1d.5b.1→.3d)
 
 > **⚠️ READER NOTE — current state (post-1d.5b.2):** the two **✅ LANDED** blocks below (1d.5b.1, 1d.5b.2) are the
 > CURRENT truth. 1d.5b.1 landed the saga-pushed ordered demote-before-promote FSM + consumers; 1d.5b.2 TORE OUT the
@@ -177,9 +177,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 > driver — `granted_key_poll_tick` and the per-entity poll no longer exist. The historical-interim descriptions in
 > the numbered consequences (1–5) and the 1d.1-layering note below describe the NOW-REMOVED 1c.8
 > promote-before-demote poll model; they are RETAINED as the why-it-was-broken record, **not** the current state.
-> STILL OWED (1d.5b.3): the strict demote-before-promote ORDERING enforcement (relocate `apply_crossing`'s autonomous
-> dest promote into `on_saga_promote`), the GhostFlow source-Ghost collider FEED, the band-exit Despawn, and the
-> per-tick mid-flight authority oracle (with the post-CAS-`DirectoryDisagrees` + zero-Owned-gap excuses).
+> **✅ D-2 NOW GREEN (1d.5b.3 COMPLETE):** .3b landed the strict demote-before-promote ordering (the dest promote
+> relocated into `on_saga_promote`) + the GhostFlow source-Ghost collider FEED; .3c landed the band-exit Despawn +
+> dual-registry teardown (the source-ghost lifecycle END); .3d landed the PER-TICK mid-flight `verify_authority_unique`
+> with the **single W1 excuse** (post-CAS source-still-Owned `DirectoryDisagrees`) — the zero-Owned gap needed NO new
+> excuse (the existing `in_flight_to_owner` path already covers it; empirically `HeldNowhere` never fires mid-flight)
+> and the two-Owned overlap is UNREACHABLE under strict demote-before-promote (so NO uncoverable excuse was added).
+> Residuals are SEPARATE owed items, NOT D-2: the orchestrator-side teardown gate (Slice-2/D-6), the cooperative
+> in-memory freeze vs the fence-enforced freeze (`transfer_protocol` §2.4), the lost-`Demote`/`Promote` re-drive
+> producer (Slice-2 — no production `Timeout` producer yet), and the symmetric Realm/Ship-half mid-flight excuse (P8/P10).
 - **LANDED (1c.8 — interim):** `interim_demote_complete` now exists in `crates/node/src/saga_runtime.rs` — an
   UNCONDITIONAL bandless stand-in, invoked from `drive_sagas` AFTER the ack loop, that for every live saga in
   `Demoting` calls `deliver(.., SagaEvent::DemoteComplete)` (a new CALLER of the existing sink — NOT a magic
@@ -330,10 +336,18 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   realm move against an in-flight entity transfer). The proper recovery (the saga `Promoting`-timeout re-drive
   producer + serializing realm moves vs in-flight entity transfers) co-lands with **D-3** (lease lifecycle) +
   **Slice-2** (the timeout/re-drive machinery), before P8/P10 multi-realm mobility.
-  The remaining 1d.5b.3 back-half: **.3c band-exit Despawn ✅ LANDED** (see the LANDED block above — registration +
-  mirror + retained-ghost-dot teardown). **.3d** is the only item left for **D-2 🟩**: the per-tick mid-flight
-  `verify_authority_unique` + the two transfer-window excuses keyed on the orchestrator LIVE-SAGA set
-  (`SagaRuntimeRes.sagas` — the directory `in_transfer` is DEAD, cleared at CAS).
+  **✅ LANDED 1d.5b.3d (per-tick mid-flight AUTHORITY-UNIQUE — D-2 GREEN):** `verify_authority_unique` is now asserted
+  EVERY tick across the transfer (capstone `p2_dod_authority_is_unique_every_mid_flight_tick`), not just post-quiesce.
+  It gained ONE tight excuse — **W1**: the post-CAS, pre-demote `DirectoryDisagrees` window (the source still holds the
+  subject `Owned` at the old fence while the directory records the dest) is excused via a monomorphic `excuse_w1`
+  (`oracle.rs`) gated on FOUR conjuncts — a LIVE saga for the entity, `saga.source == holder`, the record names
+  `Shard(saga.dest)`, and the held fence is STALE vs the record fence — reached ONLY after the `len == 1` guard, so it
+  can NEVER mask a split-brain (unit-proven: `a_split_brain_during_a_live_saga_is_still_caught_never_excused`). The
+  LIVE-saga ground truth is `SagaRuntimeRes::active_transfers() -> Vec<ActiveTransfer{subject,source,dest}>` surfaced on
+  `InspectReport.active_transfers` (orchestrator-only). The W2 zero-Owned gap needed NO new excuse — the existing
+  `in_flight_to_owner` path already returns Ok (the dest is `pending` during the gap; empirically `HeldNowhere` never
+  fires) — and the two-Owned overlap is UNREACHABLE under strict demote-before-promote, so no uncoverable excuse was
+  added. `verify_authority_settled` now also rejects a non-empty `active_transfers` (the W1 excuse is mid-flight only).
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
      by the **fence**, not by cooperative in-memory state." The source freeze IS still cooperative in-memory
      (`self_fence_foreign_entity` does a local `Authority` flip to a RETAINED Ghost — since 1d.4b it KEEPS the dot,

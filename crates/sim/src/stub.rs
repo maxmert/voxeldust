@@ -93,8 +93,9 @@ pub struct Dot {
     /// subject): its `entity` is the SUBJECT id (not a fresh mint), and it ADOPTS the existing
     /// directory record (a `HeadRead`, never a `LeaseGrant` the CAS fence would Refuse). Cleared
     /// on the grant flip. The adopt dot is born `Ghost` (the frozen ghost mirror) and STAYS Ghost
-    /// (renders NOTHING) until `apply_crossing` Promotes it `Ghost→Owned` atomically with the
-    /// crossed pose; the grant flip carries NO `SessionAttached` (the source still owns the client
+    /// (renders NOTHING) until the saga `Promote` flips it `Ghost→Owned` in `on_saga_promote`
+    /// (1d.5b.3b — strict demote-before-promote; `apply_crossing` only STORES the crossed pose, it no
+    /// longer promotes); the grant flip carries NO `SessionAttached` (the source still owns the client
     /// connection — R2).
     pub adopting: bool,
     /// The per-entity authority TRUTH (`authority.rs` FSM, attached 1d.4b/D-27): `Owned`
@@ -802,7 +803,8 @@ fn on_gateway_msg(
             // `input_active` and ADOPTS the transfer subject (1c.8): its entity becomes the
             // SUBJECT id (the record the CAS moved here), so the adopt HeadRead lands on that
             // record and flips `granted` (authority-held). It STAYS a Ghost (`simulates()==false`)
-            // — it renders nowhere (no pose carried) until `apply_crossing` Promotes it — and gets
+            // — it renders nowhere (no pose carried) until the saga `Promote` flips it in
+            // `on_saga_promote` (1d.5b.3b; `apply_crossing` only STORES the pose) — and gets
             // no `SessionAttached` reply (the source still owns the client connection — R2).
             let Some(_realm_fence) = ctx.realm_fence else {
                 // No realm lease yet: drop + count. NO re-drive in 1c.5 (the gateway already
@@ -830,9 +832,10 @@ fn on_gateway_msg(
                 granted: false,
                 input_active: false,
                 adopting: true,
-                // THE frozen ghost mirror, born Ghost (NOT Frozen) so the adopt is a legal
+                // THE frozen ghost mirror, born Ghost (NOT Frozen) so the later promote is a legal
                 // Promote (Ghost→Owned); `source_fence: GENESIS` is strictly stale vs the CAS
-                // fence the crossing carries, so `apply_crossing`'s Promote succeeds.
+                // fence, so the `on_saga_promote` Promote succeeds (1d.5b.3b — relocated out of
+                // `apply_crossing`, which now only STORES the crossed pose).
                 authority: Authority::Ghost {
                     source_fence: Fence::GENESIS,
                     since_tick: ctx.clock.local_tick,
@@ -1005,8 +1008,8 @@ enum GrantFlip {
 /// - login (`!adopting`): granted := true, Promote Ghost→Owned (now `simulates()`) → `LoggedIn`
 ///   (push SessionAttached).
 /// - adopt (`adopting`): granted := true, adopting cleared, the dot STAYS Ghost (NO Promote here —
-///   `apply_crossing` promotes it atomically with the pose), NO SessionAttached (R2 — the source
-///   owns the client) → `Adopted` (the caller drains the crossing).
+///   the saga `Promote` flips it in `on_saga_promote`, 1d.5b.3b; `apply_crossing` only STORES the
+///   pose), NO SessionAttached (R2 — the source owns the client) → `Adopted` (the caller drains the crossing).
 ///
 /// Guarded by `!dot.granted` so a duplicate grant head is idempotent (`NoOp`, no second flip).
 fn flip_grant(
@@ -1072,10 +1075,11 @@ fn dot_grant_target(dot: &Dot, entity: EntityId) -> bool {
 /// 1d.5b.2 — the saga-pushed ordered `Demote` ([`on_saga_demote`]) is now the SOLE driver of this
 /// transition; the 1c.8 cooperative granted-key poll (which DISCOVERED a foreign takeover from a
 /// directory head) is TORN OUT, so `transfer` is always the real `Demote` transfer (no inert
-/// fallback). The dest still autonomously promotes (`apply_crossing`, RETAINED until 1d.5b.3), so a
-/// transient two-holder window remains (the retained source Ghost no longer EMITS — the oracle
-/// excludes it, masked not prevented); the strict demote-before-promote ordering + the source-Ghost
-/// collider feed that close it land in 1d.5b.3.
+/// fallback). 1d.5b.3b RELOCATED the dest's autonomous `apply_crossing` promote into `on_saga_promote`
+/// (strict demote-before-promote), so the source demotes to a retained Ghost BEFORE the dest is Owned:
+/// there is NO two-holder window (a brief ZERO-Owned handoff gap instead, excused mid-flight by the
+/// 1d.5b.3d per-tick oracle). The retained source Ghost is a live collider fed by the dest (the
+/// `GhostFlow` feed, 1d.5b.3b) and torn down on band-exit (1d.5b.3c).
 fn self_fence_foreign_entity(
     dots: &mut BTreeMap<SessionId, Dot>,
     entity: EntityId,
@@ -1539,12 +1543,14 @@ fn on_transfer_envelope(
 /// Whether a dot is the ADOPTED dest dot for `entity`: authority-held (`granted`), not departing.
 /// Monomorphic predicate.
 ///
-/// 1d.3 dropped a former `simulates()`-style term. Reason: `apply_crossing` Promotes the dot
-/// Ghost→Owned on the FIRST crossing-apply, so a `!simulates()` guard would make a saga REDELIVERY
-/// (the at-least-once re-emit) miss this predicate, fall to `on_transfer_envelope`'s `None` arm, and
-/// re-buffer into `PendingCrossings` FOREVER (the dot is already adopted; no future grant-flip
-/// drains it) — a permanent strand + `crossings_buffered` inflation. Widened, a post-flip redelivery hits
-/// `apply_crossing`, the journal returns `AlreadyApplied`, and it re-acks WITHOUT re-applying.
+/// 1d.3 dropped a former `simulates()`-style term, and 1d.5b.3b made that DROP load-bearing: the
+/// adopt dot stays `Ghost` (NOT simulating) from adopt all the way until the saga `Promote` flips it
+/// in `on_saga_promote` (`apply_crossing` only STORES the pose now — it no longer promotes), so a
+/// `!simulates()`-style guard would NEVER match the adopt dot and the crossing could never land. With
+/// the term dropped, both the pre-promote Ghost AND a post-promote `Owned` redelivery match; the
+/// journal returns `AlreadyApplied` on the redelivery, so it re-acks WITHOUT re-applying (a guard that
+/// missed it would fall to `on_transfer_envelope`'s `None` arm and re-buffer into `PendingCrossings`
+/// forever — a permanent strand + `crossings_buffered` inflation).
 /// Sound because AUTHORITY-UNIQUE guarantees at most one granted non-departing dot per entity here,
 /// AND the saga addresses the crossing envelope (`InterShardFlow::Transfer`) to the DEST node only,
 /// so a widened predicate can never misland on the SOURCE's render-ready dot.
@@ -1738,7 +1744,8 @@ fn on_directory_reply(
                 // OURS: flip granted + stamp the recorded fence. A login attach pushes
                 // SessionAttached and Promotes Ghost→Owned (now simulates); a transfer-dest ADOPT
                 // (1c.8) suppresses the attach (R2 — source owns the client) and STAYS a Ghost (no
-                // pose carried; `apply_crossing` Promotes it atomically with the crossed pose). The
+                // pose carried; the saga `Promote` flips it in `on_saga_promote`, 1d.5b.3b —
+                // `apply_crossing` only STORES the crossed pose). The
                 // branching is hoisted into `flip_grant` → `GrantFlip`: LoggedIn pushes
                 // SessionAttached; Adopted drains the buffered crossing (if any) NOW; NoOp is a
                 // duplicate-grant idempotent no-op.

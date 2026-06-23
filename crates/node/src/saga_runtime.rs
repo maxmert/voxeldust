@@ -47,10 +47,22 @@ use vd_wire::intershard::{
     PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TransferAck, TransferEnvelope,
     TransitionPayload,
 };
-use vd_wire::seams::directory::{AuthorityRef, CasOutcome};
+use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey};
 use vd_wire::seams::transfer_control::TransferControlAck;
 
 use crate::orchestrator::DirectoryRes;
+
+/// One live (in-flight) transfer's identity for the mid-flight AUTHORITY-UNIQUE oracle (1d.5b.3d):
+/// the subject key + the source/dest shards. The oracle EXCUSES the post-CAS, pre-demote window (the
+/// source still holds the subject `Owned` at the old fence while the directory already records the
+/// dest) ONLY for a subject with a live saga of this exact (source→dest) shape — so a real split-brain
+/// is never masked. Typed `DirectoryKey` (NOT the `String` `SagaView`) so the oracle matches Entity keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActiveTransfer {
+    pub subject: DirectoryKey,
+    pub source: NodeId,
+    pub dest: NodeId,
+}
 
 /// One live saga: the pure FSM (ctx + state) plus the wrapper-only routing — the gateway
 /// `NodeId` to send `TransferControl` to (resolved at creation from the session's
@@ -135,6 +147,22 @@ impl SagaRuntimeRes {
                 transfer: live.ctx.transfer.to_string(),
                 state: format!("{:?}", live.state),
                 since: live.since,
+            })
+            .collect()
+    }
+
+    /// The subject + source/dest of every LIVE (in-flight) saga — the typed ground truth the
+    /// mid-flight AUTHORITY-UNIQUE oracle (1d.5b.3d) keys its W1 transfer-window excuse on. Empty once
+    /// every saga is tombstoned, so the POST-QUIESCE oracle is strict (no transfer ⇒ no excuse). In
+    /// deterministic `TransferId` order (BTreeMap). Orchestrator-only state — a shard never holds it.
+    #[must_use]
+    pub fn active_transfers(&self) -> Vec<ActiveTransfer> {
+        self.sagas
+            .values()
+            .map(|live| ActiveTransfer {
+                subject: live.ctx.subject,
+                source: live.ctx.source,
+                dest: live.ctx.dest,
             })
             .collect()
     }
@@ -1225,6 +1253,35 @@ mod tests {
         assert!(
             snap.universe_tick > since_parked.0,
             "the clock DID advance — proving `since` was held, not re-stamped to `now`"
+        );
+    }
+
+    #[test]
+    fn active_transfers_reports_the_live_triple_and_is_empty_when_idle() {
+        // 1d.5b.3d: the typed mid-flight ground truth the AUTHORITY-UNIQUE oracle excuses against —
+        // each live saga's (subject, source, dest); empty once tombstoned (post-quiesce ⇒ strict).
+        let mut rt = SagaRuntimeRes::default();
+        assert!(rt.active_transfers().is_empty());
+        rt.sagas.insert(
+            XFER,
+            LiveSaga {
+                ctx: ctx(vd_core::entity_kind::DurabilityClass::Durable, Fence(1)),
+                state: SagaState::Demoting {
+                    new_fence: Fence(2),
+                    dest_delivered: false,
+                },
+                gateway: GATEWAY,
+                since: UniverseTick(0),
+                flushed_pose: None,
+            },
+        );
+        assert_eq!(
+            rt.active_transfers(),
+            vec![ActiveTransfer {
+                subject: subject(),
+                source: SOURCE,
+                dest: DEST,
+            }],
         );
     }
 
