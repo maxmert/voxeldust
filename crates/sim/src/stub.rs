@@ -346,6 +346,10 @@ pub struct StubStats {
     /// journaled): the flip is SKIPPED (pose-before-promote — never a poseless origin frame); the
     /// saga `Promoting`-timeout re-emits. 0 in the happy path (the crossing precedes the Promote).
     pub promote_before_crossing: u64,
+    /// DEST `Promote` that arrived while this shard does NOT hold its realm (a realm self-fence raced
+    /// the Promote) — DROPPED as a counted no-op (degrade, never panic), the saga re-drives. 0 in P2
+    /// (no realm-revoke producer); reachable only at P8/P10 realm mobility (the re-drive is owed).
+    pub promote_without_realm: u64,
     /// SOURCE `GhostFlow::Delta` (1d.5b.3b) APPLIED — the fed pose + `GhostRefresh` written into the
     /// retained ghost dot. The headline ghost-feed counter.
     pub ghost_delta_applied: u64,
@@ -1368,10 +1372,11 @@ fn on_ghost_flow(
 /// Whether a dot is the local granted, non-departing holder of `entity` (the self-fence target).
 /// Monomorphic predicate so the chained `&&`s are covered in one helper, not the reply arm.
 ///
-/// ⚠️ INTENTIONALLY identical-bodied to [`crossing_target`] (DO NOT merge them — D1). The NAMES
-/// carry the opposite intents: this finds the SOURCE's local holder to DROP on a foreign takeover;
-/// that finds the DEST dot to APPLY a crossing. Different call sites, different shards, never the
-/// same dot — see [`crossing_target`] for the full reconciliation.
+/// ⚠️ INTENTIONALLY identical-bodied to [`crossing_target`] AND [`flush_target`] — a TRIPLET, DO NOT
+/// merge them (the `twin-D1` reconciliation; unrelated to DEFERRED `D-1`). The NAMES carry distinct
+/// intents at disjoint call sites/shards: this finds the SOURCE's held dot to DEMOTE on the saga
+/// `Demote`; `crossing_target` finds the DEST dot to APPLY a crossing; `flush_target` finds the
+/// SOURCE's held dot to SHIP its pose. AUTHORITY-UNIQUE bounds each to ≤1 dot — see [`crossing_target`].
 #[must_use]
 fn foreign_takeover_target(dot: &Dot, entity: EntityId) -> bool {
     (dot.entity == entity) & dot.granted & !dot.departing
@@ -1406,7 +1411,9 @@ fn on_flush_source(flush: FlushSource, config: &StubConfig, dots: &Dots, outbox:
 }
 
 /// Whether a dot is the local held holder of `entity` whose pose the source flushes. Monomorphic
-/// (the `&`s are covered once here, not the decode arm).
+/// (the `&`s are covered once here, not the decode arm). The THIRD member of the identical-bodied
+/// `twin-D1` triplet ([`foreign_takeover_target`], [`crossing_target`]) — DO NOT merge (distinct
+/// intent: this SHIPS a pose; disjoint call site; AUTHORITY-UNIQUE bounds it to ≤1 dot).
 #[must_use]
 fn flush_target(dot: &Dot, entity: EntityId) -> bool {
     (dot.entity == entity) & dot.granted & !dot.departing
@@ -1493,11 +1500,13 @@ fn on_transfer_envelope(
 /// AND the saga addresses the crossing envelope (`InterShardFlow::Transfer`) to the DEST node only,
 /// so a widened predicate can never misland on the SOURCE's render-ready dot.
 ///
-/// ⚠️ INTENTIONALLY identical-bodied to [`foreign_takeover_target`] (DO NOT merge them — D1). The
-/// NAMES are the documentation of intent: this finds the DEST dot to APPLY a crossing; that finds
-/// the local holder to DROP it on a foreign takeover. They serve OPPOSITE call sites on DIFFERENT
-/// shards (crossing → dest only; takeover reply → source only) and never fire on the same dot, so
-/// the shared body is safe — but a "DRY" merge would break one call site's legibility.
+/// ⚠️ INTENTIONALLY identical-bodied to [`foreign_takeover_target`] AND [`flush_target`] — the
+/// `twin-D1` triplet, DO NOT merge them (the tag is local DRY-legibility bookkeeping, NOT the
+/// unrelated DEFERRED `D-1`). The NAMES are the documentation of intent: this finds the DEST dot to
+/// APPLY a crossing; `foreign_takeover_target` finds the source's holder to DEMOTE on a takeover;
+/// `flush_target` finds the source's holder to SHIP its pose. They serve disjoint call sites on
+/// different shards and never fire on the same dot, so the shared body is safe — but a "DRY" merge
+/// would break each call site's legibility.
 #[must_use]
 fn crossing_target(dot: &Dot, entity: EntityId) -> bool {
     (dot.entity == entity) & dot.granted & !dot.departing
@@ -1612,11 +1621,16 @@ fn on_directory_reply(
         }
         // DEST: the saga-pushed ordered Promote (1d.5b.3b) — the REAL Ghost→Owned promoter + the
         // dest read-sub announce + the source-ghost feed registration/Spawn + PromoteAck. The dest
-        // holds its realm before the orchestrator routes a Promote to it (the realm-owner invariant).
+        // normally holds its realm before the orchestrator routes a Promote to it (the realm-owner
+        // invariant); if it does NOT (a realm self-fence raced the Promote — unreachable in P2, no
+        // realm-revoke producer; reachable only at P8/P10 multi-realm mobility), DROP the Promote as
+        // a counted no-op so the saga's `Promoting`-timeout re-drives it — DEGRADE, never panic
+        // (mirroring every sibling handler; the realm-mobility re-drive is owed with D-3/Slice-2).
         Ok(InterShardFlow::Promote(cmd)) => {
-            let realm_fence = authority
-                .0
-                .expect("the dest holds its realm before the saga routes a Promote to it");
+            let Some(realm_fence) = authority.0 else {
+                stats.promote_without_realm += 1;
+                return;
+            };
             on_saga_promote(
                 cmd,
                 config,
@@ -3672,6 +3686,25 @@ mod tests {
                 transfer: TransferId(7)
             }
         ));
+    }
+
+    #[test]
+    fn the_saga_promote_without_a_realm_is_a_counted_noop_never_a_panic() {
+        // The realm-owner guard's None arm (1d.5b.3b audit hardening): a Promote arriving while this
+        // shard does NOT hold its realm is DROPPED as a counted no-op (DEGRADE, never panic), no ack
+        // — the saga re-drives. Mirrors every sibling handler's degrade-not-crash discipline.
+        let mut rig = Rig::new(); // NO grant_realm → the shard holds no realm (authority.0 == None)
+        let sent = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert_eq!(rig.world.resource::<StubStats>().promote_without_realm, 1);
+        assert!(
+            !saga_ack_to_orch(
+                &sent,
+                TransferControlAck::PromoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "a realm-less Promote is dropped (no ack) — the saga re-drives: {sent:?}"
+        );
     }
 
     #[test]

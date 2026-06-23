@@ -301,6 +301,14 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   now PRODUCTION-DEAD** (with the relocated SubscriptionReady the dest sub/frames cannot exist while the saga is in
   Demoting — `DestDelivered` can only arrive in Promoting+); kept as a defensive/harness-only arm (annotated in
   `saga.rs`; its `an_early_delivery_in_demoting` test injects the event directly, so HR5 coverage holds).
+  **⚠️ OWED at P8/P10 (realm-mobility re-drive — full-audit hardening `wf_fde6c77f`):** the dest `Promote` arm
+  assumes the dest holds its realm. A `Promote` racing a realm SELF-FENCE (the realm reassigned/revoked while an
+  entity transfer into it is in flight) is now a counted no-op (`promote_without_realm` — DEGRADE, never panic, the
+  realm-owner guard mirrors every sibling handler), the saga re-drives. UNREACHABLE in P2 (no realm-revoke
+  producer; the entity `in_transfer` lock keys on `DirectoryKey::Entity`, never `::Realm`, so it does not serialize a
+  realm move against an in-flight entity transfer). The proper recovery (the saga `Promoting`-timeout re-drive
+  producer + serializing realm moves vs in-flight entity transfers) co-lands with **D-3** (lease lifecycle) +
+  **Slice-2** (the timeout/re-drive machinery), before P8/P10 multi-realm mobility.
   The remaining 1d.5b.3 back-half: **.3c** band-exit Despawn (`OverlapBand`, seed-derived) + the registration/mirror
   teardown, **.3d** the per-tick mid-flight `verify_authority_unique` + the two transfer-window excuses keyed on the
   orchestrator LIVE-SAGA set (the directory `in_transfer` is DEAD — cleared at CAS) → flips **D-2 🟩**.
