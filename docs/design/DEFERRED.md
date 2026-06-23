@@ -280,12 +280,30 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   **✅ LANDED 1d.5b.3a (carrier prereq, render-neutral):** `MsgClass` gains `GhostReliable` (Spawn/Despawn,
   Reliable) + `GhostDelta` (Delta, Unreliable latest-wins) (`sim/io/mod.rs`). UNROUTED — no emitter/consumer yet
   (the source-ghost feed lands at 1d.5b.3b), so zero render-timing change (the capstone trace is byte-identical).
-  The remaining 1d.5b.3 back-half: **.3b** the COUPLED CORE (relocate `apply_crossing`'s autonomous promote into
-  `on_saga_promote` for strict ordering + the GhostFlow source-ghost collider FEED + re-point the dest
-  `SubscriptionReady`/`AuthorityChanged` from adopt→promote so the client renders the source sub until the dest is
-  ready — these co-land or the render goes RED), **.3c** band-exit Despawn, **.3d** the per-tick mid-flight
-  `verify_authority_unique` + the two transfer-window excuses keyed on the orchestrator LIVE-SAGA set (the directory
-  `in_transfer` is DEAD — cleared at CAS) → flips **D-2 🟩**.
+  **✅ LANDED 1d.5b.3b (the COUPLED CORE — strict ordering + the source-ghost collider FEED):** the dest
+  `Ghost→Owned` promote RELOCATED out of `apply_crossing` (which now only stores the crossed pose; the dot stays
+  Ghost) INTO `on_saga_promote` (the real promoter, pose-before-promote guarded), so demote-before-promote is
+  STRICT — the dest becomes Owned ONLY on the saga `Promote`, after the source demoted. The dest read-sub
+  (`SubscriptionReady`) moved from the adopt flip to `on_saga_promote`, so the client's render authority moves to the
+  dest only at promote (it stays on the SOURCE sub until then). The dest-INITIATED ghost feed (`GhostFlow` owner →
+  ghost-host, `PromoteCmd.source` tells the dest the host): on_saga_promote registers the source (`GhostColliderRegistration`)
+  + sends `GhostFlow::Spawn`; `feed_source_ghosts` streams `GhostFlow::Delta` (MsgClass::GhostDelta, monotone seq);
+  the source `on_ghost_flow` writes into the retained ghost via `AuthorityCmd::GhostRefresh` (`SourceGhostMirror` =
+  pure freshness/dedup, FG-2 single-truth). `emit_frames` widened to `simulates() | is_fed_ghost | is_retained_ghost`
+  — the RETAINED source ghost SELF-EMITS its frozen last-Owned pose to fill the demote→Promote window (the feed
+  CANNOT fill it — nothing is Owned then), the feed fills the post-Promote window. **The capstone stays SEAMLESS
+  (`verify_no_vanish`, `max_absent_run==0`, `overlap_ticks>=1`) across the lengthened strict handoff.** Routing is
+  DIRECT shard↔shard mesh (`push_flow` by NodeId, no gateway hop); no new libraries.
+  **⚠️ OWED at 1d.5b.3c (per-tick leak):** `GhostColliderRegistration` (dest) + `SourceGhostMirror` (source) + the
+  retained ghost dot are NOT torn down within .3b — the band-exit `Despawn` (geometry-driven, unsatisfiable in the
+  stub fixture) lands at .3c. So the dest feed-pass + the source self-emit run EVERY tick indefinitely per committed
+  transfer (bounded per concurrent transfer, unbounded in time). **⚠️ saga `(Demoting, DestDelivered)` latch arm is
+  now PRODUCTION-DEAD** (with the relocated SubscriptionReady the dest sub/frames cannot exist while the saga is in
+  Demoting — `DestDelivered` can only arrive in Promoting+); kept as a defensive/harness-only arm (annotated in
+  `saga.rs`; its `an_early_delivery_in_demoting` test injects the event directly, so HR5 coverage holds).
+  The remaining 1d.5b.3 back-half: **.3c** band-exit Despawn (`OverlapBand`, seed-derived) + the registration/mirror
+  teardown, **.3d** the per-tick mid-flight `verify_authority_unique` + the two transfer-window excuses keyed on the
+  orchestrator LIVE-SAGA set (the directory `in_transfer` is DEAD — cleared at CAS) → flips **D-2 🟩**.
   2. **Cooperative in-memory freeze, contra the spec** — `transfer_protocol.md` §2.4 states "the freeze is enforced
      by the **fence**, not by cooperative in-memory state." The source freeze IS still cooperative in-memory
      (`self_fence_foreign_entity` does a local `Authority` flip to a RETAINED Ghost — since 1d.4b it KEEPS the dot,

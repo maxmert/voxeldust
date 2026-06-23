@@ -13,11 +13,14 @@
 //! enforced, not cooperative.
 //!
 //! ## WIRED (P2 Slice 1d.4b attached it)
-//! This FSM is now the per-entity authority TRUTH on the stub `Dot`: `simulates()` is the
-//! `emit_frames` gate, half the `apply_input` gate, and the `topology.rs` oracle held-set.
-//! Login AND the transfer-dest both mint `Ghost{GENESIS}` and Promote `Ghost→Owned` via the
-//! IDENTICAL machinery (`stub.rs` `flip_grant` for login, `apply_crossing` for the dest); the
-//! source self-fence demotes `Owned→Frozen→Ghost` and RETAINS the dot (the first ghost). It is
+//! This FSM is the per-entity authority TRUTH on the stub `Dot`: `simulates()` is half the
+//! `apply_input` gate and the `topology.rs` oracle held-set. EMIT-eligibility (1d.5b.3b) is the
+//! strictly-DERIVED `simulates() | is_fed_ghost | is_retained_ghost` (`stub.rs` `emit_frames`): a
+//! fed or retained Ghost EMITS its kinematic mirror (to keep the cross-shard handoff seamless) but
+//! integrates/accepts NOTHING. Login mints `Ghost{GENESIS}` then Promotes `Ghost→Owned` (`flip_grant`);
+//! the transfer-dest mints `Ghost{GENESIS}`, stores the crossed pose (`apply_crossing`), and Promotes
+//! ONLY on the saga `Promote` (`on_saga_promote`, 1d.5b.3b — strict demote-before-promote). The
+//! source self-fence demotes `Owned→Frozen→Ghost` and RETAINS the dot (the hosted ghost). It is
 //! KIND-GENERIC (keys only on Fence/TransferId/TickId — never `EntityKind`), so a future
 //! ship/block/signal entity uses the SAME states (no per-kind fork — HR2/HR3).
 //!

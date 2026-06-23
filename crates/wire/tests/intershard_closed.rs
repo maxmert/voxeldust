@@ -161,6 +161,7 @@ fn every_arm() -> Vec<InterShardFlow> {
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             new_fence: Fence(6),
             step_id: vd_wire::intershard::PROMOTE_STEP,
+            source: vd_core::NodeId(2),
         }),
     ]
 }

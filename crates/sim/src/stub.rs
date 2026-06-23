@@ -26,8 +26,8 @@ use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
-    DemoteCmd, FlushSource, InterShardFlow, PROMOTE_STEP, PromoteCmd, TransferAck,
-    TransferEnvelope, TransitionPayload,
+    DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd,
+    STUB_CROSSING_STEP, TransferAck, TransferEnvelope, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -97,10 +97,14 @@ pub struct Dot {
     /// connection — R2).
     pub adopting: bool,
     /// The per-entity authority TRUTH (`authority.rs` FSM, attached 1d.4b/D-27): `Owned`
-    /// simulates+emits+holds, `Ghost` is a retained read-only mirror, `Frozen` is mid-transfer.
-    /// `authority.simulates()` is the SINGLE answer to "does this shard emit / accept-by-authority
-    /// / hold this entity" — the `emit_frames` gate, half the `apply_input` gate, and the oracle
-    /// held-set. Login AND the transfer-dest both mint `Ghost{GENESIS}` (simulate nothing
+    /// simulates+holds, `Ghost` is a retained read-only mirror, `Frozen` is mid-transfer.
+    /// `authority.simulates()` is the SINGLE answer to "does this shard ACCEPT-BY-AUTHORITY / HOLD
+    /// this entity" — half the `apply_input` gate and the oracle held-set. EMIT-eligibility (1d.5b.3b)
+    /// is the strictly-DERIVED `simulates() | is_fed_ghost | is_retained_ghost` (`emit_frames`): a fed
+    /// or retained Ghost emits its kinematic mirror to keep the cross-shard handoff seamless but
+    /// integrates/accepts NOTHING (FG-2 — emit-eligibility is derived from authority + the feed
+    /// registration, never a competing authority store). Login AND the transfer-dest both mint
+    /// `Ghost{GENESIS}` (simulate nothing
     /// pre-grant) and Promote `Ghost→Owned` via the IDENTICAL machinery (login at the grant fence,
     /// dest at the crossing fence) — kind-generic: a ship/block/signal entity uses the SAME states
     /// (no per-kind fork). The source self-fence demotes `Owned→Frozen→Ghost` and RETAINS the dot.
@@ -132,6 +136,47 @@ pub struct Dots(pub BTreeMap<SessionId, Dot>);
 /// frames are emitted unowned).
 #[derive(Resource, Debug, Default)]
 pub struct RealmAuthority(pub Option<Fence>);
+
+/// One ghost-neighbor this shard FEEDS (1d.5b.3b): the node hosting a kinematic ghost of an entity
+/// we OWN, plus the monotone egress `seq` stamped on each `GhostFlow::Delta`. Holds NO pose/authority
+/// — the fed pose is read LIVE from the owned `Dot` each tick (FG-2 single-truth).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhostNeighbor {
+    /// The node hosting the ghost (the transfer SOURCE in 1d.5b.3b; any band-neighbor at P-band).
+    pub source: NodeId,
+    /// The next `GhostFlow::Delta.seq` to stamp (monotone per neighbor — the lossy-stream cursor).
+    pub seq: u64,
+}
+
+/// DEST-side ghost FEED registry (1d.5b.3b): for each entity this shard OWNS, the ghost-host
+/// neighbor(s) to feed `GhostFlow::Delta`. Populated by the relocated promote (`on_saga_promote`)
+/// in 1d.5b.3b — the dest, on becoming owner, registers the transfer source as a ghost-host. The
+/// SAME machinery serves the future band-driven multi-neighbor ghost (the owner fans `Delta` to
+/// every overlap neighbor — the registration generalizes to a neighbor SET, an additive extension).
+/// Torn down on band-exit `Despawn` (1d.5b.3c). One entry per owned, ghosted entity.
+#[derive(Resource, Debug, Default)]
+pub struct GhostColliderRegistration(pub BTreeMap<EntityId, GhostNeighbor>);
+
+/// One fed source-ghost's freshness/dedup state (1d.5b.3b): the feeding owner `from`, the
+/// last-seen `Delta.seq` (lossy latest-wins dedup), and `fed` = has-ever-been-fed-and-not-despawned
+/// (the `is_fed_ghost` emit-eligibility latch — NOT fed-this-tick, since `GhostDelta` is lossy and a
+/// dropped delta must not blink the avatar). Holds NO pose/authority copy — the fed pose is written
+/// INTO the retained ghost `Dot.pose` + `AuthorityCmd::GhostRefresh` (FG-2 single-truth).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhostFeedState {
+    /// The owner feeding this ghost (validated on `Despawn`).
+    pub from: NodeId,
+    /// The highest `Delta.seq` applied — a `seq <= last_seq` redelivery is a counted stale drop.
+    pub last_seq: u64,
+    /// Has-ever-been-fed-and-not-despawned (the `is_fed_ghost` emit latch).
+    pub fed: bool,
+}
+
+/// SOURCE-side mirror of the ghosts this shard HOSTS for owners elsewhere (1d.5b.3b): per entity,
+/// the feed freshness/dedup state. The retained source `Dot` IS the ghost (1d.4b kept it); this is
+/// pure bookkeeping beside it (no second pose/authority store). One entry per hosted ghost.
+#[derive(Resource, Debug, Default)]
+pub struct SourceGhostMirror(pub BTreeMap<EntityId, GhostFeedState>);
 
 /// Entity minting state: a per-shard monotonic sequence + seed-derived entropy.
 #[derive(Resource, Debug)]
@@ -286,14 +331,36 @@ pub struct StubStats {
     /// — there is no local Entity dot to demote, so the flip is skipped (the `DemoteAck` is still
     /// sent). 0 in a healthy Entity-transfer run (the stub's transfer subject is always an Entity).
     pub saga_demote_no_entity: u64,
-    /// DEST saga-pushed `Promote` (1d.5b.1) received and CONFIRMED for the first time — the headline
-    /// ordered-promote counter. In 1d.5b.1 the real `Ghost→Owned` flip is still `apply_crossing`'s
-    /// (RETAINED — the relocation lands in 1d.5b.3 with the ghost feed); this handler is the
-    /// fence-idempotent confirmer that journals the step + acks `PromoteAck`.
+    /// DEST saga-pushed `Promote` (1d.5b.3b) received and APPLIED for the first time — the headline
+    /// ordered-promote counter. 1d.5b.3b RELOCATED the real `Ghost→Owned` flip here (out of
+    /// `apply_crossing`), so this handler does the flip + announces the dest sub + registers the
+    /// ghost feed + acks `PromoteAck`.
     pub promotes_confirmed: u64,
     /// DEST saga-pushed `Promote` REDELIVERIES (already-journaled `(transfer, PROMOTE_STEP)`) — a
     /// counted re-ack-only no-op (at-least-once delivery). 0 in a healthy single-delivery run.
     pub promotes_redelivered: u64,
+    /// DEST `Promote` (1d.5b.3b) that found NO dot for the subject entity — a counted no-op (still
+    /// acks). 0 in a healthy run (the crossing creates the dest dot before the Promote round-trip).
+    pub promote_no_dot: u64,
+    /// DEST `Promote` (1d.5b.3b) whose crossing pose has NOT yet landed (`STUB_CROSSING_STEP` not
+    /// journaled): the flip is SKIPPED (pose-before-promote — never a poseless origin frame); the
+    /// saga `Promoting`-timeout re-emits. 0 in the happy path (the crossing precedes the Promote).
+    pub promote_before_crossing: u64,
+    /// SOURCE `GhostFlow::Delta` (1d.5b.3b) APPLIED — the fed pose + `GhostRefresh` written into the
+    /// retained ghost dot. The headline ghost-feed counter.
+    pub ghost_delta_applied: u64,
+    /// SOURCE `GhostFlow::Delta` DROPPED as stale — `seq <= last_seq` (lossy latest-wins dedup) or
+    /// no mirror entry for the entity. Expected under datagram reorder/loss; 0 in lockstep.
+    pub ghost_delta_stale: u64,
+    /// SOURCE `GhostFlow::Delta` whose `source_fence` was STALE against the ghost dot (the
+    /// `GhostRefresh` `is_stale_against` guard rejected it) — a counted no-op. 0 in a healthy run.
+    pub ghost_refresh_stale: u64,
+    /// SOURCE `GhostFlow::Despawn` (1d.5b.3c band-exit) received — the fed-ghost emit latch cleared.
+    /// 0 in 1d.5b.3b (band-exit is unsatisfiable in the stub fixture until 1d.5b.3c).
+    pub ghost_despawns: u64,
+    /// DEST feed pass skipped a registration whose entity is NOT currently owned here (no dot, or a
+    /// non-`simulates()` dot) — a counted no-op (only an Owned dot's live pose is fed). 0 steady-state.
+    pub ghost_feed_skipped: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -338,6 +405,15 @@ impl AppliedSteps {
             StepOutcome::AlreadyApplied
         }
     }
+
+    /// Non-mutating probe: has `(transfer, step_id)` been journaled? Used by the relocated dest
+    /// promote (1d.5b.3b) to gate the `Ghost→Owned` flip on the crossing pose having LANDED
+    /// (`STUB_CROSSING_STEP` applied) — pose-before-promote, so a `Promote` racing ahead of its
+    /// crossing never flips a poseless dot. Read-only (unlike `journal_step`, which records).
+    #[must_use]
+    pub fn is_applied(&self, transfer: TransferId, step_id: u32) -> bool {
+        self.0.contains(&(transfer, step_id))
+    }
 }
 
 /// One entity-state crossing held until its dot is adopted (1d.1). The `StubCrossing`, emitted by
@@ -379,7 +455,20 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(StubStats::default());
     world.insert_resource(AppliedSteps::default());
     world.insert_resource(PendingCrossings::default());
-    schedule.add_systems((request_pending_grants, process_inbound, emit_frames).chain());
+    world.insert_resource(GhostColliderRegistration::default());
+    world.insert_resource(SourceGhostMirror::default());
+    // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
+    // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
+    // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
+    schedule.add_systems(
+        (
+            request_pending_grants,
+            process_inbound,
+            feed_source_ghosts,
+            emit_frames,
+        )
+            .chain(),
+    );
 }
 
 /// Until the directory has granted this shard its realm — and every provisional
@@ -488,6 +577,8 @@ fn process_inbound(
     mut stats: ResMut<StubStats>,
     mut applied: ResMut<AppliedSteps>,
     mut pending: ResMut<PendingCrossings>,
+    mut registration: ResMut<GhostColliderRegistration>,
+    mut mirror: ResMut<SourceGhostMirror>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     for msg in &inbox.0 {
@@ -524,16 +615,19 @@ fn process_inbound(
                 &mut dots,
                 &mut applied,
                 &mut pending,
+                &mut registration,
                 &mut stats,
                 &mut outbox,
             ),
+            // 1d.5b.3b: the SOURCE-side ghost feed consumer — Spawn/Delta/Despawn from the dest owner
+            // refresh this shard's RETAINED ghost dot (kinematic collider; pose+GhostRefresh, never a
+            // second authority store). On the dedicated Ghost carriers, NOT the Saga dispatch.
+            MsgClass::GhostReliable | MsgClass::GhostDelta => {
+                on_ghost_flow(*from, bytes, &mut dots, &mut mirror, &mut stats);
+            }
             // Membership (clock sync) is consumed by the node-level follower system;
-            // Snapshot never targets a shard. The Ghost classes are UNROUTED in 1d.5b.3a (no
-            // emitter/consumer yet) — the source-ghost feed consumer (GhostDelta) lands at 1d.5b.3b.
-            MsgClass::Membership
-            | MsgClass::Snapshot
-            | MsgClass::GhostReliable
-            | MsgClass::GhostDelta => {}
+            // Snapshot never targets a shard.
+            MsgClass::Membership | MsgClass::Snapshot => {}
         }
     }
 }
@@ -872,16 +966,13 @@ struct AttachEgress {
 enum GrantFlip {
     /// A LOGIN attach flipped: push the `SessionAttached` egress.
     LoggedIn(AttachEgress),
-    /// A transfer-dest ADOPT flipped (R2 — no re-home): the caller (a) pushes the
-    /// `SubscriptionReady` egress so the gateway opens the dest read-sub + re-points the avatar's
-    /// render authority (Track R / 1d.2c — the dot STAYS a Ghost, `simulates()==false`, so the dest
-    /// emits no frames until `apply_crossing` Promotes it), and (b) drains the flipped session's
-    /// buffered crossing (if any). Carries the
-    /// session so the drain needs no second lookup, mirroring `LoggedIn`'s egress shape.
-    Adopted {
-        session: SessionId,
-        egress: AttachEgress,
-    },
+    /// A transfer-dest ADOPT flipped (R2 — no re-home): the dot becomes granted + STAYS a Ghost
+    /// (`simulates()==false`, emits no client frames). 1d.5b.3b: the dest read-sub is NO LONGER
+    /// announced here — `SubscriptionReady` RELOCATED to `on_saga_promote` (announced only when the
+    /// dest genuinely promotes Ghost→Owned), so until promote the client's render authority stays on
+    /// the SOURCE sub. The caller only drains the flipped session's buffered crossing (if any); the
+    /// `session` is carried so the drain needs no second lookup.
+    Adopted { session: SessionId },
     /// No ungranted dot matched (a duplicate grant head): idempotent no-op.
     NoOp,
 }
@@ -911,28 +1002,13 @@ fn flip_grant(
         dot.entity_fence = fence; // the recorded authority fence (== the CAS new_fence)
         if dot.adopting {
             // Transfer-dest adopt: held but not rendered, no re-home (1c.8). Clear the adopt marker
-            // so the dot becomes a normal granted holder (the dest dot; `apply_crossing` promotes it
-            // Ghost→Owned when the crossing lands).
+            // so the dot becomes a normal granted holder (the dest dot). The dot STAYS Ghost
+            // (`simulates()==false`) — it emits no client frames yet. 1d.5b.3b: the dest read-sub is
+            // NOT announced here — `SubscriptionReady` moved to `on_saga_promote` (announced only at
+            // the genuine Ghost→Owned promote), so the client stays on the SOURCE sub until then and
+            // the demote-before-promote ordering is strict. The caller only drains the crossing.
             dot.adopting = false;
-            // Track R / 1d.2c: announce the dest read-sub to the gateway via `SubscriptionReady`
-            // (riding the already-reviewed ShardToGateway seam — HR1). `realm_fence` + `frame`
-            // are the dest's, in scope HERE (the first instant the dest legitimately owns the
-            // entity), the IDENTICAL tuple login packs into `SessionAttached`. The dot STAYS Ghost
-            // (`simulates()==false`) — the sub is OPEN + ROUTABLE but the dest emits NO frames; the
-            // Promote to Owned happens in `apply_crossing` atomically with the crossed pose, NEVER
-            // here (a Promote here would emit a poseless seed-8 origin frame — capstone control (f)).
-            return GrantFlip::Adopted {
-                session: *session,
-                egress: AttachEgress {
-                    gateway: dot.gateway,
-                    reply: ShardToGateway::SubscriptionReady {
-                        session: *session,
-                        entity,
-                        frame: config.frame,
-                        realm_fence,
-                    },
-                },
-            };
+            return GrantFlip::Adopted { session: *session };
         }
         // Login Promote: Ghost{GENESIS} → Owned at the recorded grant fence (strictly > GENESIS,
         // so infallible) — the IDENTICAL Ghost→Owned machinery the transfer-dest uses (kind-generic).
@@ -1059,27 +1135,46 @@ fn on_saga_demote(
     );
 }
 
-/// DEST consumer of the saga-pushed ordered `Promote` (1d.5b.1, D-2): the SECOND half of
-/// demote-before-promote, reachable in the saga ONLY after `DemoteAck`. In 1d.5b.1 this is a
-/// fence-idempotent CONFIRMER, NOT the dest's first-Owned driver: the real `Ghost→Owned` flip still
-/// happens autonomously in [`apply_crossing`] (RETAINED here — relocating it into this handler would
-/// DELAY the dest's first-Owned moment by the multi-tick `Demote`/`Promote` round-trip and re-open
-/// the seamless vanish). By the saga's causal order the crossing (hence the autonomous promote) has
-/// already landed before this `Promote` can arrive, so the dest is Owned; this handler journals the
-/// step (redelivery dedup) and acks `PromoteAck` to drive the release gate. The flip RELOCATES into
-/// this handler in 1d.5b.3, co-landed with the GhostFlow source-ghost feed that keeps the resulting
-/// later-promote window seamless. Monomorphic.
+/// DEST consumer of the saga-pushed ordered `Promote` (1d.5b.3b, D-2): the SECOND half of
+/// demote-before-promote and — since 1d.5b.3b — the REAL `Ghost→Owned` promoter (the flip RELOCATED
+/// here out of `apply_crossing`, so the ordering is STRICT: the dest becomes Owned only on this
+/// command, after the source has demoted). On the FIRST delivery it: flips the dest dot Ghost→Owned
+/// at `cmd.new_fence` (gated pose-before-promote on the crossing having landed), announces the dest
+/// read-sub to the gateway (`SubscriptionReady` — RELOCATED here from the adopt flip, so the
+/// client's render authority moves to the dest only NOW, ~promote-time), registers the transfer
+/// `source` as a ghost-neighbor, and SPAWNS the source ghost (`GhostFlow::Spawn` → the dest drives
+/// the collider feed). It ALWAYS acks `PromoteAck` (outside the FirstApply gate) so a redelivery
+/// re-acks without re-flipping/re-spawning. Journal-gate + ack here; the branchy flip lives in the
+/// monomorphic [`promote_apply`] (HR5). `realm_fence` is the dest's realm authority (held by the
+/// invariant that the orchestrator only routes a Promote to the realm's owner).
+#[allow(clippy::too_many_arguments)]
 fn on_saga_promote(
     cmd: PromoteCmd,
     config: &StubConfig,
+    clock: &ClockSample,
+    dots: &mut Dots,
     applied: &mut AppliedSteps,
+    registration: &mut GhostColliderRegistration,
+    realm_fence: Fence,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
     match applied.journal_step(cmd.transfer, PROMOTE_STEP) {
-        StepOutcome::FirstApply => stats.promotes_confirmed += 1,
+        StepOutcome::FirstApply => promote_apply(
+            cmd,
+            config,
+            clock,
+            dots,
+            applied,
+            registration,
+            realm_fence,
+            stats,
+            outbox,
+        ),
         StepOutcome::AlreadyApplied => stats.promotes_redelivered += 1,
     }
+    // Ack UNCONDITIONALLY — the release gate (PromoteAcked AND DestDelivered) needs this ack even on
+    // a redelivery / a deferred (pose-not-yet-landed) flip; never wedge the saga in Promoting.
     outbox.push_flow(
         config.orchestrator,
         MsgClass::Saga,
@@ -1087,6 +1182,187 @@ fn on_saga_promote(
             transfer: cmd.transfer,
         }),
     );
+}
+
+/// The DEST promote effect (1d.5b.3b), monomorphic so every branch is covered ONCE here, not in a
+/// generic body (HR5). Find the dest Ghost dot for the subject entity; if the crossing pose has not
+/// yet landed (`STUB_CROSSING_STEP` not journaled) DEFER (count, no flip — pose-before-promote);
+/// else flip Ghost→Owned at `cmd.new_fence` (infallible: the dest Ghost's GENESIS `source_fence` is
+/// strictly below the post-CAS fence), announce the dest sub, register the ghost-neighbor, and spawn
+/// the source ghost. A non-Entity subject or a missing dot is a counted no-op (`promote_no_dot`).
+#[allow(clippy::too_many_arguments)]
+fn promote_apply(
+    cmd: PromoteCmd,
+    config: &StubConfig,
+    clock: &ClockSample,
+    dots: &mut Dots,
+    applied: &mut AppliedSteps,
+    registration: &mut GhostColliderRegistration,
+    realm_fence: Fence,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let Some(entity) = cmd.subject.transfer_subject_entity() else {
+        stats.promote_no_dot += 1;
+        return;
+    };
+    let Some((session, dot)) = dots.0.iter_mut().find(|(_, d)| crossing_target(d, entity)) else {
+        stats.promote_no_dot += 1;
+        return;
+    };
+    if !applied.is_applied(cmd.transfer, STUB_CROSSING_STEP) {
+        // The crossing pose has not landed yet — flipping now would emit a poseless origin frame.
+        // DEFER: the saga's `Promoting`-timeout re-emits the Promote (no production producer yet —
+        // Slice-2; the saga's causal order makes this unreachable in the happy path).
+        stats.promote_before_crossing += 1;
+        return;
+    }
+    let session = *session;
+    // Ghost→Owned at the post-CAS fence (the dest Ghost holds GENESIS `source_fence`, strictly < any
+    // CAS fence; the crossing's stale gate ensured `cmd.new_fence >= entity_fence`), hence infallible.
+    dot.authority = dot
+        .authority
+        .apply(AuthorityCmd::Promote {
+            new_fence: cmd.new_fence,
+        })
+        .expect("dest Ghost promotes at the post-CAS fence (strictly newer than its GENESIS source_fence)");
+    let gateway = dot.gateway;
+    let pose = dot.pose;
+    stats.promotes_confirmed += 1;
+    // RELOCATED here from the adopt flip (1d.5b.3b): the dest read-sub is announced ONLY now, at
+    // promote — so the client's render authority moves to the dest only after it is genuinely Owned.
+    push_session_reply(
+        outbox,
+        gateway,
+        &ShardToGateway::SubscriptionReady {
+            session,
+            entity,
+            frame: config.frame,
+            realm_fence,
+        },
+    );
+    // Register the transfer source as a ghost-neighbor + SPAWN the source ghost: the dest (owner)
+    // now DRIVES the GhostFlow collider feed to the source (owner → ghost-host), keeping the retained
+    // source ghost a live collider + the render seamless. `feed_source_ghosts` streams Delta after.
+    registration.0.insert(
+        entity,
+        GhostNeighbor {
+            source: cmd.source,
+            seq: 0,
+        },
+    );
+    outbox.push_flow(
+        cmd.source,
+        MsgClass::GhostReliable,
+        &InterShardFlow::Ghost(GhostFlow::Spawn {
+            entity,
+            pose,
+            source_fence: cmd.new_fence,
+            since_tick: clock.local_tick,
+        }),
+    );
+}
+
+/// Refresh a hosted ghost dot from a fed pose (1d.5b.3b): write the (sanitized) pose INTO `dot.pose`
+/// and advance the kinematic mirror via `AuthorityCmd::GhostRefresh` (fence-monotone; a stale
+/// `source_fence` is refused). FG-2: the dot IS the single authority/pose truth — this is the only
+/// writer of a hosted ghost's pose, never a second store. Returns `true` on apply, `false` on a
+/// refused (stale-fence / non-Ghost) refresh — ALL the branching lives in THIS monomorphic helper.
+fn refresh_source_ghost(dot: &mut Dot, pose: StampedPose, source_fence: Fence) -> bool {
+    match dot
+        .authority
+        .apply(AuthorityCmd::GhostRefresh { source_fence })
+    {
+        Ok(refreshed) => {
+            dot.authority = refreshed;
+            dot.pose = pose.sanitized();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// SOURCE-side ghost feed consumer (1d.5b.3b): the dest (new owner) drives `GhostFlow` to this shard
+/// (the ghost-host) — `Spawn` establishes the feed, `Delta` is the 20Hz latest-wins pose stream,
+/// `Despawn` ends it (1d.5b.3c band-exit). Each refreshes the RETAINED ghost dot's pose + fence
+/// (`refresh_source_ghost`) so it stays a live kinematic collider AND keeps emitting on the source
+/// sub across the handoff (the seamless fill). `Delta` is deduped by `seq` (lossy datagram). A
+/// malformed body is counted + dropped, never mis-applied. Monomorphic.
+fn on_ghost_flow(
+    from: NodeId,
+    bytes: &[u8],
+    dots: &mut Dots,
+    mirror: &mut SourceGhostMirror,
+    stats: &mut StubStats,
+) {
+    let flow = match postcard::from_bytes::<InterShardFlow>(bytes) {
+        Ok(InterShardFlow::Ghost(flow)) => flow,
+        // Any other arm misrouted onto a Ghost carrier, or a decode failure: counted + dropped.
+        _ => {
+            stats.undecodable += 1;
+            return;
+        }
+    };
+    match flow {
+        GhostFlow::Spawn {
+            entity,
+            pose,
+            source_fence,
+            ..
+        } => {
+            // Establish the feed (reliable): the mirror's `fed` latch + the dedup cursor. Refresh the
+            // retained ghost dot's pose from the spawn snapshot (it may already be live from the
+            // self-emit fill; this overwrites with the owner's authoritative pose).
+            mirror.0.insert(
+                entity,
+                GhostFeedState {
+                    from,
+                    last_seq: 0,
+                    fed: true,
+                },
+            );
+            if let Some(dot) = dots.0.values_mut().find(|d| d.entity == entity) {
+                let _ = refresh_source_ghost(dot, pose, source_fence);
+            }
+        }
+        GhostFlow::Delta {
+            entity,
+            pose,
+            source_fence,
+            seq,
+            ..
+        } => {
+            // Latest-wins dedup: no mirror entry, or a `seq <= last_seq` redelivery, is a stale drop.
+            let Some(state) = mirror.0.get_mut(&entity) else {
+                stats.ghost_delta_stale += 1;
+                return;
+            };
+            if seq <= state.last_seq {
+                stats.ghost_delta_stale += 1;
+                return;
+            }
+            state.last_seq = seq;
+            let applied = dots
+                .0
+                .values_mut()
+                .find(|d| d.entity == entity)
+                .is_some_and(|dot| refresh_source_ghost(dot, pose, source_fence));
+            if applied {
+                stats.ghost_delta_applied += 1;
+            } else {
+                // A fresh-seq Delta whose `source_fence` was stale against the ghost (or no hosted
+                // dot) — the `GhostRefresh` guard refused it; counted, pose unchanged.
+                stats.ghost_refresh_stale += 1;
+            }
+        }
+        GhostFlow::Despawn { entity, .. } => {
+            // Band-exit (1d.5b.3c): clear the emit latch so the hosted ghost stops emitting.
+            if let Some(state) = mirror.0.get_mut(&entity) {
+                state.fed = false;
+                stats.ghost_despawns += 1;
+            }
+        }
+    }
 }
 
 /// Whether a dot is the local granted, non-departing holder of `entity` (the self-fence target).
@@ -1248,27 +1524,13 @@ fn apply_crossing(
         return;
     }
     if applied.journal_step(transfer, step_id) == StepOutcome::FirstApply {
-        // Never trust the network: sanitize to finite at this ingress before storing.
+        // Never trust the network: sanitize to finite at this ingress before storing. The crossing
+        // STORES the pose but the dot STAYS Ghost — the `Ghost→Owned` promote RELOCATED to
+        // `on_saga_promote` (1d.5b.3b) so the demote-before-promote ordering is STRICT (the dest
+        // becomes Owned only on the saga `Promote`, after the source has demoted). `on_saga_promote`
+        // gates its flip on THIS journal entry (`STUB_CROSSING_STEP` applied) — pose-before-promote,
+        // so the relocated promote still never emits a poseless origin-default frame.
         dot.pose = pose.sanitized();
-        // 1d.3/1d.4b — the FIRST visible cross-shard transfer: the crossed pose is now stored, so
-        // Promote the dest Ghost→Owned (now `simulates()` → `emit_frames` emits it from the dest
-        // sub). ATOMIC-WITH the pose store — NEVER at the `flip_grant` Adopted arm, which under the
-        // buffered-crossing case fires BEFORE the pose exists and would emit a poseless origin-
-        // default (`SystemSpace{seed:8}`) ZERO frame. ⚠️ RETAINED through 1d.5b.1 (the dest's
-        // first-Owned moment): the saga's ordered `Promote` ([`on_saga_promote`]) is a CONFIRMER in
-        // 1d.5b.1, NOT this flip's replacement — relocating the flip into that handler would DELAY
-        // the promote by the `Demote`/`Promote` round-trip and re-open the seamless vanish. The
-        // relocation lands in 1d.5b.3, co-landed with the source-Ghost collider feed that keeps the
-        // consequent later-promote window seamless. The Promote keys on `dot.entity_fence` (the
-        // directory-recorded CAS fence `flip_grant` stamped), the IDENTICAL fence the stale gate
-        // above checked — so it is strictly newer than the Ghost's GENESIS `source_fence` (the
-        // stale gate already dropped any crossing below `entity_fence`), hence infallible.
-        dot.authority = dot
-            .authority
-            .apply(AuthorityCmd::Promote {
-                new_fence: dot.entity_fence,
-            })
-            .expect("dest Ghost promotes at the recorded CAS fence (the stale gate ensured it is strictly newer)");
         stats.crossings_applied += 1;
     }
     outbox.push_flow(
@@ -1323,6 +1585,7 @@ fn on_directory_reply(
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     pending: &mut PendingCrossings,
+    registration: &mut GhostColliderRegistration,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -1347,9 +1610,24 @@ fn on_directory_reply(
             on_saga_demote(cmd, config, clock, dots, stats, outbox);
             return;
         }
-        // DEST: the saga-pushed ordered Promote (1d.5b.1) — the .1 confirmer + PromoteAck.
+        // DEST: the saga-pushed ordered Promote (1d.5b.3b) — the REAL Ghost→Owned promoter + the
+        // dest read-sub announce + the source-ghost feed registration/Spawn + PromoteAck. The dest
+        // holds its realm before the orchestrator routes a Promote to it (the realm-owner invariant).
         Ok(InterShardFlow::Promote(cmd)) => {
-            on_saga_promote(cmd, config, applied, stats, outbox);
+            let realm_fence = authority
+                .0
+                .expect("the dest holds its realm before the saga routes a Promote to it");
+            on_saga_promote(
+                cmd,
+                config,
+                clock,
+                dots,
+                applied,
+                registration,
+                realm_fence,
+                stats,
+                outbox,
+            );
             return;
         }
         Ok(_) => return,
@@ -1405,10 +1683,10 @@ fn on_directory_reply(
                     GrantFlip::LoggedIn(egress) => {
                         push_session_reply(outbox, egress.gateway, &egress.reply);
                     }
-                    GrantFlip::Adopted { session, egress } => {
-                        // 1d.2c: announce the dest read-sub to the gateway (SubscriptionReady),
-                        // THEN drain any buffered crossing onto the now-adopted dot.
-                        push_session_reply(outbox, egress.gateway, &egress.reply);
+                    GrantFlip::Adopted { session } => {
+                        // 1d.5b.3b: NO SubscriptionReady here (it moved to on_saga_promote). Just
+                        // drain any buffered crossing onto the now-adopted Ghost dot (it stays Ghost
+                        // and emits nothing until the saga Promote flips it Owned).
                         drain_pending_crossing(
                             &mut dots.0,
                             session,
@@ -1458,6 +1736,78 @@ fn on_directory_reply(
     }
 }
 
+/// DEST-side ghost collider FEED (1d.5b.3b): for each registered ghost-neighbor, stream a
+/// `GhostFlow::Delta` of the OWNED entity's live pose to the ghost-host (the transfer source). The
+/// owner DRIVES the feed (owner → ghost-host). Runs AFTER `process_inbound` (this tick's promote
+/// registered the neighbor + the dot is Owned) and BEFORE `emit_frames` (the source consumes the
+/// delta it received this tick before emitting). A registration whose entity is not currently Owned
+/// here (no dot / a non-`simulates()` dot) is a counted no-op. SCALE: single-neighbor today; a
+/// band-driven multi-neighbor owner fans Delta to every neighbor — the `seq` is per-neighbor in the
+/// body, so multi-neighbor breaks encode-once (a band-ghost-era optimization, DEFERRED).
+fn feed_source_ghosts(
+    clock: Res<ClockSample>,
+    dots: Res<Dots>,
+    mut registration: ResMut<GhostColliderRegistration>,
+    mut stats: ResMut<StubStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    for (entity, neighbor) in registration.0.iter_mut() {
+        let Some(dot) = dots.0.values().find(|d| d.entity == *entity) else {
+            stats.ghost_feed_skipped += 1;
+            continue;
+        };
+        if !dot.authority.simulates() {
+            stats.ghost_feed_skipped += 1;
+            continue;
+        }
+        outbox.push_flow(
+            neighbor.source,
+            MsgClass::GhostDelta,
+            &InterShardFlow::Ghost(GhostFlow::Delta {
+                entity: *entity,
+                pose: dot.pose,
+                source_fence: dot.authority.fence(),
+                source_tick: clock.local_tick,
+                seq: neighbor.seq,
+            }),
+        );
+        neighbor.seq += 1;
+    }
+}
+
+/// Whether a hosted ghost has a LIVE feed (1d.5b.3b): has-ever-been-fed-and-not-despawned (the
+/// mirror's `fed` latch). NOT fed-this-tick — `GhostDelta` is lossy, so a dropped delta must NOT
+/// blink the avatar (it holds its last fed pose). Monomorphic (the Some/None split is here).
+#[must_use]
+fn is_fed_ghost(mirror: &SourceGhostMirror, d: &Dot) -> bool {
+    mirror.0.get(&d.entity).is_some_and(|s| s.fed)
+}
+
+/// Whether a dot is a RETAINED source ghost (1d.5b.3b): a granted, non-departing `Ghost` whose
+/// `source_fence` is POST-GENESIS — it holds its last-Owned pose, so it SELF-EMITS that pose on its
+/// sub from the demote instant, filling the demote→Promote window the dest feed cannot reach
+/// (nothing is Owned then to produce the pose). The `source_fence != GENESIS` term EXCLUDES the
+/// pre-promote DEST-adopt Ghost (which holds `GENESIS` and has no real pose — it must stay silent
+/// until `on_saga_promote` flips it Owned); `granted & !departing` excludes a pre-grant provisional
+/// Ghost. Monomorphic (the state destructure + guard live here, not in the filter closure).
+#[must_use]
+fn is_retained_ghost(d: &Dot) -> bool {
+    let retained_source = matches!(
+        d.authority,
+        Authority::Ghost { source_fence, .. } if source_fence != Fence::GENESIS
+    );
+    retained_source & d.granted & !d.departing
+}
+
+/// EMIT-eligibility (1d.5b.3b): a dot's pose is emitted if it SIMULATES (Owned — the authority
+/// truth) OR is a fed ghost OR is a retained source ghost — the DERIVED union via BITWISE `|` (never
+/// `||`, so each operand's false arm stays coverable; HR5). Authority/input/oracle truth remains
+/// `simulates()` ALONE — a ghost emits its kinematic mirror but integrates/accepts NOTHING (FG-2).
+#[must_use]
+fn emits(mirror: &SourceGhostMirror, d: &Dot) -> bool {
+    d.authority.simulates() | is_fed_ghost(mirror, d) | is_retained_ghost(d)
+}
+
 /// Emit one fence-stamped frame per tick to every gateway with an attached session.
 /// No realm authority ⇒ no frames (an unowned shard is silent, never speculative).
 fn emit_frames(
@@ -1465,20 +1815,22 @@ fn emit_frames(
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     dots: Res<Dots>,
+    mirror: Res<SourceGhostMirror>,
     mut counter: ResMut<FrameCounter>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     let Some(realm_fence) = authority.0 else {
         return;
     };
-    // Gate on whether the dot SIMULATES (`Authority::Owned`): a Ghost (a pre-promote dest, or a
-    // retained source) and a Frozen dot emit NOTHING — so the dest never emits a poseless
-    // origin-default frame and the single-shard gateway never sees an unroutable dest frame.
-    // `simulates()` is a branchless `matches!` on a `Copy` field, monomorphic at this call site.
+    // EMIT-eligibility is the DERIVED `simulates() | is_fed_ghost | is_retained_ghost` (1d.5b.3b):
+    // an Owned dot (the authority truth) emits; ALSO a fed ghost (the dest-driven collider feed) and
+    // a retained source ghost (self-emitting its last-Owned pose to fill the demote→Promote handoff)
+    // emit their kinematic mirror — so the avatar renders CONTINUOUSLY across the strict handoff (no
+    // vanish). A Frozen or pre-grant-provisional Ghost still emits NOTHING.
     let mut gateways: Vec<NodeId> = dots
         .0
         .values()
-        .filter(|d| d.authority.simulates())
+        .filter(|d| emits(&mirror, d))
         .map(|d| d.gateway)
         .collect();
     gateways.sort_unstable();
@@ -1489,7 +1841,7 @@ fn emit_frames(
     let entities: Vec<EntitySnap> = dots
         .0
         .values()
-        .filter(|d| d.authority.simulates())
+        .filter(|d| emits(&mirror, d))
         .map(|d| EntitySnap {
             entity: d.entity,
             pose: d.pose,
@@ -2702,61 +3054,53 @@ mod tests {
     }
 
     #[test]
-    fn the_adopt_grant_flip_holds_authority_announces_the_sub_without_render_or_attach() {
-        // 1c.8 + 1d.2c + 1d.4b: the grant-flip on the adopted record sets granted (authority-held)
-        // AND stamps entity_fence = the recorded CAS fence, but the dot STAYS Ghost
-        // (simulates()==false) — the Promote to Owned is `apply_crossing`'s, atomic with the pose.
-        // It pushes NO SessionAttached (R2 — the source owns the client) but DOES push a
-        // SubscriptionReady (Track R / 1d.2c: the gateway opens the dest read-sub + re-points authority).
+    fn the_adopt_grant_flip_holds_authority_without_announcing_the_sub_until_promote() {
+        // 1d.5b.3b: the adopt grant-flip sets granted + stamps entity_fence + STAYS Ghost, but NO
+        // LONGER announces the dest sub — `SubscriptionReady` RELOCATED to on_saga_promote (announced
+        // only at the genuine Ghost→Owned promote). So the client stays on the SOURCE sub until then,
+        // and demote-before-promote is strict. It still pushes NO SessionAttached (R2).
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
-        // The directory record the CAS moved here: SUBJECT @ this shard @ a NON-genesis fence.
-        let adopted = DirectoryReply::Head {
-            key: DirectoryKey::Entity(SUBJECT),
-            record: Some(vd_wire::seams::directory::OwnerRecord {
-                authority: AuthorityRef::Shard(SHARD),
-                fence: Fence(2),
-                lease_expires: UniverseTick(1_000),
-                in_transfer: None,
-            }),
-        };
-        let sent = rig.tick(vec![wire_msg(
-            ORCH,
-            MsgClass::Saga,
-            &InterShardFlow::DirectoryReply(adopted),
-        )]);
+        let sent = rig.tick(vec![adopted_head(Fence(2))]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         // Split asserts (each &&-short-circuit false arm is uncoverable — HR5).
         assert!(dot.granted, "the adopt flips granted (authority-held)");
         assert_eq!(dot.entity_fence, Fence(2), "stamped the recorded CAS fence");
         assert!(
             !dot.authority.simulates(),
-            "an adopt STAYS a Ghost until the crossing promotes it (no pose; renders nothing) — \
-             a Promote in this flip arm would emit a poseless seed-8 origin frame (capstone control (f))"
+            "an adopt STAYS a Ghost (renders nothing) until the saga Promote flips it Owned"
         );
         assert!(!dot.adopting, "adopting is cleared on the flip");
-        // EXACTLY one Control-class reply to the gateway: a SubscriptionReady carrying the DEST
-        // frame + realm fence (NOT a SessionAttached — that is suppressed on an adopt, R2).
-        let to_gateway: Vec<ShardToGateway> = sent
-            .iter()
-            .filter(|(to, class, _)| (*to == GATEWAY) & (*class == MsgClass::Control))
-            .map(|(_, _, bytes)| postcard::from_bytes(bytes).expect("decode"))
-            .collect();
+        // NO SubscriptionReady at the adopt (it moved to the promote) and NO frame rendered.
+        assert!(
+            gw_replies(&sent).is_empty(),
+            "the adopt announces NO gateway reply (the sub moved to the promote): {sent:?}"
+        );
         assert_eq!(
-            to_gateway,
+            decode_frames(&sent).len(),
+            0,
+            "an adopted Ghost dot renders nothing (simulates()==false)"
+        );
+
+        // After the crossing lands, the saga Promote DOES announce the dest sub (the relocated one).
+        let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
+        let sent = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert_eq!(
+            gw_replies(&sent),
             vec![ShardToGateway::SubscriptionReady {
                 session: SESSION,
                 entity: SUBJECT,
                 frame: FrameRef::SystemSpace { system_seed: 7 },
                 realm_fence: Fence(1), // the DEST realm fence (grant_realm set Fence(1))
             }],
-            "the adopt announces exactly one SubscriptionReady, never a SessionAttached"
+            "the Promote announces exactly one SubscriptionReady, never a SessionAttached"
         );
-        assert_eq!(
-            decode_frames(&sent).len(),
-            0,
-            "an adopted Ghost dot renders nothing (simulates()==false)"
+        assert!(
+            rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "the Promote flips the dest Ghost→Owned"
         );
     }
 
@@ -2947,21 +3291,31 @@ mod tests {
     }
 
     #[test]
-    fn the_saga_promote_confirms_acks_and_dedups_redelivery() {
-        // 1d.5b.1 DEST consumer of the ordered Promote (the .1 CONFIRMER — apply_crossing still does
-        // the real flip): journal (transfer, PROMOTE_STEP) + ack PromoteAck. A redelivery re-acks
-        // only (counted). The dot is untouched here (the confirmer does NOT flip in 1d.5b.1).
+    fn the_saga_promote_flips_owned_announces_the_sub_and_spawns_the_ghost() {
+        // 1d.5b.3b: on_saga_promote is the REAL promoter. Set up a transfer-dest Ghost dot (adopt +
+        // crossing stores the pose, the dot STAYS Ghost), then the saga Promote: flips Ghost→Owned,
+        // announces the dest read-sub (RELOCATED from adopt), registers the source ghost-neighbor,
+        // and Spawns the source ghost (the dest DRIVES the feed). Redelivery re-acks only.
         let mut rig = Rig::new();
         rig.grant_realm();
-        let _ = rig.attach();
-        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
-        let promote = InterShardFlow::Promote(PromoteCmd {
-            transfer: TransferId(7),
-            subject: DirectoryKey::Entity(entity),
-            new_fence: Fence(2),
-            step_id: PROMOTE_STEP,
-        });
-        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &promote)]);
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]); // adopting dot for SUBJECT
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // flip → granted Ghost
+        let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
+        assert!(
+            !rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "still Ghost after the crossing (the autonomous promote is gone)"
+        );
+
+        rig.set_local_tick(5); // pins the Spawn's since_tick deterministically
+        let source = NodeId(99);
+        let sent = rig.tick(vec![promote_msg(Fence(2), source)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].authority,
+            Authority::Owned { fence: Fence(2) },
+            "the Promote flips the dest Ghost→Owned at the new fence"
+        );
         assert_eq!(rig.world.resource::<StubStats>().promotes_confirmed, 1);
         assert!(
             saga_ack_to_orch(
@@ -2970,20 +3324,354 @@ mod tests {
                     transfer: TransferId(7)
                 }
             ),
-            "PromoteAck is sent to the orchestrator: {sent:?}"
+            "PromoteAck is sent: {sent:?}"
         );
-        // Redelivery: re-ack only, counted as redelivered (the journal's AlreadyApplied arm).
-        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &promote)]);
-        assert_eq!(rig.world.resource::<StubStats>().promotes_redelivered, 1);
+        // The dest read-sub is announced NOW (relocated from the adopt flip).
+        assert_eq!(
+            gw_replies(&sent),
+            vec![ShardToGateway::SubscriptionReady {
+                session: SESSION,
+                entity: SUBJECT,
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            }],
+            "the Promote announces exactly one SubscriptionReady"
+        );
+        // The source ghost-neighbor is registered (the feed pass has already advanced `seq` once this
+        // tick — it runs after process_inbound), and the source ghost is Spawned (the feed started).
+        assert_eq!(
+            rig.world
+                .resource::<GhostColliderRegistration>()
+                .0
+                .get(&SUBJECT)
+                .map(|n| n.source),
+            Some(source),
+            "the source ghost-neighbor is registered"
+        );
         assert!(
-            saga_ack_to_orch(
-                &sent,
-                TransferControlAck::PromoteAck {
-                    transfer: TransferId(7)
-                }
-            ),
-            "the redelivery STILL re-acks PromoteAck"
+            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Spawn {
+                entity: SUBJECT,
+                pose: crossing_pose().sanitized(),
+                source_fence: Fence(2),
+                since_tick: vd_core::TickId(5),
+            })),
+            "the source ghost is Spawned at the crossed pose + the new fence: {sent:?}"
         );
+
+        // Redelivery: re-ack only, NO re-flip / re-register / re-Spawn — the journal returns
+        // AlreadyApplied, so `promote_apply` (which holds the flip + register + Spawn) is NOT entered.
+        // `promotes_confirmed` staying 1 proves it. (The ongoing feed `Delta` to `source` continues
+        // every tick — that is the running collider feed, not a re-Spawn.)
+        let sent = rig.tick(vec![promote_msg(Fence(2), source)]);
+        assert_eq!(rig.world.resource::<StubStats>().promotes_redelivered, 1);
+        assert_eq!(
+            rig.world.resource::<StubStats>().promotes_confirmed,
+            1,
+            "no re-flip / re-Spawn on redelivery (promote_apply gated on FirstApply)"
+        );
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(7)
+            }
+        ));
+    }
+
+    #[test]
+    fn the_dest_feed_pass_streams_monotone_deltas_and_skips_unowned_registrations() {
+        // 1d.5b.3b: feed_source_ghosts streams GhostFlow::Delta to each registered neighbor whose
+        // entity is OWNED here, with a MONOTONE seq; a registration with no Owned dot is skipped.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]);
+        let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
+        let source = NodeId(99);
+        let _ = rig.tick(vec![promote_msg(Fence(2), source)]); // Owned + registered; first feed (seq 0)
+
+        // The next tick feeds the SECOND delta (seq 1) of the Owned dot's live pose to the source.
+        rig.set_local_tick(6);
+        let sent = rig.tick(vec![]);
+        assert!(
+            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Delta {
+                entity: SUBJECT,
+                pose: crossing_pose().sanitized(),
+                source_fence: Fence(2),
+                source_tick: vd_core::TickId(6),
+                seq: 1,
+            })),
+            "the feed streams the next monotone-seq Delta of the Owned pose: {sent:?}"
+        );
+
+        // A registration whose entity is NOT owned here (no dot) is a counted no-op (no feed).
+        rig.world
+            .resource_mut::<GhostColliderRegistration>()
+            .0
+            .insert(EntityId(0xABCD), GhostNeighbor { source, seq: 0 });
+        let skipped_before = rig.world.resource::<StubStats>().ghost_feed_skipped;
+        let _ = rig.tick(vec![]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().ghost_feed_skipped,
+            skipped_before + 1,
+            "a registration with no Owned dot is skipped"
+        );
+    }
+
+    #[test]
+    fn the_dest_feed_pass_skips_a_ghost_dot_registration() {
+        // The simulates()-gate negative arm: a registration whose entity dot is a Ghost (not Owned)
+        // is skipped — only an OWNED entity's live pose is fed.
+        let mut rig = Rig::new();
+        let entity = make_retained_ghost(&mut rig, Fence(2)); // a granted Ghost dot for `entity`
+        rig.world
+            .resource_mut::<GhostColliderRegistration>()
+            .0
+            .insert(
+                entity,
+                GhostNeighbor {
+                    source: NodeId(88),
+                    seq: 0,
+                },
+            );
+        let sent = rig.tick(vec![]);
+        assert!(
+            flows_to(&sent, NodeId(88)).is_empty(),
+            "no feed for a Ghost (non-Owned) dot: {sent:?}"
+        );
+        assert!(rig.world.resource::<StubStats>().ghost_feed_skipped >= 1);
+    }
+
+    #[test]
+    fn the_source_ghost_consumer_refreshes_and_dedups_the_feed() {
+        // 1d.5b.3b: the SOURCE ghost-host consumes the dest-driven feed — Spawn establishes it +
+        // refreshes the retained ghost's pose; a fresh Delta refreshes; a stale-seq / no-mirror /
+        // stale-fence Delta is dropped; Despawn clears the latch; a malformed body is undecodable.
+        let mut rig = Rig::new();
+        let entity = make_retained_ghost(&mut rig, Fence(2)); // retained source Ghost{Fence(2)}
+        let pose_a = crossing_pose();
+        let pose_b = StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            DVec3::new(9.0, 8.0, 7.0),
+            UniverseTick(3),
+        );
+
+        // Spawn: establish the mirror (fed) + refresh the hosted ghost's pose at the owner fence.
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
+            entity,
+            pose: pose_a,
+            source_fence: Fence(2),
+            since_tick: vd_core::TickId(0),
+        })]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].pose,
+            pose_a.sanitized(),
+            "Spawn refreshes the hosted ghost pose"
+        );
+        assert!(
+            rig.world
+                .resource::<SourceGhostMirror>()
+                .0
+                .get(&entity)
+                .is_some_and(|s| s.fed),
+            "the feed is established (fed)"
+        );
+
+        // A fresh Delta (seq 1 > 0, fence 2 >= 2) applies the new pose.
+        let _ = rig.tick(vec![ghost_delta(entity, pose_b, Fence(2), 1)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].pose,
+            pose_b.sanitized(),
+            "a fresh Delta refreshes the pose"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().ghost_delta_applied, 1);
+
+        // A stale-seq Delta (seq 1 <= last_seq 1) is dropped — the pose is unchanged.
+        let _ = rig.tick(vec![ghost_delta(entity, pose_a, Fence(2), 1)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].pose,
+            pose_b.sanitized(),
+            "a stale-seq Delta is dropped"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().ghost_delta_stale, 1);
+
+        // A fresh-seq Delta with a STALE fence (1 < the ghost's 2) is REFUSED by GhostRefresh.
+        let _ = rig.tick(vec![ghost_delta(entity, pose_a, Fence(1), 2)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].pose,
+            pose_b.sanitized(),
+            "a stale-fence Delta is refused (pose unchanged)"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().ghost_refresh_stale, 1);
+
+        // A Delta for an UNregistered entity (no mirror) is dropped.
+        let _ = rig.tick(vec![ghost_delta(EntityId(0xCAFE), pose_a, Fence(2), 9)]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().ghost_delta_stale,
+            2,
+            "a no-mirror Delta is dropped"
+        );
+
+        // Despawn clears the fed latch.
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+            entity,
+            source_fence: Fence(2),
+        })]);
+        assert!(
+            rig.world
+                .resource::<SourceGhostMirror>()
+                .0
+                .get(&entity)
+                .is_some_and(|s| !s.fed),
+            "Despawn clears the fed latch"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().ghost_despawns, 1);
+
+        // A Spawn for an entity this shard does NOT host (no dot) records the mirror but refreshes
+        // nothing — the no-dot arm of the Spawn handler.
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
+            entity: EntityId(0xDEAD),
+            pose: pose_a,
+            source_fence: Fence(2),
+            since_tick: vd_core::TickId(0),
+        })]);
+        assert!(
+            rig.world
+                .resource::<SourceGhostMirror>()
+                .0
+                .contains_key(&EntityId(0xDEAD)),
+            "a Spawn with no hosted dot still records the mirror"
+        );
+
+        // A Despawn for an entity with NO mirror is a clean no-op (the no-mirror arm).
+        let despawns_before = rig.world.resource::<StubStats>().ghost_despawns;
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+            entity: EntityId(0x12345),
+            source_fence: Fence(2),
+        })]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().ghost_despawns,
+            despawns_before,
+            "a Despawn for an unhosted entity is a clean no-op"
+        );
+
+        // A malformed ghost body is counted undecodable, never mis-applied.
+        let undec_before = rig.world.resource::<StubStats>().undecodable;
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: DEST_OWNER,
+            class: MsgClass::GhostDelta,
+            bytes: crate::io::bytes(vec![0xFF, 0xFF, 0xFF]),
+        }]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().undecodable,
+            undec_before + 1,
+            "a malformed ghost body is counted undecodable"
+        );
+    }
+
+    #[test]
+    fn a_retained_ghost_self_emits_but_an_unfed_genesis_ghost_does_not() {
+        // 1d.5b.3b emit-widening: a RETAINED source Ghost (post-GENESIS fence) SELF-EMITS its
+        // last-Owned pose (the demote→Promote fill); a pre-promote DEST-adopt Ghost (GENESIS, no real
+        // pose) emits NOTHING.
+        // (a) retained source ghost → emits.
+        let mut rig = Rig::new();
+        let _entity = make_retained_ghost(&mut rig, Fence(2));
+        let sent = rig.tick(vec![]);
+        assert_eq!(
+            decode_frames(&sent).len(),
+            1,
+            "the retained source Ghost self-emits its last-Owned pose (no vanish): {sent:?}"
+        );
+
+        // (b) a pre-promote DEST-adopt Ghost (GENESIS) → emits nothing.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let sent = rig.tick(vec![adopted_head(Fence(2))]); // granted Ghost{GENESIS}, no pose
+        assert_eq!(
+            decode_frames(&sent).len(),
+            0,
+            "an unfed GENESIS dest-adopt Ghost renders nothing until the Promote"
+        );
+    }
+
+    #[test]
+    fn emit_frames_renders_an_emitting_dot_and_filters_a_silent_one_in_the_same_tick() {
+        // Covers the entity-collect filter's FALSE arm: a tick with BOTH a retained source Ghost
+        // (emits) AND a pre-grant GENESIS adopt Ghost (silent). emit_frames does NOT early-return
+        // (the emitter makes gateways non-empty) AND the entity-collect filter EXCLUDES the silent
+        // dot — exactly the emitting one renders.
+        let mut rig = Rig::new();
+        let emitter = make_retained_ghost(&mut rig, Fence(2)); // SESSION: retained Ghost, emits
+        let _ = rig.tick(vec![open_input_slot(SessionId(0xBB), GATEWAY, 5)]); // a pre-grant GENESIS adopt Ghost, silent
+        let sent = rig.tick(vec![]);
+        let entities: Vec<EntityId> = decode_frames(&sent)
+            .into_iter()
+            .flat_map(|f| f.entities)
+            .map(|e| e.entity)
+            .collect();
+        assert_eq!(
+            entities,
+            vec![emitter],
+            "only the emitting retained Ghost renders; the silent GENESIS adopt Ghost is filtered out"
+        );
+    }
+
+    #[test]
+    fn the_saga_promote_on_an_unheld_or_non_entity_subject_is_a_counted_noop_but_acks() {
+        // on_saga_promote's no-dot arms: a Promote for an entity not held here, and for a non-Entity
+        // (Realm) subject, each flip nothing (counted `promote_no_dot`) but STILL ack PromoteAck.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // (a) unheld Entity subject.
+        let sent = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]); // SUBJECT not held here
+        assert_eq!(rig.world.resource::<StubStats>().promote_no_dot, 1);
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(7)
+            }
+        ));
+        // (b) non-Entity (Realm) subject.
+        let realm_promote = InterShardFlow::Promote(PromoteCmd {
+            transfer: TransferId(8),
+            subject: DirectoryKey::Realm(RealmId::System(9)),
+            new_fence: Fence(2),
+            step_id: PROMOTE_STEP,
+            source: NodeId(99),
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &realm_promote)]);
+        assert_eq!(rig.world.resource::<StubStats>().promote_no_dot, 2);
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(8)
+            }
+        ));
+    }
+
+    #[test]
+    fn the_saga_promote_before_the_crossing_lands_defers_the_flip_but_acks() {
+        // pose-before-promote: a Promote arriving BEFORE the crossing journaled does NOT flip (no
+        // poseless origin frame); counted `promote_before_crossing`, still acks. The dot stays Ghost.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // granted Ghost, NO crossing yet
+        let sent = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert!(
+            !rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "the Promote does NOT flip a dot whose crossing pose has not landed (stays Ghost)"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().promote_before_crossing, 1);
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(7)
+            }
+        ));
     }
 
     #[test]
@@ -3171,6 +3859,86 @@ mod tests {
         }))
     }
 
+    /// A saga `Promote` for `SUBJECT` at `new_fence`, naming `source` as the ghost-host (1d.5b.3b).
+    fn promote_msg(new_fence: Fence, source: NodeId) -> Inbound {
+        wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::Promote(PromoteCmd {
+                transfer: TransferId(7),
+                subject: DirectoryKey::Entity(SUBJECT),
+                new_fence,
+                step_id: PROMOTE_STEP,
+                source,
+            }),
+        )
+    }
+
+    /// The `ShardToGateway` Control replies this shard sent to `GATEWAY` this tick (value-compare).
+    fn gw_replies(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<ShardToGateway> {
+        sent.iter()
+            .filter(|(to, class, _)| (*to == GATEWAY) & (*class == MsgClass::Control))
+            .map(|(_, _, bytes)| postcard::from_bytes(bytes).expect("decode"))
+            .collect()
+    }
+
+    /// The `InterShardFlow`s this shard sent to `target` this tick (value-compare; `.ok()` drops the
+    /// rare non-flow / decode failure, of which there are none on a ghost/orchestrator peer).
+    fn flows_to(sent: &[(NodeId, MsgClass, Vec<u8>)], target: NodeId) -> Vec<InterShardFlow> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == target)
+            .filter_map(|(_, _, bytes)| postcard::from_bytes::<InterShardFlow>(bytes).ok())
+            .collect()
+    }
+
+    /// One `GhostFlow::Delta` as the SOURCE ghost-host receives it (for the consumer tests).
+    fn ghost_delta(entity: EntityId, pose: StampedPose, source_fence: Fence, seq: u64) -> Inbound {
+        Inbound::Wire {
+            from: DEST_OWNER,
+            class: MsgClass::GhostDelta,
+            bytes: crate::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::Ghost(GhostFlow::Delta {
+                    entity,
+                    pose,
+                    source_fence,
+                    source_tick: vd_core::TickId(0),
+                    seq,
+                }))
+                .expect("encode"),
+            ),
+        }
+    }
+
+    /// One `GhostFlow::Spawn` / `Despawn` as the SOURCE ghost-host receives it (reliable carrier).
+    fn ghost_lifecycle(flow: GhostFlow) -> Inbound {
+        Inbound::Wire {
+            from: DEST_OWNER,
+            class: MsgClass::GhostReliable,
+            bytes: crate::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::Ghost(flow)).expect("encode"),
+            ),
+        }
+    }
+
+    /// Demote the SESSION dot to a RETAINED source Ghost at `new_owner_fence` (the consumer/emit
+    /// fixture): a granted Owned dot → the saga `Demote` → `Ghost`. Returns the dot's entity.
+    fn make_retained_ghost(rig: &mut Rig, new_owner_fence: Fence) -> EntityId {
+        rig.grant_realm();
+        let _ = rig.attach();
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        let demote = InterShardFlow::Demote(DemoteCmd {
+            transfer: TransferId(7),
+            subject: DirectoryKey::Entity(entity),
+            new_owner_fence,
+            step_id: vd_wire::intershard::DEMOTE_STEP,
+        });
+        let _ = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &demote)]);
+        entity
+    }
+
+    /// The DEST owner node that feeds this shard's hosted ghosts in the consumer tests.
+    const DEST_OWNER: NodeId = NodeId(99);
+
     #[test]
     fn flush_source_ships_the_held_dots_pose() {
         let mut rig = Rig::new();
@@ -3234,37 +4002,36 @@ mod tests {
     }
 
     #[test]
-    fn a_crossing_to_an_adopted_dot_applies_immediately_and_dedups_redelivery() {
+    fn a_crossing_to_an_adopted_dot_stores_the_pose_stays_ghost_then_promote_flips_owned() {
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]); // adopting dot
         let _ = rig.tick(vec![adopted_head(Fence(2))]); // flip → granted, still a Ghost (not simulating)
         let pose = crossing_pose();
 
+        // 1d.5b.3b: the crossing STORES the pose but leaves the dot a GHOST — the Ghost→Owned promote
+        // RELOCATED to on_saga_promote (strict demote-before-promote). No autonomous flip here.
         let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
-        assert_eq!(
-            dot.pose,
-            pose.sanitized(),
-            "the crossed pose applied to the adopted dot"
-        );
+        assert_eq!(dot.pose, pose.sanitized(), "the crossed pose stored");
         assert!(
-            dot.authority.simulates(),
-            "the crossing Promotes the dest Ghost→Owned atomically with the crossed-pose store (the VISIBLE flip)"
-        );
-        assert_eq!(
-            dot.authority,
-            Authority::Owned { fence: Fence(2) },
-            "promoted to the recorded CAS fence"
+            !dot.authority.simulates(),
+            "the dot STAYS Ghost after the crossing (the autonomous promote is gone)"
         );
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
         assert!(acked(&sent, TransferId(7)), "the crossing step is acked");
 
-        // REDELIVERY AFTER THE FLIP (the widened-`crossing_target` arm, DEFECT-3): now that the dot
-        // is Owned (`simulates()`), the redelivery still matches `crossing_target` (the dropped
-        // simulate-state term), so it reaches `apply_crossing`, the journal returns `AlreadyApplied`,
-        // and it re-acks WITHOUT re-applying — it does NOT fall to the `None` arm and re-buffer
-        // (which a `!simulates()` predicate would have, stranding it forever).
+        // The saga Promote flips it Ghost→Owned (pose-before-promote satisfied — the crossing landed).
+        let _ = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].authority,
+            Authority::Owned { fence: Fence(2) },
+            "the Promote flips the dest Ghost→Owned at the recorded CAS fence"
+        );
+
+        // A crossing redelivery AFTER the flip still matches `crossing_target` (now Owned, still
+        // granted+non-departing) → the journal returns `AlreadyApplied`: re-ack WITHOUT re-applying,
+        // NOT re-buffered (no strand).
         let buffered_before = rig.world.resource::<StubStats>().crossings_buffered;
         let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
         assert_eq!(
@@ -3319,8 +4086,8 @@ mod tests {
             "a still-buffered redelivery does not inflate the buffered count"
         );
 
-        // The adopt grant-flip DRAINS the buffer → applies the pose + acks AND Promotes Ghost→Owned
-        // (the drained path shares `apply_crossing`, so the VISIBLE flip lands here too).
+        // The adopt grant-flip DRAINS the buffer → applies the pose + acks, but the dot STAYS Ghost
+        // (1d.5b.3b — the drained path shares `apply_crossing`, whose autonomous promote is gone).
         let sent = rig.tick(vec![adopted_head(Fence(2))]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
@@ -3329,22 +4096,24 @@ mod tests {
             "the buffered crossing applied on the flip"
         );
         assert!(
-            dot.authority.simulates(),
-            "the drained crossing Promotes the dest Ghost→Owned (the VISIBLE flip on the buffered path)"
-        );
-        assert_eq!(
-            dot.authority,
-            Authority::Owned { fence: Fence(2) },
-            "promoted to the recorded CAS fence on the buffered-drain path"
+            !dot.authority.simulates(),
+            "the drained crossing leaves the dot a Ghost (the promote relocated to on_saga_promote)"
         );
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 1);
         assert!(acked(&sent, TransferId(7)), "the drained crossing is acked");
 
-        // COMPOSED (audit finding 2 + DEFECT-3): a redelivery AFTER the buffered crossing was
-        // drained+journaled AND the dot Promoted to Owned hits the IMMEDIATE path (the dot is now
-        // adopted + simulating, still matched by the WIDENED `crossing_target`) and the journal
-        // dedups it ACROSS the buffer→drain→redeliver boundary — re-ack only, NO second apply, and
-        // crucially NO re-buffer (the buffered count does not move).
+        // The saga Promote then flips it Ghost→Owned (the buffered-drain path also satisfies
+        // pose-before-promote — the crossing journaled on the drain).
+        let _ = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].authority,
+            Authority::Owned { fence: Fence(2) },
+            "the Promote flips Owned on the buffered-drain path"
+        );
+
+        // A redelivery AFTER the drained crossing was journaled hits the IMMEDIATE path (now Owned,
+        // still matched by `crossing_target`) and the journal dedups it across the boundary — re-ack
+        // only, NO second apply, NO re-buffer.
         let buffered_before = rig.world.resource::<StubStats>().crossings_buffered;
         let sent = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
         assert_eq!(

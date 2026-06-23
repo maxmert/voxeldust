@@ -304,6 +304,9 @@ fn run_to_quiescence(
                             subject: ctx.subject,
                             new_fence,
                             step_id: PROMOTE_STEP,
+                            // The dest registers this SOURCE as a ghost-neighbor + drives the
+                            // GhostFlow collider feed to it after promoting (1d.5b.3b).
+                            source: ctx.source,
                         }),
                     );
                 }
@@ -621,6 +624,7 @@ mod tests {
                     subject: subject(),
                     new_fence,
                     step_id: vd_wire::intershard::PROMOTE_STEP,
+                    source: SOURCE,
                 },
             ))
             .expect("encode")

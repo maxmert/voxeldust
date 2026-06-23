@@ -22,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::{RealmId, StampedPose};
-use vd_core::{EntityId, EpochId, Fence, TickId, TransferId};
+use vd_core::{EntityId, EpochId, Fence, NodeId, TickId, TransferId};
 
 use crate::seams::directory::{DirectoryKey, DirectoryOp, DirectoryReply};
 use crate::seams::transfer_control::{TransferControl, TransferControlAck};
@@ -228,19 +228,23 @@ pub struct DemoteCmd {
     pub step_id: u32,
 }
 
-/// Orchestrator → DEST shard ORDERED-promote command (Slice 1d.5b). The dest holds the subject
-/// `Owned` at `new_fence` and acks `PromoteAck`. Reachable in the saga ONLY after `DemoteAck`
-/// (demote-before-promote). `step_id` is always [`PROMOTE_STEP`]. ⚠️ In 1d.5b.1 the dest consumer
-/// is a fence-idempotent CONFIRMER (journals `PROMOTE_STEP` + acks) — the real `Ghost→Owned` flip
-/// stays in the dest's autonomous adopt-promote (`apply_crossing`), RETAINED so the dest's
-/// first-Owned moment is not delayed by this round-trip; the flip RELOCATES into the consumer in
-/// 1d.5b.3, co-landed with the source-Ghost collider feed that keeps the later promote seamless.
+/// Orchestrator → DEST shard ORDERED-promote command (Slice 1d.5b). Reachable in the saga ONLY
+/// after `DemoteAck` (demote-before-promote). `step_id` is always [`PROMOTE_STEP`]. In 1d.5b.3 this
+/// is the REAL `Ghost→Owned` promoter (the flip RELOCATED here out of the dest's autonomous
+/// adopt-promote, so the ordering is strict — the dest becomes Owned only on this command, after the
+/// source has demoted). `source` is the transfer SOURCE node (where the demoted dot retains its
+/// kinematic ghost): the dest, on promoting, registers `source` as a ghost-neighbor and DRIVES the
+/// `GhostFlow` collider feed to it (owner → ghost-host, per `GhostFlow`'s Spawn/Delta/Despawn) so the
+/// retained source ghost stays a live collider + the render stays seamless across the handoff. The
+/// dest acks `PromoteAck`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromoteCmd {
     pub transfer: TransferId,
     pub subject: DirectoryKey,
     pub new_fence: Fence,
     pub step_id: u32,
+    /// The transfer SOURCE node — the ghost-host the dest feeds via `GhostFlow` after promoting.
+    pub source: NodeId,
 }
 
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
@@ -611,6 +615,7 @@ mod tests {
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             new_fence: Fence(6),
             step_id: PROMOTE_STEP,
+            source: NodeId(2),
         });
         assert_eq!(
             promote.effect_class(),
@@ -683,6 +688,7 @@ mod tests {
                 subject: crate::seams::directory::DirectoryKey::Entity(eid(EntityKind::Player)),
                 new_fence: Fence(6),
                 step_id: PROMOTE_STEP,
+                source: NodeId(2),
             }),
         ] {
             let bytes = postcard::to_allocvec(&flow).expect("encode");

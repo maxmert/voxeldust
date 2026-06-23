@@ -398,9 +398,12 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 A::EmitCrossing { fence: new_fence },
             ],
         ),
-        // The dest's standing delivery watermark can fire while the source demote is still in
-        // flight (the dest is already delivering from its autonomous adopt-promote): LATCH it here
-        // so the `Promoting` release gate never loses it. Monotone (idempotent re-arrival).
+        // Latch an early `DestDelivered` so the `Promoting` release gate never loses it. Monotone
+        // (idempotent re-arrival). ⚠️ PRODUCTION-DEAD since 1d.5b.3b: with the dest sub announced
+        // only at PROMOTE (`SubscriptionReady` relocated to `on_saga_promote`, strict ordering), the
+        // dest cannot DELIVER a frame while the saga is still in `Demoting` — `DestDelivered` can
+        // only arrive in `Promoting`+. Kept as a DEFENSIVE/harness arm (the
+        // `an_early_delivery_in_demoting` unit test injects the event directly; HR5 coverage holds).
         (S::Demoting { new_fence, .. }, E::DestDelivered) => (
             S::Demoting {
                 new_fence,
@@ -1288,8 +1291,12 @@ mod tests {
 
     #[test]
     fn an_early_delivery_in_demoting_is_latched_and_carried_into_promoting() {
-        // The standing watermark can fire BEFORE the demote-ack (the dest is already delivering from
-        // its autonomous adopt-promote): Demoting latches it, and DemoteAcked carries it forward so
+        // DEFENSIVE coverage of the latch carry-forward. ⚠️ COUNTERFACTUAL IN PRODUCTION since
+        // 1d.5b.3b: the dest sub is announced only at PROMOTE (strict ordering), so the dest cannot
+        // deliver while still in Demoting — this injects `DestDelivered` directly to keep the
+        // (Demoting, DestDelivered) latch arm covered. The latch + carry-forward stay correct so the
+        // gate is robust if a future reorder ever surfaces an early delivery. Demoting latches it,
+        // and DemoteAcked carries it forward so
         // a single later PromoteAcked completes the gate — no lost-delivery park.
         let c = ctx(false);
         let demoting = SagaState::Demoting {
