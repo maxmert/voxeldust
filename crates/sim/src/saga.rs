@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::RealmId;
 use vd_core::{Fence, NodeId, SessionId, TransferId};
+use vd_wire::intershard::TRANSIENT_BATCH_STEP;
 use vd_wire::seams::directory::DirectoryKey;
 use vd_wire::seams::transfer_control::{PrepareReject, PrepareResult, TransferControl};
 
@@ -144,6 +145,14 @@ pub enum SagaState {
     },
     /// The directory CAS is in flight — THE commit point.
     CommittingCas { marker_seq: u64, drained_seq: u64 },
+    /// TRANSIENT (D-7) SHORT-PATH commit: the batched `TransientGo` go-token is in flight (HR2 — the
+    /// SAME commit point + `CasWon` feedback as the durable CAS, fanned out by `commit_action`).
+    /// Entered DIRECTLY by `start` for a Transient subject (skipping Prepare/Cut/Freeze — a
+    /// session-less batch has no client cut, no per-subject pose flush). `CasWon` ends it at `Done`
+    /// with NO Swapping/Demoting/Promoting: the source→dest set hand-off is the shard↔shard
+    /// adopt-before-drop choreography (the runtime's `BatchAdopted`→`TransientDrop`), not an FSM tail.
+    /// `step_id` is the batch's `(transfer, step)` idempotency phase ([`TRANSIENT_BATCH_STEP`]).
+    BatchCommitting { step_id: u32 },
     /// CAS won: the gateway route swap (`CommitAuthority`) is in flight.
     Swapping { new_fence: Fence },
     /// Authority flipped; the saga has pushed the ORDERED `Demote` to the source — the
@@ -321,20 +330,37 @@ fn commit_action(ctx: &SagaCtx) -> SagaAction {
     }
 }
 
-/// The initial state + actions for a freshly created saga.
+/// The initial state + actions for a freshly created saga. HR2 fan-out at the FIRST of the two
+/// structural class branches (the other is `commit_action`): a `Transient` batch takes the SHORT
+/// PATH straight to the commit point; a `Durable` subject takes the full per-entity walk.
 #[must_use]
 pub fn start(ctx: &SagaCtx) -> (SagaState, Vec<SagaAction>) {
-    if ctx.needs_provision {
-        (SagaState::AwaitProvision, vec![])
-    } else {
-        (
-            SagaState::Preparing,
-            vec![SagaAction::Send(TransferControl::PrepareSubscribe {
-                transfer: ctx.transfer,
-                session: ctx.session,
-                dest: ctx.dest,
-            })],
-        )
+    match ctx.class {
+        // TRANSIENT (D-7): the SHORT FSM PATH. A session-less debris batch CANNOT traverse the
+        // durable session walk (no client `CUT_MARKER`, no per-subject pose flush, no ordered
+        // demote/promote — blocker B), so it commits straight at the batched go-token and is `Done`.
+        // `needs_provision` is durable-warp only; a transient batch crosses between live realms.
+        DurabilityClass::Transient => (
+            SagaState::BatchCommitting {
+                step_id: TRANSIENT_BATCH_STEP,
+            },
+            vec![commit_action(ctx)],
+        ),
+        // DURABLE: the full per-entity walk (warp class awaits destination provisioning first).
+        DurabilityClass::Durable => {
+            if ctx.needs_provision {
+                (SagaState::AwaitProvision, vec![])
+            } else {
+                (
+                    SagaState::Preparing,
+                    vec![SagaAction::Send(TransferControl::PrepareSubscribe {
+                        transfer: ctx.transfer,
+                        session: ctx.session,
+                        dest: ctx.dest,
+                    })],
+                )
+            }
+        }
     }
 }
 
@@ -448,6 +474,19 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         // The wrapper must re-read the directory head and re-deliver CasWon/CasLost
         // (this is why Timeout here re-issues, never aborts).
         (S::CommittingCas { .. }, E::Timeout) => (state, vec![commit_action(ctx)]),
+
+        // ---- transient batch commit (D-7): the SHORT FSM PATH commit point ------------------
+        // The batched go-token committed (HR2 — the SAME `CasWon` feedback as the durable CAS): the
+        // saga is DONE. There is NO route swap / demote / promote — the source→dest set hand-off is
+        // the shard↔shard adopt-before-drop choreography (the runtime's `BatchAdopted`→`TransientDrop`),
+        // never an FSM tail. The go-token's commit fence rides `new_fence` (the dest realm-lease fence).
+        (S::BatchCommitting { .. }, E::CasWon { new_fence }) => {
+            (S::Done { new_fence }, vec![A::Tombstone])
+        }
+        // A go-token in flight re-drives idempotently on Timeout (the ledger write is keyed by
+        // `(transfer, step)` — a re-record is a no-op), NEVER an abort — the transient twin of the
+        // CommittingCas re-issue (forward-only at the commit point). ✅ Slice-2a producer drives it.
+        (S::BatchCommitting { .. }, E::Timeout) => (state, vec![commit_action(ctx)]),
 
         // ---- post-commit: forward-only -------------------------------------------------
         // The route swapped: push the ORDERED `Demote` to the source (the fence-enforced
@@ -822,20 +861,40 @@ mod tests {
     }
 
     #[test]
-    fn transient_commit_issues_the_batched_go_token() {
-        // HR2 fan-out on ONE FSM: a Transient subject reaches the same commit point
-        // but issues the batched TransientGo go-token, not a per-entity CAS.
+    fn transient_takes_the_short_path_to_the_batched_go_token() {
+        // HR2 fan-out at `start` (D-7, the FIRST class branch): a Transient subject SKIPS
+        // Prepare/Cut/Freeze and enters BatchCommitting DIRECTLY, issuing the batched TransientGo
+        // go-token (NOT a per-entity CAS, NOT the session walk). CasWon ends it at Done with a single
+        // Tombstone — no Swapping/Demote/Promote tail (the set hand-off is the shard↔shard
+        // adopt-before-drop choreography, not the FSM's job).
         let c = ctx_class(false, DurabilityClass::Transient);
-        let (_state, actions) = drive_from_freeze(&c);
-        assert!(
-            actions.contains(&SagaAction::IssueTransientGo { expected: Fence(5) }),
-            "Transient commits via the batched go-token: {actions:?}"
+        let (state, actions) = start(&c);
+        assert_eq!(
+            state,
+            SagaState::BatchCommitting {
+                step_id: TRANSIENT_BATCH_STEP
+            },
+            "a Transient subject enters the short path directly from start"
         );
-        assert!(
-            !actions
-                .iter()
-                .any(|a| matches!(a, SagaAction::IssueCommitCas { .. })),
-            "no per-entity CAS for a Transient subject"
+        assert_eq!(
+            actions,
+            vec![SagaAction::IssueTransientGo { expected: Fence(5) }],
+            "the short path issues the batched go-token immediately (no PrepareSubscribe)"
+        );
+
+        // CasWon (the go-token committed) → Done + a single Tombstone, NO route-swap tail.
+        let new_fence = Fence(5).next();
+        let (done, actions) = step(&c, state, SagaEvent::CasWon { new_fence });
+        assert_eq!(done, SagaState::Done { new_fence });
+        assert_eq!(actions, vec![SagaAction::Tombstone]);
+
+        // A go-token Timeout re-drives the SAME go-token idempotently (forward-only, never aborts) —
+        // the transient twin of the CommittingCas re-issue.
+        let (held, actions) = step(&c, state, SagaEvent::Timeout);
+        assert_eq!(held, state);
+        assert_eq!(
+            actions,
+            vec![SagaAction::IssueTransientGo { expected: Fence(5) }]
         );
     }
 
@@ -1673,9 +1732,15 @@ mod tests {
         #[test]
         fn no_sequence_panics_and_frozen_sources_are_never_stranded(
             provision in proptest::bool::ANY,
+            class in prop_oneof![
+                Just(DurabilityClass::Durable),
+                Just(DurabilityClass::Transient),
+            ],
             events in proptest::collection::vec(arb_event(), 0..64),
         ) {
-            let c = ctx(provision);
+            // Both classes (D-7): the Durable walk AND the Transient short path are total + keep the
+            // compensation invariant (a Transient never freezes, so the invariant holds vacuously).
+            let c = ctx_class(provision, class);
             let (mut state, mut actions) = start(&c);
             for e in events {
                 let (next, acts) = step(&c, state, e);
@@ -1697,14 +1762,22 @@ mod tests {
         /// Terminality: feeding the machine its own expected progression events
         /// (whatever state it is in) always reaches Done or Aborted in bounded steps.
         #[test]
-        fn driving_with_matching_events_terminates(provision in proptest::bool::ANY) {
-            let c = ctx(provision);
+        fn driving_with_matching_events_terminates(
+            provision in proptest::bool::ANY,
+            class in prop_oneof![
+                Just(DurabilityClass::Durable),
+                Just(DurabilityClass::Transient),
+            ],
+        ) {
+            let c = ctx_class(provision, class);
             let (mut state, _) = start(&c);
             for _ in 0..16 {
                 let event = match state {
                     SagaState::AwaitProvision => SagaEvent::ProvisionReady,
                     SagaState::Preparing => SagaEvent::Prepared(PrepareResult::Ready),
                     SagaState::Cutting => SagaEvent::CutConfirmed { marker_seq: 1 },
+                    // The transient short path: CasWon ends BatchCommitting at Done (no route tail).
+                    SagaState::BatchCommitting { .. } => SagaEvent::CasWon { new_fence: Fence(9) },
                     // The pose-before-promote gate needs BOTH conditions: feed the flush first
                     // (stays Freezing), then the freeze advances to the commit.
                     SagaState::Freezing { flushed: false, .. } => {

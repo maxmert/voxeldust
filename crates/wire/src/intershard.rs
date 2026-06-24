@@ -46,6 +46,18 @@ pub const STUB_CROSSING_STEP: u32 = 8;
 pub const DEMOTE_STEP: u32 = 9;
 /// See [`FLUSH_SOURCE_STEP`] — the saga-pushed ordered-promote (1d.5b).
 pub const PROMOTE_STEP: u32 = 10;
+/// The TRANSIENT-class batch handover phases (D-7a), disjoint from the durable steps above and the
+/// 0–6 route-swap phases (so a transient step can never alias a durable step in any `(transfer,
+/// step)` journal). A whole batch shares ONE `(transfer, step)` key (the batch's `transfer` is its
+/// `BatchId`), so the go-token is amortized to one per batch (G-TIER), never per item.
+/// - [`TRANSIENT_BATCH_STEP`] (11): the SOURCE→dest `TransientBatch` envelope, its dest→orch
+///   `TransferAck::BatchAdopted` reply, AND the orchestrator's batched `TransientGo` go-token
+///   (request + ack + commit share a phase, like FreezeSource/SourceFrozen).
+/// - [`TRANSIENT_DROP_STEP`] (12): the orchestrator→source+dest `TransientDrop` (the adopt-before-drop
+///   second phase: the source drops the Held items, the dest flips Arriving→Held).
+pub const TRANSIENT_BATCH_STEP: u32 = 11;
+/// See [`TRANSIENT_BATCH_STEP`] — the adopt-before-drop completion (D-7a).
+pub const TRANSIENT_DROP_STEP: u32 = 12;
 
 /// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
 /// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
@@ -98,6 +110,14 @@ pub enum InterShardFlow {
     /// `DemoteAck` (demote-before-promote) — REPLACES the 1c.8 autonomous adopt-flip. Side-effecting,
     /// ack-driven by `(transfer, PROMOTE_STEP)`.
     Promote(PromoteCmd),
+    /// Orchestrator → SOURCE + DEST shards: the TRANSIENT adopt-before-drop COMPLETION (D-7a) — the
+    /// batched-transient twin of the durable ordered `Demote`/`Promote`. Emitted only AFTER the dest
+    /// acked `BatchAdopted` (the dest already holds the items as the uncounted `Arriving` tier), so it
+    /// is the destructive hand-off: the SOURCE drops the batch's `Held` items, the DEST flips
+    /// `Arriving→Held`. ONE message broadcast to both, handled by-local-status (idempotent: an
+    /// already-dropped source / already-Held dest is a no-op). Side-effecting, ack-driven by
+    /// `(transfer, TRANSIENT_DROP_STEP)`. APPENDED (preserves every existing postcard discriminant).
+    TransientDrop(TransientDrop),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -198,6 +218,15 @@ impl InterShardFlow {
                     step_id: cmd.step_id,
                 },
             },
+            // The transient adopt-before-drop completion (D-7a): side-effecting authority moves at
+            // the source/dest, journaled by `(transfer, TRANSIENT_DROP_STEP)` (idempotent by local
+            // held-status — the batched twin of the demote/promote idempotency).
+            InterShardFlow::TransientDrop(drop) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: drop.transfer,
+                    step_id: drop.step_id,
+                },
+            },
         }
     }
 }
@@ -245,6 +274,20 @@ pub struct PromoteCmd {
     pub step_id: u32,
     /// The transfer SOURCE node — the ghost-host the dest feeds via `GhostFlow` after promoting.
     pub source: NodeId,
+}
+
+/// Orchestrator → SOURCE + DEST shards TRANSIENT adopt-before-drop completion command (D-7a). The
+/// SOURCE drops the batch's `Held` items (counted in `transients_dropped` only when nothing held them
+/// — the happy drop is a clean hand-off, not a loss); the DEST flips its `Arriving` items for this
+/// batch to `Held`. `transfer` IS the `BatchId` (one saga per batch). `step_id` is always
+/// [`TRANSIENT_DROP_STEP`] (carried, not inline — `effect_class` keys idempotency uniformly). `fence`
+/// is the batch's commit fence (the dest realm-lease fence the go-token committed at): the dest anchors
+/// the promoted item to it; a receiver rejects a stale drop (fence rule 1). Idempotent at both ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransientDrop {
+    pub transfer: TransferId,
+    pub step_id: u32,
+    pub fence: Fence,
 }
 
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
@@ -373,6 +416,14 @@ pub enum TransferAck {
         step_id: u32,
         reason: TransferStepRejectReason,
     },
+    /// DEST → orch (phase [`TRANSIENT_BATCH_STEP`], D-7a): the dest ADOPTED a `TransientBatch` into
+    /// its `Arriving` (uncounted) tier and journaled the step. This is the transient twin of the
+    /// durable `DemoteAck` — it GATES the orchestrator's `TransientDrop` (adopt-before-drop), so the
+    /// source never drops until the dest holds the items. `transfer_id` IS the `BatchId`.
+    BatchAdopted {
+        transfer_id: TransferId,
+        step_id: u32,
+    },
 }
 
 impl TransferAck {
@@ -382,7 +433,8 @@ impl TransferAck {
         match self {
             TransferAck::SourceFlushed { transfer_id, .. }
             | TransferAck::Accepted { transfer_id, .. }
-            | TransferAck::Rejected { transfer_id, .. } => *transfer_id,
+            | TransferAck::Rejected { transfer_id, .. }
+            | TransferAck::BatchAdopted { transfer_id, .. } => *transfer_id,
         }
     }
 
@@ -392,7 +444,8 @@ impl TransferAck {
         match self {
             TransferAck::SourceFlushed { step_id, .. }
             | TransferAck::Accepted { step_id, .. }
-            | TransferAck::Rejected { step_id, .. } => *step_id,
+            | TransferAck::Rejected { step_id, .. }
+            | TransferAck::BatchAdopted { step_id, .. } => *step_id,
         }
     }
 }
@@ -635,6 +688,36 @@ mod tests {
                 }
             }
         );
+        // D-7a: the transient batch ack + the adopt-before-drop completion are side-effecting at
+        // their transient phases (11 batch+ack+go-token; 12 drop) — keyed by (transfer, step) like
+        // every other authority-moving arm (the batched twin of demote/promote idempotency).
+        let adopted = InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+            transfer_id: TransferId(11),
+            step_id: TRANSIENT_BATCH_STEP,
+        });
+        assert_eq!(
+            adopted.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: TRANSIENT_BATCH_STEP,
+                }
+            }
+        );
+        let drop = InterShardFlow::TransientDrop(TransientDrop {
+            transfer: TransferId(11),
+            step_id: TRANSIENT_DROP_STEP,
+            fence: Fence(6),
+        });
+        assert_eq!(
+            drop.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: TRANSIENT_DROP_STEP,
+                }
+            }
+        );
     }
 
     /// The entity-STATE step ids are DISJOINT from the 0–6 route-swap phases — so a state step can
@@ -649,6 +732,8 @@ mod tests {
             STUB_CROSSING_STEP,
             DEMOTE_STEP,
             PROMOTE_STEP,
+            TRANSIENT_BATCH_STEP,
+            TRANSIENT_DROP_STEP,
         ];
         for phase in 0u32..=6 {
             assert!(
@@ -773,6 +858,10 @@ mod tests {
                 step_id: STUB_CROSSING_STEP,
                 reason: TransferStepRejectReason::SpatialPrecondition,
             },
+            TransferAck::BatchAdopted {
+                transfer_id: TransferId(1),
+                step_id: TRANSIENT_BATCH_STEP,
+            },
         ] {
             // The accessors agree with the constructed key, over every arm.
             let bytes = postcard::to_allocvec(&ack).expect("encode");
@@ -802,6 +891,17 @@ mod tests {
                 step_id: FLUSH_SOURCE_STEP,
                 pose: pose(),
                 drained_seq: 42,
+            }),
+            // D-7a: the transient batch ack + the adopt-before-drop completion roundtrip distinctly
+            // (the dispatch split depends on the tag discriminating them from the durable arms).
+            InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                transfer_id: TransferId(1),
+                step_id: TRANSIENT_BATCH_STEP,
+            }),
+            InterShardFlow::TransientDrop(TransientDrop {
+                transfer: TransferId(1),
+                step_id: TRANSIENT_DROP_STEP,
+                fence: Fence(6),
             }),
         ] {
             let bytes = postcard::to_allocvec(&flow).expect("encode");

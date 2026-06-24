@@ -33,5 +33,6 @@ pub use glam;
 
 pub use fence::Fence;
 pub use ids::{
-    AccountId, EntityId, EpochId, MsgId, NodeId, SessionId, TickId, TransferId, UniverseTick,
+    AccountId, BatchId, EntityId, EpochId, MsgId, NodeId, SessionId, TickId, TransferId,
+    UniverseTick,
 };

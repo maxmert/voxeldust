@@ -56,6 +56,16 @@ pub struct InspectReport {
     /// window (source still `Owned` while the directory records the dest) ONLY for a listed subject of
     /// the matching (source→dest) shape — so the per-tick gate never masks a real split-brain.
     pub active_transfers: Vec<vd_node::saga_runtime::ActiveTransfer>,
+    /// TRANSIENTS this shard holds AUTHORITATIVELY (D-7), with the realm-lease fence each is anchored
+    /// to — the `is_held()` subset of `OwnedTransients` (the uncounted `Arriving` mid-flight tier is
+    /// EXCLUDED, the transient twin of `ghost_dots` exclusion). The `TRANSIENT-AUTHORITY-HELD` oracle
+    /// ground truth: every live transient in exactly ONE shard's set, anchored at that shard's realm
+    /// fence, backed by a committed go-token (`batch_goes`). NEVER a directory `OwnerRecord`.
+    pub owned_transients: Vec<(EntityId, Fence)>,
+    /// Committed batched-transient go-tokens (D-7) — ORCHESTRATOR-ONLY (from `SagaRuntimeRes`); empty
+    /// on shards/clients. `(BatchId, commit_fence)`; the `TRANSIENT-AUTHORITY-HELD` oracle cross-checks
+    /// each held transient's anchor against a go-token here (a transient has no directory row to check).
+    pub batch_goes: Vec<(vd_core::BatchId, Fence)>,
     /// Inputs this node APPLIED, in order (shards fill this).
     pub applied_inputs: Vec<(SessionId, u64)>,
     /// Inputs this node DISCARDED, with the typed reason (shards fill this).
@@ -115,8 +125,10 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         report.directory = dir.0.entries().map(|(k, r)| (*k, *r)).collect();
     }
     if let Some(rt) = world.get_resource::<vd_node::saga_runtime::SagaRuntimeRes>() {
-        // Orchestrator-only: the live-saga set the mid-flight AUTHORITY-UNIQUE oracle excuses against.
+        // Orchestrator-only: the live-saga set the mid-flight AUTHORITY-UNIQUE oracle excuses against,
+        // and the committed go-token ledger the TRANSIENT-AUTHORITY-HELD oracle cross-checks (D-7).
         report.active_transfers = rt.active_transfers();
+        report.batch_goes = rt.batch_goes();
     }
     if let Some(dots) = world.get_resource::<vd_sim::stub::Dots>() {
         // A dot is HELD only while it SIMULATES (`Authority::Owned`, 1d.4b): a Ghost (a retained
@@ -154,6 +166,17 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .values()
             .filter(|d| !d.authority.simulates())
             .map(|d| d.entity)
+            .collect();
+    }
+    if let Some(owned) = world.get_resource::<vd_sim::stub::OwnedTransients>() {
+        // D-7: the held-set-anchored transients. Only the `is_held()` subset is authoritative — the
+        // uncounted mid-flight `Arriving` tier is EXCLUDED (the transient twin of the ghost exclusion
+        // above) so a mid-flight adopt can never false-trip TRANSIENT-AUTHORITY-HELD (DoubleHeld).
+        report.owned_transients = owned
+            .0
+            .iter()
+            .filter(|(_, t)| t.status.is_held())
+            .map(|(entity, t)| (*entity, t.anchor_fence))
             .collect();
     }
     if let (Some(config), Some(authority)) = (
@@ -970,6 +993,54 @@ mod tests {
                 .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
                 .is_some(),
             "the stub node downcasts to its concrete ShardNode",
+        );
+
+        // D-7: a HELD transient appears in `owned_transients` (the `is_held` filter + the map
+        // closure); an `Arriving` one does NOT (the uncounted mid-flight tier — the transient twin of
+        // the ghost-dot exclusion). Seed both on the shard, then inspect.
+        let debris = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Debris, 1, 1, 0);
+        let arriving = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Debris, 1, 2, 0);
+        {
+            let concrete = topo
+                .node_mut(B)
+                .expect("shard present")
+                .as_any_mut()
+                .expect("downcast")
+                .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
+                .expect("ShardNode");
+            let pose = vd_core::pose::StampedPose::at_rest(
+                vd_core::pose::FrameRef::SystemSpace { system_seed: 5 },
+                vd_core::glam::DVec3::ZERO,
+                vd_core::UniverseTick(1),
+            );
+            let owned = &mut concrete
+                .world_mut()
+                .resource_mut::<vd_sim::stub::OwnedTransients>()
+                .0;
+            owned.insert(
+                debris,
+                vd_sim::stub::Transient {
+                    pose,
+                    anchor_fence: vd_core::Fence(7),
+                    status: vd_sim::stub::TransientStatus::Held { outbound: None },
+                },
+            );
+            owned.insert(
+                arriving,
+                vd_sim::stub::Transient {
+                    pose,
+                    anchor_fence: vd_core::Fence(7),
+                    status: vd_sim::stub::TransientStatus::Arriving {
+                        batch: vd_core::TransferId(1),
+                    },
+                },
+            );
+        }
+        let reports = topo.inspect_all();
+        assert_eq!(
+            reports[1].1.owned_transients,
+            vec![(debris, vd_core::Fence(7))],
+            "only the HELD transient is reported (Arriving is the uncounted mid-flight tier)"
         );
     }
 

@@ -9,6 +9,12 @@
 //! Feature code dispatches by capability accessor; `match`ing on a shard-kind
 //! discriminant in feature code is forbidden (G-NO-SHARD-FORK). Geometry differences
 //! are confined to `FrameSpace` impls selected by `voxel().geometry` (P4/P5).
+//!
+//! KNOWN LIMIT (DEFERRED [[D-38]]): this is HR4's STRUCTURAL half only. The literal
+//! G-IDENTICAL gate — a NAMED `assert_feature_anywhere` test running ONE identical
+//! feature fixture on a Spherical AND a Cartesian profile (one forcing a `reanchor()`)
+//! — is owed-at-first-feature (P6 block edits), because no capability-bearing feature
+//! code exists yet to diverge. The coherence test below is the foundation, not the gate.
 
 use serde::{Deserialize, Serialize};
 

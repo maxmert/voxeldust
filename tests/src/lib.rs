@@ -249,6 +249,73 @@ pub fn trigger_transfer(topo: &mut Topology, ctx: SagaCtx) {
     });
 }
 
+/// Read a realm's recorded fence from the orchestrator directory (D-7: the transient go-token /
+/// adopt anchor fence is read from the directory, never a hardcoded literal).
+#[must_use]
+pub fn realm_fence(topo: &mut Topology, realm: RealmId) -> Fence {
+    with_orchestrator(topo, |orch| {
+        orch.world_mut()
+            .resource::<DirectoryRes>()
+            .0
+            .head(DirectoryKey::Realm(realm))
+            .expect("realm recorded")
+            .fence
+    })
+}
+
+/// D-7: seed a Debris transient on the SOURCE shard ([`SHARD`]) as a pending Crossing to the DEST
+/// realm — the TEST-driven boundary-heuristic stand-in (the autonomous geometric trigger is P4/P5).
+/// The matching batch saga must be triggered separately via [`trigger_transfer`] with a Transient
+/// ctx carrying the SAME `batch` id. `anchor` is the source's realm-lease fence; `dst_realm_fence`
+/// the dest's (both via [`realm_fence`]).
+pub fn seed_transient_crossing(
+    topo: &mut Topology,
+    entity: EntityId,
+    batch: TransferId,
+    anchor: Fence,
+    dst_realm_fence: Fence,
+) {
+    with_node(topo, SHARD, |s| {
+        let pose = vd_core::pose::StampedPose::at_rest(
+            stub_config().frame,
+            vd_core::glam::DVec3::new(4.0, 5.0, 6.0),
+            vd_core::UniverseTick(1),
+        );
+        s.world_mut()
+            .resource_mut::<vd_sim::stub::OwnedTransients>()
+            .0
+            .insert(
+                entity,
+                vd_sim::stub::Transient {
+                    pose,
+                    anchor_fence: anchor,
+                    status: vd_sim::stub::TransientStatus::Crossing {
+                        dest: DEST,
+                        to_realm: dest_stub_config().realm,
+                        dst_realm_fence,
+                        batch,
+                    },
+                },
+            );
+    });
+}
+
+/// Total transients DROPPED as a LOSS (self-fence, no hand-off) across the source + dest shards
+/// (D-7) — 0 on the happy path (a clean adopt-before-drop hand-off is NOT a loss).
+#[must_use]
+pub fn transient_dropped_total(topo: &mut Topology) -> u64 {
+    [SHARD, DEST]
+        .into_iter()
+        .map(|n| {
+            with_node(topo, n, |s| {
+                s.world_mut()
+                    .resource::<vd_sim::stub::StubStats>()
+                    .transients_dropped
+            })
+        })
+        .sum()
+}
+
 /// The `Debug` state strings of every live saga on the orchestrator (the admin `views()`
 /// surface) — the deterministic phase observable the cut-window choreography polls on.
 #[must_use]

@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
-use vd_core::entity_kind::EntityKind;
+use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::geometry::OverlapBand;
 use vd_core::glam::DVec3;
 use vd_core::kinematics;
@@ -28,7 +28,8 @@ use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId}
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
     DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd,
-    STUB_CROSSING_STEP, TransferAck, TransferEnvelope, TransitionPayload,
+    STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_BATCH_STEP, TRANSIENT_DROP_STEP,
+    TransferAck, TransferEnvelope, TransientDrop, TransientItem, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -186,6 +187,66 @@ pub struct GhostFeedState {
 /// pure bookkeeping beside it (no second pose/authority store). One entry per hosted ghost.
 #[derive(Resource, Debug, Default)]
 pub struct SourceGhostMirror(pub BTreeMap<EntityId, GhostFeedState>);
+
+/// One TRANSIENT (debris/projectile) this shard tracks (D-7). Pose-only for D-7a — the ballistic
+/// `(pose0, v0)` blob that lets the dest re-advance closed-form is D-7b (`TransientItem.state`). The
+/// `Held` subset (Arriving EXCLUDED) is the authoritative ground truth; a transient is NEVER a
+/// directory `OwnerRecord` (a 1000-debris burst writes ZERO directory rows — burst isolation, HR2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transient {
+    pub pose: StampedPose,
+    /// The realm-lease fence the set is anchored to (set at adopt = the dest realm fence). The
+    /// `TRANSIENT-AUTHORITY-HELD` oracle cross-checks this against the shard's realm fence + a
+    /// committed go-token.
+    pub anchor_fence: Fence,
+    pub status: TransientStatus,
+}
+
+/// A transient's lifecycle tier (D-7) — the Held-vs-Arriving split is the transient twin of the
+/// durable Owned-vs-Ghost split that makes adopt-before-drop free of a double-held tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransientStatus {
+    /// AUTHORITATIVELY held by this shard (COUNTED + rendered). `outbound` is `None` for a settled
+    /// transient; it is set to the batch id once the item has been EMITTED in a crossing batch — the
+    /// item stays authoritative (adopt-before-drop) until the orchestrator's `TransientDrop` for that
+    /// batch drops it.
+    Held { outbound: Option<TransferId> },
+    /// A SOURCE-side pending crossing (the TEST-seeded boundary-heuristic stand-in — the autonomous
+    /// geometric trigger is P4/P5): `emit_transient_batch` drains it into ONE `TransientBatch`
+    /// envelope to `dest` and transitions the item to `Held{outbound: Some(batch)}`. The item is
+    /// still COUNTED here (it has not left yet).
+    Crossing {
+        dest: NodeId,
+        to_realm: RealmId,
+        dst_realm_fence: Fence,
+        batch: TransferId,
+    },
+    /// A mid-flight adopted copy at the DEST (UNCOUNTED — the Ghost analogue: excluded from the
+    /// conservation count AND from rendering), tagged with its batch. Flips to `Held{outbound: None}`
+    /// on the batch's `TransientDrop` (the transient twin of the ordered Ghost→Owned promote).
+    Arriving { batch: TransferId },
+}
+
+impl TransientStatus {
+    /// Is this transient AUTHORITATIVELY held by its shard (COUNTED for conservation + render)? Both
+    /// `Held` and the pre-emit `Crossing` count (the source still owns a crossing item until the
+    /// drop); `Arriving` does NOT (the uncounted mid-flight tier — the Ghost analogue). Monomorphic
+    /// predicate — the SINGLE answer to "does this shard hold this transient", mirroring
+    /// `Authority::simulates` for durable dots.
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        match self {
+            TransientStatus::Held { .. } | TransientStatus::Crossing { .. } => true,
+            TransientStatus::Arriving { .. } => false,
+        }
+    }
+}
+
+/// The transients this shard tracks, by entity id (D-7). The `is_held()` subset is the
+/// `TRANSIENT-AUTHORITY-HELD` oracle ground truth — anchored to the realm-lease fence, never the
+/// directory. Sits beside `Dots`/`GhostColliderRegistration` (a sibling held-set, not a fork).
+#[derive(Resource, Debug, Default)]
+pub struct OwnedTransients(pub BTreeMap<EntityId, Transient>);
 
 /// Entity minting state: a per-shard monotonic sequence + seed-derived entropy.
 #[derive(Resource, Debug)]
@@ -384,6 +445,28 @@ pub struct StubStats {
     /// DEST feed pass skipped a registration whose entity is NOT currently owned here (no dot, or a
     /// non-`simulates()` dot) — a counted no-op (only an Owned dot's live pose is fed). 0 steady-state.
     pub ghost_feed_skipped: u64,
+    /// SOURCE: `TransientBatch` envelopes EMITTED (D-7) — one per (dest realm, tick) batch regardless
+    /// of item count (G-TIER). The headline transient-egress counter.
+    pub transients_emitted: u64,
+    /// DEST: transient items ADOPTED as `Arriving` on the FIRST delivery of a `TransientBatch` (the
+    /// uncounted mid-flight tier). The headline transient-adopt counter.
+    pub transients_adopted: u64,
+    /// DEST: `TransientBatch` REDELIVERIES (already-journaled `(transfer, TRANSIENT_BATCH_STEP)`) — a
+    /// counted re-ack-only no-op (at-least-once). 0 in a healthy single-delivery run.
+    pub transients_adopt_redelivered: u64,
+    /// DEST: `Arriving→Held` promotions on a `TransientDrop` (the transient twin of Ghost→Owned). The
+    /// headline transient-promote counter.
+    pub transients_promoted: u64,
+    /// SOURCE: `Held` items HANDED OFF (dropped) on a clean `TransientDrop` for their batch — the
+    /// happy-path hand-off (NOT a loss). The source half of the adopt-before-drop completion.
+    pub transients_handed_off: u64,
+    /// `TransientDrop` REDELIVERIES (already-journaled `(transfer, TRANSIENT_DROP_STEP)`) — a counted
+    /// idempotent no-op (at-least-once). 0 in a healthy single-delivery run.
+    pub transient_drop_noop: u64,
+    /// LOSS: transients DROPPED because this shard self-fenced its realm lease (a crash/eviction with
+    /// NO hand-off — the items were anchored to the now-lost lease). The declared-loss counter
+    /// (D-7b's `LossBudget` gate reads it); 0 on the happy path (the realm is never lost).
+    pub transients_dropped: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -480,13 +563,18 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(PendingCrossings::default());
     world.insert_resource(GhostColliderRegistration::default());
     world.insert_resource(SourceGhostMirror::default());
+    world.insert_resource(OwnedTransients::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
+    // `emit_transient_batch` (D-7) runs AFTER `process_inbound` (a `TransientDrop` received this tick
+    // settles the set first) and is independent of the ghost/frame egress — it ships the source's
+    // pending transient crossings as ONE batch per dest realm.
     schedule.add_systems(
         (
             request_pending_grants,
             process_inbound,
+            emit_transient_batch,
             feed_source_ghosts,
             emit_frames,
         )
@@ -602,6 +690,7 @@ fn process_inbound(
     mut pending: ResMut<PendingCrossings>,
     mut registration: ResMut<GhostColliderRegistration>,
     mut mirror: ResMut<SourceGhostMirror>,
+    mut owned_transients: ResMut<OwnedTransients>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     for msg in &inbox.0 {
@@ -639,6 +728,7 @@ fn process_inbound(
                 &mut applied,
                 &mut pending,
                 &mut registration,
+                &mut owned_transients,
                 &mut stats,
                 &mut outbox,
             ),
@@ -1484,12 +1574,33 @@ fn on_transfer_envelope(
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     pending: &mut PendingCrossings,
+    owned: &mut OwnedTransients,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
     let (entity, pose) = match env.payload {
         TransitionPayload::StubCrossing { entity, pose, .. } => (entity, pose),
-        TransitionPayload::InitialSpawn { .. } | TransitionPayload::TransientBatch { .. } => {
+        // D-7: the DEST adopts a transient batch into its uncounted `Arriving` tier + acks
+        // `BatchAdopted` (the gate that lets the orchestrator emit the adopt-before-drop
+        // `TransientDrop`). Handled fully here — never the durable StubCrossing dot machinery.
+        TransitionPayload::TransientBatch {
+            dst_realm_fence,
+            items,
+            ..
+        } => {
+            adopt_transient_batch(
+                env.transfer_id,
+                dst_realm_fence,
+                items,
+                config.orchestrator,
+                owned,
+                applied,
+                stats,
+                outbox,
+            );
+            return;
+        }
+        TransitionPayload::InitialSpawn { .. } => {
             stats.crossings_unhandled += 1;
             return;
         }
@@ -1638,6 +1749,179 @@ fn drain_pending_crossing(
     );
 }
 
+/// SOURCE system (D-7): drain the pending transient crossings (`TransientStatus::Crossing`, the
+/// TEST-seeded boundary-heuristic stand-in — the autonomous geometric trigger is P4/P5) into ONE
+/// `TransientBatch` envelope per dest realm (G-TIER: one envelope per batch, never per item), and
+/// transition each emitted item to `Held{outbound: Some(batch)}` (still authoritative — the source
+/// holds it until the orchestrator's `TransientDrop`, adopt-before-drop). A shard without its realm
+/// lease ships nothing (the Crossing items were dropped on the self-fence).
+fn emit_transient_batch(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    authority: Res<RealmAuthority>,
+    mut owned: ResMut<OwnedTransients>,
+    mut stats: ResMut<StubStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    let Some(src_realm_fence) = authority.0 else {
+        return;
+    };
+    // One pass: collect each Crossing item into its batch group AND mark it sent in place (no second
+    // fallible lookup — the in-place mutate avoids an uncoverable None arm, HR5).
+    struct Group {
+        dest: NodeId,
+        to_realm: RealmId,
+        dst_realm_fence: Fence,
+        items: Vec<TransientItem>,
+    }
+    let mut batches: BTreeMap<TransferId, Group> = BTreeMap::new();
+    for (entity, t) in owned.0.iter_mut() {
+        if let TransientStatus::Crossing {
+            dest,
+            to_realm,
+            dst_realm_fence,
+            batch,
+        } = t.status
+        {
+            batches
+                .entry(batch)
+                .or_insert(Group {
+                    dest,
+                    to_realm,
+                    dst_realm_fence,
+                    items: Vec::new(),
+                })
+                .items
+                .push(TransientItem {
+                    entity: *entity,
+                    pose: t.pose,
+                    state: Vec::new(),
+                });
+            t.status = TransientStatus::Held {
+                outbound: Some(batch),
+            };
+        }
+    }
+    for (batch, g) in batches {
+        let env = TransferEnvelope {
+            transfer_id: batch,
+            universe_epoch: clock.epoch,
+            schema_version: TRANSFER_SCHEMA_VERSION,
+            fence: g.dst_realm_fence,
+            step_id: TRANSIENT_BATCH_STEP,
+            class: DurabilityClass::Transient,
+            payload: TransitionPayload::TransientBatch {
+                from_realm: config.realm,
+                to_realm: g.to_realm,
+                src_realm_fence,
+                dst_realm_fence: g.dst_realm_fence,
+                source_tick: clock.local_tick,
+                items: g.items,
+            },
+        };
+        outbox.push_flow(g.dest, MsgClass::Saga, &InterShardFlow::Transfer(env));
+        stats.transients_emitted += 1;
+    }
+}
+
+/// DEST adopt of a transient batch (D-7): journal the batch step idempotently; on FIRST delivery,
+/// insert each item into `OwnedTransients` as the uncounted `Arriving` tier (anchored to the batch's
+/// committed realm fence); ALWAYS ack `BatchAdopted` to the orchestrator (at-least-once — the ack
+/// GATES the adopt-before-drop `TransientDrop`, so a lost ack must be re-ackable). A redelivery
+/// re-acks WITHOUT re-adopting (the items are already Arriving/Held).
+#[allow(clippy::too_many_arguments)]
+fn adopt_transient_batch(
+    transfer: TransferId,
+    dst_realm_fence: Fence,
+    items: Vec<TransientItem>,
+    orchestrator: NodeId,
+    owned: &mut OwnedTransients,
+    applied: &mut AppliedSteps,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    match applied.journal_step(transfer, TRANSIENT_BATCH_STEP) {
+        StepOutcome::FirstApply => {
+            let adopted = items.len() as u64;
+            for item in items {
+                owned.0.insert(
+                    item.entity,
+                    Transient {
+                        pose: item.pose,
+                        anchor_fence: dst_realm_fence,
+                        status: TransientStatus::Arriving { batch: transfer },
+                    },
+                );
+            }
+            stats.transients_adopted += adopted;
+        }
+        StepOutcome::AlreadyApplied => stats.transients_adopt_redelivered += 1,
+    }
+    outbox.push_flow(
+        orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+            transfer_id: transfer,
+            step_id: TRANSIENT_BATCH_STEP,
+        }),
+    );
+}
+
+/// SOURCE+DEST adopt-before-drop completion (D-7): journal idempotently; on FIRST delivery, the
+/// SOURCE drops its `Held{outbound: Some(batch)}` items (a clean HAND-OFF, NOT a loss — counted in
+/// `transients_handed_off`) and the DEST flips its `Arriving{batch}` items → `Held{outbound: None}`
+/// (the transient twin of the ordered Ghost→Owned promote). ONE handler, behavior by local status —
+/// idempotent at both ends (a redelivery is a counted no-op). The promoted item re-anchors to the
+/// batch's commit fence (the dest realm fence).
+fn on_transient_drop(
+    drop: TransientDrop,
+    owned: &mut OwnedTransients,
+    applied: &mut AppliedSteps,
+    stats: &mut StubStats,
+) {
+    match applied.journal_step(drop.transfer, TRANSIENT_DROP_STEP) {
+        StepOutcome::FirstApply => {
+            let mut to_remove: Vec<EntityId> = Vec::new();
+            for (entity, t) in owned.0.iter_mut() {
+                match t.status {
+                    // SOURCE: a Held item EMITTED in this batch is handed off (dropped after adopt).
+                    TransientStatus::Held { outbound: Some(b) } => {
+                        if b == drop.transfer {
+                            to_remove.push(*entity);
+                        }
+                    }
+                    // DEST: an Arriving item for this batch is promoted to authoritative Held.
+                    TransientStatus::Arriving { batch } => {
+                        if batch == drop.transfer {
+                            t.status = TransientStatus::Held { outbound: None };
+                            t.anchor_fence = drop.fence;
+                            stats.transients_promoted += 1;
+                        }
+                    }
+                    // A settled Held / an unrelated pending Crossing: untouched by this batch's drop.
+                    TransientStatus::Held { outbound: None } | TransientStatus::Crossing { .. } => {
+                    }
+                }
+            }
+            for entity in to_remove {
+                owned.0.remove(&entity);
+                stats.transients_handed_off += 1;
+            }
+        }
+        StepOutcome::AlreadyApplied => stats.transient_drop_noop += 1,
+    }
+}
+
+/// On a realm SELF-FENCE (the lease was taken over / revoked), DROP every transient this shard
+/// tracked (D-7) — they were anchored to the now-lost lease with NO hand-off: a counted LOSS (the
+/// declared-loss path; D-7b's `LossBudget` gate reads `transients_dropped`). Durable dots are
+/// RETAINED (authority.rs owns them); only the held-set-anchored transients are lost. The `+= 0` on
+/// an empty set is a covered straight-line no-op (the happy path never loses the realm).
+fn self_fence_drop_transients(owned: &mut OwnedTransients, stats: &mut StubStats) {
+    stats.transients_dropped += owned.0.len() as u64;
+    owned.0.clear();
+}
+
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
 #[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
@@ -1650,13 +1934,15 @@ fn on_directory_reply(
     applied: &mut AppliedSteps,
     pending: &mut PendingCrossings,
     registration: &mut GhostColliderRegistration,
+    owned_transients: &mut OwnedTransients,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
     // Decode the Saga-class envelope once and dispatch by arm. The orchestrator wraps a directory
     // answer in DirectoryReply; the 1d.1 transfer machinery adds the SOURCE's FlushSource request
-    // and the DEST's Transfer (StubCrossing) envelope. Other arms (Ghost/Directory/Saga/SagaAck/
-    // TransferAck) never target a stub inbound and are ignored.
+    // and the DEST's Transfer (StubCrossing) envelope. D-7 adds the DEST's `TransientBatch` adopt
+    // (inside `on_transfer_envelope`) + the orchestrator's `TransientDrop`. Other arms
+    // (Ghost/Directory/Saga/SagaAck/TransferAck) never target a stub inbound and are ignored.
     let reply = match postcard::from_bytes::<InterShardFlow>(bytes) {
         Ok(InterShardFlow::DirectoryReply(reply)) => reply,
         // SOURCE: ship the held subject's pose (1d.1).
@@ -1664,9 +1950,25 @@ fn on_directory_reply(
             on_flush_source(flush, config, dots, outbox);
             return;
         }
-        // DEST: adopt the crossed entity state (1d.1).
+        // DEST: adopt the crossed entity state — a durable `StubCrossing` (1d.1) OR a `TransientBatch`
+        // adopt-as-Arriving (D-7); both ride the `Transfer` arm, split by payload inside.
         Ok(InterShardFlow::Transfer(env)) => {
-            on_transfer_envelope(env, config, dots, applied, pending, stats, outbox);
+            on_transfer_envelope(
+                env,
+                config,
+                dots,
+                applied,
+                pending,
+                owned_transients,
+                stats,
+                outbox,
+            );
+            return;
+        }
+        // SOURCE+DEST: the orchestrator's adopt-before-drop completion (D-7) — the source drops its
+        // `Held` items for the batch, the dest flips its `Arriving` items → `Held`. Idempotent.
+        Ok(InterShardFlow::TransientDrop(drop)) => {
+            on_transient_drop(drop, owned_transients, applied, stats);
             return;
         }
         // SOURCE: the saga-pushed ordered Demote (1d.5b.1) — Owned→Frozen→Ghost + DemoteAck.
@@ -1722,6 +2024,9 @@ fn on_directory_reply(
                     record.authority
                 );
                 authority.0 = None;
+                // D-7: the transients were anchored to the now-lost lease, with no hand-off — a
+                // counted LOSS (the declared-loss path; durable dots are retained by authority.rs).
+                self_fence_drop_transients(owned_transients, stats);
             }
         }
         DirectoryReply::Head {
@@ -1730,6 +2035,7 @@ fn on_directory_reply(
         } => {
             // The realm record is gone (revoked): self-fence (frames stop).
             authority.0 = None;
+            self_fence_drop_transients(owned_transients, stats);
         }
         DirectoryReply::Head {
             key: DirectoryKey::Entity(entity),
@@ -2127,6 +2433,443 @@ mod tests {
             class,
             bytes: postcard::to_allocvec(msg).expect("encode").into(),
         }
+    }
+
+    // ---- D-7 (transient/debris transfer) -------------------------------------------------------
+
+    const DEST_NODE: NodeId = NodeId(40);
+
+    fn transient_pose() -> StampedPose {
+        StampedPose::at_rest(config().frame, DVec3::new(1.0, 2.0, 3.0), UniverseTick(5))
+    }
+
+    /// Decode an `OutboundBox` into `(target, InterShardFlow)` pairs (the Saga-class egress).
+    fn decode_flows(outbox: &mut OutboundBox) -> Vec<(NodeId, InterShardFlow)> {
+        std::mem::take(&mut outbox.0)
+            .into_iter()
+            .map(|(to, _class, bytes)| {
+                (
+                    to,
+                    postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn transient_status_is_held_excludes_only_arriving() {
+        // Held + the pre-emit Crossing are authoritatively held (counted); Arriving is the uncounted
+        // mid-flight tier (the Ghost analogue).
+        assert!(TransientStatus::Held { outbound: None }.is_held());
+        assert!(
+            TransientStatus::Held {
+                outbound: Some(TransferId(1))
+            }
+            .is_held()
+        );
+        assert!(
+            TransientStatus::Crossing {
+                dest: DEST_NODE,
+                to_realm: RealmId::System(8),
+                dst_realm_fence: Fence(2),
+                batch: TransferId(1),
+            }
+            .is_held()
+        );
+        assert!(
+            !TransientStatus::Arriving {
+                batch: TransferId(1)
+            }
+            .is_held()
+        );
+    }
+
+    #[test]
+    fn emit_transient_batch_ships_one_envelope_and_marks_outbound() {
+        let mut rig = Rig::new();
+        rig.grant_realm(); // authority.0 = Some(Fence(1))
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        let batch = TransferId(0xB3);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Crossing {
+                    dest: DEST_NODE,
+                    to_realm: RealmId::System(8),
+                    dst_realm_fence: Fence(2),
+                    batch,
+                },
+            },
+        );
+        let sent = rig.tick(vec![]);
+        // Exactly ONE TransientBatch envelope to the dest (G-TIER: one per batch), at the dst fence.
+        let to_dest: Vec<_> = sent
+            .iter()
+            .filter(|(to, _, _)| *to == DEST_NODE)
+            .map(|(_, _, bytes)| postcard::from_bytes::<InterShardFlow>(bytes).expect("decode"))
+            .collect();
+        assert_eq!(
+            to_dest,
+            vec![InterShardFlow::Transfer(TransferEnvelope {
+                transfer_id: batch,
+                universe_epoch: vd_core::EpochId(1),
+                schema_version: TRANSFER_SCHEMA_VERSION,
+                fence: Fence(2),
+                step_id: TRANSIENT_BATCH_STEP,
+                class: DurabilityClass::Transient,
+                payload: TransitionPayload::TransientBatch {
+                    from_realm: config().realm,
+                    to_realm: RealmId::System(8),
+                    src_realm_fence: Fence(1),
+                    dst_realm_fence: Fence(2),
+                    source_tick: vd_core::TickId(1),
+                    items: vec![TransientItem {
+                        entity,
+                        pose: transient_pose(),
+                        state: vec![],
+                    }],
+                },
+            })],
+        );
+        // The emitted item is now Held{outbound} (still authoritative — adopt-before-drop).
+        assert_eq!(
+            rig.world.resource::<OwnedTransients>().0[&entity].status,
+            TransientStatus::Held {
+                outbound: Some(batch)
+            }
+        );
+        assert_eq!(rig.world.resource::<StubStats>().transients_emitted, 1);
+    }
+
+    #[test]
+    fn emit_transient_batch_ships_nothing_without_a_realm_lease() {
+        let mut rig = Rig::new(); // NO grant_realm → authority.0 = None
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        let crossing = TransientStatus::Crossing {
+            dest: DEST_NODE,
+            to_realm: RealmId::System(8),
+            dst_realm_fence: Fence(2),
+            batch: TransferId(0xB3),
+        };
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: crossing,
+            },
+        );
+        let sent = rig.tick(vec![]);
+        assert!(
+            sent.iter().all(|(to, _, _)| *to != DEST_NODE),
+            "a shard without its realm lease ships no transient batch"
+        );
+        // The Crossing item is UNCHANGED (it retries when the lease arrives).
+        assert_eq!(
+            rig.world.resource::<OwnedTransients>().0[&entity].status,
+            crossing
+        );
+        assert_eq!(rig.world.resource::<StubStats>().transients_emitted, 0);
+    }
+
+    #[test]
+    fn adopt_transient_batch_adopts_arriving_acks_and_dedups() {
+        let batch = TransferId(0xB1);
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 0);
+        let mut owned = OwnedTransients::default();
+        let mut applied = AppliedSteps::default();
+        let mut stats = StubStats::default();
+        let mut outbox = OutboundBox::default();
+        let items = vec![TransientItem {
+            entity,
+            pose: transient_pose(),
+            state: vec![],
+        }];
+
+        // FIRST delivery: adopt as Arriving (uncounted) anchored to the dst fence + ack BatchAdopted.
+        adopt_transient_batch(
+            batch,
+            Fence(5),
+            items.clone(),
+            ORCH,
+            &mut owned,
+            &mut applied,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(owned.0[&entity].status, TransientStatus::Arriving { batch });
+        assert_eq!(owned.0[&entity].anchor_fence, Fence(5));
+        assert_eq!(stats.transients_adopted, 1);
+        assert_eq!(stats.transients_adopt_redelivered, 0);
+        assert_eq!(
+            decode_flows(&mut outbox),
+            vec![(
+                ORCH,
+                InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                    transfer_id: batch,
+                    step_id: TRANSIENT_BATCH_STEP,
+                })
+            )]
+        );
+
+        // REDELIVERY: no re-adopt, re-ack only (at-least-once — the ack may have been lost).
+        adopt_transient_batch(
+            batch,
+            Fence(5),
+            items,
+            ORCH,
+            &mut owned,
+            &mut applied,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.transients_adopted, 1, "not re-adopted");
+        assert_eq!(stats.transients_adopt_redelivered, 1);
+        assert_eq!(decode_flows(&mut outbox).len(), 1, "re-acked exactly once");
+    }
+
+    #[test]
+    fn transient_drop_hands_off_source_promotes_dest_and_dedups() {
+        let this = TransferId(0xB2);
+        let other = TransferId(0xB9);
+        let held_this = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        let held_other = EntityId::pack(EntityKind::Debris, 1, 7, 2);
+        let held_settled = EntityId::pack(EntityKind::Debris, 1, 7, 3);
+        let arriving_this = EntityId::pack(EntityKind::Debris, 1, 7, 4);
+        let arriving_other = EntityId::pack(EntityKind::Debris, 1, 7, 5);
+        let crossing = EntityId::pack(EntityKind::Debris, 1, 7, 6);
+        let mk = |status| Transient {
+            pose: transient_pose(),
+            anchor_fence: Fence(2),
+            status,
+        };
+        let mut owned = OwnedTransients::default();
+        owned.0.insert(
+            held_this,
+            mk(TransientStatus::Held {
+                outbound: Some(this),
+            }),
+        );
+        owned.0.insert(
+            held_other,
+            mk(TransientStatus::Held {
+                outbound: Some(other),
+            }),
+        );
+        owned
+            .0
+            .insert(held_settled, mk(TransientStatus::Held { outbound: None }));
+        owned
+            .0
+            .insert(arriving_this, mk(TransientStatus::Arriving { batch: this }));
+        owned.0.insert(
+            arriving_other,
+            mk(TransientStatus::Arriving { batch: other }),
+        );
+        owned.0.insert(
+            crossing,
+            mk(TransientStatus::Crossing {
+                dest: DEST_NODE,
+                to_realm: RealmId::System(8),
+                dst_realm_fence: Fence(9),
+                batch: other,
+            }),
+        );
+        let mut applied = AppliedSteps::default();
+        let mut stats = StubStats::default();
+
+        let drop = TransientDrop {
+            transfer: this,
+            step_id: TRANSIENT_DROP_STEP,
+            fence: Fence(5),
+        };
+        on_transient_drop(drop, &mut owned, &mut applied, &mut stats);
+        assert!(
+            !owned.0.contains_key(&held_this),
+            "the source Held item for THIS batch is handed off (dropped)"
+        );
+        assert_eq!(
+            owned.0[&held_other].status,
+            TransientStatus::Held {
+                outbound: Some(other)
+            },
+            "a Held item for ANOTHER batch is untouched"
+        );
+        assert_eq!(
+            owned.0[&held_settled].status,
+            TransientStatus::Held { outbound: None }
+        );
+        assert_eq!(
+            owned.0[&arriving_this].status,
+            TransientStatus::Held { outbound: None },
+            "THIS batch's Arriving is promoted to authoritative Held"
+        );
+        assert_eq!(
+            owned.0[&arriving_this].anchor_fence,
+            Fence(5),
+            "the promoted item re-anchors to the batch's commit fence"
+        );
+        assert_eq!(
+            owned.0[&arriving_other].status,
+            TransientStatus::Arriving { batch: other },
+            "another batch's Arriving is untouched"
+        );
+        assert!(
+            owned.0.contains_key(&crossing),
+            "a pending Crossing is untouched"
+        );
+        assert_eq!(stats.transients_handed_off, 1);
+        assert_eq!(stats.transients_promoted, 1);
+        assert_eq!(stats.transient_drop_noop, 0);
+
+        // REDELIVERY: idempotent counted no-op (nothing re-handed/re-promoted).
+        on_transient_drop(drop, &mut owned, &mut applied, &mut stats);
+        assert_eq!(stats.transient_drop_noop, 1);
+        assert_eq!(stats.transients_handed_off, 1, "not re-handed off");
+        assert_eq!(stats.transients_promoted, 1, "not re-promoted");
+    }
+
+    #[test]
+    fn self_fence_drops_held_transients_as_a_counted_loss() {
+        // A realm takeover (the lease now held by someone else) self-fences the shard AND drops its
+        // transients (anchored to the now-lost lease) as a counted LOSS — durable dots are retained.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+            },
+        );
+        let takeover = DirectoryReply::Head {
+            key: DirectoryKey::Realm(config().realm),
+            record: Some(vd_wire::seams::directory::OwnerRecord {
+                authority: AuthorityRef::Shard(NodeId(99)),
+                fence: Fence(2),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        };
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(takeover),
+        )]);
+        assert!(
+            rig.world.resource::<OwnedTransients>().0.is_empty(),
+            "transients dropped on self-fence"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().transients_dropped, 1);
+        assert!(
+            rig.world.resource::<RealmAuthority>().0.is_none(),
+            "the shard self-fenced its realm"
+        );
+    }
+
+    #[test]
+    fn self_fence_drops_held_transients_on_realm_revoke() {
+        // The revoked arm (the realm record is GONE) also self-fences + drops transients — the second
+        // `self_fence_drop_transients` call site (a revoke vs a takeover).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 2);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+            },
+        );
+        let revoked = DirectoryReply::Head {
+            key: DirectoryKey::Realm(config().realm),
+            record: None,
+        };
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(revoked),
+        )]);
+        assert!(rig.world.resource::<OwnedTransients>().0.is_empty());
+        assert_eq!(rig.world.resource::<StubStats>().transients_dropped, 1);
+        assert!(rig.world.resource::<RealmAuthority>().0.is_none());
+    }
+
+    #[test]
+    fn transient_batch_and_drop_flow_through_the_inbound_dispatch() {
+        // Covers the inbound DISPATCH into the transient handlers (the direct-call tests above cover
+        // the handlers themselves): on_directory_reply → on_transfer_envelope's `TransientBatch` arm
+        // (adopt + ack) AND on_directory_reply's `TransientDrop` arm (promote). The DEST adopts a
+        // batch, acks BatchAdopted, then promotes Arriving→Held on the drop.
+        let mut rig = Rig::new();
+        rig.grant_realm(); // authority.0 = Some(Fence(1))
+        let debris = EntityId::pack(EntityKind::Debris, 1, 7, 0);
+        let batch = TransferId(0xB7);
+        let env = TransferEnvelope {
+            transfer_id: batch,
+            universe_epoch: vd_core::EpochId(1),
+            schema_version: TRANSFER_SCHEMA_VERSION,
+            fence: Fence(1),
+            step_id: TRANSIENT_BATCH_STEP,
+            class: DurabilityClass::Transient,
+            payload: TransitionPayload::TransientBatch {
+                from_realm: RealmId::System(8),
+                to_realm: config().realm,
+                src_realm_fence: Fence(1),
+                dst_realm_fence: Fence(1),
+                source_tick: vd_core::TickId(1),
+                items: vec![TransientItem {
+                    entity: debris,
+                    pose: transient_pose(),
+                    state: vec![],
+                }],
+            },
+        };
+        let sent = rig.tick(vec![wire_msg(
+            NodeId(50),
+            MsgClass::Saga,
+            &InterShardFlow::Transfer(env),
+        )]);
+        // Adopted as the uncounted Arriving tier, anchored to the envelope's dst realm fence.
+        assert_eq!(
+            rig.world.resource::<OwnedTransients>().0[&debris].status,
+            TransientStatus::Arriving { batch }
+        );
+        assert_eq!(
+            rig.world.resource::<OwnedTransients>().0[&debris].anchor_fence,
+            Fence(1)
+        );
+        // The ONLY egress is the BatchAdopted ack to the orchestrator (exact-vec equality — no
+        // filter/any closure with an uncoverable short-circuit arm, the HR5 test discipline).
+        let expected_ack =
+            postcard::to_allocvec(&InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                transfer_id: batch,
+                step_id: TRANSIENT_BATCH_STEP,
+            }))
+            .expect("encode");
+        assert_eq!(sent, vec![(ORCH, MsgClass::Saga, expected_ack)]);
+
+        // The TransientDrop promotes the Arriving item → authoritative Held.
+        let drop = TransientDrop {
+            transfer: batch,
+            step_id: TRANSIENT_DROP_STEP,
+            fence: Fence(1),
+        };
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientDrop(drop),
+        )]);
+        assert_eq!(
+            rig.world.resource::<OwnedTransients>().0[&debris].status,
+            TransientStatus::Held { outbound: None }
+        );
+        assert_eq!(rig.world.resource::<StubStats>().transients_promoted, 1);
     }
 
     fn input_msg(seq: u64, fence: Fence, movement: [f32; 3], look: [f32; 2]) -> Inbound {

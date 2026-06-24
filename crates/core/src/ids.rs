@@ -94,6 +94,23 @@ impl core::fmt::Display for TransferId {
     }
 }
 
+/// THE batched-transient correlation id (HR2/D-7): one [`BatchId`] identifies one
+/// (source → dest-realm, tick) batch of `Transient` entities that share ONE saga, ONE
+/// `TransientGo` go-token, and ONE `(transfer, step)` idempotency key — the per-batch (never
+/// per-item) commit that gives G-TIER its "orchestrator write rate scales with batch count, not
+/// item count". It wraps the batch saga's [`TransferId`]: the transient short-path saga IS the
+/// batch (one saga per batch), so its correlation id is its `BatchId`. A distinct newtype (not a
+/// bare `TransferId`) so the go-token ledger / the `TRANSIENT-AUTHORITY-HELD` oracle key on a
+/// batch, never on a per-entity transfer — the type makes the amortization legible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BatchId(pub TransferId);
+
+impl core::fmt::Display for BatchId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "batch-{:032x}", (self.0).0)
+    }
+}
+
 /// Identifies one universe epoch (genesis). Every persisted record carries it;
 /// a mismatch on recovery means the record belongs to a wiped/rolled universe and is
 /// discarded fail-safe rather than resumed. `Default` is epoch 0: "not yet synced".
@@ -266,6 +283,24 @@ mod tests {
             TransferId(0xFF).to_string(),
             "xfer-000000000000000000000000000000ff"
         );
+    }
+
+    #[test]
+    fn batch_id_wraps_a_transfer_and_displays_orders_roundtrips() {
+        // D-7: BatchId is the batched-transient correlation id (one batch = one saga = one go-token).
+        let b = BatchId(TransferId(0xFF));
+        assert_eq!(
+            b.0,
+            TransferId(0xFF),
+            "it wraps the batch saga's transfer id"
+        );
+        assert_eq!(b.to_string(), "batch-000000000000000000000000000000ff");
+        assert!(
+            BatchId(TransferId(1)) < BatchId(TransferId(2)),
+            "ordered for the ledger BTreeMap"
+        );
+        let bytes = postcard::to_allocvec(&b).expect("encode");
+        assert_eq!(postcard::from_bytes::<BatchId>(&bytes).expect("decode"), b);
     }
 
     #[test]

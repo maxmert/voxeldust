@@ -198,6 +198,33 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Source:** P3 Slice-1 design `wf_540e3497` + the empirical crash matrix (which refuted the design's clean-abort
   claim for kill-DEST-pre-freeze).
 
+### D-38 🟧 HR4's literal G-IDENTICAL gate (ONE fixture, ≥2 shard kinds) is unbuilt — only the capability-DAG FOUNDATION landed
+- **LANDED (the foundation):** `crates/sim/src/capability.rs` has the validated `ShardProfile` capability DAG (private
+  fields, `ShardProfile::build()` the only ctor), the 5 canonical kinds as DATA, the coherence test
+  `canonical_profiles_are_coherent`, and the negative gate (incoherent profile fails loud, `capability.rs:227`). This is
+  HR4's STRUCTURAL half: features are written against capability traits and a shard type is zero new code.
+- **MISSING (the behavior half):** the literal **G-IDENTICAL** CI gate CLAUDE.md/PLAN.md mandate — a NAMED test
+  (`assert_feature_anywhere`) that runs ONE identical feature fixture on a Spherical AND a Cartesian profile (with one
+  fixture forcing a `reanchor()`), or it doesn't land. `grep -rn assert_feature_anywhere crates/ tests/` returns
+  nothing. So HR4 is the ONE hard rule whose enforcing gate is owed-at-first-feature rather than already-green.
+- **WHY this is an INTERIM, not a defect (the deferral is sound):** there is ZERO feature code to diverge yet — the only
+  sim is the stub shard (points in empty space), and real capability-bearing features begin at **P4** (terrain) / **P6**
+  (block edits, the first true G-IDENTICAL fixture — "block edits on planet AND ship"). A G-IDENTICAL harness now would
+  assert sameness over an empty feature set: scaffolding with nothing to protect (the smallest-correct discipline forbids
+  it). The `FrameSpace` seam it tests (`SphericalSpace`/`CartesianSpace` + `reanchor()`/`AnchorGen`) itself lands at P4/P5.
+- **WHAT the audit caught (the honesty hole this entry closes):** CLAUDE.md HR4 + PLAN.md schedule G-IDENTICAL as a
+  PERMANENT gate, yet it was absent from BOTH the code AND this ledger — invisible to the "a phase isn't done until its
+  DEFERRED entries flip green" gate. The DEFECT would be the UNLEDGERED absence (the same class [[D-31]] closed for HR2's
+  `TransferableKind` and [[D-32]] closed for the directory partition seam), not the deferral. This entry is the fix.
+- **When / proper:** the `assert_feature_anywhere` harness + the first G-IDENTICAL fixture land with the first
+  capability-bearing feature — **P6** (block edits on a planet `SphericalSpace` AND a ship `CartesianSpace`, one fixture
+  forcing a reanchor), per the PLAN.md P6 delta. Every transition phase from P4 onward then adds its own fixture.
+- **Pin (exists-to-be-flipped):** `crates/sim/src/capability.rs` module doc names the missing gate + this entry. Flips
+  🟩 when `assert_feature_anywhere` runs one identical fixture green on ≥2 shard kinds in `tests/`.
+- **Dependency:** `FrameSpace` (`SphericalSpace`/`CartesianSpace`, P4/P5); the first capability-bearing feature (P6).
+- **Source:** the b0304ca holistic audit `wf_2e97cbe7` (the most substantive of four noted minors — the one hard rule
+  whose literal gate is owed-at-first-feature rather than already-green).
+
 ### D-1 🟩 Transfer abort clears the directory lock (Slice 2a)
 - **✅ CLOSED (Slice 2a):** the terminal `Aborted` edge now emits `SagaAction::ClearTransferLock` →
   `DirectoryCore::abort_clear(subject, transfer)` — the STALE-FENCE re-read (a CAS-loser/aborter's `expected_fence`
@@ -560,15 +587,32 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   idempotently to terminal on restart).
 - **Source:** the P2 plan + Slice-1b audit (ROB-2 loud-stub hardening).
 
-### D-7 🟧 Transient transfer: `IssueTransientGo` parks (no batched go-token flow)
-- **Missing:** the batched `TransientGo` commit path — a Transient subject reaches the commit point and issues
-  the go-token, but there is no flow to complete it, so the saga parks in `CommittingCas` with the key locked.
-- **Where:** `crates/node/src/saga_runtime.rs` — `SagaAction::IssueTransientGo` is a LOUD `tracing::warn` stub
-  (the FSM `commit_action` fan-out is real + class-aware from line one — HR2).
-- **When / proper:** **P3** — the batched `TransientTransferBatch` + `TransientGo` go-token + held-sets, in the
-  crash/chaos matrix. The go-token completion must drive the FSM out of `CommittingCas` AND clear `in_transfer`
-  — OR `start_transfer` must assert transients never lock CAS-backed `Entity` keys (held-set anchored instead).
-- **Source:** the P2 plan + Slice-1b audit (CPO-3).
+### D-7 🟧 Transient transfer: the class LANDED its first slice (D-7a); the park is CLOSED, the full robustness (D-7b/c/d) owed
+- **✅ CLOSED — the park (D-7a):** the `IssueTransientGo` LOUD-warn stub that parked a transient saga in
+  `CommittingCas` is GONE. The synthesis took the OR-branch: a Transient subject takes a distinct SHORT FSM PATH
+  (`saga.rs` `SagaState::BatchCommitting` — `start` enters it directly, skipping Prepare/Cut/Freeze, and `CasWon`
+  ends it at `Done` with no Swapping/Demote/Promote), `locks_directory_key(Transient)=false` so it NEVER takes a
+  directory lock (burst isolation is STRUCTURAL — a debris burst writes zero directory rows), and the executor
+  records the batched go-token into `SagaRuntimeRes.batch_goes` + feeds `CasWon` (one orchestrator write per
+  batch, G-TIER). The source→dest set hand-off is the shard↔shard ADOPT-BEFORE-DROP choreography (the demote-
+  before-promote twin): SOURCE emits `TransferEnvelope{TransientBatch}` → DEST adopts as the uncounted `Arriving`
+  tier + acks `TransferAck::BatchAdopted` → orchestrator emits `InterShardFlow::TransientDrop` → SOURCE drops the
+  `Held` items + DEST flips `Arriving→Held`. `TRANSIENT-AUTHORITY-HELD` (`oracle.rs`, no directory cross-check —
+  go-token + realm-fence anchored) holds; the e2e gate `tests/tests/p3_transient.rs` proves a 1-item Debris batch
+  crosses with no DoubleHeld, no vanish, no loss. Gate-green at 100% Tier-A region+branch.
+- **Still owed (D-7b/c/d):** the closed-form `BallisticReadvance` (`advance_transients`, Cat-A) + per-tick
+  `TRANSIENT-CONSERVATION` (Duplicated / LossOverBudget; drop-before-promote ordering under stagger) [D-7b]; the
+  `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale assertion + burst params → `StubConfig`
+  [D-7c]; the crash-matrix Transient cells (`BatchCommitting` at_phase, `EndState::BatchCommittedAt` /
+  `BatchDroppedWithinBudget`) [D-7d]. Also owed: bounded GC of completed go-tokens (`batch_goes` is unbounded in
+  D-7a — the oracle needs the live record until a drop-completion signal exists, D-7c/D-6) and the durable
+  go-token WAL (in-memory now, [[D-6]]).
+- **Where:** `saga.rs` (`BatchCommitting`), `saga_runtime.rs` (`locks_directory_key`, `IssueTransientGo` executor,
+  `batch_goes`, `handle_batch_adopted`), `stub.rs` (`OwnedTransients`/`TransientStatus`, `emit_transient_batch`,
+  `adopt_transient_batch`, `on_transient_drop`, self-fence drop), `wire/intershard.rs` (`TransferAck::BatchAdopted`,
+  `InterShardFlow::TransientDrop`, `TRANSIENT_BATCH_STEP`/`TRANSIENT_DROP_STEP`), `core/ids.rs` (`BatchId`).
+- **When / proper:** D-7b/c/d (this slice cycle); the crash cells compose with the P3 Slice-1 matrix.
+- **Source:** the P2 plan + Slice-1b audit (CPO-3) + the D-7 design `wf_2eaa4df7` (3 blockers → short-FSM-path).
 
 ### D-8 🟧 Transfer dest-input buffer: SOFT cap landed (1c.5); the durable interval-map backstop owed (1d/P3)
 - **Landed (1c.5):** the gateway `seq > marker` cut buffer `TransferProgress.dest_buffer: VecDeque<Vec<u8>>`

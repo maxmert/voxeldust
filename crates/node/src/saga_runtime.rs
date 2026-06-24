@@ -42,15 +42,15 @@ use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use vd_core::pose::StampedPose;
-use vd_core::{EpochId, Fence, NodeId, TransferId, UniverseTick};
+use vd_core::{BatchId, EpochId, Fence, NodeId, TransferId, UniverseTick};
 use vd_sim::directory::DirectoryCore;
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning};
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
-    PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TransferAck, TransferEnvelope,
-    TransitionPayload,
+    PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_DROP_STEP, TransferAck,
+    TransferEnvelope, TransientDrop, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -116,6 +116,30 @@ pub struct SagaRuntimeRes {
     /// `OrchestratorConfig.saga` in `register_orchestrator`; `Default` is the dev/test value
     /// ([`SagaTuning::default`]) for the in-process rigs.
     tuning: SagaTuning,
+    /// THE batched `TransientGo` go-token ledger (HR2/D-7): one record per `BatchId` =
+    /// `(commit_fence, source, dest)`. Written by the `IssueTransientGo` executor at the transient
+    /// SHORT-PATH commit point — ONE write per batch regardless of item count (G-TIER); the
+    /// `BatchAdopted` handler reads it to emit the adopt-before-drop `TransientDrop` to that batch's
+    /// source+dest. The `TRANSIENT-AUTHORITY-HELD` oracle cross-checks every Held transient's set
+    /// anchor against a committed go-token here — a transient is NEVER a directory `OwnerRecord`
+    /// (burst-isolation: a 1000-debris burst writes ZERO directory rows). ⚠️ IN-MEMORY (durability
+    /// owed D-6) + UNBOUNDED in D-7a (bounded GC of completed go-tokens is owed D-7c — it needs the
+    /// drop-completion signal; the oracle needs the live record until then). `or_insert` idempotent:
+    /// a Slice-2a re-driven go-token re-records the SAME (batch → fence) without duplication.
+    batch_goes: BTreeMap<BatchId, (Fence, NodeId, NodeId)>,
+}
+
+/// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
+/// `run_to_quiescence` (which is deliberately denied a `runtime` handle — `commit_result`'s
+/// write-back soundness rests on it) and recorded into [`SagaRuntimeRes::batch_goes`] by
+/// `commit_result`. `batch` is the `BatchId` (the transient saga's transfer); `fence` is the dest
+/// realm-lease fence the batch committed at; `source`/`dest` are the shards the `TransientDrop` goes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BatchGo {
+    batch: BatchId,
+    fence: Fence,
+    source: NodeId,
+    dest: NodeId,
 }
 
 /// Hard ceiling on the un-drained rejection ledger (operational param, ONE home — no inline
@@ -183,6 +207,17 @@ impl SagaRuntimeRes {
                 source: live.ctx.source,
                 dest: live.ctx.dest,
             })
+            .collect()
+    }
+
+    /// The committed batched-transient go-tokens — the `(BatchId, commit_fence)` ground truth the
+    /// `TRANSIENT-AUTHORITY-HELD` oracle cross-checks every Held transient against (D-7). In
+    /// deterministic `BatchId` order (BTreeMap). Orchestrator-only state (a shard never holds it).
+    #[must_use]
+    pub fn batch_goes(&self) -> Vec<(BatchId, Fence)> {
+        self.batch_goes
+            .iter()
+            .map(|(batch, (fence, _src, _dst))| (*batch, *fence))
             .collect()
     }
 }
@@ -295,10 +330,16 @@ fn run_to_quiescence(
     epoch: EpochId,
     now: UniverseTick,
     flush_pose: Option<StampedPose>,
-) -> (SagaState, bool, Vec<(TransferId, AbortReason)>) {
+) -> (
+    SagaState,
+    bool,
+    Vec<(TransferId, AbortReason)>,
+    Vec<BatchGo>,
+) {
     let mut events: VecDeque<SagaEvent> = VecDeque::new();
     let mut tombstone = false;
     let mut rejected = Vec::new();
+    let mut batch_gos = Vec::new();
     loop {
         for action in actions {
             match action {
@@ -371,15 +412,24 @@ fn run_to_quiescence(
                         CasOutcome::Lost { current } => SagaEvent::CasLost { current },
                     });
                 }
-                // HR2: a Transient subject commits via the batched go-token (P3); present +
-                // classified now. LOUD deferral: the saga will PARK in CommittingCas with the
-                // key locked — an operator must see why, never wonder (audit ROB-2/CPO-3).
-                SagaAction::IssueTransientGo { .. } => {
-                    tracing::warn!(
-                        transfer = ctx.transfer.0,
-                        "TransientGo is a P3 stub: the transient saga parks in CommittingCas \
-                         (no go-token flow yet)"
-                    );
+                // D-7: the batched `TransientGo` go-token IS the transient commit point (HR2 — the
+                // SAME `CasWon` feedback as the durable CAS, fanned out by `commit_action`, NEVER a
+                // per-entity directory CAS: transients aren't `OwnerRecord`s, so a 1000-debris burst
+                // writes ZERO directory rows — burst isolation, G-TIER). Collect the go-token (it is
+                // recorded into `runtime.batch_goes` by `commit_result` — `run_to_quiescence` is
+                // intentionally denied the runtime handle) and feed `CasWon` back so the SHORT-PATH
+                // saga reaches `Done` (FF-1: exactly ONE feedback event, like `IssueCommitCas`). The
+                // commit fence is `expected` — the dest realm-lease fence the batch set anchors to.
+                SagaAction::IssueTransientGo { expected } => {
+                    batch_gos.push(BatchGo {
+                        batch: BatchId(ctx.transfer),
+                        fence: expected,
+                        source: ctx.source,
+                        dest: ctx.dest,
+                    });
+                    events.push_back(SagaEvent::CasWon {
+                        new_fence: expected,
+                    });
                 }
                 // P3: group-committed redb WAL. LOUD deferral: an orchestrator restart loses
                 // every in-flight saga until then — never let a log read as if durability
@@ -411,7 +461,7 @@ fn run_to_quiescence(
             None => break,
         }
     }
-    (state, tombstone, rejected)
+    (state, tombstone, rejected, batch_gos)
 }
 
 /// Apply one event to an existing saga, then run it to quiescence + persist the result. A
@@ -432,10 +482,18 @@ fn deliver(
     let gateway = live.gateway;
     let flush_pose = live.flushed_pose; // Copy; the EmitCrossing executor reads it
     let (state, actions) = saga::step(&ctx, live.state, event);
-    let (final_state, tombstone, rejected) = run_to_quiescence(
+    let (final_state, tombstone, rejected, batch_gos) = run_to_quiescence(
         &ctx, gateway, state, actions, dir, outbox, epoch, now, flush_pose,
     );
-    commit_result(runtime, transfer, final_state, tombstone, rejected, now);
+    commit_result(
+        runtime,
+        transfer,
+        final_state,
+        tombstone,
+        rejected,
+        batch_gos,
+        now,
+    );
 }
 
 /// ROB-1: bound the un-drained rejection ledger to `REJECTION_LEDGER_CAP`, shedding the
@@ -455,17 +513,28 @@ fn bound_rejection_ledger(runtime: &mut SagaRuntimeRes) {
     }
 }
 
-/// Persist a quiescent saga: record rejections, then GC (terminal) or write back the state.
+/// Persist a quiescent saga: record rejections + the batched go-tokens, then GC (terminal) or write
+/// back the state.
 fn commit_result(
     runtime: &mut SagaRuntimeRes,
     transfer: TransferId,
     final_state: SagaState,
     tombstone: bool,
     rejected: Vec<(TransferId, AbortReason)>,
+    batch_gos: Vec<BatchGo>,
     now: UniverseTick,
 ) {
     runtime.rejected.extend(rejected);
     bound_rejection_ledger(runtime); // ROB-1: never let the un-drained ledger grow unbounded
+    // D-7: record the batched go-tokens emitted this run (here, NOT in `run_to_quiescence` — which
+    // is denied the runtime handle so this write-back stays sound). `or_insert` is idempotent: a
+    // Slice-2a re-driven go-token re-records the SAME (batch → fence/source/dest), never a dup.
+    for bg in batch_gos {
+        runtime
+            .batch_goes
+            .entry(bg.batch)
+            .or_insert((bg.fence, bg.source, bg.dest));
+    }
     if tombstone {
         runtime.sagas.remove(&transfer);
     } else {
@@ -501,10 +570,16 @@ fn process_starts(
     now: UniverseTick,
 ) {
     for PendingStart { ctx, gateway } in std::mem::take(&mut runtime.pending) {
-        // Per-key serialization: `lock_transfer` sets `in_transfer`. FALSE means the subject
-        // is absent OR already transferring — refuse to start (a spurious/duplicate trigger
-        // is a no-op, never a second concurrent saga on the same key).
-        if !dir.lock_transfer(ctx.subject, ctx.transfer) {
+        // Per-key serialization (DURABLE only): `lock_transfer` sets the directory `in_transfer`.
+        // FALSE means the subject is absent OR already transferring — refuse to start (a
+        // spurious/duplicate trigger is a no-op, never a second concurrent saga on the same key). A
+        // TRANSIENT batch is NOT in the directory (`locks_directory_key(Transient)=false`) — burst
+        // isolation is STRUCTURAL: a debris burst takes ZERO directory locks, so it can never
+        // serialize against / wedge a concurrent Durable saga (HR2). The short-circuit `&&` is
+        // HR5-coverable here: `locks_directory_key` is exercised true (Durable) AND false (Transient),
+        // and its true arm's `lock_transfer` is exercised both ways (the durable happy path = ok; the
+        // unrecorded-subject refusal = fail) — so every branch of both operands is hit.
+        if locks_directory_key(ctx.class) && !dir.lock_transfer(ctx.subject, ctx.transfer) {
             continue;
         }
         let (state, actions) = saga::start(&ctx);
@@ -518,10 +593,32 @@ fn process_starts(
                 flushed_pose: None, // filled when the source flushes (after Freezing)
             },
         );
-        // The start actions are PrepareSubscribe only — no EmitCrossing yet, so `None` is correct.
-        let (final_state, tombstone, rejected) =
+        // Durable start = PrepareSubscribe (no EmitCrossing yet); transient start = the go-token
+        // (collected by run_to_quiescence). `None` flush_pose is correct for both at start.
+        let (final_state, tombstone, rejected, batch_gos) =
             run_to_quiescence(&ctx, gateway, state, actions, dir, outbox, epoch, now, None);
-        commit_result(runtime, ctx.transfer, final_state, tombstone, rejected, now);
+        commit_result(
+            runtime,
+            ctx.transfer,
+            final_state,
+            tombstone,
+            rejected,
+            batch_gos,
+            now,
+        );
+    }
+}
+
+/// Whether a saga of this class takes a directory `in_transfer` LOCK at start (HR2 fan-out, the
+/// burst-isolation seam): `Durable` subjects are per-entity `OwnerRecord`s serialized by the
+/// directory; `Transient` batches are NOT in the directory at all (held-set anchored, committed by
+/// the batched go-token), so a debris burst takes zero locks and can never wedge a Durable saga. An
+/// explicit `match` (not `matches!`) so both arms are covered regions (HR5).
+#[must_use]
+fn locks_directory_key(class: vd_core::entity_kind::DurabilityClass) -> bool {
+    match class {
+        vd_core::entity_kind::DurabilityClass::Durable => true,
+        vd_core::entity_kind::DurabilityClass::Transient => false,
     }
 }
 
@@ -540,6 +637,7 @@ fn deadline_for(state: &SagaState, tuning: &SagaTuning) -> u64 {
         | SagaState::Freezing { .. }
         | SagaState::Aborting { .. } => tuning.abort_deadline_ticks,
         SagaState::CommittingCas { .. }
+        | SagaState::BatchCommitting { .. }
         | SagaState::Swapping { .. }
         | SagaState::Demoting { .. }
         | SagaState::Promoting { .. }
@@ -580,6 +678,32 @@ fn scan_deadlines(
             transfer,
             SagaEvent::Timeout,
         );
+    }
+}
+
+/// Handle the dest's `BatchAdopted` ack (D-7 adopt-before-drop): the dest now holds the batch as the
+/// uncounted `Arriving` tier, so emit the `TransientDrop` to the batch's SOURCE (drop the `Held`
+/// items) AND DEST (flip `Arriving→Held`) — the transient twin of the durable ordered demote-before-
+/// promote (the dest holds before the source drops, so no item is ever held nowhere). The batch's
+/// source/dest/commit-fence come from the go-token ledger (recorded at the saga's commit point). A
+/// `BatchAdopted` with NO committed go-token (a stray/duplicate, or a batch that never started) is a
+/// LOUD no-op — never a silent drop. Read-only on the runtime (the drop is pure egress; FF-1).
+fn handle_batch_adopted(runtime: &SagaRuntimeRes, outbox: &mut OutboundBox, transfer: TransferId) {
+    let batch = BatchId(transfer);
+    match runtime.batch_goes.get(&batch) {
+        Some(&(fence, source, dest)) => {
+            let drop = InterShardFlow::TransientDrop(TransientDrop {
+                transfer,
+                step_id: TRANSIENT_DROP_STEP,
+                fence,
+            });
+            outbox.push_flow(source, MsgClass::Saga, &drop);
+            outbox.push_flow(dest, MsgClass::Saga, &drop);
+        }
+        None => tracing::warn!(
+            transfer = transfer.0,
+            "BatchAdopted with no committed go-token: ignored (stray/duplicate)"
+        ),
     }
 }
 
@@ -640,6 +764,12 @@ pub fn drive_sagas(
                     transfer_id,
                     SagaEvent::SourceFlushed { drained_seq },
                 );
+            }
+            // D-7 adopt-before-drop: the dest ADOPTED the transient batch (now holds it as the
+            // uncounted `Arriving` tier) → emit the `TransientDrop` to the batch's source+dest (the
+            // transient twin of the demote-before-promote tail). Looked up in the go-token ledger.
+            Ok(InterShardFlow::TransferAck(TransferAck::BatchAdopted { transfer_id, .. })) => {
+                handle_batch_adopted(&runtime, &mut outbox, transfer_id);
             }
             // The DEST's crossing ack: the dest journal is the exactly-once dedup. Release is NOT
             // gated on this ack — it rides the ordered `PromoteAck` (1d.5b.1) instead. The crossing
@@ -759,6 +889,32 @@ mod tests {
             needs_provision: false,
             from_realm: FROM_REALM,
             to_realm: TO_REALM,
+        }
+    }
+
+    /// A TRANSIENT batch saga ctx (D-7): the subject is the dest realm (inert provenance — never
+    /// enters the directory, since `locks_directory_key(Transient)=false`); `expected_fence` is the
+    /// dest realm-lease fence the batched go-token commits at.
+    fn transient_ctx(expected_fence: Fence) -> SagaCtx {
+        SagaCtx {
+            subject: DirectoryKey::Realm(TO_REALM),
+            ..ctx(DurabilityClass::Transient, expected_fence)
+        }
+    }
+
+    /// The wire form of the orchestrator's adopt-before-drop `TransientDrop` as the source/dest
+    /// receive it (D-7), at the batch's commit `fence`.
+    fn drop_wire(fence: Fence) -> Inbound {
+        Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Saga,
+            bytes: postcard::to_allocvec(&InterShardFlow::TransientDrop(TransientDrop {
+                transfer: XFER,
+                step_id: TRANSIENT_DROP_STEP,
+                fence,
+            }))
+            .expect("encode")
+            .into(),
         }
     }
 
@@ -889,6 +1045,27 @@ mod tests {
                     MsgClass::Saga,
                     vd_sim::io::bytes(
                         postcard::to_allocvec(&InterShardFlow::SagaAck(ack)).expect("encode"),
+                    ),
+                )
+                .expect("sent");
+            self.settle();
+        }
+
+        /// The DEST acks `BatchAdopted` (D-7) — it now holds the batch as `Arriving`. Drives the
+        /// orchestrator's adopt-before-drop `TransientDrop` egress to source+dest.
+        fn batch_adopted(&mut self, transfer: TransferId) {
+            self.dest
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::TransferAck(
+                            TransferAck::BatchAdopted {
+                                transfer_id: transfer,
+                                step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
+                            },
+                        ))
+                        .expect("encode"),
                     ),
                 )
                 .expect("sent");
@@ -1243,12 +1420,81 @@ mod tests {
 
     #[test]
     fn transient_subject_commits_via_the_go_token_not_a_cas() {
-        // HR2 fan-out on ONE FSM: a Transient subject reaches the commit point and issues the
-        // batched go-token (a no-op stub here), NOT a per-entity directory CAS — so the
-        // subject's fence is unchanged after SourceFrozen.
+        // HR2 SHORT PATH (D-7): a Transient subject is NOT in the directory (no `grant_subject` —
+        // burst isolation), takes NO lock, SKIPS Prepare/Cut/Freeze, and commits the batched
+        // go-token at START → reaches Done + tombstones the SAME tick (`live()==0`). It records
+        // EXACTLY ONE go-token (G-TIER: one write per batch, never per item), NEVER a per-entity CAS,
+        // NEVER a `CommitAuthority`. The dest's `BatchAdopted` then drives the adopt-before-drop
+        // `TransientDrop` to the batch's source + dest. (The OLD `IssueTransientGo` stub PARKED here
+        // in `CommittingCas` with the key locked — D-7 closes that.)
+        let mut rig = Rig::new();
+        rig.trigger(transient_ctx(Fence(9)));
+        rig.settle(); // process_starts: no lock (Transient) → start → BatchCommitting → go-token → CasWon → Done
+
+        assert_eq!(
+            rig.live(),
+            0,
+            "the short-path transient saga reaches Done at start — no park"
+        );
+        assert!(
+            rig.drain_gateway().is_empty(),
+            "a transient drives NO gateway route-swap (no PrepareSubscribe, no CommitAuthority)"
+        );
+        // Exactly ONE go-token, at the dest realm-lease fence (G-TIER: one orchestrator write per batch).
+        assert_eq!(
+            rig.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .batch_goes(),
+            vec![(BatchId(XFER), Fence(9))],
+            "one batched go-token recorded at the commit fence"
+        );
+
+        // The DEST acks BatchAdopted → the orchestrator emits TransientDrop to BOTH source and dest
+        // (adopt-before-drop: the dest already holds the batch as Arriving), carrying the commit fence.
+        let _ = (rig.drain_source(), rig.drain_dest());
+        rig.batch_adopted(XFER);
+        assert_eq!(
+            rig.drain_source(),
+            vec![drop_wire(Fence(9))],
+            "the source is told to DROP its Held items for the adopted batch"
+        );
+        assert_eq!(
+            rig.drain_dest(),
+            vec![drop_wire(Fence(9))],
+            "the dest is told to flip its Arriving items → Held for the adopted batch"
+        );
+    }
+
+    #[test]
+    fn batch_adopted_with_no_go_token_is_a_loud_noop() {
+        // D-7 defensive: a `BatchAdopted` for a batch with NO committed go-token (a stray/duplicate,
+        // or a batch that never started) emits NO `TransientDrop` — a LOUD no-op, never a silent drop
+        // and never a panic (covers the `None` arm of `handle_batch_adopted`).
+        let mut rig = Rig::new();
+        let _ = (rig.drain_source(), rig.drain_dest());
+        rig.batch_adopted(XFER); // no prior trigger → batch_goes is empty
+        assert!(
+            rig.drain_source().is_empty(),
+            "no go-token ⇒ no drop to the source"
+        );
+        assert!(
+            rig.drain_dest().is_empty(),
+            "no go-token ⇒ no drop to the dest"
+        );
+    }
+
+    #[test]
+    fn durable_saga_parked_in_committing_is_curl_visible() {
+        // AAA-1: a parked saga is CURL-VISIBLE through the real admin snapshot — its transfer id, its
+        // actual stuck phase, and a staleness anchor, never silently wedged. (Drives both
+        // `SagaRuntimeRes::views` and `admin_snapshot`'s saga-population end to end.) D-7 moved this
+        // OFF the old transient-park vehicle: a DURABLE saga whose direct CAS is starved (the granted
+        // fence races ahead so the CAS would lose) is the wrong vehicle; instead we hold a durable
+        // saga in `Demoting` awaiting its `DemoteAck` — a genuine post-commit park.
         let mut rig = Rig::new();
         rig.grant_subject(Fence(1));
-        rig.trigger(ctx(DurabilityClass::Transient, Fence(1)));
+        rig.trigger(ctx(DurabilityClass::Durable, Fence(1)));
         rig.settle();
         rig.ack(TransferControlAck::Prepared {
             transfer: XFER,
@@ -1258,33 +1504,23 @@ mod tests {
             transfer: XFER,
             marker_seq: 3,
         });
-        let _ = rig.drain_gateway();
         rig.ack(TransferControlAck::SourceFrozen {
             transfer: XFER,
             drained_seq: 3,
         });
-        rig.flush(); // gate: both, so the commit action (the go-token stub) is reached
-        // No CommitAuthority (the go-token stub didn't produce a CasWon), no fence bump.
-        assert!(
-            rig.drain_gateway().is_empty(),
-            "Transient issues a go-token, not a CAS → no CommitAuthority yet"
-        );
-        assert_eq!(rig.subject_head().fence, Fence(1));
+        rig.flush(); // both gate conditions → the DIRECT CAS wins → Swapping
+        rig.ack(TransferControlAck::Committed { transfer: XFER }); // → Demoting (parked, awaiting DemoteAck)
+        let _ = (rig.drain_gateway(), rig.drain_source());
         assert_eq!(rig.live(), 1);
 
-        // AAA-1: the parked saga is CURL-VISIBLE through the real admin snapshot — its
-        // transfer id, its actual stuck phase, and a staleness anchor, never silently
-        // wedged. (This drives both `SagaRuntimeRes::views` and `admin_snapshot`'s
-        // saga-population end to end.)
         let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
         assert_eq!(snap.sagas.len(), 1);
         assert_eq!(snap.sagas[0].transfer, XFER.to_string());
-        // The operator sees the REAL parked phase with its fields (acked marker_seq=3,
-        // drained_seq=3), not a placeholder. Exact equality (no `assert!`-message format
-        // arm — the HR5 uncoverable-region discipline).
+        // The operator sees the REAL parked phase with its fields (the post-CAS authority fence),
+        // not a placeholder. Exact equality (no `assert!`-message format arm — HR5 discipline).
         assert_eq!(
             snap.sagas[0].state,
-            "CommittingCas { marker_seq: 3, drained_seq: 3 }"
+            "Demoting { new_fence: Fence(2), dest_delivered: false }"
         );
         // `since` was set when the saga last advanced and is bounded by the clock.
         assert!(snap.sagas[0].since.0 <= snap.universe_tick);
@@ -1292,13 +1528,16 @@ mod tests {
 
     #[test]
     fn a_stray_ack_to_a_parked_saga_preserves_its_staleness_anchor() {
-        // AAA-1-SINCE regression guard: a PARKED saga that receives a duplicate / stray ack
-        // the FSM absorbs as same-state must KEEP its `since`. An unconditional bump would
-        // reset stuck-saga staleness on every at-least-once redelivery. (This also exercises
-        // the same-state arm of the `final_state != prior` gate in `commit_result`.)
+        // AAA-1-SINCE regression guard: a PARKED saga that receives a duplicate / stray ack the FSM
+        // absorbs as same-state must KEEP its `since` — an unconditional bump would reset stuck-saga
+        // staleness on every at-least-once redelivery. (Exercises the same-state arm of the
+        // `final_state != prior` gate in `commit_result`.) D-7 moved this OFF the old transient
+        // CommittingCas park (transients no longer park) onto a DURABLE saga held in `Demoting`
+        // awaiting its `DemoteAck`: a stray duplicate `Committed` (route-swap) ack is absorbed there
+        // as same-state (`RouteSwapped` is not handled in `Demoting`), the genuine post-commit park.
         let mut rig = Rig::new();
         rig.grant_subject(Fence(1));
-        rig.trigger(ctx(DurabilityClass::Transient, Fence(1)));
+        rig.trigger(ctx(DurabilityClass::Durable, Fence(1)));
         rig.settle();
         rig.ack(TransferControlAck::Prepared {
             transfer: XFER,
@@ -1308,33 +1547,29 @@ mod tests {
             transfer: XFER,
             marker_seq: 3,
         });
-        let _ = rig.drain_gateway();
         rig.ack(TransferControlAck::SourceFrozen {
             transfer: XFER,
             drained_seq: 3,
         });
-        rig.flush(); // both gate conditions → parks in CommittingCas (the IssueTransientGo stub yields no CasWon)
+        rig.flush(); // both gate conditions → the DIRECT CAS wins → Swapping
+        rig.ack(TransferControlAck::Committed { transfer: XFER }); // → Demoting (parked, awaiting DemoteAck)
+        let _ = (rig.drain_gateway(), rig.drain_source());
         let since_parked = crate::orchestrator::admin_snapshot(rig.orch.world_mut()).sagas[0].since;
 
-        // Two duplicate SourceFrozen acks (at-least-once redelivery). The FSM absorbs each
-        // as same-state; the clock advances on every step.
-        rig.ack(TransferControlAck::SourceFrozen {
-            transfer: XFER,
-            drained_seq: 3,
-        });
-        rig.ack(TransferControlAck::SourceFrozen {
-            transfer: XFER,
-            drained_seq: 3,
-        });
+        // Two duplicate Committed acks (at-least-once redelivery of the route-swap ack). The FSM
+        // absorbs each as same-state in Demoting (RouteSwapped is not handled there); the clock
+        // advances on every step. (Well within the redrive deadline, so the producer does not fire.)
+        rig.ack(TransferControlAck::Committed { transfer: XFER });
+        rig.ack(TransferControlAck::Committed { transfer: XFER });
 
         let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
         assert_eq!(
             snap.sagas.len(),
             1,
-            "still parked, not advanced by stray acks"
+            "still parked in Demoting, not advanced by stray acks"
         );
         assert_eq!(
-            snap.sagas[0].state, "CommittingCas { marker_seq: 3, drained_seq: 3 }",
+            snap.sagas[0].state, "Demoting { new_fence: Fence(2), dest_delivered: false }",
             "state unchanged by the stray acks"
         );
         assert_eq!(

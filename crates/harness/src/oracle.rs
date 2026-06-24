@@ -55,6 +55,40 @@ pub enum AuthorityViolation {
     RealmHeldNowhere { realm: String, recorded: String },
 }
 
+/// TRANSIENT-AUTHORITY-HELD failed (D-7): the held-set invariant for batched transients. There is NO
+/// directory cross-check (a transient is NEVER an `OwnerRecord` — burst isolation); the cross-check is
+/// the batched go-token ledger (`batch_goes`) + the shards' realm-lease fences. Mirrors
+/// [`AuthorityViolation`]'s `len == 1` discipline over `OwnedTransients` (the `is_held()` subset; the
+/// uncounted `Arriving` tier is excluded so a mid-flight adopt cannot false-trip `DoubleHeld`).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TransientViolation {
+    #[error(
+        "transient {entity} is held by {holders:?} — exactly one holder required (duplication)"
+    )]
+    DoubleHeld {
+        entity: EntityId,
+        holders: Vec<NodeId>,
+    },
+    #[error(
+        "transient {entity} held by {holder} is anchored at {anchor}, which is no live shard's \
+         realm-lease fence (a stranded/forged hold)"
+    )]
+    AnchorMismatch {
+        entity: EntityId,
+        holder: NodeId,
+        anchor: Fence,
+    },
+    #[error(
+        "transient {entity} held by {holder} at {anchor} has NO committed go-token at that fence \
+         (an uncommitted hold — the batched TransientGo commit point was bypassed)"
+    )]
+    NoGoToken {
+        entity: EntityId,
+        holder: NodeId,
+        anchor: Fence,
+    },
+}
+
 /// AUTHORITY-UNIQUE (binding P1, checked every committed tick): every entity in
 /// any held-set or directory record has EXACTLY one holder, and the directory
 /// agrees with it. `len == 1` exactly — `len > 1` is split-brain, `len == 0` is a
@@ -227,6 +261,66 @@ fn excuse_w1(
     (at.source == holder)
         & (record.authority == AuthorityRef::Shard(at.dest))
         & held.is_stale_against(record.fence)
+}
+
+/// TRANSIENT-AUTHORITY-HELD (binding D-7, checked at quiescence): every transient a shard holds
+/// AUTHORITATIVELY (`OwnedTransients.is_held()` — the `Arriving` mid-flight tier EXCLUDED) is held by
+/// EXACTLY one shard (`len == 1` — `> 1` is duplication, the transient's cardinal sin), is anchored to
+/// a LIVE shard's realm-lease fence (it rides the lease, never the directory), AND is backed by a
+/// committed batched go-token at that fence (the `TransientGo` commit point was not bypassed). NO
+/// directory cross-check — a transient has no `OwnerRecord` (a 1000-debris burst writes zero directory
+/// rows, HR2). The per-tick no-double-RENDER conservation + the loss-budget gate are D-7b; this is the
+/// quiescent held-set invariant. (D-7d generalizes it dead-aware, mirroring `_excluding`.)
+///
+/// # Errors
+/// The first [`TransientViolation`] found, in deterministic entity order.
+pub fn verify_transient_authority_held(
+    reports: &[(NodeId, InspectReport)],
+) -> Result<(), TransientViolation> {
+    let mut holders: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
+    let mut anchor: BTreeMap<EntityId, Fence> = BTreeMap::new();
+    // The set of LIVE realm-lease fences (any shard) and the set of committed go-token fences — a held
+    // transient's anchor must be in BOTH (it rides a real lease AND a real batch commit). Sets, not
+    // per-holder maps, so there is no uncoverable "holder reports no realm" arm (HR5).
+    let mut realm_fences: BTreeSet<Fence> = BTreeSet::new();
+    let mut go_fences: BTreeSet<Fence> = BTreeSet::new();
+    for (node, report) in reports {
+        for (entity, a) in &report.owned_transients {
+            holders.entry(*entity).or_default().push(*node);
+            anchor.insert(*entity, *a);
+        }
+        for (_realm, fence) in &report.held_realms {
+            realm_fences.insert(*fence);
+        }
+        for (_batch, fence) in &report.batch_goes {
+            go_fences.insert(*fence);
+        }
+    }
+    for (entity, holding) in &holders {
+        if holding.len() != 1 {
+            return Err(TransientViolation::DoubleHeld {
+                entity: *entity,
+                holders: holding.clone(),
+            });
+        }
+        let holder = holding[0];
+        let a = anchor[entity];
+        if !realm_fences.contains(&a) {
+            return Err(TransientViolation::AnchorMismatch {
+                entity: *entity,
+                holder,
+                anchor: a,
+            });
+        }
+        if !go_fences.contains(&a) {
+            return Err(TransientViolation::NoGoToken {
+                entity: *entity,
+                holder,
+                anchor: a,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The realm-key half of AUTHORITY-UNIQUE: every realm record has exactly one
@@ -699,6 +793,89 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    /// D-7a: a DEST shard holding ONE transient (Held, anchored at its realm fence 3) + an
+    /// orchestrator with the committed batched go-token at fence 3 — the happy TRANSIENT-AUTHORITY-HELD
+    /// state (held by exactly one shard, anchored to a live lease, backed by a go-token; NO directory).
+    fn transient_healthy() -> Vec<(NodeId, InspectReport)> {
+        vec![
+            (
+                ORCH,
+                InspectReport {
+                    batch_goes: vec![(vd_core::BatchId(vd_core::TransferId(1)), Fence(3))],
+                    ..InspectReport::default()
+                },
+            ),
+            (
+                DEST,
+                InspectReport {
+                    held_realms: vec![(realm(), Fence(3))],
+                    owned_transients: vec![(entity(), Fence(3))],
+                    ..InspectReport::default()
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn transient_authority_held_passes_for_a_singly_held_backed_transient() {
+        assert_eq!(
+            verify_transient_authority_held(&transient_healthy()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn transient_double_held_is_caught() {
+        // The cardinal transient sin: the same transient authoritatively held by TWO shards.
+        let mut reports = transient_healthy();
+        reports.push((
+            SHARD,
+            InspectReport {
+                held_realms: vec![(realm(), Fence(3))],
+                owned_transients: vec![(entity(), Fence(3))],
+                ..InspectReport::default()
+            },
+        ));
+        assert_eq!(
+            verify_transient_authority_held(&reports),
+            Err(TransientViolation::DoubleHeld {
+                entity: entity(),
+                holders: vec![DEST, SHARD],
+            })
+        );
+    }
+
+    #[test]
+    fn transient_anchored_to_no_live_lease_is_caught() {
+        // A held transient anchored at a fence that is no live shard's realm lease — a stranded hold.
+        let mut reports = transient_healthy();
+        reports[1].1.owned_transients = vec![(entity(), Fence(99))];
+        assert_eq!(
+            verify_transient_authority_held(&reports),
+            Err(TransientViolation::AnchorMismatch {
+                entity: entity(),
+                holder: DEST,
+                anchor: Fence(99),
+            })
+        );
+    }
+
+    #[test]
+    fn transient_with_no_committed_go_token_is_caught() {
+        // A held transient anchored to a real realm lease but with NO committed go-token at that
+        // fence — the batched commit point was bypassed (an uncommitted/forged hold).
+        let mut reports = transient_healthy();
+        reports[0].1.batch_goes.clear();
+        assert_eq!(
+            verify_transient_authority_held(&reports),
+            Err(TransientViolation::NoGoToken {
+                entity: entity(),
+                holder: DEST,
+                anchor: Fence(3),
+            })
+        );
     }
 
     #[test]
