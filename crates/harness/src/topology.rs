@@ -71,6 +71,10 @@ pub struct InspectReport {
     /// on shards/clients. `(BatchId, commit_fence)`; the `TRANSIENT-AUTHORITY-HELD` oracle cross-checks
     /// each held transient's anchor against a go-token here (a transient has no directory row to check).
     pub batch_goes: Vec<(vd_core::BatchId, Fence)>,
+    /// HANDOVER-attributable transient LOSS per kind (D-7b.3), from `StubStats.transients_lost_in_handover`
+    /// — `(EntityKind, lost)` in kind order. The `verify_transient_loss_budget` gate sums this per kind
+    /// across shards and compares to the kind's `LossBudget` (NOT the gross `transients_dropped`).
+    pub transient_loss: Vec<(vd_core::entity_kind::EntityKind, u64)>,
     /// Inputs this node APPLIED, in order (shards fill this).
     pub applied_inputs: Vec<(SessionId, u64)>,
     /// Inputs this node DISCARDED, with the typed reason (shards fill this).
@@ -209,6 +213,16 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
     }
     if let Some(stats) = world.get_resource::<vd_sim::stub::StubStats>() {
         report.dest_resume_seq = stats.last_input_slot_resume;
+        // D-7b.3: the handover-attributable per-kind loss, in deterministic kind order (the
+        // DetHashMap iteration is fixed-seed-deterministic, but sort so the Vec is replay-stable
+        // regardless of insertion order — the byte-identical-trace gate).
+        let mut loss: Vec<(vd_core::entity_kind::EntityKind, u64)> = stats
+            .transients_lost_in_handover
+            .iter()
+            .map(|(k, n)| (*k, *n))
+            .collect();
+        loss.sort_by_key(|(k, _)| *k as u8);
+        report.transient_loss = loss;
     }
     report
 }
@@ -1048,6 +1062,26 @@ mod tests {
                 },
             );
         }
+        // D-7b.3: seed the per-kind handover-loss counter so the inspect scrape's map+sort closures
+        // run over a NON-EMPTY map (kind order: Debris=10 before Projectile=12).
+        {
+            let concrete = topo
+                .node_mut(B)
+                .expect("shard present")
+                .as_any_mut()
+                .expect("downcast")
+                .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
+                .expect("ShardNode");
+            let mut stats = concrete
+                .world_mut()
+                .resource_mut::<vd_sim::stub::StubStats>();
+            stats
+                .transients_lost_in_handover
+                .insert(vd_core::entity_kind::EntityKind::Projectile, 1);
+            stats
+                .transients_lost_in_handover
+                .insert(vd_core::entity_kind::EntityKind::Debris, 2);
+        }
         let reports = topo.inspect_all();
         assert_eq!(
             reports[1].1.owned_transients,
@@ -1059,6 +1093,15 @@ mod tests {
             reports[1].1.held_transient_poses,
             vec![(debris, pose)],
             "only the HELD transient's pose is reported for the render trace"
+        );
+        // D-7b.3: the per-kind handover loss is reported in kind order (Debris before Projectile).
+        assert_eq!(
+            reports[1].1.transient_loss,
+            vec![
+                (vd_core::entity_kind::EntityKind::Debris, 2),
+                (vd_core::entity_kind::EntityKind::Projectile, 1),
+            ],
+            "the handover-loss counter is scraped + sorted by kind"
         );
     }
 

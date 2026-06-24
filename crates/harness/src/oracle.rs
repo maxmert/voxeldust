@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use vd_core::entity_kind::{EntityKind, LossBudget};
 use vd_core::glam::{DQuat, DVec3};
 use vd_core::pose::FrameRef;
 use vd_core::{EntityId, Fence, NodeId, SessionId, TickId};
@@ -95,6 +96,15 @@ pub enum TransientViolation {
         entity: EntityId,
         holders: Vec<NodeId>,
         tick: TickId,
+    },
+    #[error(
+        "kind {kind:?} lost {lost} transients in handover this scenario, over its budget {budget:?} \
+         (loss WITHIN budget is tolerated; over-budget is failure; duplication is failure regardless)"
+    )]
+    LostOverBudget {
+        kind: EntityKind,
+        lost: u64,
+        budget: LossBudget,
     },
 }
 
@@ -365,6 +375,36 @@ pub fn verify_transient_conservation_tick(
                 tick,
             });
         }
+    }
+    Ok(())
+}
+
+/// TRANSIENT loss-budget (binding D-7b.3, checked ONCE per scenario at quiescence): the
+/// handover-attributable loss for `kind`, summed across shards, must not EXCEED the kind's declared
+/// [`LossBudget`]. Loss is the closed-form-debris reality — a debris vanishing on a lost handoff is
+/// invisible at gameplay scale (`sealed_shards.md`), so `lost <= budget` PASSES; `lost > budget` is
+/// `LostOverBudget`. (Duplication is failure regardless of budget — that is the per-tick
+/// `verify_transient_conservation_tick`'s job, NOT this one.) It reads the per-kind
+/// `transient_loss` (the handover-attributable counter), NEVER the gross `transients_dropped` — so a
+/// resident-eviction burst can never spuriously trip a tiny budget. The budget JUDGES drops; it never
+/// CAUSES them (runtime never sheds to stay within budget). Separate from the per-tick oracle: this is
+/// a per-SCENARIO threshold, called once after the run settles.
+///
+/// # Errors
+/// [`TransientViolation::LostOverBudget`] when `kind`'s summed handover loss exceeds its `LossBudget`.
+pub fn verify_transient_loss_budget(
+    reports: &[(NodeId, InspectReport)],
+    kind: EntityKind,
+) -> Result<(), TransientViolation> {
+    let lost: u64 = reports
+        .iter()
+        .flat_map(|(_, r)| r.transient_loss.iter())
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, n)| *n)
+        .sum();
+    let budget = kind.def().loss_budget;
+    if lost > u64::from(budget.0) {
+        return Err(TransientViolation::LostOverBudget { kind, lost, budget });
     }
     Ok(())
 }
@@ -966,6 +1006,71 @@ mod tests {
                 entity: entity(),
                 holders: vec![DEST, SHARD],
                 tick: TickId(9),
+            })
+        );
+    }
+
+    /// A shard report carrying a per-kind handover-loss count (D-7b.3).
+    fn loss_report(node: NodeId, loss: Vec<(EntityKind, u64)>) -> (NodeId, InspectReport) {
+        (
+            node,
+            InspectReport {
+                transient_loss: loss,
+                ..InspectReport::default()
+            },
+        )
+    }
+
+    #[test]
+    fn transient_loss_budget_passes_within_and_sums_over_across_shards() {
+        // DEBRIS_DEF.loss_budget = 4. Within budget passes; the sum ACROSS shards is what's compared
+        // (so split losses still trip the budget); a loss for ANOTHER kind is filtered out.
+        assert_eq!(
+            verify_transient_loss_budget(
+                &[loss_report(SHARD, vec![(EntityKind::Debris, 3)])],
+                EntityKind::Debris
+            ),
+            Ok(()),
+            "3 <= budget(4) passes"
+        );
+        // 3 + 3 across two shards = 6 > 4 → over budget (the summed count, not per-shard).
+        assert_eq!(
+            verify_transient_loss_budget(
+                &[
+                    loss_report(SHARD, vec![(EntityKind::Debris, 3)]),
+                    loss_report(DEST, vec![(EntityKind::Debris, 3)]),
+                ],
+                EntityKind::Debris,
+            ),
+            Err(TransientViolation::LostOverBudget {
+                kind: EntityKind::Debris,
+                lost: 6,
+                budget: LossBudget(4),
+            })
+        );
+        // A loss recorded for a DIFFERENT kind is filtered out (Debris sum 0 ≤ 4).
+        assert_eq!(
+            verify_transient_loss_budget(
+                &[loss_report(SHARD, vec![(EntityKind::Projectile, 99)])],
+                EntityKind::Debris,
+            ),
+            Ok(()),
+            "another kind's loss does not count against Debris"
+        );
+    }
+
+    #[test]
+    fn transient_loss_over_budget_is_caught() {
+        // 5 Debris lost in handover > budget(4) → LostOverBudget.
+        assert_eq!(
+            verify_transient_loss_budget(
+                &[loss_report(SHARD, vec![(EntityKind::Debris, 5)])],
+                EntityKind::Debris
+            ),
+            Err(TransientViolation::LostOverBudget {
+                kind: EntityKind::Debris,
+                lost: 5,
+                budget: LossBudget(4),
             })
         );
     }

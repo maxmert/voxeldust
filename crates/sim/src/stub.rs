@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
+use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of};
 use vd_core::geometry::OverlapBand;
 use vd_core::glam::DVec3;
@@ -249,6 +250,23 @@ impl TransientStatus {
             TransientStatus::Arriving { .. } | TransientStatus::Departing { .. } => false,
         }
     }
+
+    /// Is this transient MID-TRANSFER (D-7b.3) — i.e. losing it to a realm self-fence is an in-flight
+    /// transfer LOSS (counted against the kind's `LossBudget`), NOT a resident eviction? Everything
+    /// EXCEPT a settled `Held{outbound: None}`: a source item flagged-to-cross (`Crossing`), emitted
+    /// and awaiting release (`Held{outbound: Some}`), released-and-retained (`Departing`), or a dest
+    /// mid-flight copy (`Arriving`). Monomorphic predicate — the SINGLE answer to "is this a handover
+    /// loss".
+    #[must_use]
+    pub fn is_in_handover(&self) -> bool {
+        match self {
+            TransientStatus::Held { outbound: None } => false,
+            TransientStatus::Held { outbound: Some(_) }
+            | TransientStatus::Crossing { .. }
+            | TransientStatus::Arriving { .. }
+            | TransientStatus::Departing { .. } => true,
+        }
+    }
 }
 
 /// The transients this shard tracks, by entity id (D-7). The `is_held()` subset is the
@@ -476,10 +494,17 @@ pub struct StubStats {
     /// `TransientRelease` + `ReleaseComplete` REDELIVERIES (already-journaled
     /// `(transfer, TRANSIENT_RELEASE_STEP)`) — a counted idempotent no-op (at-least-once). 0 healthy.
     pub transient_release_noop: u64,
-    /// LOSS: transients DROPPED because this shard self-fenced its realm lease (a crash/eviction with
-    /// NO hand-off — the items were anchored to the now-lost lease). The declared-loss counter
-    /// (D-7b's `LossBudget` gate reads it); 0 on the happy path (the realm is never lost).
+    /// GROSS transients DROPPED on a realm self-fence — EVERY tier (handover + settled-resident). Ops
+    /// visibility only; 0 on the happy path. NOT the loss-budget gate (that reads
+    /// `transients_lost_in_handover` — a 1000-resident burst eviction would dwarf a tiny budget here).
     pub transients_dropped: u64,
+    /// HANDOVER-attributable LOSS per kind (D-7b.3): on a realm self-fence, ONLY transients in a
+    /// handover status (`is_in_handover()` — emitted/Departing/Crossing source items + Arriving dest
+    /// items) are an in-flight transfer LOSS bucketed here; a settled `Held{outbound:None}` dropped on
+    /// eviction is a resident-eviction event, OUT of transfer-budget scope. The `verify_transient_
+    /// loss_budget` gate compares this per-kind count to the kind's `LossBudget` — so a mixed-kind
+    /// burst can never spuriously trip a single-kind budget. `DetHashMap` (fixed-seed → deterministic).
+    pub transients_lost_in_handover: DetHashMap<EntityKind, u64>,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2026,7 +2051,19 @@ fn on_release_complete(rc: TransientHandoff, owned: &mut OwnedTransients, stats:
 /// RETAINED (authority.rs owns them); only the held-set-anchored transients are lost. The `+= 0` on
 /// an empty set is a covered straight-line no-op (the happy path never loses the realm).
 fn self_fence_drop_transients(owned: &mut OwnedTransients, stats: &mut StubStats) {
+    // GROSS eviction count (ops visibility) — every tier.
     stats.transients_dropped += owned.0.len() as u64;
+    // HANDOVER-attributable per-kind LOSS (the D-7b.3 budget gate reads THIS, never the gross count):
+    // only `is_in_handover()` items are an in-flight transfer loss; a settled `Held{outbound: None}`
+    // is a resident eviction OUT of budget scope. A corrupt kind tag (HR2 — never decode-to-default)
+    // is counted GROSS but NOT bucketed (the `Err` arm — it has no kind to attribute the loss to).
+    for (entity, t) in owned.0.iter() {
+        if t.status.is_in_handover()
+            && let Ok(kind) = EntityKind::from_tag(entity.kind_tag())
+        {
+            *stats.transients_lost_in_handover.entry(kind).or_insert(0) += 1;
+        }
+    }
     owned.0.clear();
 }
 
@@ -3085,6 +3122,114 @@ mod tests {
         assert!(rig.world.resource::<OwnedTransients>().0.is_empty());
         assert_eq!(rig.world.resource::<StubStats>().transients_dropped, 1);
         assert!(rig.world.resource::<RealmAuthority>().0.is_none());
+    }
+
+    #[test]
+    fn transient_status_is_in_handover_excludes_only_settled_held() {
+        // D-7b.3: every tier EXCEPT a settled `Held{outbound: None}` is a handover loss if dropped.
+        assert!(
+            !TransientStatus::Held { outbound: None }.is_in_handover(),
+            "a settled Held is a resident eviction, not a handover loss"
+        );
+        assert!(
+            TransientStatus::Held {
+                outbound: Some(TransferId(1))
+            }
+            .is_in_handover()
+        );
+        assert!(
+            TransientStatus::Crossing {
+                dest: DEST_NODE,
+                to_realm: RealmId::System(8),
+                dst_realm_fence: Fence(2),
+                batch: TransferId(1),
+            }
+            .is_in_handover()
+        );
+        assert!(
+            TransientStatus::Arriving {
+                batch: TransferId(1)
+            }
+            .is_in_handover()
+        );
+        assert!(
+            TransientStatus::Departing {
+                batch: TransferId(1)
+            }
+            .is_in_handover()
+        );
+    }
+
+    #[test]
+    fn self_fence_buckets_handover_loss_per_kind_and_excludes_resident_and_corrupt() {
+        // D-7b.3: a realm self-fence buckets ONLY handover-status items into the per-kind
+        // handover-loss counter (the budget gate's input), keyed by kind; a settled `Held{None}` is a
+        // resident eviction (NOT bucketed); a corrupt kind tag is counted GROSS but NOT bucketed (the
+        // `from_tag` Err arm). The gross `transients_dropped` still counts EVERY tier.
+        let t = TransferId(0xC0);
+        let mk = |status| Transient {
+            pose: transient_pose(),
+            anchor_fence: Fence(2),
+            status,
+        };
+        let mut owned = OwnedTransients::default();
+        // Four Debris in handover (one per tier).
+        owned.0.insert(
+            EntityId::pack(EntityKind::Debris, 1, 1, 0),
+            mk(TransientStatus::Held { outbound: Some(t) }),
+        );
+        owned.0.insert(
+            EntityId::pack(EntityKind::Debris, 1, 2, 0),
+            mk(TransientStatus::Crossing {
+                dest: DEST_NODE,
+                to_realm: RealmId::System(8),
+                dst_realm_fence: Fence(2),
+                batch: t,
+            }),
+        );
+        owned.0.insert(
+            EntityId::pack(EntityKind::Debris, 1, 3, 0),
+            mk(TransientStatus::Arriving { batch: t }),
+        );
+        owned.0.insert(
+            EntityId::pack(EntityKind::Debris, 1, 4, 0),
+            mk(TransientStatus::Departing { batch: t }),
+        );
+        // A Projectile in handover (proves per-kind disentangling).
+        owned.0.insert(
+            EntityId::pack(EntityKind::Projectile, 1, 5, 0),
+            mk(TransientStatus::Held { outbound: Some(t) }),
+        );
+        // A SETTLED Debris (resident eviction — NOT a handover loss).
+        owned.0.insert(
+            EntityId::pack(EntityKind::Debris, 1, 6, 0),
+            mk(TransientStatus::Held { outbound: None }),
+        );
+        // A corrupt kind tag (99) in handover — counted gross, NOT bucketed (the from_tag Err arm).
+        owned.0.insert(
+            EntityId(99u128 << 120),
+            mk(TransientStatus::Departing { batch: t }),
+        );
+        let mut stats = StubStats::default();
+
+        self_fence_drop_transients(&mut owned, &mut stats);
+        assert!(
+            owned.0.is_empty(),
+            "every transient is dropped on self-fence"
+        );
+        assert_eq!(stats.transients_dropped, 7, "gross counts EVERY tier");
+        assert_eq!(
+            stats.transients_lost_in_handover.get(&EntityKind::Debris),
+            Some(&4),
+            "4 Debris in handover bucketed (the settled one + the corrupt one excluded)"
+        );
+        assert_eq!(
+            stats
+                .transients_lost_in_handover
+                .get(&EntityKind::Projectile),
+            Some(&1),
+            "the Projectile is bucketed under its OWN kind (per-kind disentangling)"
+        );
     }
 
     #[test]

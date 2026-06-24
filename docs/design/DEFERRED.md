@@ -621,15 +621,25 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   on the closed-form trajectory `pos0 + vel·(t−t0)·dt_s` (no teleport, no double-advance: source
   increment + dest re-advance compose to one trajectory). `accel = ZERO` (a stub is empty space; P5's
   SphericalSpace introduces seed-derived gravity — same primitive). Gate-green at 100% Tier-A.
-- **Still owed (D-7b.3, c, d):** the per-kind handover-attributable loss counter
-  `transients_lost_in_handover` + `verify_transient_loss_budget` (ABSOLUTE per-scenario threshold vs
-  `DEBRIS_DEF.loss_budget=4` — distinct from the gross `transients_dropped`) [D-7b.3]; the
-  `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale assertion + burst params →
-  `StubConfig` [D-7c]; the crash-matrix Transient cells (`BatchCommitting` at_phase,
-  `EndState::BatchCommittedAt` / `BatchDroppedWithinBudget`) [D-7d]. Also owed: bounded GC of completed
-  go-tokens (`batch_goes` unbounded — the oracle needs the live record until a drop-completion signal,
-  D-7c/D-6); a re-drive producer for a lost transient handoff command (a permanent kill mid-handoff
-  leaves an uncounted stuck item until self-fence — D-7d); the durable go-token WAL (in-memory, [[D-6]]).
+- **✅ D-7b.3 LANDED (D-7b COMPLETE):** the per-kind handover-attributable loss budget. A new
+  `StubStats.transients_lost_in_handover: DetHashMap<EntityKind,u64>` (distinct from the gross
+  `transients_dropped`) is filled by `self_fence_drop_transients`, which buckets ONLY
+  `TransientStatus::is_in_handover()` items (the `Held{Some}`/`Crossing`/`Departing` source + `Arriving`
+  dest tiers) per kind — a settled `Held{None}` is a resident eviction OUT of budget scope, a corrupt
+  kind tag is counted gross but not bucketed (the HR2 `from_tag` Err arm). `oracle::
+  verify_transient_loss_budget(reports, kind)` sums it per kind across shards and compares to the
+  kind's `LossBudget` (`LostOverBudget` iff `lost > budget`; loss WITHIN budget is tolerated,
+  duplication is failure regardless). So a 1000-resident burst eviction can never spuriously trip a
+  tiny per-kind budget (the LOSS-BUDGET skeptic's confirmed "wrong population" hazard, fixed). Unit-
+  gate: over-budget (5>4), within (3≤4), mixed-kind disentangling, resident-excluded, corrupt-excluded.
+  Gate-green at 100% Tier-A. **D-7b (BallisticReadvance + per-tick conservation + loss budget) is DONE.**
+- **Still owed (D-7c, d):** the `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale
+  assertion + burst params → `StubConfig` [D-7c]; the crash-matrix Transient cells (`BatchCommitting`
+  at_phase, `EndState::BatchCommittedAt` / `BatchDroppedWithinBudget` — the realistic CLUSTER-level
+  over-budget self-fence + the re-drive producer for a lost transient handoff command, since a
+  permanent kill mid-handoff today leaves an uncounted stuck item until self-fence) [D-7d]. Also owed:
+  bounded GC of completed go-tokens (`batch_goes` unbounded — the oracle needs the live record until a
+  drop-completion signal, D-7c/D-6); the durable go-token WAL (in-memory, [[D-6]]).
 - **Where:** `saga.rs` (`BatchCommitting`), `saga_runtime.rs` (`locks_directory_key`, `IssueTransientGo` executor,
   `batch_goes`, `handle_batch_adopted`), `stub.rs` (`OwnedTransients`/`TransientStatus`, `emit_transient_batch`,
   `adopt_transient_batch`, `on_transient_drop`, self-fence drop), `wire/intershard.rs` (`TransferAck::BatchAdopted`,
