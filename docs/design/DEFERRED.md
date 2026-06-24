@@ -170,6 +170,34 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   recovery; a starved delivery watermark needs a delivery-path nudge, a distinct mechanism).
 - **Source:** Slice-2a design `wf_9f22c70d` (finding #3); boundary-documented, not silently wedged.
 
+### D-37 🟥 Permanent participant-kill recovery: the forward re-home / abort-on-unreachable producer
+- **Missing:** when a transfer PARTICIPANT is permanently KILLED mid-flight (not crash+resurrect — the fabric's
+  at-least-once recovers that), the saga has no way to recover to a live, consistent owner. The Slice-2a Timeout
+  producer re-drives the lost step toward the DEAD node forever (it cannot tell dead from slow — D-3) and the saga
+  PARKS. Empirically pinned by the P3 Slice-1 crash matrix (`tests/tests/p3_crash_matrix.rs`):
+  - **kill SOURCE in Demoting** (post-commit): the directory committed to the dest; the Demote never acks; the dest
+    stays Ghost. `ParkedHalfOpen{authority_at: DEST}`.
+  - **kill DEST pre-freeze** (the design's "aborts to the live source" claim was REFUTED by the matrix): the dest is
+    NOT in the pre-freeze ack path (Prepared/CutConfirmed/SourceFrozen come from the gateway + source), so killing it
+    does NOT trigger a pre-freeze abort — the saga sails to the orchestrator's LOCAL commit-CAS (commits to the dest
+    regardless of liveness) and PARKS in Promoting (the dead dest cannot ack PromoteAck). `ParkedHalfOpen{DEST}`.
+    **Consequence: there is NO clean permanent-kill-to-LIVE-source cell** — killing the source/gateway makes THEM
+    dead (a `DeadOwnerOrphan`); the abort-to-live-source end state is reached only by a NON-kill abort (a spatial
+    rejection / a transient-fault pre-freeze timeout that leaves the source alive — P3 Slice 1b).
+  - **kill SOURCE pre-freeze** (Freezing): the freeze timeout aborts (`abort_with_thaw`, gateway-acked) + tombstones,
+    but the directory is left at the now-DEAD source at a bumped fence. `DeadOwnerOrphan{SOURCE}`.
+- **Where:** `crates/node/src/saga_runtime.rs` (the `scan_deadlines` producer re-drives toward the dead node; no
+  abort-on-unreachable, no re-home). The harness makes these HONEST today: the dead-node-aware oracle
+  (`FaultFabric::is_dead`, `Topology::inspect_live`/`dead_nodes`, `oracle::verify_authority_unique_excluding`)
+  EXCLUDES the dead node's corpse claim, so a park/orphan surfaces as the true `HeldNowhere`/`RealmHeldNowhere`
+  orphan rather than a false-passing held@dead-node (or a false-RED legit park). It is OBSERVABLE, never silently wedged.
+- **When / proper:** a forward RE-HOME producer (re-drive the entity onto a LIVE shard / abort-to-a-live-owner),
+  gated on **D-3** (lease-lapse liveness — the real dead-vs-slow discriminator) + **D-6** (the durable saga WAL to
+  re-home from). Same root as the D-2 loss-of-autonomous-recovery + the killed-source-mid-Demoting case D-2 already
+  named as P3/Slice-2 scope. The orchestrator-crash row of the crash matrix is separately gated on D-6.
+- **Source:** P3 Slice-1 design `wf_540e3497` + the empirical crash matrix (which refuted the design's clean-abort
+  claim for kill-DEST-pre-freeze).
+
 ### D-1 🟩 Transfer abort clears the directory lock (Slice 2a)
 - **✅ CLOSED (Slice 2a):** the terminal `Aborted` edge now emits `SagaAction::ClearTransferLock` →
   `DirectoryCore::abort_clear(subject, transfer)` — the STALE-FENCE re-read (a CAS-loser/aborter's `expected_fence`

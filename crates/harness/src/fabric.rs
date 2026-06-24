@@ -266,6 +266,19 @@ impl FaultFabric {
         self.lock().endpoints.get(&id).is_some_and(|e| e.crashed)
     }
 
+    /// Is this node currently DOWN — killed permanently OR crashed and not yet resurrected (i.e. not
+    /// delivering, not authoritative)? The dead-node-aware oracle filter (P3 crash matrix) excludes a
+    /// dead node's authority claim so a corpse cannot FALSE-PASS AUTHORITY-UNIQUE (held@a dead node)
+    /// nor a legitimate mid-flight park FALSE-RED. NB `kill` sets `crashed` too, so this is equivalent
+    /// to `is_crashed`; spelled `killed || crashed` to document the intent at the call site.
+    #[must_use]
+    pub fn is_dead(&self, id: NodeId) -> bool {
+        self.lock()
+            .endpoints
+            .get(&id)
+            .is_some_and(|e| e.killed || e.crashed)
+    }
+
     #[must_use]
     pub fn stats(&self) -> FabricStats {
         self.lock().stats
@@ -637,6 +650,26 @@ mod tests {
         );
         fabric.ack_survivor(B);
         assert!(fabric.conservation_holds());
+    }
+
+    #[test]
+    fn is_dead_tracks_killed_crashed_and_resurrected() {
+        // The dead-node-aware-oracle predicate (P3 crash matrix): dead while killed (permanent),
+        // dead while crashed, NOT dead after resurrect. Both `killed || crashed` operands covered.
+        let (fabric, _a, _b) = perfect_pair();
+        assert!(!fabric.is_dead(A), "a live node is not dead");
+        fabric.kill(A);
+        assert!(fabric.is_dead(A), "a killed node is dead (permanent)");
+        fabric.crash(B);
+        assert!(fabric.is_dead(B), "a crashed node is dead");
+        fabric.resurrect(B);
+        assert!(
+            !fabric.is_dead(B),
+            "a resurrected (not-killed) node is no longer dead"
+        );
+        // A killed node STAYS dead through a resurrect attempt (kill is permanent).
+        fabric.resurrect(A);
+        assert!(fabric.is_dead(A), "resurrect does not revive a killed node");
     }
 
     #[test]

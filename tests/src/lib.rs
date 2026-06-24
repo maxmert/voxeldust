@@ -4,15 +4,21 @@
 //! Standing rule: every phase ADDS scenarios; nothing is deleted. The accumulated
 //! suite re-running green is the release gate for every later phase.
 
+use std::collections::BTreeSet;
 use vd_connection_plane::gateway::{
     GatewayConfig, GatewayStats, TransportTuning, register_gateway,
 };
 use vd_connection_plane::tickets;
+
+use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::{FrameRef, RealmId};
-use vd_core::{AccountId, EntityId, EpochId, Fence, NodeId, SessionId};
+use vd_core::{AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_harness::client::{DeliveredWorldView, InputCmd, ScriptedClient};
-use vd_harness::fabric::{FabricTransport, FaultFabric};
-use vd_harness::topology::{StaggerPlan, Topology};
+use vd_harness::fabric::{CrashWhen, FabricTransport, FaultFabric};
+use vd_harness::oracle::{
+    AuthorityViolation, verify_authority_settled, verify_authority_unique_excluding,
+};
+use vd_harness::topology::{InspectReport, StaggerPlan, Topology};
 use vd_node::ShardNode;
 use vd_node::app::{NodeConfig, build_app};
 use vd_node::follower::register_clock_follower;
@@ -22,7 +28,7 @@ use vd_sim::capability::NodeKind;
 use vd_sim::directory::DirectoryTuning;
 use vd_sim::saga::SagaCtx;
 use vd_sim::stub::{StubConfig, register_stub_shard};
-use vd_wire::seams::directory::DirectoryKey;
+use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, OwnerRecord};
 
 /// The canonical P1 node ids (one orchestrator, one gateway, one stub shard;
 /// clients from 100 upward).
@@ -298,5 +304,255 @@ pub fn walk_forward() -> impl FnMut(&DeliveredWorldView) -> Option<InputCmd> + S
             movement: [1.0, 0.0, 0.0],
             look: [0.0, 0.0],
         })
+    }
+}
+
+// ====================================================================================================
+// P3 Slice 1 — the crash/fault recovery matrix harness (the kill-9 thesis headline). ONE data-driven
+// driver over a cell table (DRY, HR2-additive: parameterized on `DurabilityClass`); the dead-node-aware
+// oracle (vd-harness) makes the deferred kill cells HONEST (a corpse never false-passes AUTHORITY-UNIQUE).
+// SCOPE: crash+resurrect (fabric at-least-once recovers) + permanent kill (handled cell aborts to a live
+// source; D-37 cells park/orphan honestly). Drop/partition + the seed-driven breadth chaos are P3 Slice 1b.
+// ====================================================================================================
+
+/// The crash-matrix client (distinct from the in-process capstone CLIENT 100, but same id is fine —
+/// only one client per scenario).
+pub const FAULT_CLIENT: NodeId = NodeId(100);
+
+/// The fault a scenario injects at a chosen saga phase.
+#[derive(Clone, Copy, Debug)]
+pub enum Fault {
+    /// Temporary crash (`CrashWhen` phase) then resurrect `after` ticks later — the fabric's
+    /// at-least-once redelivers the unacked message on resurrection (the common-case recovery).
+    CrashResurrect { after: u64 },
+    /// Permanent death of the victim — sends toward it bounce `NodeUnreachable`; recovery depends on
+    /// the cell (a pre-freeze dest-kill aborts to the live source; the rest park/orphan honestly, D-37).
+    Kill,
+}
+
+/// One crash-matrix cell: crash/kill `victim` once the saga reaches `at_phase`, at the `crash_when`
+/// sub-tick phase. `class` feeds `SagaCtx.class` (HR2 — Transient/Guided plug in additively, no
+/// match-on-class in the driver).
+#[derive(Clone, Copy, Debug)]
+pub struct Scenario {
+    pub class: DurabilityClass,
+    pub victim: NodeId,
+    pub at_phase: &'static str,
+    pub crash_when: CrashWhen,
+    pub fault: Fault,
+}
+
+/// The asserted end state of a scenario. Data-carrying (not 3 bare arms) so the deferred D-37 cells
+/// name WHERE the orphan/park sits — proven HONEST (not false-green) by the dead-node-aware oracle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndState {
+    /// The transfer COMMITTED + settled at `node` (the recovered happy path).
+    SettledAt(NodeId),
+    /// A clean abort returned the avatar to the live SOURCE, lock cleared, saga terminal. NOTE: NO
+    /// permanent-kill cell reaches this (killing the source/gateway makes THEM dead → an orphan; the
+    /// abort-to-a-LIVE-source path is a NON-kill abort — a spatial rejection or a transient-fault
+    /// pre-freeze timeout that heals). Exercised in P3 Slice 1b (when the Drop/Partition faults land).
+    AbortedToSource,
+    /// D-37 (RED, owed D-3+D-6): the saga PARKED (re-driving toward a dead node), directory names the
+    /// dead `authority_at`; the dead-aware oracle surfaces the orphan rather than false-passing a corpse.
+    ParkedHalfOpen { authority_at: NodeId },
+    /// D-37 (RED): the saga TOMBSTONED to a dead-owner orphan (directory names the dead `authority_at`
+    /// at a bumped fence, lock cleared, no live saga) — the dead-aware oracle surfaces it.
+    DeadOwnerOrphan { authority_at: NodeId },
+}
+
+fn fault_report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
+    &reports
+        .iter()
+        .find(|(n, _)| *n == id)
+        .expect("node present")
+        .1
+}
+
+/// Step at most `max` ticks until `cond` holds; panic if never (bounded, deterministic).
+fn fault_step_until(topo: &mut Topology, max: u64, mut cond: impl FnMut(&mut Topology) -> bool) {
+    for _ in 0..max {
+        topo.step();
+        if cond(topo) {
+            return;
+        }
+    }
+    panic!("crash-matrix condition not reached within {max} ticks");
+}
+
+/// The orchestrator's directory record for the subject entity (the authority-of-record).
+#[must_use]
+fn fault_entity_record(reports: &[(NodeId, InspectReport)], entity: EntityId) -> OwnerRecord {
+    fault_report(reports, ORCH)
+        .directory
+        .iter()
+        .find_map(|(k, r)| (*k == DirectoryKey::Entity(entity)).then_some(*r))
+        .expect("the subject entity is recorded in the directory")
+}
+
+/// Drive ONE crash-matrix scenario over the real fabric: warm up + trigger the transfer, drive to
+/// `sc.at_phase` (asserting the saga is genuinely there — anti-vacuity), inject the fault, then
+/// quiesce (settle, or cap for a parked cell). Returns the topology, the transferred entity, and the
+/// dead-node set for the dead-aware oracle.
+#[must_use]
+pub fn run_fault_scenario(seed: u64, sc: Scenario) -> (Topology, EntityId, BTreeSet<NodeId>) {
+    let fabric = FaultFabric::new(seed, 2);
+    let mut topo = p2_cluster(&fabric, 8);
+    topo.add_node(Box::new(p1_client(
+        &fabric,
+        FAULT_CLIENT,
+        AccountId(1000),
+        walk_forward(),
+    )));
+    // WARMUP: the player logs in + walks; the SOURCE grants its avatar and the DEST wins its realm.
+    fault_step_until(&mut topo, 80, |t| {
+        let r = t.inspect_all();
+        !fault_report(&r, SHARD).held_entities.is_empty()
+            && fault_report(&r, DEST)
+                .held_realms
+                .iter()
+                .any(|(realm, _)| *realm == RealmId::System(8))
+    });
+    let (session, entity, fence) = read_subject(&mut topo);
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: TransferId(1),
+            session,
+            subject: DirectoryKey::Entity(entity),
+            expected_fence: fence,
+            source: SHARD,
+            dest: DEST,
+            class: sc.class,
+            needs_provision: false,
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::System(8),
+        },
+    );
+    // Drive to the target saga phase (the client auto-stamps the CUT_MARKER on RequestCut; the saga
+    // progresses on its acks — no marker pause/resume needed for the crash matrix).
+    fault_step_until(&mut topo, 60, |t| {
+        saga_states(t).iter().any(|s| s.starts_with(sc.at_phase))
+    });
+    // ANTI-VACUITY: the saga is GENUINELY in the target phase on the fire tick (not advanced past it).
+    assert!(
+        saga_states(&mut topo)
+            .iter()
+            .any(|s| s.starts_with(sc.at_phase)),
+        "the saga is in phase {} when the fault fires (anti-vacuity)",
+        sc.at_phase,
+    );
+    match sc.fault {
+        Fault::CrashResurrect { after } => {
+            let fire = topo.tick().0 + 1;
+            topo.schedule_crash(sc.victim, TickId(fire), sc.crash_when);
+            topo.schedule_resurrect(sc.victim, TickId(fire + after));
+        }
+        Fault::Kill => fabric.kill(sc.victim),
+    }
+    // QUIESCE: settle to terminal, or cap (a D-37 parked cell never quiesces — the assert handles it).
+    for _ in 0..120 {
+        topo.step();
+        if live_sagas(&mut topo) == 0 {
+            break;
+        }
+    }
+    let dead = topo.dead_nodes();
+    (topo, entity, dead)
+}
+
+/// Assert the scenario reached its expected [`EndState`], using the dead-node-aware oracle so a killed
+/// participant's corpse can neither false-pass uniqueness nor false-RED a legitimate park.
+pub fn assert_end_state(
+    topo: &mut Topology,
+    entity: EntityId,
+    dead: &BTreeSet<NodeId>,
+    expected: EndState,
+) {
+    // The orphan that the dead-aware oracle MUST surface for a directory record naming a dead node:
+    // the entity half returns HeldNowhere (the recorded owner holds nothing live) before the realm half.
+    let orphan = |authority_at: NodeId| AuthorityViolation::HeldNowhere {
+        entity,
+        recorded: format!("{:?}", AuthorityRef::Shard(authority_at)),
+    };
+    match expected {
+        EndState::SettledAt(node) => {
+            // Post-recovery the LIVE view (a resurrect cell has no dead nodes, so inspect_live ==
+            // inspect_all here) must be consistent + settled, with the avatar held once at `node`.
+            let reports = topo.inspect_live();
+            verify_authority_unique_excluding(&reports, dead)
+                .expect("AUTHORITY-UNIQUE holds after recovery");
+            verify_authority_settled(&reports).expect("settled after recovery");
+            assert_eq!(
+                live_sagas(topo),
+                0,
+                "the saga reached terminal (recovered to Done)"
+            );
+            assert!(
+                fault_report(&reports, node)
+                    .held_entities
+                    .iter()
+                    .any(|(e, _)| *e == entity),
+                "the entity settled at {node} after recovery",
+            );
+        }
+        EndState::AbortedToSource => {
+            let reports = topo.inspect_all();
+            let rec = fault_entity_record(&reports, entity);
+            assert_eq!(
+                rec.authority,
+                AuthorityRef::Shard(SHARD),
+                "aborted back to the source"
+            );
+            assert_eq!(rec.in_transfer, None, "the directory lock cleared on abort");
+            assert_eq!(live_sagas(topo), 0, "the abort reached terminal");
+            assert!(
+                fault_report(&reports, SHARD)
+                    .held_entities
+                    .iter()
+                    .any(|(e, _)| *e == entity),
+                "the source still owns the avatar (never demoted)",
+            );
+        }
+        EndState::ParkedHalfOpen { authority_at } => {
+            let reports = topo.inspect_all();
+            assert!(
+                live_sagas(topo) >= 1,
+                "the saga is PARKED (no recovery without D-37)"
+            );
+            let rec = fault_entity_record(&reports, entity);
+            assert_eq!(
+                rec.authority,
+                AuthorityRef::Shard(authority_at),
+                "the directory names the dead node {authority_at}",
+            );
+            // The dead-aware oracle surfaces the EXACT orphan (HeldNowhere at the dead node) — pinned
+            // to the variant, not a loose is_err (HR5): a real split-brain would be WrongHolderCount.
+            assert_eq!(
+                verify_authority_unique_excluding(&reports, dead),
+                Err(orphan(authority_at)),
+                "the dead-aware oracle surfaces the orphan (NOT a false-passing corpse)",
+            );
+        }
+        EndState::DeadOwnerOrphan { authority_at } => {
+            let reports = topo.inspect_all();
+            assert_eq!(
+                live_sagas(topo),
+                0,
+                "the saga tombstoned (gateway-acked abort)"
+            );
+            let rec = fault_entity_record(&reports, entity);
+            assert_eq!(
+                rec.authority,
+                AuthorityRef::Shard(authority_at),
+                "the directory names the dead owner {authority_at}",
+            );
+            assert_eq!(rec.in_transfer, None, "the lock cleared (abort_clear)");
+            assert_eq!(
+                verify_authority_unique_excluding(&reports, dead),
+                Err(orphan(authority_at)),
+                "the dead-aware oracle surfaces the exact dead-owner orphan",
+            );
+        }
     }
 }

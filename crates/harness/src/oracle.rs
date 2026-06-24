@@ -4,7 +4,7 @@
 //! held-sets, shard input logs, and client sent-logs. Oracles AUDIT; they never
 //! trust a single node's claim about another.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use vd_core::glam::{DQuat, DVec3};
 use vd_core::pose::FrameRef;
@@ -68,6 +68,22 @@ pub enum AuthorityViolation {
 pub fn verify_authority_unique(
     reports: &[(NodeId, InspectReport)],
 ) -> Result<(), AuthorityViolation> {
+    verify_authority_unique_excluding(reports, &BTreeSet::new())
+}
+
+/// AUTHORITY-UNIQUE, but EXCLUDING the held/pending/departing claims of nodes the caller knows are
+/// DEAD (the P3 crash matrix: a killed/crashed participant's `Dot` is a CORPSE — its stale authority
+/// claim must not be read as live). A directory record naming a dead node then surfaces as the honest
+/// [`AuthorityViolation::HeldNowhere`] (the orphan), and a dead W1-transfer-source is excluded BEFORE
+/// the W1 excuse so a live parked saga cannot mask a dead source. With an empty `dead` set this is
+/// byte-identical to [`verify_authority_unique`] (the orchestrator + a live cluster are never dead).
+///
+/// # Errors
+/// The first [`AuthorityViolation`] found, in deterministic entity order.
+pub fn verify_authority_unique_excluding(
+    reports: &[(NodeId, InspectReport)],
+    dead: &BTreeSet<NodeId>,
+) -> Result<(), AuthorityViolation> {
     // Who CLAIMS to hold each entity, and at what fence.
     let mut holders: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
     let mut held_fence: BTreeMap<EntityId, Fence> = BTreeMap::new();
@@ -81,6 +97,13 @@ pub fn verify_authority_unique(
     // never excuse an entity disagreement; their build arm is covered by a Realm-subject unit test.
     let mut active: BTreeMap<EntityId, ActiveTransfer> = BTreeMap::new();
     for (node, report) in reports {
+        // A DEAD node's report is a corpse — its held/pending/departing claims are stale (it cannot
+        // be a live holder). Skipped BEFORE the holder/W1 logic so a dead node's authority can never
+        // false-pass uniqueness nor (as a W1 source) mask the orphan. (A dead shard/gateway carries no
+        // directory/active anyway — those are orchestrator-only, and the orchestrator is never dead.)
+        if dead.contains(node) {
+            continue;
+        }
         for (entity, fence) in &report.held_entities {
             holders.entry(*entity).or_default().push(*node);
             held_fence.insert(*entity, *fence);
@@ -178,7 +201,7 @@ pub fn verify_authority_unique(
     // REALM authority is checked the same way (FENCE-3): a realm transfer that
     // double-grants must not pass green just because the oracle only looked at
     // entity keys. (Ship keys extend identically at P8.)
-    verify_realm_authority(reports)
+    verify_realm_authority(reports, dead)
 }
 
 /// The 1d.5b.3d W1 transfer-window excuse: is this `DirectoryDisagrees` the LEGAL post-CAS,
@@ -208,12 +231,20 @@ fn excuse_w1(
 
 /// The realm-key half of AUTHORITY-UNIQUE: every realm record has exactly one
 /// holding shard at the matching fence, and every held realm is recorded.
-fn verify_realm_authority(reports: &[(NodeId, InspectReport)]) -> Result<(), AuthorityViolation> {
+fn verify_realm_authority(
+    reports: &[(NodeId, InspectReport)],
+    dead: &BTreeSet<NodeId>,
+) -> Result<(), AuthorityViolation> {
     use vd_core::pose::RealmId;
     let mut holders: BTreeMap<RealmId, Vec<(NodeId, Fence)>> = BTreeMap::new();
     let mut pending: BTreeMap<RealmId, Vec<NodeId>> = BTreeMap::new();
     let mut recorded: BTreeMap<RealmId, vd_wire::seams::directory::OwnerRecord> = BTreeMap::new();
     for (node, report) in reports {
+        // A dead shard's held realm is a corpse too (the P3 crash matrix): excluded, so its realm
+        // record surfaces as the honest `RealmHeldNowhere` rather than a false-passing dead holder.
+        if dead.contains(node) {
+            continue;
+        }
         for (realm, fence) in &report.held_realms {
             holders.entry(*realm).or_default().push((*node, *fence));
         }
@@ -671,6 +702,27 @@ mod tests {
     }
 
     #[test]
+    fn dead_node_exclusion_reaches_the_realm_half_orphan() {
+        // P3 crash matrix: a killed SHARD's held REALM is a corpse too — excluded by the realm-half
+        // dead filter (the entity half is empty here, so the check reaches verify_realm_authority with
+        // a non-empty dead set). The realm record naming the dead shard surfaces as RealmHeldNowhere.
+        let reports = realm_healthy(); // ORCH dir realm@SHARD, SHARD held_realms=[(realm, 3)], no entities.
+        assert_eq!(
+            verify_authority_unique(&reports),
+            Ok(()),
+            "live: the realm is consistently held"
+        );
+        let dead: BTreeSet<NodeId> = [SHARD].into_iter().collect();
+        assert_eq!(
+            verify_authority_unique_excluding(&reports, &dead),
+            Err(AuthorityViolation::RealmHeldNowhere {
+                realm: realm().to_string(),
+                recorded: format!("{:?}", AuthorityRef::Shard(SHARD)),
+            })
+        );
+    }
+
+    #[test]
     fn realm_authority_unique_passes_and_catches_split_brain() {
         assert_eq!(verify_authority_unique(&realm_healthy()), Ok(()));
         // Two shards claiming the same realm.
@@ -938,6 +990,48 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    #[test]
+    fn dead_node_exclusion_turns_a_corpse_holder_into_the_honest_orphan() {
+        // P3 crash matrix: a held entity at a node the caller knows is DEAD is a corpse — excluded,
+        // so the directory record naming it surfaces as the honest HeldNowhere (not a false-pass).
+        let reports = healthy(); // SHARD holds entity, ORCH directory records SHARD.
+        // Empty dead set ⇒ byte-identical to the plain oracle (the holder is live, all agrees).
+        assert_eq!(
+            verify_authority_unique_excluding(&reports, &BTreeSet::new()),
+            Ok(())
+        );
+        assert_eq!(verify_authority_unique(&reports), Ok(()));
+        // SHARD dead ⇒ its held claim is a corpse; the directory still records SHARD ⇒ HeldNowhere.
+        let dead: BTreeSet<NodeId> = [SHARD].into_iter().collect();
+        assert_eq!(
+            verify_authority_unique_excluding(&reports, &dead),
+            Err(AuthorityViolation::HeldNowhere {
+                entity: entity(),
+                recorded: format!("{:?}", AuthorityRef::Shard(SHARD)),
+            })
+        );
+    }
+
+    #[test]
+    fn a_dead_w1_source_is_excluded_before_the_transfer_window_excuse() {
+        // P3 crash matrix (the load-bearing dead-aware distinction): the W1 window (source still
+        // Owned@old, directory records DEST, a live saga) is normally EXCUSED — but if the source is
+        // DEAD, the excuse must NOT mask it. The dead source is excluded BEFORE the W1 logic, so the
+        // honest orphan (the recorded dest holds nothing, the source is a corpse) surfaces.
+        let reports = w1_window(); // SHARD held@1, ORCH dir DEST@2, live saga SHARD→DEST.
+        // Live source ⇒ the legal window is excused.
+        assert_eq!(verify_authority_unique(&reports), Ok(()));
+        // Dead source ⇒ NOT excused: HeldNowhere (directory DEST, no live holder, dest not pending).
+        let dead: BTreeSet<NodeId> = [SHARD].into_iter().collect();
+        assert_eq!(
+            verify_authority_unique_excluding(&reports, &dead),
+            Err(AuthorityViolation::HeldNowhere {
+                entity: entity(),
+                recorded: format!("{:?}", AuthorityRef::Shard(DEST)),
+            })
+        );
     }
 
     #[test]

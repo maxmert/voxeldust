@@ -427,6 +427,39 @@ impl Topology {
             .collect()
     }
 
+    /// Like [`inspect_all`](Self::inspect_all) but EXCLUDES nodes the fabric reports DEAD
+    /// (killed/crashed-not-resurrected) — the dead-node-aware view for the P3 crash matrix. A killed
+    /// participant's stale `Dot`/`held_entities` are a CORPSE that must not be read as live authority;
+    /// dropping them turns a "held@dead-node" false-pass / a legit-park false-RED into the honest
+    /// directory-vs-liveness verdict (`oracle::verify_authority_unique_excluding`). `inspect_all`
+    /// stays for crash+resurrect cells, where the resurrected node IS live and must be inspected.
+    pub fn inspect_live(&mut self) -> Vec<(NodeId, InspectReport)> {
+        let dead: std::collections::BTreeSet<NodeId> = self
+            .nodes
+            .keys()
+            .copied()
+            .filter(|id| self.fabric.is_dead(*id))
+            .collect();
+        self.nodes
+            .iter_mut()
+            .filter(|(id, _)| !dead.contains(id))
+            .map(|(id, n)| (*id, n.inspect()))
+            .collect()
+    }
+
+    /// The set of nodes the fabric currently reports DEAD — the `dead` argument for
+    /// [`oracle::verify_authority_unique_excluding`](crate::oracle::verify_authority_unique_excluding)
+    /// when a scenario inspects with `inspect_all` (a kill cell keeps the dead node's report so the
+    /// oracle can attribute the orphan, but excludes it from the live-holder logic).
+    #[must_use]
+    pub fn dead_nodes(&self) -> std::collections::BTreeSet<NodeId> {
+        self.nodes
+            .keys()
+            .copied()
+            .filter(|id| self.fabric.is_dead(*id))
+            .collect()
+    }
+
     /// THE WIRE-TRUTH CHECK (the P0 WireMonitor): a node's CLAIMED drain counts (its
     /// own TickReports, summed from the trace) must exactly account for what the
     /// fabric ACTUALLY delivered: `delivered == claimed + cleared_by_crash + pending`.
@@ -677,6 +710,37 @@ mod tests {
             .filter(|e| matches!(e, TraceEvent::Resurrected { .. }))
             .count();
         assert_eq!(resurrections, 2);
+    }
+
+    #[test]
+    fn inspect_live_and_dead_nodes_track_a_killed_node() {
+        // P3 crash matrix: a killed node is EXCLUDED from inspect_live (its corpse report is dropped)
+        // but RETAINED by inspect_all (so a kill cell can still attribute the orphan); dead_nodes names it.
+        let fabric = FaultFabric::new(19, 2);
+        let mut topo = seeded_topology(&fabric);
+        assert!(topo.dead_nodes().is_empty(), "no node dead at the start");
+        assert_eq!(
+            topo.inspect_live().len(),
+            topo.inspect_all().len(),
+            "all live initially"
+        );
+        fabric.kill(B);
+        assert_eq!(
+            topo.dead_nodes(),
+            [B].into_iter().collect(),
+            "the killed node is dead"
+        );
+        let live: Vec<NodeId> = topo.inspect_live().into_iter().map(|(n, _)| n).collect();
+        assert!(
+            !live.contains(&B),
+            "the killed node is excluded from inspect_live"
+        );
+        assert!(live.contains(&A), "the live node remains");
+        let all: Vec<NodeId> = topo.inspect_all().into_iter().map(|(n, _)| n).collect();
+        assert!(
+            all.contains(&B),
+            "inspect_all RETAINS the killed node (orphan attribution)"
+        );
     }
 
     #[test]
