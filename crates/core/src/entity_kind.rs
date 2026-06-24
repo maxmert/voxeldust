@@ -83,6 +83,15 @@ impl EntityKind {
     }
 }
 
+/// The continuity model of the kind an `EntityId` encodes (D-7b: the per-continuity advance seam —
+/// dispatch on the KIND, never a shard kind, HR3). An `EntityId` whose tag this binary does not know
+/// re-advances as `Frozen` (stamp-only, no invented motion) — the conservative default for the
+/// decode-to-Default-banned (HR2) unknown-kind case, never a panic on a corrupt id.
+#[must_use]
+pub fn continuity_of(entity: crate::EntityId) -> ContinuityModel {
+    EntityKind::from_tag(entity.kind_tag()).map_or(ContinuityModel::Frozen, |k| k.def().continuity)
+}
+
 /// An `EntityId` carried a kind tag this binary does not know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("unknown entity-kind tag {0}")]
@@ -261,6 +270,20 @@ mod tests {
             EntityKind::from_tag(200).expect_err("unknown").to_string(),
             "unknown entity-kind tag 200"
         );
+    }
+
+    #[test]
+    fn continuity_of_reads_the_kind_and_defaults_unknown_to_frozen() {
+        // D-7b: a Debris id re-advances ballistically (its kind's continuity); a corrupt id whose tag
+        // this binary does not know re-advances as Frozen (stamp-only) — never a panic.
+        let debris = crate::EntityId::pack(EntityKind::Debris, 1, 7, 0);
+        assert_eq!(continuity_of(debris), ContinuityModel::BallisticReadvance);
+        let player = crate::EntityId::pack(EntityKind::Player, 1, 7, 0);
+        assert_eq!(continuity_of(player), ContinuityModel::Frozen);
+        // An EntityId with an unknown tag byte (99) → the safe Frozen default.
+        let unknown_tag = crate::EntityId(99u128 << 120);
+        assert_eq!(unknown_tag.kind_tag(), 99);
+        assert_eq!(continuity_of(unknown_tag), ContinuityModel::Frozen);
     }
 
     #[test]

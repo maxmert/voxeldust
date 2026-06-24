@@ -62,6 +62,11 @@ pub struct InspectReport {
     /// ground truth: every live transient in exactly ONE shard's set, anchored at that shard's realm
     /// fence, backed by a committed go-token (`batch_goes`). NEVER a directory `OwnerRecord`.
     pub owned_transients: Vec<(EntityId, Fence)>,
+    /// The held transients' POSES (D-7b — the transient twin of `held_poses`): the `is_held()` subset's
+    /// re-advanced poses, the render-continuity ground truth for a MOVING debris. The uncounted
+    /// `Arriving`/`Departing` tiers are EXCLUDED (not rendered). Feeds the moving-Debris POSE-CONTINUITY
+    /// gate (no teleport across the cut). Aligned by entity with `owned_transients`.
+    pub held_transient_poses: Vec<(EntityId, StampedPose)>,
     /// Committed batched-transient go-tokens (D-7) — ORCHESTRATOR-ONLY (from `SagaRuntimeRes`); empty
     /// on shards/clients. `(BatchId, commit_fence)`; the `TRANSIENT-AUTHORITY-HELD` oracle cross-checks
     /// each held transient's anchor against a go-token here (a transient has no directory row to check).
@@ -177,6 +182,13 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .iter()
             .filter(|(_, t)| t.status.is_held())
             .map(|(entity, t)| (*entity, t.anchor_fence))
+            .collect();
+        // D-7b: the same is_held() subset's POSES — the moving-Debris render-continuity ground truth.
+        report.held_transient_poses = owned
+            .0
+            .iter()
+            .filter(|(_, t)| t.status.is_held())
+            .map(|(entity, t)| (*entity, t.pose))
             .collect();
     }
     if let (Some(config), Some(authority)) = (
@@ -1000,6 +1012,11 @@ mod tests {
         // the ghost-dot exclusion). Seed both on the shard, then inspect.
         let debris = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Debris, 1, 1, 0);
         let arriving = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Debris, 1, 2, 0);
+        let pose = vd_core::pose::StampedPose::at_rest(
+            vd_core::pose::FrameRef::SystemSpace { system_seed: 5 },
+            vd_core::glam::DVec3::ZERO,
+            vd_core::UniverseTick(1),
+        );
         {
             let concrete = topo
                 .node_mut(B)
@@ -1008,11 +1025,6 @@ mod tests {
                 .expect("downcast")
                 .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
                 .expect("ShardNode");
-            let pose = vd_core::pose::StampedPose::at_rest(
-                vd_core::pose::FrameRef::SystemSpace { system_seed: 5 },
-                vd_core::glam::DVec3::ZERO,
-                vd_core::UniverseTick(1),
-            );
             let owned = &mut concrete
                 .world_mut()
                 .resource_mut::<vd_sim::stub::OwnedTransients>()
@@ -1041,6 +1053,12 @@ mod tests {
             reports[1].1.owned_transients,
             vec![(debris, vd_core::Fence(7))],
             "only the HELD transient is reported (Arriving is the uncounted mid-flight tier)"
+        );
+        // D-7b: the same is_held() subset's POSES feed the render-continuity trace (Arriving excluded).
+        assert_eq!(
+            reports[1].1.held_transient_poses,
+            vec![(debris, pose)],
+            "only the HELD transient's pose is reported for the render trace"
         );
     }
 

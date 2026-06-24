@@ -97,9 +97,93 @@ fn clamp_unit(v: f64) -> f32 {
     v.clamp(-1.0, 1.0) as f32
 }
 
+/// Re-advance a transient's pose from its frozen origin to `target_tick` per its CONTINUITY model
+/// (D-7b, Category-A — the ONLY way transient/frozen motion crosses hosts: a closed form, NEVER a
+/// physics re-step, which is not cross-binary deterministic). Dispatch on the KIND's continuity
+/// (`KindDef::continuity`), never on a shard kind (HR3) — so Debris and Projectile share the one
+/// `BallisticReadvance` arm verbatim. Ships only the two continuities that exist as transfer classes
+/// today: `BallisticReadvance` (constant-acceleration closed form via
+/// [`StampedPose::advanced_ballistic`]) advances; every other continuity is STAMP-ONLY (the pose does
+/// not self-advance — `Frozen` players/ships are re-advanced by the saga's pose flush, and `Guided`
+/// (P10/P11) + `RealmAnchored` (P6) get their REAL per-continuity advance with their own arm WHEN
+/// they land — no invented motion now). Pure + branchless-per-arm.
+#[must_use]
+pub fn advance_continuity(
+    continuity: crate::entity_kind::ContinuityModel,
+    pose0: crate::pose::StampedPose,
+    accel: DVec3,
+    dt_s: f64,
+    target_tick: crate::UniverseTick,
+) -> crate::pose::StampedPose {
+    use crate::entity_kind::ContinuityModel;
+    match continuity {
+        ContinuityModel::BallisticReadvance => pose0.advanced_ballistic(accel, dt_s, target_tick),
+        // STAMP-ONLY (no self-advance): Frozen is saga-flush-carried; Guided/RealmAnchored get their
+        // real advance at P10/P11/P6. The match is the additive per-continuity seam.
+        ContinuityModel::Frozen | ContinuityModel::Guided | ContinuityModel::RealmAnchored => {
+            crate::pose::StampedPose {
+                universe_tick: target_tick,
+                ..pose0
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity_kind::ContinuityModel;
+    use crate::pose::{FrameRef, StampedPose};
+
+    #[test]
+    fn advance_continuity_ballistic_moves_others_stamp_only() {
+        // BallisticReadvance advances by v·dt (+ ½a·dt²); the stamp-only continuities just re-stamp
+        // the tick without moving. Covers BOTH match arms (D-7b).
+        let pose0 = StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            pos: DVec3::new(1.0, 2.0, 3.0),
+            vel: DVec3::new(10.0, 0.0, -5.0),
+            orient: glam::DQuat::IDENTITY,
+            universe_tick: crate::UniverseTick(100),
+        };
+        let target = crate::UniverseTick(110);
+        // Ballistic: dt=2s, accel=ZERO → pos += vel·2.
+        let ball = advance_continuity(
+            ContinuityModel::BallisticReadvance,
+            pose0,
+            DVec3::ZERO,
+            2.0,
+            target,
+        );
+        assert_eq!(ball.pos, DVec3::new(21.0, 2.0, -7.0), "advanced by vel·dt");
+        assert_eq!(ball.vel, pose0.vel, "constant velocity (accel ZERO)");
+        assert_eq!(ball.universe_tick, target);
+        // Non-zero accel exercises the ½a·dt² + a·dt terms.
+        let ball_a = advance_continuity(
+            ContinuityModel::BallisticReadvance,
+            pose0,
+            DVec3::Y,
+            2.0,
+            target,
+        );
+        assert_eq!(
+            ball_a.pos,
+            DVec3::new(21.0, 4.0, -7.0),
+            "+ ½·1·2² = +2 on Y"
+        );
+        assert_eq!(ball_a.vel, DVec3::new(10.0, 2.0, -5.0), "+ a·dt on Y");
+        // Stamp-only: Frozen / Guided / RealmAnchored re-stamp the tick, never move.
+        for c in [
+            ContinuityModel::Frozen,
+            ContinuityModel::Guided,
+            ContinuityModel::RealmAnchored,
+        ] {
+            let stamped = advance_continuity(c, pose0, DVec3::Y, 2.0, target);
+            assert_eq!(stamped.pos, pose0.pos, "{c:?} does not self-advance");
+            assert_eq!(stamped.vel, pose0.vel);
+            assert_eq!(stamped.universe_tick, target, "{c:?} re-stamps the tick");
+        }
+    }
 
     #[test]
     fn rest_forward_is_minus_z() {

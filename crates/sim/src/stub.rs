@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
-use vd_core::entity_kind::{DurabilityClass, EntityKind};
+use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of};
 use vd_core::geometry::OverlapBand;
 use vd_core::glam::DVec3;
 use vd_core::kinematics;
@@ -580,13 +580,16 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
-    // `emit_transient_batch` (D-7) runs AFTER `process_inbound` (a `TransientDrop` received this tick
-    // settles the set first) and is independent of the ghost/frame egress — it ships the source's
+    // `readvance_transients` (D-7b) runs AFTER `process_inbound` (this tick's promote/drop settled the
+    // held-set) and BEFORE `emit_transient_batch` (a crossing item is emitted with its CURRENT
+    // re-advanced pose, keeping the source/dest origins consistent). `emit_transient_batch` (D-7) runs
+    // AFTER `process_inbound` and is independent of the ghost/frame egress — it ships the source's
     // pending transient crossings as ONE batch per dest realm.
     schedule.add_systems(
         (
             request_pending_grants,
             process_inbound,
+            readvance_transients,
             emit_transient_batch,
             feed_source_ghosts,
             emit_frames,
@@ -1762,6 +1765,40 @@ fn drain_pending_crossing(
     );
 }
 
+/// Per-shard system (D-7b): RE-ADVANCE every AUTHORITATIVELY-HELD transient's pose by its closed-form
+/// continuity each tick — debris is a MOVING object, so a frozen-on-cut pose would teleport. Runs on
+/// BOTH source and dest, each from its OWN stamped origin (no double-advance: the dest re-advances
+/// from the pose it ADOPTED, which the source already advanced to its emit tick, so by composability
+/// of constant-velocity motion the dest lands exactly where the source's trajectory would). The
+/// UNCOUNTED `Arriving` (dest mid-flight) + `Departing` (source released) tiers are SKIPPED — they are
+/// not rendered, and the dest catches up in one closed-form step at promote. Per-shard-LOCAL over
+/// `owned.0`, zero cross-shard read → `par_iter_mut`-ready for the D-7c burst (zero logic change). The
+/// f64 pose feeds ONLY render + the batch payload, NEVER a control discriminant (Category-A; the
+/// crossing trigger compares integer cells, P4/P5).
+fn readvance_transients(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    mut owned: ResMut<OwnedTransients>,
+) {
+    let now = clock.universe_tick;
+    for (entity, t) in owned.0.iter_mut() {
+        if t.status.is_held() {
+            // The SINGLE tick_dt_s chokepoint (no inline literal); `saturating_sub` enforces
+            // monotonic-forward-only — a backward target yields dt=0 (no motion), never negative time.
+            // accel = ZERO: a stub is empty space with no gravity field (P5's SphericalSpace introduces
+            // the seed-derived analytic gravity — same primitive, non-zero accel, no system rewrite).
+            let dt_s = now.0.saturating_sub(t.pose.universe_tick.0) as f64 * config.tick_dt_s;
+            t.pose = kinematics::advance_continuity(
+                continuity_of(*entity),
+                t.pose,
+                DVec3::ZERO,
+                dt_s,
+                now,
+            );
+        }
+    }
+}
+
 /// SOURCE system (D-7): drain the pending transient crossings (`TransientStatus::Crossing`, the
 /// TEST-seeded boundary-heuristic stand-in — the autonomous geometric trigger is P4/P5) into ONE
 /// `TransientBatch` envelope per dest realm (G-TIER: one envelope per batch, never per item), and
@@ -1860,7 +1897,10 @@ fn adopt_transient_batch(
                 owned.0.insert(
                     item.entity,
                     Transient {
-                        pose: item.pose,
+                        // SANITIZE network input at the decode-ingress chokepoint (D-7b): a corrupt /
+                        // diverged sender could carry NaN/Inf, which would poison the ballistic
+                        // re-advance + the render — never trust the wire pose.
+                        pose: item.pose.sanitized(),
                         anchor_fence: dst_realm_fence,
                         status: TransientStatus::Arriving { batch: transfer },
                     },
@@ -2568,6 +2608,76 @@ mod tests {
     }
 
     #[test]
+    fn readvance_advances_held_transients_and_skips_the_uncounted_tiers() {
+        // D-7b: an AUTHORITATIVELY-held debris re-advances by its closed-form ballistic motion each
+        // tick (vel·dt); the uncounted Arriving/Departing tiers are SKIPPED (not rendered, caught up
+        // at promote). The Rig clock is universe_tick=100; a pose stamped at tick 98 advances dt =
+        // (100-98)·tick_dt_s(0.05) = 0.1s.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let held = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        let arriving = EntityId::pack(EntityKind::Debris, 1, 7, 2);
+        let departing = EntityId::pack(EntityKind::Debris, 1, 7, 3);
+        let moving = StampedPose {
+            vel: DVec3::new(10.0, 0.0, 0.0),
+            ..StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(98))
+        };
+        {
+            let mut owned = rig.world.resource_mut::<OwnedTransients>();
+            owned.0.insert(
+                held,
+                Transient {
+                    pose: moving,
+                    anchor_fence: Fence(1),
+                    status: TransientStatus::Held { outbound: None },
+                },
+            );
+            owned.0.insert(
+                arriving,
+                Transient {
+                    pose: moving,
+                    anchor_fence: Fence(1),
+                    status: TransientStatus::Arriving {
+                        batch: TransferId(1),
+                    },
+                },
+            );
+            owned.0.insert(
+                departing,
+                Transient {
+                    pose: moving,
+                    anchor_fence: Fence(1),
+                    status: TransientStatus::Departing {
+                        batch: TransferId(1),
+                    },
+                },
+            );
+        }
+        let _ = rig.tick(vec![]);
+        let owned = rig.world.resource::<OwnedTransients>();
+        assert_eq!(
+            owned.0[&held].pose.pos,
+            DVec3::new(1.0, 0.0, 0.0),
+            "the held debris advanced by vel·dt (10 · 0.1)"
+        );
+        assert_eq!(
+            owned.0[&held].pose.universe_tick,
+            UniverseTick(100),
+            "re-stamped to now"
+        );
+        assert_eq!(
+            owned.0[&arriving].pose.pos,
+            DVec3::ZERO,
+            "the uncounted Arriving tier is NOT advanced"
+        );
+        assert_eq!(
+            owned.0[&departing].pose.pos,
+            DVec3::ZERO,
+            "the uncounted Departing tier is NOT advanced"
+        );
+    }
+
+    #[test]
     fn emit_transient_batch_ships_one_envelope_and_marks_outbound() {
         let mut rig = Rig::new();
         rig.grant_realm(); // authority.0 = Some(Fence(1))
@@ -2610,7 +2720,13 @@ mod tests {
                     source_tick: vd_core::TickId(1),
                     items: vec![TransientItem {
                         entity,
-                        pose: transient_pose(),
+                        // D-7b: `readvance_transients` ran BEFORE emit (Crossing is_held), re-stamping
+                        // the pose to the source's current universe-tick (100); a rest pose's position
+                        // is unchanged (vel ZERO), only the stamp moves.
+                        pose: StampedPose {
+                            universe_tick: UniverseTick(100),
+                            ..transient_pose()
+                        },
                         state: vec![],
                     }],
                 },

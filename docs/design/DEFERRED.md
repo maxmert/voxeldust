@@ -610,11 +610,21 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   STAGGERED crossing (`tests/tests/p3_transient.rs` `..._under_stagger`). One `TransientHandoff` struct
   serves the three command arms (DRY); `with_batch_token` shares the ledger lookup. Gate-green at 100%
   Tier-A.
-- **Still owed (D-7b.2/.3, c, d):** the closed-form `BallisticReadvance` (`advance_continuity` reusing
-  `StampedPose::advanced_ballistic` + `readvance_transients` + `held_transient_poses` render trace,
-  Cat-A) [D-7b.2]; the per-kind handover-attributable loss counter `transients_lost_in_handover` +
-  `verify_transient_loss_budget` (ABSOLUTE per-scenario threshold vs `DEBRIS_DEF.loss_budget=4`) [D-7b.3];
-  the `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale assertion + burst params →
+- **✅ D-7b.2 LANDED:** the closed-form `BallisticReadvance` — `kinematics::advance_continuity`
+  (dispatch on `KindDef::continuity`, NOT shard kind; reuses `StampedPose::advanced_ballistic`; ships
+  the `BallisticReadvance` + stamp-only arms, Guided/RealmAnchored owed at P10/P11/P6) + the
+  `readvance_transients` system (advances the `is_held()` subset each tick from its OWN origin; the
+  uncounted Arriving/Departing tiers skipped; `par_iter_mut`-ready) + `continuity_of(EntityId)` (unknown
+  tag → Frozen, never a panic) + adopt-time `.sanitized()` (never trust a wire pose) +
+  `InspectReport.held_transient_poses` (the moving-Debris render-continuity trace). The e2e proves a
+  moving debris (and a projectile-speed one UNDER stagger) re-advances CONTINUOUSLY — its dest pose lies
+  on the closed-form trajectory `pos0 + vel·(t−t0)·dt_s` (no teleport, no double-advance: source
+  increment + dest re-advance compose to one trajectory). `accel = ZERO` (a stub is empty space; P5's
+  SphericalSpace introduces seed-derived gravity — same primitive). Gate-green at 100% Tier-A.
+- **Still owed (D-7b.3, c, d):** the per-kind handover-attributable loss counter
+  `transients_lost_in_handover` + `verify_transient_loss_budget` (ABSOLUTE per-scenario threshold vs
+  `DEBRIS_DEF.loss_budget=4` — distinct from the gross `transients_dropped`) [D-7b.3]; the
+  `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale assertion + burst params →
   `StubConfig` [D-7c]; the crash-matrix Transient cells (`BatchCommitting` at_phase,
   `EndState::BatchCommittedAt` / `BatchDroppedWithinBudget`) [D-7d]. Also owed: bounded GC of completed
   go-tokens (`batch_goes` unbounded — the oracle needs the live record until a drop-completion signal,

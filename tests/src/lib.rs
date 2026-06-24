@@ -284,6 +284,13 @@ pub fn realm_fence(topo: &mut Topology, realm: RealmId) -> Fence {
     })
 }
 
+/// The seeded Debris origin (D-7b) — the SINGLE source of the crossing pose's `pos0`/`tick0`, shared
+/// by [`seed_transient_crossing`] AND the e2e ballistic-trajectory assertion, so the expected
+/// trajectory can NEVER silently drift from what the seed actually writes (no-drift discipline).
+pub const TRANSIENT_SEED_POS0: vd_core::glam::DVec3 = vd_core::glam::DVec3::new(4.0, 5.0, 6.0);
+/// See [`TRANSIENT_SEED_POS0`] — the seeded crossing pose's analytic-clock origin `tick0`.
+pub const TRANSIENT_SEED_TICK0: vd_core::UniverseTick = vd_core::UniverseTick(1);
+
 /// D-7: seed a Debris transient on the SOURCE shard ([`SHARD`]) as a pending Crossing to the DEST
 /// realm — the TEST-driven boundary-heuristic stand-in (the autonomous geometric trigger is P4/P5).
 /// The matching batch saga must be triggered separately via [`trigger_transfer`] with a Transient
@@ -295,13 +302,17 @@ pub fn seed_transient_crossing(
     batch: TransferId,
     anchor: Fence,
     dst_realm_fence: Fence,
+    vel: vd_core::glam::DVec3,
 ) {
     with_node(topo, SHARD, |s| {
-        let pose = vd_core::pose::StampedPose::at_rest(
-            stub_config().frame,
-            vd_core::glam::DVec3::new(4.0, 5.0, 6.0),
-            vd_core::UniverseTick(1),
-        );
+        let pose = vd_core::pose::StampedPose {
+            vel,
+            ..vd_core::pose::StampedPose::at_rest(
+                stub_config().frame,
+                TRANSIENT_SEED_POS0,
+                TRANSIENT_SEED_TICK0,
+            )
+        };
         s.world_mut()
             .resource_mut::<vd_sim::stub::OwnedTransients>()
             .0

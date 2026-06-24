@@ -12,6 +12,7 @@
 //! scale proof (D-7c), and the crash-matrix transient cells (D-7d) build on this.
 
 use vd_core::entity_kind::{DurabilityClass, EntityKind};
+use vd_core::glam::DVec3;
 use vd_core::pose::RealmId;
 use vd_core::{BatchId, EntityId, NodeId, SessionId, TickId, TransferId};
 use vd_harness::fabric::FaultFabric;
@@ -19,10 +20,39 @@ use vd_harness::oracle::{verify_transient_authority_held, verify_transient_conse
 use vd_harness::topology::{StaggerPlan, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
-    DEST, SHARD, p2_cluster, p2_cluster_staggered, realm_fence, seed_transient_crossing,
-    transient_dropped_total, trigger_transfer,
+    DEST, SHARD, TRANSIENT_SEED_POS0, TRANSIENT_SEED_TICK0, dest_stub_config, p2_cluster,
+    p2_cluster_staggered, realm_fence, seed_transient_crossing, transient_dropped_total,
+    trigger_transfer,
 };
 use vd_wire::seams::directory::DirectoryKey;
+
+/// Assert the DEST holds `debris` at a pose that lies on its closed-form ballistic trajectory from the
+/// seeded origin (D-7b: no teleport across the cut, correct re-advance, NO double-advance). The dest's
+/// re-advanced pose at universe-tick `t` must equal `pos0 + vel·(t - tick0)·tick_dt_s` — proving the
+/// source's incremental advance + the dest's re-advance compose to the one trajectory. `pos0`/`tick0`
+/// come from the SHARED [`TRANSIENT_SEED_POS0`]/[`TRANSIENT_SEED_TICK0`] (one source with the seed
+/// helper — the expected trajectory can never silently drift from what was seeded).
+fn assert_debris_on_ballistic_trajectory(topo: &mut Topology, debris: EntityId, vel: DVec3) {
+    let reports = topo.inspect_all();
+    let dest_pose = reports
+        .iter()
+        .flat_map(|(_, r)| r.held_transient_poses.iter())
+        .find(|(e, _)| *e == debris)
+        .map(|(_, p)| *p)
+        .expect("the dest holds the debris pose");
+    let dt_s =
+        (dest_pose.universe_tick.0 - TRANSIENT_SEED_TICK0.0) as f64 * dest_stub_config().tick_dt_s;
+    let expected = TRANSIENT_SEED_POS0 + vel * dt_s;
+    assert!(
+        (dest_pose.pos - expected).length() < 1.0e-6,
+        "debris off its ballistic trajectory: got {:?}, expected {expected:?} (dt_s={dt_s})",
+        dest_pose.pos
+    );
+    assert!(
+        (dest_pose.pos - TRANSIENT_SEED_POS0).length() > 1.0,
+        "the debris actually MOVED from its origin (a static check would be vacuous)"
+    );
+}
 
 /// Step `topo` `ticks` times, asserting per-tick TRANSIENT-CONSERVATION (no transient COUNTED-held by
 /// more than one shard) at EVERY committed tick — the D-7b structural drop-before-promote proof that
@@ -58,7 +88,7 @@ fn p3_transient_debris_batch_crosses_adopt_before_drop() {
     // orchestrator producer a player's saga uses — the Transient class just takes the short path).
     let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 1, 0);
     let batch = TransferId(0xD7A_0001);
-    seed_transient_crossing(&mut topo, debris, batch, src_fence, dst_fence);
+    seed_transient_crossing(&mut topo, debris, batch, src_fence, dst_fence, DVec3::ZERO);
     trigger_transfer(
         &mut topo,
         SagaCtx {
@@ -152,7 +182,7 @@ fn p3_transient_crosses_without_double_holding_under_stagger() {
 
     let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 2, 0);
     let batch = TransferId(0xD7B_0001);
-    seed_transient_crossing(&mut topo, debris, batch, src_fence, dst_fence);
+    seed_transient_crossing(&mut topo, debris, batch, src_fence, dst_fence, DVec3::ZERO);
     trigger_transfer(
         &mut topo,
         SagaCtx {
@@ -193,4 +223,101 @@ fn p3_transient_crosses_without_double_holding_under_stagger() {
         0,
         "a clean staggered hand-off loses nothing"
     );
+}
+
+/// D-7b.2: a MOVING debris crosses and re-advances CONTINUOUSLY — the dest's pose lies exactly on the
+/// closed-form ballistic trajectory from the seeded origin (no teleport across the cut, no
+/// double-advance: the source's incremental per-tick advance + the dest's re-advance from the adopted
+/// pose compose to the one trajectory). Permanent gate.
+#[test]
+fn p3_moving_debris_re_advances_continuously_across_the_cut() {
+    let fabric = FaultFabric::new(0xD7B2, 4);
+    let mut topo = p2_cluster(&fabric, 4);
+    for _ in 0..10 {
+        topo.step();
+    }
+    let src_fence = realm_fence(&mut topo, SRC_REALM);
+    let dst_fence = realm_fence(&mut topo, DST_REALM);
+
+    let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 3, 0);
+    let batch = TransferId(0xD7B2_0001);
+    let vel = DVec3::new(20.0, 0.0, -8.0); // a moving debris (m/s)
+    seed_transient_crossing(&mut topo, debris, batch, src_fence, dst_fence, vel);
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: batch,
+            session: SessionId(0),
+            subject: DirectoryKey::Realm(DST_REALM),
+            expected_fence: dst_fence,
+            source: SHARD,
+            dest: DEST,
+            class: DurabilityClass::Transient,
+            needs_provision: false,
+            from_realm: SRC_REALM,
+            to_realm: DST_REALM,
+        },
+    );
+    step_asserting_conservation(&mut topo, 24);
+
+    // Settled at the DEST, and ON its ballistic trajectory (continuity / no-teleport / no-double-advance).
+    let reports = topo.inspect_all();
+    let holders: Vec<NodeId> = reports
+        .iter()
+        .filter(|(_, r)| r.owned_transients.iter().any(|(e, _)| *e == debris))
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(holders, vec![DEST], "the moving debris settled at the DEST");
+    assert_debris_on_ballistic_trajectory(&mut topo, debris, vel);
+}
+
+/// D-7b.2: a FAST (projectile-speed) debris crosses UNDER STAGGER and STILL re-advances continuously —
+/// no double-held tick AND its pose stays on the trajectory even when the dest lags. The
+/// high-velocity + skew combination is the worst case for the closed-form re-advance continuity.
+#[test]
+fn p3_fast_debris_re_advances_continuously_under_stagger() {
+    let fabric = FaultFabric::new(0xD7B2F, 4);
+    let mut topo = p2_cluster_staggered(&fabric, 4, StaggerPlan::lockstep().with_offset(DEST, 2));
+    for _ in 0..18 {
+        topo.step();
+    }
+    let src_fence = realm_fence(&mut topo, SRC_REALM);
+    let dst_fence = realm_fence(&mut topo, DST_REALM);
+
+    let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 4, 0);
+    let batch = TransferId(0xD7B2_0002);
+    let vel = DVec3::new(600.0, 120.0, 0.0); // projectile-speed
+    seed_transient_crossing(&mut topo, debris, batch, src_fence, dst_fence, vel);
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: batch,
+            session: SessionId(0),
+            subject: DirectoryKey::Realm(DST_REALM),
+            expected_fence: dst_fence,
+            source: SHARD,
+            dest: DEST,
+            class: DurabilityClass::Transient,
+            needs_provision: false,
+            from_realm: SRC_REALM,
+            to_realm: DST_REALM,
+        },
+    );
+    // While the lagging dest's universe-tick trails the source's emit-tick, readvance's
+    // `now.saturating_sub(emit_tick)` is 0 — the adopted pose is held in place (no backward teleport)
+    // and catches up in ONE closed-form step on the first tick where the dest's clock reaches it.
+    step_asserting_conservation(&mut topo, 40);
+
+    let reports = topo.inspect_all();
+    let holders: Vec<NodeId> = reports
+        .iter()
+        .filter(|(_, r)| r.owned_transients.iter().any(|(e, _)| *e == debris))
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(
+        holders,
+        vec![DEST],
+        "the fast debris settled at the DEST under stagger"
+    );
+    assert_debris_on_ballistic_trajectory(&mut topo, debris, vel);
 }
