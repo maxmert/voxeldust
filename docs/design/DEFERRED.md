@@ -587,7 +587,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   idempotently to terminal on restart).
 - **Source:** the P2 plan + Slice-1b audit (ROB-2 loud-stub hardening).
 
-### D-7 🟧 Transient transfer: the class LANDED its first slice (D-7a); the park is CLOSED, the full robustness (D-7b/c/d) owed
+### D-7 🟧 Transient transfer: D-7a/b/c LANDED (park closed, ballistic + conservation + loss-budget + G-TIER + DURABLE-UNAFFECTED); D-7d crash-cells + cap-split + mixed-realm owed
 - **✅ CLOSED — the park (D-7a):** the `IssueTransientGo` LOUD-warn stub that parked a transient saga in
   `CommittingCas` is GONE. The synthesis took the OR-branch: a Transient subject takes a distinct SHORT FSM PATH
   (`saga.rs` `SagaState::BatchCommitting` — `start` enters it directly, skipping Prepare/Cut/Freeze, and `CasWon`
@@ -633,13 +633,45 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   tiny per-kind budget (the LOSS-BUDGET skeptic's confirmed "wrong population" hazard, fixed). Unit-
   gate: over-budget (5>4), within (3≤4), mixed-kind disentangling, resident-excluded, corrupt-excluded.
   Gate-green at 100% Tier-A. **D-7b (BallisticReadvance + per-tick conservation + loss budget) is DONE.**
-- **Still owed (D-7c, d):** the `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale
-  assertion + burst params → `StubConfig` [D-7c]; the crash-matrix Transient cells (`BatchCommitting`
+- **✅ D-7c LANDED (design `wf_364d34ba`, doc `d7c_transient_burst.md`):** the G-TIER one-write-per-batch
+  scale proof + `DURABLE-UNAFFECTED-BY-BURST` differential. The crown insight the 4 skeptics caught:
+  `batch_goes.len()==K` is FALSE-GREEN (idempotent `or_insert` collapses a 1000-same-key-write regression
+  to `len==1`), so the ONLY observable that turns a per-item-write regression RED is a monotonic
+  `SagaRuntimeRes.batch_go_writes: u64` (incremented in `commit_result`'s loop BEFORE `or_insert`, surfaced
+  on `InspectReport`). 7c.1 (the Tier-A observable + reader, unit-asserted `==1`) + 7c.2 G-TIER
+  (`p3_gtier_burst_write_rate_is_batch_count_not_item_count`: 1000-item batch ⇒ `sum(batch_go_writes)==1`,
+  one ledger entry, ZERO directory rows, `held_at_dest==1000`, nothing lost; `…scales_with_batch_count`:
+  K=3 distinct batches ⇒ writes==3, NOT the cap-split which is broken at HEAD) + 7c.3 DURABLE-UNAFFECTED
+  (`durable_subset(reports, subject, session)` projects only the burst-invariant durable footprint —
+  EXCLUDES `owned_transients`/`batch_goes`/`trace_bytes` which legitimately move; `assert_eq!(base, burst)`
+  byte-identical under a concurrent 1000-burst, two-sided SENSITIVITY + a real-burst SPECIFICITY control).
+  Both variants step a FIXED tick window so they sample tick-aligned (a renewed lease is then burst-
+  independent by construction). Multithreading verdict: SEQUENTIAL — rayon NOT adopted (flagged for the
+  user, not unilaterally taken; µs-scale work, byte-identical-replay guarantee, parallelism already at the
+  shard granularity). Gate-green at 100% Tier-A. **D-7c (G-TIER + DURABLE-UNAFFECTED) is DONE.**
+- **Still owed (D-7d):** the crash-matrix Transient cells (`BatchCommitting`
   at_phase, `EndState::BatchCommittedAt` / `BatchDroppedWithinBudget` — the realistic CLUSTER-level
   over-budget self-fence + the re-drive producer for a lost transient handoff command, since a
-  permanent kill mid-handoff today leaves an uncounted stuck item until self-fence) [D-7d]. Also owed:
-  bounded GC of completed go-tokens (`batch_goes` unbounded — the oracle needs the live record until a
-  drop-completion signal, D-7c/D-6); the durable go-token WAL (in-memory, [[D-6]]).
+  permanent kill mid-handoff today leaves an uncounted stuck item until self-fence). Also owed:
+  `StubConfig.max_items_per_batch` (the source-side wire-frame cap — DEFERRED whole from D-7c because a
+  cap-split is lossy-if-triggered under the derived-id dedup journal and `MsgClass::Saga` is reliable, so
+  the sub-batch→distinct-go-token wiring must land WITH it here); MIXED-KIND / MULTI-DEST-REALM burst (a
+  3rd shard + a `seed_transient_crossing_to(dest, realm)` parameterization — structurally unreachable
+  through the current `dest=DEST`/`to_realm=System(8)`-hardcoded API); bounded GC of completed go-tokens
+  (`batch_goes` unbounded — the oracle needs the live record until a drop-completion signal D-7d
+  co-designs; GC MUST fire at `on_release_complete`, the shard's terminal retire, NOT a timeout); the
+  durable go-token WAL (in-memory, [[D-6]]).
+- **Shard-side handoff is O(K·M), not O(batch) (audit D-7c SCALE-1, LOW):** the one-write-per-batch claim
+  is honest for the ORCHESTRATOR control plane ONLY (doc `d7c_transient_burst.md` lines 36/86). On the
+  shard, `on_transient_release`/`on_transient_promote`/`on_release_complete` (`stub.rs`) each scan the
+  WHOLE `OwnedTransients` map filtered by `batch == cmd.transfer`, so the 3 handoff phases cost
+  O(K-concurrent-batches × M-resident) and `readvance_transients` is O(M)/tick. Structurally unreachable
+  today (`seed_transient_crossing` hardcodes a single DEST/realm → K=1), so it bites only at P11 combat
+  scale. PROPER fix (lands WITH the multi-batch/multi-realm burst above): index `OwnedTransients` by batch
+  (a secondary `BTreeMap<TransferId, BTreeSet<EntityId>>` of in-handover members maintained at status
+  transitions) so the handoff phases touch O(batch_size); keep `readvance_transients` a full scan (it is
+  genuinely all-held work). Per the load-tests-when-applicable standard, add a shard-tick burst-soak load
+  test (~10k resident × ~100 concurrent bursts) BEFORE P11 relies on the burst path.
 - **Where:** `saga.rs` (`BatchCommitting`), `saga_runtime.rs` (`locks_directory_key`, `IssueTransientGo` executor,
   `batch_goes`, `handle_batch_adopted`), `stub.rs` (`OwnedTransients`/`TransientStatus`, `emit_transient_batch`,
   `adopt_transient_batch`, `on_transient_drop`, self-fence drop), `wire/intershard.rs` (`TransferAck::BatchAdopted`,

@@ -10,8 +10,8 @@ use vd_connection_plane::gateway::{
 };
 use vd_connection_plane::tickets;
 
-use vd_core::entity_kind::DurabilityClass;
-use vd_core::pose::{FrameRef, RealmId};
+use vd_core::entity_kind::{DurabilityClass, EntityKind};
+use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::{AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_harness::client::{DeliveredWorldView, InputCmd, ScriptedClient};
 use vd_harness::fabric::{CrashWhen, FabricTransport, FaultFabric};
@@ -23,7 +23,7 @@ use vd_node::ShardNode;
 use vd_node::app::{NodeConfig, build_app};
 use vd_node::follower::register_clock_follower;
 use vd_node::orchestrator::{DirectoryRes, OrchestratorConfig, register_orchestrator};
-use vd_node::saga_runtime::SagaRuntimeRes;
+use vd_node::saga_runtime::{ActiveTransfer, SagaRuntimeRes};
 use vd_sim::capability::NodeKind;
 use vd_sim::directory::DirectoryTuning;
 use vd_sim::saga::SagaCtx;
@@ -346,6 +346,144 @@ pub fn transient_dropped_total(topo: &mut Topology) -> u64 {
             })
         })
         .sum()
+}
+
+/// The SOURCE shard's count of `TransientBatch` envelopes EMITTED (D-7c G-TIER ack-cost dimension) —
+/// one per batch, regardless of item count. The K-batch gate asserts this == K (round-trip cost is
+/// O(batches), not O(items)).
+#[must_use]
+pub fn source_transients_emitted(topo: &mut Topology) -> u64 {
+    with_node(topo, SHARD, |s| {
+        s.world_mut()
+            .resource::<vd_sim::stub::StubStats>()
+            .transients_emitted
+    })
+}
+
+/// D-7c G-TIER: seed a BURST of `count` distinct Debris transients on the SOURCE shard ([`SHARD`]),
+/// ALL carrying the SAME `batch` id (so `emit_transient_batch` aggregates them into ONE envelope +
+/// ONE go-token — the burst-isolation claim). Entity seqs are `seq_base..seq_base+count` (give each
+/// batch a DISTINCT `seq_base` so K batches do not collide on entity id). Returns the seeded entity
+/// set (for the `held_at_dest` positive guard). Reuses [`seed_transient_crossing`] (DRY); rest poses.
+pub fn seed_transient_burst(
+    topo: &mut Topology,
+    batch: TransferId,
+    count: u32,
+    seq_base: u64,
+    anchor: Fence,
+    dst_realm_fence: Fence,
+) -> BTreeSet<EntityId> {
+    let mut seeded = BTreeSet::new();
+    for i in 0..count {
+        let entity = EntityId::pack(
+            EntityKind::Debris,
+            SHARD.0 as u32,
+            seq_base + u64::from(i),
+            0,
+        );
+        seed_transient_crossing(
+            topo,
+            entity,
+            batch,
+            anchor,
+            dst_realm_fence,
+            vd_core::glam::DVec3::ZERO,
+        );
+        seeded.insert(entity);
+    }
+    seeded
+}
+
+/// How many of the `entities` the DEST shard holds AUTHORITATIVELY (D-7c G-TIER positive guard — the
+/// drop-axis vacuity closer: proves all N burst items actually settled at the DEST, not silently
+/// dropped). Reads `owned_transients` (the `is_held()` subset) at DEST.
+#[must_use]
+pub fn held_at_dest(reports: &[(NodeId, InspectReport)], entities: &BTreeSet<EntityId>) -> usize {
+    reports
+        .iter()
+        .filter(|(n, _)| *n == DEST)
+        .flat_map(|(_, r)| r.owned_transients.iter())
+        .filter(|(e, _)| entities.contains(e))
+        .count()
+}
+
+/// The DURABLE-relevant projection of one node's [`InspectReport`], filtered to the durable subject
+/// (D-7c DURABLE-UNAFFECTED-BY-BURST). Projects ONLY fields a transient burst must NEVER perturb (the
+/// subject's directory row + held authority/pose/pending/departing/ghost + its live saga); EXCLUDES
+/// the legitimately-moving transient/wire fields (`owned_transients`, `held_transient_poses`,
+/// `batch_goes`, `batch_go_writes`, `transient_loss`, `held_realms`, `trace_bytes`). `PartialEq` (NOT
+/// `Eq` — `StampedPose` carries `f64`); a deterministic same-seed run yields bit-identical poses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DurableProjection {
+    pub directory_subject: Option<OwnerRecord>,
+    pub directory_session: Option<OwnerRecord>,
+    pub held_subject: Vec<(EntityId, Fence)>,
+    pub held_pose_subject: Vec<(EntityId, StampedPose)>,
+    pub pending_subject: Vec<EntityId>,
+    pub departing_subject: Vec<EntityId>,
+    pub ghost_subject: bool,
+    pub active_durable: Vec<ActiveTransfer>,
+}
+
+/// Project the durable subject's footprint from every node's report (D-7c). The differential gate
+/// asserts this is byte-identical with vs without a concurrent transient burst — any diff is a burst
+/// leak into the durable path = an HR1/HR2 violation. PRECONDITION: byte-identity holds only under the
+/// ZERO `LinkPolicy` (`p2_cluster` installs no faults); a faulted variant would need invariant-equality
+/// (same terminal directory record + applied-input multiset), not raw `assert_eq!` on this projection.
+#[must_use]
+pub fn durable_subset(
+    reports: &[(NodeId, InspectReport)],
+    subject: EntityId,
+    session: SessionId,
+) -> Vec<(NodeId, DurableProjection)> {
+    reports
+        .iter()
+        .map(|(node, r)| {
+            (
+                *node,
+                DurableProjection {
+                    directory_subject: r
+                        .directory
+                        .iter()
+                        .find_map(|(k, rec)| (*k == DirectoryKey::Entity(subject)).then_some(*rec)),
+                    directory_session: r.directory.iter().find_map(|(k, rec)| {
+                        (*k == DirectoryKey::Session(session)).then_some(*rec)
+                    }),
+                    held_subject: r
+                        .held_entities
+                        .iter()
+                        .filter(|(e, _)| *e == subject)
+                        .copied()
+                        .collect(),
+                    held_pose_subject: r
+                        .held_poses
+                        .iter()
+                        .filter(|(e, _)| *e == subject)
+                        .copied()
+                        .collect(),
+                    pending_subject: r
+                        .pending_entities
+                        .iter()
+                        .filter(|e| **e == subject)
+                        .copied()
+                        .collect(),
+                    departing_subject: r
+                        .departing_entities
+                        .iter()
+                        .filter(|e| **e == subject)
+                        .copied()
+                        .collect(),
+                    ghost_subject: r.ghost_dots.contains(&subject),
+                    active_durable: r
+                        .active_transfers
+                        .iter()
+                        .filter(|at| at.subject == DirectoryKey::Entity(subject))
+                        .copied()
+                        .collect(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// The `Debug` state strings of every live saga on the orchestrator (the admin `views()`

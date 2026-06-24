@@ -11,20 +11,42 @@
 //! no LOSS. The closed-form ballistic re-advance + per-tick conservation (D-7b), the burst/G-TIER
 //! scale proof (D-7c), and the crash-matrix transient cells (D-7d) build on this.
 
+use std::collections::BTreeSet;
 use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::glam::DVec3;
 use vd_core::pose::RealmId;
-use vd_core::{BatchId, EntityId, NodeId, SessionId, TickId, TransferId};
+use vd_core::{AccountId, BatchId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_harness::fabric::FaultFabric;
 use vd_harness::oracle::{verify_transient_authority_held, verify_transient_conservation_tick};
-use vd_harness::topology::{StaggerPlan, Topology};
+use vd_harness::topology::{InspectReport, StaggerPlan, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
-    DEST, SHARD, TRANSIENT_SEED_POS0, TRANSIENT_SEED_TICK0, dest_stub_config, p2_cluster,
-    p2_cluster_staggered, realm_fence, seed_transient_crossing, transient_dropped_total,
-    trigger_transfer,
+    DEST, SHARD, TRANSIENT_SEED_POS0, TRANSIENT_SEED_TICK0, dest_stub_config, durable_subset,
+    held_at_dest, live_sagas, p1_client, p2_cluster, p2_cluster_staggered, read_subject,
+    realm_fence, seed_transient_burst, seed_transient_crossing, source_transients_emitted,
+    transient_dropped_total, trigger_transfer, walk_forward,
 };
 use vd_wire::seams::directory::DirectoryKey;
+
+/// The durable-warmup client (one client per scenario; id is local to these tests).
+const CLIENT: NodeId = NodeId(100);
+
+/// A Transient batch saga ctx for `batch` (D-7c) — the session-less transient trigger shape, shared by
+/// the G-TIER burst tests (DRY).
+fn transient_batch_ctx(batch: TransferId, dst_fence: vd_core::Fence) -> SagaCtx {
+    SagaCtx {
+        transfer: batch,
+        session: SessionId(0),
+        subject: DirectoryKey::Realm(DST_REALM),
+        expected_fence: dst_fence,
+        source: SHARD,
+        dest: DEST,
+        class: DurabilityClass::Transient,
+        needs_provision: false,
+        from_realm: SRC_REALM,
+        to_realm: DST_REALM,
+    }
+}
 
 /// Assert the DEST holds `debris` at a pose that lies on its closed-form ballistic trajectory from the
 /// seeded origin (D-7b: no teleport across the cut, correct re-advance, NO double-advance). The dest's
@@ -320,4 +342,319 @@ fn p3_fast_debris_re_advances_continuously_under_stagger() {
         "the fast debris settled at the DEST under stagger"
     );
     assert_debris_on_ballistic_trajectory(&mut topo, debris, vel);
+}
+
+/// THE D-7c G-TIER headline: a 1000-item Debris burst commits via EXACTLY ONE go-token WRITE (the
+/// orchestrator write rate scales with BATCH count, NOT item count) and writes ZERO directory rows —
+/// the burst-isolation that keeps the orchestrator directory off the hot path at volume in a
+/// multi-shard cloud mesh. The write COUNT (not batch_goes.len(), which is false-green under the
+/// idempotent or_insert) is the observable that turns a per-item-write regression RED. Permanent gate.
+#[test]
+fn p3_gtier_burst_write_rate_is_batch_count_not_item_count() {
+    const BURST_SIZE: u32 = 1000;
+    let fabric = FaultFabric::new(0xD7C, 4);
+    let mut topo = p2_cluster(&fabric, 4);
+    for _ in 0..10 {
+        topo.step();
+    }
+    let src_fence = realm_fence(&mut topo, SRC_REALM);
+    let dst_fence = realm_fence(&mut topo, DST_REALM);
+    let batch = TransferId(0xD7C_0001);
+    let burst = seed_transient_burst(&mut topo, batch, BURST_SIZE, 0, src_fence, dst_fence);
+    trigger_transfer(&mut topo, transient_batch_ctx(batch, dst_fence));
+    step_asserting_conservation(&mut topo, 24);
+
+    let reports = topo.inspect_all();
+    // (A) THE PROBE — the orchestrator wrote ONE go-token for the whole 1000-item batch (write RATE ==
+    // batch COUNT). A per-item-write regression would inflate this to 1000 while batch_goes.len() (B)
+    // stays 1 — which is precisely why the write COUNT, not the map size, is the real G-TIER observable.
+    let writes: u64 = reports.iter().map(|(_, r)| r.batch_go_writes).sum();
+    assert_eq!(
+        writes, 1,
+        "ONE go-token write for 1000 items (write rate == batch count)"
+    );
+    // (B) SIZE — one ledger entry at the dest realm fence.
+    let go_tokens: Vec<(BatchId, _)> = reports
+        .iter()
+        .flat_map(|(_, r)| r.batch_goes.clone())
+        .collect();
+    assert_eq!(go_tokens, vec![(BatchId(batch), dst_fence)]);
+    // (C) ZERO directory rows for ANY of the 1000 transients (burst isolation — HR2).
+    let dir_rows = reports
+        .iter()
+        .flat_map(|(_, r)| r.directory.iter())
+        .filter(|(k, _)| matches!(k, DirectoryKey::Entity(e) if burst.contains(e)))
+        .count();
+    assert_eq!(
+        dir_rows, 0,
+        "a transient is NEVER a directory OwnerRecord, even at 1000-item volume"
+    );
+    // (D) POSITIVE guards (close the drop-axis vacuity) — all 1000 settled SINGLY at the DEST, no loss.
+    assert_eq!(
+        held_at_dest(&reports, &burst),
+        BURST_SIZE as usize,
+        "all 1000 burst items settled at the DEST"
+    );
+    assert_eq!(
+        transient_dropped_total(&mut topo),
+        0,
+        "no burst item was lost"
+    );
+}
+
+/// THE D-7c G-TIER discriminator: K=3 DISTINCT batches commit K go-token WRITES (one EACH) — proving
+/// the write rate tracks the BATCH count, not a fixed 1, and not the 15 items. The per-batch envelope
+/// (ack/round-trip) cost is likewise O(batches) == 3, not O(items). (K>1 is K distinct seeded batches +
+/// K triggers — NOT a cap-split of one batch, which is architecturally broken at HEAD; owed D-7d.)
+#[test]
+fn p3_gtier_write_rate_scales_with_batch_count() {
+    let fabric = FaultFabric::new(0xD7C2, 4);
+    let mut topo = p2_cluster(&fabric, 4);
+    for _ in 0..10 {
+        topo.step();
+    }
+    let src_fence = realm_fence(&mut topo, SRC_REALM);
+    let dst_fence = realm_fence(&mut topo, DST_REALM);
+    let mut all = BTreeSet::new();
+    for (k, batch) in [TransferId(0xA1), TransferId(0xA2), TransferId(0xA3)]
+        .into_iter()
+        .enumerate()
+    {
+        let set = seed_transient_burst(&mut topo, batch, 5, (k as u64) * 100, src_fence, dst_fence);
+        all.extend(&set);
+        trigger_transfer(&mut topo, transient_batch_ctx(batch, dst_fence));
+    }
+    step_asserting_conservation(&mut topo, 24);
+
+    let reports = topo.inspect_all();
+    let writes: u64 = reports.iter().map(|(_, r)| r.batch_go_writes).sum();
+    assert_eq!(
+        writes, 3,
+        "write rate == BATCH count (3), not item count (15), not 1"
+    );
+    let go_tokens: Vec<(BatchId, _)> = reports
+        .iter()
+        .flat_map(|(_, r)| r.batch_goes.clone())
+        .collect();
+    assert_eq!(go_tokens.len(), 3, "3 distinct go-tokens");
+    assert_eq!(
+        held_at_dest(&reports, &all),
+        15,
+        "all 15 items (3 batches × 5) settled at the DEST"
+    );
+    assert_eq!(
+        source_transients_emitted(&mut topo),
+        3,
+        "3 envelopes — the ack/round-trip cost is O(batches), not O(items)"
+    );
+}
+
+// ====================================================================================================
+// D-7c 7c.3 — DURABLE-UNAFFECTED-BY-BURST. A concurrent 1000-item transient burst must leave EVERY
+// concurrent Durable saga BYTE-IDENTICAL (the differential gate). The durable warmup is INLINED via the
+// PUBLIC building blocks (p1_client/walk_forward/read_subject/trigger_transfer) — the cut choreography's
+// private `run_cut_transfer` lives in p2_transfer_gates and is not cross-crate visible.
+// ====================================================================================================
+
+/// Find a node's report in an inspect slice.
+fn report(reports: &[(NodeId, InspectReport)], node: NodeId) -> &InspectReport {
+    reports
+        .iter()
+        .find(|(n, _)| *n == node)
+        .map(|(_, r)| r)
+        .expect("node present in the inspect slice")
+}
+
+/// Sum `batch_go_writes` across every node (the G-TIER write-rate observable; 0 ⇒ no burst ran).
+fn total_go_writes(reports: &[(NodeId, InspectReport)]) -> u64 {
+    reports.iter().map(|(_, r)| r.batch_go_writes).sum()
+}
+
+/// Log a player in over `fabric` and walk until SHARD grants the avatar AND DEST wins its realm lease —
+/// the deterministic prelude shared by the transfer and no-transfer (sensitivity) durable paths. Returns
+/// the topo + the durable subject + its session + the avatar's live directory fence (for the trigger).
+/// Bounded + deterministic (same seed ⇒ same grant tick ⇒ the two variants stay tick-aligned).
+fn warmup_durable(fabric: &FaultFabric) -> (Topology, EntityId, SessionId, Fence) {
+    let mut topo = p2_cluster(fabric, 8);
+    topo.add_node(Box::new(p1_client(
+        fabric,
+        CLIENT,
+        AccountId(1000),
+        walk_forward(),
+    )));
+    let mut warmed = false;
+    for _ in 0..80 {
+        topo.step();
+        let r = topo.inspect_all();
+        if !report(&r, SHARD).held_entities.is_empty()
+            && report(&r, DEST)
+                .held_realms
+                .iter()
+                .any(|(realm, _)| *realm == DST_REALM)
+        {
+            warmed = true;
+            break;
+        }
+    }
+    assert!(
+        warmed,
+        "durable warmup granted the avatar + the DEST realm lease"
+    );
+    let (session, entity, fence) = read_subject(&mut topo);
+    (topo, entity, session, fence)
+}
+
+/// Drive a DURABLE player transfer SHARD→DEST to full settle over the ZERO-fault `fabric`. When
+/// `with_burst`, a concurrent 1000-item Debris burst + its Transient saga ride alongside the durable saga
+/// on the ONE `SagaRuntimeRes`. Both variants run the IDENTICAL deterministic warmup then step a FIXED
+/// window — so the two are sampled at the IDENTICAL absolute tick and every tick-dependent field (a
+/// renewed lease, a re-stamped pose tick) is burst-independent BY CONSTRUCTION, not by luck. Returns the
+/// settled topo + the durable subject + session + the burst entity set (empty when `!with_burst`).
+fn run_durable_to_settle(
+    fabric: &FaultFabric,
+    with_burst: bool,
+) -> (Topology, EntityId, SessionId, BTreeSet<EntityId>) {
+    let (mut topo, entity, session, fence) = warmup_durable(fabric);
+
+    // CONCURRENT BURST (optional) — seed 1000 Debris + trigger its Transient saga BEFORE the durable
+    // trigger (NO `step` between → both variants trigger the durable saga at the SAME tick), so the burst
+    // is genuinely in flight WHILE the durable saga commits + demotes.
+    let mut burst = BTreeSet::new();
+    if with_burst {
+        let src_fence = realm_fence(&mut topo, SRC_REALM);
+        let dst_fence = realm_fence(&mut topo, DST_REALM);
+        let batch = TransferId(0xB57);
+        burst = seed_transient_burst(&mut topo, batch, 1000, 0, src_fence, dst_fence);
+        trigger_transfer(&mut topo, transient_batch_ctx(batch, dst_fence));
+    }
+
+    // TRIGGER the durable avatar transfer — the SAME saga machinery; Durable takes the full path.
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: TransferId(1),
+            session,
+            subject: DirectoryKey::Entity(entity),
+            expected_fence: fence,
+            source: SHARD,
+            dest: DEST,
+            class: DurabilityClass::Durable,
+            needs_provision: false,
+            from_realm: SRC_REALM,
+            to_realm: DST_REALM,
+        },
+    );
+
+    // FIXED window (tick-aligned across variants), asserting per-tick transient conservation throughout.
+    for i in 0..120 {
+        topo.step();
+        let r = topo.inspect_all();
+        verify_transient_conservation_tick(&r, TickId(i))
+            .expect("transient conservation holds every tick (durable + burst)");
+    }
+
+    // CONFIRM full settle — fail loud if the fixed window was too short (never silently under-drive).
+    let r = topo.inspect_all();
+    assert!(
+        !report(&r, SHARD)
+            .held_entities
+            .iter()
+            .any(|(e, _)| *e == entity),
+        "the source demoted the durable subject within the window",
+    );
+    assert!(
+        report(&r, DEST)
+            .held_entities
+            .iter()
+            .any(|(e, _)| *e == entity),
+        "the dest holds the durable subject within the window",
+    );
+    assert_eq!(
+        live_sagas(&mut topo),
+        0,
+        "every saga (durable + burst) reached Done"
+    );
+    if with_burst {
+        assert_eq!(
+            held_at_dest(&r, &burst),
+            burst.len(),
+            "all 1000 burst items settled at the DEST within the window",
+        );
+    }
+    (topo, entity, session, burst)
+}
+
+/// THE D-7c DURABLE-UNAFFECTED-BY-BURST headline: a concurrent 1000-item transient burst leaves the
+/// durable player saga's footprint BYTE-IDENTICAL. Transients take NO directory lock and write ZERO
+/// directory rows, so the durable saga and the burst share NO mutable orchestrator state except
+/// `batch_goes` (excluded from the projection) and the wire fabric — so the durable SUBSET is invariant
+/// while `trace_bytes` legitimately moves. Any subset diff is a burst leak into the durable path = an
+/// HR1/HR2 violation. PERMANENT gate. (Byte-identity is valid ONLY under the zero `LinkPolicy` — see
+/// `durable_subset`'s doc precondition.)
+#[test]
+fn p3_durable_transfer_byte_identical_under_concurrent_burst() {
+    // SAME seed both runs ⇒ deterministic + tick-aligned; the ONLY difference is the concurrent burst.
+    let (mut base, base_entity, base_session, _) =
+        run_durable_to_settle(&FaultFabric::new(909, 2), false);
+    let (mut burst, burst_entity, burst_session, burst_set) =
+        run_durable_to_settle(&FaultFabric::new(909, 2), true);
+
+    // The durable subject is minted identically (same seed + same warmup) — the projections are comparable.
+    assert_eq!(
+        base_entity, burst_entity,
+        "same durable subject id in both runs"
+    );
+    assert_eq!(base_session, burst_session, "same session id in both runs");
+
+    // THE GATE — the durable footprint is byte-identical with vs without the burst.
+    let base_reports = base.inspect_all();
+    let burst_reports = burst.inspect_all();
+    assert_eq!(
+        durable_subset(&base_reports, base_entity, base_session),
+        durable_subset(&burst_reports, burst_entity, burst_session),
+        "the durable saga footprint is UNAFFECTED by a concurrent 1000-item transient burst",
+    );
+
+    // SPECIFICITY (negative control) — the burst GENUINELY ran in the burst variant and was ABSENT in the
+    // base variant, so the byte-identity above is not a false-green from a burst that never happened.
+    assert_eq!(
+        held_at_dest(&burst_reports, &burst_set),
+        1000,
+        "the burst variant actually moved all 1000 transients to the DEST",
+    );
+    assert_eq!(
+        total_go_writes(&burst_reports),
+        1,
+        "the burst variant committed exactly one go-token",
+    );
+    assert_eq!(
+        total_go_writes(&base_reports),
+        0,
+        "the base variant ran NO burst (zero go-token writes) — the control is real",
+    );
+}
+
+/// The two-sided counterpart to the gate (SENSITIVITY): a REAL durable-path change MOVES the durable
+/// subset — proving `durable_subset` is not an over-filtered inert constant that would pass the gate
+/// above vacuously. BASE transfers the avatar to the DEST; PERTURBED runs the identical warmup but never
+/// triggers the transfer, so the subject stays authoritative at the SHARD — the projections must differ.
+#[test]
+fn p3_durable_subset_moves_when_durable_saga_perturbed() {
+    let (mut base, base_entity, base_session, _) =
+        run_durable_to_settle(&FaultFabric::new(909, 2), false);
+    // PERTURBED: the SAME warmup, but NO durable transfer — the subject stays at the SHARD.
+    let (mut perturbed, p_entity, p_session, _) = warmup_durable(&FaultFabric::new(909, 2));
+    for _ in 0..16 {
+        perturbed.step();
+    }
+    assert_eq!(
+        base_entity, p_entity,
+        "same subject id (same seed + warmup)"
+    );
+    assert_eq!(base_session, p_session, "same session id");
+    assert_ne!(
+        durable_subset(&base.inspect_all(), base_entity, base_session),
+        durable_subset(&perturbed.inspect_all(), p_entity, p_session),
+        "a real durable-path change (transfer vs no-transfer) MOVES the durable subset",
+    );
 }

@@ -124,10 +124,23 @@ pub struct SagaRuntimeRes {
     /// `TRANSIENT-AUTHORITY-HELD` oracle cross-checks every Held transient's set
     /// anchor against a committed go-token here — a transient is NEVER a directory `OwnerRecord`
     /// (burst-isolation: a 1000-debris burst writes ZERO directory rows). ⚠️ IN-MEMORY (durability
-    /// owed D-6) + UNBOUNDED in D-7a (bounded GC of completed go-tokens is owed D-7c — it needs the
-    /// drop-completion signal; the oracle needs the live record until then). `or_insert` idempotent:
+    /// owed D-6). ⚠️ SAME UNBOUNDED-LEDGER CLASS as `rejected` (audit ROB-1) but NOT yet bounded:
+    /// one `(Fence, NodeId, NodeId)` entry per batch EVER committed accumulates for orchestrator
+    /// uptime (worst case = total batches committed since start) — UNLIKE `rejected`, this cannot be
+    /// a cap-and-shed ring because the `TRANSIENT-AUTHORITY-HELD` oracle needs the live record while
+    /// any item is Held. The proper GC fires at the shard's terminal retire (`on_release_complete`),
+    /// gated on the drop-completion signal D-7d co-designs (owed D-7d, NOT a timeout). Until then do
+    /// not run a long-lived burst soak without monitoring orchestrator RSS. `or_insert` idempotent:
     /// a Slice-2a re-driven go-token re-records the SAME (batch → fence) without duplication.
     batch_goes: BTreeMap<BatchId, (Fence, NodeId, NodeId)>,
+    /// THE G-TIER observable (D-7c): a MONOTONIC count of go-token WRITES (incremented once per
+    /// emitted `BatchGo`, BEFORE the idempotent `or_insert`). `batch_goes.len()` alone is FALSE-GREEN
+    /// for the "write rate scales with BATCH count, not ITEM count" claim — the `or_insert` collapses N
+    /// same-key writes to one entry, so a per-item-write regression would leave `len` at 1 yet inflate
+    /// THIS counter to N. The G-TIER gate asserts `batch_go_writes == distinct-batch-count` (== 1 for a
+    /// 1000-item single batch). The metric is forward-compatible with [[D-6]]'s durable WAL: one
+    /// in-memory write per batch is exactly one fsync per batch.
+    batch_go_writes: u64,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -221,6 +234,15 @@ impl SagaRuntimeRes {
             .iter()
             .map(|(batch, (fence, _src, _dst))| (*batch, *fence))
             .collect()
+    }
+
+    /// The MONOTONIC go-token write count (D-7c G-TIER observable): how many `BatchGo`s have been
+    /// recorded, regardless of how many collapsed onto the same `BatchId` via `or_insert`. The gate
+    /// asserts this equals the distinct-batch count (NOT the item count) — the proof the orchestrator
+    /// write rate scales with batch count, never burst size.
+    #[must_use]
+    pub fn batch_go_writes(&self) -> u64 {
+        self.batch_go_writes
     }
 }
 
@@ -532,6 +554,9 @@ fn commit_result(
     // is denied the runtime handle so this write-back stays sound). `or_insert` is idempotent: a
     // Slice-2a re-driven go-token re-records the SAME (batch → fence/source/dest), never a dup.
     for bg in batch_gos {
+        // D-7c: count the WRITE (the G-TIER observable) BEFORE the idempotent `or_insert` — so a
+        // per-item-write regression inflates this to N even though `or_insert` keeps `len` at 1.
+        runtime.batch_go_writes += 1;
         runtime
             .batch_goes
             .entry(bg.batch)
@@ -1536,6 +1561,15 @@ mod tests {
                 .batch_goes(),
             vec![(BatchId(XFER), Fence(9))],
             "one batched go-token recorded at the commit fence"
+        );
+        // D-7c G-TIER observable: ONE write (the write COUNT, not just the deduped map size).
+        assert_eq!(
+            rig.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .batch_go_writes(),
+            1,
+            "one go-token WRITE per batch (the per-item-regression probe)"
         );
 
         // The D-7b structural drop-before-promote, driven through the orchestrator (two ordered

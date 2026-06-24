@@ -71,6 +71,10 @@ pub struct InspectReport {
     /// on shards/clients. `(BatchId, commit_fence)`; the `TRANSIENT-AUTHORITY-HELD` oracle cross-checks
     /// each held transient's anchor against a go-token here (a transient has no directory row to check).
     pub batch_goes: Vec<(vd_core::BatchId, Fence)>,
+    /// The MONOTONIC go-token WRITE count (D-7c G-TIER) — ORCHESTRATOR-ONLY. `batch_goes.len()` is
+    /// false-green for the write-rate claim (idempotent `or_insert` collapses same-key writes); the
+    /// gate sums THIS and asserts it equals the distinct-batch count, NOT the burst item count.
+    pub batch_go_writes: u64,
     /// HANDOVER-attributable transient LOSS per kind (D-7b.3), from `StubStats.transients_lost_in_handover`
     /// — `(EntityKind, lost)` in kind order. The `verify_transient_loss_budget` gate sums this per kind
     /// across shards and compares to the kind's `LossBudget` (NOT the gross `transients_dropped`).
@@ -138,6 +142,7 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         // and the committed go-token ledger the TRANSIENT-AUTHORITY-HELD oracle cross-checks (D-7).
         report.active_transfers = rt.active_transfers();
         report.batch_goes = rt.batch_goes();
+        report.batch_go_writes = rt.batch_go_writes(); // D-7c G-TIER write-rate observable
     }
     if let Some(dots) = world.get_resource::<vd_sim::stub::Dots>() {
         // A dot is HELD only while it SIMULATES (`Authority::Owned`, 1d.4b): a Ghost (a retained
