@@ -53,11 +53,19 @@ pub const PROMOTE_STEP: u32 = 10;
 /// - [`TRANSIENT_BATCH_STEP`] (11): the SOURCE→dest `TransientBatch` envelope, its dest→orch
 ///   `TransferAck::BatchAdopted` reply, AND the orchestrator's batched `TransientGo` go-token
 ///   (request + ack + commit share a phase, like FreezeSource/SourceFrozen).
-/// - [`TRANSIENT_DROP_STEP`] (12): the orchestrator→source+dest `TransientDrop` (the adopt-before-drop
-///   second phase: the source drops the Held items, the dest flips Arriving→Held).
+/// - [`TRANSIENT_RELEASE_STEP`] (13, D-7b): the orchestrator→SOURCE `TransientRelease` (phase 1 of the
+///   STRUCTURAL drop-before-promote — the source flips `Held→Departing`, goes uncounted, and acks
+///   `TransferAck::DropApplied`). Mirrors the durable `Demote`/`DemoteAck`.
+/// - [`TRANSIENT_DROP_STEP`] (12, D-7b NARROWED): the orchestrator→DEST `TransientDrop` = PROMOTE
+///   (`Arriving→Held`), reachable ONLY after the source's `DropApplied` — and the dest's own
+///   promote-confirm `DropApplied`, which drives the orchestrator's `ReleaseComplete` to the source
+///   (retiring the retained `Departing` copy). The holder set transits `{S}→{}→{D}`, never `{S,D}`.
 pub const TRANSIENT_BATCH_STEP: u32 = 11;
-/// See [`TRANSIENT_BATCH_STEP`] — the adopt-before-drop completion (D-7a).
+/// See [`TRANSIENT_BATCH_STEP`] — the dest PROMOTE phase (`TransientDrop`) + the dest promote-confirm.
 pub const TRANSIENT_DROP_STEP: u32 = 12;
+/// See [`TRANSIENT_BATCH_STEP`] — the SOURCE release phase (`TransientRelease` + its `DropApplied` ack),
+/// D-7b's structural drop-before-promote.
+pub const TRANSIENT_RELEASE_STEP: u32 = 13;
 
 /// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
 /// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
@@ -110,14 +118,21 @@ pub enum InterShardFlow {
     /// `DemoteAck` (demote-before-promote) — REPLACES the 1c.8 autonomous adopt-flip. Side-effecting,
     /// ack-driven by `(transfer, PROMOTE_STEP)`.
     Promote(PromoteCmd),
-    /// Orchestrator → SOURCE + DEST shards: the TRANSIENT adopt-before-drop COMPLETION (D-7a) — the
-    /// batched-transient twin of the durable ordered `Demote`/`Promote`. Emitted only AFTER the dest
-    /// acked `BatchAdopted` (the dest already holds the items as the uncounted `Arriving` tier), so it
-    /// is the destructive hand-off: the SOURCE drops the batch's `Held` items, the DEST flips
-    /// `Arriving→Held`. ONE message broadcast to both, handled by-local-status (idempotent: an
-    /// already-dropped source / already-Held dest is a no-op). Side-effecting, ack-driven by
-    /// `(transfer, TRANSIENT_DROP_STEP)`. APPENDED (preserves every existing postcard discriminant).
-    TransientDrop(TransientDrop),
+    /// Orchestrator → SOURCE shard: phase 1 of the TRANSIENT structural drop-before-promote (D-7b) —
+    /// the source flips its `Held{outbound}` batch items to the uncounted+unrendered `Departing` tier
+    /// and acks `TransferAck::DropApplied` (the transient twin of `Demote`/`DemoteAck`). Emitted only
+    /// after the dest's `BatchAdopted`. Side-effecting, ack-driven by `(transfer, TRANSIENT_RELEASE_STEP)`.
+    TransientRelease(TransientHandoff),
+    /// Orchestrator → DEST shard: the TRANSIENT PROMOTE (D-7b NARROWED from the D-7a broadcast) — the
+    /// dest flips its `Arriving` batch items to authoritative `Held`. Reachable ONLY after the source's
+    /// `DropApplied`, so the source is already uncounted: the holder set is never `{S,D}`. Side-effecting,
+    /// ack-driven by `(transfer, TRANSIENT_DROP_STEP)` (the dest's promote-confirm `DropApplied`).
+    TransientDrop(TransientHandoff),
+    /// Orchestrator → SOURCE shard: phase 3 — retire the retained `Departing` copy after the dest's
+    /// promote-confirm (a dest-crash before this lets the promote re-drive against the still-extant
+    /// source copy). Side-effecting, ack-driven by `(transfer, TRANSIENT_RELEASE_STEP)`. APPENDED
+    /// (preserves every existing postcard discriminant).
+    ReleaseComplete(TransientHandoff),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -218,13 +233,16 @@ impl InterShardFlow {
                     step_id: cmd.step_id,
                 },
             },
-            // The transient adopt-before-drop completion (D-7a): side-effecting authority moves at
-            // the source/dest, journaled by `(transfer, TRANSIENT_DROP_STEP)` (idempotent by local
-            // held-status — the batched twin of the demote/promote idempotency).
-            InterShardFlow::TransientDrop(drop) => EffectClass::SideEffecting {
+            // The transient structural drop-before-promote handoff commands (D-7b): side-effecting
+            // authority moves at the source/dest, journaled by `(transfer, step_id)` (idempotent by
+            // local held-status — the batched twin of the demote/promote idempotency). All three
+            // share the `TransientHandoff` shape and one classification arm (DRY).
+            InterShardFlow::TransientRelease(h)
+            | InterShardFlow::TransientDrop(h)
+            | InterShardFlow::ReleaseComplete(h) => EffectClass::SideEffecting {
                 idempotency: IdempotencyKey::TransferStep {
-                    transfer: drop.transfer,
-                    step_id: drop.step_id,
+                    transfer: h.transfer,
+                    step_id: h.step_id,
                 },
             },
         }
@@ -276,15 +294,18 @@ pub struct PromoteCmd {
     pub source: NodeId,
 }
 
-/// Orchestrator → SOURCE + DEST shards TRANSIENT adopt-before-drop completion command (D-7a). The
-/// SOURCE drops the batch's `Held` items (counted in `transients_dropped` only when nothing held them
-/// — the happy drop is a clean hand-off, not a loss); the DEST flips its `Arriving` items for this
-/// batch to `Held`. `transfer` IS the `BatchId` (one saga per batch). `step_id` is always
-/// [`TRANSIENT_DROP_STEP`] (carried, not inline — `effect_class` keys idempotency uniformly). `fence`
-/// is the batch's commit fence (the dest realm-lease fence the go-token committed at): the dest anchors
-/// the promoted item to it; a receiver rejects a stale drop (fence rule 1). Idempotent at both ends.
+/// The ONE shape carried by the three TRANSIENT structural drop-before-promote command arms (D-7b):
+/// `TransientRelease` (orch→source, `TRANSIENT_RELEASE_STEP` — flip `Held→Departing`), `TransientDrop`
+/// (orch→dest, `TRANSIENT_DROP_STEP` — PROMOTE `Arriving→Held`), `ReleaseComplete` (orch→source,
+/// `TRANSIENT_RELEASE_STEP` — retire the `Departing` copy). `transfer` IS the `BatchId` (one saga per
+/// batch). `step_id` (carried, not inline — `effect_class` keys idempotency uniformly) + the ARM
+/// together name the action. `fence` is the batch's commit fence (the dest realm-lease fence the
+/// go-token committed at): the dest anchors the promoted item to it (it is NOT yet a stale-reject
+/// guard — the in-process saga-ordered path makes a stale handoff unrepresentable; a fence-rule-1
+/// reject lands with the cross-host mesh transport, P3+). Dedup is by the journaled `(transfer,
+/// step_id)` idempotency at each receiver — at-least-once, redelivery re-acks without re-effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TransientDrop {
+pub struct TransientHandoff {
     pub transfer: TransferId,
     pub step_id: u32,
     pub fence: Fence,
@@ -418,9 +439,18 @@ pub enum TransferAck {
     },
     /// DEST → orch (phase [`TRANSIENT_BATCH_STEP`], D-7a): the dest ADOPTED a `TransientBatch` into
     /// its `Arriving` (uncounted) tier and journaled the step. This is the transient twin of the
-    /// durable `DemoteAck` — it GATES the orchestrator's `TransientDrop` (adopt-before-drop), so the
+    /// durable `DemoteAck` — it GATES the orchestrator's `TransientRelease` (adopt-before-drop), so the
     /// source never drops until the dest holds the items. `transfer_id` IS the `BatchId`.
     BatchAdopted {
+        transfer_id: TransferId,
+        step_id: u32,
+    },
+    /// SHARD → orch (D-7b): proof a transient handoff step was applied. The SOURCE sends it with
+    /// `step_id = TRANSIENT_RELEASE_STEP` (the `Held→Departing` release is done — GATES the dest
+    /// promote); the DEST sends it with `step_id = TRANSIENT_DROP_STEP` (the `Arriving→Held` promote is
+    /// done — GATES the source's `ReleaseComplete`). The SAME ack variant, distinguished by `step_id`
+    /// — the transient twin of `DemoteAck`/`PromoteAck` collapsed onto one phased ack.
+    DropApplied {
         transfer_id: TransferId,
         step_id: u32,
     },
@@ -434,7 +464,8 @@ impl TransferAck {
             TransferAck::SourceFlushed { transfer_id, .. }
             | TransferAck::Accepted { transfer_id, .. }
             | TransferAck::Rejected { transfer_id, .. }
-            | TransferAck::BatchAdopted { transfer_id, .. } => *transfer_id,
+            | TransferAck::BatchAdopted { transfer_id, .. }
+            | TransferAck::DropApplied { transfer_id, .. } => *transfer_id,
         }
     }
 
@@ -445,7 +476,8 @@ impl TransferAck {
             TransferAck::SourceFlushed { step_id, .. }
             | TransferAck::Accepted { step_id, .. }
             | TransferAck::Rejected { step_id, .. }
-            | TransferAck::BatchAdopted { step_id, .. } => *step_id,
+            | TransferAck::BatchAdopted { step_id, .. }
+            | TransferAck::DropApplied { step_id, .. } => *step_id,
         }
     }
 }
@@ -688,9 +720,10 @@ mod tests {
                 }
             }
         );
-        // D-7a: the transient batch ack + the adopt-before-drop completion are side-effecting at
-        // their transient phases (11 batch+ack+go-token; 12 drop) — keyed by (transfer, step) like
-        // every other authority-moving arm (the batched twin of demote/promote idempotency).
+        // D-7a/b: the transient batch ack + the structural drop-before-promote handoff commands are
+        // side-effecting at their transient phases (11 batch+ack+go-token; 13 release; 12 promote) —
+        // keyed by (transfer, step) like every authority-moving arm. The three handoff arms share one
+        // classification arm; assert each routes through it (DRY proof).
         let adopted = InterShardFlow::TransferAck(TransferAck::BatchAdopted {
             transfer_id: TransferId(11),
             step_id: TRANSIENT_BATCH_STEP,
@@ -704,17 +737,53 @@ mod tests {
                 }
             }
         );
-        let drop = InterShardFlow::TransientDrop(TransientDrop {
-            transfer: TransferId(11),
-            step_id: TRANSIENT_DROP_STEP,
-            fence: Fence(6),
+        for (flow, step) in [
+            (
+                InterShardFlow::TransientRelease(TransientHandoff {
+                    transfer: TransferId(11),
+                    step_id: TRANSIENT_RELEASE_STEP,
+                    fence: Fence(6),
+                }),
+                TRANSIENT_RELEASE_STEP,
+            ),
+            (
+                InterShardFlow::TransientDrop(TransientHandoff {
+                    transfer: TransferId(11),
+                    step_id: TRANSIENT_DROP_STEP,
+                    fence: Fence(6),
+                }),
+                TRANSIENT_DROP_STEP,
+            ),
+            (
+                InterShardFlow::ReleaseComplete(TransientHandoff {
+                    transfer: TransferId(11),
+                    step_id: TRANSIENT_RELEASE_STEP,
+                    fence: Fence(6),
+                }),
+                TRANSIENT_RELEASE_STEP,
+            ),
+        ] {
+            assert_eq!(
+                flow.effect_class(),
+                EffectClass::SideEffecting {
+                    idempotency: IdempotencyKey::TransferStep {
+                        transfer: TransferId(11),
+                        step_id: step,
+                    }
+                }
+            );
+        }
+        // The DropApplied ack (D-7b) is side-effecting at its phase too.
+        let drop_applied = InterShardFlow::TransferAck(TransferAck::DropApplied {
+            transfer_id: TransferId(11),
+            step_id: TRANSIENT_RELEASE_STEP,
         });
         assert_eq!(
-            drop.effect_class(),
+            drop_applied.effect_class(),
             EffectClass::SideEffecting {
                 idempotency: IdempotencyKey::TransferStep {
                     transfer: TransferId(11),
-                    step_id: TRANSIENT_DROP_STEP,
+                    step_id: TRANSIENT_RELEASE_STEP,
                 }
             }
         );
@@ -734,6 +803,7 @@ mod tests {
             PROMOTE_STEP,
             TRANSIENT_BATCH_STEP,
             TRANSIENT_DROP_STEP,
+            TRANSIENT_RELEASE_STEP,
         ];
         for phase in 0u32..=6 {
             assert!(
@@ -862,6 +932,10 @@ mod tests {
                 transfer_id: TransferId(1),
                 step_id: TRANSIENT_BATCH_STEP,
             },
+            TransferAck::DropApplied {
+                transfer_id: TransferId(1),
+                step_id: TRANSIENT_RELEASE_STEP,
+            },
         ] {
             // The accessors agree with the constructed key, over every arm.
             let bytes = postcard::to_allocvec(&ack).expect("encode");
@@ -892,15 +966,29 @@ mod tests {
                 pose: pose(),
                 drained_seq: 42,
             }),
-            // D-7a: the transient batch ack + the adopt-before-drop completion roundtrip distinctly
-            // (the dispatch split depends on the tag discriminating them from the durable arms).
+            // D-7a/b: the transient batch ack + the DropApplied ack + the three structural handoff
+            // command arms roundtrip distinctly (the dispatch split depends on the tag).
             InterShardFlow::TransferAck(TransferAck::BatchAdopted {
                 transfer_id: TransferId(1),
                 step_id: TRANSIENT_BATCH_STEP,
             }),
-            InterShardFlow::TransientDrop(TransientDrop {
+            InterShardFlow::TransferAck(TransferAck::DropApplied {
+                transfer_id: TransferId(1),
+                step_id: TRANSIENT_DROP_STEP,
+            }),
+            InterShardFlow::TransientRelease(TransientHandoff {
+                transfer: TransferId(1),
+                step_id: TRANSIENT_RELEASE_STEP,
+                fence: Fence(6),
+            }),
+            InterShardFlow::TransientDrop(TransientHandoff {
                 transfer: TransferId(1),
                 step_id: TRANSIENT_DROP_STEP,
+                fence: Fence(6),
+            }),
+            InterShardFlow::ReleaseComplete(TransientHandoff {
+                transfer: TransferId(1),
+                step_id: TRANSIENT_RELEASE_STEP,
                 fence: Fence(6),
             }),
         ] {

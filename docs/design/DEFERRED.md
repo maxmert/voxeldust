@@ -600,13 +600,26 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   `Held` items + DEST flips `Arriving→Held`. `TRANSIENT-AUTHORITY-HELD` (`oracle.rs`, no directory cross-check —
   go-token + realm-fence anchored) holds; the e2e gate `tests/tests/p3_transient.rs` proves a 1-item Debris batch
   crosses with no DoubleHeld, no vanish, no loss. Gate-green at 100% Tier-A region+branch.
-- **Still owed (D-7b/c/d):** the closed-form `BallisticReadvance` (`advance_transients`, Cat-A) + per-tick
-  `TRANSIENT-CONSERVATION` (Duplicated / LossOverBudget; drop-before-promote ordering under stagger) [D-7b]; the
-  `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale assertion + burst params → `StubConfig`
-  [D-7c]; the crash-matrix Transient cells (`BatchCommitting` at_phase, `EndState::BatchCommittedAt` /
-  `BatchDroppedWithinBudget`) [D-7d]. Also owed: bounded GC of completed go-tokens (`batch_goes` is unbounded in
-  D-7a — the oracle needs the live record until a drop-completion signal exists, D-7c/D-6) and the durable
-  go-token WAL (in-memory now, [[D-6]]).
+- **✅ D-7b.1 LANDED (design `wf_55d7e981`, doc `d7b_transient_ballistic.md`):** the STRUCTURAL
+  drop-before-promote that makes per-tick `TRANSIENT-CONSERVATION` hold under tick-skew. The D-7a
+  broadcast `TransientDrop` (which could double-hold for the stagger window — the dest promotes while
+  the source still counts) is REPLACED by the ordered `TransientRelease → DropApplied → TransientDrop`
+  (=PROMOTE) ` → DropApplied → ReleaseComplete`: the source flips `Held→Departing` (the new UNCOUNTED
+  retained tier) BEFORE the dest promotes, so the holder set transits `{S}→{}→{D}`, never `{S,D}`.
+  `oracle::verify_transient_conservation_tick` (`len > 1`, no excuse) is asserted EVERY tick of a
+  STAGGERED crossing (`tests/tests/p3_transient.rs` `..._under_stagger`). One `TransientHandoff` struct
+  serves the three command arms (DRY); `with_batch_token` shares the ledger lookup. Gate-green at 100%
+  Tier-A.
+- **Still owed (D-7b.2/.3, c, d):** the closed-form `BallisticReadvance` (`advance_continuity` reusing
+  `StampedPose::advanced_ballistic` + `readvance_transients` + `held_transient_poses` render trace,
+  Cat-A) [D-7b.2]; the per-kind handover-attributable loss counter `transients_lost_in_handover` +
+  `verify_transient_loss_budget` (ABSOLUTE per-scenario threshold vs `DEBRIS_DEF.loss_budget=4`) [D-7b.3];
+  the `DURABLE-UNAFFECTED-BY-BURST` differential + the G-TIER 1000-item scale assertion + burst params →
+  `StubConfig` [D-7c]; the crash-matrix Transient cells (`BatchCommitting` at_phase,
+  `EndState::BatchCommittedAt` / `BatchDroppedWithinBudget`) [D-7d]. Also owed: bounded GC of completed
+  go-tokens (`batch_goes` unbounded — the oracle needs the live record until a drop-completion signal,
+  D-7c/D-6); a re-drive producer for a lost transient handoff command (a permanent kill mid-handoff
+  leaves an uncounted stuck item until self-fence — D-7d); the durable go-token WAL (in-memory, [[D-6]]).
 - **Where:** `saga.rs` (`BatchCommitting`), `saga_runtime.rs` (`locks_directory_key`, `IssueTransientGo` executor,
   `batch_goes`, `handle_batch_adopted`), `stub.rs` (`OwnedTransients`/`TransientStatus`, `emit_transient_batch`,
   `adopt_transient_batch`, `on_transient_drop`, self-fence drop), `wire/intershard.rs` (`TransferAck::BatchAdopted`,

@@ -49,8 +49,8 @@ use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning};
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
-    PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_DROP_STEP, TransferAck,
-    TransferEnvelope, TransientDrop, TransitionPayload,
+    PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_DROP_STEP,
+    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -119,8 +119,9 @@ pub struct SagaRuntimeRes {
     /// THE batched `TransientGo` go-token ledger (HR2/D-7): one record per `BatchId` =
     /// `(commit_fence, source, dest)`. Written by the `IssueTransientGo` executor at the transient
     /// SHORT-PATH commit point — ONE write per batch regardless of item count (G-TIER); the
-    /// `BatchAdopted` handler reads it to emit the adopt-before-drop `TransientDrop` to that batch's
-    /// source+dest. The `TRANSIENT-AUTHORITY-HELD` oracle cross-checks every Held transient's set
+    /// `BatchAdopted`/`DropApplied` handlers read it to drive the D-7b structural drop-before-promote
+    /// (release the source, gate the dest promote, then ReleaseComplete the source). The
+    /// `TRANSIENT-AUTHORITY-HELD` oracle cross-checks every Held transient's set
     /// anchor against a committed go-token here — a transient is NEVER a directory `OwnerRecord`
     /// (burst-isolation: a 1000-debris burst writes ZERO directory rows). ⚠️ IN-MEMORY (durability
     /// owed D-6) + UNBOUNDED in D-7a (bounded GC of completed go-tokens is owed D-7c — it needs the
@@ -133,7 +134,8 @@ pub struct SagaRuntimeRes {
 /// `run_to_quiescence` (which is deliberately denied a `runtime` handle — `commit_result`'s
 /// write-back soundness rests on it) and recorded into [`SagaRuntimeRes::batch_goes`] by
 /// `commit_result`. `batch` is the `BatchId` (the transient saga's transfer); `fence` is the dest
-/// realm-lease fence the batch committed at; `source`/`dest` are the shards the `TransientDrop` goes to.
+/// realm-lease fence the batch committed at; `source`/`dest` are the shards the D-7b handoff commands
+/// (`TransientRelease`/`TransientDrop`/`ReleaseComplete`) target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BatchGo {
     batch: BatchId,
@@ -681,30 +683,78 @@ fn scan_deadlines(
     }
 }
 
-/// Handle the dest's `BatchAdopted` ack (D-7 adopt-before-drop): the dest now holds the batch as the
-/// uncounted `Arriving` tier, so emit the `TransientDrop` to the batch's SOURCE (drop the `Held`
-/// items) AND DEST (flip `Arriving→Held`) — the transient twin of the durable ordered demote-before-
-/// promote (the dest holds before the source drops, so no item is ever held nowhere). The batch's
-/// source/dest/commit-fence come from the go-token ledger (recorded at the saga's commit point). A
-/// `BatchAdopted` with NO committed go-token (a stray/duplicate, or a batch that never started) is a
-/// LOUD no-op — never a silent drop. Read-only on the runtime (the drop is pure egress; FF-1).
-fn handle_batch_adopted(runtime: &SagaRuntimeRes, outbox: &mut OutboundBox, transfer: TransferId) {
-    let batch = BatchId(transfer);
-    match runtime.batch_goes.get(&batch) {
-        Some(&(fence, source, dest)) => {
-            let drop = InterShardFlow::TransientDrop(TransientDrop {
-                transfer,
-                step_id: TRANSIENT_DROP_STEP,
-                fence,
-            });
-            outbox.push_flow(source, MsgClass::Saga, &drop);
-            outbox.push_flow(dest, MsgClass::Saga, &drop);
-        }
+/// Look up a batch's committed go-token (commit-fence, source, dest) and run `f` with it; a missing
+/// go-token (a stray/duplicate ack, or a batch that never started/already retired) is a LOUD no-op —
+/// never a silent drop. The shared lookup for both transient-handoff ack handlers (DRY); read-only on
+/// the runtime (the egress is pure; FF-1).
+fn with_batch_token(
+    runtime: &SagaRuntimeRes,
+    transfer: TransferId,
+    f: impl FnOnce(Fence, NodeId, NodeId),
+) {
+    match runtime.batch_goes.get(&BatchId(transfer)) {
+        Some(&(fence, source, dest)) => f(fence, source, dest),
         None => tracing::warn!(
             transfer = transfer.0,
-            "BatchAdopted with no committed go-token: ignored (stray/duplicate)"
+            "transient handoff ack with no committed go-token: ignored (stray/duplicate)"
         ),
     }
+}
+
+/// Handle the dest's `BatchAdopted` ack (D-7b adopt-before-drop, PHASE 1): the dest now holds the
+/// batch as the uncounted `Arriving` tier, so tell the SOURCE ONLY to RELEASE (flip `Held→Departing`,
+/// go uncounted) — the transient twin of the durable ordered `Demote`. The dest promote does NOT fire
+/// yet; it is gated on the source's `DropApplied` (`handle_drop_applied`), so the source is uncounted
+/// BEFORE the dest counts — the holder set is never `{source, dest}`.
+fn handle_batch_adopted(runtime: &SagaRuntimeRes, outbox: &mut OutboundBox, transfer: TransferId) {
+    with_batch_token(runtime, transfer, |fence, source, _dest| {
+        outbox.push_flow(
+            source,
+            MsgClass::Saga,
+            &InterShardFlow::TransientRelease(TransientHandoff {
+                transfer,
+                step_id: TRANSIENT_RELEASE_STEP,
+                fence,
+            }),
+        );
+    });
+}
+
+/// Handle a `DropApplied` ack (D-7b, the phased proof-of-apply gate): `TRANSIENT_RELEASE_STEP` means
+/// the SOURCE released (now uncounted) → PROMOTE the dest (`TransientDrop` to DEST only); any other
+/// phase is the DEST's promote-confirm (`TRANSIENT_DROP_STEP`) → retire the source's retained
+/// `Departing` copy (`ReleaseComplete` to SOURCE only). The binary if/else is total over the only two
+/// phases `DropApplied` ever carries (enforced by its sole producers — the source release-ack + the
+/// dest promote-confirm), so both arms are reachable and there is no uncoverable third branch (HR5).
+fn handle_drop_applied(
+    runtime: &SagaRuntimeRes,
+    outbox: &mut OutboundBox,
+    transfer: TransferId,
+    step_id: u32,
+) {
+    with_batch_token(runtime, transfer, |fence, source, dest| {
+        if step_id == TRANSIENT_RELEASE_STEP {
+            outbox.push_flow(
+                dest,
+                MsgClass::Saga,
+                &InterShardFlow::TransientDrop(TransientHandoff {
+                    transfer,
+                    step_id: TRANSIENT_DROP_STEP,
+                    fence,
+                }),
+            );
+        } else {
+            outbox.push_flow(
+                source,
+                MsgClass::Saga,
+                &InterShardFlow::ReleaseComplete(TransientHandoff {
+                    transfer,
+                    step_id: TRANSIENT_RELEASE_STEP,
+                    fence,
+                }),
+            );
+        }
+    });
 }
 
 /// The orchestrator saga-runtime system: process new triggers, FIRE due deadlines (Slice 2a), then
@@ -765,11 +815,19 @@ pub fn drive_sagas(
                     SagaEvent::SourceFlushed { drained_seq },
                 );
             }
-            // D-7 adopt-before-drop: the dest ADOPTED the transient batch (now holds it as the
-            // uncounted `Arriving` tier) → emit the `TransientDrop` to the batch's source+dest (the
-            // transient twin of the demote-before-promote tail). Looked up in the go-token ledger.
+            // D-7b adopt-before-drop PHASE 1: the dest ADOPTED the batch (uncounted `Arriving`) → tell
+            // the SOURCE ONLY to release (`Held→Departing`), gating the dest promote on the source's
+            // `DropApplied`. The transient twin of the demote-before-promote tail.
             Ok(InterShardFlow::TransferAck(TransferAck::BatchAdopted { transfer_id, .. })) => {
                 handle_batch_adopted(&runtime, &mut outbox, transfer_id);
+            }
+            // D-7b PHASES 2+3: a `DropApplied` proof-of-apply — RELEASE_STEP (source released) gates
+            // the dest PROMOTE; DROP_STEP (dest promote-confirmed) drives the source `ReleaseComplete`.
+            Ok(InterShardFlow::TransferAck(TransferAck::DropApplied {
+                transfer_id,
+                step_id,
+            })) => {
+                handle_drop_applied(&runtime, &mut outbox, transfer_id, step_id);
             }
             // The DEST's crossing ack: the dest journal is the exactly-once dedup. Release is NOT
             // gated on this ack — it rides the ordered `PromoteAck` (1d.5b.1) instead. The crossing
@@ -902,20 +960,27 @@ mod tests {
         }
     }
 
-    /// The wire form of the orchestrator's adopt-before-drop `TransientDrop` as the source/dest
-    /// receive it (D-7), at the batch's commit `fence`.
-    fn drop_wire(fence: Fence) -> Inbound {
+    /// The wire form of an orchestrator→shard `InterShardFlow` as the source/dest receive it (D-7b:
+    /// the structural drop-before-promote `TransientRelease`/`TransientDrop`/`ReleaseComplete`).
+    fn flow_inbound(flow: &InterShardFlow) -> Inbound {
         Inbound::Wire {
             from: ORCH,
             class: MsgClass::Saga,
-            bytes: postcard::to_allocvec(&InterShardFlow::TransientDrop(TransientDrop {
-                transfer: XFER,
-                step_id: TRANSIENT_DROP_STEP,
-                fence,
-            }))
-            .expect("encode")
-            .into(),
+            bytes: postcard::to_allocvec(flow).expect("encode").into(),
         }
+    }
+
+    /// A `TransientHandoff` egress the orchestrator emits (the target asserts it against `flow_inbound`).
+    fn handoff(
+        arm: fn(TransientHandoff) -> InterShardFlow,
+        step_id: u32,
+        fence: Fence,
+    ) -> InterShardFlow {
+        arm(TransientHandoff {
+            transfer: XFER,
+            step_id,
+            fence,
+        })
     }
 
     /// A stepped orchestrator + a hub the test drives the saga through. The `source`/`dest`
@@ -1052,7 +1117,7 @@ mod tests {
         }
 
         /// The DEST acks `BatchAdopted` (D-7) — it now holds the batch as `Arriving`. Drives the
-        /// orchestrator's adopt-before-drop `TransientDrop` egress to source+dest.
+        /// orchestrator's D-7b adopt-before-drop `TransientRelease` egress to the source.
         fn batch_adopted(&mut self, transfer: TransferId) {
             self.dest
                 .send(
@@ -1063,6 +1128,29 @@ mod tests {
                             TransferAck::BatchAdopted {
                                 transfer_id: transfer,
                                 step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
+                            },
+                        ))
+                        .expect("encode"),
+                    ),
+                )
+                .expect("sent");
+            self.settle();
+        }
+
+        /// A shard's `DropApplied` proof-of-apply (D-7b): `TRANSIENT_RELEASE_STEP` = the source
+        /// released (gates the dest promote); `TRANSIENT_DROP_STEP` = the dest promote-confirmed
+        /// (drives the source `ReleaseComplete`). The orchestrator ignores the sender, so it rides
+        /// `self.source` regardless of which shard it models.
+        fn drop_applied(&mut self, step_id: u32) {
+            self.source
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::TransferAck(
+                            TransferAck::DropApplied {
+                                transfer_id: XFER,
+                                step_id,
                             },
                         ))
                         .expect("encode"),
@@ -1424,9 +1512,9 @@ mod tests {
         // burst isolation), takes NO lock, SKIPS Prepare/Cut/Freeze, and commits the batched
         // go-token at START → reaches Done + tombstones the SAME tick (`live()==0`). It records
         // EXACTLY ONE go-token (G-TIER: one write per batch, never per item), NEVER a per-entity CAS,
-        // NEVER a `CommitAuthority`. The dest's `BatchAdopted` then drives the adopt-before-drop
-        // `TransientDrop` to the batch's source + dest. (The OLD `IssueTransientGo` stub PARKED here
-        // in `CommittingCas` with the key locked — D-7 closes that.)
+        // NEVER a `CommitAuthority`. The dest's `BatchAdopted` then drives the D-7b structural
+        // drop-before-promote (release source → promote dest → ReleaseComplete). (The OLD
+        // `IssueTransientGo` stub PARKED here in `CommittingCas` with the key locked — D-7 closes that.)
         let mut rig = Rig::new();
         rig.trigger(transient_ctx(Fence(9)));
         rig.settle(); // process_starts: no lock (Transient) → start → BatchCommitting → go-token → CasWon → Done
@@ -1450,37 +1538,74 @@ mod tests {
             "one batched go-token recorded at the commit fence"
         );
 
-        // The DEST acks BatchAdopted → the orchestrator emits TransientDrop to BOTH source and dest
-        // (adopt-before-drop: the dest already holds the batch as Arriving), carrying the commit fence.
+        // The D-7b structural drop-before-promote, driven through the orchestrator (two ordered
+        // round-trips). PHASE 1 — the DEST's BatchAdopted → the orchestrator tells the SOURCE ONLY to
+        // RELEASE (not a broadcast); the dest gets NOTHING yet (gated on the source's DropApplied).
         let _ = (rig.drain_source(), rig.drain_dest());
         rig.batch_adopted(XFER);
         assert_eq!(
             rig.drain_source(),
-            vec![drop_wire(Fence(9))],
-            "the source is told to DROP its Held items for the adopted batch"
+            vec![flow_inbound(&handoff(
+                InterShardFlow::TransientRelease,
+                TRANSIENT_RELEASE_STEP,
+                Fence(9)
+            ))],
+            "the source is told to RELEASE (Held→Departing) — adopt-before-drop phase 1"
         );
+        assert!(
+            rig.drain_dest().is_empty(),
+            "the dest is NOT promoted until the source releases (no both-held window)"
+        );
+
+        // PHASE 2 — the source's DropApplied(RELEASE) → the orchestrator PROMOTES the DEST only.
+        rig.drop_applied(TRANSIENT_RELEASE_STEP);
         assert_eq!(
             rig.drain_dest(),
-            vec![drop_wire(Fence(9))],
-            "the dest is told to flip its Arriving items → Held for the adopted batch"
+            vec![flow_inbound(&handoff(
+                InterShardFlow::TransientDrop,
+                TRANSIENT_DROP_STEP,
+                Fence(9)
+            ))],
+            "the dest is told to PROMOTE (Arriving→Held) only after the source released"
+        );
+        assert!(
+            rig.drain_source().is_empty(),
+            "no source egress on the promote step"
+        );
+
+        // PHASE 3 — the dest's DropApplied(DROP, promote-confirm) → the orchestrator tells the SOURCE
+        // to retire the retained Departing copy (ReleaseComplete).
+        rig.drop_applied(TRANSIENT_DROP_STEP);
+        assert_eq!(
+            rig.drain_source(),
+            vec![flow_inbound(&handoff(
+                InterShardFlow::ReleaseComplete,
+                TRANSIENT_RELEASE_STEP,
+                Fence(9)
+            ))],
+            "the dest's promote-confirm retires the source's Departing copy"
         );
     }
 
     #[test]
-    fn batch_adopted_with_no_go_token_is_a_loud_noop() {
-        // D-7 defensive: a `BatchAdopted` for a batch with NO committed go-token (a stray/duplicate,
-        // or a batch that never started) emits NO `TransientDrop` — a LOUD no-op, never a silent drop
-        // and never a panic (covers the `None` arm of `handle_batch_adopted`).
+    fn a_transient_handoff_ack_with_no_go_token_is_a_loud_noop() {
+        // D-7 defensive: a `BatchAdopted` OR a `DropApplied` for a batch with NO committed go-token (a
+        // stray/duplicate, or a batch that never started/already retired) emits NOTHING — a LOUD
+        // no-op, never a silent drop and never a panic (covers the `None` arm of `with_batch_token`,
+        // reached via both `handle_batch_adopted` and `handle_drop_applied`).
         let mut rig = Rig::new();
         let _ = (rig.drain_source(), rig.drain_dest());
         rig.batch_adopted(XFER); // no prior trigger → batch_goes is empty
+        assert!(rig.drain_source().is_empty(), "no go-token ⇒ no release");
+        assert!(rig.drain_dest().is_empty(), "no go-token ⇒ no promote");
+        rig.drop_applied(TRANSIENT_RELEASE_STEP); // also no go-token → handle_drop_applied None arm
         assert!(
             rig.drain_source().is_empty(),
-            "no go-token ⇒ no drop to the source"
+            "a DropApplied with no go-token is a loud no-op (no source egress)"
         );
         assert!(
             rig.drain_dest().is_empty(),
-            "no go-token ⇒ no drop to the dest"
+            "a DropApplied with no go-token is a loud no-op (no dest egress)"
         );
     }
 

@@ -154,6 +154,12 @@ fn every_arm() -> Vec<InterShardFlow> {
             transfer_id: TransferId(10),
             step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
         }),
+        // D-7b arm: the transient handoff DropApplied ack (release-ack / promote-confirm) — sealed
+        // so a new TransferAck variant rides the surface gate + the roundtrip/classification.
+        InterShardFlow::TransferAck(TransferAck::DropApplied {
+            transfer_id: TransferId(10),
+            step_id: vd_wire::intershard::TRANSIENT_RELEASE_STEP,
+        }),
         // 1d.5b arms: the saga-pushed ordered demote/promote commands (SIDE-EFFECTING,
         // TransferStep-keyed by DEMOTE_STEP/PROMOTE_STEP).
         InterShardFlow::Demote(vd_wire::intershard::DemoteCmd {
@@ -169,11 +175,22 @@ fn every_arm() -> Vec<InterShardFlow> {
             step_id: vd_wire::intershard::PROMOTE_STEP,
             source: vd_core::NodeId(2),
         }),
-        // D-7a arm: the transient adopt-before-drop completion (SIDE-EFFECTING, TransferStep-keyed
-        // by TRANSIENT_DROP_STEP) — broadcast orch→source+dest, idempotent by local held-status.
-        InterShardFlow::TransientDrop(vd_wire::intershard::TransientDrop {
+        // D-7b arms: the three transient structural drop-before-promote handoff commands (all
+        // SIDE-EFFECTING, TransferStep-keyed; the source-only release/complete + the dest-only
+        // promote — idempotent by journaled step + local held-status). Share `TransientHandoff`.
+        InterShardFlow::TransientRelease(vd_wire::intershard::TransientHandoff {
+            transfer: TransferId(10),
+            step_id: vd_wire::intershard::TRANSIENT_RELEASE_STEP,
+            fence: Fence(6),
+        }),
+        InterShardFlow::TransientDrop(vd_wire::intershard::TransientHandoff {
             transfer: TransferId(10),
             step_id: vd_wire::intershard::TRANSIENT_DROP_STEP,
+            fence: Fence(6),
+        }),
+        InterShardFlow::ReleaseComplete(vd_wire::intershard::TransientHandoff {
+            transfer: TransferId(10),
+            step_id: vd_wire::intershard::TRANSIENT_RELEASE_STEP,
             fence: Fence(6),
         }),
     ]
@@ -196,7 +213,9 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::TransferAck(_)
         | InterShardFlow::Demote(_)
         | InterShardFlow::Promote(_)
-        | InterShardFlow::TransientDrop(_) => {}
+        | InterShardFlow::TransientRelease(_)
+        | InterShardFlow::TransientDrop(_)
+        | InterShardFlow::ReleaseComplete(_) => {}
     }
 }
 

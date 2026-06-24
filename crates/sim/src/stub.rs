@@ -29,7 +29,8 @@ use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, part
 use vd_wire::intershard::{
     DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd,
     STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_BATCH_STEP, TRANSIENT_DROP_STEP,
-    TransferAck, TransferEnvelope, TransientDrop, TransientItem, TransitionPayload,
+    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransientItem,
+    TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -208,8 +209,8 @@ pub struct Transient {
 pub enum TransientStatus {
     /// AUTHORITATIVELY held by this shard (COUNTED + rendered). `outbound` is `None` for a settled
     /// transient; it is set to the batch id once the item has been EMITTED in a crossing batch — the
-    /// item stays authoritative (adopt-before-drop) until the orchestrator's `TransientDrop` for that
-    /// batch drops it.
+    /// item stays authoritative (adopt-before-drop) until the orchestrator's `TransientRelease` for
+    /// that batch flips it to `Departing`.
     Held { outbound: Option<TransferId> },
     /// A SOURCE-side pending crossing (the TEST-seeded boundary-heuristic stand-in — the autonomous
     /// geometric trigger is P4/P5): `emit_transient_batch` drains it into ONE `TransientBatch`
@@ -223,21 +224,29 @@ pub enum TransientStatus {
     },
     /// A mid-flight adopted copy at the DEST (UNCOUNTED — the Ghost analogue: excluded from the
     /// conservation count AND from rendering), tagged with its batch. Flips to `Held{outbound: None}`
-    /// on the batch's `TransientDrop` (the transient twin of the ordered Ghost→Owned promote).
+    /// on the batch's `TransientDrop` (= PROMOTE; the transient twin of the ordered Ghost→Owned).
     Arriving { batch: TransferId },
+    /// A SOURCE-side RELEASED copy (D-7b), retained UNCOUNTED and UNRENDERED across the handoff gap:
+    /// on `TransientRelease` the source flips `Held{outbound:Some(b)}→Departing{b}` (so it stops both
+    /// counting and rendering BEFORE the dest promotes — the holder set is never `{source,dest}`), and
+    /// removes it only on `ReleaseComplete` (after the dest's promote-confirm). Retaining it (rather
+    /// than removing on release) lets a dest-crash-mid-promote re-drive the promote against a
+    /// still-extant copy. The source-side twin of the durable retained Ghost.
+    Departing { batch: TransferId },
 }
 
 impl TransientStatus {
-    /// Is this transient AUTHORITATIVELY held by its shard (COUNTED for conservation + render)? Both
-    /// `Held` and the pre-emit `Crossing` count (the source still owns a crossing item until the
-    /// drop); `Arriving` does NOT (the uncounted mid-flight tier — the Ghost analogue). Monomorphic
-    /// predicate — the SINGLE answer to "does this shard hold this transient", mirroring
+    /// Is this transient AUTHORITATIVELY held by its shard (COUNTED for conservation + render)? `Held`
+    /// and the pre-emit `Crossing` count (the source still owns a crossing item until release);
+    /// `Arriving` (dest mid-flight) and `Departing` (source released, retained) do NOT — the two
+    /// UNCOUNTED tiers that make the holder set transit `{source}→{}→{dest}`, never `{source,dest}`.
+    /// Monomorphic — the SINGLE answer to "does this shard hold this transient", mirroring
     /// `Authority::simulates` for durable dots.
     #[must_use]
     pub fn is_held(&self) -> bool {
         match self {
             TransientStatus::Held { .. } | TransientStatus::Crossing { .. } => true,
-            TransientStatus::Arriving { .. } => false,
+            TransientStatus::Arriving { .. } | TransientStatus::Departing { .. } => false,
         }
     }
 }
@@ -454,15 +463,19 @@ pub struct StubStats {
     /// DEST: `TransientBatch` REDELIVERIES (already-journaled `(transfer, TRANSIENT_BATCH_STEP)`) — a
     /// counted re-ack-only no-op (at-least-once). 0 in a healthy single-delivery run.
     pub transients_adopt_redelivered: u64,
-    /// DEST: `Arriving→Held` promotions on a `TransientDrop` (the transient twin of Ghost→Owned). The
-    /// headline transient-promote counter.
+    /// DEST: `Arriving→Held` PROMOTIONS on a `TransientDrop` (D-7b: the transient twin of Ghost→Owned,
+    /// reachable only after the source released). The headline transient-promote counter.
     pub transients_promoted: u64,
-    /// SOURCE: `Held` items HANDED OFF (dropped) on a clean `TransientDrop` for their batch — the
-    /// happy-path hand-off (NOT a loss). The source half of the adopt-before-drop completion.
+    /// SOURCE: `Held{outbound}` items RELEASED to `Departing` on a `TransientRelease` (D-7b: the source
+    /// goes uncounted BEFORE the dest promotes — the clean hand-off, NOT a loss). The source half of
+    /// the structural drop-before-promote.
     pub transients_handed_off: u64,
-    /// `TransientDrop` REDELIVERIES (already-journaled `(transfer, TRANSIENT_DROP_STEP)`) — a counted
-    /// idempotent no-op (at-least-once). 0 in a healthy single-delivery run.
+    /// `TransientDrop` (promote) REDELIVERIES (already-journaled `(transfer, TRANSIENT_DROP_STEP)`) — a
+    /// counted idempotent no-op (at-least-once). 0 in a healthy single-delivery run.
     pub transient_drop_noop: u64,
+    /// `TransientRelease` + `ReleaseComplete` REDELIVERIES (already-journaled
+    /// `(transfer, TRANSIENT_RELEASE_STEP)`) — a counted idempotent no-op (at-least-once). 0 healthy.
+    pub transient_release_noop: u64,
     /// LOSS: transients DROPPED because this shard self-fenced its realm lease (a crash/eviction with
     /// NO hand-off — the items were anchored to the now-lost lease). The declared-loss counter
     /// (D-7b's `LossBudget` gate reads it); 0 on the happy path (the realm is never lost).
@@ -1867,48 +1880,103 @@ fn adopt_transient_batch(
     );
 }
 
-/// SOURCE+DEST adopt-before-drop completion (D-7): journal idempotently; on FIRST delivery, the
-/// SOURCE drops its `Held{outbound: Some(batch)}` items (a clean HAND-OFF, NOT a loss — counted in
-/// `transients_handed_off`) and the DEST flips its `Arriving{batch}` items → `Held{outbound: None}`
-/// (the transient twin of the ordered Ghost→Owned promote). ONE handler, behavior by local status —
-/// idempotent at both ends (a redelivery is a counted no-op). The promoted item re-anchors to the
-/// batch's commit fence (the dest realm fence).
-fn on_transient_drop(
-    drop: TransientDrop,
+/// SOURCE — phase 1 of the structural drop-before-promote (D-7b): on `TransientRelease` flip this
+/// batch's `Held{outbound: Some(b)}` items to the UNCOUNTED `Departing{b}` tier (the source stops
+/// counting + rendering BEFORE the dest promotes — a clean hand-off, NOT a loss) and ALWAYS ack
+/// `DropApplied`(`TRANSIENT_RELEASE_STEP`) to gate the dest promote. Journaled idempotent: a
+/// redelivery re-acks WITHOUT re-flipping (at-least-once). The item is RETAINED (not removed) so a
+/// dest-crash-mid-promote can re-drive against it; `on_release_complete` retires it later.
+#[allow(clippy::too_many_arguments)]
+fn on_transient_release(
+    rel: TransientHandoff,
     owned: &mut OwnedTransients,
     applied: &mut AppliedSteps,
     stats: &mut StubStats,
+    config: &StubConfig,
+    outbox: &mut OutboundBox,
 ) {
-    match applied.journal_step(drop.transfer, TRANSIENT_DROP_STEP) {
+    match applied.journal_step(rel.transfer, TRANSIENT_RELEASE_STEP) {
         StepOutcome::FirstApply => {
-            let mut to_remove: Vec<EntityId> = Vec::new();
-            for (entity, t) in owned.0.iter_mut() {
-                match t.status {
-                    // SOURCE: a Held item EMITTED in this batch is handed off (dropped after adopt).
-                    TransientStatus::Held { outbound: Some(b) } => {
-                        if b == drop.transfer {
-                            to_remove.push(*entity);
-                        }
-                    }
-                    // DEST: an Arriving item for this batch is promoted to authoritative Held.
-                    TransientStatus::Arriving { batch } => {
-                        if batch == drop.transfer {
-                            t.status = TransientStatus::Held { outbound: None };
-                            t.anchor_fence = drop.fence;
-                            stats.transients_promoted += 1;
-                        }
-                    }
-                    // A settled Held / an unrelated pending Crossing: untouched by this batch's drop.
-                    TransientStatus::Held { outbound: None } | TransientStatus::Crossing { .. } => {
-                    }
+            for t in owned.0.values_mut() {
+                if let TransientStatus::Held { outbound: Some(b) } = t.status
+                    && b == rel.transfer
+                {
+                    t.status = TransientStatus::Departing { batch: b };
+                    stats.transients_handed_off += 1;
                 }
             }
-            for entity in to_remove {
-                owned.0.remove(&entity);
-                stats.transients_handed_off += 1;
+        }
+        StepOutcome::AlreadyApplied => stats.transient_release_noop += 1,
+    }
+    // ALWAYS ack (at-least-once — the ack GATES the dest promote, so a lost ack must be re-ackable).
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::TransferAck(TransferAck::DropApplied {
+            transfer_id: rel.transfer,
+            step_id: TRANSIENT_RELEASE_STEP,
+        }),
+    );
+}
+
+/// DEST — phase 2 (PROMOTE, D-7b): on `TransientDrop` flip this batch's `Arriving{b}` items to
+/// authoritative `Held{outbound: None}`, re-anchoring to the batch's commit fence, and ALWAYS ack
+/// `DropApplied`(`TRANSIENT_DROP_STEP`) (the promote-confirm that drives the source `ReleaseComplete`).
+/// Reachable only after the source released (the orchestrator gates it on the source's `DropApplied`),
+/// so the source is already uncounted — the holder set is never `{source, dest}`. Journaled idempotent.
+#[allow(clippy::too_many_arguments)]
+fn on_transient_promote(
+    promote: TransientHandoff,
+    owned: &mut OwnedTransients,
+    applied: &mut AppliedSteps,
+    stats: &mut StubStats,
+    config: &StubConfig,
+    outbox: &mut OutboundBox,
+) {
+    match applied.journal_step(promote.transfer, TRANSIENT_DROP_STEP) {
+        StepOutcome::FirstApply => {
+            for t in owned.0.values_mut() {
+                if let TransientStatus::Arriving { batch } = t.status
+                    && batch == promote.transfer
+                {
+                    t.status = TransientStatus::Held { outbound: None };
+                    t.anchor_fence = promote.fence;
+                    stats.transients_promoted += 1;
+                }
             }
         }
         StepOutcome::AlreadyApplied => stats.transient_drop_noop += 1,
+    }
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::TransferAck(TransferAck::DropApplied {
+            transfer_id: promote.transfer,
+            step_id: TRANSIENT_DROP_STEP,
+        }),
+    );
+}
+
+/// SOURCE — phase 3 (D-7b): on `ReleaseComplete` (after the dest's promote-confirm) RETIRE this
+/// batch's retained `Departing{b}` items. STATE-idempotent (like the durable retained-ghost teardown,
+/// `remove_retained_ghost`): a redelivery finds no `Departing` item and is a counted no-op
+/// (`transient_release_noop`) — no journal needed, no ack (terminal). A lost `ReleaseComplete` leaves
+/// the uncounted `Departing` copy until a realm self-fence buckets it as a genuine in-flight loss.
+fn on_release_complete(rc: TransientHandoff, owned: &mut OwnedTransients, stats: &mut StubStats) {
+    let mut to_remove: Vec<EntityId> = Vec::new();
+    for (entity, t) in owned.0.iter() {
+        if let TransientStatus::Departing { batch } = t.status
+            && batch == rc.transfer
+        {
+            to_remove.push(*entity);
+        }
+    }
+    if to_remove.is_empty() {
+        stats.transient_release_noop += 1;
+    } else {
+        for entity in to_remove {
+            owned.0.remove(&entity);
+        }
     }
 }
 
@@ -1965,10 +2033,19 @@ fn on_directory_reply(
             );
             return;
         }
-        // SOURCE+DEST: the orchestrator's adopt-before-drop completion (D-7) — the source drops its
-        // `Held` items for the batch, the dest flips its `Arriving` items → `Held`. Idempotent.
-        Ok(InterShardFlow::TransientDrop(drop)) => {
-            on_transient_drop(drop, owned_transients, applied, stats);
+        // D-7b structural drop-before-promote: SOURCE release (`Held→Departing` + ack), DEST promote
+        // (`Arriving→Held` + ack), SOURCE complete (retire the `Departing` copy). The holder set
+        // transits `{source}→{}→{dest}`, never `{source,dest}`.
+        Ok(InterShardFlow::TransientRelease(rel)) => {
+            on_transient_release(rel, owned_transients, applied, stats, config, outbox);
+            return;
+        }
+        Ok(InterShardFlow::TransientDrop(promote)) => {
+            on_transient_promote(promote, owned_transients, applied, stats, config, outbox);
+            return;
+        }
+        Ok(InterShardFlow::ReleaseComplete(rc)) => {
+            on_release_complete(rc, owned_transients, stats);
             return;
         }
         // SOURCE: the saga-pushed ordered Demote (1d.5b.1) — Owned→Frozen→Ghost + DemoteAck.
@@ -2457,9 +2534,9 @@ mod tests {
     }
 
     #[test]
-    fn transient_status_is_held_excludes_only_arriving() {
-        // Held + the pre-emit Crossing are authoritatively held (counted); Arriving is the uncounted
-        // mid-flight tier (the Ghost analogue).
+    fn transient_status_is_held_excludes_arriving_and_departing() {
+        // Held + the pre-emit Crossing are authoritatively held (counted); Arriving (dest mid-flight)
+        // AND Departing (source released, retained) are the two UNCOUNTED tiers (D-7b).
         assert!(TransientStatus::Held { outbound: None }.is_held());
         assert!(
             TransientStatus::Held {
@@ -2478,6 +2555,12 @@ mod tests {
         );
         assert!(
             !TransientStatus::Arriving {
+                batch: TransferId(1)
+            }
+            .is_held()
+        );
+        assert!(
+            !TransientStatus::Departing {
                 batch: TransferId(1)
             }
             .is_held()
@@ -2631,7 +2714,11 @@ mod tests {
     }
 
     #[test]
-    fn transient_drop_hands_off_source_promotes_dest_and_dedups() {
+    fn transient_release_promote_complete_lifecycle_and_dedup() {
+        // The full D-7b source/dest handler lifecycle on ONE mixed owned set (the handlers walk by
+        // status; source-vs-dest is just which statuses are present in production): RELEASE flips
+        // `Held{Some}→Departing` (uncounted), PROMOTE flips `Arriving→Held` (re-anchored), COMPLETE
+        // retires `Departing` — each journaled/state idempotent (redelivery = counted no-op + re-ack).
         let this = TransferId(0xB2);
         let other = TransferId(0xB9);
         let held_this = EntityId::pack(EntityKind::Debris, 1, 7, 1);
@@ -2640,6 +2727,7 @@ mod tests {
         let arriving_this = EntityId::pack(EntityKind::Debris, 1, 7, 4);
         let arriving_other = EntityId::pack(EntityKind::Debris, 1, 7, 5);
         let crossing = EntityId::pack(EntityKind::Debris, 1, 7, 6);
+        let departing_other = EntityId::pack(EntityKind::Debris, 1, 7, 7);
         let mk = |status| Transient {
             pose: transient_pose(),
             anchor_fence: Fence(2),
@@ -2677,18 +2765,27 @@ mod tests {
                 batch: other,
             }),
         );
+        owned.0.insert(
+            departing_other,
+            mk(TransientStatus::Departing { batch: other }),
+        );
         let mut applied = AppliedSteps::default();
         let mut stats = StubStats::default();
+        let cfg = config();
+        let mut outbox = OutboundBox::default();
 
-        let drop = TransientDrop {
+        // RELEASE (SOURCE): `Held{Some(this)}` → uncounted `Departing`; `Held{Some(other)}` and every
+        // other status untouched; ack `DropApplied`(RELEASE_STEP) to the orchestrator.
+        let rel = TransientHandoff {
             transfer: this,
-            step_id: TRANSIENT_DROP_STEP,
+            step_id: TRANSIENT_RELEASE_STEP,
             fence: Fence(5),
         };
-        on_transient_drop(drop, &mut owned, &mut applied, &mut stats);
-        assert!(
-            !owned.0.contains_key(&held_this),
-            "the source Held item for THIS batch is handed off (dropped)"
+        on_transient_release(rel, &mut owned, &mut applied, &mut stats, &cfg, &mut outbox);
+        assert_eq!(
+            owned.0[&held_this].status,
+            TransientStatus::Departing { batch: this },
+            "the source's Held item for THIS batch is released to the uncounted Departing tier"
         );
         assert_eq!(
             owned.0[&held_other].status,
@@ -2700,6 +2797,38 @@ mod tests {
         assert_eq!(
             owned.0[&held_settled].status,
             TransientStatus::Held { outbound: None }
+        );
+        assert_eq!(stats.transients_handed_off, 1);
+        assert_eq!(
+            decode_flows(&mut outbox),
+            vec![(
+                ORCH,
+                InterShardFlow::TransferAck(TransferAck::DropApplied {
+                    transfer_id: this,
+                    step_id: TRANSIENT_RELEASE_STEP,
+                })
+            )]
+        );
+        // RELEASE REDELIVERY: re-ack, no re-flip.
+        on_transient_release(rel, &mut owned, &mut applied, &mut stats, &cfg, &mut outbox);
+        assert_eq!(stats.transient_release_noop, 1);
+        assert_eq!(stats.transients_handed_off, 1, "not re-released");
+        assert_eq!(decode_flows(&mut outbox).len(), 1, "re-acked exactly once");
+
+        // PROMOTE (DEST): `Arriving{this}` → `Held{None}` re-anchored to the commit fence;
+        // `Arriving{other}` untouched; ack `DropApplied`(DROP_STEP).
+        let promote = TransientHandoff {
+            transfer: this,
+            step_id: TRANSIENT_DROP_STEP,
+            fence: Fence(5),
+        };
+        on_transient_promote(
+            promote,
+            &mut owned,
+            &mut applied,
+            &mut stats,
+            &cfg,
+            &mut outbox,
         );
         assert_eq!(
             owned.0[&arriving_this].status,
@@ -2720,15 +2849,57 @@ mod tests {
             owned.0.contains_key(&crossing),
             "a pending Crossing is untouched"
         );
-        assert_eq!(stats.transients_handed_off, 1);
         assert_eq!(stats.transients_promoted, 1);
-        assert_eq!(stats.transient_drop_noop, 0);
-
-        // REDELIVERY: idempotent counted no-op (nothing re-handed/re-promoted).
-        on_transient_drop(drop, &mut owned, &mut applied, &mut stats);
+        assert_eq!(
+            decode_flows(&mut outbox),
+            vec![(
+                ORCH,
+                InterShardFlow::TransferAck(TransferAck::DropApplied {
+                    transfer_id: this,
+                    step_id: TRANSIENT_DROP_STEP,
+                })
+            )]
+        );
+        // PROMOTE REDELIVERY: re-ack, no re-flip.
+        on_transient_promote(
+            promote,
+            &mut owned,
+            &mut applied,
+            &mut stats,
+            &cfg,
+            &mut outbox,
+        );
         assert_eq!(stats.transient_drop_noop, 1);
-        assert_eq!(stats.transients_handed_off, 1, "not re-handed off");
         assert_eq!(stats.transients_promoted, 1, "not re-promoted");
+        assert_eq!(decode_flows(&mut outbox).len(), 1, "re-acked exactly once");
+
+        // COMPLETE (SOURCE): retire THIS batch's `Departing` copy (held_this); a `Departing` for
+        // ANOTHER batch (departing_other) is untouched; no ack (terminal).
+        let rc = TransientHandoff {
+            transfer: this,
+            step_id: TRANSIENT_RELEASE_STEP,
+            fence: Fence(5),
+        };
+        on_release_complete(rc, &mut owned, &mut stats);
+        assert!(
+            !owned.0.contains_key(&held_this),
+            "the retained Departing copy for THIS batch is retired"
+        );
+        assert_eq!(
+            owned.0[&departing_other].status,
+            TransientStatus::Departing { batch: other },
+            "a Departing copy for ANOTHER batch is untouched"
+        );
+        assert!(
+            decode_flows(&mut outbox).is_empty(),
+            "ReleaseComplete is terminal — no ack"
+        );
+        // COMPLETE REDELIVERY: no Departing for THIS batch → counted no-op.
+        on_release_complete(rc, &mut owned, &mut stats);
+        assert_eq!(
+            stats.transient_release_noop, 2,
+            "the redelivered complete is a counted no-op"
+        );
     }
 
     #[test]
@@ -2854,22 +3025,84 @@ mod tests {
             .expect("encode");
         assert_eq!(sent, vec![(ORCH, MsgClass::Saga, expected_ack)]);
 
-        // The TransientDrop promotes the Arriving item → authoritative Held.
-        let drop = TransientDrop {
+        // The TransientDrop dispatch arm PROMOTES the Arriving item → Held + acks DropApplied(DROP).
+        let promote = TransientHandoff {
             transfer: batch,
             step_id: TRANSIENT_DROP_STEP,
             fence: Fence(1),
         };
-        let _ = rig.tick(vec![wire_msg(
+        let sent = rig.tick(vec![wire_msg(
             ORCH,
             MsgClass::Saga,
-            &InterShardFlow::TransientDrop(drop),
+            &InterShardFlow::TransientDrop(promote),
         )]);
         assert_eq!(
             rig.world.resource::<OwnedTransients>().0[&debris].status,
             TransientStatus::Held { outbound: None }
         );
         assert_eq!(rig.world.resource::<StubStats>().transients_promoted, 1);
+        let promote_ack =
+            postcard::to_allocvec(&InterShardFlow::TransferAck(TransferAck::DropApplied {
+                transfer_id: batch,
+                step_id: TRANSIENT_DROP_STEP,
+            }))
+            .expect("encode");
+        assert_eq!(sent, vec![(ORCH, MsgClass::Saga, promote_ack)]);
+
+        // The TransientRelease + ReleaseComplete dispatch arms (SOURCE role): seed a Held source item
+        // for a 2nd batch, release it → Departing + DropApplied(RELEASE) ack, then complete → retired.
+        let src_batch = TransferId(0xB8);
+        let src_item = EntityId::pack(EntityKind::Debris, 1, 7, 9);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            src_item,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held {
+                    outbound: Some(src_batch),
+                },
+            },
+        );
+        let rel = TransientHandoff {
+            transfer: src_batch,
+            step_id: TRANSIENT_RELEASE_STEP,
+            fence: Fence(1),
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientRelease(rel),
+        )]);
+        assert_eq!(
+            rig.world.resource::<OwnedTransients>().0[&src_item].status,
+            TransientStatus::Departing { batch: src_batch }
+        );
+        let release_ack =
+            postcard::to_allocvec(&InterShardFlow::TransferAck(TransferAck::DropApplied {
+                transfer_id: src_batch,
+                step_id: TRANSIENT_RELEASE_STEP,
+            }))
+            .expect("encode");
+        assert_eq!(sent, vec![(ORCH, MsgClass::Saga, release_ack)]);
+
+        let rc = TransientHandoff {
+            transfer: src_batch,
+            step_id: TRANSIENT_RELEASE_STEP,
+            fence: Fence(1),
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::ReleaseComplete(rc),
+        )]);
+        assert!(
+            !rig.world
+                .resource::<OwnedTransients>()
+                .0
+                .contains_key(&src_item),
+            "ReleaseComplete retired the Departing copy"
+        );
+        assert!(sent.is_empty(), "ReleaseComplete is terminal — no egress");
     }
 
     fn input_msg(seq: u64, fence: Fence, movement: [f32; 3], look: [f32; 2]) -> Inbound {

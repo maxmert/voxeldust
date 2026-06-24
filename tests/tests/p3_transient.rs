@@ -13,15 +13,28 @@
 
 use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::pose::RealmId;
-use vd_core::{BatchId, EntityId, NodeId, SessionId, TransferId};
+use vd_core::{BatchId, EntityId, NodeId, SessionId, TickId, TransferId};
 use vd_harness::fabric::FaultFabric;
-use vd_harness::oracle::verify_transient_authority_held;
+use vd_harness::oracle::{verify_transient_authority_held, verify_transient_conservation_tick};
+use vd_harness::topology::{StaggerPlan, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
-    DEST, SHARD, p2_cluster, realm_fence, seed_transient_crossing, transient_dropped_total,
-    trigger_transfer,
+    DEST, SHARD, p2_cluster, p2_cluster_staggered, realm_fence, seed_transient_crossing,
+    transient_dropped_total, trigger_transfer,
 };
 use vd_wire::seams::directory::DirectoryKey;
+
+/// Step `topo` `ticks` times, asserting per-tick TRANSIENT-CONSERVATION (no transient COUNTED-held by
+/// more than one shard) at EVERY committed tick — the D-7b structural drop-before-promote proof that
+/// the holder set transits `{source}→{}→{dest}`, never `{source,dest}`, even under StaggerPlan skew.
+fn step_asserting_conservation(topo: &mut Topology, ticks: u64) {
+    for i in 0..ticks {
+        topo.step();
+        let reports = topo.inspect_all();
+        verify_transient_conservation_tick(&reports, TickId(i))
+            .expect("no transient is COUNTED-held by two shards at any tick");
+    }
+}
 
 const SRC_REALM: RealmId = RealmId::System(7);
 const DST_REALM: RealmId = RealmId::System(8);
@@ -62,11 +75,9 @@ fn p3_transient_debris_batch_crosses_adopt_before_drop() {
         },
     );
 
-    // Step to quiescence: SHARD emits the batch → DEST adopts as Arriving + acks BatchAdopted → the
-    // orchestrator emits TransientDrop → SHARD drops + DEST promotes Arriving→Held.
-    for _ in 0..20 {
-        topo.step();
-    }
+    // Step to quiescence through the D-7b structural drop-before-promote (release → DropApplied →
+    // promote → DropApplied → ReleaseComplete), asserting per-tick conservation EVERY tick.
+    step_asserting_conservation(&mut topo, 24);
 
     let reports = topo.inspect_all();
 
@@ -117,5 +128,69 @@ fn p3_transient_debris_batch_crosses_adopt_before_drop() {
     assert_eq!(
         debris_rows, 0,
         "a transient is NEVER a directory OwnerRecord"
+    );
+}
+
+/// THE D-7b headline (the correctness blocker the structural drop-before-promote fixes): a Debris
+/// batch crosses while the DEST shard LAGS the source by a StaggerPlan offset — and per-tick
+/// TRANSIENT-CONSERVATION holds at EVERY tick (the holder set transits `{SHARD}→{}→{DEST}`, never
+/// `{SHARD,DEST}`). On the OLD D-7a broadcast model the dest could promote while the source still
+/// held, double-holding for the skew window; the structural release-before-promote makes that
+/// unrepresentable. Becomes a permanent gate.
+#[test]
+fn p3_transient_crosses_without_double_holding_under_stagger() {
+    let fabric = FaultFabric::new(0xD7B, 4);
+    // DEST lags SHARD by 2 ticks — the source releases (uncounts) well before the lagging dest
+    // would otherwise promote, so the per-tick gate exercises the skew window the fix closes.
+    let mut topo = p2_cluster_staggered(&fabric, 4, StaggerPlan::lockstep().with_offset(DEST, 2));
+    // WARMUP: both shards win their realm leases (the lagging dest needs more topology ticks).
+    for _ in 0..18 {
+        topo.step();
+    }
+    let src_fence = realm_fence(&mut topo, SRC_REALM);
+    let dst_fence = realm_fence(&mut topo, DST_REALM);
+
+    let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 2, 0);
+    let batch = TransferId(0xD7B_0001);
+    seed_transient_crossing(&mut topo, debris, batch, src_fence, dst_fence);
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: batch,
+            session: SessionId(0),
+            subject: DirectoryKey::Realm(DST_REALM),
+            expected_fence: dst_fence,
+            source: SHARD,
+            dest: DEST,
+            class: DurabilityClass::Transient,
+            needs_provision: false,
+            from_realm: SRC_REALM,
+            to_realm: DST_REALM,
+        },
+    );
+
+    // The whole handoff under skew, asserting NO double-held tick — the structural-fix proof.
+    step_asserting_conservation(&mut topo, 40);
+
+    let reports = topo.inspect_all();
+    let holders: Vec<NodeId> = reports
+        .iter()
+        .filter(|(_, r)| r.owned_transients.iter().any(|(e, _)| *e == debris))
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(
+        holders,
+        vec![DEST],
+        "the debris settled at the DEST under stagger — held by exactly one shard"
+    );
+    assert_eq!(
+        verify_transient_authority_held(&reports),
+        Ok(()),
+        "TRANSIENT-AUTHORITY-HELD holds after the staggered crossing settles"
+    );
+    assert_eq!(
+        transient_dropped_total(&mut topo),
+        0,
+        "a clean staggered hand-off loses nothing"
     );
 }

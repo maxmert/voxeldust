@@ -87,6 +87,15 @@ pub enum TransientViolation {
         holder: NodeId,
         anchor: Fence,
     },
+    #[error(
+        "transient {entity} is COUNTED-held by {holders:?} at tick {tick} — duplication (a moving \
+         transient on two shards in one tick is the cardinal sin; ANY occurrence is failure)"
+    )]
+    Duplicated {
+        entity: EntityId,
+        holders: Vec<NodeId>,
+        tick: TickId,
+    },
 }
 
 /// AUTHORITY-UNIQUE (binding P1, checked every committed tick): every entity in
@@ -317,6 +326,43 @@ pub fn verify_transient_authority_held(
                 entity: *entity,
                 holder,
                 anchor: a,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// TRANSIENT-CONSERVATION (binding D-7b, checked EVERY committed tick — the per-tick twin of the
+/// quiescent [`verify_transient_authority_held`]): no transient is COUNTED-held by more than one shard
+/// at any tick (`len > 1` is duplication — a moving transient rendered on two shards in one tick, the
+/// cardinal sin). The test is `> 1`, NOT `!= 1`: the structural drop-before-promote makes the zero-held
+/// gap (`{source}→{}→{dest}`) the ONLY relaxation, so zero holders is legal (mid-flight) while two is
+/// always failure — there is NO excuse helper, nothing to be fooled (the never-GC'd `batch_goes` is
+/// never consulted). The per-tick LOOP lives in the scenario harness (it passes the current `tick`),
+/// mirroring how `verify_authority_unique` is driven per committed tick. Loss within budget is the
+/// SEPARATE per-scenario `verify_transient_loss_budget` (D-7b.3); this owns ONLY duplication.
+///
+/// # Errors
+/// [`TransientViolation::Duplicated`] for the first transient COUNTED-held by >1 shard, in entity order.
+pub fn verify_transient_conservation_tick(
+    reports: &[(NodeId, InspectReport)],
+    tick: TickId,
+) -> Result<(), TransientViolation> {
+    let mut holders: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
+    for (node, report) in reports {
+        // `owned_transients` is already the `is_held()` subset (`inspect_world` filters it): the
+        // uncounted `Arriving` (dest mid-flight) AND `Departing` (source released) tiers are excluded,
+        // so a healthy handoff shows the entity in ZERO or ONE counted set, never two.
+        for (entity, _anchor) in &report.owned_transients {
+            holders.entry(*entity).or_default().push(*node);
+        }
+    }
+    for (entity, holding) in &holders {
+        if holding.len() > 1 {
+            return Err(TransientViolation::Duplicated {
+                entity: *entity,
+                holders: holding.clone(),
+                tick,
             });
         }
     }
@@ -874,6 +920,52 @@ mod tests {
                 entity: entity(),
                 holder: DEST,
                 anchor: Fence(3),
+            })
+        );
+    }
+
+    #[test]
+    fn transient_conservation_tick_passes_for_zero_or_one_counted_holder() {
+        // ONE counted holder (the settled dest) passes; the zero-held mid-flight gap (no shard reports
+        // the transient — Arriving/Departing are excluded from owned_transients) also passes (`> 1`,
+        // not `!= 1`).
+        assert_eq!(
+            verify_transient_conservation_tick(&transient_healthy(), TickId(5)),
+            Ok(())
+        );
+        let zero_held = vec![(
+            SHARD,
+            InspectReport {
+                held_realms: vec![(realm(), Fence(3))],
+                ..InspectReport::default()
+            },
+        )];
+        assert_eq!(
+            verify_transient_conservation_tick(&zero_held, TickId(6)),
+            Ok(()),
+            "the zero-held handoff gap is legal — only >1 is duplication"
+        );
+    }
+
+    #[test]
+    fn transient_conservation_tick_catches_a_duplication() {
+        // The cardinal sin: the same transient COUNTED-held by two shards in one tick — caught with the
+        // offending tick (what D-7d's crash matrix needs to pin which tick a cell duplicated).
+        let mut reports = transient_healthy();
+        reports.push((
+            SHARD,
+            InspectReport {
+                held_realms: vec![(realm(), Fence(3))],
+                owned_transients: vec![(entity(), Fence(3))],
+                ..InspectReport::default()
+            },
+        ));
+        assert_eq!(
+            verify_transient_conservation_tick(&reports, TickId(9)),
+            Err(TransientViolation::Duplicated {
+                entity: entity(),
+                holders: vec![DEST, SHARD],
+                tick: TickId(9),
             })
         );
     }

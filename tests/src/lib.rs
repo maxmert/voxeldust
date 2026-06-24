@@ -91,8 +91,9 @@ fn build_cluster(
     max_sessions: usize,
     clock_peers: Vec<NodeId>,
     shards: Vec<(NodeId, StubConfig)>,
+    stagger: StaggerPlan,
 ) -> Topology {
-    let mut topo = Topology::new(fabric.clone(), StaggerPlan::lockstep());
+    let mut topo = Topology::new(fabric.clone(), stagger);
 
     let mut orch = build_app(
         NodeConfig {
@@ -176,6 +177,7 @@ pub fn p1_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
         max_sessions,
         vec![GATEWAY, SHARD],
         vec![(SHARD, stub_config())],
+        StaggerPlan::lockstep(),
     )
 }
 
@@ -189,6 +191,25 @@ pub fn p2_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
         max_sessions,
         vec![GATEWAY, SHARD, DEST],
         vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
+        StaggerPlan::lockstep(),
+    )
+}
+
+/// The P2 transfer cluster under a deliberate `StaggerPlan` (D-7b): the source/dest process the
+/// handoff at SKEWED local ticks, so a per-tick conservation gate can prove the structural
+/// drop-before-promote never double-holds even when one shard lags the other.
+#[must_use]
+pub fn p2_cluster_staggered(
+    fabric: &FaultFabric,
+    max_sessions: usize,
+    stagger: StaggerPlan,
+) -> Topology {
+    build_cluster(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD, DEST],
+        vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
+        stagger,
     )
 }
 
