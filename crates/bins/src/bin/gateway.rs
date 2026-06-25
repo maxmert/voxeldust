@@ -52,6 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The SAME VD_TICK_HZ that paces this node — relayed to clients via
             // UniverseRate so the render cursor tracks the cluster's rate (R1).
             tick_hz: env.parse("VD_TICK_HZ")?,
+            // D-3 session-lease heartbeat cadence (the gateway's local copy). INERT (0) until D-3 is on.
+            lease_renew_interval_ticks: env.parse_or("VD_LEASE_RENEW_INTERVAL", 0)?,
             tuning: TransportTuning {
                 max_sessions: env.parse("VD_MAX_SESSIONS")?,
                 max_buffered_inputs: env.parse("VD_MAX_BUFFERED_INPUTS")?,

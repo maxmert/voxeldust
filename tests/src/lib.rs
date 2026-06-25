@@ -68,6 +68,9 @@ pub fn stub_config() -> StubConfig {
         // lease revocation. The 1c.8 per-entity granted-key poll is GONE (1d.5b.2): the source
         // ENTITY self-fence is now driven by the saga-pushed ordered `Demote`, not a directory poll.
         realm_recheck_interval: 4,
+        // D-3 INERT here: the cluster scenarios do not exercise the lease-renewal heartbeat (the D-3
+        // cells set it explicitly). 0 = no heartbeat, matching pre-D-3 behavior.
+        lease_renew_interval_ticks: 0,
         snapshot_datagram_budget: 1100,
     }
 }
@@ -159,6 +162,8 @@ fn build_cluster(
             auth_verifying_key: auth_verifying_key(),
             session_seed: 23,
             tick_hz: 50,
+            // D-3 INERT: the cluster scenarios do not exercise the session heartbeat (the D-3 cells do).
+            lease_renew_interval_ticks: 0,
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs: TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS,

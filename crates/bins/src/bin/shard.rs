@@ -64,6 +64,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input_log_capacity: env.parse("VD_INPUT_LOG_CAP")?,
             // How often to re-read the realm head to observe a lost lease (FENCE-1/5/8).
             realm_recheck_interval: env.parse("VD_REALM_RECHECK")?,
+            // D-3 lease-renewal heartbeat cadence (the holder's local copy of the orchestrator's
+            // lease_renew_interval_ticks). Defaults INERT (0 = no heartbeat) until D-3 is switched on.
+            lease_renew_interval_ticks: env.parse_or("VD_LEASE_RENEW_INTERVAL", 0)?,
             // Per-datagram snapshot budget — partitioned so none exceeds the MTU (GW-1).
             snapshot_datagram_budget: snapshot_budget,
         },

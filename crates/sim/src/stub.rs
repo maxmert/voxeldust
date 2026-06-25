@@ -61,6 +61,12 @@ pub struct StubConfig {
     /// How often (ticks) a shard re-reads its realm head to OBSERVE a lost lease
     /// (fence rule 4 self-fence — FENCE-1/5/8). 0 disables (single-shard P1 tests).
     pub realm_recheck_interval: u64,
+    /// D-3 lease-liveness heartbeat cadence (the holder's LOCAL ticks): how often the shard re-sends
+    /// `LeaseRenew` for its Realm + every granted Entity, keeping leases alive against the orchestrator's
+    /// reaper. `0` = INERT (no heartbeat — the pre-D-3 default). The holder's local copy of
+    /// `DirectoryTuning::lease_renew_interval_ticks` (set from the same env knob), so the producer gates
+    /// on `local_tick` without reaching across the directory seam.
+    pub lease_renew_interval_ticks: u64,
     /// Per-datagram byte budget for snapshot partitioning (audit GW-1): a full-world
     /// snapshot is split into chunks each encoding under this, so none exceeds the
     /// QUIC datagram MTU. Operational param (never an inline literal in systems).
@@ -653,13 +659,14 @@ fn request_pending_grants(
                 &InterShardFlow::Directory(op),
             );
         }
-        Some(_) if config.realm_recheck_interval > 0 => {
+        Some(realm_fence) => {
             // Periodically re-read the realm head: the reply reveals a lost lease so
             // the shard self-fences (the loss-reaction is otherwise unreachable).
-            if clock
-                .local_tick
-                .0
-                .is_multiple_of(config.realm_recheck_interval)
+            if config.realm_recheck_interval > 0
+                && clock
+                    .local_tick
+                    .0
+                    .is_multiple_of(config.realm_recheck_interval)
             {
                 let op = DirectoryOp::HeadRead {
                     key: DirectoryKey::Realm(config.realm),
@@ -670,8 +677,25 @@ fn request_pending_grants(
                     &InterShardFlow::Directory(op),
                 );
             }
+            // D-3 lease-renewal heartbeat: keep the Realm + every granted, non-departing Entity lease
+            // alive on the holder's own LOCAL cadence (the orchestrator's reaper revokes a lapsed lease).
+            // INERT when `lease_renew_interval_ticks == 0` (pre-D-3 default). A departing dot is excluded
+            // (its lease is about to be revoked by the logout `LeaseRevoke`, not renewed).
+            if config.lease_renew_interval_ticks > 0
+                && clock
+                    .local_tick
+                    .0
+                    .is_multiple_of(config.lease_renew_interval_ticks)
+            {
+                let renewals = std::iter::once((DirectoryKey::Realm(config.realm), realm_fence)).chain(
+                    dots.0
+                        .values()
+                        .filter(|d| d.granted && !d.departing)
+                        .map(|d| (DirectoryKey::Entity(d.entity), d.entity_fence)),
+                );
+                outbox.push_renewals(renewals, config.orchestrator);
+            }
         }
-        Some(_) => {}
     }
     // Per-dot grant/revoke requests (login LeaseGrant, adopt HeadRead, logout LeaseRevoke). The
     // 1c.8 SOURCE granted-key poll is GONE (1d.5b.2): the saga-pushed `Demote` (on_saga_demote) is
@@ -2544,6 +2568,7 @@ mod tests {
             mint_seed: 99,
             input_log_capacity: 1024,
             realm_recheck_interval: 0,
+            lease_renew_interval_ticks: 0,
             snapshot_datagram_budget: 1100,
         }
     }
@@ -3727,6 +3752,83 @@ mod tests {
         // An ODD tick does not (the interval gate's other branch).
         rig.set_local_tick(3);
         assert!(!is_head_read(&rig.tick(vec![])), "odd tick is quiet");
+    }
+
+    #[test]
+    fn a_granted_shard_renews_its_realm_and_granted_entities_on_cadence() {
+        // D-3 heartbeat: on the renew cadence a granted shard re-sends LeaseRenew for its Realm AND
+        // every GRANTED, NON-DEPARTING Entity — never a non-granted (still-granting) or departing
+        // (logging-out) dot. INERT off-cadence + when the interval is 0.
+        let mut rig = Rig::with_config(StubConfig {
+            lease_renew_interval_ticks: 4,
+            ..config()
+        });
+        rig.grant_realm();
+        let mk = |entity: EntityId, granted: bool, departing: bool| Dot {
+            entity,
+            account: AccountId(1),
+            session_fence: Fence(1),
+            gateway: GATEWAY,
+            granted,
+            input_active: false,
+            adopting: false,
+            authority: Authority::Owned { fence: Fence(1) },
+            departing,
+            entity_fence: Fence(1),
+            pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(0)),
+            yaw: 0.0,
+            pitch: 0.0,
+            last_applied_seq: None,
+        };
+        let granted_e = EntityId::pack(EntityKind::Player, 10, 1, 1);
+        let provisional_e = EntityId::pack(EntityKind::Player, 10, 2, 2);
+        let departing_e = EntityId::pack(EntityKind::Player, 10, 3, 3);
+        {
+            let mut dots = rig.world.resource_mut::<Dots>();
+            dots.0.insert(SessionId(1), mk(granted_e, true, false));
+            dots.0.insert(SessionId(2), mk(provisional_e, false, false)); // emits LeaseGrant
+            dots.0.insert(SessionId(3), mk(departing_e, true, true)); // emits LeaseRevoke
+        }
+        let renew_keys = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<DirectoryKey> {
+            sent.iter()
+                .filter(|(to, _, _)| *to == ORCH)
+                .filter_map(|(_, _, b)| {
+                    match postcard::from_bytes::<InterShardFlow>(b) {
+                        Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew { key, fence })) => {
+                            assert_eq!(fence, Fence(1), "renews at the held fence");
+                            Some(key)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+        // A multiple tick renews the Realm + the granted, non-departing entity ONLY.
+        rig.set_local_tick(4);
+        let on = renew_keys(&rig.tick(vec![]));
+        assert!(
+            on.contains(&DirectoryKey::Realm(config().realm)),
+            "the realm lease is renewed"
+        );
+        assert!(
+            on.contains(&DirectoryKey::Entity(granted_e)),
+            "a granted, non-departing entity lease is renewed"
+        );
+        assert!(
+            !on.contains(&DirectoryKey::Entity(provisional_e)),
+            "a non-granted (still-granting) entity is NOT renewed"
+        );
+        assert!(
+            !on.contains(&DirectoryKey::Entity(departing_e)),
+            "a departing (logging-out) entity is NOT renewed"
+        );
+        // Off-cadence: no heartbeat at all (the interval gate's modulo branch). The inert branch
+        // (interval == 0) is covered by every other granted-shard test (all run config() at interval 0).
+        rig.set_local_tick(5);
+        assert!(
+            renew_keys(&rig.tick(vec![])).is_empty(),
+            "an off-cadence tick emits no LeaseRenew"
+        );
     }
 
     #[test]

@@ -104,6 +104,12 @@ pub struct GatewayConfig {
     /// `ServerControlMsg::UniverseRate` so they drive the render cursor at the
     /// server's rate. The SAME value the node feeds its `TickPacer` (VD_TICK_HZ).
     pub tick_hz: u32,
+    /// D-3 lease-liveness heartbeat cadence (the gateway's LOCAL ticks): how often it re-sends
+    /// `LeaseRenew` for every Active session's `Session` key, keeping the session lease alive against
+    /// the orchestrator's reaper. `0` = INERT (no heartbeat — the pre-D-3 default). The gateway's local
+    /// copy of `DirectoryTuning::lease_renew_interval_ticks` (same env knob), so the producer gates on
+    /// `local_tick` without reaching across the directory seam.
+    pub lease_renew_interval_ticks: u64,
     pub tuning: TransportTuning,
 }
 
@@ -535,7 +541,42 @@ pub fn register_gateway(world: &mut World, schedule: &mut Schedule, config: Gate
     world.insert_resource(GatewaySessions::default());
     world.insert_resource(SessionMint(SplitMix64::new(session_seed)));
     world.insert_resource(GatewayStats::default());
-    schedule.add_systems((process_gateway_inbound, drive_pending_sessions).chain());
+    schedule.add_systems(
+        (
+            process_gateway_inbound,
+            drive_pending_sessions,
+            renew_session_leases,
+        )
+            .chain(),
+    );
+}
+
+/// D-3 lease-liveness heartbeat (gateway half): re-send `LeaseRenew` for every Active session's
+/// `Session` key on the gateway's own LOCAL cadence, so the session lease never lapses while the client
+/// is connected (the orchestrator's reaper revokes a lapsed-and-confirmed-dead lease). ONE mechanism with
+/// the shard's Realm/Entity heartbeat (the shared `push_renewals` shim — HR3, never a match-on-shard-kind).
+/// INERT when `lease_renew_interval_ticks == 0` (the pre-D-3 default). Non-Active (still-logging-in)
+/// sessions have no lease to renew yet, so they are excluded.
+fn renew_session_leases(
+    config: Res<GatewayConfig>,
+    clock: Res<ClockSample>,
+    sessions: Res<GatewaySessions>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    if config.lease_renew_interval_ticks == 0
+        || !clock
+            .local_tick
+            .0
+            .is_multiple_of(config.lease_renew_interval_ticks)
+    {
+        return;
+    }
+    let renewals = sessions
+        .by_session
+        .iter()
+        .filter(|(_, s)| matches!(s.phase, SessionPhase::Active { .. }))
+        .map(|(id, s)| (DirectoryKey::Session(*id), s.fence));
+    outbox.push_renewals(renewals, config.orchestrator);
 }
 
 /// ---------------------------------------------------------------------------
@@ -1854,6 +1895,7 @@ mod tests {
             auth_verifying_key: verifying_key(),
             session_seed: 7,
             tick_hz: 50,
+            lease_renew_interval_ticks: 0,
             tuning: TransportTuning {
                 max_sessions: 4,
                 max_buffered_inputs: 8,
@@ -5208,6 +5250,83 @@ mod tests {
             delivered_snapshot_subs(&sent),
             vec![SubId(1)],
             "post-release only the DEST sub routes — the avatar is single-sub on the dest"
+        );
+    }
+
+    #[test]
+    fn the_gateway_renews_active_session_leases_on_cadence() {
+        // D-3 heartbeat (gateway half): on the renew cadence the gateway re-sends LeaseRenew for every
+        // ACTIVE session's Session key — never a still-logging-in (non-Active) session, and never
+        // off-cadence. Drives ONE session through AwaitingAttach (non-Active) then Active so both filter
+        // arms + the iterator's zero-iter (no Active → empty) and nonzero-iter (Active) are exercised.
+        let renewed_sessions = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<SessionId> {
+            sent.iter()
+                .filter(|(to, _, _)| *to == ORCH)
+                .filter_map(|(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                    Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew {
+                        key: DirectoryKey::Session(s),
+                        ..
+                    })) => Some(s),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut rig = Rig::new();
+        rig.world.insert_resource(GatewayConfig {
+            lease_renew_interval_ticks: 4,
+            ..config()
+        });
+        // Hello → AwaitingDirectory: the gateway sends a session LeaseGrant to the orchestrator (a
+        // Directory op that is NOT a LeaseRenew — exercises the decoder's non-renew arm).
+        let hello = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        assert!(
+            renewed_sessions(&hello).is_empty(),
+            "login emits a LeaseGrant, not a LeaseRenew"
+        );
+        let session_id = rig
+            .world
+            .resource::<GatewaySessions>()
+            .sessions()
+            .next()
+            .expect("session pending");
+        // The directory grant → AwaitingAttach (still at tick 1, no renew).
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(session_id))]);
+
+        // A renew tick while the session is NON-Active (AwaitingAttach): nothing renewed (filter false
+        // arm; push_renewals called with an empty iterator).
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(4);
+        assert!(
+            renewed_sessions(&rig.tick(vec![])).is_empty(),
+            "a non-Active (still-attaching) session is not renewed"
+        );
+
+        // Attach at an off-cadence tick → Active (no renew at tick 5).
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(5);
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: session_id,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+
+        // A renew tick while Active: the session lease is renewed (filter true arm; nonzero iterator).
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(8);
+        assert_eq!(
+            renewed_sessions(&rig.tick(vec![])),
+            vec![session_id],
+            "an Active session's lease is renewed on cadence"
+        );
+
+        // Off-cadence (the modulo branch on the proceed path): no renewal.
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(9);
+        assert!(
+            renewed_sessions(&rig.tick(vec![])).is_empty(),
+            "an off-cadence tick emits no LeaseRenew"
         );
     }
 }

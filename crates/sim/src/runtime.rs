@@ -71,6 +71,31 @@ impl OutboundBox {
         );
         self.0.push((to, class, bytes));
     }
+
+    /// D-3 lease-liveness heartbeat: push one `LeaseRenew{key, fence}` per held key toward the
+    /// orchestrator. A BRANCHLESS generic shim (HR5) — no `if`/`match`/`?`; ALL cadence + key-selection
+    /// logic lives in the monomorphic callers (the gateway feeds its `Session` keys, the shard feeds its
+    /// `Realm` + granted `Entity` keys — ONE mechanism, never a match-on-shard-kind, HR3). Renewals are
+    /// idempotent-by-fence at `DirectoryCore::renew` and loss-tolerant (the next heartbeat covers a drop).
+    pub fn push_renewals<I>(&mut self, keys: I, orchestrator: NodeId)
+    where
+        I: IntoIterator<
+            Item = (
+                vd_wire::seams::directory::DirectoryKey,
+                vd_core::Fence,
+            ),
+        >,
+    {
+        for (key, fence) in keys {
+            self.push_flow(
+                orchestrator,
+                MsgClass::Saga,
+                &vd_wire::intershard::InterShardFlow::Directory(
+                    vd_wire::seams::directory::DirectoryOp::LeaseRenew { key, fence },
+                ),
+            );
+        }
+    }
 }
 
 /// This node's identity + kind, readable by systems.
