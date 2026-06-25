@@ -24,10 +24,11 @@ use vd_harness::topology::{InspectReport, StaggerPlan, Topology};
 use vd_node::ShardNode;
 use vd_node::app::{NodeConfig, build_app};
 use vd_node::follower::register_clock_follower;
-use vd_node::orchestrator::{DirectoryRes, OrchestratorConfig, register_orchestrator};
+use vd_node::orchestrator::{DirectoryRes, OrchestratorConfig, register_orchestrator_with_store};
 use vd_node::saga_runtime::{ActiveTransfer, SagaRuntimeRes};
 use vd_sim::capability::NodeKind;
 use vd_sim::directory::DirectoryTuning;
+use vd_sim::io::mem::MemStore;
 use vd_sim::saga::SagaCtx;
 use vd_sim::stub::{StubConfig, register_stub_shard};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, OwnerRecord};
@@ -88,12 +89,29 @@ pub fn dest_stub_config() -> StubConfig {
 /// `p1_cluster` baseline must stay byte-identical). `clock_peers` are the nodes the
 /// orchestrator drives the universe clock to; EVERY follower shard must be listed or its clock
 /// never advances. Clients are added by the caller.
+/// The cluster orchestrator's config (shared by `build_cluster` + the D-6 orchestrator-kill rebuild, so
+/// a rebuilt orchestrator is built IDENTICALLY — same reserve_chunk/tuning → a clean recover).
+#[must_use]
+pub fn orch_config(clock_peers: Vec<NodeId>) -> OrchestratorConfig {
+    OrchestratorConfig {
+        epoch: EpochId(1),
+        reserve_chunk: 1024,
+        clock_peers,
+        directory: DirectoryTuning {
+            lease_ttl_ticks: 1_000,
+        },
+        // Slice 2a: the deadline producer runs LIVE in the capstone cluster (dev values 8/24).
+        saga: vd_sim::saga::SagaTuning::default(),
+    }
+}
+
 fn build_cluster(
     fabric: &FaultFabric,
     max_sessions: usize,
     clock_peers: Vec<NodeId>,
     shards: Vec<(NodeId, StubConfig)>,
     stagger: StaggerPlan,
+    orch_store: MemStore,
 ) -> Topology {
     let mut topo = Topology::new(fabric.clone(), stagger);
 
@@ -105,19 +123,14 @@ fn build_cluster(
         fabric.register(ORCH),
     );
     let (world, schedule) = orch.parts_mut();
-    register_orchestrator(
+    // D-6: the orchestrator is built against a durable Store. Normal clusters pass a fresh (genesis)
+    // `MemStore` (transparent); the D-6 orchestrator-kill driver passes a RETAINED handle so a rebuilt
+    // orchestrator re-hydrates the SAME committed WAL.
+    register_orchestrator_with_store(
         world,
         schedule,
-        &OrchestratorConfig {
-            epoch: EpochId(1),
-            reserve_chunk: 1024,
-            clock_peers,
-            directory: DirectoryTuning {
-                lease_ttl_ticks: 1_000,
-            },
-            // Slice 2a: the deadline producer runs LIVE in the capstone cluster (dev values 8/24).
-            saga: vd_sim::saga::SagaTuning::default(),
-        },
+        &orch_config(clock_peers),
+        Box::new(orch_store),
     );
     topo.add_node(Box::new(orch));
 
@@ -180,6 +193,7 @@ pub fn p1_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
         vec![GATEWAY, SHARD],
         vec![(SHARD, stub_config())],
         StaggerPlan::lockstep(),
+        MemStore::new(), // a fresh (genesis) store — this cluster is not rebuilt
     )
 }
 
@@ -194,7 +208,25 @@ pub fn p2_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
         vec![GATEWAY, SHARD, DEST],
         vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
         StaggerPlan::lockstep(),
+        MemStore::new(), // a fresh (genesis) store — this cluster is not rebuilt
     )
+}
+
+/// The P2 transfer cluster whose orchestrator is built against a caller-RETAINED `MemStore` (D-6): the
+/// returned handle lets the orchestrator-kill driver rebuild the orchestrator against the SAME committed
+/// WAL (the kill-9 analog). Identical to [`p2_cluster`] otherwise.
+#[must_use]
+pub fn p2_cluster_durable_orch(fabric: &FaultFabric, max_sessions: usize) -> (Topology, MemStore) {
+    let store = MemStore::new();
+    let topo = build_cluster(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD, DEST],
+        vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
+        StaggerPlan::lockstep(),
+        store.clone(),
+    );
+    (topo, store)
 }
 
 /// The P2 transfer cluster under a deliberate `StaggerPlan` (D-7b): the source/dest process the
@@ -212,6 +244,7 @@ pub fn p2_cluster_staggered(
         vec![GATEWAY, SHARD, DEST],
         vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
         stagger,
+        MemStore::new(), // a fresh (genesis) store — this cluster is not rebuilt
     )
 }
 
@@ -1008,5 +1041,187 @@ pub fn assert_transient_end_state(
             );
         }
         _ => panic!("assert_transient_end_state handles only the transient end states"),
+    }
+}
+
+/// REBUILD the orchestrator on its existing identity (D-6 kill-9 recovery): drop the running World (its
+/// in-memory saga set / directory / clock — gone with the process RAM) and stand up a FRESH one that
+/// RE-HYDRATES from `store`. Mirrors a real restart: [`FaultFabric::reregister`] hands the rebuilt process
+/// a fresh transport on the prior peer links (the at-least-once unacked ledger redelivers what the dead
+/// process never acked) and [`Topology::replace_node`] swaps the new World in. Built IDENTICALLY to the
+/// original (same [`orch_config`]) so recovery is a clean re-hydrate. Pass the RETAINED handle from
+/// [`p2_cluster_durable_orch`] to recover; pass a fresh `MemStore::new()` to model a NON-durable restart
+/// (the anti-theater control — nothing is recovered). The caller has typically `kill`ed the node first.
+pub fn rebuild_orchestrator(topo: &mut Topology, fabric: &FaultFabric, store: MemStore) {
+    let mut orch = build_app(
+        NodeConfig {
+            node_id: ORCH,
+            kind: NodeKind::Orchestrator,
+        },
+        fabric.reregister(ORCH),
+    );
+    let (world, schedule) = orch.parts_mut();
+    register_orchestrator_with_store(
+        world,
+        schedule,
+        &orch_config(vec![GATEWAY, SHARD, DEST]),
+        Box::new(store),
+    );
+    topo.replace_node(Box::new(orch));
+}
+
+/// The outcome of an orchestrator kill-9 + rebuild ([`run_orch_kill_transient`]).
+pub struct OrchKillOutcome {
+    /// The cluster, settled (durable) or frozen right after the rebuild (anti-theater).
+    pub topo: Topology,
+    /// The seeded debris entity the batch carried.
+    pub debris: EntityId,
+    /// Dead nodes after the rebuild — EMPTY (the orchestrator is alive again), for the dead-aware oracle.
+    pub dead: BTreeSet<NodeId>,
+    /// `saga_states` captured the INSTANT the rebuilt orchestrator boots, before it re-drives anything —
+    /// THE recovery evidence: a `BatchHandoff` saga (re-hydrated from the retained WAL) when durable,
+    /// EMPTY (nothing survived the dropped World) for the fresh-store anti-theater control.
+    pub recovered_states: Vec<String>,
+}
+
+/// D-6 e2e: kill-9 the orchestrator MID-`BatchHandoff` of a live transient batch, then rebuild it. With
+/// `durable`, the rebuilt orchestrator re-hydrates the retained durable WAL, re-drives the in-flight
+/// handoff to `Done`, and the debris settles at [`DEST`] with zero loss — an orchestrator crash mid-handoff
+/// never wedges nor loses the batch. With `!durable` (rebuilt against a FRESH empty store) it recovers
+/// NOTHING — the anti-theater control proving the recovery rides the persisted WAL, not in-process World
+/// survival across the kill. Conservation is asserted EVERY tick of the re-drive (no transient is ever
+/// COUNTED-held by two live shards across the orchestrator's death + recovery).
+#[must_use]
+pub fn run_orch_kill_transient(seed: u64, durable: bool) -> OrchKillOutcome {
+    let fabric = FaultFabric::new(seed, 2);
+    let (mut topo, store) = p2_cluster_durable_orch(&fabric, 8);
+    // WARMUP: BOTH shards win their realm leases (the source to cross from, the dest to adopt into).
+    fault_step_until(&mut topo, 80, |t| {
+        let r = t.inspect_all();
+        fault_report(&r, SHARD)
+            .held_realms
+            .iter()
+            .any(|(realm, _)| *realm == RealmId::System(7))
+            && fault_report(&r, DEST)
+                .held_realms
+                .iter()
+                .any(|(realm, _)| *realm == RealmId::System(8))
+    });
+    let src_fence = realm_fence(&mut topo, RealmId::System(7));
+    let dst_fence = realm_fence(&mut topo, RealmId::System(8));
+    let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 1, 0);
+    let batch = TransferId(1);
+    seed_transient_crossing(
+        &mut topo,
+        debris,
+        batch,
+        src_fence,
+        dst_fence,
+        vd_core::glam::DVec3::ZERO,
+    );
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: batch,
+            session: SessionId(0),
+            subject: DirectoryKey::Realm(RealmId::System(8)),
+            expected_fence: dst_fence,
+            source: SHARD,
+            dest: DEST,
+            class: DurabilityClass::Transient,
+            needs_provision: false,
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::System(8),
+        },
+    );
+    // Drive to the `BatchHandoff` tail — the saga is quiescent-but-persisted (the kill target).
+    fault_step_until(&mut topo, 60, |t| {
+        saga_states(t).iter().any(|s| s.starts_with("BatchHandoff"))
+    });
+    assert!(
+        saga_states(&mut topo)
+            .iter()
+            .any(|s| s.starts_with("BatchHandoff")),
+        "anti-vacuity: the saga is in BatchHandoff when the orchestrator is killed"
+    );
+    // The orchestrator PERSISTED durable state before the kill — else the recovery is vacuous. (The
+    // BatchHandoff assert above proves the saga is the in-flight thing; the cell's `recovered_states`
+    // assert proves the saga specifically rehydrated. This is the "there IS a committed WAL" floor.)
+    assert!(
+        !store.is_empty(),
+        "the orchestrator committed durable state (incl. the in-flight saga) before the kill"
+    );
+    // KILL-9: `crash` (not `kill`) is the restart-able death — the orchestrator's in-process inbound is
+    // cleared (RAM lost), but the at-least-once ledger HOLDS the in-flight shard acks (e.g. a dest
+    // `BatchAdopted` sent while it is down) for redelivery once it is back; `kill` is permanent death
+    // (bounces + DROPS those acks, which the producer-less `AwaitAdopt` phase could never re-solicit).
+    // The World itself dies at `replace_node` below — `crash` + rehydrated `replace_node` = kill-9+restart.
+    fabric.crash(ORCH);
+    // OUTAGE: a few ticks down — the orchestrator is skipped; the dest adopts off the source's envelope
+    // and acks `BatchAdopted`, which the fabric HOLDS (blocked on the crashed orchestrator, rescheduled).
+    // Conservation holds even here (the dead orchestrator is excluded; the dest's `Arriving` is uncounted).
+    for _ in 0..4 {
+        topo.step();
+        let tick = topo.tick();
+        let dead = topo.dead_nodes();
+        let reports = topo.inspect_all();
+        verify_transient_conservation_tick_excluding(&reports, &dead, tick)
+            .expect("no transient COUNTED-held by two LIVE shards while the orchestrator is down");
+    }
+    // REBUILD on the SAME identity: durable → re-hydrate the retained store; anti-theater → a FRESH
+    // (empty) store, which recovers NOTHING (the proof the retained WAL is load-bearing).
+    let recover_store = if durable {
+        store.clone()
+    } else {
+        MemStore::new()
+    };
+    rebuild_orchestrator(&mut topo, &fabric, recover_store);
+    // THE recovery evidence — captured the instant the rebuilt World boots, before it re-drives.
+    let recovered_states = saga_states(&mut topo);
+    if !durable {
+        // The anti-theater control stops here: nothing re-hydrated, so there is nothing to re-drive.
+        let dead = topo.dead_nodes();
+        return OrchKillOutcome {
+            topo,
+            debris,
+            dead,
+            recovered_states,
+        };
+    }
+    // QUIESCE: the re-hydrated saga re-arms (since=0) → the deadline producer re-emits the `BatchHandoff`
+    // egress, the redelivered acks land, the handoff completes. Conservation holds EVERY tick.
+    let mut settled = false;
+    for _ in 0..200 {
+        topo.step();
+        let tick = topo.tick();
+        let dead = topo.dead_nodes();
+        let reports = topo.inspect_all();
+        verify_transient_conservation_tick_excluding(&reports, &dead, tick).expect(
+            "no transient COUNTED-held by two LIVE shards at any tick across the orchestrator kill-9",
+        );
+        if live_sagas(&mut topo) == 0 {
+            settled = true;
+            break;
+        }
+    }
+    assert!(
+        settled,
+        "the rebuilt orchestrator re-drove the in-flight transient batch to quiescence"
+    );
+    // Let the recovered handoff's resolution egress settle (mirror `run_transient_fault_scenario`).
+    for _ in 0..24 {
+        topo.step();
+        let tick = topo.tick();
+        let dead = topo.dead_nodes();
+        let reports = topo.inspect_all();
+        verify_transient_conservation_tick_excluding(&reports, &dead, tick)
+            .expect("conservation holds while the recovered handoff's egress settles");
+    }
+    let dead = topo.dead_nodes();
+    OrchKillOutcome {
+        topo,
+        debris,
+        dead,
+        recovered_states,
     }
 }

@@ -262,6 +262,15 @@ pub trait Clock {
 ///    `NodeUnreachable`, also in order).
 /// 4. `drain_inbound` returns everything delivered since the previous drain, in
 ///    delivery order, without blocking.
+///
+/// ⚠️ DELIVERY SEMANTICS are NOT yet uniform across impls and are a ledgered io-prod precondition
+/// (DEFERRED.md D-6, the producer-less-recovery gap): the harness `FaultFabric` is at-least-once
+/// (redelivery-until-acked, surviving a receiver crash), while the io-prod `MeshTransport` is
+/// at-most-once (a send to a down peer surfaces `NodeUnreachable` and is dropped). Saga forward
+/// progress must therefore NOT depend on this trait redelivering a message lost to a peer restart —
+/// `scan_deadlines` re-drives every saga phase that HAS orchestrator egress; the one phase that does
+/// not (`BatchHandoff::AwaitAdopt`) is the ledgered gap whose cure (a re-solicit egress, or a
+/// sender-side durable outbox) is owed before the redb backend / a real rolling deploy.
 pub trait Transport {
     /// Enqueue an outbound message toward `to`.
     fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError>;
@@ -287,6 +296,10 @@ pub trait Transport {
 ///    BEFORE `commit` loses the staged batch; a crash AFTER it keeps the whole batch.
 /// 3. `scan(prefix)` returns every COMMITTED `(key, value)` whose key starts with `prefix`, in ascending
 ///    key order — the rehydrate primitive (one prefix tag per key family); staged writes are invisible.
+/// 4. LAST-WRITE-WINS within one fsync window: of several staged `put`/`delete`s at the SAME key before a
+///    `commit`, only the last takes effect (a `delete` then `put` nets to the put; a `put` then `delete`
+///    nets to the delete). The directory RECONCILE (delete-all-then-put-current in one barrier) relies on
+///    this: a still-present record nets to a put, a revoked one to a lone delete (the audit COMP-2 cure).
 ///
 /// OBJECT-SAFE by construction (used as `&mut dyn Store`), so there is NO per-monomorphization region
 /// gotcha (HR5); ALL postcard encode/decode lives at the monomorphic call sites, never in the trait body.

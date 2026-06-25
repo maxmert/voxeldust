@@ -357,6 +357,23 @@ impl Topology {
         assert!(previous.is_none(), "duplicate topology node: {id}");
     }
 
+    /// REPLACE an existing node with a freshly-rebuilt one — the D-6 kill-9 REBUILD (the durable-recovery
+    /// crash cells): the old node's World is DROPPED here (its in-memory state is gone, modeling the lost
+    /// process RAM), and the caller has already built `node` afresh — re-attached via
+    /// `FaultFabric::reregister` and RE-HYDRATED from the node's retained `Store`. The id MUST be present
+    /// (a rebuild reclaims a live identity, unlike `add_node`).
+    ///
+    /// # Panics
+    /// If `id` is not already present — a rebuild reclaims an existing node.
+    pub fn replace_node(&mut self, node: Box<dyn SteppableNode>) {
+        let id = node.node_id();
+        let previous = self.nodes.insert(id, node);
+        assert!(
+            previous.is_some(),
+            "replace_node reclaims an existing node: {id}"
+        );
+    }
+
     /// Schedule a crash at `tick` in phase `when`.
     pub fn schedule_crash(&mut self, node: NodeId, tick: TickId, when: CrashWhen) {
         self.crashes.insert((tick, when, node));
@@ -625,6 +642,56 @@ mod tests {
             .send(B, MsgClass::Control, vec![1].into())
             .expect("seed message accepted");
         topo
+    }
+
+    #[test]
+    fn replace_node_swaps_a_rebuilt_node_in_place() {
+        // D-6: replace_node reclaims an EXISTING identity (the kill-9 rebuild) — exactly one node per id
+        // (the old World dropped, the rebuilt one swapped in), never a duplicate / loss. The rebuilt node
+        // re-attaches via `reregister` (plain `register` would panic on the still-live identity).
+        let fabric = FaultFabric::new(7, 2);
+        let mut topo = Topology::new(fabric.clone(), StaggerPlan::lockstep());
+        let original = vd_node::build_app(
+            NodeConfig {
+                node_id: A,
+                kind: NodeKind::StubShard,
+            },
+            fabric.register(A),
+        );
+        topo.add_node(Box::new(original));
+        assert_eq!(topo.inspect_all().len(), 1);
+        let rebuilt = vd_node::build_app(
+            NodeConfig {
+                node_id: A,
+                kind: NodeKind::StubShard,
+            },
+            fabric.reregister(A),
+        );
+        topo.replace_node(Box::new(rebuilt));
+        assert_eq!(
+            topo.inspect_all().len(),
+            1,
+            "replace swapped A in place — no duplicate, no loss"
+        );
+        topo.step(); // the rebuilt node steps cleanly
+    }
+
+    #[test]
+    #[should_panic(expected = "replace_node reclaims an existing node")]
+    fn replace_node_panics_on_an_absent_id() {
+        // The mirror of `add_node`'s duplicate guard: `replace_node` RECLAIMS a live identity, so an
+        // absent id is a caller bug (a rebuild of a node never added). Covers the assert's panic arm +
+        // its lazily-evaluated `{id}` message (HR5: a format arg is uncoverable until the panic fires).
+        let fabric = FaultFabric::new(8, 2);
+        let mut topo = Topology::new(fabric.clone(), StaggerPlan::lockstep());
+        let orphan = vd_node::build_app(
+            NodeConfig {
+                node_id: A,
+                kind: NodeKind::StubShard,
+            },
+            fabric.register(A),
+        );
+        topo.replace_node(Box::new(orphan)); // A was never `add_node`d — reclaims nothing
     }
 
     #[test]

@@ -69,10 +69,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // IN-MEMORY `MemStore` (the durable redb backend is owed io-prod). So THIS BINARY is NON-DURABLE: a
     // restart resets universe time to tick 0 and loses every in-flight transfer. LOUD at boot (never a
     // silent non-durable production path — ROB-2 discipline) until io-prod swaps in the durable store.
+    // TWO production preconditions are owed (DEFERRED.md D-6), not just the Store: (1) the durable redb
+    // WAL backend; (2) a transport that REDELIVERS an in-flight ack across a receiver restart — the
+    // `MeshTransport` is at-most-once today, so a producer-less recovery phase (`AwaitAdopt`) would wedge
+    // on a real kill-9 even WITH a durable store. Recovery is proven only vs the harness at-least-once model.
     tracing::warn!(
-        "orchestrator is NON-DURABLE (in-memory Store): a restart RESETS universe time and LOSES \
-         all in-flight transfers — the durable redb WAL backend is owed (io-prod). Do not run a \
-         production deployment until it lands."
+        "orchestrator is NON-DURABLE (in-memory Store) AND the mesh transport is at-most-once: a restart \
+         RESETS universe time and LOSES all in-flight transfers, and even with a durable store a \
+         producer-less recovery phase can wedge without transport redelivery. The redb WAL backend AND a \
+         redelivering transport are owed (io-prod). Do not run a production deployment until both land."
     );
     register_orchestrator(
         world,

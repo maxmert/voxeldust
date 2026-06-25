@@ -251,6 +251,33 @@ impl FaultFabric {
         }
     }
 
+    /// Re-attach a FRESH transport for an already-registered node — the kill-9-REBUILD analog (D-6): the
+    /// process died (its undrained inbound is LOST with the dead process — the at-least-once unacked
+    /// ledger redelivers it) and a fresh process reclaims the same identity + peer links. Resets the
+    /// inbound + `drained_pending_ack` + `crashed`/`killed` (like `crash` then `resurrect`), and hands a
+    /// new `FabricTransport` (the old one dropped with the dead node's World). The node's DURABLE state
+    /// survives SEPARATELY via its retained `Store` — that is what the rebuilt World re-hydrates from.
+    ///
+    /// # Panics
+    /// If `id` was never registered — a rebuild RECLAIMS a prior identity.
+    #[must_use]
+    pub fn reregister(&self, id: NodeId) -> FabricTransport {
+        let mut inner = self.lock();
+        let ep = inner
+            .endpoints
+            .get_mut(&id)
+            .expect("reregister reclaims a prior registration");
+        ep.cleared_by_crash += ep.inbound.len() as u64;
+        ep.inbound.clear();
+        ep.drained_pending_ack.clear();
+        ep.crashed = false;
+        ep.killed = false;
+        FabricTransport {
+            local: id,
+            fabric: self.clone(),
+        }
+    }
+
     /// Bring a crashed (not killed) node back.
     pub fn resurrect(&self, id: NodeId) {
         let mut inner = self.lock();
@@ -601,6 +628,32 @@ mod tests {
         // no ghost retry of something already final.
         assert_eq!(fabric.pump(TickId(3)), 0);
         assert!(b.drain_inbound().is_empty());
+    }
+
+    #[test]
+    fn reregister_rebuilds_a_node_for_a_kill_9() {
+        // D-6: a rebuilt node reclaims its identity + peer links. Its undrained inbound is cleared (lost
+        // with the dead process — the at-least-once ledger redelivers separately), `killed`/`crashed`
+        // are reset, and a FRESH transport sends/receives anew. (The durable state survives in the
+        // node's retained `Store` — what the rebuilt World re-hydrates from.)
+        let (fabric, mut a, mut b) = perfect_pair();
+        a.send(B, MsgClass::Saga, vec![1].into()).expect("accepted");
+        fabric.pump(TickId(1)); // delivered to B's inbound (undrained)
+        fabric.kill(B); // the orchestrator process dies
+        let mut b2 = fabric.reregister(B); // a fresh process reclaims B
+        assert!(
+            b.drain_inbound().is_empty(),
+            "the rebuild cleared the dead process's undrained inbound"
+        );
+        // The rebuilt endpoint is alive (un-killed) and sends.
+        b2.send(A, MsgClass::Saga, vec![9].into())
+            .expect("post-rebuild send accepted");
+        fabric.pump(TickId(10));
+        assert_eq!(
+            a.drain_inbound().len(),
+            1,
+            "the rebuilt node sends + delivers over its fresh transport"
+        );
     }
 
     #[test]

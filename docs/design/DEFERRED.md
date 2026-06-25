@@ -602,7 +602,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
-### D-6 🟧 Durable saga WAL: S0–S3 LANDED (persist+recover ENGINE); S4–S5 (e2e kill-9 cells) + the redb backend owed
+### D-6 🟧 Durable saga WAL: S0–S5 LANDED (persist+recover ENGINE + e2e orchestrator kill-9 cells); the redb backend + 3 io-prod preconditions owed
 - **✅ S0–S3 LANDED (design `wf_0f8321dc`, doc `d6_saga_wal.md`):** the orchestrator now durably persists its
   saga set + go-tokens + directory + clock ceiling through the `sim::io::Store` seam (`MemStore` staged/committed
   two-tier; redb is the io-prod backend, DEFERRED — NO new dep). `commit_result` stages the QUIESCENT
@@ -617,19 +617,58 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   survives + re-drives the Demote forward; a transient go-token survives (`batch_go_writes` preserved); a revoked
   record stays gone; a re-trigger of a live transient is a guarded no-op. `PersistCheckpoint` is now a documented
   no-op (the write-back + barrier subsume it — the loud-warn stub is GONE). Gate-green at 100% Tier-A.
+- **✅ S4–S5 LANDED (this slice):** the harness kill-9 REBUILD analog — `FaultFabric::reregister` (fresh
+  transport on the prior identity; clears the crashed node's inbound = RAM loss, but the global at-least-once
+  unacked ledger HOLDS in-flight messages for redelivery) + `Topology::replace_node` (drops the old World, swaps
+  the rehydrated one in), each at 100% with a `#[should_panic]` for the reclaim-an-existing-id guard. The e2e
+  cells (`tests/tests/p3_orch_kill.rs` via `run_orch_kill_transient`): a live TRANSIENT batch caught mid-
+  `BatchHandoff` survives an orchestrator `crash`+rebuild — the rehydrated saga re-drives on the redelivered
+  acks and the debris settles at DEST with zero loss + per-tick conservation across the whole outage+recovery;
+  the ANTI-THEATER twin rebuilds against a FRESH empty store and recovers NOTHING (proves the retained WAL is
+  load-bearing, not in-process World survival). NB the cell uses `crash` (restart-able) not `kill` (permanent),
+  because recovery of the producer-less `AwaitAdopt` phase depends on the held redelivery — see the ⚠️ below.
 - **⚠️ The prod orchestrator BINARY is NON-DURABLE** (`crates/bins/src/bin/orchestrator.rs` injects a fresh
   in-memory `MemStore`): a restart resets the clock + loses in-flight transfers. LOUD `tracing::warn` at boot
-  (audit D6-ROB-1) until the redb backend swaps in. No production deployment until then.
-- **Still owed:** **S4–S5** — the e2e kill-9 crash cells (`Fault::KillRebuild` + a `Topology` orchestrator-swap
-  over `FaultFabric` re-attaching the retained Store; the C1–C9 cells in `p3_crash_matrix.rs`, with a
-  no-op-stub-Store anti-theater guard so a cell can't false-green on in-process World survival). The **redb
-  `Store` backend + off-tick fsync** (io-prod). The **`StoreKey::Tombstone` family + the C8 redeliver-PREPARE
-  drop** (a redelivered trigger for an ALREADY-COMPLETED transfer is not yet dropped on recover — the live-saga
-  clobber is now guarded, but the post-completion zombie needs the persisted tombstone; owed with S5 / the 1d
-  idempotent-trigger slice). The **explicit head-re-read** for io-prod independent-file directory/saga
-  disagreement. `batch_goes`/tombstone WAL GC (co-gated with D-7d Slice 2).
-- **Source:** the P2 plan + Slice-1b audit (ROB-2) + the D-6 design `wf_0f8321dc` + the holistic audit
-  `wf_132becc3` (COMP-2 directory-resurrect fix, D6-ROB-1 non-durable-bin warn, D6-1 tombstone/clobber).
+  (audit D6-ROB-1) — now also names the transport-redelivery dependency below — until the redb backend swaps in.
+  No production deployment until then.
+- **⚠️ Three io-prod / real-deploy PRECONDITIONS (audit `wf_7cc86404`, all HIGH, none break P2/P3 correctness —
+  proven against the in-process MemStore + harness at-least-once model the S0–S5 cells run on):**
+  1. **`AwaitAdopt` recovery depends on transport REDELIVERY the production `MeshTransport` does not provide.**
+     `BatchHandoff::AwaitAdopt` (saga.rs:563-571,631-634) has NO orchestrator re-drive egress (the dest adopts off
+     the source's envelope; the orchestrator only awaits `BatchAdopted`). The harness `crash` preserves the
+     at-least-once ledger so the lost ack redelivers; the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once
+     (`NodeUnreachable`-and-drop). **Owed cure (preferred): give `AwaitAdopt` a real re-solicit egress on Timeout**
+     (orchestrator re-prompts the source to re-emit the `TransientBatch`, or the dest to re-ack) so saga recovery is
+     SELF-SUFFICIENT and stops depending on an un-promised transport property — a designed slice (NEW saga action +
+     shard handler, full architecture first per the no-hack rule). Alternative: a sender-side durable outbox /
+     retry-until-acked transport layer (identity_persistence.md:122). **WHEN: before the redb backend / any real
+     rolling deploy.** Until then, producer-less-phase orchestrator-crash recovery is proven ONLY vs the FaultFabric.
+  2. **Directory RECONCILE is a per-TICK O(directory) delete-all + put-all + fsync, even on fully idle ticks**
+     (saga_runtime.rs:1187-1203). Correctness-safe; a write-amplification cliff at MMO directory scale (per-Session/
+     Entity/Realm/Ship rows). **Owed: io-prod replaces the full reconcile with INCREMENTAL per-mutation deletes
+     (threaded from `serve_directory` + `commit_cas`, as the :1185 comment names) + a dirty-guard that skips the
+     directory write (and the fsync if nothing else staged) on an unmutated tick + a SCALE soak guard (large stable
+     directory, zero transfers). WHEN: the redb backend swap.**
+  3. **Durable WAL records carry NO schema version** (saga_runtime.rs:124-150 snapshot structs; bare
+     `postcard::from_bytes(...).expect` decodes at :833/:848/:856/:873). Safe in-process (same binary wrote the
+     bytes); a one-way boot-panic door the instant redb persists across a rolling deploy with a changed
+     `SagaCtx`/`SagaSnapshot` shape (D-33 slaved-keys / 1d.6 TLV blob both grow it before prod). **Owed: a
+     `WAL_FORMAT_VERSION` prefix per persisted value (or one genesis-stamp record), validated in `rehydrate` BEFORE
+     the family scans (fail-loud typed `BootError` or migrate), AND per-record FALLIBLE decode that quarantines +
+     counts (`wal_records_skipped`) a torn row instead of aborting the whole boot. WHEN: the FIRST persisted-shape
+     change OR the redb swap, whichever is first.**
+- **Still owed (engine):** the **redb `Store` backend + off-tick fsync** (io-prod). The **`StoreKey::Tombstone`
+  family + the C8 redeliver-PREPARE drop** (a redelivered trigger for an ALREADY-COMPLETED transfer is not yet
+  dropped on recover — the live-saga clobber is guarded, but the post-completion zombie needs the persisted
+  tombstone; owed with the 1d idempotent-trigger slice). The **explicit head-re-read** for io-prod independent-file
+  directory/saga disagreement. The full **C1–C9 DURABLE player crash matrix + the cut-warmup durable cell** (the
+  S5 machinery — `rebuild_orchestrator` + `p2_cluster_durable_orch` — generalizes; only the durable-class fixture
+  differs). **`batch_goes` WAL GC is now a HARD redb precondition** (it is durable+unbounded now, not just RAM —
+  the WAL `delete` must be staged alongside the in-RAM `batch_goes.remove` at the shard's terminal retire;
+  co-gated with D-7d Slice 2 GC).
+- **Source:** the P2 plan + Slice-1b audit (ROB-2) + the D-6 design `wf_0f8321dc` + the holistic audits
+  `wf_132becc3` (COMP-2 directory-resurrect fix, D6-ROB-1 non-durable-bin warn, D6-1 tombstone/clobber) and
+  `wf_7cc86404` (S0–S5 DONE_NO_CRITICAL; the 3 io-prod preconditions above).
 
 ### D-7 🟧 Transient transfer: D-7a/b/c + D-7d Slice 1 LANDED (park closed, ballistic, conservation, loss-budget, G-TIER, DURABLE-UNAFFECTED, kill-9 crash resolution); D-7d Slice 2 (burst-scale + dual-death + GC + cap-split + mixed-realm) owed
 - **✅ CLOSED — the park (D-7a):** the `IssueTransientGo` LOUD-warn stub that parked a transient saga in
