@@ -99,6 +99,7 @@ pub fn orch_config(clock_peers: Vec<NodeId>) -> OrchestratorConfig {
         clock_peers,
         directory: DirectoryTuning {
             lease_ttl_ticks: 1_000,
+            ..DirectoryTuning::default()
         },
         // Slice 2a: the deadline producer runs LIVE in the capstone cluster (dev values 8/24).
         saga: vd_sim::saga::SagaTuning::default(),

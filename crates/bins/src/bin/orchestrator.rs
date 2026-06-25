@@ -65,6 +65,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
     };
     saga.validate()?;
+    // D-3 lease-liveness budget: the heartbeat/reaper/self-fence knobs, env-overridable per deployment,
+    // defaulting INERT (renew/reaper intervals 0 = pre-D-3 behavior). `validate` rejects a mis-tuned
+    // ordering chain at boot (a too-sparse renewal, or a self-fence grace that overlaps the orchestrator's
+    // reassign-after window = a split-brain window) — LOUD config error, never a silent liveness hole.
+    let d3 = DirectoryTuning::default();
+    let directory = DirectoryTuning {
+        lease_ttl_ticks: env.parse("VD_LEASE_TTL")?,
+        lease_renew_interval_ticks: env
+            .parse_or("VD_LEASE_RENEW_INTERVAL", d3.lease_renew_interval_ticks)?,
+        min_renews_before_lapse: env.parse_or("VD_MIN_RENEWS_BEFORE_LAPSE", d3.min_renews_before_lapse)?,
+        self_fence_grace_ticks: env.parse_or("VD_SELF_FENCE_GRACE", d3.self_fence_grace_ticks)?,
+        max_self_fence_grace_ticks: env
+            .parse_or("VD_MAX_SELF_FENCE_GRACE", d3.max_self_fence_grace_ticks)?,
+        reaper_interval_ticks: env.parse_or("VD_REAPER_INTERVAL", d3.reaper_interval_ticks)?,
+        recovery_grace_ticks: env.parse_or("VD_RECOVERY_GRACE", d3.recovery_grace_ticks)?,
+    };
+    directory.validate()?;
     // D-6 (audit D6-ROB-1): the WAL engine is built, but `register_orchestrator` injects a fresh
     // IN-MEMORY `MemStore` (the durable redb backend is owed io-prod). So THIS BINARY is NON-DURABLE: a
     // restart resets universe time to tick 0 and loses every in-flight transfer. LOUD at boot (never a
@@ -86,9 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             epoch: vd_core::EpochId(env.parse("VD_EPOCH")?),
             reserve_chunk: env.parse("VD_RESERVE_CHUNK")?,
             clock_peers: env.node_list("VD_CLOCK_PEERS")?,
-            directory: DirectoryTuning {
-                lease_ttl_ticks: env.parse("VD_LEASE_TTL")?,
-            },
+            directory,
             saga,
         },
     );

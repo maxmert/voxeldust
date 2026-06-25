@@ -124,6 +124,83 @@ impl SagaTuning {
     }
 }
 
+/// D-3 dead-vs-slow discriminator tuning (ONE reviewed home, beside [`SagaTuning`]). A peer is
+/// confirmed dead only after `n_consecutive_unreachable` `NodeUnreachable` notices within
+/// `unreachable_window_ticks` with NO intervening successful inbound — so a single recoverable blip
+/// toward a HEALTHY peer never confirms it dead (the CSCALE-1 cure). Defaults reproduce today's
+/// kill-only behavior (`n_consecutive_unreachable == 1`) so the inert path is byte-identical pre-D-3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LivenessTuning {
+    /// Consecutive `NodeUnreachable` notices (within the window, no intervening ack) required before a
+    /// peer's dead bit flips. `1` = today's kill-only stand-in. Prod ≥ 3 (survives a transient blip).
+    pub n_consecutive_unreachable: u32,
+    /// The window (universe ticks) the consecutive notices must fall within; an older first-notice
+    /// resets the run. MUST span `n_consecutive_unreachable` redelivery spacings (else a real dead
+    /// peer's notices arrive too far apart to ever confirm) — enforced by `validate`.
+    pub unreachable_window_ticks: u64,
+    /// The expected redelivery spacing (universe ticks) of `NodeUnreachable` toward a down peer — the
+    /// transport's redial/retry cadence (the harness `FaultFabric` retry delay; io-prod's QUIC idle
+    /// cadence). Only used by `validate` to cross-check the window covers the confirmation run.
+    pub retry_delay_ticks_hint: u64,
+}
+
+/// DEV/test liveness default — kill-only-equivalent (`n_consecutive_unreachable == 1`), so a default
+/// cluster confirms a permanent kill exactly as the pre-D-3 stand-in did and every existing crash cell
+/// stays byte-identical. PRODUCTION sets `n_consecutive_unreachable` ≥ 3 from env (the CSCALE-1 margin).
+impl Default for LivenessTuning {
+    fn default() -> LivenessTuning {
+        LivenessTuning {
+            n_consecutive_unreachable: 1,
+            unreachable_window_ticks: 64,
+            retry_delay_ticks_hint: 2,
+        }
+    }
+}
+
+/// A mis-tuned [`LivenessTuning`] — rejected LOUD at boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LivenessTuningError {
+    #[error("n_consecutive_unreachable must be >= 1 (0 would confirm a peer dead with no evidence)")]
+    ZeroConsecutive,
+    #[error(
+        "unreachable_window_ticks ({window}) must be >= n_consecutive_unreachable ({n}) * \
+         retry_delay_ticks_hint ({retry}) = {span}: the window must span the whole confirmation run, \
+         else a genuinely-dead peer's spaced-out notices reset before they ever confirm"
+    )]
+    WindowTooTight {
+        window: u64,
+        n: u32,
+        retry: u64,
+        span: u64,
+    },
+}
+
+impl LivenessTuning {
+    /// Reject a mis-tuned dead-vs-slow budget at boot. `n_consecutive_unreachable` must be ≥ 1, and
+    /// the window must be wide enough to hold `n` notices at the redelivery spacing (else a real dead
+    /// peer is never confirmed — a liveness hole, the dual of CSCALE-1's false-confirm).
+    ///
+    /// # Errors
+    /// [`LivenessTuningError`] for a zero confirmation count or a window too tight for the run.
+    pub fn validate(&self) -> Result<(), LivenessTuningError> {
+        if self.n_consecutive_unreachable < 1 {
+            return Err(LivenessTuningError::ZeroConsecutive);
+        }
+        let span = self
+            .retry_delay_ticks_hint
+            .saturating_mul(self.n_consecutive_unreachable as u64);
+        if self.unreachable_window_ticks < span {
+            return Err(LivenessTuningError::WindowTooTight {
+                window: self.unreachable_window_ticks,
+                n: self.n_consecutive_unreachable,
+                retry: self.retry_delay_ticks_hint,
+                span,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The sub-phase of the D-7d transient post-commit tail ([`SagaState::BatchHandoff`]): which
 /// choreography ack the saga is awaiting. Each phase has ONE pending egress the producer re-emits on a
 /// `Timeout` (idempotent — the shard journals by `(transfer, step)`), and any phase resolves on a
@@ -1529,6 +1606,47 @@ mod tests {
             Err(SagaTuningError::AbortTighterThanRedrive {
                 redrive: 8,
                 abort: 4
+            })
+        );
+    }
+
+    #[test]
+    fn liveness_tuning_validate_rejects_a_mistuned_budget() {
+        // D-3 Slice 0: the dead-vs-slow confirmation budget. The default (kill-only, n=1) validates;
+        // a 0 confirmation count or a window too tight to hold the run is rejected LOUD at boot.
+        assert_eq!(LivenessTuning::default().validate(), Ok(()));
+        // A prod margin (n=3 within a window spanning 3 retry-spacings) validates.
+        assert_eq!(
+            LivenessTuning {
+                n_consecutive_unreachable: 3,
+                unreachable_window_ticks: 64,
+                retry_delay_ticks_hint: 2,
+            }
+            .validate(),
+            Ok(())
+        );
+        // ZeroConsecutive — would confirm a peer dead with no evidence.
+        assert_eq!(
+            LivenessTuning {
+                n_consecutive_unreachable: 0,
+                ..LivenessTuning::default()
+            }
+            .validate(),
+            Err(LivenessTuningError::ZeroConsecutive)
+        );
+        // WindowTooTight — 3 notices at spacing 2 need a 6-tick span; a 4-tick window never confirms.
+        assert_eq!(
+            LivenessTuning {
+                n_consecutive_unreachable: 3,
+                unreachable_window_ticks: 4,
+                retry_delay_ticks_hint: 2,
+            }
+            .validate(),
+            Err(LivenessTuningError::WindowTooTight {
+                window: 4,
+                n: 3,
+                retry: 2,
+                span: 6,
             })
         );
     }

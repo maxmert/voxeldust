@@ -17,11 +17,121 @@ use vd_core::{Fence, TransferId, UniverseTick};
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 
 /// Directory-side operational parameters (ONE reviewed struct — never inline
-/// literals at use sites).
+/// literals at use sites). The D-3 lease-liveness knobs default INERT (renew/reaper
+/// intervals 0 = no heartbeat / no sweep, exactly like `realm_recheck_interval == 0`)
+/// so a default-tuned cluster behaves identically to pre-D-3; production sets them from env.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectoryTuning {
     /// Soft lease length granted on every grant/renewal, in universe ticks.
     pub lease_ttl_ticks: u64,
+    /// How often (in the holder's LOCAL ticks) an authority holder re-sends `LeaseRenew`.
+    /// `0` = INERT (no heartbeat producer fires). Prod ≈ `lease_ttl_ticks / 4`.
+    pub lease_renew_interval_ticks: u64,
+    /// How many renew intervals must fit inside one TTL (the renewal safety margin: a lease
+    /// survives losing `min_renews_before_lapse - 1` consecutive renewals). Used by `validate`.
+    pub min_renews_before_lapse: u32,
+    /// A holder whose lease provably lapsed THIS many LOCAL ticks ago hard-stops its own authority
+    /// (self-fence-before-grant, D-3 Slice 5) — strictly BEFORE the orchestrator may reassign.
+    pub self_fence_grace_ticks: u64,
+    /// The orchestrator waits `lease_ttl_ticks + max_self_fence_grace_ticks` after a lapse before
+    /// reassigning — the upper bound on a holder's self-fence, so no overlap (= no split-brain).
+    pub max_self_fence_grace_ticks: u64,
+    /// How often (universe ticks) the orchestrator sweeps for lapsed-AND-confirmed-dead leases.
+    /// `0` = INERT (no reaper). Prod a small interval (the sweep is O(directory) like `scan_deadlines`).
+    pub reaper_interval_ticks: u64,
+    /// A FIXED post-restart freeze (universe ticks) after a rehydrate before the reaper may act —
+    /// belt-and-suspenders atop the RAM-only liveness tracker (which is the real CAP freeze: an empty
+    /// tracker confirms nobody dead until fresh post-restart `NodeUnreachable`s re-accrue). NOT
+    /// downtime-proportional (the virtual clock cannot measure wall-time).
+    pub recovery_grace_ticks: u64,
+}
+
+/// A mis-tuned [`DirectoryTuning`] — rejected LOUD at boot (the bin calls `validate` after env read),
+/// never a silent lease-liveness misconfiguration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DirectoryTuningError {
+    #[error(
+        "lease renewal is too sparse: lease_renew_interval_ticks ({interval}) * \
+         min_renews_before_lapse ({renews}) = {product} must be <= lease_ttl_ticks ({ttl}) so a \
+         lease survives losing renewals (a renewal heartbeat that cannot fit the TTL lapses a live holder)"
+    )]
+    RenewTooSparse {
+        interval: u64,
+        renews: u32,
+        product: u64,
+        ttl: u64,
+    },
+    #[error(
+        "self_fence_grace_ticks ({grace}) must be > lease_ttl_ticks ({ttl}): a holder must keep \
+         authority through its whole lease and only self-fence AFTER it provably lapsed"
+    )]
+    SelfFenceWithinTtl { ttl: u64, grace: u64 },
+    #[error(
+        "self_fence_grace_ticks ({grace}) must be <= lease_ttl_ticks ({ttl}) + \
+         max_self_fence_grace_ticks ({max}): the holder must finish self-fencing BEFORE the \
+         orchestrator's reassign-after window opens (no overlap = no split-brain)"
+    )]
+    SelfFenceOutlivesReassign { ttl: u64, grace: u64, max: u64 },
+}
+
+impl Default for DirectoryTuning {
+    fn default() -> DirectoryTuning {
+        DirectoryTuning {
+            lease_ttl_ticks: 100,
+            lease_renew_interval_ticks: 0,
+            min_renews_before_lapse: 4,
+            self_fence_grace_ticks: 150,
+            max_self_fence_grace_ticks: 50,
+            reaper_interval_ticks: 0,
+            recovery_grace_ticks: 200,
+        }
+    }
+}
+
+impl DirectoryTuning {
+    /// Reject a mis-tuned lease-liveness budget at boot. Enforces the binding ordering chain so the
+    /// heartbeat keeps live leases alive AND a holder always self-fences before the orchestrator
+    /// reassigns (the no-split-brain invariant). An INERT renew interval (`0`) skips the renewal
+    /// margin check — there is no heartbeat to under-provision.
+    ///
+    /// # Errors
+    /// [`DirectoryTuningError`] for a renewal too sparse to survive the TTL, or a self-fence grace
+    /// that is inside the TTL (too eager) or outlives the orchestrator's reassign-after window (overlap).
+    pub fn validate(&self) -> Result<(), DirectoryTuningError> {
+        // ALL D-3 checks are gated on the heartbeat being ACTIVE (`lease_renew_interval_ticks != 0`):
+        // when inert (renewal off — the pre-D-3 default, every existing in-process rig, and the dev
+        // cluster) no lease is ever renewed, reaped, or self-fenced, so the ordering chain is vacuous and
+        // a large `lease_ttl_ticks` with default graces is fine. The bitwise `&` keeps both operands
+        // covered with no short-circuit branch (HR5, mirroring `SagaTuning::validate`'s `|`).
+        let active = self.lease_renew_interval_ticks != 0;
+        let product = self
+            .lease_renew_interval_ticks
+            .saturating_mul(self.min_renews_before_lapse as u64);
+        if active & (product > self.lease_ttl_ticks) {
+            return Err(DirectoryTuningError::RenewTooSparse {
+                interval: self.lease_renew_interval_ticks,
+                renews: self.min_renews_before_lapse,
+                product,
+                ttl: self.lease_ttl_ticks,
+            });
+        }
+        if active & (self.self_fence_grace_ticks <= self.lease_ttl_ticks) {
+            return Err(DirectoryTuningError::SelfFenceWithinTtl {
+                ttl: self.lease_ttl_ticks,
+                grace: self.self_fence_grace_ticks,
+            });
+        }
+        if active
+            & (self.self_fence_grace_ticks > self.lease_ttl_ticks + self.max_self_fence_grace_ticks)
+        {
+            return Err(DirectoryTuningError::SelfFenceOutlivesReassign {
+                ttl: self.lease_ttl_ticks,
+                grace: self.self_fence_grace_ticks,
+                max: self.max_self_fence_grace_ticks,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Outcome of a grant attempt (the wire reply is the resulting head record; this
@@ -282,8 +392,17 @@ mod tests {
     use vd_core::pose::RealmId;
     use vd_core::{NodeId, SessionId};
 
+    // A const can't use `..Default::default()`, so spell the D-3 knobs (the defaults) explicitly. Kept
+    // INERT (renew/reaper 0) — these directory unit tests exercise grant/renew/revoke/CAS, not the D-3
+    // heartbeat/reaper systems (those are node-level, tested there).
     const TUNING: DirectoryTuning = DirectoryTuning {
         lease_ttl_ticks: 100,
+        lease_renew_interval_ticks: 0,
+        min_renews_before_lapse: 4,
+        self_fence_grace_ticks: 150,
+        max_self_fence_grace_ticks: 50,
+        reaper_interval_ticks: 0,
+        recovery_grace_ticks: 200,
     };
     const NOW: UniverseTick = UniverseTick(50);
 
@@ -587,5 +706,80 @@ mod tests {
         let _ = dir.grant(k1, shard(1), Fence(1), NOW);
         let keys: Vec<DirectoryKey> = dir.entries().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![k1, k2], "BTreeMap order, deterministic");
+    }
+
+    // ---- D-3 Slice 0: DirectoryTuning::validate (the lease-liveness ordering chain) ----------------
+
+    #[test]
+    fn directory_tuning_default_and_a_prod_config_validate() {
+        assert_eq!(DirectoryTuning::default().validate(), Ok(()));
+        // A representative prod config: heartbeat every ttl/4, 4 renews fit the ttl exactly.
+        let prod = DirectoryTuning {
+            lease_ttl_ticks: 100,
+            lease_renew_interval_ticks: 25,
+            min_renews_before_lapse: 4,
+            self_fence_grace_ticks: 130,
+            max_self_fence_grace_ticks: 40,
+            reaper_interval_ticks: 8,
+            recovery_grace_ticks: 200,
+        };
+        assert_eq!(prod.validate(), Ok(()));
+    }
+
+    #[test]
+    fn directory_tuning_rejects_a_too_sparse_renewal() {
+        // 30 * 4 = 120 > 100: a heartbeat that cannot fit 4 renews in the TTL lapses a live holder.
+        let t = DirectoryTuning {
+            lease_renew_interval_ticks: 30,
+            min_renews_before_lapse: 4,
+            ..DirectoryTuning::default()
+        };
+        assert_eq!(
+            t.validate(),
+            Err(DirectoryTuningError::RenewTooSparse {
+                interval: 30,
+                renews: 4,
+                product: 120,
+                ttl: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn directory_tuning_rejects_a_self_fence_within_the_ttl() {
+        // grace == ttl: the holder would self-fence before its lease even expires (too eager). The check
+        // is gated on an ACTIVE heartbeat, so set a valid renew interval to reach it.
+        let t = DirectoryTuning {
+            lease_renew_interval_ticks: 10,
+            self_fence_grace_ticks: 100,
+            ..DirectoryTuning::default()
+        };
+        assert_eq!(
+            t.validate(),
+            Err(DirectoryTuningError::SelfFenceWithinTtl {
+                ttl: 100,
+                grace: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn directory_tuning_rejects_a_self_fence_outliving_reassign() {
+        // grace 151 > ttl 100 + max 50 = 150: the holder could still be live when the orchestrator
+        // reassigns — a split-brain window. Gated on an active heartbeat, so set a valid renew interval.
+        let t = DirectoryTuning {
+            lease_renew_interval_ticks: 10,
+            self_fence_grace_ticks: 151,
+            max_self_fence_grace_ticks: 50,
+            ..DirectoryTuning::default()
+        };
+        assert_eq!(
+            t.validate(),
+            Err(DirectoryTuningError::SelfFenceOutlivesReassign {
+                ttl: 100,
+                grace: 151,
+                max: 50,
+            })
+        );
     }
 }

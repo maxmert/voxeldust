@@ -1368,6 +1368,7 @@ mod tests {
             clock_peers: vec![],
             directory: DirectoryTuning {
                 lease_ttl_ticks: 10_000,
+                ..DirectoryTuning::default()
             },
             saga: SagaTuning::default(),
         }
@@ -2455,6 +2456,7 @@ mod tests {
         let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive=8, abort=24
         let mut dir = DirectoryCore::new(DirectoryTuning {
             lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
         });
         inject_saga(
             &mut runtime,
@@ -2518,6 +2520,7 @@ mod tests {
         let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
         let mut dir = DirectoryCore::new(DirectoryTuning {
             lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
         });
         inject_saga(
             &mut runtime,
@@ -2583,6 +2586,7 @@ mod tests {
         };
         let mut dir = DirectoryCore::new(DirectoryTuning {
             lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
         });
 
         // SOURCE dead → self-promote the dest (TransientDrop to DEST), tombstone, count once.

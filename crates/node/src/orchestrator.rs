@@ -305,6 +305,7 @@ mod tests {
             clock_peers: vec![SHARD, GATEWAY],
             directory: DirectoryTuning {
                 lease_ttl_ticks: 100,
+                ..DirectoryTuning::default()
             },
             saga: vd_sim::saga::SagaTuning::default(),
         }

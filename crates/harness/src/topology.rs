@@ -981,6 +981,7 @@ mod tests {
                 clock_peers: vec![B],
                 directory: DirectoryTuning {
                     lease_ttl_ticks: 100,
+                    ..DirectoryTuning::default()
                 },
                 saga: vd_sim::saga::SagaTuning::default(),
             },
