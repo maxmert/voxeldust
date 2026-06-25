@@ -185,7 +185,8 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     dead (a `DeadOwnerOrphan`); the abort-to-live-source end state is reached only by a NON-kill abort (a spatial
     rejection / a transient-fault pre-freeze timeout that leaves the source alive — P3 Slice 1b).
   - **kill SOURCE pre-freeze** (Freezing): the freeze timeout aborts (`abort_with_thaw`, gateway-acked) + tombstones,
-    but the directory is left at the now-DEAD source at a bumped fence. `DeadOwnerOrphan{SOURCE}`.
+    but the directory is left at the now-DEAD source (fence-neutral abort — `abort_clear` no longer bumps).
+    `DeadOwnerOrphan{SOURCE}` (a `HeldNowhere`: the dead owner holds nothing, so the fence value is moot here).
 - **Where:** `crates/node/src/saga_runtime.rs` (the `scan_deadlines` producer re-drives toward the dead node; no
   abort-on-unreachable, no re-home). The harness makes these HONEST today: the dead-node-aware oracle
   (`FaultFabric::is_dead`, `Topology::inspect_live`/`dead_nodes`, `oracle::verify_authority_unique_excluding`)
@@ -229,12 +230,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **✅ CLOSED (Slice 2a):** the terminal `Aborted` edge now emits `SagaAction::ClearTransferLock` →
   `DirectoryCore::abort_clear(subject, transfer)` — the STALE-FENCE re-read (a CAS-loser/aborter's `expected_fence`
   is stale by definition, so a naive `abort_cas(expected)` would also Lose; `abort_clear` re-derives the head and
-  clears the lock IFF still held by THIS transfer, NEVER steals another saga's lock, bumping the fence to fence-out a
-  stale crossing). Authority is UNCHANGED (abort keeps the source owner). Idempotent (a re-driven terminal whose lock
-  already cleared = `Lost` no-op). The two pinned "exists-to-be-flipped" asserts
-  (`prepare_rejection_aborts_and_tombstones_with_typed_feedback`, `cas_loss_unwinds_with_a_thaw`) are FLIPPED from
-  `in_transfer == Some(XFER)` to `== None` (authority still `Shard(SOURCE)`, fence bumped). An aborted subject can
-  immediately re-transfer (R1's directory-side manifestation is cured).
+  clears the lock IFF still held by THIS transfer, NEVER steals another saga's lock). Authority is UNCHANGED (abort
+  keeps the source owner) and the abort is **FENCE-NEUTRAL** (`abort_clear` does NOT bump — abort-path fix, see the
+  D-6 abort-path note: an abort is not an ownership change, no crossing is ever in flight to fence out where the
+  bump fired, and a bump would strand the surviving source / wedge a logout `LeaseRevoke`). Idempotent (a re-driven
+  terminal whose lock already cleared = `Lost` no-op, driven by the lock not the fence). The two pinned
+  "exists-to-be-flipped" asserts (`prepare_rejection_aborts_and_tombstones_with_typed_feedback`,
+  `cas_loss_unwinds_with_a_thaw`) are FLIPPED from `in_transfer == Some(XFER)` to `== None` (authority still
+  `Shard(SOURCE)`, fence UNCHANGED). An aborted subject can immediately re-transfer (R1's directory-side
+  manifestation is cured).
 - **RACE-1/D-23 closed-without-unmasking:** `ClearTransferLock` fires at the TERMINAL edge (after BOTH compensator
   acks), so the gateway's `apply_abort` has pruned the session journal before any re-transfer's `PrepareSubscribe`
   could discard it — see D-23.
@@ -669,17 +673,26 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   rehydrated saga re-drives the demote/promote forward to `Done`, the avatar settles at DEST, AUTHORITY-UNIQUE,
   zero loss + an anti-theater control (fresh store recovers nothing). Reuses `run_orch_kill_durable` on the same
   `rebuild_orchestrator` + `p2_cluster_durable_orch` machinery as the transient cell.
+- **✅ RESOLVED (abort-path fence-neutrality, design `wf_5cfc96b0`, adversarially verified, high-confidence):** the
+  PRE-commit abort-with-surviving-source fence divergence is FIXED. Root cause: `abort_clear` bumped the directory
+  fence "to fence-out a stale crossing", but that bump-guard (`in_transfer == Some(this)`) is reachable ONLY
+  pre/at-CAS (a winning `commit_cas`/`abort_cas` clears the lock at the commit point; post-commit phases never
+  abort), where authority never moved AND no crossing was ever emitted (`EmitCrossing` is post-`CasWon`-only) — so
+  the bump was PROVABLY spurious wherever it fired, and it stranded the surviving source one fence behind
+  (directory@N+1 vs owner@N). That was not merely an oracle nit: a post-abort logout `LeaseRevoke{fence: N}` (and a
+  re-transfer keyed at N) is permanently REFUSED by `directory.revoke`'s exact-fence requirement against N+1 — a
+  real logout/reassignment WEDGE. **Fix (A): `abort_clear` is now FENCE-NEUTRAL** — clears the lock, leaves the
+  fence put (an abort is not an ownership change). `directory.fence == source.entity_fence` (FENCE-9) holds, so no
+  re-sync machinery / new message is needed (rejected fix B's source head-re-read stays torn out). The PRE-commit
+  orchestrator-kill cell now lands GREEN (`AbortedToSource`, with the asserter strengthened to run AUTHORITY-UNIQUE
+  so a future re-introduced bump REDs). Tests flipped: `abort_clear_*` (no-bump) + new `abort_clear_is_fence_neutral`
+  pin; `cas_loss_unwinds_with_a_thaw` (Fence 6→5). **⚠️ D-33 forward note:** the future `commit_cas_bundle` abort
+  twin MUST inherit fence-neutrality across all N+1 keys (hull + every `ChildOf` passenger, possibly on different
+  source shards) — else a compound abort replicates the divergence per passenger / leaves passengers at mixed
+  fences relative to their hull. The `abort_clear_is_fence_neutral` pin guards against silently reintroducing it.
 - **Still owed (durable crash matrix):** the full **C1–C9 phase × victim sweep + the cut-warmup durable cell**
-  (the S5 machinery generalizes; only the durable fixtures differ). **⚠️ NEW (abort-path, surfaced probing the
-  PRE-commit orchestrator-kill cell — DEFERRED, see the `p3_orch_kill.rs` NOTE):** a PRE-commit abort with a
-  SURVIVING source leaves a **fence divergence** — `abort_clear` bumps the directory entity fence (to fence-out
-  stale crossings) but `ThawSource` carries NO fence, so the source stays at its pre-abort fence (directory@2 vs
-  owner@1). The gateway route fence is NOT bumped by an abort (no route swap) so it is *likely* functionally
-  benign, but owner-vs-directory divergence is the split-brain shape the AUTHORITY-UNIQUE oracle catches.
-  **Owed: a focused abort-path decision — either `abort_clear` should NOT bump on a pre-commit abort (no crossing
-  to fence out), OR the thaw must re-sync the source's fence — then the pre-commit orchestrator-kill cell lands
-  asserting a clean SettledAt(SOURCE).** Never exposed before: no prior cell had a pre-commit abort whose source
-  survives (the existing `kill_source_in_freezing` cell KILLS the source → an orphan, not a thawed survivor).
+  (the S5 machinery — `run_orch_kill_durable` + `rebuild_orchestrator` + `p2_cluster_durable_orch` — generalizes;
+  only the durable fixtures differ; the post-commit, pre-commit-abort, and anti-theater cells already land).
 - **Source:** the P2 plan + Slice-1b audit (ROB-2) + the D-6 design `wf_0f8321dc` + the holistic audits
   `wf_132becc3` (COMP-2 directory-resurrect fix, D6-ROB-1 non-durable-bin warn, D6-1 tombstone/clobber) and
   `wf_7cc86404` (S0–S5 DONE_NO_CRITICAL; the 3 io-prod preconditions above).

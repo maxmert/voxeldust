@@ -207,6 +207,13 @@ impl DirectoryCore {
 
     /// The abort CAS: same fence race as commit (mutual exclusion by construction),
     /// but authority STAYS with the current owner; only the lock clears.
+    ///
+    /// ⚠️ This BUMPS the fence (via `cas_next`). It is the FENCE-MOVING abort arm — use it ONLY where the
+    /// abort genuinely races a commit on a known-current `expected` fence. Do NOT route a TERMINAL abort
+    /// through it: a terminal abort of a SURVIVING source must be FENCE-NEUTRAL (use [`abort_clear`]) or it
+    /// strands the source one fence behind the directory and wedges a post-abort logout `LeaseRevoke`
+    /// (FENCE-9; see the D-6 abort-path note). A future N-orchestrator router (D-32) wiring terminal aborts
+    /// MUST dispatch to `abort_clear`, never here — the `abort_clear_is_fence_neutral` pin guards the producer.
     pub fn abort_cas(&mut self, key: DirectoryKey, expected: Fence) -> CasOutcome {
         match self.records.get_mut(&key) {
             Some(record) => match Fence::cas_next(record.fence, expected) {
@@ -229,16 +236,23 @@ impl DirectoryCore {
     /// aborter's `expected_fence` (fixed at saga creation) is STALE by definition once any phase bumped
     /// the head, so a fence-matched [`abort_cas`](Self::abort_cas) would also Lose. This re-derives the
     /// current head and clears the lock IFF it is still held by THIS `transfer` — NEVER steals another
-    /// saga's lock — bumping the fence to fence-out any stale in-flight crossing. Authority is
-    /// UNCHANGED (abort keeps the source owner). Idempotent: a re-driven terminal whose lock already
-    /// cleared (`None`) or moved to another transfer (`Some(other)`) is a `Lost` no-op.
+    /// saga's lock. The fence is UNCHANGED (FENCE-NEUTRAL): an abort is NOT an ownership change — this
+    /// never writes `record.authority`, the source keeps the avatar — so the directory fence must stay
+    /// put, keeping `directory.fence == source.entity_fence` (FENCE-9). That is load-bearing: a bumped
+    /// fence would strand the surviving source one fence behind, and a post-abort `LeaseRevoke{fence}`
+    /// (logout) / re-transfer keyed at the source's fence would be permanently Refused. A stale in-flight
+    /// crossing cannot exist here to fence out: `EmitCrossing` is emitted only POST-commit (`CasWon →
+    /// Swapping`) and post-commit phases NEVER abort, so the `in_transfer == Some(this)` guard is reachable
+    /// only pre/at-CAS (⚠️ this no-bump correctness is contingent on crossings staying post-commit-only).
+    /// Idempotent: a re-driven terminal whose lock already cleared (`None`) or moved to another transfer
+    /// (`Some(other)`) is a `Lost` no-op — driven by the lock, NOT the fence value.
     pub fn abort_clear(&mut self, key: DirectoryKey, transfer: TransferId) -> CasOutcome {
         match self.records.get_mut(&key) {
             Some(record) if record.in_transfer == Some(transfer) => {
-                let new_fence = record.fence.next();
-                record.fence = new_fence;
                 record.in_transfer = None;
-                CasOutcome::Won { new_fence }
+                CasOutcome::Won {
+                    new_fence: record.fence,
+                }
             }
             Some(record) => CasOutcome::Lost {
                 current: record.fence,
@@ -459,7 +473,8 @@ mod tests {
     #[test]
     fn abort_clear_clears_the_lock_by_re_reading_the_stale_head() {
         // Slice 2a (D-1): the aborter's expected fence is STALE (the head advanced) — abort_clear
-        // re-reads + clears IFF still held by THIS transfer, keeping authority, bumping the fence.
+        // re-reads + clears IFF still held by THIS transfer, keeping authority. FENCE-NEUTRAL: an abort
+        // is not an ownership change, so the fence does NOT move (the lock cleared at the SAME fence).
         let mut dir = DirectoryCore::new(TUNING);
         let _ = dir.grant(key(), shard(1), Fence(1), NOW);
         assert!(dir.lock_transfer(key(), TransferId(5)));
@@ -468,24 +483,50 @@ mod tests {
         assert_eq!(
             outcome,
             CasOutcome::Won {
-                new_fence: Fence(2)
+                new_fence: Fence(1)
             }
         );
         let record = dir.head(key()).expect("record");
         assert_eq!(record.authority, shard(1), "abort retains the source owner");
         assert_eq!(record.in_transfer, None, "the lock cleared");
+        assert_eq!(
+            record.fence,
+            Fence(1),
+            "abort is fence-neutral: no ownership change, no bump (FENCE-9)"
+        );
+    }
+
+    #[test]
+    fn abort_clear_is_fence_neutral() {
+        // Pin the fence-neutral contract at the unit boundary: a future re-introduction of the bump (or
+        // a D-33 bundle-abort that bumps per passenger) is caught here. Authority unchanged, lock cleared,
+        // fence stays put — so directory.fence == source.entity_fence (no surviving-source stranding).
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(3), NOW);
+        assert!(dir.lock_transfer(key(), TransferId(7)));
+        assert_eq!(
+            dir.abort_clear(key(), TransferId(7)),
+            CasOutcome::Won {
+                new_fence: Fence(3)
+            }
+        );
+        let record = dir.head(key()).expect("record");
+        assert_eq!(record.fence, Fence(3), "the fence did not move on abort");
+        assert_eq!(record.in_transfer, None, "the lock cleared");
+        assert_eq!(record.authority, shard(1), "the source still owns");
     }
 
     #[test]
     fn abort_clear_is_an_idempotent_noop_when_already_clear() {
-        // A re-driven terminal abort (the lock already cleared): Lost no-op, fence unchanged.
+        // A re-driven terminal abort (the lock already cleared): Lost no-op, fence unchanged. The first
+        // clear is fence-neutral (stays Fence(1)), so the second observes the same fence.
         let mut dir = DirectoryCore::new(TUNING);
         let _ = dir.grant(key(), shard(1), Fence(1), NOW);
         assert!(dir.lock_transfer(key(), TransferId(5)));
-        let _ = dir.abort_clear(key(), TransferId(5)); // clears (Fence 2)
+        let _ = dir.abort_clear(key(), TransferId(5)); // clears the lock, fence stays Fence(1)
         assert_eq!(
             dir.abort_clear(key(), TransferId(5)),
-            CasOutcome::Lost { current: Fence(2) },
+            CasOutcome::Lost { current: Fence(1) },
             "the second clear is a no-op (lock already None)"
         );
     }

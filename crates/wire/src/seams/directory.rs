@@ -94,7 +94,12 @@ pub enum DirectoryOp {
         transfer: TransferId,
         new_owner: AuthorityRef,
     },
-    /// The abort CAS — mutually exclusive with commit by construction (fence rule 3).
+    /// The abort CAS — mutually exclusive with commit by construction (fence rule 3). ⚠️ This is the
+    /// FENCE-MOVING abort arm (bumps via `cas_next`). Do NOT route a TERMINAL abort through it: a terminal
+    /// abort of a surviving source must be FENCE-NEUTRAL (the in-process path uses `DirectoryCore::abort_clear`)
+    /// or it strands the source a fence behind + wedges a post-abort logout `LeaseRevoke` (FENCE-9; D-6 abort-path
+    /// note). A future N-orchestrator router (D-32) carrying terminal aborts over this seam needs a fence-neutral
+    /// `AbortClear` op, not this one.
     AbortCas {
         key: DirectoryKey,
         expected: Fence,

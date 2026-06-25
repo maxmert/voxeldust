@@ -662,8 +662,9 @@ pub enum EndState {
     /// D-37 (RED, owed D-3+D-6): the saga PARKED (re-driving toward a dead node), directory names the
     /// dead `authority_at`; the dead-aware oracle surfaces the orphan rather than false-passing a corpse.
     ParkedHalfOpen { authority_at: NodeId },
-    /// D-37 (RED): the saga TOMBSTONED to a dead-owner orphan (directory names the dead `authority_at`
-    /// at a bumped fence, lock cleared, no live saga) — the dead-aware oracle surfaces it.
+    /// D-37 (RED): the saga TOMBSTONED to a dead-owner orphan (directory names the dead `authority_at`,
+    /// lock cleared, no live saga) — the dead-aware oracle surfaces it (the orphan is a HeldNowhere: a
+    /// dead owner holds nothing, so the fence value is moot here).
     DeadOwnerOrphan { authority_at: NodeId },
     /// D-7d TRANSIENT analogue of [`EndState::SettledAt`]: the batch committed + settled at `node`'s
     /// HELD set (a transient has NO directory row), proven by the dead-aware held-set + a fired
@@ -828,6 +829,16 @@ pub fn assert_end_state(
                     .any(|(e, _)| *e == entity),
                 "the source still owns the avatar (never demoted)",
             );
+            // FENCE-9 (the abort-path fence-neutrality fix): the surviving source's HELD fence equals the
+            // directory's RECORDED fence — `abort_clear` did NOT bump (an abort is no ownership change), so
+            // there is no owner-vs-directory split that would strand the source / wedge a logout LeaseRevoke.
+            verify_authority_unique_excluding(&reports, dead)
+                .expect("AUTHORITY-UNIQUE holds after the abort (no fence divergence — FENCE-9)");
+            // SETTLED (parity with the SettledAt arm): the abort left NO lingering pending/departing/ghost
+            // set — the AbortTransfer compensator tore the dest ghost down. Catches a leaked teardown that
+            // the uniqueness check (which excludes Ghosts) would miss — load-bearing for a future
+            // signal-grant / compound abort that is likelier to leak.
+            verify_authority_settled(&reports).expect("settled after the abort (no leaked dest ghost)");
         }
         EndState::ParkedHalfOpen { authority_at } => {
             let reports = topo.inspect_all();
@@ -1321,8 +1332,9 @@ pub fn run_orch_kill_durable(seed: u64, at_phase: &str, durable_store: bool) -> 
         }
     }
     // SETTLE the terminal egress: the saga tombstones the SAME tick it emits its last action (the final
-    // Promote/ReleaseComplete on the commit path, or the ThawSource on the abort path), so the SOURCE/DEST
-    // applies it — including the fence sync — only AFTER quiescence (mirror `run_transient_fault_scenario`).
+    // Promote/ReleaseComplete on the commit path, or the ThawSource + AbortTransfer teardown on the abort
+    // path), so the SOURCE/DEST applies it only AFTER quiescence (mirror `run_transient_fault_scenario`).
+    // (The abort path is FENCE-NEUTRAL — no fence sync to wait for; this lets the dest ghost teardown land.)
     for _ in 0..24 {
         topo.step();
     }

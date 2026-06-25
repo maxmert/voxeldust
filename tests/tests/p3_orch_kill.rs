@@ -94,14 +94,26 @@ fn p3_orchestrator_kill_9_durable_without_a_store_recovers_nothing() {
     );
 }
 
-// NOTE — the PRE-commit orchestrator kill-9 cell (a player caught mid-`Freezing`, authority not yet moved)
-// is DEFERRED. Probing it surfaced a real, pre-existing ABORT-PATH gap (DEFERRED.md D-6, "pre-commit abort
-// fence re-sync"): the rehydrated saga re-arms `since=0` → the abort deadline fires → `abort_with_thaw`
-// thaws the source + `abort_clear` BUMPS the directory fence (to fence-out stale crossings), but
-// `ThawSource` carries NO fence, so the surviving source stays at its pre-abort fence → the directory
-// (fence 2) and the owning source (fence 1) DIVERGE, which the AUTHORITY-UNIQUE oracle flags. The gateway
-// route fence is NOT bumped by an abort (no route swap), so it is likely functionally benign — but
-// owner-vs-directory fence divergence is exactly the split-brain shape the oracle exists to catch, so the
-// honest call is a focused abort-path slice (decide: abort_clear should not bump for a pre-commit abort,
-// OR the thaw must re-sync the source), not a contorted assert here. The POST-commit recovery above is the
-// orchestrator-kill headline and is fully green.
+/// The PRE-commit orchestrator kill-9 (the conservative-safe counterpart, now GREEN after the abort-path
+/// fence-neutrality fix): a player crossing while the saga is still `Freezing` (authority NOT yet moved —
+/// the directory CAS never ran). The rehydrated saga re-arms `since=0`, so the FIRST post-restart
+/// `scan_deadlines` fires the (large) abort deadline → `abort_with_thaw` thaws the source → terminal
+/// `Aborted`. The player stays ALIVE at SOURCE, authoritative, no loss. This is the documented operational
+/// semantic: an orchestrator restart RE-DRIVES post-commit transfers forward to DEST but ABORTS in-flight
+/// pre-commit transfers back to a live source (fail-safe — nothing was committed anywhere). The fence-
+/// neutral `abort_clear` (this slice) is what makes the end state CLEAN: the surviving source's held fence
+/// equals the directory's recorded fence (FENCE-9, asserted inside `AbortedToSource`), so the player is
+/// neither stranded nor logout-wedged — the divergence that originally deferred this cell is fixed.
+#[test]
+fn p3_orchestrator_kill_9_pre_commit_aborts_a_durable_player_back_to_the_live_source() {
+    let mut out = run_orch_kill_durable(0xD6_D004, "Freezing", true);
+    // RECOVERY EVIDENCE: the pre-commit saga came back from the retained WAL (then the abort deadline fires).
+    assert!(
+        out.recovered_states.iter().any(|s| s.starts_with("Freezing")),
+        "the rebuilt orchestrator re-hydrated the pre-commit durable saga from its durable store: {:?}",
+        out.recovered_states,
+    );
+    // END STATE: aborted to the LIVE source, no loss — and (the fix's proof) NO fence divergence: the
+    // `AbortedToSource` asserter now also runs AUTHORITY-UNIQUE (FENCE-9), which would RED on a bumped fence.
+    assert_end_state(&mut out.topo, out.subject, &out.dead, EndState::AbortedToSource);
+}

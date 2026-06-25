@@ -150,8 +150,8 @@ fn p3_kill_source_in_demoting_parks_and_the_dead_aware_oracle_surfaces_it() {
 
 /// DEFERRED D-37 (honest RED): PERMANENT KILL of the SOURCE while it is FREEZING (PRE-commit). The
 /// SourceFrozen ack never comes (source dead) → the freeze timeout fires `abort_with_thaw` (the
-/// compensators are gateway-acked) → terminal Aborted → `abort_clear` clears the lock + bumps the
-/// fence + tombstones the saga. But the CAS never ran, so authority never moved off the SOURCE —
+/// compensators are gateway-acked) → terminal Aborted → `abort_clear` clears the lock (FENCE-NEUTRAL —
+/// no bump) + tombstones the saga. But the CAS never ran, so authority never moved off the SOURCE —
 /// which is now a CORPSE: `DeadOwnerOrphan{SOURCE}` (saga terminal, lock clear, directory at a dead
 /// owner). The dead-aware oracle surfaces the exact orphan. (This is why "abort to the live source"
 /// is NOT reachable by a permanent SOURCE kill — the aborted-to owner is dead.)

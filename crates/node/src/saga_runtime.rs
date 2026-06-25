@@ -1892,7 +1892,9 @@ mod tests {
         assert_eq!(rig.live(), 0);
         // ✅ FLIPPED (Slice 2a, D-1, audit CPO-2): even the CAS-LOSER's terminal abort clears the
         // lock — `abort_clear` RE-READS the head (this saga's expected fence is stale by definition,
-        // so a naive `abort_cas(expected)` would lose too), bumping the fence + clearing the lock.
+        // so a naive `abort_cas(expected)` would lose too) and clears the lock. FENCE-NEUTRAL: the CAS
+        // LOST so authority never moved off the source and no crossing was ever emitted (CasLost never
+        // reaches Swapping), so the fence stays put — `directory.fence == source.entity_fence` (FENCE-9).
         let head = rig.subject_head();
         assert_eq!(
             head.in_transfer, None,
@@ -1900,8 +1902,8 @@ mod tests {
         );
         assert_eq!(
             head.fence,
-            Fence(6),
-            "abort_clear bumped the re-read head fence (5 → 6) to fence-out any stale crossing"
+            Fence(5),
+            "abort_clear is fence-neutral: the source still owns at Fence(5), no spurious bump (FENCE-9)"
         );
     }
 
