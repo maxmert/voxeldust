@@ -193,6 +193,13 @@ fn every_arm() -> Vec<InterShardFlow> {
             step_id: vd_wire::intershard::TRANSIENT_RELEASE_STEP,
             fence: Fence(6),
         }),
+        // D-7d arm: the dead-DEST ABANDON (SIDE-EFFECTING, TransferStep-keyed by TRANSIENT_ABANDON_STEP;
+        // shares `TransientHandoff` — a proper new action, classified by the same one arm).
+        InterShardFlow::TransientAbandon(vd_wire::intershard::TransientHandoff {
+            transfer: TransferId(10),
+            step_id: vd_wire::intershard::TRANSIENT_ABANDON_STEP,
+            fence: Fence(6),
+        }),
     ]
 }
 
@@ -215,7 +222,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::Promote(_)
         | InterShardFlow::TransientRelease(_)
         | InterShardFlow::TransientDrop(_)
-        | InterShardFlow::ReleaseComplete(_) => {}
+        | InterShardFlow::ReleaseComplete(_)
+        | InterShardFlow::TransientAbandon(_) => {}
     }
 }
 

@@ -17,6 +17,8 @@ use vd_harness::client::{DeliveredWorldView, InputCmd, ScriptedClient};
 use vd_harness::fabric::{CrashWhen, FabricTransport, FaultFabric};
 use vd_harness::oracle::{
     AuthorityViolation, verify_authority_settled, verify_authority_unique_excluding,
+    verify_transient_authority_held_excluding, verify_transient_conservation_tick_excluding,
+    verify_transient_loss_budget,
 };
 use vd_harness::topology::{InspectReport, StaggerPlan, Topology};
 use vd_node::ShardNode;
@@ -508,6 +510,40 @@ pub fn live_sagas(topo: &mut Topology) -> usize {
     })
 }
 
+/// D-7d — the count of dead-SOURCE self-promote resolutions on the orchestrator (the SOURCE-kill cell's
+/// anti-vacuity observable: `> 0` proves the resolution actually fired, not that the happy path ran).
+#[must_use]
+pub fn source_unreachable_resolutions(topo: &mut Topology) -> u64 {
+    with_orchestrator(topo, |orch| {
+        orch.world_mut()
+            .resource::<SagaRuntimeRes>()
+            .source_unreachable_resolutions()
+    })
+}
+
+/// D-7d — the count of dead-DEST abandon resolutions on the orchestrator (the DEST-kill cell's
+/// anti-vacuity observable).
+#[must_use]
+pub fn dest_unreachable_resolutions(topo: &mut Topology) -> u64 {
+    with_orchestrator(topo, |orch| {
+        orch.world_mut()
+            .resource::<SagaRuntimeRes>()
+            .dest_unreachable_resolutions()
+    })
+}
+
+/// D-7d — the total handover-attributable loss for `kind`, summed across every node's `transient_loss`
+/// (the budget gate's population). Used by the DEST-kill cell to assert a NON-ZERO, within-budget loss.
+#[must_use]
+pub fn total_handover_loss(reports: &[(NodeId, InspectReport)], kind: EntityKind) -> u64 {
+    reports
+        .iter()
+        .flat_map(|(_, r)| r.transient_loss.iter())
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, n)| *n)
+        .sum()
+}
+
 /// The gateway's count of client inputs BUFFERED for the transfer dest (the `seq > marker` cut
 /// buffer fills) — so the conservation gate can assert the buffer/DRAIN path was actually
 /// exercised, not merely that the dest applied SOMETHING post-marker (which a direct-forward
@@ -596,6 +632,15 @@ pub enum EndState {
     /// D-37 (RED): the saga TOMBSTONED to a dead-owner orphan (directory names the dead `authority_at`
     /// at a bumped fence, lock cleared, no live saga) — the dead-aware oracle surfaces it.
     DeadOwnerOrphan { authority_at: NodeId },
+    /// D-7d TRANSIENT analogue of [`EndState::SettledAt`]: the batch committed + settled at `node`'s
+    /// HELD set (a transient has NO directory row), proven by the dead-aware held-set + a fired
+    /// SOURCE-unreachable self-promote resolution; ZERO loss. (Dead source mid-handoff → the go-token
+    /// authorizes the dest self-promote.)
+    BatchCommittedAt { node: NodeId },
+    /// D-7d accounted-loss outcome: the batch was DROPPED (the dead-DEST abandon) — held at NO live
+    /// shard, lost WITHIN the `kind`'s `LossBudget` AND non-zero (anti-vacuity), via a fired
+    /// DEST-unreachable resolution. (Dead dest mid-handoff → drop-within-budget, the transient answer.)
+    BatchDroppedWithinBudget { kind: EntityKind },
 }
 
 fn fault_report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
@@ -791,5 +836,177 @@ pub fn assert_end_state(
                 "the dead-aware oracle surfaces the exact dead-owner orphan",
             );
         }
+        // The TRANSIENT end states are held-set / loss-budget shaped (no directory row) — asserted by
+        // [`assert_transient_end_state`], never this directory-shaped durable asserter.
+        EndState::BatchCommittedAt { .. } | EndState::BatchDroppedWithinBudget { .. } => {
+            panic!(
+                "transient end states are asserted by assert_transient_end_state, not assert_end_state"
+            )
+        }
+    }
+}
+
+/// Drive ONE crash-matrix scenario for a TRANSIENT batch (D-7d) — the held-set/loss-budget sibling of
+/// [`run_fault_scenario`] (which is directory-shaped to the bone; a transient writes ZERO directory rows,
+/// so forcing both through one driver would need a forbidden match-on-class). REUSES the shared spine
+/// (cluster, realm-lease warmup, `seed_transient_crossing`, a Transient `trigger_transfer`, the
+/// `Fault`/`CrashWhen` enums, `schedule_crash`/`kill`/`dead_nodes`) verbatim; only the transient-shaped
+/// 40% differs (warmup waits for BOTH realm leases; drive-to-phase matches the `BatchHandoff` string;
+/// per-tick conservation is dead-aware; quiesce on `live_sagas == 0`). Returns the topo + the debris
+/// entity + the dead-node set for [`assert_transient_end_state`].
+#[must_use]
+pub fn run_transient_fault_scenario(
+    seed: u64,
+    sc: Scenario,
+) -> (Topology, EntityId, BTreeSet<NodeId>) {
+    let fabric = FaultFabric::new(seed, 2);
+    let mut topo = p2_cluster(&fabric, 8);
+    // WARMUP: BOTH shards win their realm leases (the source to cross from, the dest to adopt into).
+    fault_step_until(&mut topo, 80, |t| {
+        let r = t.inspect_all();
+        fault_report(&r, SHARD)
+            .held_realms
+            .iter()
+            .any(|(realm, _)| *realm == RealmId::System(7))
+            && fault_report(&r, DEST)
+                .held_realms
+                .iter()
+                .any(|(realm, _)| *realm == RealmId::System(8))
+    });
+    let src_fence = realm_fence(&mut topo, RealmId::System(7));
+    let dst_fence = realm_fence(&mut topo, RealmId::System(8));
+    // Seed a 1-item Debris crossing SHARD→DEST and trigger the matching Transient batch saga.
+    let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 1, 0);
+    let batch = TransferId(1);
+    seed_transient_crossing(
+        &mut topo,
+        debris,
+        batch,
+        src_fence,
+        dst_fence,
+        vd_core::glam::DVec3::ZERO,
+    );
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: batch,
+            session: SessionId(0),
+            subject: DirectoryKey::Realm(RealmId::System(8)),
+            expected_fence: dst_fence,
+            source: SHARD,
+            dest: DEST,
+            class: sc.class,
+            needs_provision: false,
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::System(8),
+        },
+    );
+    // Drive to the target `BatchHandoff` phase (the saga progresses on the choreography acks).
+    fault_step_until(&mut topo, 60, |t| {
+        saga_states(t).iter().any(|s| s.starts_with(sc.at_phase))
+    });
+    assert!(
+        saga_states(&mut topo)
+            .iter()
+            .any(|s| s.starts_with(sc.at_phase)),
+        "the saga is in phase {} when the fault fires (anti-vacuity)",
+        sc.at_phase,
+    );
+    match sc.fault {
+        Fault::CrashResurrect { after } => {
+            let fire = topo.tick().0 + 1;
+            topo.schedule_crash(sc.victim, TickId(fire), sc.crash_when);
+            topo.schedule_resurrect(sc.victim, TickId(fire + after));
+        }
+        Fault::Kill => fabric.kill(sc.victim),
+    }
+    // PHASE 1 — drive to SAGA quiescence: the dead-resolution fires ~2 redrive windows after the kill
+    // (the first Timeout re-emit bounces `NodeUnreachable` → marks the node dead; the next due injects
+    // the resolution), tombstoning the saga. Dead-aware per-tick TRANSIENT-CONSERVATION holds EVERY tick
+    // (a killed participant's corpse is excluded, so a stale Held claim is never a phantom holder).
+    let mut settled = false;
+    for i in 0..160 {
+        topo.step();
+        let dead = topo.dead_nodes();
+        let reports = topo.inspect_all();
+        verify_transient_conservation_tick_excluding(&reports, &dead, TickId(i))
+            .expect("no transient COUNTED-held by two LIVE shards at any tick under the crash");
+        if live_sagas(&mut topo) == 0 {
+            settled = true;
+            break;
+        }
+    }
+    assert!(
+        settled,
+        "the transient crash scenario did not reach saga quiescence"
+    );
+    // PHASE 2 — let the RESOLUTION'S EGRESS settle: the saga tombstones the SAME tick it emits the
+    // self-promote (→ the dest flips `Arriving→Held`) / abandon (→ the source drops + buckets the loss),
+    // so the SURVIVOR processes it only AFTER quiescence. Conservation still holds each settle tick.
+    for i in 0..24 {
+        topo.step();
+        let dead = topo.dead_nodes();
+        let reports = topo.inspect_all();
+        verify_transient_conservation_tick_excluding(&reports, &dead, TickId(i)).expect(
+            "no transient COUNTED-held by two LIVE shards while the resolution egress settles",
+        );
+    }
+    let dead = topo.dead_nodes();
+    (topo, debris, dead)
+}
+
+/// Assert a TRANSIENT crash scenario reached its expected [`EndState`] (D-7d), held-set / loss-budget
+/// shaped (a transient has no directory row). The dead-aware `TRANSIENT-AUTHORITY-HELD` holds in EVERY
+/// outcome (no double-hold; corpses excluded). `BatchCommittedAt` = the debris held SINGLY at the live
+/// survivor + a fired source-unreachable resolution + zero loss; `BatchDroppedWithinBudget` = held at NO
+/// live shard + a within-budget NON-ZERO loss + a fired dest-unreachable resolution.
+pub fn assert_transient_end_state(
+    topo: &mut Topology,
+    debris: EntityId,
+    dead: &BTreeSet<NodeId>,
+    expected: EndState,
+) {
+    let reports = topo.inspect_all();
+    verify_transient_authority_held_excluding(&reports, dead)
+        .expect("TRANSIENT-AUTHORITY-HELD (dead-aware) holds after the crash settles");
+    let live_holders: Vec<NodeId> = reports
+        .iter()
+        .filter(|(n, _)| !dead.contains(n))
+        .filter(|(_, r)| r.owned_transients.iter().any(|(e, _)| *e == debris))
+        .map(|(n, _)| *n)
+        .collect();
+    match expected {
+        EndState::BatchCommittedAt { node } => {
+            // OUTCOME-only (reusable by BOTH the SOURCE-kill cell AND the crash-resurrect control, which
+            // reaches the same outcome WITHOUT a resolution): the debris settled SINGLY at the live
+            // survivor, zero loss. Each cell adds its mechanism check (resolution fired vs NOT fired).
+            assert_eq!(
+                live_holders,
+                vec![node],
+                "the debris settled at the live survivor, held by exactly one shard"
+            );
+            assert_eq!(
+                transient_dropped_total(topo),
+                0,
+                "BatchCommittedAt is ZERO loss (the item was kept, not dropped)"
+            );
+        }
+        EndState::BatchDroppedWithinBudget { kind } => {
+            assert!(
+                live_holders.is_empty(),
+                "the abandoned debris is held at NO live shard: {live_holders:?}"
+            );
+            verify_transient_loss_budget(&reports, kind)
+                .expect("the loss is within the kind's budget");
+            assert!(
+                total_handover_loss(&reports, kind) > 0,
+                "anti-vacuity: a loss was actually counted (not a silent vanish)"
+            );
+            assert!(
+                dest_unreachable_resolutions(topo) > 0,
+                "the dead-dest abandon resolution actually fired (anti-vacuity)"
+            );
+        }
+        _ => panic!("assert_transient_end_state handles only the transient end states"),
     }
 }

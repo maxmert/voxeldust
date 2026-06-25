@@ -66,6 +66,13 @@ pub const TRANSIENT_DROP_STEP: u32 = 12;
 /// See [`TRANSIENT_BATCH_STEP`] — the SOURCE release phase (`TransientRelease` + its `DropApplied` ack),
 /// D-7b's structural drop-before-promote.
 pub const TRANSIENT_RELEASE_STEP: u32 = 13;
+/// See [`TRANSIENT_BATCH_STEP`] — the SOURCE retire-complete phase (D-7d): `on_release_complete` now
+/// acks `TransferAck::DropApplied`(`TRANSIENT_COMPLETE_STEP`) after dropping the retained `Departing`
+/// copy, so the saga's `BatchHandoff` tail reaches `Done` (`SourceRetired`) instead of running ownerless.
+pub const TRANSIENT_COMPLETE_STEP: u32 = 14;
+/// See [`TRANSIENT_BATCH_STEP`] — the D-7d dead-DEST ABANDON phase: the orchestrator→SOURCE
+/// `TransientAbandon` + the source's `DropApplied`(`TRANSIENT_ABANDON_STEP`) ack. Journaled idempotent.
+pub const TRANSIENT_ABANDON_STEP: u32 = 15;
 
 /// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
 /// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
@@ -133,6 +140,12 @@ pub enum InterShardFlow {
     /// source copy). Side-effecting, ack-driven by `(transfer, TRANSIENT_RELEASE_STEP)`. APPENDED
     /// (preserves every existing postcard discriminant).
     ReleaseComplete(TransientHandoff),
+    /// Orchestrator → SOURCE shard: D-7d dead-DEST resolution — the dest died mid-handoff so the only
+    /// promote target is gone; the source ABANDONS the batch's retained `Departing`/`Held` items as an
+    /// accounted loss-within-budget (a PROPER new action, semantically distinct from `ReleaseComplete`'s
+    /// clean no-loss retire). Side-effecting, ack-driven by `(transfer, TRANSIENT_ABANDON_STEP)`.
+    /// APPENDED (preserves every existing postcard discriminant).
+    TransientAbandon(TransientHandoff),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -233,13 +246,14 @@ impl InterShardFlow {
                     step_id: cmd.step_id,
                 },
             },
-            // The transient structural drop-before-promote handoff commands (D-7b): side-effecting
-            // authority moves at the source/dest, journaled by `(transfer, step_id)` (idempotent by
-            // local held-status — the batched twin of the demote/promote idempotency). All three
-            // share the `TransientHandoff` shape and one classification arm (DRY).
+            // The transient structural drop-before-promote handoff commands (D-7b) + the D-7d dead-DEST
+            // ABANDON: side-effecting authority moves at the source/dest, journaled by `(transfer,
+            // step_id)` (idempotent by local held-status — the batched twin of the demote/promote
+            // idempotency). All FOUR share the `TransientHandoff` shape and one classification arm (DRY).
             InterShardFlow::TransientRelease(h)
             | InterShardFlow::TransientDrop(h)
-            | InterShardFlow::ReleaseComplete(h) => EffectClass::SideEffecting {
+            | InterShardFlow::ReleaseComplete(h)
+            | InterShardFlow::TransientAbandon(h) => EffectClass::SideEffecting {
                 idempotency: IdempotencyKey::TransferStep {
                     transfer: h.transfer,
                     step_id: h.step_id,

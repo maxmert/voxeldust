@@ -124,6 +124,24 @@ impl SagaTuning {
     }
 }
 
+/// The sub-phase of the D-7d transient post-commit tail ([`SagaState::BatchHandoff`]): which
+/// choreography ack the saga is awaiting. Each phase has ONE pending egress the producer re-emits on a
+/// `Timeout` (idempotent — the shard journals by `(transfer, step)`), and any phase resolves on a
+/// dead-participant notice (the D-7d kill cells). The transient analogue of the durable
+/// `Demoting`→`Promoting`→`Releasing` walk, but driven by the shard↔shard adopt-before-drop acks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchHandoffPhase {
+    /// Awaiting the dest's `BatchAdopted` (it now holds the batch as the uncounted `Arriving` tier).
+    AwaitAdopt,
+    /// Awaiting the source's `DropApplied`(release): it flipped `Held→Departing` (now uncounted).
+    AwaitRelease,
+    /// Awaiting the dest's `DropApplied`(promote-confirm): `Arriving→Held` (the dest now counts it).
+    AwaitPromote,
+    /// Awaiting the source's `SourceRetired` (the new D-7d ack): it dropped the retained `Departing`
+    /// copy — the choreography is complete and the saga may tombstone.
+    AwaitComplete,
+}
+
 /// The saga's phase. Serializable: the two durable checkpoints persist it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SagaState {
@@ -153,6 +171,17 @@ pub enum SagaState {
     /// adopt-before-drop choreography (the runtime's `BatchAdopted`→`TransientDrop`), not an FSM tail.
     /// `step_id` is the batch's `(transfer, step)` idempotency phase ([`TRANSIENT_BATCH_STEP`]).
     BatchCommitting { step_id: u32 },
+    /// TRANSIENT (D-7d) POST-COMMIT TAIL: the go-token committed; the saga is NOT yet tombstoned but
+    /// owns the adopt-before-drop choreography to its terminal — the transient twin of the durable
+    /// `Demoting`/`Promoting` tail (HR2: ONE recovery machinery, the SAME `scan_deadlines` producer
+    /// re-drives both). Replaces the D-7a/b/c tombstone-at-commit + ledger-driven handlers: keeping the
+    /// saga alive is exactly what lets the producer see a stranded handoff and inject the dead-resolution
+    /// (the D-7d kill cells). `new_fence` is the committed go-token fence (the SOLE promote authority,
+    /// carried VERBATIM into every choreography egress — re-anchors the dest even with the source dead).
+    BatchHandoff {
+        phase: BatchHandoffPhase,
+        new_fence: Fence,
+    },
     /// CAS won: the gateway route swap (`CommitAuthority`) is in flight.
     Swapping { new_fence: Fence },
     /// Authority flipped; the saga has pushed the ORDERED `Demote` to the source — the
@@ -249,6 +278,27 @@ pub enum SagaEvent {
     Released,
     SourceThawed,
     DestAborted,
+    /// D-7d transient post-commit tail (`BatchHandoff`) — the adopt-before-drop acks routed through
+    /// `deliver` to advance the phase (replacing the D-7a/b/c ledger-driven read-only handlers). The
+    /// dest adopted the batch (uncounted `Arriving`) → drives `AwaitAdopt→AwaitRelease`.
+    BatchAdopted,
+    /// D-7d — the SOURCE acked its release `DropApplied`(`TRANSIENT_RELEASE_STEP`): `Held→Departing`
+    /// (now uncounted) → drives `AwaitRelease→AwaitPromote` (the dest promote is reachable only now —
+    /// the source is uncounted BEFORE the dest counts, so the holder set is never `{source, dest}`).
+    SourceDropApplied,
+    /// D-7d — the DEST acked its promote-confirm `DropApplied`(`TRANSIENT_DROP_STEP`): `Arriving→Held`
+    /// (the dest now counts it) → drives `AwaitPromote→AwaitComplete`.
+    DestDropApplied,
+    /// D-7d — the SOURCE acked it RETIRED the retained `Departing` copy (`TRANSIENT_COMPLETE_STEP`, the
+    /// NEW ack `on_release_complete` now emits): the choreography is complete → `AwaitComplete→Done`.
+    SourceRetired,
+    /// D-7d DEAD-RESOLUTION — `scan_deadlines` learned (via a kill-only `NodeUnreachable`) that the
+    /// SOURCE is unreachable while the saga is in `BatchHandoff` AND the redrive deadline elapsed: the
+    /// dest already adopted, so self-promote it from the go-token (zero loss). Terminal on first fire.
+    SourceUnreachable,
+    /// D-7d — the DEST is unreachable mid-`BatchHandoff`: the only promote target is gone, so ABANDON
+    /// the source's retained copy as an accounted loss-within-budget. Terminal on first fire.
+    DestUnreachable,
     /// The phase's adaptive deadline (k·RTT, hard-capped) elapsed.
     Timeout,
     /// Pre-commit cancellation request.
@@ -298,6 +348,33 @@ pub enum SagaAction {
     /// classified now; the batched transient flow is driven at P3.
     IssueTransientGo {
         expected: Fence,
+    },
+    /// D-7d transient tail egress — tell the SOURCE to RELEASE the batch (`Held→Departing`). The wrapper
+    /// resolves the target (`SagaCtx.source`) + step (`TRANSIENT_RELEASE_STEP`); `fence` is the committed
+    /// go-token fence carried VERBATIM. Emitted on `AwaitAdopt+BatchAdopted`; re-emitted on a `Timeout`
+    /// in `AwaitRelease` (idempotent — the source journals by `(transfer, RELEASE_STEP)`).
+    EmitTransientRelease {
+        fence: Fence,
+    },
+    /// D-7d — tell the DEST to PROMOTE the batch (`Arriving→Held`, re-anchored to the go-token `fence`).
+    /// Target `SagaCtx.dest` + step `TRANSIENT_DROP_STEP`. Emitted on `AwaitRelease+SourceDropApplied`
+    /// (the source is uncounted first) OR DIRECTLY on a dead-source resolution (the go-token is the SOLE
+    /// authority — legitimate with the source dead). Re-emitted on a `Timeout` in `AwaitPromote`.
+    EmitTransientPromote {
+        fence: Fence,
+    },
+    /// D-7d — tell the SOURCE the handoff is complete (`ReleaseComplete`): retire the retained
+    /// `Departing` copy + ack `SourceRetired`. Target `SagaCtx.source` + step `TRANSIENT_RELEASE_STEP`.
+    /// Emitted on `AwaitPromote+DestDropApplied`; re-emitted on a `Timeout` in `AwaitComplete`.
+    EmitReleaseComplete {
+        fence: Fence,
+    },
+    /// D-7d dead-DEST resolution egress — tell the SOURCE to ABANDON the batch (drop the retained
+    /// `Departing` copy as an accounted loss-within-budget). Target `SagaCtx.source` + step
+    /// `TRANSIENT_ABANDON_STEP`. A PROPER new action (NOT a repurposed `ReleaseComplete`, whose
+    /// semantics are "clean retire, no loss"): abandon = "this batch is dead, count the drop".
+    EmitTransientAbandon {
+        fence: Fence,
     },
     /// Durable checkpoint — exactly two per happy path (after Prepared, at CAS won),
     /// group-committed by the wrapper.
@@ -368,6 +445,7 @@ pub fn start(ctx: &SagaCtx) -> (SagaState, Vec<SagaAction>) {
 /// idempotent no-ops (at-least-once delivery makes duplicates routine, not errors).
 #[must_use]
 pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Vec<SagaAction>) {
+    use BatchHandoffPhase as P;
     use SagaAction as A;
     use SagaEvent as E;
     use SagaState as S;
@@ -477,16 +555,119 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
 
         // ---- transient batch commit (D-7): the SHORT FSM PATH commit point ------------------
         // The batched go-token committed (HR2 — the SAME `CasWon` feedback as the durable CAS): the
-        // saga is DONE. There is NO route swap / demote / promote — the source→dest set hand-off is
-        // the shard↔shard adopt-before-drop choreography (the runtime's `BatchAdopted`→`TransientDrop`),
-        // never an FSM tail. The go-token's commit fence rides `new_fence` (the dest realm-lease fence).
-        (S::BatchCommitting { .. }, E::CasWon { new_fence }) => {
-            (S::Done { new_fence }, vec![A::Tombstone])
-        }
+        // saga enters the POST-COMMIT TAIL (D-7d), NOT a tombstone. The go-token's commit fence rides
+        // `new_fence` (the dest realm-lease fence) and is the SOLE promote authority hereafter. Keeping
+        // the saga alive through the adopt-before-drop choreography is what lets `scan_deadlines` see a
+        // stranded handoff and resolve it (the D-7d kill cells) — the transient twin of the durable
+        // post-commit `Swapping→Demoting→Promoting` tail, ONE recovery machinery (HR2).
+        (S::BatchCommitting { .. }, E::CasWon { new_fence }) => (
+            S::BatchHandoff {
+                phase: P::AwaitAdopt,
+                new_fence,
+            },
+            // NO egress: the dest adopts AUTONOMOUSLY off the source's `TransientBatch` envelope (the
+            // fabric redelivers it at-least-once); the saga just awaits the dest's `BatchAdopted`.
+            vec![],
+        ),
         // A go-token in flight re-drives idempotently on Timeout (the ledger write is keyed by
         // `(transfer, step)` — a re-record is a no-op), NEVER an abort — the transient twin of the
         // CommittingCas re-issue (forward-only at the commit point). ✅ Slice-2a producer drives it.
         (S::BatchCommitting { .. }, E::Timeout) => (state, vec![commit_action(ctx)]),
+
+        // ---- D-7d transient post-commit tail (BatchHandoff): the adopt-before-drop choreography ------
+        // PHASE 1→2: the dest ADOPTED (uncounted `Arriving`) → tell the SOURCE to RELEASE (`Held→
+        // Departing`). The dest promote does NOT fire yet (gated on the source's `DropApplied`), so the
+        // source is uncounted BEFORE the dest counts — the holder set is never `{source, dest}`.
+        (
+            S::BatchHandoff {
+                phase: P::AwaitAdopt,
+                new_fence,
+            },
+            E::BatchAdopted,
+        ) => (
+            S::BatchHandoff {
+                phase: P::AwaitRelease,
+                new_fence,
+            },
+            vec![A::EmitTransientRelease { fence: new_fence }],
+        ),
+        // PHASE 2→3: the source released (now uncounted) → PROMOTE the dest (`Arriving→Held`).
+        (
+            S::BatchHandoff {
+                phase: P::AwaitRelease,
+                new_fence,
+            },
+            E::SourceDropApplied,
+        ) => (
+            S::BatchHandoff {
+                phase: P::AwaitPromote,
+                new_fence,
+            },
+            vec![A::EmitTransientPromote { fence: new_fence }],
+        ),
+        // PHASE 3→4: the dest promote-confirmed (it now counts the batch) → tell the SOURCE to RETIRE
+        // its retained `Departing` copy (`ReleaseComplete`).
+        (
+            S::BatchHandoff {
+                phase: P::AwaitPromote,
+                new_fence,
+            },
+            E::DestDropApplied,
+        ) => (
+            S::BatchHandoff {
+                phase: P::AwaitComplete,
+                new_fence,
+            },
+            vec![A::EmitReleaseComplete { fence: new_fence }],
+        ),
+        // PHASE 4→DONE: the source retired the last copy → the choreography is complete, tombstone.
+        (
+            S::BatchHandoff {
+                phase: P::AwaitComplete,
+                new_fence,
+            },
+            E::SourceRetired,
+        ) => (S::Done { new_fence }, vec![A::Tombstone]),
+        // Timeout re-drive: re-emit the CURRENT phase's pending egress idempotently (the shard journals
+        // by `(transfer, step)`, so a re-emit is a no-op). `AwaitAdopt` has NO orchestrator egress to
+        // re-drive (the dest adopts off the redelivered envelope), so it falls through to the no-op
+        // catch-all — the saga simply keeps awaiting `BatchAdopted`.
+        (
+            S::BatchHandoff {
+                phase: P::AwaitRelease,
+                new_fence,
+            },
+            E::Timeout,
+        ) => (state, vec![A::EmitTransientRelease { fence: new_fence }]),
+        (
+            S::BatchHandoff {
+                phase: P::AwaitPromote,
+                new_fence,
+            },
+            E::Timeout,
+        ) => (state, vec![A::EmitTransientPromote { fence: new_fence }]),
+        (
+            S::BatchHandoff {
+                phase: P::AwaitComplete,
+                new_fence,
+            },
+            E::Timeout,
+        ) => (state, vec![A::EmitReleaseComplete { fence: new_fence }]),
+        // D-7d DEAD-RESOLUTION (terminal on FIRST fire — straight to Done, NEVER back to BatchHandoff,
+        // structurally avoiding the D-37 forever-bounce). SOURCE dead: every BatchHandoff phase is
+        // post-adopt, so the dest holds the batch and the go-token is the SOLE promote authority →
+        // self-promote the dest (zero loss). DEST dead: the only promote target is gone → ABANDON the
+        // source's retained copy as an accounted loss-within-budget. The go-token is NOT GC'd here (it
+        // backs the dest's Held authority + the TRANSIENT-AUTHORITY-HELD oracle; bounded GC is owed
+        // D-7d Slice 2, which co-designs the drop-completion signal without breaking the quiescence count).
+        (S::BatchHandoff { new_fence, .. }, E::SourceUnreachable) => (
+            S::Done { new_fence },
+            vec![A::EmitTransientPromote { fence: new_fence }, A::Tombstone],
+        ),
+        (S::BatchHandoff { new_fence, .. }, E::DestUnreachable) => (
+            S::Done { new_fence },
+            vec![A::EmitTransientAbandon { fence: new_fence }, A::Tombstone],
+        ),
 
         // ---- post-commit: forward-only -------------------------------------------------
         // The route swapped: push the ORDERED `Demote` to the source (the fence-enforced
@@ -864,9 +1045,9 @@ mod tests {
     fn transient_takes_the_short_path_to_the_batched_go_token() {
         // HR2 fan-out at `start` (D-7, the FIRST class branch): a Transient subject SKIPS
         // Prepare/Cut/Freeze and enters BatchCommitting DIRECTLY, issuing the batched TransientGo
-        // go-token (NOT a per-entity CAS, NOT the session walk). CasWon ends it at Done with a single
-        // Tombstone — no Swapping/Demote/Promote tail (the set hand-off is the shard↔shard
-        // adopt-before-drop choreography, not the FSM's job).
+        // go-token (NOT a per-entity CAS, NOT the session walk). CasWon enters the post-commit
+        // `BatchHandoff` tail (D-7d) — the saga OWNS the adopt-before-drop choreography to its terminal
+        // (the transient twin of the durable demote/promote tail), tombstoning only at `SourceRetired`.
         let c = ctx_class(false, DurabilityClass::Transient);
         let (state, actions) = start(&c);
         assert_eq!(
@@ -882,20 +1063,161 @@ mod tests {
             "the short path issues the batched go-token immediately (no PrepareSubscribe)"
         );
 
-        // CasWon (the go-token committed) → Done + a single Tombstone, NO route-swap tail.
+        // CasWon (the go-token committed) → the POST-COMMIT TAIL (D-7d), NOT a tombstone: the saga now
+        // owns the adopt-before-drop choreography (the transient twin of the durable demote/promote tail).
         let new_fence = Fence(5).next();
-        let (done, actions) = step(&c, state, SagaEvent::CasWon { new_fence });
-        assert_eq!(done, SagaState::Done { new_fence });
-        assert_eq!(actions, vec![SagaAction::Tombstone]);
+        let (tail, actions) = step(&c, state, SagaEvent::CasWon { new_fence });
+        assert_eq!(
+            tail,
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitAdopt,
+                new_fence
+            },
+            "CasWon enters the post-commit handoff tail awaiting the dest's BatchAdopted"
+        );
+        assert_eq!(
+            actions,
+            vec![],
+            "no egress on entering AwaitAdopt — the dest adopts autonomously off the redelivered envelope"
+        );
 
-        // A go-token Timeout re-drives the SAME go-token idempotently (forward-only, never aborts) —
-        // the transient twin of the CommittingCas re-issue.
+        // The choreography acks walk the tail to Done, each emitting exactly its one egress.
+        let (s, acts) = step(&c, tail, SagaEvent::BatchAdopted);
+        assert_eq!(
+            s,
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitRelease,
+                new_fence
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::EmitTransientRelease { fence: new_fence }]
+        );
+        let (s, acts) = step(&c, s, SagaEvent::SourceDropApplied);
+        assert_eq!(
+            s,
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitPromote,
+                new_fence
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::EmitTransientPromote { fence: new_fence }]
+        );
+        let (s, acts) = step(&c, s, SagaEvent::DestDropApplied);
+        assert_eq!(
+            s,
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitComplete,
+                new_fence
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::EmitReleaseComplete { fence: new_fence }]
+        );
+        let (done, acts) = step(&c, s, SagaEvent::SourceRetired);
+        assert_eq!(done, SagaState::Done { new_fence });
+        assert_eq!(acts, vec![SagaAction::Tombstone]);
+
+        // A go-token Timeout in BatchCommitting re-drives the SAME go-token idempotently (forward-only,
+        // never aborts) — the transient twin of the CommittingCas re-issue.
         let (held, actions) = step(&c, state, SagaEvent::Timeout);
         assert_eq!(held, state);
         assert_eq!(
             actions,
             vec![SagaAction::IssueTransientGo { expected: Fence(5) }]
         );
+
+        // Each BatchHandoff phase RE-EMITS its one pending egress on a Timeout (the producer re-drive,
+        // idempotent — the shard journals by step). AwaitAdopt re-drives NOTHING (the dest adopts off the
+        // redelivered envelope), falling through to the no-op catch-all.
+        let await_adopt = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitAdopt,
+            new_fence,
+        };
+        assert_eq!(
+            step(&c, await_adopt, SagaEvent::Timeout),
+            (await_adopt, vec![])
+        );
+        let await_release = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitRelease,
+            new_fence,
+        };
+        assert_eq!(
+            step(&c, await_release, SagaEvent::Timeout),
+            (
+                await_release,
+                vec![SagaAction::EmitTransientRelease { fence: new_fence }]
+            )
+        );
+        let await_promote = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitPromote,
+            new_fence,
+        };
+        assert_eq!(
+            step(&c, await_promote, SagaEvent::Timeout),
+            (
+                await_promote,
+                vec![SagaAction::EmitTransientPromote { fence: new_fence }]
+            )
+        );
+        let await_complete = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitComplete,
+            new_fence,
+        };
+        assert_eq!(
+            step(&c, await_complete, SagaEvent::Timeout),
+            (
+                await_complete,
+                vec![SagaAction::EmitReleaseComplete { fence: new_fence }]
+            )
+        );
+    }
+
+    #[test]
+    fn batch_handoff_resolves_terminally_on_a_dead_participant() {
+        // D-7d dead-resolution arms (terminal on FIRST fire — straight to Done + Tombstone from ANY
+        // phase, NEVER back to BatchHandoff, so the D-37 forever-bounce is structurally impossible). A
+        // dead SOURCE self-promotes the dest from the go-token (zero loss); a dead DEST abandons the
+        // source's retained copy (accounted loss). Exercised from every phase (the `..` phase wildcard).
+        let c = ctx_class(false, DurabilityClass::Transient);
+        let nf = Fence(5).next();
+        for phase in [
+            BatchHandoffPhase::AwaitAdopt,
+            BatchHandoffPhase::AwaitRelease,
+            BatchHandoffPhase::AwaitPromote,
+            BatchHandoffPhase::AwaitComplete,
+        ] {
+            let st = SagaState::BatchHandoff {
+                phase,
+                new_fence: nf,
+            };
+            assert_eq!(
+                step(&c, st, SagaEvent::SourceUnreachable),
+                (
+                    SagaState::Done { new_fence: nf },
+                    vec![
+                        SagaAction::EmitTransientPromote { fence: nf },
+                        SagaAction::Tombstone
+                    ]
+                ),
+                "dead source → self-promote the dest from the go-token, then Done"
+            );
+            assert_eq!(
+                step(&c, st, SagaEvent::DestUnreachable),
+                (
+                    SagaState::Done { new_fence: nf },
+                    vec![
+                        SagaAction::EmitTransientAbandon { fence: nf },
+                        SagaAction::Tombstone
+                    ]
+                ),
+                "dead dest → abandon the source copy as accounted loss, then Done"
+            );
+        }
     }
 
     /// Drive a fresh saga to the commit-issue point and return (state, actions there). The
@@ -1776,8 +2098,25 @@ mod tests {
                     SagaState::AwaitProvision => SagaEvent::ProvisionReady,
                     SagaState::Preparing => SagaEvent::Prepared(PrepareResult::Ready),
                     SagaState::Cutting => SagaEvent::CutConfirmed { marker_seq: 1 },
-                    // The transient short path: CasWon ends BatchCommitting at Done (no route tail).
+                    // The transient short path: CasWon ends BatchCommitting at the post-commit tail
+                    // (D-7d), then the adopt-before-drop choreography acks walk it to Done.
                     SagaState::BatchCommitting { .. } => SagaEvent::CasWon { new_fence: Fence(9) },
+                    SagaState::BatchHandoff {
+                        phase: BatchHandoffPhase::AwaitAdopt,
+                        ..
+                    } => SagaEvent::BatchAdopted,
+                    SagaState::BatchHandoff {
+                        phase: BatchHandoffPhase::AwaitRelease,
+                        ..
+                    } => SagaEvent::SourceDropApplied,
+                    SagaState::BatchHandoff {
+                        phase: BatchHandoffPhase::AwaitPromote,
+                        ..
+                    } => SagaEvent::DestDropApplied,
+                    SagaState::BatchHandoff {
+                        phase: BatchHandoffPhase::AwaitComplete,
+                        ..
+                    } => SagaEvent::SourceRetired,
                     // The pose-before-promote gate needs BOTH conditions: feed the flush first
                     // (stays Freezing), then the freeze advances to the commit.
                     SagaState::Freezing { flushed: false, .. } => {

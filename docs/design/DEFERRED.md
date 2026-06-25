@@ -587,7 +587,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   idempotently to terminal on restart).
 - **Source:** the P2 plan + Slice-1b audit (ROB-2 loud-stub hardening).
 
-### D-7 🟧 Transient transfer: D-7a/b/c LANDED (park closed, ballistic + conservation + loss-budget + G-TIER + DURABLE-UNAFFECTED); D-7d crash-cells + cap-split + mixed-realm owed
+### D-7 🟧 Transient transfer: D-7a/b/c + D-7d Slice 1 LANDED (park closed, ballistic, conservation, loss-budget, G-TIER, DURABLE-UNAFFECTED, kill-9 crash resolution); D-7d Slice 2 (burst-scale + dual-death + GC + cap-split + mixed-realm) owed
 - **✅ CLOSED — the park (D-7a):** the `IssueTransientGo` LOUD-warn stub that parked a transient saga in
   `CommittingCas` is GONE. The synthesis took the OR-branch: a Transient subject takes a distinct SHORT FSM PATH
   (`saga.rs` `SagaState::BatchCommitting` — `start` enters it directly, skipping Prepare/Cut/Freeze, and `CasWon`
@@ -649,18 +649,44 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   independent by construction). Multithreading verdict: SEQUENTIAL — rayon NOT adopted (flagged for the
   user, not unilaterally taken; µs-scale work, byte-identical-replay guarantee, parallelism already at the
   shard granularity). Gate-green at 100% Tier-A. **D-7c (G-TIER + DURABLE-UNAFFECTED) is DONE.**
-- **Still owed (D-7d):** the crash-matrix Transient cells (`BatchCommitting`
-  at_phase, `EndState::BatchCommittedAt` / `BatchDroppedWithinBudget` — the realistic CLUSTER-level
-  over-budget self-fence + the re-drive producer for a lost transient handoff command, since a
-  permanent kill mid-handoff today leaves an uncounted stuck item until self-fence). Also owed:
+- **✅ D-7d SLICE 1 LANDED (design `wf_f82daa5e-56b`, doc `d7d_transient_crash.md`):** the saga-owned
+  transient handoff TAIL + dead-aware crash resolution — the P3 kill-9 headline for the debris class. The
+  transient adopt-before-drop choreography moved OUT of the ledger-driven read-only handlers INTO a
+  `SagaState::BatchHandoff{phase, new_fence}` FSM tail (replacing tombstone-at-commit) the ONE
+  `scan_deadlines` producer re-drives (HR2: the transient twin of the durable Demoting/Promoting tail, no
+  second machine); `on_release_complete` now acks `DropApplied(TRANSIENT_COMPLETE_STEP)` (the new
+  `SourceRetired` signal) so the tail reaches Done. Dead resolution: `dead_participants` (fed by a
+  kill-only `Inbound::NodeUnreachable`) + a `scan_deadlines` gate → a dead SOURCE self-promotes the dest
+  from the go-token (zero loss); a dead DEST abandons the source's retained copy as accounted
+  loss-within-budget (new `InterShardFlow::TransientAbandon` + `on_transient_abandon`), terminal-on-first-
+  fire (no D-37 bounce). Dead-aware oracle twins (`verify_transient_*_excluding`). 3 crash cells
+  (source-kill → `BatchCommittedAt{DEST}`, dest-kill → `BatchDroppedWithinBudget{Debris}`, crash-resurrect
+  control proving the kill-only gate fires NO spurious resolution). Gate-green at 100% Tier-A; holistic
+  audit DONE_NO_CRITICAL. Deviations from the design (correctness-improving, recorded in the doc): NO
+  `GcGoToken` in Slice 1 (it would break the D-7c `batch_goes` gate + `TRANSIENT-AUTHORITY-HELD`);
+  resolution counters live on the orchestrator (the dest can't distinguish a self-promote).
+- **⚠️ DUAL-PARTICIPANT death (audit D7D-1, MEDIUM, owed Slice 2):** if BOTH source AND dest are killed
+  mid-handoff, the source-first `scan_deadlines` gate selects `SourceUnreachable` → a promote aimed at the
+  DEAD dest (never applied), and NO loss path fires (`on_transient_abandon` is never reached) → the debris
+  is held at no live shard AND counted in no loss bucket = a SILENT, uncounted loss. NOT an invariant
+  break (no double-hold / no corruption — the cardinal invariant holds unconditionally); a loss-ACCOUNTING
+  gap under a simultaneous double-kill crash-storm (debris-only, loss-tolerable). Proper fix: a COUNTED
+  orchestrator-side drop on dual-death so the loss enters the budget gate, WITH a dual-victim harness
+  `Scenario` (the current single-`victim` field cannot express it). The D-7d doc's conservation claim is
+  scoped to single-participant kills accordingly.
+- **Still owed (D-7d Slice 2+):** the BURST-scale crash cells (1000-item wholesale self-promote;
+  cluster-level over-budget DEST-kill → `LostOverBudget` honest RED) + the dual-death counted-drop above;
   `StubConfig.max_items_per_batch` (the source-side wire-frame cap — DEFERRED whole from D-7c because a
   cap-split is lossy-if-triggered under the derived-id dedup journal and `MsgClass::Saga` is reliable, so
   the sub-batch→distinct-go-token wiring must land WITH it here); MIXED-KIND / MULTI-DEST-REALM burst (a
   3rd shard + a `seed_transient_crossing_to(dest, realm)` parameterization — structurally unreachable
   through the current `dest=DEST`/`to_realm=System(8)`-hardcoded API); bounded GC of completed go-tokens
-  (`batch_goes` unbounded — the oracle needs the live record until a drop-completion signal D-7d
-  co-designs; GC MUST fire at `on_release_complete`, the shard's terminal retire, NOT a timeout); the
-  durable go-token WAL (in-memory, [[D-6]]).
+  (`batch_goes` unbounded — the oracle needs the live record until a drop-completion signal Slice 2
+  co-designs; GC MUST fire at `on_release_complete`, the shard's terminal retire, NOT a timeout — and NOT
+  on the crash-path Done, which would break the D-7c quiescence count); the durable go-token WAL
+  (in-memory, [[D-6]]); the ORCHESTRATOR-kill cell ([[D-6]] — `batch_goes`/live-saga set are in-memory);
+  D-3 lease-lapse liveness as the real crash-vs-partition discriminator + the "flap" fault (replacing the
+  kill-only `NodeUnreachable` heuristic — the prod 20s-idle-reap-of-a-live-peer path is gate-invisible today).
 - **Shard-side handoff is O(K·M), not O(batch) (audit D-7c SCALE-1, LOW):** the one-write-per-batch claim
   is honest for the ORCHESTRATOR control plane ONLY (doc `d7c_transient_burst.md` lines 36/86). On the
   shard, `on_transient_release`/`on_transient_promote`/`on_release_complete` (`stub.rs`) each scan the

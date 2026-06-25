@@ -29,9 +29,9 @@ use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId}
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
     DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd,
-    STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_BATCH_STEP, TRANSIENT_DROP_STEP,
-    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransientItem,
-    TransitionPayload,
+    STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP,
+    TRANSIENT_COMPLETE_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck,
+    TransferEnvelope, TransientHandoff, TransientItem, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -505,6 +505,12 @@ pub struct StubStats {
     /// loss_budget` gate compares this per-kind count to the kind's `LossBudget` — so a mixed-kind
     /// burst can never spuriously trip a single-kind budget. `DetHashMap` (fixed-seed → deterministic).
     pub transients_lost_in_handover: DetHashMap<EntityKind, u64>,
+    /// D-7d — transients dropped by `on_transient_abandon` (the dead-DEST resolution: the dest died
+    /// mid-handoff, so the source's retained copy is dropped as an ACCOUNTED loss). 0 on the happy path
+    /// and on a dead-SOURCE resolution (which self-promotes, no loss); `> 0` is the DEST-kill cell's
+    /// anti-vacuity proof. Each increment ALSO feeds `transients_lost_in_handover` (the SAME budget the
+    /// realm self-fence feeds, DRY) — so `verify_transient_loss_budget` sees a deterministic, named loss.
+    pub transients_departure_cancelled: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2025,9 +2031,18 @@ fn on_transient_promote(
 /// SOURCE — phase 3 (D-7b): on `ReleaseComplete` (after the dest's promote-confirm) RETIRE this
 /// batch's retained `Departing{b}` items. STATE-idempotent (like the durable retained-ghost teardown,
 /// `remove_retained_ghost`): a redelivery finds no `Departing` item and is a counted no-op
-/// (`transient_release_noop`) — no journal needed, no ack (terminal). A lost `ReleaseComplete` leaves
-/// the uncounted `Departing` copy until a realm self-fence buckets it as a genuine in-flight loss.
-fn on_release_complete(rc: TransientHandoff, owned: &mut OwnedTransients, stats: &mut StubStats) {
+/// (`transient_release_noop`). D-7d: it now ALWAYS acks `DropApplied`(`TRANSIENT_COMPLETE_STEP`) — the
+/// `SourceRetired` signal that drives the saga's `BatchHandoff` tail to `Done` (so a lost
+/// `ReleaseComplete` is RE-DRIVEN by the saga's `AwaitComplete` Timeout, not left until a realm
+/// self-fence). The ack fires on BOTH paths (removed + already-gone) so a redelivery is still ackable;
+/// the orchestrator's tombstoned saga absorbs the duplicate as a no-op.
+fn on_release_complete(
+    rc: TransientHandoff,
+    owned: &mut OwnedTransients,
+    stats: &mut StubStats,
+    config: &StubConfig,
+    outbox: &mut OutboundBox,
+) {
     let mut to_remove: Vec<EntityId> = Vec::new();
     for (entity, t) in owned.0.iter() {
         if let TransientStatus::Departing { batch } = t.status
@@ -2042,6 +2057,55 @@ fn on_release_complete(rc: TransientHandoff, owned: &mut OwnedTransients, stats:
         for entity in to_remove {
             owned.0.remove(&entity);
         }
+    }
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::TransferAck(TransferAck::DropApplied {
+            transfer_id: rc.transfer,
+            step_id: TRANSIENT_COMPLETE_STEP,
+        }),
+    );
+}
+
+/// SOURCE — D-7d dead-DEST resolution: on `TransientAbandon` (the dest died mid-handoff, so the only
+/// promote target is gone) DROP this batch's retained items — `Departing{b}` (already released) OR
+/// `Held{outbound: Some(b)}` (the dest died before the source released) — as an ACCOUNTED loss: each is
+/// removed + bucketed into `transients_lost_in_handover` by kind (the SAME budget the realm self-fence
+/// feeds — DRY, so `verify_transient_loss_budget` reads ONE honest population) + counted in
+/// `transients_departure_cancelled`. Journaled idempotent (`TRANSIENT_ABANDON_STEP`): a redelivery
+/// short-circuits, so the loss counts EXACTLY once. A corrupt kind tag (HR2 — never decode-to-default)
+/// is still removed but NOT bucketed (no kind to attribute the loss to — the `Err` arm).
+fn on_transient_abandon(
+    abandon: TransientHandoff,
+    owned: &mut OwnedTransients,
+    applied: &mut AppliedSteps,
+    stats: &mut StubStats,
+) {
+    match applied.journal_step(abandon.transfer, TRANSIENT_ABANDON_STEP) {
+        StepOutcome::FirstApply => {
+            let mut to_remove: Vec<EntityId> = Vec::new();
+            for (entity, t) in owned.0.iter() {
+                let in_batch = match t.status {
+                    TransientStatus::Departing { batch } => batch == abandon.transfer,
+                    TransientStatus::Held {
+                        outbound: Some(batch),
+                    } => batch == abandon.transfer,
+                    _ => false,
+                };
+                if in_batch {
+                    to_remove.push(*entity);
+                }
+            }
+            for entity in to_remove {
+                owned.0.remove(&entity);
+                stats.transients_departure_cancelled += 1;
+                if let Ok(kind) = EntityKind::from_tag(entity.kind_tag()) {
+                    *stats.transients_lost_in_handover.entry(kind).or_insert(0) += 1;
+                }
+            }
+        }
+        StepOutcome::AlreadyApplied => stats.transient_release_noop += 1,
     }
 }
 
@@ -2122,7 +2186,14 @@ fn on_directory_reply(
             return;
         }
         Ok(InterShardFlow::ReleaseComplete(rc)) => {
-            on_release_complete(rc, owned_transients, stats);
+            on_release_complete(rc, owned_transients, stats, config, outbox);
+            return;
+        }
+        // SOURCE: the D-7d dead-DEST resolution — abandon this batch's retained copy as an accounted
+        // loss (no ack: the resolving saga is already terminal; the fabric delivers reliably to the
+        // live source, and a lost abandon falls back to the realm self-fence loss path).
+        Ok(InterShardFlow::TransientAbandon(abandon)) => {
+            on_transient_abandon(abandon, owned_transients, applied, stats);
             return;
         }
         // SOURCE: the saga-pushed ordered Demote (1d.5b.1) — Owned→Frozen→Ghost + DemoteAck.
@@ -3027,13 +3098,14 @@ mod tests {
         assert_eq!(decode_flows(&mut outbox).len(), 1, "re-acked exactly once");
 
         // COMPLETE (SOURCE): retire THIS batch's `Departing` copy (held_this); a `Departing` for
-        // ANOTHER batch (departing_other) is untouched; no ack (terminal).
+        // ANOTHER batch (departing_other) is untouched; D-7d: ALWAYS ack DropApplied(COMPLETE_STEP) —
+        // the `SourceRetired` signal that drives the saga's BatchHandoff tail to Done.
         let rc = TransientHandoff {
             transfer: this,
             step_id: TRANSIENT_RELEASE_STEP,
             fence: Fence(5),
         };
-        on_release_complete(rc, &mut owned, &mut stats);
+        on_release_complete(rc, &mut owned, &mut stats, &cfg, &mut outbox);
         assert!(
             !owned.0.contains_key(&held_this),
             "the retained Departing copy for THIS batch is retired"
@@ -3043,15 +3115,28 @@ mod tests {
             TransientStatus::Departing { batch: other },
             "a Departing copy for ANOTHER batch is untouched"
         );
-        assert!(
-            decode_flows(&mut outbox).is_empty(),
-            "ReleaseComplete is terminal — no ack"
+        assert_eq!(
+            decode_flows(&mut outbox),
+            vec![(
+                ORCH,
+                InterShardFlow::TransferAck(TransferAck::DropApplied {
+                    transfer_id: this,
+                    step_id: TRANSIENT_COMPLETE_STEP,
+                })
+            )],
+            "ReleaseComplete acks the retire-complete so the saga tail reaches Done (SourceRetired)"
         );
-        // COMPLETE REDELIVERY: no Departing for THIS batch → counted no-op.
-        on_release_complete(rc, &mut owned, &mut stats);
+        // COMPLETE REDELIVERY: no Departing for THIS batch → counted no-op, but STILL acks
+        // (at-least-once — the orchestrator's tombstoned saga absorbs the duplicate).
+        on_release_complete(rc, &mut owned, &mut stats, &cfg, &mut outbox);
         assert_eq!(
             stats.transient_release_noop, 2,
             "the redelivered complete is a counted no-op"
+        );
+        assert_eq!(
+            decode_flows(&mut outbox).len(),
+            1,
+            "the redelivery still acks (at-least-once)"
         );
     }
 
@@ -3233,6 +3318,90 @@ mod tests {
     }
 
     #[test]
+    fn on_transient_abandon_drops_the_batch_as_accounted_loss_and_is_idempotent() {
+        // D-7d dead-DEST resolution: abandon drops THIS batch's retained items — both `Departing{this}`
+        // (already released) AND `Held{Some(this)}` (the dest died before release) — bucketing each into
+        // the per-kind loss budget + counting departure_cancelled. A `Held{None}` resident, a
+        // `Departing{other}` batch, and a `Held{Some(other)}` batch are UNTOUCHED. A corrupt kind tag is
+        // removed but NOT bucketed (the from_tag Err arm). A redelivery is a journaled no-op.
+        let this = TransferId(0xD7D);
+        let other = TransferId(0xBEEF);
+        let mk = |status| Transient {
+            pose: transient_pose(),
+            anchor_fence: Fence(3),
+            status,
+        };
+        let mut owned = OwnedTransients::default();
+        let dep_this = EntityId::pack(EntityKind::Debris, 1, 1, 0);
+        let held_this = EntityId::pack(EntityKind::Debris, 1, 2, 0);
+        let resident = EntityId::pack(EntityKind::Debris, 1, 3, 0);
+        let dep_other = EntityId::pack(EntityKind::Debris, 1, 4, 0);
+        let held_other = EntityId::pack(EntityKind::Debris, 1, 5, 0);
+        let corrupt = EntityId(99u128 << 120); // tag 99 → from_tag Err (removed, not bucketed)
+        owned
+            .0
+            .insert(dep_this, mk(TransientStatus::Departing { batch: this }));
+        owned.0.insert(
+            held_this,
+            mk(TransientStatus::Held {
+                outbound: Some(this),
+            }),
+        );
+        owned
+            .0
+            .insert(resident, mk(TransientStatus::Held { outbound: None }));
+        owned
+            .0
+            .insert(dep_other, mk(TransientStatus::Departing { batch: other }));
+        owned.0.insert(
+            held_other,
+            mk(TransientStatus::Held {
+                outbound: Some(other),
+            }),
+        );
+        owned
+            .0
+            .insert(corrupt, mk(TransientStatus::Departing { batch: this }));
+        let mut applied = AppliedSteps::default();
+        let mut stats = StubStats::default();
+        let abandon = TransientHandoff {
+            transfer: this,
+            step_id: TRANSIENT_ABANDON_STEP,
+            fence: Fence(3),
+        };
+
+        on_transient_abandon(abandon, &mut owned, &mut applied, &mut stats);
+        // THIS batch's Departing + Held{Some} + the corrupt one are dropped.
+        assert!(!owned.0.contains_key(&dep_this));
+        assert!(!owned.0.contains_key(&held_this));
+        assert!(!owned.0.contains_key(&corrupt));
+        // The resident + the OTHER batch's copies survive (not this batch).
+        assert!(owned.0.contains_key(&resident));
+        assert!(owned.0.contains_key(&dep_other));
+        assert!(owned.0.contains_key(&held_other));
+        assert_eq!(
+            stats.transients_departure_cancelled, 3,
+            "3 items abandoned (2 Debris + 1 corrupt)"
+        );
+        assert_eq!(
+            stats.transients_lost_in_handover.get(&EntityKind::Debris),
+            Some(&2),
+            "only the 2 Debris are bucketed (the corrupt kind is removed but not attributable)"
+        );
+
+        // REDELIVERY: the journal short-circuits — no double-count, the survivors are untouched.
+        on_transient_abandon(abandon, &mut owned, &mut applied, &mut stats);
+        assert_eq!(
+            stats.transients_departure_cancelled, 3,
+            "the redelivery did not re-count"
+        );
+        assert_eq!(
+            stats.transient_release_noop, 1,
+            "the redelivery is a counted journal no-op"
+        );
+    }
+
+    #[test]
     fn transient_batch_and_drop_flow_through_the_inbound_dispatch() {
         // Covers the inbound DISPATCH into the transient handlers (the direct-call tests above cover
         // the handlers themselves): on_directory_reply → on_transfer_envelope's `TransientBatch` arm
@@ -3363,7 +3532,58 @@ mod tests {
                 .contains_key(&src_item),
             "ReleaseComplete retired the Departing copy"
         );
-        assert!(sent.is_empty(), "ReleaseComplete is terminal — no egress");
+        let complete_ack =
+            postcard::to_allocvec(&InterShardFlow::TransferAck(TransferAck::DropApplied {
+                transfer_id: src_batch,
+                step_id: TRANSIENT_COMPLETE_STEP,
+            }))
+            .expect("encode");
+        assert_eq!(
+            sent,
+            vec![(ORCH, MsgClass::Saga, complete_ack)],
+            "D-7d: ReleaseComplete acks the retire-complete (SourceRetired drives the saga tail to Done)"
+        );
+
+        // The D-7d TransientAbandon dispatch arm (SOURCE role): seed a fresh Departing item for a 3rd
+        // batch (the dead-dest case), abandon it → dropped + bucketed as an accounted loss, NO ack (the
+        // resolving saga is already terminal).
+        let abandon_batch = TransferId(0xB9);
+        let abandon_item = EntityId::pack(EntityKind::Debris, 1, 8, 9);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            abandon_item,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Departing {
+                    batch: abandon_batch,
+                },
+            },
+        );
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientAbandon(TransientHandoff {
+                transfer: abandon_batch,
+                step_id: TRANSIENT_ABANDON_STEP,
+                fence: Fence(1),
+            }),
+        )]);
+        assert!(
+            !rig.world
+                .resource::<OwnedTransients>()
+                .0
+                .contains_key(&abandon_item),
+            "TransientAbandon dropped the retained Departing copy"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .transients_lost_in_handover
+                .get(&EntityKind::Debris),
+            Some(&1),
+            "the abandoned Debris is bucketed as an accounted loss"
+        );
+        assert!(sent.is_empty(), "TransientAbandon is terminal — no ack");
     }
 
     fn input_msg(seq: u64, fence: Fence, movement: [f32; 3], look: [f32; 2]) -> Inbound {

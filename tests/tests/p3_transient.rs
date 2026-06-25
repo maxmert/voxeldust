@@ -16,17 +16,24 @@ use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::glam::DVec3;
 use vd_core::pose::RealmId;
 use vd_core::{AccountId, BatchId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
-use vd_harness::fabric::FaultFabric;
+use vd_harness::fabric::{CrashWhen, FaultFabric};
 use vd_harness::oracle::{verify_transient_authority_held, verify_transient_conservation_tick};
 use vd_harness::topology::{InspectReport, StaggerPlan, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
-    DEST, SHARD, TRANSIENT_SEED_POS0, TRANSIENT_SEED_TICK0, dest_stub_config, durable_subset,
+    DEST, EndState, Fault, SHARD, Scenario, TRANSIENT_SEED_POS0, TRANSIENT_SEED_TICK0,
+    assert_transient_end_state, dest_stub_config, dest_unreachable_resolutions, durable_subset,
     held_at_dest, live_sagas, p1_client, p2_cluster, p2_cluster_staggered, read_subject,
-    realm_fence, seed_transient_burst, seed_transient_crossing, source_transients_emitted,
-    transient_dropped_total, trigger_transfer, walk_forward,
+    realm_fence, run_transient_fault_scenario, seed_transient_burst, seed_transient_crossing,
+    source_transients_emitted, source_unreachable_resolutions, transient_dropped_total,
+    trigger_transfer, walk_forward,
 };
 use vd_wire::seams::directory::DirectoryKey;
+
+/// The `BatchHandoff` phase strings the D-7d crash cells target (matched as a `starts_with` prefix on
+/// the saga `Debug` — the deterministic drive-to-phase observable). ONE home each (no inline literal).
+const AT_AWAIT_RELEASE: &str = "BatchHandoff { phase: AwaitRelease";
+const AT_AWAIT_PROMOTE: &str = "BatchHandoff { phase: AwaitPromote";
 
 /// The durable-warmup client (one client per scenario; id is local to these tests).
 const CLIENT: NodeId = NodeId(100);
@@ -656,5 +663,124 @@ fn p3_durable_subset_moves_when_durable_saga_perturbed() {
         durable_subset(&base.inspect_all(), base_entity, base_session),
         durable_subset(&perturbed.inspect_all(), p_entity, p_session),
         "a real durable-path change (transfer vs no-transfer) MOVES the durable subset",
+    );
+}
+
+// ====================================================================================================
+// D-7d Slice 1 — the kill-9 crash cells for the TRANSIENT class (the P3 headline for debris). Every
+// stranded transient lands DETERMINISTICALLY in exactly one of {held-at-the-survivor,
+// bucketed-as-accounted-loss}, proven under a permanent kill of the source or dest mid-handoff — plus a
+// crash-resurrect control proving the dead-resolution is gated on the KILL-only notice, not a bare timeout.
+// ====================================================================================================
+
+/// THE D-7d SOURCE-kill headline: the source is permanently killed mid-handoff AFTER the dest adopted
+/// (at `AwaitRelease`) — today's stranded-until-self-fence gap. The go-token authorizes the dest
+/// self-promote, so the debris settles at the DEST with ZERO loss; the dead source's `Held` corpse is
+/// excluded by the dead-aware oracle (never a phantom second holder). Permanent gate.
+#[test]
+fn p3_transient_source_kill_self_promotes_the_dest_zero_loss() {
+    let (mut topo, debris, dead) = run_transient_fault_scenario(
+        0xD7D_5041,
+        Scenario {
+            class: DurabilityClass::Transient,
+            victim: SHARD,
+            at_phase: AT_AWAIT_RELEASE,
+            crash_when: CrashWhen::PostStep, // ignored for a permanent Kill
+            fault: Fault::Kill,
+        },
+    );
+    assert_transient_end_state(
+        &mut topo,
+        debris,
+        &dead,
+        EndState::BatchCommittedAt { node: DEST },
+    );
+    // MECHANISM (anti-vacuity): the dead-SOURCE self-promote resolution actually fired exactly once —
+    // this is the kill path, NOT the happy path that completes without a resolution.
+    assert_eq!(
+        source_unreachable_resolutions(&mut topo),
+        1,
+        "the self-promote resolution fired exactly once",
+    );
+    assert_eq!(
+        dest_unreachable_resolutions(&mut topo),
+        0,
+        "no dest resolution"
+    );
+}
+
+/// THE D-7d DEST-kill headline: the dest is permanently killed mid-handoff AFTER the source released
+/// (at `AwaitPromote`) — the "vanished from the counted set" gap. The only promote target is gone, so
+/// the source ABANDONS its retained `Departing` copy as a DETERMINISTIC accounted loss (within the
+/// Debris budget, NON-ZERO — the retained copy is what makes the loss COUNTABLE, not silent). Permanent gate.
+#[test]
+fn p3_transient_dest_kill_abandons_within_budget() {
+    let (mut topo, debris, dead) = run_transient_fault_scenario(
+        0xD7D_4553,
+        Scenario {
+            class: DurabilityClass::Transient,
+            victim: DEST,
+            at_phase: AT_AWAIT_PROMOTE,
+            crash_when: CrashWhen::PostStep, // ignored for a permanent Kill
+            fault: Fault::Kill,
+        },
+    );
+    assert_transient_end_state(
+        &mut topo,
+        debris,
+        &dead,
+        EndState::BatchDroppedWithinBudget {
+            kind: EntityKind::Debris,
+        },
+    );
+    assert_eq!(
+        dest_unreachable_resolutions(&mut topo),
+        1,
+        "the abandon resolution fired exactly once",
+    );
+    assert_eq!(
+        source_unreachable_resolutions(&mut topo),
+        0,
+        "no source resolution",
+    );
+}
+
+/// THE D-7d control: the source CRASHES mid-handoff (at `AwaitRelease`) then RESURRECTS — the fabric
+/// redelivers the in-flight `TransientRelease` and the choreography completes NORMALLY to the DEST. The
+/// source NEVER enters `dead_participants` (a crash emits NO kill-only `NodeUnreachable`), so NO
+/// resolution fires — proving the dead-resolution is gated on the kill-only notice, NOT a bare timeout
+/// (the held-set self-heals before any resolution could). The `after` outlasts the redrive deadline, so
+/// the BatchHandoff Timeout re-drive (the "due but NOT dead" branch) is exercised during the crash.
+#[test]
+fn p3_transient_source_crash_resurrect_completes_without_resolving() {
+    let (mut topo, debris, dead) = run_transient_fault_scenario(
+        0xD7D_C0DE,
+        Scenario {
+            class: DurabilityClass::Transient,
+            victim: SHARD,
+            at_phase: AT_AWAIT_RELEASE,
+            crash_when: CrashWhen::PostStep,
+            fault: Fault::CrashResurrect { after: 12 }, // > redrive deadline (8) → Timeout re-drive fires
+        },
+    );
+    assert!(dead.is_empty(), "the resurrected source is not a dead node");
+    // The SAME outcome as the kill cell (debris at the DEST, zero loss) — but reached by NORMAL
+    // completion, NOT a resolution.
+    assert_transient_end_state(
+        &mut topo,
+        debris,
+        &dead,
+        EndState::BatchCommittedAt { node: DEST },
+    );
+    // THE GATE: a crash is NOT a kill — neither dead-resolution fired (no spurious abandon/self-promote).
+    assert_eq!(
+        source_unreachable_resolutions(&mut topo),
+        0,
+        "a crash-then-resurrect must NOT trigger a dead-source resolution (kill-only gate)",
+    );
+    assert_eq!(
+        dest_unreachable_resolutions(&mut topo),
+        0,
+        "no dest resolution either",
     );
 }

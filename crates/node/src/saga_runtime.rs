@@ -49,8 +49,9 @@ use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning};
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
-    PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_DROP_STEP,
-    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransitionPayload,
+    PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP,
+    TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff,
+    TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -141,6 +142,24 @@ pub struct SagaRuntimeRes {
     /// 1000-item single batch). The metric is forward-compatible with [[D-6]]'s durable WAL: one
     /// in-memory write per batch is exactly one fsync per batch.
     batch_go_writes: u64,
+    /// D-7d — nodes the orchestrator has learned are UNREACHABLE (fed by the kill-only
+    /// `Inbound::NodeUnreachable` arm). Bounded by the cluster node count. `scan_deadlines` reads it to
+    /// resolve a `BatchHandoff` saga whose source/dest is dead (self-promote the dest / abandon the
+    /// source) instead of re-driving toward a corpse forever. ⚠️ KILL-ONLY-TODAY: in io-prod a single
+    /// `NodeUnreachable` can mean "one send failed" (a transient blip / 20s idle reap of a LIVE peer),
+    /// NOT "dead" — so the resolution is doubly gated (in this set AND the redrive deadline elapsed) and
+    /// a node is NEVER cleared here (a harness kill is permanent). The proper crash-vs-partition
+    /// discriminator (lease-lapse liveness + clear-on-recovery) is owed D-3; until then the deterministic
+    /// suite's `kill == permanent NodeUnreachable` keeps this sound, and the prod blip path is gate-
+    /// invisible (the fabric cannot model a recoverable `NodeUnreachable` — the D-3 "flap" fault).
+    dead_participants: std::collections::BTreeSet<NodeId>,
+    /// D-7d anti-vacuity observables (orchestrator-side: the dest cannot tell a self-promote from a
+    /// normal promote, so the resolution is counted HERE where it is decided). `source_unreachable`
+    /// counts dead-SOURCE self-promote resolutions (BatchCommittedAt, zero loss); `dest_unreachable`
+    /// counts dead-DEST abandon resolutions (BatchDroppedWithinBudget). Both 0 on every healthy run —
+    /// `> 0` is the proof a crash cell's resolution actually fired (not that the happy path completed).
+    source_unreachable_resolutions: u64,
+    dest_unreachable_resolutions: u64,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -243,6 +262,22 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn batch_go_writes(&self) -> u64 {
         self.batch_go_writes
+    }
+
+    /// D-7d — the count of dead-SOURCE self-promote resolutions (the dest was self-promoted from the
+    /// go-token after the source died mid-handoff). 0 on every healthy run; `> 0` proves a SOURCE-kill
+    /// cell's resolution fired (anti-vacuity for `BatchCommittedAt`).
+    #[must_use]
+    pub fn source_unreachable_resolutions(&self) -> u64 {
+        self.source_unreachable_resolutions
+    }
+
+    /// D-7d — the count of dead-DEST abandon resolutions (the source's retained copy was dropped as an
+    /// accounted loss after the dest died mid-handoff). 0 on every healthy run; `> 0` proves a DEST-kill
+    /// cell's resolution fired (anti-vacuity for `BatchDroppedWithinBudget`).
+    #[must_use]
+    pub fn dest_unreachable_resolutions(&self) -> u64 {
+        self.dest_unreachable_resolutions
     }
 }
 
@@ -455,6 +490,58 @@ fn run_to_quiescence(
                         new_fence: expected,
                     });
                 }
+                // D-7d transient post-commit tail egress (replacing the deleted ledger-driven
+                // handle_batch_adopted/handle_drop_applied): pure egress to ctx.source/ctx.dest carrying
+                // the committed go-token `fence`. The shard journals each by (transfer, step), so a
+                // Timeout re-emit (the producer re-drive) is idempotent. FF-1: no synchronous feedback —
+                // the shard's ack rides TransferAck back, routed to the FSM in `drive_sagas`.
+                SagaAction::EmitTransientRelease { fence } => {
+                    outbox.push_flow(
+                        ctx.source,
+                        MsgClass::Saga,
+                        &InterShardFlow::TransientRelease(TransientHandoff {
+                            transfer: ctx.transfer,
+                            step_id: TRANSIENT_RELEASE_STEP,
+                            fence,
+                        }),
+                    );
+                }
+                SagaAction::EmitTransientPromote { fence } => {
+                    outbox.push_flow(
+                        ctx.dest,
+                        MsgClass::Saga,
+                        &InterShardFlow::TransientDrop(TransientHandoff {
+                            transfer: ctx.transfer,
+                            step_id: TRANSIENT_DROP_STEP,
+                            fence,
+                        }),
+                    );
+                }
+                SagaAction::EmitReleaseComplete { fence } => {
+                    outbox.push_flow(
+                        ctx.source,
+                        MsgClass::Saga,
+                        &InterShardFlow::ReleaseComplete(TransientHandoff {
+                            transfer: ctx.transfer,
+                            step_id: TRANSIENT_RELEASE_STEP,
+                            fence,
+                        }),
+                    );
+                }
+                // D-7d dead-DEST resolution: the source ABANDONS the batch as an accounted loss (the
+                // dest died, so the promote target is gone). Pure egress to ctx.source carrying the
+                // go-token fence; the source journals `(transfer, TRANSIENT_ABANDON_STEP)`. FF-1.
+                SagaAction::EmitTransientAbandon { fence } => {
+                    outbox.push_flow(
+                        ctx.source,
+                        MsgClass::Saga,
+                        &InterShardFlow::TransientAbandon(TransientHandoff {
+                            transfer: ctx.transfer,
+                            step_id: TRANSIENT_ABANDON_STEP,
+                            fence,
+                        }),
+                    );
+                }
                 // P3: group-committed redb WAL. LOUD deferral: an orchestrator restart loses
                 // every in-flight saga until then — never let a log read as if durability
                 // exists (audit ROB-2).
@@ -665,6 +752,7 @@ fn deadline_for(state: &SagaState, tuning: &SagaTuning) -> u64 {
         | SagaState::Aborting { .. } => tuning.abort_deadline_ticks,
         SagaState::CommittingCas { .. }
         | SagaState::BatchCommitting { .. }
+        | SagaState::BatchHandoff { .. }
         | SagaState::Swapping { .. }
         | SagaState::Demoting { .. }
         | SagaState::Promoting { .. }
@@ -688,98 +776,58 @@ fn scan_deadlines(
     now: UniverseTick,
 ) {
     let tuning = runtime.tuning;
-    let mut due: Vec<TransferId> = Vec::new();
+    let mut due: Vec<(TransferId, SagaEvent)> = Vec::new();
     for (transfer, live) in runtime.sagas.iter_mut() {
         if now.0.saturating_sub(live.since.0) >= deadline_for(&live.state, &tuning) {
             live.since = now; // re-arm BEFORE delivery — one fire per window, never a per-tick storm
-            due.push(*transfer);
+            // D-7d: a due `BatchHandoff` saga whose source/dest is KNOWN-DEAD resolves (self-promote /
+            // abandon) instead of re-driving toward a corpse forever; otherwise the phase's idempotent
+            // Timeout re-drive. The gate is doubly-conditioned (BatchHandoff AND in `dead_participants`)
+            // so a healthy slow handoff (no kill ⇒ no NodeUnreachable ⇒ not in the set) only ever
+            // re-drives — never a spurious resolution. `dead_participants` is a field disjoint from
+            // `sagas`, so the direct read here is a sound partial borrow.
+            let event = if let SagaState::BatchHandoff { .. } = live.state {
+                if runtime.dead_participants.contains(&live.ctx.source) {
+                    SagaEvent::SourceUnreachable
+                } else if runtime.dead_participants.contains(&live.ctx.dest) {
+                    SagaEvent::DestUnreachable
+                } else {
+                    SagaEvent::Timeout
+                }
+            } else {
+                SagaEvent::Timeout
+            };
+            due.push((*transfer, event));
         }
     }
-    for transfer in due {
-        deliver(
-            runtime,
-            dir,
-            outbox,
-            epoch,
-            now,
-            transfer,
-            SagaEvent::Timeout,
-        );
-    }
-}
-
-/// Look up a batch's committed go-token (commit-fence, source, dest) and run `f` with it; a missing
-/// go-token (a stray/duplicate ack, or a batch that never started/already retired) is a LOUD no-op —
-/// never a silent drop. The shared lookup for both transient-handoff ack handlers (DRY); read-only on
-/// the runtime (the egress is pure; FF-1).
-fn with_batch_token(
-    runtime: &SagaRuntimeRes,
-    transfer: TransferId,
-    f: impl FnOnce(Fence, NodeId, NodeId),
-) {
-    match runtime.batch_goes.get(&BatchId(transfer)) {
-        Some(&(fence, source, dest)) => f(fence, source, dest),
-        None => tracing::warn!(
-            transfer = transfer.0,
-            "transient handoff ack with no committed go-token: ignored (stray/duplicate)"
-        ),
-    }
-}
-
-/// Handle the dest's `BatchAdopted` ack (D-7b adopt-before-drop, PHASE 1): the dest now holds the
-/// batch as the uncounted `Arriving` tier, so tell the SOURCE ONLY to RELEASE (flip `Held→Departing`,
-/// go uncounted) — the transient twin of the durable ordered `Demote`. The dest promote does NOT fire
-/// yet; it is gated on the source's `DropApplied` (`handle_drop_applied`), so the source is uncounted
-/// BEFORE the dest counts — the holder set is never `{source, dest}`.
-fn handle_batch_adopted(runtime: &SagaRuntimeRes, outbox: &mut OutboundBox, transfer: TransferId) {
-    with_batch_token(runtime, transfer, |fence, source, _dest| {
-        outbox.push_flow(
-            source,
-            MsgClass::Saga,
-            &InterShardFlow::TransientRelease(TransientHandoff {
-                transfer,
-                step_id: TRANSIENT_RELEASE_STEP,
-                fence,
-            }),
-        );
-    });
-}
-
-/// Handle a `DropApplied` ack (D-7b, the phased proof-of-apply gate): `TRANSIENT_RELEASE_STEP` means
-/// the SOURCE released (now uncounted) → PROMOTE the dest (`TransientDrop` to DEST only); any other
-/// phase is the DEST's promote-confirm (`TRANSIENT_DROP_STEP`) → retire the source's retained
-/// `Departing` copy (`ReleaseComplete` to SOURCE only). The binary if/else is total over the only two
-/// phases `DropApplied` ever carries (enforced by its sole producers — the source release-ack + the
-/// dest promote-confirm), so both arms are reachable and there is no uncoverable third branch (HR5).
-fn handle_drop_applied(
-    runtime: &SagaRuntimeRes,
-    outbox: &mut OutboundBox,
-    transfer: TransferId,
-    step_id: u32,
-) {
-    with_batch_token(runtime, transfer, |fence, source, dest| {
-        if step_id == TRANSIENT_RELEASE_STEP {
-            outbox.push_flow(
-                dest,
-                MsgClass::Saga,
-                &InterShardFlow::TransientDrop(TransientHandoff {
-                    transfer,
-                    step_id: TRANSIENT_DROP_STEP,
-                    fence,
-                }),
-            );
-        } else {
-            outbox.push_flow(
-                source,
-                MsgClass::Saga,
-                &InterShardFlow::ReleaseComplete(TransientHandoff {
-                    transfer,
-                    step_id: TRANSIENT_RELEASE_STEP,
-                    fence,
-                }),
-            );
+    for (transfer, event) in due {
+        // Count the resolution (orchestrator-side anti-vacuity) BEFORE delivery; the resolution arm is
+        // terminal-on-first-fire (the saga tombstones), so each resolved batch counts exactly once.
+        match event {
+            SagaEvent::SourceUnreachable => runtime.source_unreachable_resolutions += 1,
+            SagaEvent::DestUnreachable => runtime.dest_unreachable_resolutions += 1,
+            _ => {}
         }
-    });
+        deliver(runtime, dir, outbox, epoch, now, transfer, event);
+    }
+}
+
+/// Map a `DropApplied` proof-of-apply ack to the [`SagaState::BatchHandoff`] event its `step_id` proves
+/// (D-7d). Total over the only three steps `DropApplied` carries — RELEASE (the SOURCE went
+/// `Held→Departing`), DROP (the DEST promoted `Arriving→Held`), else COMPLETE (the SOURCE retired its
+/// retained `Departing` copy) — each emitted by exactly ONE producer, so all three arms are reachable
+/// and the `else` is the COMPLETE case, NOT an unexpected-step catch-all (HR5). The egress that used to
+/// live in the old `handle_drop_applied`/`handle_batch_adopted` is now in the saga's `Emit*` executors
+/// (the saga owns the choreography — so a stranded handoff is visible to `scan_deadlines`).
+#[must_use]
+fn drop_applied_event(step_id: u32) -> SagaEvent {
+    if step_id == TRANSIENT_RELEASE_STEP {
+        SagaEvent::SourceDropApplied
+    } else if step_id == TRANSIENT_DROP_STEP {
+        SagaEvent::DestDropApplied
+    } else {
+        SagaEvent::SourceRetired
+    }
 }
 
 /// The orchestrator saga-runtime system: process new triggers, FIRE due deadlines (Slice 2a), then
@@ -799,8 +847,15 @@ pub fn drive_sagas(
     // gets its Timeout re-drive/abort next tick (the producer is the R1 backstop, never a wedge).
     scan_deadlines(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
     for msg in &inbox.0 {
-        let Inbound::Wire { class, bytes, .. } = msg else {
-            continue;
+        let (class, bytes) = match msg {
+            Inbound::Wire { class, bytes, .. } => (class, bytes),
+            // D-7d: a kill-only delivery failure — RECORD the dead node so a due `BatchHandoff` saga
+            // resolves (self-promote / abandon) next scan instead of re-driving toward a corpse forever.
+            // Never cleared here (a harness kill is permanent); D-3 owns the recoverable-blip path.
+            Inbound::NodeUnreachable { to, .. } => {
+                runtime.dead_participants.insert(*to);
+                continue;
+            }
         };
         if *class != MsgClass::Saga {
             continue;
@@ -840,19 +895,37 @@ pub fn drive_sagas(
                     SagaEvent::SourceFlushed { drained_seq },
                 );
             }
-            // D-7b adopt-before-drop PHASE 1: the dest ADOPTED the batch (uncounted `Arriving`) → tell
-            // the SOURCE ONLY to release (`Held→Departing`), gating the dest promote on the source's
-            // `DropApplied`. The transient twin of the demote-before-promote tail.
+            // D-7d adopt-before-drop PHASE 1: the dest ADOPTED the batch (uncounted `Arriving`) → drive
+            // the LIVE saga's `BatchHandoff` tail (`AwaitAdopt→AwaitRelease`, emitting `TransientRelease`
+            // to the source). Routing through `deliver` (not the old read-only handler) is what keeps the
+            // saga alive across the handoff so `scan_deadlines` can resolve a stranded item (D-7d kills).
             Ok(InterShardFlow::TransferAck(TransferAck::BatchAdopted { transfer_id, .. })) => {
-                handle_batch_adopted(&runtime, &mut outbox, transfer_id);
+                deliver(
+                    &mut runtime,
+                    &mut dir.0,
+                    &mut outbox,
+                    epoch,
+                    now,
+                    transfer_id,
+                    SagaEvent::BatchAdopted,
+                );
             }
-            // D-7b PHASES 2+3: a `DropApplied` proof-of-apply — RELEASE_STEP (source released) gates
-            // the dest PROMOTE; DROP_STEP (dest promote-confirmed) drives the source `ReleaseComplete`.
+            // D-7d PHASES 2-4: a `DropApplied` proof-of-apply advances the tail by the phase its step
+            // proves (`drop_applied_event`): RELEASE → `AwaitRelease→AwaitPromote` (promote the dest),
+            // DROP → `AwaitPromote→AwaitComplete` (release-complete the source), COMPLETE → `Done`.
             Ok(InterShardFlow::TransferAck(TransferAck::DropApplied {
                 transfer_id,
                 step_id,
             })) => {
-                handle_drop_applied(&runtime, &mut outbox, transfer_id, step_id);
+                deliver(
+                    &mut runtime,
+                    &mut dir.0,
+                    &mut outbox,
+                    epoch,
+                    now,
+                    transfer_id,
+                    drop_applied_event(step_id),
+                );
             }
             // The DEST's crossing ack: the dest journal is the exactly-once dedup. Release is NOT
             // gated on this ack — it rides the ordered `PromoteAck` (1d.5b.1) instead. The crossing
@@ -880,6 +953,8 @@ mod tests {
     use vd_sim::directory::DirectoryTuning;
     use vd_sim::io::Transport;
     use vd_sim::io::mem::MemHub;
+    use vd_sim::saga::BatchHandoffPhase;
+    use vd_wire::intershard::TRANSIENT_COMPLETE_STEP;
     use vd_wire::seams::directory::{DirectoryKey, DirectoryOp};
     use vd_wire::seams::transfer_control::{
         PrepareReject, PrepareResult, SpatialReject, TransferControl,
@@ -1534,20 +1609,19 @@ mod tests {
     #[test]
     fn transient_subject_commits_via_the_go_token_not_a_cas() {
         // HR2 SHORT PATH (D-7): a Transient subject is NOT in the directory (no `grant_subject` —
-        // burst isolation), takes NO lock, SKIPS Prepare/Cut/Freeze, and commits the batched
-        // go-token at START → reaches Done + tombstones the SAME tick (`live()==0`). It records
-        // EXACTLY ONE go-token (G-TIER: one write per batch, never per item), NEVER a per-entity CAS,
-        // NEVER a `CommitAuthority`. The dest's `BatchAdopted` then drives the D-7b structural
-        // drop-before-promote (release source → promote dest → ReleaseComplete). (The OLD
-        // `IssueTransientGo` stub PARKED here in `CommittingCas` with the key locked — D-7 closes that.)
+        // burst isolation), takes NO lock, SKIPS Prepare/Cut/Freeze, and commits the batched go-token at
+        // START. It records EXACTLY ONE go-token (G-TIER: one write per batch, never per item), NEVER a
+        // per-entity CAS, NEVER a `CommitAuthority`. D-7d: the go-token commit enters the POST-COMMIT
+        // `BatchHandoff` TAIL (the saga stays LIVE owning the adopt-before-drop choreography — so a
+        // stranded handoff is visible to `scan_deadlines`), tombstoning only at `SourceRetired`.
         let mut rig = Rig::new();
         rig.trigger(transient_ctx(Fence(9)));
-        rig.settle(); // process_starts: no lock (Transient) → start → BatchCommitting → go-token → CasWon → Done
+        rig.settle(); // process_starts: no lock (Transient) → start → BatchCommitting → go-token → CasWon → BatchHandoff{AwaitAdopt}
 
         assert_eq!(
             rig.live(),
-            0,
-            "the short-path transient saga reaches Done at start — no park"
+            1,
+            "the short-path transient saga enters the BatchHandoff tail (alive until the choreography completes), NOT tombstoned at commit"
         );
         assert!(
             rig.drain_gateway().is_empty(),
@@ -1619,20 +1693,45 @@ mod tests {
             ))],
             "the dest's promote-confirm retires the source's Departing copy"
         );
+        // The saga is STILL live through the handoff (the D-7d tail) — NOT tombstoned at commit.
+        assert_eq!(
+            rig.live(),
+            1,
+            "the saga owns the handoff to its terminal (awaiting the source's retire-complete)"
+        );
+
+        // PHASE 4 (D-7d) — the source's COMPLETE ack (`on_release_complete`'s `DropApplied`(COMPLETE))
+        // drives `SourceRetired` → the tail tombstones. NO further egress (the choreography is done).
+        rig.drop_applied(TRANSIENT_COMPLETE_STEP);
+        assert_eq!(
+            rig.live(),
+            0,
+            "the source's retire-complete drives the BatchHandoff tail to Done (tombstoned)"
+        );
+        // Split (NOT `&&`) so neither short-circuit edge is an uncoverable branch (HR5).
+        assert!(
+            rig.drain_source().is_empty(),
+            "no source egress after the handoff completes"
+        );
+        assert!(
+            rig.drain_dest().is_empty(),
+            "no dest egress after the handoff completes"
+        );
     }
 
     #[test]
     fn a_transient_handoff_ack_with_no_go_token_is_a_loud_noop() {
-        // D-7 defensive: a `BatchAdopted` OR a `DropApplied` for a batch with NO committed go-token (a
-        // stray/duplicate, or a batch that never started/already retired) emits NOTHING — a LOUD
-        // no-op, never a silent drop and never a panic (covers the `None` arm of `with_batch_token`,
-        // reached via both `handle_batch_adopted` and `handle_drop_applied`).
+        // D-7d defensive: a `BatchAdopted` OR a `DropApplied` for a batch with NO LIVE saga (a
+        // stray/duplicate, or a batch that never started / already tombstoned) emits NOTHING — a no-op,
+        // never a silent drop and never a panic. Covers `deliver`'s early-return on an absent saga
+        // (`runtime.sagas.get_mut` → `None`), the same idempotency that absorbs a redelivered ack after
+        // the BatchHandoff tail tombstoned.
         let mut rig = Rig::new();
         let _ = (rig.drain_source(), rig.drain_dest());
-        rig.batch_adopted(XFER); // no prior trigger → batch_goes is empty
-        assert!(rig.drain_source().is_empty(), "no go-token ⇒ no release");
-        assert!(rig.drain_dest().is_empty(), "no go-token ⇒ no promote");
-        rig.drop_applied(TRANSIENT_RELEASE_STEP); // also no go-token → handle_drop_applied None arm
+        rig.batch_adopted(XFER); // no prior trigger → no live saga for XFER
+        assert!(rig.drain_source().is_empty(), "no saga ⇒ no release");
+        assert!(rig.drain_dest().is_empty(), "no saga ⇒ no promote");
+        rig.drop_applied(TRANSIENT_RELEASE_STEP); // also no saga → deliver early-returns (None arm)
         assert!(
             rig.drain_source().is_empty(),
             "a DropApplied with no go-token is a loud no-op (no source egress)"
@@ -1799,6 +1898,11 @@ mod tests {
             SagaState::CommittingCas {
                 marker_seq: 0,
                 drained_seq: 0,
+            },
+            SagaState::BatchCommitting { step_id: 11 },
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitPromote,
+                new_fence: Fence(2),
             },
             SagaState::Swapping {
                 new_fence: Fence(2),
@@ -1974,6 +2078,99 @@ mod tests {
             })),
             "the producer re-drove AbortTransfer: {to_gateway:?}"
         );
+    }
+
+    #[test]
+    fn scan_deadlines_resolves_a_batch_handoff_with_a_dead_participant() {
+        // D-7d: a DUE `BatchHandoff` saga whose SOURCE is known-dead self-promotes the dest
+        // (SourceUnreachable → EmitTransientPromote + Done, counted); whose DEST is dead abandons the
+        // source copy (DestUnreachable → EmitTransientAbandon + Done, counted); with NEITHER dead it just
+        // RE-DRIVES (Timeout, still live, uncounted). The redrive deadline is 8 (`SagaTuning::default`).
+        let mk = || {
+            let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+            inject_saga(
+                &mut runtime,
+                SagaState::BatchHandoff {
+                    phase: BatchHandoffPhase::AwaitPromote,
+                    new_fence: Fence(2),
+                },
+                UniverseTick(0),
+            );
+            runtime
+        };
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+        });
+
+        // SOURCE dead → self-promote the dest (TransientDrop to DEST), tombstone, count once.
+        let mut runtime = mk();
+        runtime.dead_participants.insert(SOURCE);
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8),
+        );
+        assert_eq!(
+            runtime.live(),
+            0,
+            "the dead-source resolution tombstoned the saga"
+        );
+        assert!(
+            flows_to_node(&outbox, DEST).contains(&InterShardFlow::TransientDrop(
+                TransientHandoff {
+                    transfer: XFER,
+                    step_id: TRANSIENT_DROP_STEP,
+                    fence: Fence(2),
+                }
+            )),
+            "self-promote to the dest: {:?}",
+            outbox.0
+        );
+        assert_eq!(runtime.source_unreachable_resolutions(), 1);
+        assert_eq!(runtime.dest_unreachable_resolutions(), 0);
+
+        // DEST dead → abandon the source copy (TransientAbandon to SOURCE), tombstone, count once.
+        let mut runtime = mk();
+        runtime.dead_participants.insert(DEST);
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8),
+        );
+        assert_eq!(runtime.live(), 0);
+        assert!(
+            flows_to_node(&outbox, SOURCE).contains(&InterShardFlow::TransientAbandon(
+                TransientHandoff {
+                    transfer: XFER,
+                    step_id: TRANSIENT_ABANDON_STEP,
+                    fence: Fence(2),
+                }
+            )),
+            "abandon to the source: {:?}",
+            outbox.0
+        );
+        assert_eq!(runtime.dest_unreachable_resolutions(), 1);
+        assert_eq!(runtime.source_unreachable_resolutions(), 0);
+
+        // NEITHER dead → a plain Timeout re-drive: still live, no resolution counted.
+        let mut runtime = mk();
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8),
+        );
+        assert_eq!(runtime.live(), 1, "neither dead → re-drive, not resolve");
+        assert_eq!(runtime.source_unreachable_resolutions(), 0);
+        assert_eq!(runtime.dest_unreachable_resolutions(), 0);
     }
 
     #[test]

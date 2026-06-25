@@ -296,6 +296,24 @@ fn excuse_w1(
 pub fn verify_transient_authority_held(
     reports: &[(NodeId, InspectReport)],
 ) -> Result<(), TransientViolation> {
+    verify_transient_authority_held_excluding(reports, &BTreeSet::new())
+}
+
+/// [`verify_transient_authority_held`], EXCLUDING the corpse claims of nodes the caller knows are DEAD
+/// (D-7d crash matrix). A killed SOURCE still reporting `Held{Some(b)}` (its corpse appears in
+/// `owned_transients` — `is_held()` is true for `Held`) must NOT read as a phantom SECOND holder after
+/// the dead-aware self-promote moved the item to the live dest. The dead node is skipped BEFORE its
+/// `owned_transients`/`held_realms`/`batch_goes` are collected (mirroring
+/// [`verify_authority_unique_excluding`]). With an empty `dead` set this is byte-identical to the parent
+/// (no empty-set theater — it lands WITH its D-7d crash consumer). The orchestrator (which holds
+/// `batch_goes`) is never dead, so `go_fences` is always real.
+///
+/// # Errors
+/// The first [`TransientViolation`] found, in deterministic entity order.
+pub fn verify_transient_authority_held_excluding(
+    reports: &[(NodeId, InspectReport)],
+    dead: &BTreeSet<NodeId>,
+) -> Result<(), TransientViolation> {
     let mut holders: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
     let mut anchor: BTreeMap<EntityId, Fence> = BTreeMap::new();
     // The set of LIVE realm-lease fences (any shard) and the set of committed go-token fences — a held
@@ -304,6 +322,11 @@ pub fn verify_transient_authority_held(
     let mut realm_fences: BTreeSet<Fence> = BTreeSet::new();
     let mut go_fences: BTreeSet<Fence> = BTreeSet::new();
     for (node, report) in reports {
+        // A DEAD node's report is a corpse — its held-transient/realm claims are stale and must not
+        // false-pass DoubleHeld nor false-anchor (skipped BEFORE collection, like the durable twin).
+        if dead.contains(node) {
+            continue;
+        }
         for (entity, a) in &report.owned_transients {
             holders.entry(*entity).or_default().push(*node);
             anchor.insert(*entity, *a);
@@ -358,8 +381,30 @@ pub fn verify_transient_conservation_tick(
     reports: &[(NodeId, InspectReport)],
     tick: TickId,
 ) -> Result<(), TransientViolation> {
+    verify_transient_conservation_tick_excluding(reports, &BTreeSet::new(), tick)
+}
+
+/// [`verify_transient_conservation_tick`], EXCLUDING the corpse claims of nodes the caller knows are
+/// DEAD (D-7d crash matrix). A killed SOURCE still reporting `Held{Some(b)}` (corpse) + the live dest's
+/// `Held{None}` for the same entity (after the self-promote) would read as `len > 1` (a phantom
+/// Duplication) unless the corpse is skipped FIRST. With an empty `dead` set this is byte-identical to
+/// the parent (delegated, no theater). Drives the per-tick conservation gate inside the D-7d transient
+/// crash-fault driver (which passes `dead_nodes()`).
+///
+/// # Errors
+/// [`TransientViolation::Duplicated`] for the first transient COUNTED-held by >1 LIVE shard, in entity order.
+pub fn verify_transient_conservation_tick_excluding(
+    reports: &[(NodeId, InspectReport)],
+    dead: &BTreeSet<NodeId>,
+    tick: TickId,
+) -> Result<(), TransientViolation> {
     let mut holders: BTreeMap<EntityId, Vec<NodeId>> = BTreeMap::new();
     for (node, report) in reports {
+        // A DEAD node's `owned_transients` is a corpse — skip it BEFORE the `len > 1` count so a
+        // killed source's stale Held claim is never a phantom second holder against the live survivor.
+        if dead.contains(node) {
+            continue;
+        }
         // `owned_transients` is already the `is_held()` subset (`inspect_world` filters it): the
         // uncounted `Arriving` (dest mid-flight) AND `Departing` (source released) tiers are excluded,
         // so a healthy handoff shows the entity in ZERO or ONE counted set, never two.
@@ -931,6 +976,14 @@ mod tests {
                 holders: vec![DEST, SHARD],
             })
         );
+        // D-7d dead-aware twin (RED-then-GREEN on the SAME fixture): with the SOURCE (SHARD) known DEAD,
+        // its `Held{Some}` corpse is skipped BEFORE the count → the single live holder (DEST) passes.
+        let dead: BTreeSet<NodeId> = [SHARD].into_iter().collect();
+        assert_eq!(
+            verify_transient_authority_held_excluding(&reports, &dead),
+            Ok(()),
+            "the dead source's corpse is not a phantom second holder after the self-promote"
+        );
     }
 
     #[test]
@@ -1007,6 +1060,12 @@ mod tests {
                 holders: vec![DEST, SHARD],
                 tick: TickId(9),
             })
+        );
+        // D-7d dead-aware twin (RED-then-GREEN): excluding the dead SOURCE corpse → one live holder.
+        let dead: BTreeSet<NodeId> = [SHARD].into_iter().collect();
+        assert_eq!(
+            verify_transient_conservation_tick_excluding(&reports, &dead, TickId(9)),
+            Ok(())
         );
     }
 
