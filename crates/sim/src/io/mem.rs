@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use vd_core::{EpochId, MsgId, NodeId, TickId, UniverseTick};
 
-use super::{BoundedInbox, Bytes, Clock, Inbound, MsgClass, SendError, Transport};
+use super::{BoundedInbox, Bytes, Clock, Inbound, MsgClass, SendError, Store, Transport};
 
 /// The deterministic test clock: the topology driver advances it explicitly; nodes
 /// only ever READ it through the [`Clock`] trait. Shared-handle semantics (clone =
@@ -66,6 +66,78 @@ impl Clock for VirtualClock {
     }
     fn epoch(&self) -> EpochId {
         self.inner.epoch
+    }
+}
+
+/// The deterministic test [`Store`] (D-6): a staged/committed two-tier map. `committed` survives a node
+/// REBUILD (the harness retains this handle and re-attaches it to the fresh node) while `staged` is
+/// dropped when the World dies — modeling the prod fsync window the orchestrator-kill cells must crash
+/// ACROSS (a put-is-instantly-durable store would make the lose-the-uncommitted-batch crash untestable,
+/// and the no-split-brain proof rests on that boundary). Shared-handle semantics (clone = same backing
+/// log), exactly like [`MemHub`]/[`VirtualClock`].
+#[derive(Clone, Debug, Default)]
+pub struct MemStore {
+    inner: Arc<Mutex<StoreInner>>,
+}
+
+#[derive(Debug, Default)]
+struct StoreInner {
+    /// Durable: survives a crash + a node rebuild.
+    committed: BTreeMap<Vec<u8>, Bytes>,
+    /// Pending this fsync window: `Some` = staged put, `None` = staged delete. Dropped on a crash
+    /// before `commit` (the un-fsynced batch is lost), merged into `committed` on `commit`.
+    staged: BTreeMap<Vec<u8>, Option<Bytes>>,
+}
+
+impl MemStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, StoreInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether anything is durably COMMITTED — the orchestrator's genesis-vs-recover discriminator on
+    /// rebuild (empty ⇒ fresh genesis; non-empty ⇒ rehydrate). Staged-but-uncommitted does not count.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lock().committed.is_empty()
+    }
+}
+
+impl Store for MemStore {
+    fn put(&mut self, key: &[u8], value: &Bytes) {
+        self.lock().staged.insert(key.to_vec(), Some(value.clone()));
+    }
+
+    fn delete(&mut self, key: &[u8]) {
+        self.lock().staged.insert(key.to_vec(), None);
+    }
+
+    fn scan(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Bytes)> {
+        self.lock()
+            .committed
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    fn commit(&mut self) {
+        let mut inner = self.lock();
+        let staged = std::mem::take(&mut inner.staged);
+        for (key, value) in staged {
+            match value {
+                Some(bytes) => {
+                    inner.committed.insert(key, bytes);
+                }
+                None => {
+                    inner.committed.remove(&key);
+                }
+            }
+        }
     }
 }
 
@@ -492,5 +564,80 @@ mod tests {
             .expect("post-poison send works");
         hub.pump();
         assert_eq!(b.drain_inbound().len(), 1, "post-poison delivery works");
+    }
+
+    // ---- MemStore (D-6): the staged/committed durability seam ----------------------------------
+
+    #[test]
+    fn memstore_stages_until_commit_then_survives_a_rebuild() {
+        let mut s = MemStore::new();
+        let k: &[u8] = b"k1";
+        let v: Bytes = vec![1, 2, 3].into();
+        assert!(s.is_empty(), "a fresh store is empty (genesis)");
+        s.put(k, &v);
+        // STAGED, not durable: a crash before commit loses it, so scan (committed-only) sees nothing.
+        assert!(s.scan(b"").is_empty(), "an uncommitted put is not durable");
+        assert!(
+            s.is_empty(),
+            "staged writes do not make the store non-empty"
+        );
+        s.commit();
+        assert_eq!(
+            s.scan(b""),
+            vec![(k.to_vec(), v.clone())],
+            "commit made it durable"
+        );
+        assert!(!s.is_empty(), "a committed store is non-empty (recover)");
+        // Shared-handle: a clone sees the same committed log — exactly how a rebuilt node re-attaches.
+        let clone = s.clone();
+        assert_eq!(
+            clone.scan(b""),
+            vec![(k.to_vec(), v)],
+            "the rebuilt handle sees committed state"
+        );
+    }
+
+    #[test]
+    fn memstore_crash_before_commit_drops_only_the_staged_batch() {
+        let mut s = MemStore::new();
+        let durable: Bytes = vec![9].into();
+        s.put(b"a", &durable);
+        s.commit(); // durable
+        // A second batch, staged but NOT committed: the crash window.
+        s.put(b"b", &(vec![8].into()));
+        s.delete(b"a"); // a staged delete in the same window
+        // CRASH = never commit; the committed view keeps `a` and never saw `b` or the delete.
+        assert_eq!(
+            s.scan(b""),
+            vec![(b"a".to_vec(), durable)],
+            "the staged put + staged delete are both lost on a crash-before-commit",
+        );
+    }
+
+    #[test]
+    fn memstore_commit_applies_puts_and_deletes_and_scan_filters_by_prefix() {
+        let mut s = MemStore::new();
+        s.put(b"x:1", &(vec![1].into()));
+        s.put(b"x:2", &(vec![2].into()));
+        s.put(b"y:1", &(vec![3].into()));
+        s.commit();
+        assert_eq!(
+            s.scan(b"x:").len(),
+            2,
+            "a prefix scan returns exactly one key family"
+        );
+        assert_eq!(s.scan(b"y:"), vec![(b"y:1".to_vec(), vec![3].into())]);
+        assert!(
+            s.scan(b"z:").is_empty(),
+            "a non-matching prefix returns nothing"
+        );
+        // delete + commit removes (the None arm of commit).
+        s.delete(b"x:1");
+        s.commit();
+        assert_eq!(
+            s.scan(b"x:"),
+            vec![(b"x:2".to_vec(), vec![2].into())],
+            "the committed delete removed x:1, x:2 remains",
+        );
     }
 }

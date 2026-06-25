@@ -273,6 +273,34 @@ pub trait Transport {
     fn local_id(&self) -> NodeId;
 }
 
+/// The persistence half of `ShardIo` (D-6): durable state that survives a process kill-9 — the
+/// orchestrator's saga WAL + directory + clock ceiling. Simulation/node code NEVER touches a disk
+/// directly (clippy-enforced); durability is seen ONLY through this trait. Production: an io-prod
+/// redb-backed impl with an off-tick fsync thread (DEFERRED — the backend redb-vs-sled-vs-custom is a
+/// joint investigation). Test: [`mem::MemStore`], a staged/committed two-tier map whose `committed`
+/// survives a node rebuild (the harness retains the handle) while `staged` is dropped on a crash —
+/// modeling the fsync window the kill-9 cells must crash ACROSS.
+///
+/// Contract (the durability barrier, asserted by the contract tests):
+/// 1. `put`/`delete` STAGE a mutation; neither is durable until `commit`.
+/// 2. `commit` makes every staged mutation durable ATOMICALLY (the group-commit fsync point). A crash
+///    BEFORE `commit` loses the staged batch; a crash AFTER it keeps the whole batch.
+/// 3. `scan(prefix)` returns every COMMITTED `(key, value)` whose key starts with `prefix`, in ascending
+///    key order — the rehydrate primitive (one prefix tag per key family); staged writes are invisible.
+///
+/// OBJECT-SAFE by construction (used as `&mut dyn Store`), so there is NO per-monomorphization region
+/// gotcha (HR5); ALL postcard encode/decode lives at the monomorphic call sites, never in the trait body.
+pub trait Store {
+    /// Stage a durable write of `value` at `key` (overwrites any staged/committed value at the key).
+    fn put(&mut self, key: &[u8], value: &Bytes);
+    /// Stage a durable delete of `key` (idempotent; a no-op at `commit` if the key is absent).
+    fn delete(&mut self, key: &[u8]);
+    /// Every COMMITTED `(key, value)` whose key starts with `prefix`, ascending by key.
+    fn scan(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Bytes)>;
+    /// THE durability barrier: make every staged `put`/`delete` durable atomically (group-commit).
+    fn commit(&mut self);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
