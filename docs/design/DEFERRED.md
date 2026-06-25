@@ -602,14 +602,34 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
-### D-6 🟧 `PersistCheckpoint` is an in-memory no-op (no durable saga WAL)
-- **Missing:** the saga's two durable checkpoints are in-memory only; an orchestrator restart loses every
-  in-flight saga.
-- **Where:** `crates/node/src/saga_runtime.rs` — `SagaAction::PersistCheckpoint` arm is a LOUD `tracing::warn`
-  stub.
-- **When / proper:** **P3** — group-committed redb WAL (persist at PREPARE-ack + COMMIT-CAS; re-drive
-  idempotently to terminal on restart).
-- **Source:** the P2 plan + Slice-1b audit (ROB-2 loud-stub hardening).
+### D-6 🟧 Durable saga WAL: S0–S3 LANDED (persist+recover ENGINE); S4–S5 (e2e kill-9 cells) + the redb backend owed
+- **✅ S0–S3 LANDED (design `wf_0f8321dc`, doc `d6_saga_wal.md`):** the orchestrator now durably persists its
+  saga set + go-tokens + directory + clock ceiling through the `sim::io::Store` seam (`MemStore` staged/committed
+  two-tier; redb is the io-prod backend, DEFERRED — NO new dep). `commit_result` stages the QUIESCENT
+  `SagaSnapshot` at the write-back (the single point that knows `final_state`); `drive_sagas`' tail is the ONE
+  group-commit barrier (persist-before-effect, before the flush phase). `register_orchestrator_with_store` →
+  `rehydrate` (genesis-or-recover); recovered sagas re-arm `since=0` so the EXISTING Slice-2a Timeout producer
+  re-drives them forward (no new recovery path). Atomic-MemStore co-commit ⇒ directory+saga always CONSISTENT
+  post-crash (a Swapping snapshot ⟺ dest-owned directory) ⇒ NO bespoke head-re-read (the C4/C5 intra-tick
+  split-brain is structurally precluded in the mem tier; it reappears only at io-prod's independent files, where
+  the explicit head-re-read is owed). The directory barrier RECONCILES (delete-durable + put-current) so a
+  REVOKED record is not resurrected (audit COMP-2 fix). Proven by rig kill-9 tests: a durable saga in `Demoting`
+  survives + re-drives the Demote forward; a transient go-token survives (`batch_go_writes` preserved); a revoked
+  record stays gone; a re-trigger of a live transient is a guarded no-op. `PersistCheckpoint` is now a documented
+  no-op (the write-back + barrier subsume it — the loud-warn stub is GONE). Gate-green at 100% Tier-A.
+- **⚠️ The prod orchestrator BINARY is NON-DURABLE** (`crates/bins/src/bin/orchestrator.rs` injects a fresh
+  in-memory `MemStore`): a restart resets the clock + loses in-flight transfers. LOUD `tracing::warn` at boot
+  (audit D6-ROB-1) until the redb backend swaps in. No production deployment until then.
+- **Still owed:** **S4–S5** — the e2e kill-9 crash cells (`Fault::KillRebuild` + a `Topology` orchestrator-swap
+  over `FaultFabric` re-attaching the retained Store; the C1–C9 cells in `p3_crash_matrix.rs`, with a
+  no-op-stub-Store anti-theater guard so a cell can't false-green on in-process World survival). The **redb
+  `Store` backend + off-tick fsync** (io-prod). The **`StoreKey::Tombstone` family + the C8 redeliver-PREPARE
+  drop** (a redelivered trigger for an ALREADY-COMPLETED transfer is not yet dropped on recover — the live-saga
+  clobber is now guarded, but the post-completion zombie needs the persisted tombstone; owed with S5 / the 1d
+  idempotent-trigger slice). The **explicit head-re-read** for io-prod independent-file directory/saga
+  disagreement. `batch_goes`/tombstone WAL GC (co-gated with D-7d Slice 2).
+- **Source:** the P2 plan + Slice-1b audit (ROB-2) + the D-6 design `wf_0f8321dc` + the holistic audit
+  `wf_132becc3` (COMP-2 directory-resurrect fix, D6-ROB-1 non-durable-bin warn, D6-1 tombstone/clobber).
 
 ### D-7 🟧 Transient transfer: D-7a/b/c + D-7d Slice 1 LANDED (park closed, ballistic, conservation, loss-budget, G-TIER, DURABLE-UNAFFECTED, kill-9 crash resolution); D-7d Slice 2 (burst-scale + dual-death + GC + cap-split + mixed-realm) owed
 - **✅ CLOSED — the park (D-7a):** the `IssueTransientGo` LOUD-warn stub that parked a transient saga in

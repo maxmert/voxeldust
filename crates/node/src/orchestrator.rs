@@ -10,7 +10,8 @@
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::{EpochId, NodeId};
 use vd_sim::directory::{DirectoryCore, DirectoryTuning};
-use vd_sim::io::{Inbound, MsgClass};
+use vd_sim::io::mem::MemStore;
+use vd_sim::io::{Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{DirectoryOp, DirectoryReply};
@@ -58,18 +59,57 @@ pub struct OrchestratorStats {
 /// # Panics
 /// On a zero `reserve_chunk` — an operator configuration error, failed loud at boot.
 pub fn register_orchestrator(world: &mut World, schedule: &mut Schedule, cfg: &OrchestratorConfig) {
-    let (mut clock, ClockAction::ReserveCeiling(ceiling)) =
-        CeilingClock::genesis(cfg.epoch, cfg.reserve_chunk).expect("non-zero reserve chunk");
-    clock
-        .confirm_ceiling(ceiling)
-        .expect("genesis ceiling confirms exactly once");
+    // D-6: every orchestrator has a durable Store. The default uses a FRESH MemStore (genesis) — the
+    // ~5 unrelated unit-test/bin call sites need no churn, and `drive_sagas`'s `StoreRes` is always
+    // present. A caller that needs a RECOVERABLE (kill-9-survivable) orchestrator passes a retained
+    // handle via [`register_orchestrator_with_store`]; redb is the io-prod backend (DEFERRED).
+    register_orchestrator_with_store(world, schedule, cfg, Box::new(MemStore::new()));
+}
+
+/// As [`register_orchestrator`], but against a caller-provided durable [`Store`] (D-6). A NON-EMPTY
+/// store (a prior orchestrator's committed WAL) is RE-HYDRATED — the clock resumes forward, the
+/// directory + sagas + go-tokens restore, and the existing Slice-2a Timeout producer re-drives each
+/// in-flight saga to terminal; an EMPTY store is a fresh genesis. The harness retains the concrete
+/// handle to re-attach it to a rebuilt orchestrator (the kill-9 crash cells).
+pub fn register_orchestrator_with_store(
+    world: &mut World,
+    schedule: &mut Schedule,
+    cfg: &OrchestratorConfig,
+    store: Box<dyn Store + Send + Sync>,
+) {
+    let (clock, directory, runtime) = match crate::saga_runtime::rehydrate(
+        store.as_ref(),
+        cfg.reserve_chunk,
+        cfg.saga,
+        cfg.directory,
+    ) {
+        // RECOVER: the rebuilt orchestrator resumes its durable state (no in-flight transfer vanishes).
+        Some(r) => (r.clock, r.directory, r.runtime),
+        // GENESIS: a fresh orchestrator reserves the clock ceiling + starts with an empty directory/saga set.
+        None => {
+            let (mut clock, ClockAction::ReserveCeiling(ceiling)) =
+                CeilingClock::genesis(cfg.epoch, cfg.reserve_chunk)
+                    .expect("non-zero reserve chunk");
+            clock
+                .confirm_ceiling(ceiling)
+                .expect("genesis ceiling confirms exactly once");
+            (
+                clock,
+                DirectoryCore::new(cfg.directory),
+                crate::saga_runtime::SagaRuntimeRes::with_tuning(cfg.saga),
+            )
+        }
+    };
     world.insert_resource(UniverseClockRes(clock));
-    world.insert_resource(DirectoryRes(DirectoryCore::new(cfg.directory)));
+    world.insert_resource(DirectoryRes(directory));
     world.insert_resource(ClockPeers(cfg.clock_peers.clone()));
     world.insert_resource(OrchestratorStats::default());
-    world.insert_resource(crate::saga_runtime::SagaRuntimeRes::with_tuning(cfg.saga));
+    world.insert_resource(runtime);
+    world.insert_resource(crate::saga_runtime::StoreRes(store));
     // serve_directory then drive_sagas: both read the Saga-class inbound (directory ops vs
-    // gateway acks); the saga runtime's direct commit_cas runs after the directory service.
+    // gateway acks); the saga runtime's direct commit_cas runs after the directory service. The
+    // D-6 group-commit barrier is at the tail of drive_sagas (the chain's last system), so it fsyncs
+    // AFTER every state change this tick and BEFORE the node's flush phase sends `outbox`.
     schedule.add_systems(
         (
             advance_and_broadcast_clock,

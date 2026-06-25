@@ -63,6 +63,23 @@ impl DirectoryCore {
         }
     }
 
+    /// Reconstruct the directory from durably-persisted records (D-6 orchestrator rehydrate). The
+    /// persisted `(key, record)` pairs ARE the authority-of-record at the last group-commit, so they
+    /// are installed VERBATIM (bypassing `grant`'s fence/lock logic — recovery RESTORES state, it does
+    /// not re-decide it; the single commit point is unchanged). The `Directory` key family is persisted
+    /// independently of the saga WAL (a distinct prefix) so io-prod can split it into its own file
+    /// without a cross-file atomic transaction (the D-32 partitioning seam).
+    #[must_use]
+    pub fn restore(
+        tuning: DirectoryTuning,
+        records: impl IntoIterator<Item = (DirectoryKey, OwnerRecord)>,
+    ) -> DirectoryCore {
+        DirectoryCore {
+            records: records.into_iter().collect(),
+            tuning,
+        }
+    }
+
     /// Assign authority at `fence`. Idempotent by fence; refuses stale fences,
     /// equal-fence owner changes, and transfer-locked keys.
     pub fn grant(

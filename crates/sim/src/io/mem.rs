@@ -234,6 +234,35 @@ impl MemHub {
         }
     }
 
+    /// Re-attach a FRESH transport endpoint for an already-registered node — the kill-9-REBUILD analog
+    /// (D-6): the node's process died (its in-flight outbound/inbound queues are LOST with the dead
+    /// process) and a fresh process reclaims the same identity + peer connectivity. RESETS the node's
+    /// queues + `next_msg_id` + `alive`. The node's DURABLE state survives SEPARATELY via its retained
+    /// `Store` handle — exactly what the rebuilt node re-hydrates from (the World's RAM is gone, the WAL
+    /// is not). Distinct from `register` (which refuses a duplicate) — rebuild PRESUMES a prior identity.
+    ///
+    /// # Panics
+    /// If `id` was never registered (a rebuild reclaims an existing identity).
+    #[must_use]
+    pub fn reregister(&self, id: NodeId, outbound_capacity: usize) -> MemTransport {
+        let mut inner = self.lock();
+        let node = inner
+            .nodes
+            .get_mut(&id)
+            .expect("reregister reclaims a prior registration");
+        *node = NodeQueues {
+            outbound: VecDeque::new(),
+            outbound_capacity,
+            inbound: BoundedInbox::new(outbound_capacity.saturating_mul(8).max(64)),
+            next_msg_id: 0,
+            alive: true,
+        };
+        MemTransport {
+            local: id,
+            hub: self.clone(),
+        }
+    }
+
     /// Kill a node: it stops receiving; in-flight and future frames toward it surface
     /// to their senders as [`Inbound::NodeUnreachable`] on the next pump.
     pub fn kill(&self, id: NodeId) {
@@ -564,6 +593,33 @@ mod tests {
             .expect("post-poison send works");
         hub.pump();
         assert_eq!(b.drain_inbound().len(), 1, "post-poison delivery works");
+    }
+
+    #[test]
+    fn reregister_resets_a_node_for_a_kill_9_rebuild() {
+        // D-6: a rebuilt node reclaims its identity + peer connectivity but LOSES its in-flight queues
+        // (the dead process's RAM) — only its durable Store survives (held separately by the harness).
+        let hub = MemHub::new();
+        let mut a = hub.register(A, 8);
+        let mut b = hub.register(B, 8);
+        a.send(B, MsgClass::Control, vec![1].into())
+            .expect("pre-rebuild send accepted into A's outbound");
+        // REBUILD A (kill-9): the in-flight outbound frame is dropped with the old process's queue.
+        let mut a2 = hub.reregister(A, 8);
+        hub.pump();
+        assert!(
+            b.drain_inbound().is_empty(),
+            "the pre-rebuild in-flight send was lost with the dead process"
+        );
+        // The rebuilt endpoint is reachable + sends anew.
+        a2.send(B, MsgClass::Control, vec![2].into())
+            .expect("post-rebuild send accepted");
+        hub.pump();
+        assert_eq!(
+            b.drain_inbound().len(),
+            1,
+            "the rebuilt node sends + delivers"
+        );
     }
 
     // ---- MemStore (D-6): the staged/committed durability seam ----------------------------------

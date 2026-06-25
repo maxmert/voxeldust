@@ -149,6 +149,14 @@ impl CeilingClock {
     pub fn epoch(&self) -> EpochId {
         self.epoch
     }
+
+    /// The durably-confirmed write-ahead ceiling (D-6): persisted each tick so an orchestrator restart
+    /// can [`CeilingClock::recover`] AT it — a forward jump past real progress, never behind it (time
+    /// never rewinds). `current <= confirmed_ceiling` always holds, so recovering to the ceiling is safe.
+    #[must_use]
+    pub fn confirmed_ceiling(&self) -> UniverseTick {
+        self.confirmed_ceiling
+    }
 }
 
 /// What a follower did with an observed sync value.

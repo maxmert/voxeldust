@@ -65,6 +65,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
     };
     saga.validate()?;
+    // D-6 (audit D6-ROB-1): the WAL engine is built, but `register_orchestrator` injects a fresh
+    // IN-MEMORY `MemStore` (the durable redb backend is owed io-prod). So THIS BINARY is NON-DURABLE: a
+    // restart resets universe time to tick 0 and loses every in-flight transfer. LOUD at boot (never a
+    // silent non-durable production path — ROB-2 discipline) until io-prod swaps in the durable store.
+    tracing::warn!(
+        "orchestrator is NON-DURABLE (in-memory Store): a restart RESETS universe time and LOSES \
+         all in-flight transfers — the durable redb WAL backend is owed (io-prod). Do not run a \
+         production deployment until it lands."
+    );
     register_orchestrator(
         world,
         schedule,

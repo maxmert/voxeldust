@@ -41,10 +41,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
+use serde::{Deserialize, Serialize};
 use vd_core::pose::StampedPose;
 use vd_core::{BatchId, EpochId, Fence, NodeId, TransferId, UniverseTick};
-use vd_sim::directory::DirectoryCore;
-use vd_sim::io::{Inbound, MsgClass};
+use vd_sim::directory::{DirectoryCore, DirectoryTuning};
+use vd_sim::io::{Bytes, Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning};
 use vd_wire::intershard::{
@@ -53,10 +54,11 @@ use vd_wire::intershard::{
     TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff,
     TransitionPayload,
 };
-use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey};
+use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 use vd_wire::seams::transfer_control::TransferControlAck;
 
-use crate::orchestrator::DirectoryRes;
+use crate::orchestrator::{DirectoryRes, UniverseClockRes};
+use crate::universe_clock::{CeilingClock, ClockAction};
 
 /// One live (in-flight) transfer's identity for the mid-flight AUTHORITY-UNIQUE oracle (1d.5b.3d):
 /// the subject key + the source/dest shards. The oracle EXCUSES the post-CAS, pre-demote window (the
@@ -69,6 +71,90 @@ pub struct ActiveTransfer {
     pub source: NodeId,
     pub dest: NodeId,
 }
+
+/// The typed key families in the orchestrator's durable [`Store`] (D-6 saga WAL). Each key is a 1-byte
+/// family TAG + the postcard-encoded id, so `scan(&[TAG])` recovers exactly one family on rehydrate. The
+/// VALUE at each key is SELF-DESCRIBING (carries its own id/record), so rehydrate never parses a key back.
+/// The `Directory` family is a DISTINCT prefix (independently splittable into its own io-prod file — the
+/// D-32 partitioning seam — without a cross-file atomic transaction).
+#[derive(Clone, Copy, Debug)]
+enum StoreKey {
+    Saga(TransferId),
+    BatchGo(BatchId),
+    Directory(DirectoryKey),
+    Clock,
+}
+
+impl StoreKey {
+    const SAGA: u8 = 1;
+    const BATCH_GO: u8 = 2;
+    const DIRECTORY: u8 = 3;
+    const CLOCK: u8 = 4;
+
+    /// The store key bytes: family tag + postcard(id). postcard encoding of these small fixed-shape
+    /// types is infallible (no I/O); `.expect` is straight-line at this monomorphic site (the panic body
+    /// is in stdlib, not a coverable caller branch — HR5, matching the codebase's `to_allocvec().expect`).
+    fn bytes(self) -> Vec<u8> {
+        let mut k = Vec::with_capacity(16);
+        match self {
+            StoreKey::Saga(t) => {
+                k.push(Self::SAGA);
+                k.extend(postcard::to_allocvec(&t).expect("encode TransferId store key"));
+            }
+            StoreKey::BatchGo(b) => {
+                k.push(Self::BATCH_GO);
+                k.extend(postcard::to_allocvec(&b).expect("encode BatchId store key"));
+            }
+            StoreKey::Directory(d) => {
+                k.push(Self::DIRECTORY);
+                k.extend(postcard::to_allocvec(&d).expect("encode DirectoryKey store key"));
+            }
+            StoreKey::Clock => k.push(Self::CLOCK),
+        }
+        k
+    }
+}
+
+/// The durable snapshot of one live saga (D-6) — exactly the serializable [`LiveSaga`] fields, persisted
+/// at `commit_result`'s write-back (the SINGLE point that knows the true QUIESCENT `final_state`: since
+/// `IssueCommitCas` is a same-tick DIRECT call, `CommittingCas` is never a quiescent phase, so anchoring
+/// only to the `PersistCheckpoint` emit sites would force a stale-`Cutting` restart abort of a maybe-
+/// committed transfer). Re-hydrated on an orchestrator restart, then re-driven to terminal by the
+/// existing Slice-2a Timeout producer (forward-only past Committed; shards dedup by `(transfer, step)`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SagaSnapshot {
+    ctx: SagaCtx,
+    state: SagaState,
+    gateway: NodeId,
+    since: UniverseTick,
+    flushed_pose: Option<StampedPose>,
+}
+
+/// The persisted go-token (D-6) — self-describing (carries its own `BatchId`) so rehydrate restores
+/// `batch_goes` without parsing keys; one record per batch (the G-TIER `batch_go_writes` decoupling is
+/// preserved on restart: rehydrate sets the counter to the map len, it does NOT re-drive the `+= 1`).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct GoTokenSnapshot {
+    batch: BatchId,
+    fence: Fence,
+    source: NodeId,
+    dest: NodeId,
+}
+
+/// The persisted directory record (D-6) — self-describing `(key, record)` so rehydrate calls
+/// `DirectoryCore::restore` without parsing keys.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct DirSnapshot {
+    key: DirectoryKey,
+    record: OwnerRecord,
+}
+
+/// The orchestrator's durable store handle, resource-wrapped (D-6). Holds a `dyn Store` so the backend is
+/// swappable behind the seam (MemStore now; redb in io-prod). Present on EVERY orchestrator (genesis uses
+/// a fresh `MemStore`); the harness RETAINS the concrete handle to re-attach it to a rebuilt orchestrator
+/// (the kill-9 analog — the World's RAM dies, the store's committed log survives).
+#[derive(Resource)]
+pub struct StoreRes(pub Box<dyn Store + Send + Sync>);
 
 /// One live saga: the pure FSM (ctx + state) plus the wrapper-only routing — the gateway
 /// `NodeId` to send `TransferControl` to (resolved at creation from the session's
@@ -160,6 +246,12 @@ pub struct SagaRuntimeRes {
     /// `> 0` is the proof a crash cell's resolution actually fired (not that the happy path completed).
     source_unreachable_resolutions: u64,
     dest_unreachable_resolutions: u64,
+    /// D-6 — durable writes STAGED this tick by `commit_result` (saga snapshots + go-tokens, encoded at
+    /// the monomorphic call site), drained to the [`StoreRes`] + group-committed ONCE at the end of
+    /// `drive_sagas` (the ~1-fsync/tick barrier). `Some(bytes)` = put, `None` = delete (a tombstoned
+    /// saga). Held on the runtime (not threaded through `commit_result`) so the persist stays a
+    /// straight-line push; the single drain+commit is the only place that touches the store for sagas.
+    pending_writes: Vec<(Vec<u8>, Option<Bytes>)>,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -542,16 +634,12 @@ fn run_to_quiescence(
                         }),
                     );
                 }
-                // P3: group-committed redb WAL. LOUD deferral: an orchestrator restart loses
-                // every in-flight saga until then — never let a log read as if durability
-                // exists (audit ROB-2).
-                SagaAction::PersistCheckpoint => {
-                    tracing::warn!(
-                        transfer = ctx.transfer.0,
-                        "PersistCheckpoint is a P3 stub: saga state is IN-MEMORY ONLY \
-                         (a restart loses in-flight sagas)"
-                    );
-                }
+                // D-6: durability is REAL now — `commit_result` stages the QUIESCENT saga snapshot at
+                // EVERY transition (this checkpoint's `Send`/`EmitCrossing` effect included), and the
+                // end-of-tick `Store::commit()` barrier flushes it BEFORE the node's flush phase sends
+                // the tick's effects (persist-before-effect). So the two emit sites (dest-ghost-exists,
+                // authority-flipped) need no per-action work — the write-back + barrier subsume them.
+                SagaAction::PersistCheckpoint => {}
                 SagaAction::NotifyRejected(reason) => rejected.push((ctx.transfer, reason)),
                 // Clear the directory lock at TERMINAL abort (Slice 2a, closes D-1), called DIRECTLY
                 // (this thread owns the directory — same as IssueCommitCas). The stale-fence re-read
@@ -648,9 +736,27 @@ fn commit_result(
             .batch_goes
             .entry(bg.batch)
             .or_insert((bg.fence, bg.source, bg.dest));
+        // D-6: STAGE the go-token durably (self-describing; one record per batch — preserves the
+        // G-TIER decouple, since rehydrate restores `batch_go_writes` from the map len, never re-driving
+        // the `+= 1`). Committed at the end-of-tick barrier with the saga snapshots.
+        let token = GoTokenSnapshot {
+            batch: bg.batch,
+            fence: bg.fence,
+            source: bg.source,
+            dest: bg.dest,
+        };
+        runtime
+            .pending_writes
+            .push((StoreKey::BatchGo(bg.batch).bytes(), Some(encode(&token))));
     }
     if tombstone {
         runtime.sagas.remove(&transfer);
+        // D-6: a tombstoned saga's durable snapshot is DELETED — rehydrate's Saga-scan must not
+        // resurrect it (the matching directory mutation commits in the SAME barrier, so the durable
+        // saga set + directory are always consistent post-crash).
+        runtime
+            .pending_writes
+            .push((StoreKey::Saga(transfer).bytes(), None));
     } else {
         // Sound because nothing between the lookup and this write-back can touch
         // `runtime.sagas`: `run_to_quiescence` takes only `dir`/`outbox` (the borrow
@@ -671,7 +777,114 @@ fn commit_result(
             live.since = now;
         }
         live.state = final_state;
+        // D-6: STAGE the QUIESCENT snapshot (built by copying the just-updated live saga, so `live`'s
+        // borrow ends before the disjoint `pending_writes` push — NLL). The end-of-tick barrier commits
+        // it before the node's flush phase sends this tick's effects (persist-before-effect).
+        let snapshot = SagaSnapshot {
+            ctx: live.ctx,
+            state: live.state,
+            gateway: live.gateway,
+            since: live.since,
+            flushed_pose: live.flushed_pose,
+        };
+        runtime
+            .pending_writes
+            .push((StoreKey::Saga(transfer).bytes(), Some(encode(&snapshot))));
     }
+}
+
+/// Encode a durable record to [`Bytes`] (D-6). A BRANCHLESS generic shim (postcard to a `Vec` is
+/// infallible for these fixed-shape types; the `.expect` panic body lives in stdlib, not a coverable
+/// caller branch — HR5, matching the codebase's `to_allocvec().expect` idiom). Instantiated per record
+/// type, each covered by its persist site.
+fn encode<T: Serialize>(value: &T) -> Bytes {
+    postcard::to_allocvec(value)
+        .expect("postcard encodes a durable record")
+        .into()
+}
+
+/// The orchestrator state recovered from a non-empty durable [`Store`] on restart (D-6).
+pub(crate) struct Rehydrated {
+    pub clock: CeilingClock,
+    pub directory: DirectoryCore,
+    pub runtime: SagaRuntimeRes,
+}
+
+/// Reconstruct the orchestrator's durable state from the [`Store`] on a kill-9 restart (D-6). Returns
+/// `None` when the store is empty — a fresh GENESIS orchestrator (no `Clock` record committed yet). On
+/// RECOVER: the clock resumes FORWARD at the persisted ceiling (`CeilingClock::recover` — never rewinds,
+/// so `scan_deadlines` stays live); the directory + go-tokens restore verbatim (`batch_go_writes` set to
+/// the map len, NOT re-driven through the `+= 1` — the G-TIER decouple survives); each saga re-hydrates
+/// with `since` ARMED to 0 so the first `scan_deadlines` fires it and the EXISTING per-phase Timeout
+/// producer re-drives it to terminal (forward-only past Committed — NO new recovery path). The directory
+/// and the saga set commit in the SAME barrier, so they are always CONSISTENT post-crash (a `Swapping`
+/// snapshot pairs a dest-owned directory; a `Freezing` snapshot pairs a source-owned directory) — the
+/// Timeout arms reconcile correctly without a bespoke head-re-read (that is the io-prod separate-file future).
+pub(crate) fn rehydrate(
+    store: &dyn Store,
+    reserve_chunk: u64,
+    saga_tuning: SagaTuning,
+    dir_tuning: DirectoryTuning,
+) -> Option<Rehydrated> {
+    // The Clock family is the genesis-vs-recover discriminator: absent ⇒ no tick ever committed ⇒ genesis.
+    let clock_recs = store.scan(&[StoreKey::CLOCK]);
+    let (_clock_key, clock_bytes) = clock_recs.first()?;
+    let (epoch, ceiling): (EpochId, UniverseTick) =
+        postcard::from_bytes(clock_bytes).expect("decode persisted clock ceiling");
+    let (mut clock, ClockAction::ReserveCeiling(next)) =
+        CeilingClock::recover(epoch, ceiling, reserve_chunk)
+            .expect("non-zero reserve chunk on recover");
+    clock
+        .confirm_ceiling(next)
+        .expect("the recovered reservation confirms in-memory exactly once");
+
+    let directory = DirectoryCore::restore(
+        dir_tuning,
+        store
+            .scan(&[StoreKey::DIRECTORY])
+            .into_iter()
+            .map(|(_k, v)| {
+                let snapshot: DirSnapshot =
+                    postcard::from_bytes(&v).expect("decode persisted directory record");
+                (snapshot.key, snapshot.record)
+            }),
+    );
+
+    let mut sagas: BTreeMap<TransferId, LiveSaga> = BTreeMap::new();
+    for (_k, v) in store.scan(&[StoreKey::SAGA]) {
+        let snapshot: SagaSnapshot =
+            postcard::from_bytes(&v).expect("decode persisted saga snapshot");
+        sagas.insert(
+            snapshot.ctx.transfer,
+            LiveSaga {
+                ctx: snapshot.ctx,
+                state: snapshot.state,
+                gateway: snapshot.gateway,
+                // ARM: `now` jumped forward to the recovered ceiling, so `now - 0 >= deadline` fires the
+                // re-drive on the first post-restart `scan_deadlines` tick (deterministic, never wedged).
+                since: UniverseTick(0),
+                flushed_pose: snapshot.flushed_pose,
+            },
+        );
+    }
+
+    let mut batch_goes: BTreeMap<BatchId, (Fence, NodeId, NodeId)> = BTreeMap::new();
+    for (_k, v) in store.scan(&[StoreKey::BATCH_GO]) {
+        let token: GoTokenSnapshot = postcard::from_bytes(&v).expect("decode persisted go-token");
+        batch_goes.insert(token.batch, (token.fence, token.source, token.dest));
+    }
+    let batch_go_writes = batch_goes.len() as u64;
+
+    let mut runtime = SagaRuntimeRes::with_tuning(saga_tuning);
+    runtime.sagas = sagas;
+    runtime.batch_goes = batch_goes;
+    runtime.batch_go_writes = batch_go_writes;
+
+    Some(Rehydrated {
+        clock,
+        directory,
+        runtime,
+    })
 }
 
 /// Process the create-on-trigger queue: per-key-serialize via `lock_transfer`, `start` the
@@ -684,6 +897,13 @@ fn process_starts(
     now: UniverseTick,
 ) {
     for PendingStart { ctx, gateway } in std::mem::take(&mut runtime.pending) {
+        // GUARD (audit D6-1): a re-trigger for an ALREADY-LIVE transfer is a no-op — never CLOBBER an
+        // in-flight saga. The durable path's `lock_transfer` already refuses a second saga (the subject
+        // is `in_transfer`-locked), but a TRANSIENT batch takes NO lock, so an unconditional re-insert
+        // would overwrite its live `BatchHandoff` saga (resetting the choreography). One key → one saga.
+        if runtime.sagas.contains_key(&ctx.transfer) {
+            continue;
+        }
         // Per-key serialization (DURABLE only): `lock_transfer` sets the directory `in_transfer`.
         // FALSE means the subject is absent OR already transferring — refuse to start (a
         // spurious/duplicate trigger is a no-op, never a second concurrent saga on the same key). A
@@ -836,9 +1056,11 @@ fn drop_applied_event(step_id: u32) -> SagaEvent {
 pub fn drive_sagas(
     inbox: Res<InboundBox>,
     clock: Res<ClockSample>,
+    clock_res: Res<UniverseClockRes>,
     mut dir: ResMut<DirectoryRes>,
     mut runtime: ResMut<SagaRuntimeRes>,
     mut outbox: ResMut<OutboundBox>,
+    mut store: ResMut<StoreRes>,
 ) {
     let now = clock.universe_tick;
     let epoch = clock.epoch;
@@ -938,13 +1160,54 @@ pub fn drive_sagas(
             _ => {}
         }
     }
+    // D-6 GROUP-COMMIT BARRIER: stage every saga/go-token write recorded this tick (drained from
+    // `pending_writes`), snapshot the DIRECTORY (the independent key family) + the durable clock ceiling,
+    // then ONE `commit()` — the ~1-fsync/tick durability point (io-prod batches it off-tick later). This
+    // runs at the END of the schedule, BEFORE the node's flush phase sends `outbox`, so no effect leaves
+    // the orchestrator before the state authorizing it is durable (persist-before-effect). The directory
+    // reconcile + the saga writes commit in the SAME barrier ⇒ the durable saga set and directory are
+    // always CONSISTENT post-crash (a Swapping snapshot ⟺ dest-owned directory; rehydrate never sees a
+    // half-state). The clock ceiling is persisted so a rebuild resumes FORWARD (`CeilingClock::recover`).
+    for (key, value) in std::mem::take(&mut runtime.pending_writes) {
+        match value {
+            Some(bytes) => store.0.put(&key, &bytes),
+            None => store.0.delete(&key),
+        }
+    }
+    // RECONCILE the durable Directory family with RAM (audit COMP-2): DELETE every durable row, then PUT
+    // every CURRENT one. A put-only snapshot only GROWS — a REVOKED record (a logged-out / departed owner
+    // removed from RAM via `LeaseRevoke`, `directory.rs` `revoke`) would otherwise be RESURRECTED at its
+    // stale owner+fence by `rehydrate`'s `restore` on the next kill-9 = a zombie authority record
+    // (split-brain on the exact recover path D-6 cures). The directory is mutated across TWO systems
+    // (serve_directory + drive_sagas), so the reconcile lives HERE — the one place with both the store +
+    // the directory — rather than threading a per-remove delete through serve_directory (which has no
+    // `pending_writes`). The MemStore staged map is last-write-wins, so a still-present key's
+    // delete-then-put nets to the put; a vanished key's lone delete stands. O(directory) at
+    // single-orchestrator P3; io-prod does incremental (a per-mutation delete co-located with the WAL).
+    for (key_bytes, _) in store.0.scan(&[StoreKey::DIRECTORY]) {
+        store.0.delete(&key_bytes);
+    }
+    for (key, record) in dir.0.entries() {
+        let snapshot = DirSnapshot {
+            key: *key,
+            record: *record,
+        };
+        store
+            .0
+            .put(&StoreKey::Directory(*key).bytes(), &encode(&snapshot));
+    }
+    store.0.put(
+        &StoreKey::Clock.bytes(),
+        &encode(&(clock_res.0.epoch(), clock_res.0.confirmed_ceiling())),
+    );
+    store.0.commit();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::{NodeConfig, build_app};
-    use crate::orchestrator::{OrchestratorConfig, register_orchestrator};
+    use crate::orchestrator::{OrchestratorConfig, register_orchestrator_with_store};
     use vd_core::entity_kind::{DurabilityClass, EntityKind};
     use vd_core::glam::DVec3;
     use vd_core::pose::{FrameRef, RealmId};
@@ -952,7 +1215,7 @@ mod tests {
     use vd_sim::capability::NodeKind;
     use vd_sim::directory::DirectoryTuning;
     use vd_sim::io::Transport;
-    use vd_sim::io::mem::MemHub;
+    use vd_sim::io::mem::{MemHub, MemStore};
     use vd_sim::saga::BatchHandoffPhase;
     use vd_wire::intershard::TRANSIENT_COMPLETE_STEP;
     use vd_wire::seams::directory::{DirectoryKey, DirectoryOp};
@@ -1092,11 +1355,28 @@ mod tests {
         gateway: vd_sim::io::mem::MemTransport,
         source: vd_sim::io::mem::MemTransport,
         dest: vd_sim::io::mem::MemTransport,
+        /// D-6: the RETAINED durable store — survives a `rebuild` (the kill-9 analog), so the rebuilt
+        /// orchestrator re-hydrates its in-flight sagas/directory/clock from it.
+        store: MemStore,
+    }
+
+    /// The shared orchestrator config (so `new` + `rebuild` build the IDENTICAL orchestrator).
+    fn orch_config() -> OrchestratorConfig {
+        OrchestratorConfig {
+            epoch: EpochId(1),
+            reserve_chunk: 1024,
+            clock_peers: vec![],
+            directory: DirectoryTuning {
+                lease_ttl_ticks: 10_000,
+            },
+            saga: SagaTuning::default(),
+        }
     }
 
     impl Rig {
         fn new() -> Rig {
             let hub = MemHub::new();
+            let store = MemStore::new();
             let mut orch = build_app(
                 NodeConfig {
                     node_id: ORCH,
@@ -1105,18 +1385,13 @@ mod tests {
                 hub.register(ORCH, 64),
             );
             let (world, schedule) = orch.parts_mut();
-            register_orchestrator(
+            // D-6: build against a RETAINED store (empty ⇒ genesis); the Rig keeps the handle so
+            // `rebuild` can re-attach the SAME committed WAL to a fresh orchestrator.
+            register_orchestrator_with_store(
                 world,
                 schedule,
-                &OrchestratorConfig {
-                    epoch: EpochId(1),
-                    reserve_chunk: 1024,
-                    clock_peers: vec![],
-                    directory: DirectoryTuning {
-                        lease_ttl_ticks: 10_000,
-                    },
-                    saga: SagaTuning::default(),
-                },
+                &orch_config(),
+                Box::new(store.clone()),
             );
             let gateway = hub.register(GATEWAY, 64);
             let source = hub.register(SOURCE, 64);
@@ -1127,7 +1402,31 @@ mod tests {
                 gateway,
                 source,
                 dest,
+                store,
             }
+        }
+
+        /// KILL-9 + REBUILD the orchestrator (D-6): drop the World (its in-memory saga/directory/clock
+        /// state is GONE), re-attach ORCH's transport on the same hub (peers reachable, in-flight queues
+        /// lost), and build a FRESH orchestrator that RECOVERS from the retained durable store. The
+        /// SOURCE/DEST/GATEWAY peers are untouched (only the orchestrator died).
+        fn rebuild(&mut self) {
+            let transport = self.hub.reregister(ORCH, 64);
+            let mut orch = build_app(
+                NodeConfig {
+                    node_id: ORCH,
+                    kind: NodeKind::Orchestrator,
+                },
+                transport,
+            );
+            let (world, schedule) = orch.parts_mut();
+            register_orchestrator_with_store(
+                world,
+                schedule,
+                &orch_config(),
+                Box::new(self.store.clone()),
+            );
+            self.orch = orch; // the old orchestrator World is dropped here — its RAM is lost
         }
 
         /// Deliver pending sends to the orchestrator, run one tick, then deliver its outbound
@@ -1782,6 +2081,188 @@ mod tests {
         );
         // `since` was set when the saga last advanced and is bounded by the clock.
         assert!(snap.sagas[0].since.0 <= snap.universe_tick);
+    }
+
+    #[test]
+    fn orchestrator_rehydrates_an_in_flight_durable_saga_across_a_kill_9() {
+        // D-6 HEADLINE: a durable saga in flight (Demoting, POST-commit) SURVIVES an orchestrator kill-9.
+        // The rebuilt orchestrator re-hydrates it from the durable WAL (NOT vaporized) and the existing
+        // Slice-2a Timeout producer re-drives it FORWARD (re-emits the ordered Demote) — never-vanish
+        // holds across a restart. Anti-theater: the `rebuild` drops the in-memory World, so the saga can
+        // only survive via the durable Store (a no-persist orchestrator would lose it = `live() == 0`).
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.trigger(ctx(DurabilityClass::Durable, Fence(1)));
+        rig.settle();
+        rig.ack(TransferControlAck::Prepared {
+            transfer: XFER,
+            result: PrepareResult::Ready,
+        });
+        rig.ack(TransferControlAck::CutConfirmed {
+            transfer: XFER,
+            marker_seq: 3,
+        });
+        rig.ack(TransferControlAck::SourceFrozen {
+            transfer: XFER,
+            drained_seq: 3,
+        });
+        rig.flush(); // both gate conditions → the DIRECT CAS wins → Swapping (durable at the barrier)
+        rig.ack(TransferControlAck::Committed { transfer: XFER }); // → Demoting (durable at the barrier)
+        let _ = (rig.drain_gateway(), rig.drain_source());
+        assert_eq!(rig.live(), 1, "the saga is live in Demoting pre-crash");
+        let before = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+        // Static message (no `{}` format arg — a lazily-evaluated arg is an uncoverable region when the
+        // assert passes, HR5); the `starts_with` IS the always-evaluated condition.
+        assert!(
+            before.sagas[0].state.starts_with("Demoting"),
+            "pre-crash state is Demoting"
+        );
+
+        // KILL-9 + REBUILD: the in-memory saga set dies with the World; the rebuilt orchestrator RECOVERS
+        // its in-flight saga + the committed directory + the clock from the retained WAL.
+        rig.rebuild();
+        assert_eq!(
+            rig.live(),
+            1,
+            "the in-flight saga SURVIVED the orchestrator kill-9 (re-hydrated from the WAL, not vanished)"
+        );
+        let after = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+        assert!(
+            after.sagas[0].state.starts_with("Demoting"),
+            "re-hydrated at the SAME quiescent phase (Demoting)"
+        );
+        // The directory survived too: the subject's authority committed to the DEST at the CAS fence.
+        let head = rig
+            .orch
+            .world_mut()
+            .resource::<DirectoryRes>()
+            .0
+            .head(subject())
+            .expect("the subject's directory record re-hydrated");
+        assert_eq!(head.authority, AuthorityRef::Shard(DEST));
+        assert_eq!(
+            head.fence,
+            Fence(2),
+            "the committed CAS fence survived the crash"
+        );
+
+        // RE-DRIVE: the recovered saga's `since` is armed, so the first post-restart tick fires
+        // `scan_deadlines` → Demoting+Timeout re-emits the ordered Demote to the SOURCE (forward-only,
+        // the SAME proven producer — no new recovery path). Proves the transfer makes progress post-crash.
+        let _ = rig.drain_source();
+        rig.settle();
+        assert!(
+            rig.drain_source().contains(&demote_wire(Fence(2))),
+            "the rebuilt orchestrator re-drove the in-flight transfer forward (re-emitted the Demote)"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rehydrates_a_transient_go_token_across_a_kill_9() {
+        // D-6 (transient arm): an in-flight transient batch's go-token + its `BatchHandoff` saga survive
+        // an orchestrator kill-9. The WAL carries the go-token as ONE record per batch, so rehydrate
+        // restores `batch_go_writes` from the map LEN — the G-TIER decouple is preserved on restart, NOT
+        // re-driven through the `+= 1` (a regression that re-incremented would read N here, not 1).
+        let mut rig = Rig::new();
+        rig.trigger(transient_ctx(Fence(9)));
+        rig.settle(); // BatchCommitting → the go-token commits (persisted) → BatchHandoff{AwaitAdopt}
+        {
+            let runtime = rig.orch.world_mut().resource::<SagaRuntimeRes>();
+            assert_eq!(
+                runtime.live(),
+                1,
+                "the transient saga is live in the BatchHandoff tail pre-crash"
+            );
+            assert_eq!(runtime.batch_goes(), vec![(BatchId(XFER), Fence(9))]);
+            assert_eq!(runtime.batch_go_writes(), 1);
+        }
+
+        rig.rebuild();
+        let runtime = rig.orch.world_mut().resource::<SagaRuntimeRes>();
+        assert_eq!(
+            runtime.live(),
+            1,
+            "the in-flight transient saga SURVIVED the kill-9 (re-hydrated from the WAL)"
+        );
+        assert_eq!(
+            runtime.batch_goes(),
+            vec![(BatchId(XFER), Fence(9))],
+            "the committed go-token re-hydrated (the dest's Held authority stays backed)"
+        );
+        assert_eq!(
+            runtime.batch_go_writes(),
+            1,
+            "batch_go_writes restored from the map len, NOT re-incremented through the +=1 (G-TIER decouple)"
+        );
+    }
+
+    #[test]
+    fn rehydrate_does_not_resurrect_a_revoked_directory_record() {
+        // D-6 (audit COMP-2): a directory record REVOKED before a kill-9 (a logged-out / departed owner —
+        // the gateway-Bye / stub-departing `LeaseRevoke` path) must NOT be resurrected by rehydrate. The
+        // reconcile barrier deletes the durable row; a put-only snapshot would re-install a stale-authority
+        // zombie on recover. This exercises the barrier's durable-delete loop + the no-resurrect guarantee.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1)); // SOURCE owns the subject at Fence(1) — durably persisted
+        // REVOKE it at its exact fence (the logout / departed path), then settle so the barrier reconciles.
+        rig.source
+            .send(
+                ORCH,
+                MsgClass::Saga,
+                vd_sim::io::bytes(
+                    postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
+                        key: subject(),
+                        fence: Fence(1),
+                    }))
+                    .expect("encode"),
+                ),
+            )
+            .expect("revoke sent");
+        rig.settle();
+        assert!(
+            rig.orch
+                .world_mut()
+                .resource::<DirectoryRes>()
+                .0
+                .head(subject())
+                .is_none(),
+            "the record is gone from RAM after the revoke"
+        );
+
+        // KILL-9 + REBUILD: the revoked record must STAY gone (not resurrected by rehydrate's restore).
+        rig.rebuild();
+        assert!(
+            rig.orch
+                .world_mut()
+                .resource::<DirectoryRes>()
+                .0
+                .head(subject())
+                .is_none(),
+            "the revoked record is NOT resurrected by rehydrate (COMP-2: the barrier durably deleted it)"
+        );
+    }
+
+    #[test]
+    fn a_re_trigger_of_a_live_transient_saga_does_not_clobber_it() {
+        // Audit D6-1: a DUPLICATE trigger for an in-flight transient `BatchId` is a no-op — the live
+        // `BatchHandoff` saga + its committed go-token are untouched (one key → one saga, never reset).
+        // The durable path is already guarded by `lock_transfer`; this covers the transient path (no lock).
+        let mut rig = Rig::new();
+        rig.trigger(transient_ctx(Fence(9)));
+        rig.settle(); // → BatchHandoff{AwaitAdopt}, go-token committed (batch_go_writes == 1)
+        rig.trigger(transient_ctx(Fence(9))); // a spurious/duplicate producer re-trigger
+        rig.settle();
+        let runtime = rig.orch.world_mut().resource::<SagaRuntimeRes>();
+        assert_eq!(
+            runtime.live(),
+            1,
+            "the re-trigger did NOT start a second saga (guarded)"
+        );
+        assert_eq!(
+            runtime.batch_go_writes(),
+            1,
+            "the live saga was NOT clobbered + its go-token NOT re-committed"
+        );
     }
 
     #[test]
