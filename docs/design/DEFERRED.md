@@ -519,21 +519,45 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   saga-gated not frame-fence-enforced; the dest promote is currently autonomous and needs a real saga
   `Promoting` state; no collision system exists yet so 1d.5b lands the ghost FEED+registration, response @P5).
 
-### D-3 🟥 Lease lifecycle: no renewal producer, no expiry reaper (TTL unenforced)
+### D-3 🟥 Lease lifecycle: no renewal producer, no expiry reaper (TTL unenforced) + the kill-only-`NodeUnreachable` dead-vs-slow stand-in (audit CSCALE-1, HIGH)
 - **Missing:** `OwnerRecord.lease_expires` is written on every grant/renew/commit, but NO node sends
   `LeaseRenew` (no heartbeat producer) and nothing reads `lease_expires` to reap a lapsed record — so a
   crashed node's keys are immortal. Inert for P1's fixed roster; a broken promise the moment nodes can die.
+- **⚠️ CSCALE-1 (whole-codebase audit `wf_2de9063f`, HIGH — latent, fix before real-node chaos):** the
+  D-7d dead-resolution uses a kill-only `Inbound::NodeUnreachable` as its dead-vs-slow STAND-IN: in io-prod
+  a SINGLE recoverable write blip (a 20s idle-reap / VXLAN drop of a LIVE peer — `io-prod/.../mesh.rs`
+  emits `NodeUnreachable`, the writer auto-redials next frame) inserts the peer into
+  `SagaRuntimeRes.dead_participants` (`saga_runtime.rs` `drive_sagas`) which is **NEVER cleared** (no
+  `remove`/`retain` anywhere — confirmed), and a due `BatchHandoff` saga then resolves to `DestUnreachable`
+  → `EmitTransientAbandon` + Tombstone = irreversible accounted loss of an in-flight transient batch toward
+  a HEALTHY dest. `deadline_for` puts `BatchHandoff` on the CHEAP `redrive_deadline_ticks`, so a blip + a
+  few ticks is enough. NOT critical TODAY: the harness emits `NodeUnreachable` only via a PERMANENT kill
+  (the blip→live-dest path is gate-invisible), there is NO real-network fault injection over QUIC, and the
+  transient burst path runs only in-process — so it CANNOT fire on a live cluster until P3 real-node chaos
+  (this entry's WHEN). Bounded to transient kinds (debris/projectiles) within loss-budget; durables
+  unaffected.
 - **Where:** `crates/sim/src/directory.rs` (`renew`/`lease_expires` written, never consumed);
-  `crates/node/src/orchestrator.rs` (the only `LeaseRenew` consumer is the receive arm). Pinned by the
-  `OwnerRecord.lease_expires` doc in `crates/wire/src/seams/directory.rs` (TTL-ENFORCEMENT-UNIMPLEMENTED).
-- **When / proper:** **before the P2 crash/stagger matrix and P3 chaos with real nodes.** Both halves: a
-  renewal heartbeat from each authority holder (gateway for `Session`, shard for `Realm`/`Entity`) + an
-  orchestrator expiry sweep gated on **unreachable-confirmation** (`transfer_protocol.md`: lapsed lease ⇒
-  ownership loss ONLY when the owner is confirmed unreachable — an orchestrator outage freezes recovery,
-  never mass-orphans).
-- **Dependency:** none structural (the plumbing — `renew`/`revoke`/`now`/`entries` — exists); needs the two
-  driver systems + the unreachable-confirmation gate.
-- **Source:** whole-codebase audit `wf_43fea0dd` (XSI-1 / SCALE-A).
+  `crates/node/src/orchestrator.rs` (the only `LeaseRenew` consumer is the receive arm);
+  `crates/node/src/saga_runtime.rs` (`dead_participants` insert in `drive_sagas`, never cleared; the
+  `DestUnreachable`/`SourceUnreachable` resolution gate in `scan_deadlines`; `deadline_for`'s BatchHandoff →
+  `redrive_deadline_ticks`). Pinned by the `OwnerRecord.lease_expires` doc in
+  `crates/wire/src/seams/directory.rs` (TTL-ENFORCEMENT-UNIMPLEMENTED) + the kill-only-today doc on
+  `dead_participants`.
+- **When / proper:** **before the P2 crash/stagger matrix and P3 chaos with real nodes / any multi-pod
+  deploy.** FOUR parts: (1) a renewal heartbeat from each authority holder (gateway for `Session`, shard
+  for `Realm`/`Entity`); (2) an orchestrator expiry sweep gated on **unreachable-confirmation** (lapsed
+  lease ⇒ ownership loss ONLY when the owner is confirmed unreachable — an orchestrator outage freezes
+  recovery, never mass-orphans); (3) CSCALE-1 hardening — require N-consecutive `NodeUnreachable` toward
+  the same node within a window before flipping its dead bit AND **clear it on the next successful ack**
+  (a recovered peer un-marks itself), and gate the DESTRUCTIVE `EmitTransientAbandon` resolution behind
+  the LARGE `abort_deadline_ticks` (not the cheap `redrive_deadline_ticks` — `saga.rs` already validates
+  `abort >= redrive`, so the budget exists); (4) a harness **"flap" fault** (a recoverable
+  `NodeUnreachable` the `FaultFabric` cannot model today) so the blip→live-dest-abandon path is caught RED
+  before io-prod ships into a multi-pod deployment. (3)+(4) are the clear-on-recovery path D-7d Slice 1
+  deliberately deferred as HR5-untestable without the flap fault — they LAND TOGETHER here.
+- **Dependency:** none structural (the plumbing — `renew`/`revoke`/`now`/`entries` — exists); needs the
+  driver systems + the unreachable-confirmation gate + the flap fault. Gates D-37 (durable re-home).
+- **Source:** whole-codebase audits `wf_43fea0dd` (XSI-1 / SCALE-A) + `wf_2de9063f` (CSCALE-1, HIGH).
 
 ### D-4 🟥 The reliable `EventMsg` client `MsgClass` arm — carrier for BOTH AoI eviction AND cross-shard signals
 - **Missing:** `MsgClass` has Control/Saga/Snapshot/Input/Membership — **no `Event`/`Bulk` arm** — so the
@@ -678,7 +702,13 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   cluster-level over-budget DEST-kill → `LostOverBudget` honest RED) + the dual-death counted-drop above;
   `StubConfig.max_items_per_batch` (the source-side wire-frame cap — DEFERRED whole from D-7c because a
   cap-split is lossy-if-triggered under the derived-id dedup journal and `MsgClass::Saga` is reliable, so
-  the sub-batch→distinct-go-token wiring must land WITH it here); MIXED-KIND / MULTI-DEST-REALM burst (a
+  the sub-batch→distinct-go-token wiring must land WITH it here) + **audit COMP-1 (LOW):** the io-prod
+  RELIABLE-arm `FrameError::TooLarge` currently mis-classifies a caller-side framing fault as transport
+  DEATH (tears the connection / surfaces `NodeUnreachable`) — split `write_wireframe`/`peer_writer` so a
+  `TooLarge` is a counted drop + `tracing::error` that NEVER tears down the connection (mirror the datagram
+  arm's `TooLarge` guard) + a wire-level test asserting an over-cap reliable `TransferEnvelope` does NOT
+  surface as `NodeUnreachable`; no trigger today (K=1 single-DEST, no >1 MiB frame constructible), lands
+  WITH the cap; MIXED-KIND / MULTI-DEST-REALM burst (a
   3rd shard + a `seed_transient_crossing_to(dest, realm)` parameterization — structurally unreachable
   through the current `dest=DEST`/`to_realm=System(8)`-hardcoded API); bounded GC of completed go-tokens
   (`batch_goes` unbounded — the oracle needs the live record until a drop-completion signal Slice 2
