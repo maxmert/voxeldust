@@ -661,11 +661,25 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   family + the C8 redeliver-PREPARE drop** (a redelivered trigger for an ALREADY-COMPLETED transfer is not yet
   dropped on recover — the live-saga clobber is guarded, but the post-completion zombie needs the persisted
   tombstone; owed with the 1d idempotent-trigger slice). The **explicit head-re-read** for io-prod independent-file
-  directory/saga disagreement. The full **C1–C9 DURABLE player crash matrix + the cut-warmup durable cell** (the
-  S5 machinery — `rebuild_orchestrator` + `p2_cluster_durable_orch` — generalizes; only the durable-class fixture
-  differs). **`batch_goes` WAL GC is now a HARD redb precondition** (it is durable+unbounded now, not just RAM —
-  the WAL `delete` must be staged alongside the in-RAM `batch_goes.remove` at the shard's terminal retire;
-  co-gated with D-7d Slice 2 GC).
+  directory/saga disagreement. **`batch_goes` WAL GC is now a HARD redb precondition** (it is durable+unbounded
+  now, not just RAM — the WAL `delete` must be staged alongside the in-RAM `batch_goes.remove` at the shard's
+  terminal retire; co-gated with D-7d Slice 2 GC).
+- **✅ DURABLE orchestrator kill-9 recovery LANDED (this slice, `p3_orch_kill.rs`):** the POST-commit headline —
+  a player crossing while the operator kill-9s the orchestrator mid-`Demoting` survives a `crash`+rebuild: the
+  rehydrated saga re-drives the demote/promote forward to `Done`, the avatar settles at DEST, AUTHORITY-UNIQUE,
+  zero loss + an anti-theater control (fresh store recovers nothing). Reuses `run_orch_kill_durable` on the same
+  `rebuild_orchestrator` + `p2_cluster_durable_orch` machinery as the transient cell.
+- **Still owed (durable crash matrix):** the full **C1–C9 phase × victim sweep + the cut-warmup durable cell**
+  (the S5 machinery generalizes; only the durable fixtures differ). **⚠️ NEW (abort-path, surfaced probing the
+  PRE-commit orchestrator-kill cell — DEFERRED, see the `p3_orch_kill.rs` NOTE):** a PRE-commit abort with a
+  SURVIVING source leaves a **fence divergence** — `abort_clear` bumps the directory entity fence (to fence-out
+  stale crossings) but `ThawSource` carries NO fence, so the source stays at its pre-abort fence (directory@2 vs
+  owner@1). The gateway route fence is NOT bumped by an abort (no route swap) so it is *likely* functionally
+  benign, but owner-vs-directory divergence is the split-brain shape the AUTHORITY-UNIQUE oracle catches.
+  **Owed: a focused abort-path decision — either `abort_clear` should NOT bump on a pre-commit abort (no crossing
+  to fence out), OR the thaw must re-sync the source's fence — then the pre-commit orchestrator-kill cell lands
+  asserting a clean SettledAt(SOURCE).** Never exposed before: no prior cell had a pre-commit abort whose source
+  survives (the existing `kill_source_in_freezing` cell KILLS the source → an orphan, not a thawed survivor).
 - **Source:** the P2 plan + Slice-1b audit (ROB-2) + the D-6 design `wf_0f8321dc` + the holistic audits
   `wf_132becc3` (COMP-2 directory-resurrect fix, D6-ROB-1 non-durable-bin warn, D6-1 tombstone/clobber) and
   `wf_7cc86404` (S0–S5 DONE_NO_CRITICAL; the 3 io-prod preconditions above).

@@ -1070,12 +1070,12 @@ pub fn rebuild_orchestrator(topo: &mut Topology, fabric: &FaultFabric, store: Me
     topo.replace_node(Box::new(orch));
 }
 
-/// The outcome of an orchestrator kill-9 + rebuild ([`run_orch_kill_transient`]).
+/// The outcome of an orchestrator kill-9 + rebuild ([`run_orch_kill_transient`] / [`run_orch_kill_durable`]).
 pub struct OrchKillOutcome {
-    /// The cluster, settled (durable) or frozen right after the rebuild (anti-theater).
+    /// The cluster, settled (recovered) or frozen right after the rebuild (anti-theater).
     pub topo: Topology,
-    /// The seeded debris entity the batch carried.
-    pub debris: EntityId,
+    /// The transferred subject — a debris item (transient) or a player avatar (durable).
+    pub subject: EntityId,
     /// Dead nodes after the rebuild — EMPTY (the orchestrator is alive again), for the dead-aware oracle.
     pub dead: BTreeSet<NodeId>,
     /// `saga_states` captured the INSTANT the rebuilt orchestrator boots, before it re-drives anything —
@@ -1183,7 +1183,7 @@ pub fn run_orch_kill_transient(seed: u64, durable: bool) -> OrchKillOutcome {
         let dead = topo.dead_nodes();
         return OrchKillOutcome {
             topo,
-            debris,
+            subject: debris,
             dead,
             recovered_states,
         };
@@ -1220,7 +1220,116 @@ pub fn run_orch_kill_transient(seed: u64, durable: bool) -> OrchKillOutcome {
     let dead = topo.dead_nodes();
     OrchKillOutcome {
         topo,
-        debris,
+        subject: debris,
+        dead,
+        recovered_states,
+    }
+}
+
+/// D-6 e2e: kill-9 the orchestrator mid-saga of a live DURABLE player transfer, then rebuild it — the
+/// P3 headline for the class that carries PLAYERS (zero loss, AUTHORITY-UNIQUE). The durable twin of
+/// [`run_orch_kill_transient`]: a separate driver because the durable path is directory-shaped (a client
+/// logs in + walks, the avatar is a directory `Entity` record, the saga runs the full
+/// `Preparing→…→Demoting→Promoting` choreography) where the transient is held-set-shaped — forcing both
+/// through one driver would need a forbidden match-on-class. The SHARED spine is reused verbatim:
+/// `p2_cluster_durable_orch` (retained Store), `fault_step_until`, `fabric.crash` + `rebuild_orchestrator`,
+/// the `recovered_states` capture, the quiesce loop. Drive to `at_phase`, `crash` the orchestrator, rebuild
+/// from the retained store (or a FRESH one for the anti-theater control), and let the rehydrated saga
+/// re-drive. POST-commit phases (e.g. `Demoting`) re-drive forward to `Done`; the cell asserts via
+/// [`assert_end_state`]. With `!durable_store` the rebuilt orchestrator recovers NOTHING (the control).
+#[must_use]
+pub fn run_orch_kill_durable(seed: u64, at_phase: &str, durable_store: bool) -> OrchKillOutcome {
+    let fabric = FaultFabric::new(seed, 2);
+    let (mut topo, store) = p2_cluster_durable_orch(&fabric, 8);
+    topo.add_node(Box::new(p1_client(
+        &fabric,
+        FAULT_CLIENT,
+        AccountId(1000),
+        walk_forward(),
+    )));
+    // WARMUP: the player logs in + walks; the SOURCE grants its avatar and the DEST wins its realm.
+    fault_step_until(&mut topo, 80, |t| {
+        let r = t.inspect_all();
+        !fault_report(&r, SHARD).held_entities.is_empty()
+            && fault_report(&r, DEST)
+                .held_realms
+                .iter()
+                .any(|(realm, _)| *realm == RealmId::System(8))
+    });
+    let (session, entity, fence) = read_subject(&mut topo);
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: TransferId(1),
+            session,
+            subject: DirectoryKey::Entity(entity),
+            expected_fence: fence,
+            source: SHARD,
+            dest: DEST,
+            class: DurabilityClass::Durable,
+            needs_provision: false,
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::System(8),
+        },
+    );
+    // Drive to the target saga phase (the client auto-stamps the CUT_MARKER on RequestCut).
+    fault_step_until(&mut topo, 60, |t| {
+        saga_states(t).iter().any(|s| s.starts_with(at_phase))
+    });
+    assert!(
+        saga_states(&mut topo)
+            .iter()
+            .any(|s| s.starts_with(at_phase)),
+        "anti-vacuity: the saga is in the target phase when the orchestrator is killed"
+    );
+    assert!(
+        !store.is_empty(),
+        "the orchestrator committed durable state (incl. the in-flight saga) before the kill"
+    );
+    // KILL-9: `crash` (restart-able) clears the orchestrator's in-process inbound (RAM lost) while the
+    // at-least-once ledger HOLDS the in-flight shard acks for redelivery; the World dies at `replace_node`.
+    fabric.crash(ORCH);
+    // OUTAGE: a few ticks down. The client keeps emitting to the GATEWAY (unaffected by the orchestrator
+    // crash); the source/dest acks are held for redelivery. (No per-tick AUTHORITY-UNIQUE here — that
+    // oracle reads the directory on the crashed orchestrator; the end-state assert covers recovery.)
+    for _ in 0..4 {
+        topo.step();
+    }
+    let recover_store = if durable_store {
+        store.clone()
+    } else {
+        MemStore::new()
+    };
+    rebuild_orchestrator(&mut topo, &fabric, recover_store);
+    let recovered_states = saga_states(&mut topo);
+    if !durable_store {
+        let dead = topo.dead_nodes();
+        return OrchKillOutcome {
+            topo,
+            subject: entity,
+            dead,
+            recovered_states,
+        };
+    }
+    // QUIESCE: the re-hydrated saga re-arms (since=0) → the deadline producer re-drives the choreography
+    // (POST-commit phases re-emit Demote/Promote idempotently → forward to Done at DEST; a PRE-commit phase
+    // fires the abort deadline → ThawSource → terminal Aborted at SOURCE). Either way the saga tombstones.
+    for _ in 0..200 {
+        topo.step();
+        if live_sagas(&mut topo) == 0 {
+            break;
+        }
+    }
+    // SETTLE the terminal egress: the saga tombstones the SAME tick it emits its last action (the final
+    // Promote/ReleaseComplete on the commit path, or the ThawSource on the abort path), so the SOURCE/DEST
+    // applies it — including the fence sync — only AFTER quiescence (mirror `run_transient_fault_scenario`).
+    for _ in 0..24 {
+        topo.step();
+    }
+    let dead = topo.dead_nodes();
+    OrchKillOutcome {
+        topo,
+        subject: entity,
         dead,
         recovered_states,
     }
