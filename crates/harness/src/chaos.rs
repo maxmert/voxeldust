@@ -111,6 +111,9 @@ pub fn run_chaos(seed: u64, config: &ChaosConfig) -> Result<Vec<u8>, WireTruthVi
             max_extra_delay_ticks: rng.range_u64(0, config.max_extra_delay_ticks + 1),
             partitioned: false,
             send_reject_p: 0.0,
+            // D-3 flap is a deterministic-window fault (not a probability), so the seeded chaos sweep
+            // does not inject it — it is exercised by the dedicated CSCALE-1 flap cells (Slice 3).
+            flap_until_tick: None,
         };
         fabric.set_policy(from, to, policy);
     }

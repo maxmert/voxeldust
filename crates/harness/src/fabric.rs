@@ -35,6 +35,12 @@ pub struct LinkPolicy {
     /// Probability `Transport::send` synchronously refuses (`QueueFull`) —
     /// the deterministic trigger for the back-pressure code path.
     pub send_reject_p: f64,
+    /// D-3 FLAP fault: while `now < flap_until_tick`, a delivery ATTEMPT toward a still-ALIVE receiver
+    /// bounces `NodeUnreachable` to the sender (modeling a transport idle-reap/redial of a LIVE peer),
+    /// but the subject message is RETAINED + auto-redelivered after the window. `None` = no flap (the
+    /// default perfect link). DETERMINISTIC (a tick deadline, not a probability) so it never races the
+    /// liveness-confirmation deadline gate it exists to test (CSCALE-1, Slice 3).
+    pub flap_until_tick: Option<TickId>,
 }
 
 impl Default for LinkPolicy {
@@ -45,6 +51,7 @@ impl Default for LinkPolicy {
             max_extra_delay_ticks: 0,
             partitioned: false,
             send_reject_p: 0.0,
+            flap_until_tick: None,
         }
     }
 }
@@ -227,6 +234,18 @@ impl FaultFabric {
         self.lock().policies.insert((from, to), policy);
     }
 
+    /// D-3: FLAP the directed link `from -> to` until `until` — a RECOVERABLE blip toward a still-ALIVE
+    /// receiver (each attempt before `until` bounces `NodeUnreachable` to the sender, the subject auto-
+    /// redelivers after the window). The in-process deterministic stand-in for an io-prod QUIC idle-reap /
+    /// VXLAN drop of a LIVE peer — the fault the FaultFabric could not model (only a permanent `kill`
+    /// emitted `NodeUnreachable`), so the CSCALE-1 blip→healthy-dest false-confirm path was gate-invisible.
+    /// Preserves any other fault on the link, then sets the flap window.
+    pub fn flap(&self, from: NodeId, to: NodeId, until: TickId) {
+        let mut inner = self.lock();
+        let policy = inner.policies.entry((from, to)).or_default();
+        policy.flap_until_tick = Some(until);
+    }
+
     /// Permanently kill a node: pending and future traffic toward it bounces back
     /// to senders as `NodeUnreachable`.
     pub fn kill(&self, id: NodeId) {
@@ -369,6 +388,38 @@ impl FabricInner {
 
     /// Attempt delivery now: apply partition/drop/dup/death policies. Returns how
     /// many copies landed in the receiver's inbound.
+    /// Bounce a `NodeUnreachable` notice for `msg` back to its sender (if alive; a crashed sender just
+    /// misses it — counted, never silent). `notice_seq` is the bounced notice's OWN global_seq: the kill
+    /// path passes the subject's seq (the subject is dropped, so there is nothing to evict); the flap path
+    /// passes a FRESH seq (the subject is retained for redelivery, so its seq must survive the notice's ack).
+    fn bounce_unreachable(&mut self, msg: &Tracked, notice_seq: u64) {
+        let sender_alive = self
+            .endpoints
+            .get(&msg.from)
+            .is_some_and(|sender| !sender.crashed);
+        if sender_alive {
+            let sender = self
+                .endpoints
+                .get_mut(&msg.from)
+                .expect("sender liveness just checked");
+            sender.delivered_total += 1;
+            sender.inbound.push_back(Tracked {
+                from: msg.to,
+                to: msg.from,
+                class: msg.class,
+                bytes: vd_sim::io::bytes(Vec::new()),
+                msg_id: msg.msg_id,
+                global_seq: notice_seq,
+                kind: TrackedKind::Notice {
+                    dead: msg.to,
+                    undelivered: msg.msg_id,
+                },
+            });
+        } else {
+            self.stats.notices_missed_by_crashed_sender += 1;
+        }
+    }
+
     fn deliver_attempt(&mut self, msg: Tracked, now: TickId) -> usize {
         let policy = self
             .policies
@@ -379,36 +430,27 @@ impl FabricInner {
 
         let receiver_killed = self.endpoints.get(&msg.to).is_none_or(|e| e.killed);
         if receiver_killed {
-            // Permanent death: bounce as NodeUnreachable to the sender (if alive;
-            // a crashed sender just misses the notice — counted, not silent).
+            // Permanent death: bounce NodeUnreachable to the sender + DROP the subject (loss-forever is a
+            // kill-only property). The Notice reuses the subject's `seq` — safe BECAUSE the subject is
+            // removed from `unacked` here, so there is no live seq for an ack to evict.
             self.unacked.remove(&seq);
             self.redeliver_at.remove(&seq);
             self.stats.unreachable_returned += 1;
-            let sender_alive = self
-                .endpoints
-                .get(&msg.from)
-                .is_some_and(|sender| !sender.crashed);
-            if sender_alive {
-                let sender = self
-                    .endpoints
-                    .get_mut(&msg.from)
-                    .expect("sender liveness just checked");
-                sender.delivered_total += 1;
-                sender.inbound.push_back(Tracked {
-                    from: msg.to,
-                    to: msg.from,
-                    class: msg.class,
-                    bytes: vd_sim::io::bytes(Vec::new()),
-                    msg_id: msg.msg_id,
-                    global_seq: seq,
-                    kind: TrackedKind::Notice {
-                        dead: msg.to,
-                        undelivered: msg.msg_id,
-                    },
-                });
-            } else {
-                self.stats.notices_missed_by_crashed_sender += 1;
-            }
+            self.bounce_unreachable(&msg, seq);
+            return 0;
+        }
+
+        // D-3 FLAP: a RECOVERABLE blip toward a still-ALIVE receiver (kill took precedence above). Bounce
+        // NodeUnreachable to the sender but RETAIN the subject in `unacked` + reschedule it, so it
+        // auto-redelivers once the window passes. The Notice carries a FRESH global_seq (NOT the subject's)
+        // so draining+acking it cannot evict the subject's seq from `unacked` (else the redelivery the flap
+        // promises would never fire — graft D).
+        if policy.flap_until_tick.is_some_and(|until| now.0 < until.0) {
+            self.redeliver_at
+                .insert(seq, TickId(now.0 + self.retry_delay_ticks));
+            let notice_seq = self.next_global_seq;
+            self.next_global_seq += 1;
+            self.bounce_unreachable(&msg, notice_seq);
             return 0;
         }
 
@@ -773,6 +815,67 @@ mod tests {
             }
         }
         assert_eq!(got.len(), 1, "healed partition delivers");
+        assert!(fabric.conservation_holds());
+    }
+
+    #[test]
+    fn flap_bounces_unreachable_then_auto_redelivers_after_the_window() {
+        // D-3 flap: a RECOVERABLE blip toward a still-ALIVE receiver. During the window each delivery
+        // attempt bounces NodeUnreachable to the SENDER, but the subject is RETAINED and delivered to the
+        // receiver once the window heals (the fresh-seq fix: the bounce never evicts the subject from the
+        // unacked ledger). The deterministic in-process stand-in for an io-prod QUIC blip of a live peer.
+        let (fabric, mut a, mut b) = perfect_pair();
+        fabric.flap(A, B, TickId(4));
+        // A B->A Wire (perfect link) so A's inbound carries a non-Notice too (covers both Inbound arms).
+        b.send(A, MsgClass::Control, vec![1, 2].into()).expect("ok");
+        a.send(B, MsgClass::Control, vec![7].into()).expect("ok");
+        let mut notices = 0u32;
+        for t in 1..4 {
+            fabric.pump(TickId(t));
+            assert!(
+                b.drain_inbound().is_empty(),
+                "the receiver is blocked during the flap at tick {t}"
+            );
+            for m in a.drain_inbound() {
+                match m {
+                    Inbound::NodeUnreachable { to, .. } => {
+                        assert_eq!(to, B, "the bounce names the flapping peer");
+                        notices += 1;
+                    }
+                    Inbound::Wire { .. } => {} // the B->A message, delivered normally
+                }
+            }
+            assert!(fabric.conservation_holds(), "conservation during flap at {t}");
+            assert!(!fabric.is_dead(B), "B stays ALIVE through the flap (recover, not kill)");
+        }
+        assert!(notices >= 1, "the sender observed at least one NodeUnreachable blip");
+        // After the window heals: the SAME subject auto-redelivers to the receiver EXACTLY once (recover,
+        // not loss). Ack what the receiver drains each tick (the at-least-once commit), so it is not
+        // re-delivered — a fixed loop (no early break) keeps every iteration's branch covered.
+        let mut delivered = 0usize;
+        for t in 4..10 {
+            fabric.pump(TickId(t));
+            delivered += b.drain_inbound().len();
+            fabric.ack_survivor(B);
+        }
+        assert_eq!(delivered, 1, "the subject delivers exactly once after the flap heals");
+        assert!(fabric.conservation_holds());
+    }
+
+    #[test]
+    fn a_kill_takes_precedence_over_a_flap_window() {
+        // A receiver that is BOTH killed and flapping takes the PERMANENT kill path (subject dropped,
+        // unreachable_returned increments) — flap is the recoverable case, kill is not.
+        let (fabric, mut a, _b) = perfect_pair();
+        fabric.flap(A, B, TickId(100));
+        fabric.kill(B);
+        a.send(B, MsgClass::Control, vec![1].into()).expect("ok");
+        fabric.pump(TickId(1));
+        assert_eq!(
+            fabric.stats().unreachable_returned,
+            1,
+            "the kill path fired (not the flap, which would retain the subject)"
+        );
         assert!(fabric.conservation_holds());
     }
 
