@@ -47,7 +47,9 @@ use vd_core::{BatchId, EpochId, Fence, NodeId, TransferId, UniverseTick};
 use vd_sim::directory::{DirectoryCore, DirectoryTuning};
 use vd_sim::io::{Bytes, Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
-use vd_sim::saga::{self, AbortReason, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning};
+use vd_sim::saga::{
+    self, AbortReason, LivenessTuning, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning,
+};
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
     PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP,
@@ -174,6 +176,13 @@ struct LiveSaga {
     /// it is `Some` before the CAS for an Entity subject, so `EmitCrossing` never ships a None pose.
     /// (The TLV state blob joins this at 1d.6; pose-only now.)
     flushed_pose: Option<StampedPose>,
+    /// D-3 — the universe tick this saga's DEST was first observed CONFIRMED-DEAD while in `BatchHandoff`
+    /// (`None` otherwise). The DESTRUCTIVE dest-abandon (`EmitTransientAbandon`) waits the LARGE
+    /// `abort_deadline_ticks` measured FROM HERE — NOT from `since` (which `scan_deadlines` re-arms to
+    /// `now` on every fire, making a `now - since >= abort` gate structurally unsatisfiable). RAM-ONLY
+    /// (NOT persisted in `SagaSnapshot`): on rehydrate it re-derives `None`, so a restarted orchestrator
+    /// re-accrues the abort budget from scratch rather than firing an irreversible abandon immediately.
+    dead_observed_since: Option<UniverseTick>,
 }
 
 /// A pending create-on-trigger. Enqueued by [`SagaRuntimeRes::start_transfer`] and processed
@@ -181,6 +190,79 @@ struct LiveSaga {
 struct PendingStart {
     ctx: SagaCtx,
     gateway: NodeId,
+}
+
+/// D-3 dead-vs-slow EVIDENCE for one peer: how many CONSECUTIVE `NodeUnreachable` notices (no
+/// intervening successful inbound) have been observed toward it, and when the run STARTED — the
+/// abort-budget anchor, PRESERVED across the run (never re-armed per notice, unlike the saga's `since`).
+#[derive(Clone, Copy, Debug)]
+struct UnreachEvidence {
+    consecutive: u32,
+    first_unreachable_tick: UniverseTick,
+}
+
+/// D-3 the dead-vs-slow discriminator (the CSCALE-1 cure). Replaces the insert-only / never-cleared
+/// `dead_participants` set: a peer is CONFIRMED dead only after `n_consecutive_unreachable`
+/// `NodeUnreachable` notices within `unreachable_window_ticks` with NO intervening successful inbound —
+/// so a single recoverable blip toward a HEALTHY peer never confirms it dead, and a recovered peer
+/// un-marks itself on its next inbound (clear-on-ack). RAM-only: rebuilt EMPTY on rehydrate (the D-6
+/// freeze — a restarted orchestrator confirms nobody dead until fresh post-restart notices re-accrue,
+/// so an orchestrator outage never mass-orphans). The default tuning (`n == 1`) is kill-equivalent.
+#[derive(Default)]
+struct LivenessTracker {
+    seen: std::collections::BTreeMap<NodeId, UnreachEvidence>,
+    tuning: LivenessTuning,
+}
+
+impl LivenessTracker {
+    fn new(tuning: LivenessTuning) -> LivenessTracker {
+        LivenessTracker {
+            seen: std::collections::BTreeMap::new(),
+            tuning,
+        }
+    }
+
+    /// A `NodeUnreachable` toward `node` at `now`: EXTEND its consecutive run, or START a fresh run if
+    /// the window since the run's first notice has elapsed (a stale run is not evidence of a live death).
+    fn record_unreachable(&mut self, node: NodeId, now: UniverseTick) {
+        let ev = self.seen.entry(node).or_insert(UnreachEvidence {
+            consecutive: 0,
+            first_unreachable_tick: now,
+        });
+        if now.0.saturating_sub(ev.first_unreachable_tick.0) > self.tuning.unreachable_window_ticks {
+            *ev = UnreachEvidence {
+                consecutive: 1,
+                first_unreachable_tick: now,
+            };
+        } else {
+            ev.consecutive = ev.consecutive.saturating_add(1);
+        }
+    }
+
+    /// ANY successful inbound from `node`: it is alive — clear its evidence (idempotent; the clear-on-ack
+    /// that makes a recoverable blip non-fatal).
+    fn record_ack(&mut self, node: NodeId) {
+        self.seen.remove(&node);
+    }
+
+    /// Is `node` CONFIRMED dead at `now`: enough consecutive notices AND the run still within the window
+    /// (a too-old run is stale — re-confirmation needs fresh notices). Bitwise `&` keeps both operands
+    /// covered with no short-circuit branch (HR5).
+    fn is_confirmed_dead(&self, node: NodeId, now: UniverseTick) -> bool {
+        let Some(ev) = self.seen.get(&node) else {
+            return false;
+        };
+        let enough = ev.consecutive >= self.tuning.n_consecutive_unreachable;
+        let fresh = now.0.saturating_sub(ev.first_unreachable_tick.0)
+            <= self.tuning.unreachable_window_ticks;
+        enough & fresh
+    }
+
+    /// Re-tune the discriminator (the prod config path sets it via `with_tunings`; a test scenario that
+    /// needs a specific confirmation margin — e.g. the CSCALE-1 flap cells at `n = 3` — sets it here).
+    fn set_tuning(&mut self, tuning: LivenessTuning) {
+        self.tuning = tuning;
+    }
 }
 
 /// The live-saga set + the trigger queue, resource-wrapped (single writer: this schedule).
@@ -228,17 +310,13 @@ pub struct SagaRuntimeRes {
     /// 1000-item single batch). The metric is forward-compatible with [[D-6]]'s durable WAL: one
     /// in-memory write per batch is exactly one fsync per batch.
     batch_go_writes: u64,
-    /// D-7d — nodes the orchestrator has learned are UNREACHABLE (fed by the kill-only
-    /// `Inbound::NodeUnreachable` arm). Bounded by the cluster node count. `scan_deadlines` reads it to
-    /// resolve a `BatchHandoff` saga whose source/dest is dead (self-promote the dest / abandon the
-    /// source) instead of re-driving toward a corpse forever. ⚠️ KILL-ONLY-TODAY: in io-prod a single
-    /// `NodeUnreachable` can mean "one send failed" (a transient blip / 20s idle reap of a LIVE peer),
-    /// NOT "dead" — so the resolution is doubly gated (in this set AND the redrive deadline elapsed) and
-    /// a node is NEVER cleared here (a harness kill is permanent). The proper crash-vs-partition
-    /// discriminator (lease-lapse liveness + clear-on-recovery) is owed D-3; until then the deterministic
-    /// suite's `kill == permanent NodeUnreachable` keeps this sound, and the prod blip path is gate-
-    /// invisible (the fabric cannot model a recoverable `NodeUnreachable` — the D-3 "flap" fault).
-    dead_participants: std::collections::BTreeSet<NodeId>,
+    /// D-3 the dead-vs-slow discriminator (CSCALE-1 cure): evidence-gated + clearable (was the insert-only
+    /// `dead_participants` set). Fed by the `Inbound::NodeUnreachable` arm (`record_unreachable`) + cleared
+    /// by ANY successful inbound (`record_ack`); `scan_deadlines` reads `is_confirmed_dead` to resolve a
+    /// `BatchHandoff` saga whose source/dest is dead. A single recoverable blip no longer confirms a HEALTHY
+    /// peer dead (needs `n_consecutive_unreachable` within the window), and the DESTRUCTIVE dest-abandon is
+    /// further gated behind the LARGE `abort_deadline_ticks` from the per-saga `dead_observed_since`.
+    liveness: LivenessTracker,
     /// D-7d anti-vacuity observables (orchestrator-side: the dest cannot tell a self-promote from a
     /// normal promote, so the resolution is counted HERE where it is decided). `source_unreachable`
     /// counts dead-SOURCE self-promote resolutions (BatchCommittedAt, zero loss); `dest_unreachable`
@@ -252,6 +330,11 @@ pub struct SagaRuntimeRes {
     /// saga). Held on the runtime (not threaded through `commit_result`) so the persist stays a
     /// straight-line push; the single drain+commit is the only place that touches the store for sagas.
     pending_writes: Vec<(Vec<u8>, Option<Bytes>)>,
+    /// D-3 anti-vacuity observable: total `NodeUnreachable` notices fed to the liveness tracker. A
+    /// CSCALE-1 flap cell asserts this is `> 0` (the blip was genuinely observed — the path the OLD
+    /// insert-only code would have abandoned on) AND that `dest_unreachable_resolutions == 0` (the cure:
+    /// a recoverable blip toward a healthy dest no longer abandons the batch). 0 on a no-fault run.
+    liveness_notices: u64,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -278,10 +361,28 @@ impl SagaRuntimeRes {
     /// (`register_orchestrator`) calls this with `cfg.saga`; `Default` is the dev/test value.
     #[must_use]
     pub fn with_tuning(tuning: SagaTuning) -> SagaRuntimeRes {
+        // The dev/test path: the kill-equivalent liveness default (n == 1) — a permanent kill's first
+        // NodeUnreachable confirms, so the existing crash cells keep their behavior.
+        Self::with_tunings(tuning, LivenessTuning::default())
+    }
+
+    /// The production constructor (`register_orchestrator`): the saga deadline budget + the D-3 dead-vs-slow
+    /// confirmation tuning, both from `OrchestratorConfig`. Prod sets `n_consecutive_unreachable >= 3` (the
+    /// CSCALE-1 margin) so a single recoverable blip never confirms a healthy peer dead.
+    #[must_use]
+    pub fn with_tunings(tuning: SagaTuning, liveness: LivenessTuning) -> SagaRuntimeRes {
         SagaRuntimeRes {
             tuning,
+            liveness: LivenessTracker::new(liveness),
             ..SagaRuntimeRes::default()
         }
+    }
+
+    /// Re-tune the dead-vs-slow discriminator after construction — for a test scenario that needs a
+    /// specific confirmation margin (the CSCALE-1 flap cells run `n_consecutive_unreachable == 3` so a
+    /// short blip stays below the threshold). Prod configures it via [`with_tunings`] / `OrchestratorConfig`.
+    pub fn set_liveness_tuning(&mut self, liveness: LivenessTuning) {
+        self.liveness.set_tuning(liveness);
     }
 
     /// Trigger a new transfer (create-on-trigger). `ctx.subject` MUST already be a directory
@@ -370,6 +471,13 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn dest_unreachable_resolutions(&self) -> u64 {
         self.dest_unreachable_resolutions
+    }
+
+    /// D-3 anti-vacuity: total `NodeUnreachable` notices observed (the CSCALE-1 flap cell asserts `> 0`,
+    /// so the blip genuinely exercised the path the old insert-only code would have abandoned on).
+    #[must_use]
+    pub fn liveness_notices(&self) -> u64 {
+        self.liveness_notices
     }
 }
 
@@ -864,6 +972,9 @@ pub(crate) fn rehydrate(
                 // re-drive on the first post-restart `scan_deadlines` tick (deterministic, never wedged).
                 since: UniverseTick(0),
                 flushed_pose: snapshot.flushed_pose,
+                // D-3: NOT persisted — a rehydrated saga re-accrues its abort budget from scratch (so a
+                // restart never fires an immediate irreversible abandon; the RAM tracker is also empty).
+                dead_observed_since: None,
             },
         );
     }
@@ -925,6 +1036,7 @@ fn process_starts(
                 gateway,
                 since: now,
                 flushed_pose: None, // filled when the source flushes (after Freezing)
+                dead_observed_since: None,
             },
         );
         // Durable start = PrepareSubscribe (no EmitCrossing yet); transient start = the go-token
@@ -1000,18 +1112,30 @@ fn scan_deadlines(
     for (transfer, live) in runtime.sagas.iter_mut() {
         if now.0.saturating_sub(live.since.0) >= deadline_for(&live.state, &tuning) {
             live.since = now; // re-arm BEFORE delivery — one fire per window, never a per-tick storm
-            // D-7d: a due `BatchHandoff` saga whose source/dest is KNOWN-DEAD resolves (self-promote /
-            // abandon) instead of re-driving toward a corpse forever; otherwise the phase's idempotent
-            // Timeout re-drive. The gate is doubly-conditioned (BatchHandoff AND in `dead_participants`)
-            // so a healthy slow handoff (no kill ⇒ no NodeUnreachable ⇒ not in the set) only ever
-            // re-drives — never a spurious resolution. `dead_participants` is a field disjoint from
-            // `sagas`, so the direct read here is a sound partial borrow.
+            // D-7d + D-3: a due `BatchHandoff` saga whose source/dest is CONFIRMED-DEAD (the evidence-gated
+            // `is_confirmed_dead`, NOT a single blip) resolves instead of re-driving toward a corpse
+            // forever; otherwise the phase's idempotent Timeout re-drive. A healthy slow handoff (no kill ⇒
+            // no NodeUnreachable run ⇒ not confirmed) only ever re-drives — never a spurious resolution.
+            // `liveness` is a field disjoint from `sagas`, so reading it here is a sound partial borrow.
+            //   - SOURCE dead → self-promote the dest (zero loss): the cheap redrive deadline is fine.
+            //   - DEST dead → ABANDON the batch (DESTRUCTIVE, accounted loss): gated behind the LARGE
+            //     `abort_deadline_ticks` measured from `dead_observed_since` (the CSCALE-1 cure — a
+            //     recoverable blip that clears before the budget elapses NEVER abandons a healthy dest).
+            //     `dead_observed_since` is NOT `since` (which re-armed to `now` two lines up), so the
+            //     budget genuinely accrues across re-drives rather than resetting every fire (graft A).
             let event = if let SagaState::BatchHandoff { .. } = live.state {
-                if runtime.dead_participants.contains(&live.ctx.source) {
+                if runtime.liveness.is_confirmed_dead(live.ctx.source, now) {
+                    live.dead_observed_since = None;
                     SagaEvent::SourceUnreachable
-                } else if runtime.dead_participants.contains(&live.ctx.dest) {
-                    SagaEvent::DestUnreachable
+                } else if runtime.liveness.is_confirmed_dead(live.ctx.dest, now) {
+                    let observed = *live.dead_observed_since.get_or_insert(now);
+                    if now.0.saturating_sub(observed.0) >= tuning.abort_deadline_ticks {
+                        SagaEvent::DestUnreachable
+                    } else {
+                        SagaEvent::Timeout // cheap re-drive while the abort budget accrues (corpse won't ack)
+                    }
                 } else {
+                    live.dead_observed_since = None; // neither confirmed dead → clear stale budget, re-drive
                     SagaEvent::Timeout
                 }
             } else {
@@ -1070,12 +1194,21 @@ pub fn drive_sagas(
     scan_deadlines(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
     for msg in &inbox.0 {
         let (class, bytes) = match msg {
-            Inbound::Wire { class, bytes, .. } => (class, bytes),
-            // D-7d: a kill-only delivery failure — RECORD the dead node so a due `BatchHandoff` saga
-            // resolves (self-promote / abandon) next scan instead of re-driving toward a corpse forever.
-            // Never cleared here (a harness kill is permanent); D-3 owns the recoverable-blip path.
+            // D-3 CLEAR-ON-ACK: ANY successful inbound from a peer is proof it is alive — clear its
+            // unreachable evidence (done at the TOP, BEFORE the class filter, so a peer that only sends
+            // `LeaseRenew`/Directory ops — not saga acks — still un-marks itself; this is why no separate
+            // `serve_directory` clear is needed: both systems read the same inbox, this one sees it all).
+            Inbound::Wire { from, class, bytes } => {
+                runtime.liveness.record_ack(*from);
+                (class, bytes)
+            }
+            // D-3: a delivery failure toward `to` — record one unreachable notice. The evidence-gated
+            // tracker confirms `to` dead only after `n_consecutive_unreachable` within the window with no
+            // intervening ack (so a recoverable blip never confirms a healthy peer); `scan_deadlines`
+            // resolves a `BatchHandoff` whose source/dest is CONFIRMED dead.
             Inbound::NodeUnreachable { to, .. } => {
-                runtime.dead_participants.insert(*to);
+                runtime.liveness.record_unreachable(*to, now);
+                runtime.liveness_notices += 1;
                 continue;
             }
         };
@@ -1371,6 +1504,7 @@ mod tests {
                 ..DirectoryTuning::default()
             },
             saga: SagaTuning::default(),
+            liveness: LivenessTuning::default(),
         }
     }
 
@@ -1764,6 +1898,7 @@ mod tests {
                     gateway: GATEWAY,
                     since: UniverseTick(0),
                     flushed_pose: None,
+                    dead_observed_since: None,
                 },
             );
         }
@@ -2341,6 +2476,7 @@ mod tests {
                 gateway: GATEWAY,
                 since: UniverseTick(0),
                 flushed_pose: None,
+                dead_observed_since: None,
             },
         );
         assert_eq!(
@@ -2436,6 +2572,7 @@ mod tests {
                 gateway: GATEWAY,
                 since,
                 flushed_pose: None,
+                dead_observed_since: None,
             },
         );
     }
@@ -2589,9 +2726,13 @@ mod tests {
             ..DirectoryTuning::default()
         });
 
-        // SOURCE dead → self-promote the dest (TransientDrop to DEST), tombstone, count once.
+        // SOURCE dead → self-promote the dest (TransientDrop to DEST), tombstone, count once. The
+        // zero-loss self-promote is NOT abort-gated, so it fires on the first due scan once confirmed
+        // (n == 1 in the default liveness tuning → one NodeUnreachable confirms).
         let mut runtime = mk();
-        runtime.dead_participants.insert(SOURCE);
+        runtime
+            .liveness
+            .record_unreachable(SOURCE, UniverseTick(8));
         let mut outbox = OutboundBox::default();
         scan_deadlines(
             &mut runtime,
@@ -2619,16 +2760,34 @@ mod tests {
         assert_eq!(runtime.source_unreachable_resolutions(), 1);
         assert_eq!(runtime.dest_unreachable_resolutions(), 0);
 
-        // DEST dead → abandon the source copy (TransientAbandon to SOURCE), tombstone, count once.
+        // DEST dead → abandon the source copy — but the DESTRUCTIVE abandon (irreversible accounted loss)
+        // is gated behind the LARGE abort budget from the FIRST confirmed-dead observation (the CSCALE-1
+        // cure): a dest that recovers before the budget elapses must NOT be abandoned.
         let mut runtime = mk();
-        runtime.dead_participants.insert(DEST);
+        runtime.liveness.record_unreachable(DEST, UniverseTick(8));
         let mut outbox = OutboundBox::default();
+        // First due scan: dest CONFIRMED dead, but the abort budget has not elapsed → re-drive, not abandon.
         scan_deadlines(
             &mut runtime,
             &mut dir,
             &mut outbox,
             EpochId(1),
             UniverseTick(8),
+        );
+        assert_eq!(
+            runtime.live(),
+            1,
+            "the abandon waits the abort budget — not fired on the first confirmed observation"
+        );
+        assert_eq!(runtime.dest_unreachable_resolutions(), 0);
+        // After `abort_deadline_ticks` from the first observation: the abandon fires.
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8 + saga::DEFAULT_ABORT_DEADLINE_TICKS),
         );
         assert_eq!(runtime.live(), 0);
         assert!(
@@ -2658,6 +2817,77 @@ mod tests {
         assert_eq!(runtime.live(), 1, "neither dead → re-drive, not resolve");
         assert_eq!(runtime.source_unreachable_resolutions(), 0);
         assert_eq!(runtime.dest_unreachable_resolutions(), 0);
+    }
+
+    #[test]
+    fn liveness_tracker_confirms_only_after_n_consecutive_within_the_window() {
+        // D-3 CSCALE-1: a peer is CONFIRMED dead only after `n_consecutive_unreachable` notices within the
+        // window — a single blip never confirms. Covers: not-in-seen, not-enough, enough+fresh→confirmed,
+        // stale (not-fresh), and clear-on-ack.
+        let mut t = LivenessTracker::new(LivenessTuning {
+            n_consecutive_unreachable: 3,
+            unreachable_window_ticks: 10,
+            retry_delay_ticks_hint: 2,
+        });
+        let n = NodeId(5);
+        // Not in the tracker → not confirmed (the None arm).
+        assert!(!t.is_confirmed_dead(n, UniverseTick(0)));
+        // One notice → consecutive 1 < 3 → not enough.
+        t.record_unreachable(n, UniverseTick(1));
+        assert!(!t.is_confirmed_dead(n, UniverseTick(1)));
+        // Two more within the window → consecutive 3 >= 3 + fresh → confirmed (the existing-entry increment).
+        t.record_unreachable(n, UniverseTick(2));
+        t.record_unreachable(n, UniverseTick(3));
+        assert!(t.is_confirmed_dead(n, UniverseTick(3)));
+        // STALE: far past the window from the run's first notice (tick 1) → not fresh → not confirmed.
+        assert!(!t.is_confirmed_dead(n, UniverseTick(1 + 11)));
+        // CLEAR-ON-ACK: a successful inbound un-marks the recovered peer.
+        t.record_ack(n);
+        assert!(!t.is_confirmed_dead(n, UniverseTick(3)));
+        // record_ack is idempotent (clearing an absent node is a no-op).
+        t.record_ack(n);
+    }
+
+    #[test]
+    fn liveness_tracker_resets_a_run_whose_window_elapsed() {
+        // A notice arriving AFTER the window since the run's first notice STARTS a fresh run (consecutive
+        // 1), not an extension — a long-ago blip is not evidence of a current death (the RESET arm).
+        let mut t = LivenessTracker::new(LivenessTuning {
+            n_consecutive_unreachable: 2,
+            unreachable_window_ticks: 5,
+            retry_delay_ticks_hint: 2,
+        });
+        let n = NodeId(7);
+        t.record_unreachable(n, UniverseTick(1)); // run starts: consecutive 1, first = 1
+        t.record_unreachable(n, UniverseTick(2)); // within window: consecutive 2
+        assert!(t.is_confirmed_dead(n, UniverseTick(2)));
+        // A notice at tick 10 (10 - 1 = 9 > window 5) RESETS the run to consecutive 1, first = 10.
+        t.record_unreachable(n, UniverseTick(10));
+        assert!(
+            !t.is_confirmed_dead(n, UniverseTick(10)),
+            "the reset run has only 1 notice (< 2) — a stale run is not a confirmation"
+        );
+    }
+
+    #[test]
+    fn set_liveness_tuning_raises_the_confirmation_threshold() {
+        // The test-config setter (used by the CSCALE-1 flap cell to run the prod margin n = 3 in-process):
+        // re-tuning to n = 3 means a SINGLE NodeUnreachable no longer confirms a peer dead, where the
+        // kill-equivalent default (n = 1) would. A fresh runtime has observed zero notices.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // n = 1
+        assert_eq!(runtime.liveness_notices(), 0);
+        runtime.set_liveness_tuning(LivenessTuning {
+            n_consecutive_unreachable: 3,
+            unreachable_window_ticks: 64,
+            retry_delay_ticks_hint: 2,
+        });
+        runtime
+            .liveness
+            .record_unreachable(NodeId(9), UniverseTick(1));
+        assert!(
+            !runtime.liveness.is_confirmed_dead(NodeId(9), UniverseTick(1)),
+            "after re-tuning to n = 3, one notice is below the confirmation threshold"
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ use vd_node::saga_runtime::{ActiveTransfer, SagaRuntimeRes};
 use vd_sim::capability::NodeKind;
 use vd_sim::directory::DirectoryTuning;
 use vd_sim::io::mem::MemStore;
-use vd_sim::saga::SagaCtx;
+use vd_sim::saga::{LivenessTuning, SagaCtx};
 use vd_sim::stub::{StubConfig, register_stub_shard};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, OwnerRecord};
 
@@ -106,6 +106,9 @@ pub fn orch_config(clock_peers: Vec<NodeId>) -> OrchestratorConfig {
         },
         // Slice 2a: the deadline producer runs LIVE in the capstone cluster (dev values 8/24).
         saga: vd_sim::saga::SagaTuning::default(),
+        // D-3: kill-equivalent (n == 1) so the existing crash cells confirm a permanent kill on the
+        // first NodeUnreachable; the CSCALE-1 flap cells override to n == 3 via set_liveness_tuning.
+        liveness: vd_sim::saga::LivenessTuning::default(),
     }
 }
 
@@ -568,6 +571,15 @@ pub fn dest_unreachable_resolutions(topo: &mut Topology) -> u64 {
         orch.world_mut()
             .resource::<SagaRuntimeRes>()
             .dest_unreachable_resolutions()
+    })
+}
+
+/// D-3 — total `NodeUnreachable` notices the orchestrator observed (the CSCALE-1 flap cell's anti-vacuity
+/// observable: `> 0` proves the blip genuinely exercised the path the old code would have abandoned on).
+#[must_use]
+pub fn liveness_notices(topo: &mut Topology) -> u64 {
+    with_orchestrator(topo, |orch| {
+        orch.world_mut().resource::<SagaRuntimeRes>().liveness_notices()
     })
 }
 
@@ -1059,6 +1071,89 @@ pub fn assert_transient_end_state(
         }
         _ => panic!("assert_transient_end_state handles only the transient end states"),
     }
+}
+
+/// D-3 CSCALE-1 e2e: a recoverable BLIP (flap) toward a HEALTHY dest during a transient `BatchHandoff`
+/// must NOT abandon the batch — the cure. The orchestrator is tuned to `n_consecutive_unreachable = 3`
+/// (the prod margin), so the flap's `NodeUnreachable{DEST}` notices (the orch→dest promote bouncing)
+/// never reach the confirmation threshold; the dest is never confirmed dead, the flap heals, the promote
+/// redelivers, and the batch lands at DEST with zero loss. RED before Slice 3 (one `NodeUnreachable` →
+/// `dead_participants` → the cheap-redrive abandon → irreversible loss of a HEALTHY batch). Returns the
+/// settled topology + the debris entity (no node is killed, so the dead set is empty at the assert).
+#[must_use]
+pub fn run_transient_dest_flap(seed: u64) -> (Topology, EntityId) {
+    let fabric = FaultFabric::new(seed, 2);
+    let mut topo = p2_cluster(&fabric, 8);
+    // The CSCALE-1 margin: a short blip (< 3 consecutive notices) never confirms the dest dead.
+    with_orchestrator(&mut topo, |o| {
+        o.world_mut()
+            .resource_mut::<SagaRuntimeRes>()
+            .set_liveness_tuning(LivenessTuning {
+                n_consecutive_unreachable: 3,
+                unreachable_window_ticks: 64,
+                retry_delay_ticks_hint: 2,
+            });
+    });
+    // WARMUP: both shards win their realm leases (the source to cross from, the dest to adopt into).
+    fault_step_until(&mut topo, 80, |t| {
+        let r = t.inspect_all();
+        fault_report(&r, SHARD)
+            .held_realms
+            .iter()
+            .any(|(realm, _)| *realm == RealmId::System(7))
+            && fault_report(&r, DEST)
+                .held_realms
+                .iter()
+                .any(|(realm, _)| *realm == RealmId::System(8))
+    });
+    let src_fence = realm_fence(&mut topo, RealmId::System(7));
+    let dst_fence = realm_fence(&mut topo, RealmId::System(8));
+    let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 1, 0);
+    let batch = TransferId(1);
+    seed_transient_crossing(
+        &mut topo,
+        debris,
+        batch,
+        src_fence,
+        dst_fence,
+        vd_core::glam::DVec3::ZERO,
+    );
+    trigger_transfer(
+        &mut topo,
+        SagaCtx {
+            transfer: batch,
+            session: SessionId(0),
+            subject: DirectoryKey::Realm(RealmId::System(8)),
+            expected_fence: dst_fence,
+            source: SHARD,
+            dest: DEST,
+            class: DurabilityClass::Transient,
+            needs_provision: false,
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::System(8),
+        },
+    );
+    // Drive to AwaitRelease (BEFORE AwaitPromote), so the orch→DEST promote — emitted on the AwaitPromote
+    // transition — bounces during the flap window opened next.
+    fault_step_until(&mut topo, 60, |t| {
+        saga_states(t)
+            .iter()
+            .any(|s| s.starts_with("BatchHandoff { phase: AwaitRelease"))
+    });
+    // FLAP orch→DEST for a short window: the promote bounces (`NodeUnreachable{DEST}` → record_unreachable),
+    // but < 3 consecutive + clear-on-ack → never confirmed; the flap heals → promote redelivers → done.
+    fabric.flap(ORCH, DEST, TickId(topo.tick().0 + 10));
+    for _ in 0..200 {
+        topo.step();
+        if live_sagas(&mut topo) == 0 {
+            break;
+        }
+    }
+    // Settle the handoff's terminal egress (the dest's promote-ack → the source retires).
+    for _ in 0..24 {
+        topo.step();
+    }
+    (topo, debris)
 }
 
 /// REBUILD the orchestrator on its existing identity (D-6 kill-9 recovery): drop the running World (its

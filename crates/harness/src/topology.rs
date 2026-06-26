@@ -984,6 +984,7 @@ mod tests {
                     ..DirectoryTuning::default()
                 },
                 saga: vd_sim::saga::SagaTuning::default(),
+                liveness: vd_sim::saga::LivenessTuning::default(),
             },
         );
         topo.add_node(Box::new(orch));

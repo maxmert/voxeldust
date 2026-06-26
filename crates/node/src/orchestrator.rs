@@ -30,6 +30,11 @@ pub struct OrchestratorConfig {
     /// The saga deadline budget (Slice 2a) — the timeout producer's two thresholds. The bin reads
     /// it from env; in-process rigs use `SagaTuning::default()`.
     pub saga: vd_sim::saga::SagaTuning,
+    /// The D-3 dead-vs-slow confirmation tuning. The bin reads it from env with a PROD-SAFE default
+    /// (`n_consecutive_unreachable >= 3` — the CSCALE-1 margin so a single recoverable blip never
+    /// confirms a healthy peer dead); in-process rigs use `LivenessTuning::default()` (kill-equivalent
+    /// `n == 1`, so the existing crash cells keep their behavior).
+    pub liveness: vd_sim::saga::LivenessTuning,
 }
 
 /// The directory, resource-wrapped (single writer: this node's schedule).
@@ -96,7 +101,7 @@ pub fn register_orchestrator_with_store(
             (
                 clock,
                 DirectoryCore::new(cfg.directory),
-                crate::saga_runtime::SagaRuntimeRes::with_tuning(cfg.saga),
+                crate::saga_runtime::SagaRuntimeRes::with_tunings(cfg.saga, cfg.liveness),
             )
         }
     };
@@ -308,6 +313,7 @@ mod tests {
                 ..DirectoryTuning::default()
             },
             saga: vd_sim::saga::SagaTuning::default(),
+            liveness: vd_sim::saga::LivenessTuning::default(),
         }
     }
 

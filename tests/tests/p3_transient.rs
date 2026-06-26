@@ -23,10 +23,10 @@ use vd_sim::saga::SagaCtx;
 use vd_tests::{
     DEST, EndState, Fault, SHARD, Scenario, TRANSIENT_SEED_POS0, TRANSIENT_SEED_TICK0,
     assert_transient_end_state, dest_stub_config, dest_unreachable_resolutions, durable_subset,
-    held_at_dest, live_sagas, p1_client, p2_cluster, p2_cluster_staggered, read_subject,
-    realm_fence, run_transient_fault_scenario, seed_transient_burst, seed_transient_crossing,
-    source_transients_emitted, source_unreachable_resolutions, transient_dropped_total,
-    trigger_transfer, walk_forward,
+    held_at_dest, live_sagas, liveness_notices, p1_client, p2_cluster, p2_cluster_staggered,
+    read_subject, realm_fence, run_transient_dest_flap, run_transient_fault_scenario,
+    seed_transient_burst, seed_transient_crossing, source_transients_emitted,
+    source_unreachable_resolutions, transient_dropped_total, trigger_transfer, walk_forward,
 };
 use vd_wire::seams::directory::DirectoryKey;
 
@@ -782,5 +782,34 @@ fn p3_transient_source_crash_resurrect_completes_without_resolving() {
         dest_unreachable_resolutions(&mut topo),
         0,
         "no dest resolution either",
+    );
+}
+
+/// D-3 CSCALE-1 (the dead-vs-slow cure, the headline regression cell): a recoverable BLIP toward a
+/// HEALTHY dest during a transient `BatchHandoff` must NOT abandon the batch. The orchestrator runs the
+/// prod confirmation margin (`n_consecutive_unreachable = 3`); the flap's `NodeUnreachable{DEST}` notices
+/// never reach the threshold, the dest is never confirmed dead, the flap heals, and the batch lands.
+/// RED before Slice 3 (one `NodeUnreachable` → `dead_participants` → cheap-redrive abandon → irreversible
+/// loss of a HEALTHY batch); GREEN after (evidence-gated tracker + clear-on-ack + the abort-budget gate).
+#[test]
+fn p3_transient_a_dest_blip_does_not_abandon_a_healthy_batch() {
+    let (mut topo, debris) = run_transient_dest_flap(0xC5A1_E001);
+    // The batch landed at DEST, held singly, zero loss — no node was killed, so the dead set is empty.
+    assert_transient_end_state(
+        &mut topo,
+        debris,
+        &BTreeSet::new(),
+        EndState::BatchCommittedAt { node: DEST },
+    );
+    assert_eq!(
+        dest_unreachable_resolutions(&mut topo),
+        0,
+        "a recoverable blip never abandons a HEALTHY dest (the CSCALE-1 cure)",
+    );
+    // ANTI-VACUITY: the blip was genuinely observed (the orch→dest promote bounced ≥1) — the exact path
+    // the old insert-only / cheap-redrive code would have abandoned the healthy batch on.
+    assert!(
+        liveness_notices(&mut topo) > 0,
+        "the flap produced at least one NodeUnreachable — the cell is non-vacuous",
     );
 }

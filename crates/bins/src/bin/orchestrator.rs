@@ -82,6 +82,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovery_grace_ticks: env.parse_or("VD_RECOVERY_GRACE", d3.recovery_grace_ticks)?,
     };
     directory.validate()?;
+    // D-3 dead-vs-slow confirmation tuning. PROD-SAFE default `n = 3` (the CSCALE-1 margin: a single
+    // recoverable blip / idle-reap of a LIVE peer never confirms it dead) — DISTINCT from the dev/test
+    // `LivenessTuning::default()` (`n = 1`, kill-equivalent). `validate` rejects a 0 confirmation count
+    // or a window too tight to span the run at boot.
+    let liveness = vd_sim::saga::LivenessTuning {
+        n_consecutive_unreachable: env.parse_or("VD_LIVENESS_N", 3)?,
+        unreachable_window_ticks: env.parse_or(
+            "VD_LIVENESS_WINDOW",
+            vd_sim::saga::LivenessTuning::default().unreachable_window_ticks,
+        )?,
+        retry_delay_ticks_hint: env.parse_or(
+            "VD_LIVENESS_RETRY_HINT",
+            vd_sim::saga::LivenessTuning::default().retry_delay_ticks_hint,
+        )?,
+    };
+    liveness.validate()?;
     // D-6 (audit D6-ROB-1): the WAL engine is built, but `register_orchestrator` injects a fresh
     // IN-MEMORY `MemStore` (the durable redb backend is owed io-prod). So THIS BINARY is NON-DURABLE: a
     // restart resets universe time to tick 0 and loses every in-flight transfer. LOUD at boot (never a
@@ -105,6 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             clock_peers: env.node_list("VD_CLOCK_PEERS")?,
             directory,
             saga,
+            liveness,
         },
     );
 
