@@ -71,6 +71,9 @@ pub fn stub_config() -> StubConfig {
         // D-3 INERT here: the cluster scenarios do not exercise the lease-renewal heartbeat (the D-3
         // cells set it explicitly). 0 = no heartbeat, matching pre-D-3 behavior.
         lease_renew_interval_ticks: 0,
+        // D-3 Slice 5 INERT here (grace 0 vetoes the proactive self-fence even with recheck active);
+        // the self-fence cells set it explicitly. Pre-D-3 behavior: no proactive fence.
+        self_fence_grace_ticks: 0,
         snapshot_datagram_budget: 1100,
     }
 }

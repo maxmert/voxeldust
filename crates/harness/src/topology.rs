@@ -1011,6 +1011,7 @@ mod tests {
                 input_log_capacity: 1_000_000,
                 realm_recheck_interval: 0,
                 lease_renew_interval_ticks: 0,
+                self_fence_grace_ticks: 0,
                 snapshot_datagram_budget: 1100,
             },
         );

@@ -67,6 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // D-3 lease-renewal heartbeat cadence (the holder's local copy of the orchestrator's
             // lease_renew_interval_ticks). Defaults INERT (0 = no heartbeat) until D-3 is switched on.
             lease_renew_interval_ticks: env.parse_or("VD_LEASE_RENEW_INTERVAL", 0)?,
+            // D-3 Slice 5 proactive self-fence grace (the holder's local copy of the orchestrator's
+            // self_fence_grace_ticks). Defaults INERT (0); requires VD_REALM_RECHECK > 0 as the
+            // confirmation channel. The split-brain-safe ordering is validated orchestrator-side.
+            self_fence_grace_ticks: env.parse_or("VD_SELF_FENCE_GRACE", 0)?,
             // Per-datagram snapshot budget — partitioned so none exceeds the MTU (GW-1).
             snapshot_datagram_budget: snapshot_budget,
         },

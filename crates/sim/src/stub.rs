@@ -71,6 +71,16 @@ pub struct StubConfig {
     /// snapshot is split into chunks each encoding under this, so none exceeds the
     /// QUIC datagram MTU. Operational param (never an inline literal in systems).
     pub snapshot_datagram_budget: usize,
+    /// D-3 Slice 5 — the PROACTIVE self-fence grace (the holder's LOCAL ticks). When the realm is held
+    /// but its lease has gone un-CONFIRMED for longer than this (`local_tick - last realm-head
+    /// round-trip > grace`), the shard hard-stops its own realm authority (fence rule 4) BEFORE the
+    /// orchestrator's reassign window opens — the split-brain cure a partitioned holder needs (the
+    /// reactive `realm_recheck` reply never arrives under partition). `0` = INERT (the pre-D-3 default).
+    /// The holder's local copy of `DirectoryTuning::self_fence_grace_ticks`; the split-brain-safe timing
+    /// (`lease_ttl < grace <= lease_ttl + max_self_fence_grace`) is enforced orchestrator-side by
+    /// `DirectoryTuning::validate`. REQUIRES `realm_recheck_interval > 0` as the confirmation channel —
+    /// the timer is inert without it (no round-trip ⇒ no `last_confirmed` ⇒ nothing to measure).
+    pub self_fence_grace_ticks: u64,
 }
 
 /// One connected avatar.
@@ -147,6 +157,16 @@ pub struct Dots(pub BTreeMap<SessionId, Dot>);
 /// frames are emitted unowned).
 #[derive(Resource, Debug, Default)]
 pub struct RealmAuthority(pub Option<Fence>);
+
+/// D-3 Slice 5 — the `local_tick` of the last realm-head ROUND-TRIP confirmation (the reply at which
+/// the directory affirmed this shard still owns its realm). The partition detector for the proactive
+/// self-fence: it advances only when a `realm_recheck` reply lands, so under a partition (the
+/// orchestrator unreachable, no reply) it FREEZES while `local_tick` keeps advancing — the gap is the
+/// evidence the holder has lost contact. Meaningful only while `RealmAuthority` is `Some` (the
+/// self-fence timer guards on that); reset to the current `local_tick` on every (re)confirmation, so a
+/// re-granted realm never inherits a stale deadline.
+#[derive(Resource, Debug, Default)]
+pub struct RealmConfirmedAt(pub TickId);
 
 /// One ghost-neighbor this shard FEEDS (1d.5b.3b): the node hosting a kinematic ghost of an entity
 /// we OWN, plus the monotone egress `seq` stamped on each `GhostFlow::Delta`. Holds NO pose/authority
@@ -504,6 +524,10 @@ pub struct StubStats {
     /// visibility only; 0 on the happy path. NOT the loss-budget gate (that reads
     /// `transients_lost_in_handover` — a 1000-resident burst eviction would dwarf a tiny budget here).
     pub transients_dropped: u64,
+    /// D-3 Slice 5 — PROACTIVE self-fences: the holder dropped its realm authority because the lease
+    /// went un-confirmed past `self_fence_grace_ticks` (a detected partition from the orchestrator). Ops
+    /// visibility / partition signal; `0` on the happy path and inert (`self_fence_grace_ticks == 0`).
+    pub realm_self_fenced_lapsed: u64,
     /// HANDOVER-attributable LOSS per kind (D-7b.3): on a realm self-fence, ONLY transients in a
     /// handover status (`is_in_handover()` — emitted/Departing/Crossing source items + Arriving dest
     /// items) are an in-flight transfer LOSS bucketed here; a settled `Held{outbound:None}` dropped on
@@ -602,6 +626,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(config);
     world.insert_resource(Dots::default());
     world.insert_resource(RealmAuthority::default());
+    world.insert_resource(RealmConfirmedAt::default());
     world.insert_resource(EntityMint {
         seq: 0,
         rng: SplitMix64::new(config.mint_seed),
@@ -622,10 +647,16 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // re-advanced pose, keeping the source/dest origins consistent). `emit_transient_batch` (D-7) runs
     // AFTER `process_inbound` and is independent of the ghost/frame egress — it ships the source's
     // pending transient crossings as ONE batch per dest realm.
+    // `self_fence_lapsed_realm` (D-3 Slice 5) runs AFTER `process_inbound` (so THIS tick's realm-head
+    // confirmation has already refreshed `RealmConfirmedAt` — a fresh reply pre-empts a spurious
+    // self-fence) and BEFORE the egress systems (a holder that self-fences this tick drops its
+    // transients and emits NO frames this tick — a stale partitioned owner stops affecting clients at
+    // once). INERT unless `self_fence_grace_ticks > 0` (the pre-D-3 default and every single-shard rig).
     schedule.add_systems(
         (
             request_pending_grants,
             process_inbound,
+            self_fence_lapsed_realm,
             readvance_transients,
             emit_transient_batch,
             feed_source_ghosts,
@@ -754,6 +785,7 @@ fn process_inbound(
     inbox: Res<InboundBox>,
     mut dots: ResMut<Dots>,
     mut authority: ResMut<RealmAuthority>,
+    mut confirmed: ResMut<RealmConfirmedAt>,
     mut mint: ResMut<EntityMint>,
     mut log: ResMut<InputLog>,
     mut stats: ResMut<StubStats>,
@@ -795,6 +827,7 @@ fn process_inbound(
                 &config,
                 &clock,
                 &mut authority,
+                &mut confirmed,
                 &mut dots,
                 &mut applied,
                 &mut pending,
@@ -2155,6 +2188,49 @@ fn self_fence_drop_transients(owned: &mut OwnedTransients, stats: &mut StubStats
     owned.0.clear();
 }
 
+/// D-3 Slice 5 — the PROACTIVE self-fence (fence rule 4, the partition cure). When this shard HOLDS its
+/// realm but has had no round-trip confirmation (`RealmConfirmedAt`) within `self_fence_grace_ticks` of
+/// its own `local_tick` — i.e. it is partitioned from the orchestrator, so the reactive `realm_recheck`
+/// reply never arrives — it HARD-STOPS its own authority BEFORE the orchestrator's reassign window
+/// opens (`lease_ttl + max_self_fence_grace`; the split-brain-safe ordering `lease_ttl < grace <=
+/// lease_ttl + max` is enforced orchestrator-side by `DirectoryTuning::validate`). The schedule runs
+/// this before the egress systems, so a holder that self-fences this tick drops its held transients and
+/// emits NO frames — two owners can never both reach clients. The reactive `realm_recheck` reply path
+/// (a reply showing a takeover) remains the prompt cure while the link is ALIVE; this is the only path
+/// that fires when it is NOT. `local_tick` is the partition-surviving clock (it advances every
+/// `step_tick` regardless of `ClockSync`), so the measurement holds even with the universe clock frozen.
+fn self_fence_lapsed_realm(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    confirmed: Res<RealmConfirmedAt>,
+    mut authority: ResMut<RealmAuthority>,
+    mut owned_transients: ResMut<OwnedTransients>,
+    mut stats: ResMut<StubStats>,
+) {
+    if realm_lease_lapsed(
+        authority.0.is_some(),
+        config.self_fence_grace_ticks,
+        config.realm_recheck_interval,
+        clock.local_tick,
+        confirmed.0,
+    ) {
+        authority.0 = None;
+        self_fence_drop_transients(&mut owned_transients, &mut stats);
+        stats.realm_self_fenced_lapsed += 1;
+    }
+}
+
+/// The proactive self-fence predicate as a MONOMORPHIC, branchless shim (HR5, mirroring the bitwise
+/// `&`/`|` in `DirectoryTuning::validate`): every operand is a region with NO short-circuit, so a single
+/// armed evaluation covers them all and only the caller's `if` carries the two-arm branch. Self-fence
+/// iff ALL hold: the realm is HELD; the timer is armed (`grace != 0` — INERT at the pre-D-3 default and
+/// every single-shard rig); the confirmation channel EXISTS (`recheck != 0` — with no round-trips there
+/// is no `last_confirmed` to measure, so the timer must stay inert); and the last confirmation is STALER
+/// than the grace (`local - confirmed > grace`, saturating so a confirmed-in-the-future never panics).
+fn realm_lease_lapsed(held: bool, grace: u64, recheck: u64, local_tick: TickId, confirmed: TickId) -> bool {
+    held & (grace != 0) & (recheck != 0) & (local_tick.0.saturating_sub(confirmed.0) > grace)
+}
+
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
 #[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
@@ -2163,6 +2239,7 @@ fn on_directory_reply(
     config: &StubConfig,
     clock: &ClockSample,
     authority: &mut RealmAuthority,
+    confirmed: &mut RealmConfirmedAt,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     pending: &mut PendingCrossings,
@@ -2264,6 +2341,9 @@ fn on_directory_reply(
         } => {
             if record.authority == AuthorityRef::Shard(identity.node_id) {
                 authority.0 = Some(record.fence);
+                // D-3 Slice 5: a round-trip that AFFIRMS ownership re-arms the self-fence deadline —
+                // the holder has just heard from the directory, so it is provably not partitioned now.
+                confirmed.0 = clock.local_tick;
             } else {
                 // The realm was taken over (P2 transfer / reassignment): SELF-FENCE
                 // immediately (fence rule 4) — drop authority and stop emitting
@@ -2569,6 +2649,7 @@ mod tests {
             input_log_capacity: 1024,
             realm_recheck_interval: 0,
             lease_renew_interval_ticks: 0,
+            self_fence_grace_ticks: 0,
             snapshot_datagram_budget: 1100,
         }
     }
@@ -2738,6 +2819,72 @@ mod tests {
             }
             .is_held()
         );
+    }
+
+    #[test]
+    fn realm_lease_lapsed_requires_held_armed_channel_and_stale() {
+        // The proactive self-fence predicate (HR5 branchless shim). Self-fence iff ALL hold: the realm
+        // is HELD, the timer is ARMED (grace != 0), the confirmation CHANNEL exists (recheck != 0), and
+        // the last confirmation is STALER than the grace. Each guard alone vetoes; the boundary
+        // (`== grace`) is NOT lapsed (a strict `>`), so the holder keeps authority for the whole window.
+        let now = TickId(100);
+        assert!(realm_lease_lapsed(true, 5, 2, now, TickId(94))); // 6 > 5 ⇒ lapsed
+        assert!(!realm_lease_lapsed(false, 5, 2, now, TickId(94))); // not held
+        assert!(!realm_lease_lapsed(true, 0, 2, now, TickId(94))); // timer disarmed (pre-D-3 default)
+        assert!(!realm_lease_lapsed(true, 5, 0, now, TickId(94))); // no confirmation channel
+        assert!(!realm_lease_lapsed(true, 5, 2, now, TickId(95))); // 100-95 = 5 == grace ⇒ within, holds
+    }
+
+    #[test]
+    fn a_partitioned_holder_proactively_self_fences_then_re_arms_on_re_grant() {
+        // D-3 Slice 5: the realm is granted (a round-trip confirmation at tick 1), then NO further
+        // realm-head reply arrives (a partition from the orchestrator). Once `local_tick - confirmed`
+        // exceeds the grace, the holder hard-stops its OWN authority and drops its held transients —
+        // before the orchestrator's reassign window opens — so a stale owner can never affect clients.
+        // A later re-grant re-arms the deadline, so a re-granted realm never inherits the stale one.
+        let mut rig = Rig::with_config(StubConfig {
+            realm_recheck_interval: 2, // the round-trip confirmation channel is active
+            self_fence_grace_ticks: 5, // rig-local; ttl < grace <= ttl + max is validated orch-side
+            ..config()
+        });
+        rig.grant_realm(); // confirm at local_tick 1 ⇒ RealmConfirmedAt(1), authority Some(Fence(1))
+        let debris = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            debris,
+            Transient {
+                pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(98)),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+            },
+        );
+
+        // Within the grace (local 6 - confirmed 1 = 5, NOT > 5): the holder KEEPS authority.
+        rig.set_local_tick(6);
+        let _ = rig.tick(vec![]);
+        assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)));
+        assert_eq!(rig.world.resource::<StubStats>().realm_self_fenced_lapsed, 0);
+        assert!(rig.world.resource::<OwnedTransients>().0.contains_key(&debris));
+
+        // Past the grace (local 7 - confirmed 1 = 6 > 5): SELF-FENCE — authority dropped, transient lost.
+        rig.set_local_tick(7);
+        let _ = rig.tick(vec![]);
+        assert_eq!(rig.world.resource::<RealmAuthority>().0, None, "authority hard-stopped");
+        assert_eq!(rig.world.resource::<StubStats>().realm_self_fenced_lapsed, 1);
+        assert_eq!(
+            rig.world.resource::<StubStats>().transients_dropped,
+            1,
+            "the held transient anchored to the lost lease is a counted loss"
+        );
+        assert!(rig.world.resource::<OwnedTransients>().0.is_empty());
+
+        // A re-grant at local 7 re-confirms (RealmConfirmedAt ⇒ 7); at local 11 (11-7 = 4 <= 5) the
+        // holder is STILL authoritative — proof the re-granted realm did NOT inherit the stale deadline
+        // (had `confirmed` stayed 1, 11-1 = 10 > 5 would have re-fenced it immediately).
+        rig.grant_realm();
+        rig.set_local_tick(11);
+        let _ = rig.tick(vec![]);
+        assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)), "re-grant re-armed the timer");
+        assert_eq!(rig.world.resource::<StubStats>().realm_self_fenced_lapsed, 1, "no second self-fence");
     }
 
     #[test]
