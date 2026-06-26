@@ -52,9 +52,9 @@ use vd_sim::saga::{
 };
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
-    PromoteCmd, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP,
-    TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff,
-    TransitionPayload,
+    PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION,
+    TRANSIENT_ABANDON_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck,
+    TransferEnvelope, TransientHandoff, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -573,6 +573,46 @@ fn emit_crossing(
     }
 }
 
+/// Build the `ReHome` adopt envelope the saga ships to a re-home `target` (D-37). Returns `None` (a
+/// no-op) for a non-Entity subject or a missing flushed pose. A DEDICATED arm (NOT `Promote`): the target
+/// RECONSTRUCTS the subject from `ReHomeState::PoseOnly`, having no pre-existing ghost. `new_fence` is the
+/// post-CAS authority fence (fence rule 1). Monomorphic helper so the executor arm stays branchless (HR5).
+fn build_rehome(
+    ctx: &SagaCtx,
+    new_fence: Fence,
+    flush_pose: Option<StampedPose>,
+) -> Option<InterShardFlow> {
+    let _entity = ctx.subject.transfer_subject_entity()?;
+    let pose = flush_pose?;
+    Some(InterShardFlow::ReHome(ReHomeCmd {
+        transfer: ctx.transfer,
+        subject: ctx.subject,
+        new_fence,
+        step_id: RE_HOME_STEP,
+        state: ReHomeState::PoseOnly(pose),
+        source: ctx.source,
+    }))
+}
+
+/// Push the re-home adopt to `target` if one can be built (Entity subject + a stashed pose), else a LOUD
+/// no-op (mirrors `emit_crossing`). Holds the Some/None branch (covered both ways by unit tests) so the
+/// executor arm stays a branchless dispatch (HR5).
+fn emit_rehome(
+    ctx: &SagaCtx,
+    new_fence: Fence,
+    target: NodeId,
+    flush_pose: Option<StampedPose>,
+    outbox: &mut OutboundBox,
+) {
+    match build_rehome(ctx, new_fence, flush_pose) {
+        Some(rehome) => outbox.push_flow(target, MsgClass::Saga, &rehome),
+        None => tracing::warn!(
+            transfer = ctx.transfer.0,
+            "ReHomeAdopt skipped: non-Entity subject or no flushed pose"
+        ),
+    }
+}
+
 /// The action executor: run a saga from `(state, actions)` to quiescence, executing each
 /// action and feeding any SYNCHRONOUS follow-up event (the direct CAS outcome) back into the
 /// FSM. Returns the final state, whether it tombstoned (terminal), and any client rejections.
@@ -678,6 +718,25 @@ fn run_to_quiescence(
                         CasOutcome::Won { new_fence } => SagaEvent::CasWon { new_fence },
                         CasOutcome::Lost { current } => SagaEvent::CasLost { current },
                     });
+                }
+                // D-37 forward re-home commit — the SAME single commit point (D-32 routing caveat applies
+                // identically), re-pointed at the live `target` rather than the hardcoded `ctx.dest`. The
+                // `cas_next` bump (`expected` → `expected+1`) atomically names `target`, clears the lock,
+                // and strictly stales the dead owner's claim (the fence-monotone no-double-owner property).
+                // Feeds `CasWon`/`CasLost` back exactly like `IssueCommitCas` (FF-1: one feedback event).
+                SagaAction::ReHomeCommit { expected, target } => {
+                    let outcome =
+                        dir.commit_cas(ctx.subject, expected, AuthorityRef::Shard(target), now);
+                    events.push_back(match outcome {
+                        CasOutcome::Won { new_fence } => SagaEvent::CasWon { new_fence },
+                        CasOutcome::Lost { current } => SagaEvent::CasLost { current },
+                    });
+                }
+                // D-37 forward re-home adopt — emit the dedicated `ReHome` to `target` from the stashed
+                // pose. The Some/None branch lives in `emit_rehome` (unit-tested both ways), so this arm
+                // stays a branchless dispatch (HR5). Pure egress (the target's `PromoteAck` rides back).
+                SagaAction::ReHomeAdopt { new_fence, target } => {
+                    emit_rehome(ctx, new_fence, target, flush_pose, outbox);
                 }
                 // D-7: the batched `TransientGo` go-token IS the transient commit point (HR2 — the
                 // SAME `CasWon` feedback as the durable CAS, fanned out by `commit_action`, NEVER a
@@ -1106,6 +1165,11 @@ fn deadline_for(state: &SagaState, tuning: &SagaTuning) -> u64 {
         | SagaState::Swapping { .. }
         | SagaState::Demoting { .. }
         | SagaState::Promoting { .. }
+        // D-37: a CAS-in-flight state like CommittingCas. In-process the re-home CAS feedback is
+        // synchronous (run_to_quiescence resolves CasWon/CasLost before the tick ends), so a saga never
+        // PERSISTS in ReHoming and this deadline is not consulted at runtime; the redrive value is the
+        // consistent CAS-in-flight choice (and the D-32 async-routed CAS re-drive home, if it ever persists).
+        | SagaState::ReHoming { .. }
         | SagaState::Releasing { .. } => tuning.redrive_deadline_ticks,
         SagaState::Done { .. } | SagaState::Aborted { .. } => u64::MAX,
     }
@@ -2863,6 +2927,10 @@ mod tests {
                 promote_acked: false,
                 dest_delivered: false,
             },
+            SagaState::ReHoming {
+                target: NodeId(4),
+                prev_fence: Fence(2),
+            },
             SagaState::Releasing {
                 new_fence: Fence(2),
             },
@@ -3144,6 +3212,147 @@ mod tests {
             select_rehome_target(&CapRequest::default(), &only_stub, &liveness, UniverseTick(0)),
             Some(NodeId(3)),
             "an empty bare-point req is satisfied by a live stub shard"
+        );
+    }
+
+    #[test]
+    fn deliver_rehome_to_commits_to_the_target_and_emits_the_dedicated_adopt() {
+        // D-37 CELL 2 executor: a Promoting saga whose committed dest is now dead, delivered ReHomeTo
+        // {target}, re-homes onto the live target. ReHomeCommit re-points commit_cas to the target (the
+        // fence-monotone bump 1→2 strictly stales the dead dest AND names the target BEFORE the adopt);
+        // CasWon → Promoting + ReHomeAdopt emits the DEDICATED ReHome envelope from the stashed pose.
+        // Covers the ReHomeCommit + ReHomeAdopt executor arms + emit_rehome's Some arm end-to-end.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
+        });
+        // The subject is committed to the (now-dead) DEST at Fence(1) — the re-home CAS expectation.
+        let _ = dir.grant(subject(), AuthorityRef::Shard(DEST), Fence(1), UniverseTick(0));
+        inject_saga(
+            &mut runtime,
+            SagaState::Promoting {
+                new_fence: Fence(1),
+                promote_acked: false,
+                dest_delivered: false,
+            },
+            UniverseTick(0),
+        );
+        stash_flush(&mut runtime, XFER, flushed_pose()); // the adopt payload
+        let target = NodeId(9);
+        let mut outbox = OutboundBox::default();
+        deliver(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(5),
+            XFER,
+            SagaEvent::ReHomeTo { target },
+        );
+        // The directory now names the live TARGET at the bumped fence (fence-monotone 1 → 2).
+        let head = dir.head(subject()).expect("subject still recorded");
+        assert_eq!(
+            head.authority,
+            AuthorityRef::Shard(target),
+            "re-home committed authority to the live target"
+        );
+        assert_eq!(
+            head.fence,
+            Fence(2),
+            "fence-monotone bump (1→2) strictly stales the dead dest"
+        );
+        // The DEDICATED ReHome adopt (NOT a Promote) was emitted to the target from the stashed pose.
+        let expected = InterShardFlow::ReHome(ReHomeCmd {
+            transfer: XFER,
+            subject: subject(),
+            new_fence: Fence(2),
+            step_id: RE_HOME_STEP,
+            state: ReHomeState::PoseOnly(flushed_pose()),
+            source: SOURCE,
+        });
+        assert!(
+            flows_to_node(&outbox, target).contains(&expected),
+            "the dedicated ReHome adopt was emitted to the target: {:?}",
+            outbox.0
+        );
+    }
+
+    #[test]
+    fn rehome_adopt_is_a_loud_no_op_for_a_non_entity_subject_or_missing_pose() {
+        // build_rehome / emit_rehome gate on an Entity subject AND a stashed pose (mirrors build/emit_
+        // crossing) so the executor ReHomeAdopt arm stays branchless (HR5). A Realm subject (no
+        // transfer_subject_entity) ⇒ None; an Entity subject with NO pose ⇒ None; both ⇒ Some.
+        let realm_ctx = SagaCtx {
+            subject: DirectoryKey::Realm(RealmId::System(9)),
+            ..ctx(DurabilityClass::Durable, Fence(1))
+        };
+        assert!(
+            build_rehome(&realm_ctx, Fence(2), Some(flushed_pose())).is_none(),
+            "non-Entity subject ⇒ None"
+        );
+        let entity_ctx = ctx(DurabilityClass::Durable, Fence(1)); // subject() is an Entity
+        assert!(
+            build_rehome(&entity_ctx, Fence(2), None).is_none(),
+            "missing flushed pose ⇒ None"
+        );
+        assert!(
+            build_rehome(&entity_ctx, Fence(2), Some(flushed_pose())).is_some(),
+            "Entity subject + a stashed pose ⇒ Some"
+        );
+        // emit_rehome's None arm: a non-Entity re-home adopt emits NOTHING (the LOUD no-op).
+        let mut outbox = OutboundBox::default();
+        emit_rehome(&realm_ctx, Fence(2), NodeId(9), Some(flushed_pose()), &mut outbox);
+        assert!(
+            outbox.0.is_empty(),
+            "a non-Entity re-home adopt emits no envelope"
+        );
+    }
+
+    #[test]
+    fn deliver_rehome_to_aborts_cleanly_when_the_cas_is_lost() {
+        // D-37 rule 3: if another writer moved the fence past prev_fence, the re-home CAS LOSES — the saga
+        // is the loser and tombstones as a clean no-op (the entity is alive at the CAS winner; no
+        // compensation, no ReHome envelope). Covers the ReHomeCommit executor's Lost arm end-to-end.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
+        });
+        // Drive the head AHEAD (Fence 2 @ SOURCE) of the saga's expectation (Fence 1) — someone else won.
+        let _ = dir.grant(subject(), AuthorityRef::Shard(DEST), Fence(1), UniverseTick(0));
+        let _ = dir.commit_cas(subject(), Fence(1), AuthorityRef::Shard(SOURCE), UniverseTick(0));
+        inject_saga(
+            &mut runtime,
+            SagaState::Promoting {
+                new_fence: Fence(1),
+                promote_acked: false,
+                dest_delivered: false,
+            },
+            UniverseTick(0),
+        );
+        stash_flush(&mut runtime, XFER, flushed_pose());
+        let mut outbox = OutboundBox::default();
+        deliver(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(5),
+            XFER,
+            SagaEvent::ReHomeTo { target: NodeId(9) },
+        );
+        assert_eq!(runtime.live(), 0, "the re-home loser tombstoned (clean no-op)");
+        let head = dir.head(subject()).expect("subject still recorded");
+        assert_eq!(
+            head.authority,
+            AuthorityRef::Shard(SOURCE),
+            "the CAS winner still owns the entity"
+        );
+        assert_eq!(head.fence, Fence(2), "the re-home CAS did not bump (it lost)");
+        assert!(
+            flows_to_node(&outbox, NodeId(9)).is_empty(),
+            "no ReHome adopt is emitted to the target when the CAS is lost"
         );
     }
 

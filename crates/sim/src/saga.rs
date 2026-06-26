@@ -282,6 +282,14 @@ pub enum SagaState {
         promote_acked: bool,
         dest_delivered: bool,
     },
+    /// D-37 forward re-home: the committed owner was permanently KILLED, so the saga is re-targeting the
+    /// subject onto a LIVE capability-matched shard `target`. `ReHomeCommit` is in flight (the directory
+    /// CAS at `prev_fence` → `prev_fence+1` naming `target`); its `CasWon` advances to `Promoting{target}`
+    /// plus the `ReHome` adopt, while `CasLost` (someone else won the key — rule 3) terminates as a clean
+    /// no-op. `prev_fence` is the fence the dead owner was committed at (the CAS expectation). Reached from
+    /// `Promoting` via the producer-injected `ReHomeTo` once the dead dest is confirmed and the abort budget
+    /// elapsed.
+    ReHoming { target: NodeId, prev_fence: Fence },
     /// `ReleaseSubscribe` issued for the source subscription.
     Releasing { new_fence: Fence },
     /// Terminal success.
@@ -380,6 +388,12 @@ pub enum SagaEvent {
     Timeout,
     /// Pre-commit cancellation request.
     Cancel,
+    /// D-37 forward re-home: `scan_deadlines` confirmed the committed dest dead (in `Promoting`), the
+    /// abort budget elapsed, AND `select_rehome_target` found a LIVE capability-matched `target`. Drives
+    /// `Promoting → ReHoming{target}`. The producer carries the chosen `target` (the pure FSM cannot
+    /// select — selection needs the roster + liveness); a `None` selection injects nothing (the saga
+    /// stays parked, honest, never a forced re-home).
+    ReHomeTo { target: NodeId },
 }
 
 /// What the wrapper must do after a step. The saga never performs effects itself.
@@ -419,6 +433,24 @@ pub enum SagaAction {
     /// expectation; the wrapper fills `transfer`/`new_owner` from the `SagaCtx`.
     IssueCommitCas {
         expected: Fence,
+    },
+    /// D-37 forward re-home commit (the SAME single commit point, re-targeted): the wrapper calls
+    /// `commit_cas(subject, expected, Shard(target))` — bumping the fence to `expected+1` (the
+    /// fence-monotone invariant: a resurrected dead owner holds `< expected+1` and self-fences), clearing
+    /// any lock, and naming `target` BEFORE the adopt (so the target is a legitimate owner when the
+    /// `ReHome` lands). Feeds `CasWon`/`CasLost` back exactly like `IssueCommitCas` (HR3 one commit
+    /// machinery), but to `target` (a live roster shard) rather than the hardcoded `ctx.dest`.
+    ReHomeCommit {
+        expected: Fence,
+        target: NodeId,
+    },
+    /// D-37 forward re-home adopt: emit the dedicated `InterShardFlow::ReHome` to `target` carrying the
+    /// stashed flushed pose (`ReHomeState::PoseOnly`), so the target reconstructs the subject as Owned at
+    /// `new_fence` and acks `PromoteAck`. The Some/None build (Entity subject + a stashed pose) lives in
+    /// `emit_rehome` (a monomorphic helper, unit-tested both ways) so this arm stays a branchless dispatch.
+    ReHomeAdopt {
+        new_fence: Fence,
+        target: NodeId,
     },
     /// Issue the BATCHED `TransientGo` go-token (commit point for a TRANSIENT
     /// subject) — the same Fence-CAS amortized across a batch (HR2). Present and
@@ -885,6 +917,47 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 dest_delivered,
             },
             vec![A::Promote { new_fence }],
+        ),
+        // ---- D-37 forward re-home: the committed owner was permanently KILLED ------------------------
+        // The producer (scan_deadlines) confirmed the committed dest dead in Promoting, the abort budget
+        // elapsed, AND selected a live capability-matched `target` → re-target the subject onto it. The
+        // re-home commit is the SAME single commit point re-pointed (HR3): bump the fence to
+        // `new_fence+1` (the fence-monotone invariant — a resurrected dead dest is then strictly stale and
+        // self-fences) and name `target` BEFORE the adopt.
+        (S::Promoting { new_fence, .. }, E::ReHomeTo { target }) => (
+            S::ReHoming {
+                target,
+                prev_fence: new_fence,
+            },
+            vec![A::ReHomeCommit {
+                expected: new_fence,
+                target,
+            }],
+        ),
+        // The re-home CAS won: the directory now names `target` at the bumped fence. Adopt the subject
+        // there (the dedicated `ReHome` arm, NOT `Promote` — the target reconstructs state, no ghost to
+        // flip) and enter `Promoting{target}`. The release gate (PromoteAcked AND DestDelivered) then
+        // drives `Releasing → Done` — NEVER Done-on-promote: a starved `DeliveredToObservers` watermark
+        // (no gateway sub to the fresh target until the client re-subscribes) parks here, the D-36 wedge
+        // the re-home cannot cure (it cures the AUTHORITY orphan; the client re-route is owed, D-37/D-36).
+        (S::ReHoming { target, .. }, E::CasWon { new_fence }) => (
+            S::Promoting {
+                new_fence,
+                promote_acked: false,
+                dest_delivered: false,
+            },
+            vec![A::ReHomeAdopt { new_fence, target }],
+        ),
+        // The re-home CAS LOST (rule 3): some other writer moved the fence past `prev_fence` — this saga
+        // is the loser and no-ops. The entity is alive at the CAS winner; no compensation (the re-home
+        // froze nothing new). Defensive in the single-orchestrator in-process model (the Entity key is
+        // unlocked + the reaper leaves it for re-home, so nothing else races it); reachable under
+        // N-orchestrator partition (D-32). Terminal.
+        (S::ReHoming { .. }, E::CasLost { .. }) => (
+            S::Aborted {
+                reason: AbortReason::CasLost,
+            },
+            vec![A::Tombstone],
         ),
         (S::Releasing { new_fence }, E::Released) => (S::Done { new_fence }, vec![A::Tombstone]),
         (S::Releasing { new_fence }, E::Timeout) => (
@@ -2154,6 +2227,68 @@ mod tests {
     }
 
     #[test]
+    fn rehome_to_a_live_target_commits_adopts_then_aborts_on_cas_loss() {
+        // D-37 CELL 2: a Promoting saga whose committed dest was permanently KILLED re-homes onto a LIVE
+        // target. ReHomeTo{target} → ReHoming + ReHomeCommit (the CAS at prev_fence, the fence-monotone
+        // bump); CasWon → Promoting at the target + the DEDICATED ReHome adopt; CasLost (rule 3) → a clean
+        // Aborted no-op (the entity is alive at the CAS winner — no compensation).
+        let c = ctx(false);
+        let promoting = SagaState::Promoting {
+            new_fence: Fence(6),
+            promote_acked: false,
+            dest_delivered: false,
+        };
+        let (state, acts) = step(&c, promoting, SagaEvent::ReHomeTo { target: NodeId(9) });
+        assert_eq!(
+            state,
+            SagaState::ReHoming {
+                target: NodeId(9),
+                prev_fence: Fence(6),
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::ReHomeCommit {
+                expected: Fence(6),
+                target: NodeId(9),
+            }]
+        );
+        // CasWon: the directory now names the target at the bumped fence → adopt there, re-enter Promoting.
+        let (state, acts) = step(&c, state, SagaEvent::CasWon { new_fence: Fence(7) });
+        assert_eq!(
+            state,
+            SagaState::Promoting {
+                new_fence: Fence(7),
+                promote_acked: false,
+                dest_delivered: false,
+            }
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::ReHomeAdopt {
+                new_fence: Fence(7),
+                target: NodeId(9),
+            }]
+        );
+        // CasLost from ReHoming → a clean terminal no-op (rule 3; the entity is alive at the CAS winner).
+        let (state, acts) = step(
+            &c,
+            SagaState::ReHoming {
+                target: NodeId(9),
+                prev_fence: Fence(6),
+            },
+            SagaEvent::CasLost { current: Fence(8) },
+        );
+        assert_eq!(
+            state,
+            SagaState::Aborted {
+                reason: AbortReason::CasLost,
+            }
+        );
+        assert_eq!(acts, vec![SagaAction::Tombstone]);
+    }
+
+    #[test]
     fn ordered_tail_timeouts_re_emit_forward_only() {
         // A Demoting timeout re-emits the Demote; a Promoting timeout re-emits the Promote — both
         // idempotent re-drives, never aborts (post-commit is forward-only). ✅ Slice 2a: the
@@ -2258,6 +2393,9 @@ mod tests {
         #[test]
         fn driving_with_matching_events_terminates(
             provision in proptest::bool::ANY,
+            // D-37: when set, re-home ONCE from the first Promoting (ReHomeTo → ReHoming → CasWon →
+            // Promoting), proving the forward-re-home path ALSO reaches a terminal in bounded steps.
+            rehome in proptest::bool::ANY,
             class in prop_oneof![
                 Just(DurabilityClass::Durable),
                 Just(DurabilityClass::Transient),
@@ -2265,6 +2403,7 @@ mod tests {
         ) {
             let c = ctx_class(provision, class);
             let (mut state, _) = start(&c);
+            let mut rehomed = false;
             for _ in 0..16 {
                 let event = match state {
                     SagaState::AwaitProvision => SagaEvent::ProvisionReady,
@@ -2300,6 +2439,16 @@ mod tests {
                     // The ordered tail: DemoteAcked leaves Demoting → Promoting; then the two-flag
                     // gate (PromoteAcked then DestDelivered) reaches Releasing (mirrors Freezing).
                     SagaState::Demoting { .. } => SagaEvent::DemoteAcked,
+                    // D-37: re-home ONCE from the first Promoting (the committed dest "died") — proving
+                    // the re-home path terminates too. The CasWon below walks ReHoming back to Promoting.
+                    SagaState::Promoting {
+                        promote_acked: false,
+                        ..
+                    } if rehome && !rehomed => {
+                        rehomed = true;
+                        SagaEvent::ReHomeTo { target: NodeId(9) }
+                    }
+                    SagaState::ReHoming { .. } => SagaEvent::CasWon { new_fence: Fence(9) },
                     SagaState::Promoting {
                         promote_acked: false,
                         ..
