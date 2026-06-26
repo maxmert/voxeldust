@@ -932,6 +932,7 @@ pub(crate) fn rehydrate(
     store: &dyn Store,
     reserve_chunk: u64,
     saga_tuning: SagaTuning,
+    liveness: LivenessTuning,
     dir_tuning: DirectoryTuning,
 ) -> Option<Rehydrated> {
     // The Clock family is the genesis-vs-recover discriminator: absent ⇒ no tick ever committed ⇒ genesis.
@@ -986,7 +987,10 @@ pub(crate) fn rehydrate(
     }
     let batch_go_writes = batch_goes.len() as u64;
 
-    let mut runtime = SagaRuntimeRes::with_tuning(saga_tuning);
+    // D-3: thread the CONFIGURED liveness tuning through the recover path so a kill-9-rebuilt orchestrator
+    // keeps its prod dead-vs-slow margin (n=3), not the kill-equivalent n=1 default. The tracker itself is
+    // rebuilt EMPTY (the CAP freeze), but its TUNING must survive the restart.
+    let mut runtime = SagaRuntimeRes::with_tunings(saga_tuning, liveness);
     runtime.sagas = sagas;
     runtime.batch_goes = batch_goes;
     runtime.batch_go_writes = batch_go_writes;
@@ -1562,6 +1566,30 @@ mod tests {
                 Box::new(self.store.clone()),
             );
             self.orch = orch; // the old orchestrator World is dropped here — its RAM is lost
+        }
+
+        /// Like [`rebuild`](Self::rebuild) but with a specific D-3 liveness tuning in the recover config —
+        /// proves a kill-9-rebuilt orchestrator KEEPS its configured dead-vs-slow margin (not the default).
+        fn rebuild_with_liveness(&mut self, liveness: LivenessTuning) {
+            let transport = self.hub.reregister(ORCH, 64);
+            let mut orch = build_app(
+                NodeConfig {
+                    node_id: ORCH,
+                    kind: NodeKind::Orchestrator,
+                },
+                transport,
+            );
+            let (world, schedule) = orch.parts_mut();
+            register_orchestrator_with_store(
+                world,
+                schedule,
+                &OrchestratorConfig {
+                    liveness,
+                    ..orch_config()
+                },
+                Box::new(self.store.clone()),
+            );
+            self.orch = orch;
         }
 
         /// Deliver pending sends to the orchestrator, run one tick, then deliver its outbound
@@ -2377,6 +2405,31 @@ mod tests {
                 .head(subject())
                 .is_none(),
             "the revoked record is NOT resurrected by rehydrate (COMP-2: the barrier durably deleted it)"
+        );
+    }
+
+    #[test]
+    fn rehydrate_keeps_the_configured_liveness_margin() {
+        // D-3 (re-audit wf_4d2ca7ae): a kill-9-rebuilt orchestrator must KEEP its prod dead-vs-slow margin
+        // (n = 3), NOT drop to the kill-equivalent n = 1 default — `rehydrate` threads `cfg.liveness` into
+        // the rebuilt runtime. (The tracker is still rebuilt EMPTY — the CAP freeze — but its TUNING survives.)
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1)); // persist a directory record + the clock ceiling to the store
+        rig.settle();
+        rig.rebuild_with_liveness(LivenessTuning {
+            n_consecutive_unreachable: 3,
+            unreachable_window_ticks: 64,
+            retry_delay_ticks_hint: 2,
+        });
+        // The recovered runtime confirms a peer dead only after 3 notices (the n = 1 default would confirm
+        // on the first) — proving the configured margin survived the kill-9 recover.
+        let mut runtime = rig.orch.world_mut().resource_mut::<SagaRuntimeRes>();
+        runtime
+            .liveness
+            .record_unreachable(SOURCE, UniverseTick(1));
+        assert!(
+            !runtime.liveness.is_confirmed_dead(SOURCE, UniverseTick(1)),
+            "the recovered orchestrator kept its configured n = 3 margin, not the n = 1 default"
         );
     }
 

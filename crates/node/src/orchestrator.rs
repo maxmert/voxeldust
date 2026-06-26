@@ -86,6 +86,7 @@ pub fn register_orchestrator_with_store(
         store.as_ref(),
         cfg.reserve_chunk,
         cfg.saga,
+        cfg.liveness,
         cfg.directory,
     ) {
         // RECOVER: the rebuilt orchestrator resumes its durable state (no in-flight transfer vanishes).

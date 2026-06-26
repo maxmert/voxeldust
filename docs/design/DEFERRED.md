@@ -523,7 +523,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   saga-gated not frame-fence-enforced; the dest promote is currently autonomous and needs a real saga
   `Promoting` state; no collision system exists yet so 1d.5b lands the ghost FEED+registration, response @P5).
 
-### D-3 🟧 Lease lifecycle: slices 0–2 LANDED (config + heartbeat producer + flap fault); the reaper + CSCALE-1 tracker + self-fence owed (design wf_24c1ecc5, 6 slices)
+### D-3 🟧 Lease lifecycle: slices 0–3 LANDED (config + heartbeat + flap fault + CSCALE-1 tracker — CSCALE-1 CLOSED); the reaper (4) + self-fence (5) owed (design wf_24c1ecc5, 6 slices)
 - **✅ LANDED (slices 0–2 of 6, all gate-green 100% Tier-A):**
   - **Slice 0 (5e73fdf) — config foundation:** `DirectoryTuning` + the lease-liveness knobs
     (`lease_renew_interval_ticks`, `min_renews_before_lapse`, `self_fence_grace_ticks`,
@@ -536,37 +536,38 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     `lease_expires` IS now refreshed by a live producer.
   - **Slice 2 (ca756c7) — the harness FLAP fault:** `LinkPolicy.flap_until_tick` + `FaultFabric::flap` (a
     recoverable `NodeUnreachable` with the fresh-seq fix so the subject auto-redelivers) — the in-process
-    stand-in for an io-prod blip. EXISTS but no scenario consumes it yet (Slice 3 wires the CSCALE-1 cells).
-- **Still owed (slices 3–5):** **Slice 3 — the CSCALE-1 tracker:** rework `dead_participants` → an
-  evidence-gated `LivenessTracker` (N-consecutive within `unreachable_window_ticks` + clear-on-ack), add a
-  per-saga `dead_observed_since`, and move the DESTRUCTIVE dest-abandon behind the LARGE `abort_deadline_ticks`
-  (the cure). **Slice 4 — the orchestrator expiry REAPER + CAP freeze** (lapsed-AND-confirmed-dead, inside the
-  D-6 group-commit barrier; reaps `Session` keys, MARKS Realm/Entity/Ship for D-37). **Slice 5 —
-  self-fence-before-grant** (the proactive owner timer on `local_tick`). Each gate-green; commit-ask each.
-- **⚠️ CSCALE-1 still OPEN until Slice 3** (the tracker is not yet reworked): `dead_participants` is still
-  insert-only / never-cleared, and the dest-abandon still rides the cheap `redrive_deadline_ticks`. Bounded +
-  gate-invisible exactly as below (the flap fault exists but no cell uses it yet, so the blip path stays
-  unexercised). Slice 3 closes it.
-- **⚠️ CSCALE-1 (whole-codebase audit `wf_2de9063f`, HIGH — latent, fix before real-node chaos):** the
-  D-7d dead-resolution uses a kill-only `Inbound::NodeUnreachable` as its dead-vs-slow STAND-IN: in io-prod
-  a SINGLE recoverable write blip (a 20s idle-reap / VXLAN drop of a LIVE peer — `io-prod/.../mesh.rs`
-  emits `NodeUnreachable`, the writer auto-redials next frame) inserts the peer into
-  `SagaRuntimeRes.dead_participants` (`saga_runtime.rs` `drive_sagas`) which is **NEVER cleared** (no
-  `remove`/`retain` anywhere — confirmed), and a due `BatchHandoff` saga then resolves to `DestUnreachable`
-  → `EmitTransientAbandon` + Tombstone = irreversible accounted loss of an in-flight transient batch toward
-  a HEALTHY dest. `deadline_for` puts `BatchHandoff` on the CHEAP `redrive_deadline_ticks`, so a blip + a
-  few ticks is enough. NOT critical TODAY: the harness emits `NodeUnreachable` only via a PERMANENT kill
-  (the blip→live-dest path is gate-invisible), there is NO real-network fault injection over QUIC, and the
-  transient burst path runs only in-process — so it CANNOT fire on a live cluster until P3 real-node chaos
-  (this entry's WHEN). Bounded to transient kinds (debris/projectiles) within loss-budget; durables
-  unaffected.
-- **Where:** `crates/sim/src/directory.rs` (`renew`/`lease_expires` written, never consumed);
-  `crates/node/src/orchestrator.rs` (the only `LeaseRenew` consumer is the receive arm);
-  `crates/node/src/saga_runtime.rs` (`dead_participants` insert in `drive_sagas`, never cleared; the
-  `DestUnreachable`/`SourceUnreachable` resolution gate in `scan_deadlines`; `deadline_for`'s BatchHandoff →
-  `redrive_deadline_ticks`). Pinned by the `OwnerRecord.lease_expires` doc in
-  `crates/wire/src/seams/directory.rs` (TTL-ENFORCEMENT-UNIMPLEMENTED) + the kill-only-today doc on
-  `dead_participants`.
+    stand-in for an io-prod blip. Consumed by the Slice-3 CSCALE-1 flap cell.
+  - **Slice 3 (68ec2d2) — the CSCALE-1 tracker (CSCALE-1 CLOSED):** the insert-only / never-cleared
+    `dead_participants` set is GONE — replaced by an evidence-gated, clearable `LivenessTracker` (a peer is
+    confirmed dead only after `n_consecutive_unreachable` notices within `unreachable_window_ticks` with no
+    intervening successful inbound; cleared on ANY inbound Wire at the top of `drive_sagas`). The DESTRUCTIVE
+    dest-abandon is moved off the cheap `redrive_deadline_ticks` onto the LARGE `abort_deadline_ticks`,
+    measured from a NEW per-saga RAM-only `dead_observed_since` (NOT `since`, which `scan_deadlines` re-arms
+    every fire). `LivenessTuning` threaded through `OrchestratorConfig`→`with_tunings` (incl. the recover
+    path `rehydrate`, re-audit fix) — prod default `n = 3` (the CSCALE-1 margin), dev/test `n = 1`
+    (kill-equivalent). Proven by unit tests (all tracker branches + the recover-margin) + the e2e flap cell
+    (a blip toward a HEALTHY dest lands the batch, zero abandon, non-vacuous). Re-audited DONE_NO_CRITICAL
+    (`wf_4d2ca7ae`).
+- **Still owed (slices 4–5):** **Slice 4 — the orchestrator expiry REAPER + CAP freeze** (lapsed-AND-
+  confirmed-dead, inside the D-6 group-commit barrier so the revoke is durable; reaps `Session` keys, MARKS
+  Realm/Entity/Ship for D-37; `liveness_quiesced_until` set on rehydrate = `now + recovery_grace_ticks`).
+  **Slice 5 — self-fence-before-grant** (the proactive owner timer on `local_tick`). Each gate-green;
+  commit-ask each. (Fold in the `due_this_tick` cadence-guard DRY helper the holistic audit flagged.)
+- **✅ CSCALE-1 CLOSED (Slice 3, `68ec2d2`) — was: whole-codebase audit `wf_2de9063f`, HIGH.** The
+  BEFORE-state (now historical): the D-7d dead-resolution used a kill-only `Inbound::NodeUnreachable` as its
+  dead-vs-slow stand-in, so in io-prod a SINGLE recoverable write blip (a 20s idle-reap / VXLAN drop of a LIVE
+  peer; the writer auto-redials next frame) inserted the peer into an insert-only / NEVER-cleared
+  `dead_participants` set, and a due `BatchHandoff` resolved to `DestUnreachable` → `EmitTransientAbandon` +
+  Tombstone = irreversible loss of a HEALTHY in-flight batch (the cheap `redrive_deadline_ticks`, so a blip +
+  a few ticks sufficed). FIXED: the evidence-gated `LivenessTracker` (N-consecutive + clear-on-ack) means a
+  blip never confirms a healthy peer, and the destructive abandon now waits the LARGE `abort_deadline_ticks`
+  from `dead_observed_since`. The e2e flap cell exercises the exact blip path the old code abandoned on. (The
+  io-prod transport that PRODUCES the real blip is still owed — see DEFERRED.md D-6 transport-redelivery; the
+  in-process flap fault is its deterministic stand-in.)
+- **Where (residual — slices 4–5):** `crates/sim/src/directory.rs` (`renew`/`lease_expires` written; the
+  expiry reaper that CONSUMES `lease_expires` is owed Slice 4); `crates/node/src/saga_runtime.rs` (the
+  `LivenessTracker` is built + consumed by the BatchHandoff resolution; Slice 4 adds the directory reaper
+  reading `is_confirmed_dead`, Slice 5 the proactive self-fence timer).
 - **When / proper:** **before the P2 crash/stagger matrix and P3 chaos with real nodes / any multi-pod
   deploy.** FOUR parts: (1) ✅ a renewal heartbeat from each authority holder (gateway `Session`, shard
   `Realm`/`Entity`) — LANDED, Slice 1; (2) an orchestrator expiry sweep gated on **unreachable-confirmation**
