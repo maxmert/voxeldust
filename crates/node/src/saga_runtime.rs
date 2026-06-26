@@ -335,6 +335,14 @@ pub struct SagaRuntimeRes {
     /// insert-only code would have abandoned on) AND that `dest_unreachable_resolutions == 0` (the cure:
     /// a recoverable blip toward a healthy dest no longer abandons the batch). 0 on a no-fault run.
     liveness_notices: u64,
+    /// D-3 Slice 4: the universe tick the expiry REAPER last swept, re-armed on fire so the O(directory)
+    /// sweep runs at most once per `reaper_interval_ticks` (never per tick — like `scan_deadlines`' `since`).
+    last_reap_tick: UniverseTick,
+    /// D-3 Slice 4 CAP freeze: the reaper does NOT act before this tick. Set on rehydrate to
+    /// `now + recovery_grace_ticks` — a FIXED post-restart freeze (belt-and-suspenders atop the RAM-empty
+    /// tracker, which is the PRIMARY freeze: an empty tracker confirms nobody dead until fresh notices
+    /// re-accrue). 0 at genesis (a fresh orchestrator has no stale leases to reap, so no freeze needed).
+    liveness_quiesced_until: UniverseTick,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -994,6 +1002,12 @@ pub(crate) fn rehydrate(
     runtime.sagas = sagas;
     runtime.batch_goes = batch_goes;
     runtime.batch_go_writes = batch_go_writes;
+    // D-3 Slice 4 CAP freeze: a rebuilt orchestrator does NOT reap for `recovery_grace_ticks` after recover
+    // — belt-and-suspenders atop the RAM-empty tracker (the PRIMARY freeze), so even a fast restart cannot
+    // race a slow-rejoining live peer into a reap before its first renewal re-lands. Measured from the
+    // recovered ceiling (the resumed `now`).
+    runtime.liveness_quiesced_until =
+        UniverseTick(ceiling.0.saturating_add(dir_tuning.recovery_grace_ticks));
 
     Some(Rehydrated {
         clock,
@@ -1178,6 +1192,63 @@ fn drop_applied_event(step_id: u32) -> SagaEvent {
     }
 }
 
+/// D-3 Slice 4: the CAP AND-gate deciding if a directory record may be REAPED. All THREE must hold (never
+/// OR): (1) the post-restart quiesce window has elapsed (a rebuilt orchestrator does not reap until its
+/// liveness evidence has had time to re-accrue); (2) the lease has LAPSED (necessary, NOT sufficient — a
+/// slow renewal is not a death); (3) the owner is CONFIRMED dead (the evidence-gated discriminator — not a
+/// single blip). The combination realizes the binding CAP choice: an orchestrator outage FREEZES recovery
+/// (the reaper only runs inside a live orchestrator, and the RAM tracker is empty on rehydrate so gate (3)
+/// is unsatisfiable until fresh notices re-accrue) — so an outage NEVER mass-orphans. Three monomorphic
+/// `if`s (HR5; no short-circuit `&&`); each corner is covered.
+#[must_use]
+fn should_reap(
+    record: &OwnerRecord,
+    now: UniverseTick,
+    liveness: &LivenessTracker,
+    quiesced_until: UniverseTick,
+) -> bool {
+    if now.0 < quiesced_until.0 {
+        return false;
+    }
+    if record.lease_expires.0 >= now.0 {
+        return false;
+    }
+    if !liveness.is_confirmed_dead(record.authority.node(), now) {
+        return false;
+    }
+    true
+}
+
+/// D-3 Slice 4: the orchestrator expiry REAPER. Once per `reaper_interval_ticks` (re-armed via
+/// `last_reap_tick`, never per tick — an O(directory) sweep), revoke every lapsed-AND-confirmed-dead lease.
+/// SCOPE (the D-37 boundary): FULLY REVOKE a dead `Session` key (the client reconnects via its ResumeTicket
+/// — a well-defined path), but LEAVE a dead `Realm`/`Entity`/`Ship` key for D-37's forward re-home —
+/// revoking a player's ship realm into `HeldNowhere` would freeze the ship forever (the durable re-home is
+/// owed, ledgered). Collect-then-act (the immutable `entries()` borrow ends before the `revoke` mutation).
+/// INERT when `reaper_interval_ticks == 0` (the pre-D-3 default). Runs INSIDE the D-6 group-commit barrier
+/// (before the directory reconcile) so a revoke is captured by the same tick's reconcile + commit (durable
+/// — a reaped record never resurrects on a kill-9). `revoke` refuses a transfer-locked key (a saga owns it).
+fn reap_lapsed_leases(runtime: &mut SagaRuntimeRes, dir: &mut DirectoryCore, now: UniverseTick) {
+    let interval = dir.tuning().reaper_interval_ticks;
+    if (interval == 0) | (now.0.saturating_sub(runtime.last_reap_tick.0) < interval) {
+        return;
+    }
+    runtime.last_reap_tick = now;
+    let quiesced_until = runtime.liveness_quiesced_until;
+    // SESSION keys only (Realm/Entity/Ship re-home is D-37): collect the reapable ones, then revoke.
+    let reapable: Vec<(DirectoryKey, Fence)> = dir
+        .entries()
+        .filter(|(key, record)| {
+            matches!(key, DirectoryKey::Session(_))
+                && should_reap(record, now, &runtime.liveness, quiesced_until)
+        })
+        .map(|(key, record)| (*key, record.fence))
+        .collect();
+    for (key, fence) in reapable {
+        let _ = dir.revoke(key, fence);
+    }
+}
+
 /// The orchestrator saga-runtime system: process new triggers, FIRE due deadlines (Slice 2a), then
 /// drive every live saga forward on the gateway acks delivered this tick. Runs on the orchestrator's
 /// single-threaded schedule; the directory CAS is a direct in-process call (no await, no lock across a send).
@@ -1297,6 +1368,11 @@ pub fn drive_sagas(
             _ => {}
         }
     }
+    // D-3 Slice 4: the expiry REAPER runs at the HEAD of the barrier — BEFORE the directory reconcile below
+    // — so a revoke it makes is captured by the SAME tick's delete-all-then-put-current reconcile + the
+    // single commit (the revoke is durable this tick; a reaped record never resurrects on a kill-9 — the
+    // COMP-2 guarantee). It mutates the directory in RAM; the reconcile then persists the post-reap RAM.
+    reap_lapsed_leases(&mut runtime, &mut dir.0, now);
     // D-6 GROUP-COMMIT BARRIER: stage every saga/go-token write recorded this tick (drained from
     // `pending_writes`), snapshot the DIRECTORY (the independent key family) + the durable clock ceiling,
     // then ONE `commit()` — the ~1-fsync/tick durability point (io-prod batches it off-tick later). This
@@ -2430,6 +2506,128 @@ mod tests {
         assert!(
             !runtime.liveness.is_confirmed_dead(SOURCE, UniverseTick(1)),
             "the recovered orchestrator kept its configured n = 3 margin, not the n = 1 default"
+        );
+    }
+
+    // ---- D-3 Slice 4: the expiry reaper + CAP gate -------------------------------------------------
+
+    fn rec(node: NodeId, lease_expires: u64) -> vd_wire::seams::directory::OwnerRecord {
+        vd_wire::seams::directory::OwnerRecord {
+            authority: AuthorityRef::Shard(node),
+            fence: Fence(1),
+            lease_expires: UniverseTick(lease_expires),
+            in_transfer: None,
+        }
+    }
+
+    #[test]
+    fn should_reap_requires_quiesced_lapsed_and_confirmed_dead() {
+        // The CAP AND-gate: reap iff quiesce-elapsed AND lapsed AND confirmed-dead. Covers all 4 corners.
+        let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1
+        let dead = NodeId(5);
+        liveness.record_unreachable(dead, UniverseTick(100)); // confirmed (n = 1)
+        let now = UniverseTick(100);
+        let quiesced = UniverseTick(50); // window elapsed (now >= quiesced)
+        // All three hold → reap (lapsed at 90 < now 100; dead confirmed; quiesce elapsed).
+        assert!(should_reap(&rec(dead, 90), now, &liveness, quiesced));
+        // (1) NOT past the quiesce freeze → no reap.
+        assert!(!should_reap(&rec(dead, 90), now, &liveness, UniverseTick(150)));
+        // (2) NOT lapsed (lease_expires >= now) → no reap.
+        assert!(!should_reap(&rec(dead, 200), now, &liveness, quiesced));
+        // (3) NOT confirmed dead (a node with no unreachable evidence) → no reap.
+        assert!(!should_reap(&rec(NodeId(99), 90), now, &liveness, quiesced));
+    }
+
+    #[test]
+    fn reaper_revokes_a_lapsed_confirmed_dead_session_only() {
+        // The reaper FULLY revokes a dead Session key but LEAVES a dead Realm key (D-37 re-homes it, not
+        // the reaper — revoking a realm into HeldNowhere would freeze it). A lapsed-but-NOT-confirmed
+        // session is left (CAP). reaper_interval active; renew INERT (the reaper does not need the heartbeat).
+        let dir_tuning = DirectoryTuning {
+            lease_ttl_ticks: 10,
+            reaper_interval_ticks: 8,
+            ..DirectoryTuning::default()
+        };
+        let mut dir = DirectoryCore::new(dir_tuning);
+        let dead = NodeId(5);
+        let live = NodeId(6);
+        // Grant at tick 0 ⇒ lease_expires = 10 (lapsed by now = 100).
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(1)),
+            AuthorityRef::Gateway(dead),
+            Fence(1),
+            UniverseTick(0),
+        );
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(2)),
+            AuthorityRef::Gateway(live),
+            Fence(1),
+            UniverseTick(0),
+        );
+        let _ = dir.grant(
+            DirectoryKey::Realm(RealmId::System(7)),
+            AuthorityRef::Shard(dead),
+            Fence(1),
+            UniverseTick(0),
+        );
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // n = 1
+        runtime.liveness.record_unreachable(dead, UniverseTick(50)); // only `dead` is confirmed
+        reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+        assert!(
+            dir.head(DirectoryKey::Session(SessionId(1))).is_none(),
+            "the lapsed, confirmed-dead session is reaped"
+        );
+        assert!(
+            dir.head(DirectoryKey::Session(SessionId(2))).is_some(),
+            "a lapsed but NOT-confirmed-dead session is left (CAP — only confirmed deaths reap)"
+        );
+        assert!(
+            dir.head(DirectoryKey::Realm(RealmId::System(7))).is_some(),
+            "a dead Realm is LEFT for D-37 forward re-home, never reaped into HeldNowhere"
+        );
+    }
+
+    #[test]
+    fn reaper_is_inert_at_zero_interval_and_respects_its_cadence() {
+        let dead = NodeId(5);
+        // INERT: reaper_interval == 0 never reaps, even a lapsed + confirmed-dead session.
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10,
+            ..DirectoryTuning::default() // reaper_interval_ticks = 0
+        });
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(1)),
+            AuthorityRef::Gateway(dead),
+            Fence(1),
+            UniverseTick(0),
+        );
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        runtime.liveness.record_unreachable(dead, UniverseTick(50));
+        reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(10_000));
+        assert!(
+            dir.head(DirectoryKey::Session(SessionId(1))).is_some(),
+            "an inert reaper (interval 0) never reaps"
+        );
+
+        // NOT DUE: interval > 0 but the elapsed since the last sweep is below it → no reap this tick.
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10,
+            reaper_interval_ticks: 8,
+            ..DirectoryTuning::default()
+        });
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(1)),
+            AuthorityRef::Gateway(dead),
+            Fence(1),
+            UniverseTick(0),
+        );
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        runtime.liveness.record_unreachable(dead, UniverseTick(50));
+        runtime.last_reap_tick = UniverseTick(100); // just swept at 100
+        reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(103)); // 103 - 100 = 3 < 8 → not due
+        assert!(
+            dir.head(DirectoryKey::Session(SessionId(1))).is_some(),
+            "a sweep below the reaper interval since the last is skipped"
         );
     }
 

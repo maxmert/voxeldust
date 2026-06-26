@@ -279,6 +279,19 @@ pub fn admin_snapshot(world: &mut bevy_ecs::prelude::World) -> vd_wire::admin::A
             .entries()
             .map(|(key, record)| vd_wire::admin::directory_entry_view(key, record))
             .collect();
+        // D-3 Slice 4: per-record lease health, so a lapsed-pending lease (negative ticks_remaining —
+        // awaiting reaper confirmation / a D-37 re-home) is VISIBLE to a 2am operator, never a silent wedge.
+        snapshot.leases = dir
+            .0
+            .entries()
+            .map(|(_, record)| vd_wire::admin::LeaseHealthView {
+                node: record.authority.node(),
+                lease_expires: record.lease_expires,
+                // Negative = LAPSED. Straight-line cast (no uncoverable fallback branch, HR5); universe
+                // ticks are far below i64::MAX so the cast is exact.
+                ticks_remaining: record.lease_expires.0 as i64 - clock.universe_tick.0 as i64,
+            })
+            .collect();
     }
     // AAA-1: the in-flight sagas — the "curl a stuck saga at 2am" promise. A saga that
     // parks (e.g. a P3-stub TransientGo, or a Demoting tail awaiting the band predicate)
@@ -579,6 +592,7 @@ mod tests {
         // No saga has been triggered, so the (present) saga runtime renders an empty
         // list — the saga view is populated from real state, never fabricated (AAA-1).
         assert_eq!(snap.sagas, vec![]);
+        assert_eq!(snap.leases, vec![], "no records ⇒ no lease-health rows (D-3)");
 
         // A granted lease appears in the dump.
         let mut requester = hub.register(SHARD, 64);
@@ -599,11 +613,20 @@ mod tests {
         assert_eq!(snap.directory.len(), 1);
         assert_eq!(snap.directory[0].authority, "shard:node-2");
         assert_eq!(snap.directory[0].fence, Fence(1));
+        // D-3: the granted lease shows up as a lease-health row — the holder + a POSITIVE ticks_remaining
+        // (a fresh lease, not lapsed). A lapsed lease would render a negative value (operator-visible).
+        assert_eq!(snap.leases.len(), 1);
+        assert_eq!(snap.leases[0].node, SHARD);
+        assert!(
+            snap.leases[0].ticks_remaining > 0,
+            "a freshly-granted lease has positive ticks_remaining (not lapsed)"
+        );
 
         // A world without a directory (non-orchestrator) stays shaped-empty.
         let mut bare = bevy_ecs::prelude::World::new();
         bare.insert_resource(ClockSample::default());
         assert_eq!(admin_snapshot(&mut bare).directory, vec![]);
+        assert_eq!(admin_snapshot(&mut bare).leases, vec![]);
     }
 
     #[test]

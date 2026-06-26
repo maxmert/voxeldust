@@ -49,6 +49,17 @@ pub enum AuthorityRef {
     Gateway(NodeId),
 }
 
+impl AuthorityRef {
+    /// The holding node's id (the D-3 reaper + admin lease-health read this to check the owner's
+    /// liveness; both arms carry one `NodeId`).
+    #[must_use]
+    pub fn node(self) -> NodeId {
+        match self {
+            AuthorityRef::Shard(n) | AuthorityRef::Gateway(n) => n,
+        }
+    }
+}
+
 /// One directory record. The fence IS the linearizability primitive; `in_transfer`
 /// is ENFORCED (blocks concurrent sagas and ghost-despawn mid-transfer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

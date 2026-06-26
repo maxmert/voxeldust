@@ -173,6 +173,13 @@ impl DirectoryCore {
         }
     }
 
+    /// The directory's operational tuning (the D-3 reaper reads `reaper_interval_ticks` for its cadence
+    /// and the lease/grace knobs; ONE reviewed config home — never an inline literal).
+    #[must_use]
+    pub fn tuning(&self) -> DirectoryTuning {
+        self.tuning
+    }
+
     /// Reconstruct the directory from durably-persisted records (D-6 orchestrator rehydrate). The
     /// persisted `(key, record)` pairs ARE the authority-of-record at the last group-commit, so they
     /// are installed VERBATIM (bypassing `grant`'s fence/lock logic — recovery RESTORES state, it does
