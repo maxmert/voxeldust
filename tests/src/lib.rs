@@ -691,6 +691,11 @@ pub enum EndState {
     /// lock cleared, no live saga) — the dead-aware oracle surfaces it (the orphan is a HeldNowhere: a
     /// dead owner holds nothing, so the fence value is moot here).
     DeadOwnerOrphan { authority_at: NodeId },
+    /// D-37 entity-recovery slices (0/2, INTERMEDIATE): the ENTITY self-promoted / re-homed to the LIVE
+    /// owner `entity_at` (it is no longer an orphan), but the dead SOURCE shard's REALM is STILL orphaned
+    /// — the STANDING realm re-home is owed at Slice 3/4. GREEN entity, honest-RED realm; Slice 4 flips
+    /// the cell to [`EndState::SettledAt`].
+    EntityRecoveredRealmOrphaned { entity_at: NodeId },
     /// D-7d TRANSIENT analogue of [`EndState::SettledAt`]: the batch committed + settled at `node`'s
     /// HELD set (a transient has NO directory row), proven by the dead-aware held-set + a fired
     /// SOURCE-unreachable self-promote resolution; ZERO loss. (Dead source mid-handoff → the go-token
@@ -903,6 +908,29 @@ pub fn assert_end_state(
                 verify_authority_unique_excluding(&reports, dead),
                 Err(orphan(authority_at)),
                 "the dead-aware oracle surfaces the exact dead-owner orphan",
+            );
+        }
+        EndState::EntityRecoveredRealmOrphaned { entity_at } => {
+            // D-37 entity-recovery slices (0/2): the ENTITY self-promoted/re-homed to the LIVE `entity_at`
+            // (no longer an orphan), but the dead SOURCE shard's REALM is still orphaned — the STANDING
+            // realm re-home is owed at Slice 3/4. The dead-aware oracle honestly surfaces ONLY the realm
+            // orphan now (the entity check PASSES), proving the entity recovery without false-passing the
+            // realm gap. (vd-tests is the integration tier, not coverage-gated, so `matches!` is fine.)
+            let reports = topo.inspect_all();
+            let rec = fault_entity_record(&reports, entity);
+            assert_eq!(
+                rec.authority,
+                AuthorityRef::Shard(entity_at),
+                "the entity recovered to the live owner {entity_at}",
+            );
+            assert!(
+                matches!(
+                    verify_authority_unique_excluding(&reports, dead),
+                    Err(AuthorityViolation::RealmHeldNowhere { .. })
+                ),
+                "the entity is no longer the orphan; the ONLY remaining orphan is the dead SOURCE shard's \
+                 REALM (the standing realm re-home is owed at Slice 3/4): {:?}",
+                verify_authority_unique_excluding(&reports, dead),
             );
         }
         // The TRANSIENT end states are held-set / loss-budget shaped (no directory row) — asserted by

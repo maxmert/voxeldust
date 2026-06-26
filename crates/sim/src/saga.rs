@@ -804,6 +804,31 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             },
             vec![A::Promote { new_fence }],
         ),
+        // D-37 CELL 1 (permanent kill of the SOURCE post-commit, in Demoting): the ordered Demote will
+        // NEVER `DemoteAcked` because the source is a confirmed-dead corpse — and its held claim is moot
+        // (the dead-aware oracle `verify_authority_unique_excluding` excludes it; the directory already
+        // committed authority to the dest at `new_fence`). So SELF-PROMOTE the already-committed live dest:
+        // the EXACT structural analogue of the transient `(BatchHandoff, SourceUnreachable)` self-promote
+        // above, and of the `DemoteAcked` exit — carrying the latched `dest_delivered` forward so the
+        // `Promoting` release gate never loses an early delivery. The wasted `ReleaseSubscribe` to the dead
+        // source on the way to Done is tolerated by the forward-only `Releasing` timeout. AUTHORITY-UNIQUE
+        // holds (the corpse holds nothing; one live owner at `new_fence`). The PRODUCER (scan_deadlines)
+        // only injects this once the source is `is_confirmed_dead` (D-3 evidence-gated) — a live-but-slow
+        // source merely re-drives via the Demoting `Timeout` arm below.
+        (
+            S::Demoting {
+                new_fence,
+                dest_delivered,
+            },
+            E::SourceUnreachable,
+        ) => (
+            S::Promoting {
+                new_fence,
+                promote_acked: false,
+                dest_delivered,
+            },
+            vec![A::Promote { new_fence }],
+        ),
         // A Demoting timeout RE-EMITS the ordered Demote (idempotent at the source — `self_fence_skipped`),
         // never aborts: post-commit is forward-only. ✅ Slice 2a: the production `Timeout` PRODUCER
         // (`saga_runtime::scan_deadlines`, `now - since >= redrive_deadline_ticks`) now drives this in
@@ -2096,6 +2121,35 @@ mod tests {
             SagaState::Releasing {
                 new_fence: Fence(6)
             }
+        );
+    }
+
+    #[test]
+    fn a_confirmed_dead_source_in_demoting_self_promotes_the_committed_dest() {
+        // D-37 CELL 1: a post-commit Demoting saga whose SOURCE is permanently killed never gets its
+        // DemoteAcked (the corpse never replies). Injecting SourceUnreachable self-promotes the
+        // already-committed live dest — the structural analogue of the DemoteAcked exit — carrying the
+        // latched `dest_delivered` forward so the Promoting release gate never loses an early delivery.
+        let c = ctx(false);
+        let demoting = SagaState::Demoting {
+            new_fence: Fence(6),
+            dest_delivered: true,
+        };
+        let (state, acts) = step(&c, demoting, SagaEvent::SourceUnreachable);
+        assert_eq!(
+            state,
+            SagaState::Promoting {
+                new_fence: Fence(6),
+                promote_acked: false,
+                dest_delivered: true,
+            },
+            "a confirmed-dead source self-promotes the committed dest, carrying dest_delivered forward"
+        );
+        assert_eq!(
+            acts,
+            vec![SagaAction::Promote {
+                new_fence: Fence(6)
+            }]
         );
     }
 

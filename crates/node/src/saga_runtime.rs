@@ -1111,6 +1111,61 @@ fn deadline_for(state: &SagaState, tuning: &SagaTuning) -> u64 {
     }
 }
 
+/// The dead-aware deadline event for a due saga (D-7d transient hand-off + D-3 liveness discriminator +
+/// D-37 durable re-home), hoisted out of [`scan_deadlines`] so the scan stays a branchless dispatch and
+/// every branch is covered in ONE monomorphic place (HR5). A re-drive toward a CONFIRMED-DEAD participant
+/// (`is_confirmed_dead` — the evidence-gated run, NOT a single blip) becomes a RESOLUTION instead of
+/// looping at a corpse forever; a healthy slow peer (no kill ⇒ no NodeUnreachable run ⇒ never confirmed)
+/// only ever re-drives via plain `Timeout`. SOURCE-dead is the cheap NON-destructive path (self-promote
+/// the already-committed dest/batch — the demote toward the corpse is moot, its claim excluded by the
+/// dead-aware oracle). DEST-dead is the DESTRUCTIVE budget gate: resolve only after `abort_deadline_ticks`
+/// measured from `dead_observed_since` (the CSCALE-1 cure — a recoverable blip that clears in time never
+/// resolves a healthy dest); `dead_observed_since` is the per-saga budget anchor, NOT `since` (which
+/// re-armed to `now`), so the budget accrues across re-drives rather than resetting every fire.
+fn rehome_event_for(
+    state: &SagaState,
+    ctx: &SagaCtx,
+    liveness: &LivenessTracker,
+    dead_observed_since: &mut Option<UniverseTick>,
+    tuning: &SagaTuning,
+    now: UniverseTick,
+) -> SagaEvent {
+    match state {
+        // D-7d transient batch hand-off: source-dead self-promotes the dest, dest-dead abandons the
+        // source's retained copy (DESTRUCTIVE, budget-gated).
+        SagaState::BatchHandoff { .. } => {
+            if liveness.is_confirmed_dead(ctx.source, now) {
+                *dead_observed_since = None;
+                SagaEvent::SourceUnreachable
+            } else if liveness.is_confirmed_dead(ctx.dest, now) {
+                let observed = *dead_observed_since.get_or_insert(now);
+                if now.0.saturating_sub(observed.0) >= tuning.abort_deadline_ticks {
+                    SagaEvent::DestUnreachable
+                } else {
+                    SagaEvent::Timeout // cheap re-drive while the abort budget accrues (corpse won't ack)
+                }
+            } else {
+                *dead_observed_since = None; // neither confirmed dead → clear stale budget, re-drive
+                SagaEvent::Timeout
+            }
+        }
+        // D-37 CELL 1: a POST-commit `Demoting` saga whose SOURCE is confirmed dead self-promotes the
+        // already-committed live dest (the ordered Demote toward the corpse will never ack). NON-destructive
+        // — the directory already committed authority to the dest — so the cheap redrive deadline, no
+        // budget. A live-but-slow source only re-drives (record_ack clears the evidence before confirmation).
+        SagaState::Demoting { .. } => {
+            if liveness.is_confirmed_dead(ctx.source, now) {
+                SagaEvent::SourceUnreachable
+            } else {
+                SagaEvent::Timeout
+            }
+        }
+        // Every other phase (pre-commit + the forward-only Swapping/Promoting/Releasing tail) → the
+        // idempotent Timeout re-drive. D-37 Slice 2 adds the `Promoting` dest-dead forward-re-home arm here.
+        _ => SagaEvent::Timeout,
+    }
+}
+
 /// THE Slice 2a TIMEOUT PRODUCER (the R1 cure): inject `SagaEvent::Timeout` into every live saga whose
 /// `now - since` reached its phase deadline, so a lost saga-ack RE-DRIVES (post-commit) or ABORTS
 /// (pre-freeze) instead of PARKING forever. Phase-agnostic — ONE scan, ONE injected event; the FSM's
@@ -1130,35 +1185,19 @@ fn scan_deadlines(
     for (transfer, live) in runtime.sagas.iter_mut() {
         if now.0.saturating_sub(live.since.0) >= deadline_for(&live.state, &tuning) {
             live.since = now; // re-arm BEFORE delivery — one fire per window, never a per-tick storm
-            // D-7d + D-3: a due `BatchHandoff` saga whose source/dest is CONFIRMED-DEAD (the evidence-gated
-            // `is_confirmed_dead`, NOT a single blip) resolves instead of re-driving toward a corpse
-            // forever; otherwise the phase's idempotent Timeout re-drive. A healthy slow handoff (no kill ⇒
-            // no NodeUnreachable run ⇒ not confirmed) only ever re-drives — never a spurious resolution.
-            // `liveness` is a field disjoint from `sagas`, so reading it here is a sound partial borrow.
-            //   - SOURCE dead → self-promote the dest (zero loss): the cheap redrive deadline is fine.
-            //   - DEST dead → ABANDON the batch (DESTRUCTIVE, accounted loss): gated behind the LARGE
-            //     `abort_deadline_ticks` measured from `dead_observed_since` (the CSCALE-1 cure — a
-            //     recoverable blip that clears before the budget elapses NEVER abandons a healthy dest).
-            //     `dead_observed_since` is NOT `since` (which re-armed to `now` two lines up), so the
-            //     budget genuinely accrues across re-drives rather than resetting every fire (graft A).
-            let event = if let SagaState::BatchHandoff { .. } = live.state {
-                if runtime.liveness.is_confirmed_dead(live.ctx.source, now) {
-                    live.dead_observed_since = None;
-                    SagaEvent::SourceUnreachable
-                } else if runtime.liveness.is_confirmed_dead(live.ctx.dest, now) {
-                    let observed = *live.dead_observed_since.get_or_insert(now);
-                    if now.0.saturating_sub(observed.0) >= tuning.abort_deadline_ticks {
-                        SagaEvent::DestUnreachable
-                    } else {
-                        SagaEvent::Timeout // cheap re-drive while the abort budget accrues (corpse won't ack)
-                    }
-                } else {
-                    live.dead_observed_since = None; // neither confirmed dead → clear stale budget, re-drive
-                    SagaEvent::Timeout
-                }
-            } else {
-                SagaEvent::Timeout
-            };
+            // The dead-aware deadline event: a re-drive toward a CONFIRMED-DEAD participant becomes a
+            // RESOLUTION instead of looping at a corpse forever. ALL branching lives in the monomorphic
+            // `rehome_event_for` helper (see its doc) so this scan stays a branchless dispatch (HR5). The
+            // borrows are disjoint: `liveness` is a field of `runtime` disjoint from `sagas` (a sound
+            // partial borrow), and `state`/`ctx`/`dead_observed_since` are disjoint fields of `live`.
+            let event = rehome_event_for(
+                &live.state,
+                &live.ctx,
+                &runtime.liveness,
+                &mut live.dead_observed_since,
+                &tuning,
+                now,
+            );
             due.push((*transfer, event));
         }
     }
@@ -2966,6 +3005,59 @@ mod tests {
             })),
             "the producer re-drove AbortTransfer: {to_gateway:?}"
         );
+    }
+
+    #[test]
+    fn scan_deadlines_self_promotes_a_demoting_saga_with_a_confirmed_dead_source() {
+        // D-37 CELL 1: a DUE post-commit `Demoting` saga whose SOURCE is confirmed-dead self-promotes the
+        // already-committed live dest — re-driving the ordered Demote toward the corpse would PARK forever.
+        // The producer injects SourceUnreachable (non-destructive, the cheap redrive deadline; n==1 confirms
+        // on the first NodeUnreachable), the FSM transitions Demoting→Promoting and emits the Promote to the
+        // DEST (NOT a Demote toward the dead source). The saga stays LIVE — Promoting awaits PromoteAck +
+        // DestDelivered (the Releasing gate, never Done-on-promote: the D-36 starved-watermark caveat holds).
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive=8
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
+        });
+        inject_saga(
+            &mut runtime,
+            SagaState::Demoting {
+                new_fence: Fence(2),
+                dest_delivered: false,
+            },
+            UniverseTick(0),
+        );
+        runtime.liveness.record_unreachable(SOURCE, UniverseTick(8)); // confirmed dead (n == 1)
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8),
+        );
+        assert!(
+            flows_to_node(&outbox, DEST).contains(&InterShardFlow::Promote(PromoteCmd {
+                transfer: XFER,
+                subject: subject(),
+                new_fence: Fence(2),
+                step_id: PROMOTE_STEP,
+                source: SOURCE,
+            })),
+            "the dead-source Demoting saga self-promotes the committed dest: {:?}",
+            outbox.0
+        );
+        assert!(
+            flows_to_node(&outbox, SOURCE).is_empty(),
+            "no Demote is re-driven toward the dead source"
+        );
+        assert_eq!(
+            runtime.live(),
+            1,
+            "still LIVE — Promoting awaits PromoteAck + DestDelivered (never Done-on-promote, D-36)"
+        );
+        assert_eq!(runtime.source_unreachable_resolutions(), 1);
     }
 
     #[test]

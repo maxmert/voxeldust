@@ -118,13 +118,16 @@ fn p3_kill_dest_pre_freeze_commits_to_the_dead_dest_then_parks() {
     );
 }
 
-/// DEFERRED D-37 (honest RED): PERMANENT KILL of the SOURCE while it is Demoting (post-commit). The
-/// directory already committed to the dest; the Demote re-drives forever toward the dead source and the
-/// saga PARKS. The dead-node-aware oracle EXCLUDES the dead source's corpse claim and surfaces the
-/// honest orphan (NOT a false-pass) — proving the foundation makes the gap observable. Recovery (a
-/// forward re-home) is owed at D-37 (gated on D-3 lease liveness + D-6 WAL).
+/// D-37 Slice 0 (CELL 1, the ENTITY cure): PERMANENT KILL of the SOURCE while it is Demoting (post-commit).
+/// The directory already committed to the dest; the ordered Demote would re-drive forever toward the dead
+/// source. Now the orchestrator confirms the source dead (D-3) and the `scan_deadlines` re-home producer
+/// injects `SourceUnreachable`, self-promoting the already-committed live dest (the corpse holds nothing).
+/// The ENTITY recovers to DEST — no park, no entity orphan. The dead SOURCE shard's REALM (system-7) is
+/// STILL orphaned: re-homing a dead shard's realm is the STANDING re-home owed at Slice 3/4, so the cell
+/// is `EntityRecoveredRealmOrphaned` (GREEN entity, honest-RED realm) until Slice 4 flips it to SettledAt.
+/// (Was fully honest-RED `ParkedHalfOpen{DEST}` before D-37; gated on D-3 lease liveness + D-6 WAL.)
 #[test]
-fn p3_kill_source_in_demoting_parks_and_the_dead_aware_oracle_surfaces_it() {
+fn p3_kill_source_in_demoting_self_promotes_the_committed_dest() {
     let (mut topo, entity, dead) = run_fault_scenario(
         SEED,
         Scenario {
@@ -144,7 +147,7 @@ fn p3_kill_source_in_demoting_parks_and_the_dead_aware_oracle_surfaces_it() {
         &mut topo,
         entity,
         &dead,
-        EndState::ParkedHalfOpen { authority_at: DEST },
+        EndState::EntityRecoveredRealmOrphaned { entity_at: DEST },
     );
 }
 
