@@ -7,14 +7,15 @@
 //! freezes incrementally with its first consumer, like `InterShardFlow`'s arms):
 //! 1. **Connection plane** (client↔gateway, the families the gateway terminates):
 //!    `ControlMsg | InputDatagram | BulkMsg | EventMsg | SnapshotDatagram`.
-//! 2. **`InterShardFlow`** (shard↔shard / shard↔orchestrator) — the CURRENT closed set:
-//!    `Ghost | Transfer | Directory | Saga | SagaAck | DirectoryReply` — one reviewed
-//!    file (`intershard.rs`), arms frozen INCREMENTALLY with their first consumer
-//!    (P0: Ghost/Transfer-Durable/Directory; P2: Saga/SagaAck — the route-swap saga —
-//!    plus DirectoryReply, the orchestrator→requester directory head/outcome envelope
-//!    that keeps a reply distinct from a `Saga(TransferControl)` on the shared Saga
-//!    class; RESERVED future arms, added under review with their phases: BlockEdit +
-//!    Transfer-Transient at P3/P6, Coupling at P8, Signal at P9).
+//! 2. **`InterShardFlow`** (shard↔shard / shard↔orchestrator) — one reviewed file
+//!    (`intershard.rs`), arms frozen INCREMENTALLY with their first consumer. The CURRENT
+//!    closed set is 15 arms: `Ghost | Transfer | Directory | Saga | SagaAck | DirectoryReply
+//!    | FlushSource | TransferAck | Demote | Promote | TransientRelease | TransientDrop |
+//!    ReleaseComplete | TransientAbandon | ReHome` (P0 Ghost/Transfer-Durable/Directory; P2
+//!    the route-swap + 1d.1/1d.5b transfer machinery; P3 the D-7 transient handoff + the D-37
+//!    `ReHome` forward-re-home adopt). RESERVED future arms (added under review with their
+//!    phases): `BlockEdit` (P6), `Coupling` `EffectFree` ports (P8), `Signal` (P9). See
+//!    `intershard.rs`'s header for the per-phase breakdown + the G-SEALED effect-class invariant.
 //! 3. **`session_flow`** (gateway↔shard session-scoped traffic; `session_flow.rs`):
 //!    `GatewayToShard | ShardToGateway` — routed ALWAYS by in-frame `SessionId` + `Fence`
 //!    (never source address, R2); the gateway forwards snapshot/input payloads as OPAQUE

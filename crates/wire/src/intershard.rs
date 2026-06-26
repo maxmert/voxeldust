@@ -6,13 +6,18 @@
 //! express a new cross-shard flow you MUST add a variant here, under review.
 //!
 //! Arms freeze INCREMENTALLY with their first consumer (the closed-set guarantee is
-//! the per-release conformance test below, not a day-one empty freeze):
-//! - P0 (now): `Ghost`, `Transfer` (Durable class), `Directory`.
-//! - P2: `Saga` (the saga→gateway transfer commands) + `SagaAck` (gateway→saga acks) —
-//!   the route-swap saga drives the gateway exclusively through these.
-//! - P3/P6: `Transfer` transient batches + `BlockEdit`.
-//! - P8: `Coupling` (`EffectFree` ports). — variant reserved, payload lands with ships.
-//! - P9: `Signal`.
+//! the per-release conformance test below, not a day-one empty freeze). LANDED (15 arms):
+//! - P0: `Ghost`, `Transfer` (Durable class), `Directory`.
+//! - P2 route swap: `Saga` (saga→gateway transfer commands) + `SagaAck` (gateway→saga acks).
+//! - P2 transfer machinery (1d.1/1d.5b): `DirectoryReply`, `FlushSource`, `TransferAck`, `Demote`,
+//!   `Promote` (the saga-pushed ordered demote-before-promote + the entity-state crossing/ack family).
+//! - P3 transient (D-7): `Transfer` transient batches + `TransientRelease`/`TransientDrop`/
+//!   `ReleaseComplete`/`TransientAbandon` (the structural drop-before-promote handoff + the dead-DEST abandon).
+//! - P3 permanent-kill recovery (D-37): `ReHome` (the forward re-home adopt — a DEDICATED arm, never a
+//!   `Promote` reuse).
+//!
+//! RESERVED (variant lands with its consumer): `BlockEdit` (P6), `Coupling` `EffectFree` ports (P8),
+//! `Signal` (P9 cross-shard functional-block signals).
 //!
 //! Effect classes (the G-SEALED invariant, enforced by `effect_class` + its test):
 //! - SIDE-EFFECTING arms carry `(TransferId, step_id)` idempotency and are ack-driven.

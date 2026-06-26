@@ -110,7 +110,9 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **A1 — the `Bye` detach leak (the present-but-masked half):** on `Bye` the gateway sends `DetachSession` to
   `config.shard` UNCONDITIONALLY. After even ONE transfer (player now homed on dest B, source A's sub closed — the
   1d.2/1d.3 path), this detaches A and never tells B to free its saga-attested `SessionTable` entry → B leaks until
-  lease-TTL reap, and TTL enforcement is itself unbuilt ([[D-3]]), so on a real cluster the entry is immortal. This is
+  lease-TTL reap. TTL enforcement now LANDED ([[D-3]] — the reaper reaps the lapsed directory `Session` lease), but the
+  reaper clears the DIRECTORY record, not B's LOCAL saga-attested `SessionTable` entry, so that local entry still
+  leaks until B's own lease-recheck observes the loss — this item's concern remains. This is
   the INVERSE of the `"any sub != config.shard"` anti-pattern the abort path explicitly forbids (`gateway.rs` ~987-991).
   MASKED today only because no test does Bye-AFTER-transfer and there is one login shard. **NOTE the cheap "iterate
   `session.subs.keys()`" fix is WRONG:** `subs` is empty at login, so it would regress the basic login→Bye detach —

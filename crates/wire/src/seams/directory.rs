@@ -69,16 +69,16 @@ pub struct OwnerRecord {
     /// Soft lease deadline against the analytic clock; renewals never touch durable
     /// storage — only ASSIGNMENTS are persisted.
     ///
-    /// ## TTL ENFORCEMENT IS NOT YET IMPLEMENTED (binding pre-crash-matrix item)
-    /// The deadline is WRITTEN on every grant/renew/commit but nothing DRIVES the
-    /// lifecycle yet: no node sends `LeaseRenew` (the heartbeat producer is unbuilt)
-    /// and no sweep reads `lease_expires` to reap a lapsed record — a crashed node's
-    /// keys currently stay owned forever. Inert for P1's fixed roster (keys are
-    /// explicitly revoked on detach); MUST land before the P2 crash/stagger matrix +
-    /// P3 chaos: a renewal heartbeat from each authority holder AND an orchestrator
-    /// expiry sweep gated on unreachable-confirmation (lapsed lease ⇒ ownership loss
-    /// ONLY when the owner is confirmed unreachable). Do NOT assume crash recovery
-    /// exists yet. (Audit XSI-1.)
+    /// ## TTL ENFORCEMENT IS LIVE (D-3 lease lifecycle, all 6 slices LANDED)
+    /// The deadline is WRITTEN on every grant/renew/commit AND the lifecycle is now driven end-to-end:
+    /// each authority holder sends `LeaseRenew` on its local cadence (`OutboundBox::push_renewals` — the
+    /// shard's Realm/Entity heartbeat, the gateway's Session heartbeat), the orchestrator's expiry REAPER
+    /// (`reap_lapsed_leases`) reaps a lapsed-AND-confirmed-dead `Session` record inside the D-6 group-commit
+    /// barrier, and a partitioned holder self-fences (`self_fence_lapsed_realm` / `self_fence_lapsed_sessions`)
+    /// BEFORE the orchestrator's reassign window. Lapsed ownership is lost ONLY when the owner is CONFIRMED
+    /// unreachable (the evidence-gated `LivenessTracker`); an orchestrator outage FREEZES recovery (the CAP
+    /// choice), never mass-orphans. A dead owner's `Realm`/`Entity`/`Ship` key is LEFT for D-37 forward
+    /// re-home (the reaper does not revoke it into `HeldNowhere`) — that producer is the in-flight P3 piece.
     pub lease_expires: UniverseTick,
     pub in_transfer: Option<TransferId>,
 }
