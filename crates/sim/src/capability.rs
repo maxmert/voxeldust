@@ -141,6 +141,28 @@ impl ShardProfile {
     pub fn hull_host(&self) -> bool {
         self.hull_host
     }
+
+    /// Does this profile provide EVERY capability a re-home subject REQUIRES (D-37 target selection)? The
+    /// target must match the required voxel GEOMETRY exactly (a ship's Cartesian realm can never re-home
+    /// onto a Spherical shard, and vice-versa) AND provide every required boolean capability. An EMPTY
+    /// request (`CapRequest::default()` — a bare point entity in empty space, every P3 stub subject) is
+    /// satisfied by ANY profile. HR3: a capability match, never a shard-kind discriminant. Branchless
+    /// bitwise `&`/`|` (HR5, no short-circuit gaps): each `!req.x | self.x` reads "req.x implies self.x".
+    #[must_use]
+    pub fn satisfies(&self, req: &CapRequest) -> bool {
+        let voxel_ok = match req.voxel {
+            None => true,                                   // no geometry requirement
+            Some(geometry) => self.voxel == Some(geometry), // exact geometry match
+        };
+        voxel_ok
+            & (!req.signal_graph | self.signal_graph)
+            & (!req.functional_blocks | self.functional_blocks)
+            & (!req.block_edit | self.block_edit)
+            & (!req.surfaces | self.surfaces)
+            & (!req.seats | self.seats)
+            & (!req.signal_relay | self.signal_relay)
+            & (!req.hull_host | self.hull_host)
+    }
 }
 
 /// The canonical profiles as DATA (sealed_shards §4): shard types are coherent
@@ -348,5 +370,43 @@ mod tests {
                 kind
             );
         }
+    }
+
+    #[test]
+    fn satisfies_matches_voxel_geometry_and_required_booleans() {
+        // An EMPTY request (a bare P3 point entity in empty space) is satisfied by ANY profile.
+        let stub = ShardProfile::build(CapRequest::default()).expect("empty profile is coherent");
+        assert!(stub.satisfies(&CapRequest::default()), "empty req ⇒ a bare stub satisfies");
+        let planet = profiles::planet().expect("planet"); // Spherical voxel
+        assert!(planet.satisfies(&CapRequest::default()), "empty req ⇒ a planet satisfies too");
+
+        // VOXEL GEOMETRY must match EXACTLY (a ship's Cartesian realm can never re-home onto a Spherical
+        // shard, and vice-versa).
+        let spherical = CapRequest {
+            voxel: Some(VoxelGeometry::Spherical),
+            ..CapRequest::default()
+        };
+        let cartesian = CapRequest {
+            voxel: Some(VoxelGeometry::Cartesian),
+            ..CapRequest::default()
+        };
+        assert!(!stub.satisfies(&spherical), "a stub (no voxel) cannot host a voxel realm");
+        assert!(planet.satisfies(&spherical), "a Spherical planet hosts a Spherical realm");
+        assert!(!planet.satisfies(&cartesian), "a Spherical planet cannot host a Cartesian realm");
+        assert!(
+            profiles::ship().expect("ship").satisfies(&cartesian),
+            "a Cartesian ship hosts a Cartesian realm"
+        );
+
+        // A required BOOLEAN capability the profile LACKS ⇒ not satisfied; PRESENT ⇒ satisfied.
+        let needs_relay = CapRequest {
+            signal_relay: true,
+            ..CapRequest::default()
+        };
+        assert!(!planet.satisfies(&needs_relay), "a planet lacks signal_relay ⇒ not satisfied");
+        assert!(
+            profiles::galaxy().expect("galaxy").satisfies(&needs_relay),
+            "a galaxy relay provides signal_relay ⇒ satisfied"
+        );
     }
 }

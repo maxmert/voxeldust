@@ -1166,6 +1166,29 @@ fn rehome_event_for(
     }
 }
 
+/// D-37 target selection (Slice 1): the LOWEST live `NodeId` in the roster whose profile SATISFIES the
+/// subject's required capabilities — the deterministic forward-re-home target. `BTreeMap` iterates
+/// ascending, so the first match IS the lowest (a deterministic tie-break the SEED-replay byte-identical
+/// canary depends on). HR3: a `ShardProfile` capability match (`satisfies`), NEVER a match on a shard-kind
+/// discriminant. Returns `None` when no capable live shard exists (whole-pool death / zero spare capacity)
+/// — the caller then leaves the saga PARKED (honest RED, never a forced re-home to a dead or incapable
+/// node). Bitwise `&` (HR5, no short-circuit branch gap): both predicates are evaluated for every
+/// candidate (`satisfies` on a dead node is harmless). For a P3 bare-point entity `req` is empty, so the
+/// selection degenerates to "the lowest live shard"; the capability match future-proofs ship/voxel realms.
+// Wired into the standing re-home producer in Slice 2/3 (the consumer of the roster); fully unit-tested now.
+#[allow(dead_code)]
+fn select_rehome_target(
+    req: &vd_sim::capability::CapRequest,
+    roster: &std::collections::BTreeMap<NodeId, vd_sim::capability::ShardProfile>,
+    liveness: &LivenessTracker,
+    now: UniverseTick,
+) -> Option<NodeId> {
+    roster
+        .iter()
+        .find(|(node, profile)| !liveness.is_confirmed_dead(**node, now) & profile.satisfies(req))
+        .map(|(node, _)| *node)
+}
+
 /// THE Slice 2a TIMEOUT PRODUCER (the R1 cure): inject `SagaEvent::Timeout` into every live saga whose
 /// `now - since` reached its phase deadline, so a lost saga-ack RE-DRIVES (post-commit) or ABORTS
 /// (pre-freeze) instead of PARKING forever. Phase-agnostic — ONE scan, ONE injected event; the FSM's
@@ -3058,6 +3081,70 @@ mod tests {
             "still LIVE — Promoting awaits PromoteAck + DestDelivered (never Done-on-promote, D-36)"
         );
         assert_eq!(runtime.source_unreachable_resolutions(), 1);
+    }
+
+    #[test]
+    fn select_rehome_target_picks_the_lowest_live_capable_shard() {
+        use std::collections::BTreeMap;
+        use vd_sim::capability::{CapRequest, ShardProfile, VoxelGeometry};
+        let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
+        let cartesian = ShardProfile::build(CapRequest {
+            voxel: Some(VoxelGeometry::Cartesian),
+            ..CapRequest::default()
+        })
+        .expect("cartesian profile");
+        // N2 dead + capable, N3 live but INCAPABLE (empty, no voxel), N4 + N5 live + capable.
+        let roster: BTreeMap<NodeId, ShardProfile> = [
+            (NodeId(2), cartesian),
+            (NodeId(3), empty),
+            (NodeId(4), cartesian),
+            (NodeId(5), cartesian),
+        ]
+        .into_iter()
+        .collect();
+        let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1
+        liveness.record_unreachable(NodeId(2), UniverseTick(5)); // N2 confirmed dead
+        let req = CapRequest {
+            voxel: Some(VoxelGeometry::Cartesian),
+            ..CapRequest::default()
+        };
+        // N2 dead (skip), N3 incapable (skip), N4 live + capable = the LOWEST live capable (< N5).
+        assert_eq!(
+            select_rehome_target(&req, &roster, &liveness, UniverseTick(5)),
+            Some(NodeId(4)),
+            "the lowest LIVE, CAPABLE shard is chosen (dead + incapable skipped, deterministic order)"
+        );
+    }
+
+    #[test]
+    fn select_rehome_target_returns_none_when_no_capable_live_shard_and_serves_an_empty_req() {
+        use std::collections::BTreeMap;
+        use vd_sim::capability::{CapRequest, ShardProfile, VoxelGeometry};
+        let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
+        let liveness = LivenessTracker::new(LivenessTuning::default());
+        // Empty roster ⇒ None (no target — the caller leaves the saga PARKED, honest RED).
+        let none_roster: BTreeMap<NodeId, ShardProfile> = BTreeMap::new();
+        assert_eq!(
+            select_rehome_target(&CapRequest::default(), &none_roster, &liveness, UniverseTick(0)),
+            None
+        );
+        // A roster of only INCAPABLE shards for a voxel req ⇒ None (never a forced incapable re-home).
+        let only_stub: BTreeMap<NodeId, ShardProfile> = [(NodeId(3), empty)].into_iter().collect();
+        let voxel_req = CapRequest {
+            voxel: Some(VoxelGeometry::Cartesian),
+            ..CapRequest::default()
+        };
+        assert_eq!(
+            select_rehome_target(&voxel_req, &only_stub, &liveness, UniverseTick(0)),
+            None,
+            "no shard satisfies a voxel req ⇒ None"
+        );
+        // But for the P3 EMPTY (bare-point) req, that same live stub IS the target.
+        assert_eq!(
+            select_rehome_target(&CapRequest::default(), &only_stub, &liveness, UniverseTick(0)),
+            Some(NodeId(3)),
+            "an empty bare-point req is satisfied by a live stub shard"
+        );
     }
 
     #[test]
