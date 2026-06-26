@@ -523,10 +523,30 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   saga-gated not frame-fence-enforced; the dest promote is currently autonomous and needs a real saga
   `Promoting` state; no collision system exists yet so 1d.5b lands the ghost FEED+registration, response @P5).
 
-### D-3 🟥 Lease lifecycle: no renewal producer, no expiry reaper (TTL unenforced) + the kill-only-`NodeUnreachable` dead-vs-slow stand-in (audit CSCALE-1, HIGH)
-- **Missing:** `OwnerRecord.lease_expires` is written on every grant/renew/commit, but NO node sends
-  `LeaseRenew` (no heartbeat producer) and nothing reads `lease_expires` to reap a lapsed record — so a
-  crashed node's keys are immortal. Inert for P1's fixed roster; a broken promise the moment nodes can die.
+### D-3 🟧 Lease lifecycle: slices 0–2 LANDED (config + heartbeat producer + flap fault); the reaper + CSCALE-1 tracker + self-fence owed (design wf_24c1ecc5, 6 slices)
+- **✅ LANDED (slices 0–2 of 6, all gate-green 100% Tier-A):**
+  - **Slice 0 (5e73fdf) — config foundation:** `DirectoryTuning` + the lease-liveness knobs
+    (`lease_renew_interval_ticks`, `min_renews_before_lapse`, `self_fence_grace_ticks`,
+    `max_self_fence_grace_ticks`, `reaper_interval_ticks`, `recovery_grace_ticks`) + `LivenessTuning`
+    (`n_consecutive_unreachable`, `unreachable_window_ticks`, `retry_delay_ticks_hint`), each with a
+    `validate()` (the ordering chain, gated on an ACTIVE heartbeat so inert configs pass). ALL defaults INERT.
+  - **Slice 1 (3907c93) — the heartbeat PRODUCER:** `OutboundBox::push_renewals` (ONE branchless generic
+    shim, HR3); the shard renews its `Realm` + every granted, non-departing `Entity` and the gateway renews
+    every Active `Session`, each on its own LOCAL cadence (`lease_renew_interval_ticks`, INERT at 0). So
+    `lease_expires` IS now refreshed by a live producer.
+  - **Slice 2 (ca756c7) — the harness FLAP fault:** `LinkPolicy.flap_until_tick` + `FaultFabric::flap` (a
+    recoverable `NodeUnreachable` with the fresh-seq fix so the subject auto-redelivers) — the in-process
+    stand-in for an io-prod blip. EXISTS but no scenario consumes it yet (Slice 3 wires the CSCALE-1 cells).
+- **Still owed (slices 3–5):** **Slice 3 — the CSCALE-1 tracker:** rework `dead_participants` → an
+  evidence-gated `LivenessTracker` (N-consecutive within `unreachable_window_ticks` + clear-on-ack), add a
+  per-saga `dead_observed_since`, and move the DESTRUCTIVE dest-abandon behind the LARGE `abort_deadline_ticks`
+  (the cure). **Slice 4 — the orchestrator expiry REAPER + CAP freeze** (lapsed-AND-confirmed-dead, inside the
+  D-6 group-commit barrier; reaps `Session` keys, MARKS Realm/Entity/Ship for D-37). **Slice 5 —
+  self-fence-before-grant** (the proactive owner timer on `local_tick`). Each gate-green; commit-ask each.
+- **⚠️ CSCALE-1 still OPEN until Slice 3** (the tracker is not yet reworked): `dead_participants` is still
+  insert-only / never-cleared, and the dest-abandon still rides the cheap `redrive_deadline_ticks`. Bounded +
+  gate-invisible exactly as below (the flap fault exists but no cell uses it yet, so the blip path stays
+  unexercised). Slice 3 closes it.
 - **⚠️ CSCALE-1 (whole-codebase audit `wf_2de9063f`, HIGH — latent, fix before real-node chaos):** the
   D-7d dead-resolution uses a kill-only `Inbound::NodeUnreachable` as its dead-vs-slow STAND-IN: in io-prod
   a SINGLE recoverable write blip (a 20s idle-reap / VXLAN drop of a LIVE peer — `io-prod/.../mesh.rs`
@@ -548,20 +568,25 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   `crates/wire/src/seams/directory.rs` (TTL-ENFORCEMENT-UNIMPLEMENTED) + the kill-only-today doc on
   `dead_participants`.
 - **When / proper:** **before the P2 crash/stagger matrix and P3 chaos with real nodes / any multi-pod
-  deploy.** FOUR parts: (1) a renewal heartbeat from each authority holder (gateway for `Session`, shard
-  for `Realm`/`Entity`); (2) an orchestrator expiry sweep gated on **unreachable-confirmation** (lapsed
-  lease ⇒ ownership loss ONLY when the owner is confirmed unreachable — an orchestrator outage freezes
-  recovery, never mass-orphans); (3) CSCALE-1 hardening — require N-consecutive `NodeUnreachable` toward
-  the same node within a window before flipping its dead bit AND **clear it on the next successful ack**
-  (a recovered peer un-marks itself), and gate the DESTRUCTIVE `EmitTransientAbandon` resolution behind
-  the LARGE `abort_deadline_ticks` (not the cheap `redrive_deadline_ticks` — `saga.rs` already validates
-  `abort >= redrive`, so the budget exists); (4) a harness **"flap" fault** (a recoverable
-  `NodeUnreachable` the `FaultFabric` cannot model today) so the blip→live-dest-abandon path is caught RED
-  before io-prod ships into a multi-pod deployment. (3)+(4) are the clear-on-recovery path D-7d Slice 1
-  deliberately deferred as HR5-untestable without the flap fault — they LAND TOGETHER here.
-- **Dependency:** none structural (the plumbing — `renew`/`revoke`/`now`/`entries` — exists); needs the
-  driver systems + the unreachable-confirmation gate + the flap fault. Gates D-37 (durable re-home).
-- **Source:** whole-codebase audits `wf_43fea0dd` (XSI-1 / SCALE-A) + `wf_2de9063f` (CSCALE-1, HIGH).
+  deploy.** FOUR parts: (1) ✅ a renewal heartbeat from each authority holder (gateway `Session`, shard
+  `Realm`/`Entity`) — LANDED, Slice 1; (2) an orchestrator expiry sweep gated on **unreachable-confirmation**
+  (lapsed lease ⇒ ownership loss ONLY when the owner is confirmed unreachable — an orchestrator outage
+  freezes recovery, never mass-orphans) — owed, Slice 4; (3) CSCALE-1 hardening — N-consecutive
+  `NodeUnreachable` within a window before the dead bit + **clear it on the next successful ack**, and gate
+  the DESTRUCTIVE abandon behind the LARGE `abort_deadline_ticks` (not the cheap `redrive_deadline_ticks`) —
+  owed, Slice 3; (4) ✅ a harness **"flap" fault** (a recoverable `NodeUnreachable`) — LANDED, Slice 2. The
+  CSCALE-1 cure (3) is now testable RED via the landed flap fault (4); Slice 3 lands the cells + the tracker.
+- **⚠️ SCALE (filed per the holistic audit `wf_9a986473`):** `scan_deadlines` is an O(live-sagas) full scan
+  per tick (`saga_runtime.rs` — bounded by the deadline re-arm, like `views()`/`active_transfers()`), and the
+  Slice-4 reaper adds an O(directory) full scan per `reaper_interval`. At MMO scale (thousands of in-flight
+  sagas / leased keys) both want a deadline-ordered min-heap / per-node lease index instead of a full walk —
+  a D-32-adjacent scale optimization, additive (no rework). Inert at P2/P3 in-process size. **WHEN: the redb
+  backend / N-orchestrator (D-32) era**, alongside the directory-reconcile write-amp (DEFERRED.md D-6).
+- **Dependency:** none structural (the plumbing — `renew`/`revoke`/`now`/`entries` + the heartbeat + the flap
+  fault — now exists); needs the tracker rework (Slice 3) + the reaper (Slice 4) + self-fence (Slice 5).
+  Gates D-37 (durable re-home).
+- **Source:** whole-codebase audits `wf_43fea0dd` (XSI-1 / SCALE-A) + `wf_2de9063f` (CSCALE-1, HIGH) +
+  `wf_9a986473` (the scan_deadlines scale entry + the D-3 ledger sync); design `wf_24c1ecc5` (the 6 slices).
 
 ### D-4 🟥 The reliable `EventMsg` client `MsgClass` arm — carrier for BOTH AoI eviction AND cross-shard signals
 - **Missing:** `MsgClass` has Control/Saga/Snapshot/Input/Membership — **no `Event`/`Bulk` arm** — so the
