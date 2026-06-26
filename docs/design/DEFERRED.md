@@ -523,8 +523,8 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   saga-gated not frame-fence-enforced; the dest promote is currently autonomous and needs a real saga
   `Promoting` state; no collision system exists yet so 1d.5b lands the ghost FEED+registration, response @P5).
 
-### D-3 🟧 Lease lifecycle: slices 0–3 LANDED (config + heartbeat + flap fault + CSCALE-1 tracker — CSCALE-1 CLOSED); the reaper (4) + self-fence (5) owed (design wf_24c1ecc5, 6 slices)
-- **✅ LANDED (slices 0–2 of 6, all gate-green 100% Tier-A):**
+### D-3 🟧 Lease lifecycle: slices 0–4 LANDED (config + heartbeat + flap fault + CSCALE-1 tracker + expiry reaper); only self-fence (5) owed (design wf_24c1ecc5, 6 slices)
+- **✅ LANDED (slices 0–4 of 6, all gate-green 100% Tier-A):**
   - **Slice 0 (5e73fdf) — config foundation:** `DirectoryTuning` + the lease-liveness knobs
     (`lease_renew_interval_ticks`, `min_renews_before_lapse`, `self_fence_grace_ticks`,
     `max_self_fence_grace_ticks`, `reaper_interval_ticks`, `recovery_grace_ticks`) + `LivenessTuning`
@@ -548,11 +548,22 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     (kill-equivalent). Proven by unit tests (all tracker branches + the recover-margin) + the e2e flap cell
     (a blip toward a HEALTHY dest lands the batch, zero abandon, non-vacuous). Re-audited DONE_NO_CRITICAL
     (`wf_4d2ca7ae`).
-- **Still owed (slices 4–5):** **Slice 4 — the orchestrator expiry REAPER + CAP freeze** (lapsed-AND-
-  confirmed-dead, inside the D-6 group-commit barrier so the revoke is durable; reaps `Session` keys, MARKS
-  Realm/Entity/Ship for D-37; `liveness_quiesced_until` set on rehydrate = `now + recovery_grace_ticks`).
-  **Slice 5 — self-fence-before-grant** (the proactive owner timer on `local_tick`). Each gate-green;
-  commit-ask each. (Fold in the `due_this_tick` cadence-guard DRY helper the holistic audit flagged.)
+  - **Slice 4 (650911d) — the orchestrator expiry REAPER + CAP freeze:** finally CONSUMES
+    `lease_expires`. `should_reap` = a 3-if CAP AND-gate (quiesce-elapsed AND lapsed AND confirmed-dead);
+    `reap_lapsed_leases` runs INSIDE the D-6 group-commit barrier (before the directory reconcile) so a
+    revoke is durable that tick (COMP-2, no kill-9 resurrection), once per `reaper_interval_ticks` (re-armed
+    via `last_reap_tick`; INERT at 0). The D-37 boundary: FULLY revokes a dead `Session` key (client
+    reconnects via its ResumeTicket) but LEAVES dead Realm/Entity/Ship for D-37 forward re-home; `revoke`
+    refuses an `in_transfer`-locked key (a saga owns it). `liveness_quiesced_until` set on rehydrate =
+    `ceiling + recovery_grace_ticks` (belt-and-suspenders atop the RAM-empty tracker — the primary CAP
+    freeze). `admin_snapshot.leases` surfaces lapsed-pending leases (negative `ticks_remaining`) — never a
+    silent wedge. Focused review DONE_NO_CRITICAL (`wf_31119adb`).
+- **Still owed (slice 5):** **Slice 5 — self-fence-before-grant** (the proactive owner timer on the
+  partition-surviving `local_tick`: a holder whose lease provably lapsed `self_fence_grace_ticks` ago
+  hard-stops its OWN authority before the orchestrator's reassign-after window opens — the split-brain cure
+  the reactive `realm_recheck` poll cannot give). Gate-green; commit-ask. (Fold in the `due_this_tick`
+  cadence-guard DRY helper the holistic audit flagged.) Residual LOW (review `wf_31119adb`, defense-in-depth,
+  optional): a `unreachable_window_ticks < lease_ttl_ticks` validate cross-check.
 - **✅ CSCALE-1 CLOSED (Slice 3, `68ec2d2`) — was: whole-codebase audit `wf_2de9063f`, HIGH.** The
   BEFORE-state (now historical): the D-7d dead-resolution used a kill-only `Inbound::NodeUnreachable` as its
   dead-vs-slow stand-in, so in io-prod a SINGLE recoverable write blip (a 20s idle-reap / VXLAN drop of a LIVE

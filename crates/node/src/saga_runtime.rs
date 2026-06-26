@@ -2570,6 +2570,16 @@ mod tests {
             Fence(1),
             UniverseTick(0),
         );
+        // A lapsed, confirmed-dead session that is MID-TRANSFER (in_transfer-locked): the reaper TRIES
+        // to revoke it (should_reap is true) but `revoke` REFUSES a transfer-locked key — the saga owns
+        // it, and the saga's own recovery (scan_deadlines) handles the dead participant, not the reaper.
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(3)),
+            AuthorityRef::Gateway(dead),
+            Fence(1),
+            UniverseTick(0),
+        );
+        assert!(dir.lock_transfer(DirectoryKey::Session(SessionId(3)), TransferId(7)));
         let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // n = 1
         runtime.liveness.record_unreachable(dead, UniverseTick(50)); // only `dead` is confirmed
         reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
@@ -2584,6 +2594,10 @@ mod tests {
         assert!(
             dir.head(DirectoryKey::Realm(RealmId::System(7))).is_some(),
             "a dead Realm is LEFT for D-37 forward re-home, never reaped into HeldNowhere"
+        );
+        assert!(
+            dir.head(DirectoryKey::Session(SessionId(3))).is_some(),
+            "an in_transfer-locked dead session is NOT reaped — revoke refuses it (the saga owns the key)"
         );
     }
 
