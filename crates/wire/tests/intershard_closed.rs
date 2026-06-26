@@ -200,6 +200,16 @@ fn every_arm() -> Vec<InterShardFlow> {
             step_id: vd_wire::intershard::TRANSIENT_ABANDON_STEP,
             fence: Fence(6),
         }),
+        // D-37 arm: the forward re-home adopt (SIDE-EFFECTING, TransferStep-keyed by RE_HOME_STEP) — a
+        // DEDICATED arm carrying the `ReHomeState` payload, never a `Promote` reuse (no-repurpose).
+        InterShardFlow::ReHome(vd_wire::intershard::ReHomeCmd {
+            transfer: TransferId(10),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            new_fence: Fence(6),
+            step_id: vd_wire::intershard::RE_HOME_STEP,
+            state: vd_wire::intershard::ReHomeState::PoseOnly(pose()),
+            source: NodeId(2),
+        }),
     ]
 }
 
@@ -223,7 +233,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::TransientRelease(_)
         | InterShardFlow::TransientDrop(_)
         | InterShardFlow::ReleaseComplete(_)
-        | InterShardFlow::TransientAbandon(_) => {}
+        | InterShardFlow::TransientAbandon(_)
+        | InterShardFlow::ReHome(_) => {}
     }
 }
 

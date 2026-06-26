@@ -73,6 +73,10 @@ pub const TRANSIENT_COMPLETE_STEP: u32 = 14;
 /// See [`TRANSIENT_BATCH_STEP`] — the D-7d dead-DEST ABANDON phase: the orchestrator→SOURCE
 /// `TransientAbandon` + the source's `DropApplied`(`TRANSIENT_ABANDON_STEP`) ack. Journaled idempotent.
 pub const TRANSIENT_ABANDON_STEP: u32 = 15;
+/// D-37 forward re-home: the orchestrator→TARGET [`ReHome`](InterShardFlow::ReHome) adopt command + the
+/// target's `PromoteAck` (the target becomes the Owned authority). Journaled idempotent by
+/// `(transfer, RE_HOME_STEP)` at the target so a redelivery re-acks without re-adopting.
+pub const RE_HOME_STEP: u32 = 16;
 
 /// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
 /// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
@@ -146,6 +150,14 @@ pub enum InterShardFlow {
     /// clean no-loss retire). Side-effecting, ack-driven by `(transfer, TRANSIENT_ABANDON_STEP)`.
     /// APPENDED (preserves every existing postcard discriminant).
     TransientAbandon(TransientHandoff),
+    /// Orchestrator → re-home TARGET shard (D-37 forward re-home): ADOPT the subject as Owned from the
+    /// carried [`ReHomeState`] after a permanent kill of its committed owner re-homed it here. A
+    /// DEDICATED arm, NOT `Promote` — the re-home adopt RECONSTRUCTS state from a payload at a fresh
+    /// target (no pre-existing ghost to flip), so reusing `Promote` would repurpose a Ghost→Owned command
+    /// for a create-from-state operation. Side-effecting, ack-driven by `(transfer, RE_HOME_STEP)`; the
+    /// target acks `PromoteAck` (it is now the Owned authority). APPENDED (preserves every existing
+    /// postcard discriminant).
+    ReHome(ReHomeCmd),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -259,6 +271,15 @@ impl InterShardFlow {
                     step_id: h.step_id,
                 },
             },
+            // D-37 forward re-home adopt: side-effecting (the target adopts the subject as Owned),
+            // journaled by `(transfer, RE_HOME_STEP)` — the SAME idempotency discipline as `Promote`, on a
+            // dedicated arm. An adopt-from-state mutation, never fire-and-forget.
+            InterShardFlow::ReHome(cmd) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: cmd.transfer,
+                    step_id: cmd.step_id,
+                },
+            },
         }
     }
 }
@@ -306,6 +327,37 @@ pub struct PromoteCmd {
     pub step_id: u32,
     /// The transfer SOURCE node — the ghost-host the dest feeds via `GhostFlow` after promoting.
     pub source: NodeId,
+}
+
+/// Orchestrator → re-home TARGET shard adopt command (D-37 forward re-home). When a transfer's committed
+/// owner is permanently KILLED, the orchestrator re-homes the subject onto a LIVE capability-matched
+/// shard: it first commits the directory to `target` at `new_fence` (the fence-monotone bump — `new_fence`
+/// strictly exceeds the dead owner's recorded fence, so a resurrected corpse self-fences), THEN sends this
+/// command so the target ADOPTS the subject from `state`. The target acks `PromoteAck` (it is now the
+/// Owned authority) and registers `source` (the demoted ghost-host) as a ghost-neighbor, exactly as
+/// `Promote` does. `step_id` is always [`RE_HOME_STEP`] (carried for uniform `effect_class` keying).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReHomeCmd {
+    pub transfer: TransferId,
+    pub subject: DirectoryKey,
+    pub new_fence: Fence,
+    pub step_id: u32,
+    /// The adopt payload (D-37): the subject's authoritative state the target reconstructs from.
+    pub state: ReHomeState,
+    /// The transfer's ghost-host (the demoted source) the target registers as a ghost-neighbor — as
+    /// `Promote` does. DEAD in the standing re-home (CELL 3); the registration is then inert.
+    pub source: NodeId,
+}
+
+/// The re-home adopt payload (D-37). POSE-ONLY today (the stub tier — every realm is points in empty
+/// space); the P7 checkpoint slice grows a `Snapshot(Vec<u8>)` TLV-blob arm ADDITIVELY (the new owner
+/// opens the RealmId-keyed redb, loads the snapshot, replays the WAL `> up_to_lsn`, restores the player
+/// checkpoint honoring durable freeze markers). The typed enum IS the P7 state-reload SEAM — never an
+/// opaque escape hatch; only the blob FILL is deferred, so P7 is not painted into a corner.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ReHomeState {
+    /// The subject's authoritative pose (the source's flushed pose, carried verbatim).
+    PoseOnly(StampedPose),
 }
 
 /// The ONE shape carried by the three TRANSIENT structural drop-before-promote command arms (D-7b):
@@ -801,6 +853,53 @@ mod tests {
                 }
             }
         );
+        // D-37: the forward re-home adopt is side-effecting at (transfer, RE_HOME_STEP), on its DEDICATED
+        // arm (never reuses Promote — the no-repurpose discipline; the target adopts state, not a ghost).
+        let rehome = InterShardFlow::ReHome(ReHomeCmd {
+            transfer: TransferId(11),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            new_fence: Fence(6),
+            step_id: RE_HOME_STEP,
+            state: ReHomeState::PoseOnly(pose()),
+            source: NodeId(2),
+        });
+        assert_eq!(
+            rehome.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: TransferId(11),
+                    step_id: RE_HOME_STEP,
+                }
+            }
+        );
+    }
+
+    /// D-37: the dedicated `ReHome` arm + its `ReHomeState` payload survive a postcard roundtrip (the new
+    /// types' derived ser/de/clone/debug), and `RE_HOME_STEP` is distinct from every other step phase.
+    #[test]
+    fn rehome_arm_and_payload_roundtrip() {
+        let rehome = InterShardFlow::ReHome(ReHomeCmd {
+            transfer: TransferId(11),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            new_fence: Fence(6),
+            step_id: RE_HOME_STEP,
+            state: ReHomeState::PoseOnly(pose()),
+            source: NodeId(2),
+        });
+        let bytes = postcard::to_allocvec(&rehome).expect("encode");
+        let decoded: InterShardFlow = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded, rehome.clone(), "ReHome survives a postcard roundtrip");
+        assert!(format!("{rehome:?}").contains("ReHome"), "Debug renders the arm");
+        // RE_HOME_STEP is its own phase, disjoint from the route-swap (0–10) + transient (11–15) steps.
+        for other in [
+            FLUSH_SOURCE_STEP,
+            STUB_CROSSING_STEP,
+            DEMOTE_STEP,
+            PROMOTE_STEP,
+            TRANSIENT_ABANDON_STEP,
+        ] {
+            assert_ne!(RE_HOME_STEP, other);
+        }
     }
 
     /// The entity-STATE step ids are DISJOINT from the 0–6 route-swap phases — so a state step can
