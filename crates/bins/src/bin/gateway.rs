@@ -38,6 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (world, schedule) = node.parts_mut();
     register_clock_follower(world, schedule);
     let shard = env.node_id("VD_SHARD")?;
+    // D-3 Slice 5b: the proactive self-fence cadence is a node-side knob — validate its split-brain
+    // safety (armed ⇒ a recheck channel exists AND grace >= 2 recheck cycles) HERE at boot, so a
+    // mis-tuned config can never silently mass-self-fence healthy sessions.
+    let session_recheck_interval: u64 = env.parse_or("VD_SESSION_RECHECK", 0)?;
+    let self_fence_grace_ticks: u64 = env.parse_or("VD_SELF_FENCE_GRACE", 0)?;
+    vd_sim::directory::validate_self_fence_cadence(self_fence_grace_ticks, session_recheck_interval)?;
     register_gateway(
         world,
         schedule,
@@ -54,6 +60,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tick_hz: env.parse("VD_TICK_HZ")?,
             // D-3 session-lease heartbeat cadence (the gateway's local copy). INERT (0) until D-3 is on.
             lease_renew_interval_ticks: env.parse_or("VD_LEASE_RENEW_INTERVAL", 0)?,
+            // D-3 Slice 5b: session-head recheck cadence (the round-trip confirmation channel) + the
+            // proactive self-fence grace. Both INERT (0) by default; validated above at boot (armed ⇒ a
+            // recheck channel exists AND grace spans >= 2 recheck cycles — the no-mass-fence guard).
+            session_recheck_interval,
+            self_fence_grace_ticks,
             tuning: TransportTuning {
                 max_sessions: env.parse("VD_MAX_SESSIONS")?,
                 max_buffered_inputs: env.parse("VD_MAX_BUFFERED_INPUTS")?,

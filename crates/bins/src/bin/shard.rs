@@ -47,6 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (world, schedule) = node.parts_mut();
     register_clock_follower(world, schedule);
     let realm_seed: u64 = env.parse("VD_REALM_SEED")?;
+    // D-3 Slice 5: the proactive self-fence cadence is a NODE-side knob the orchestrator never sees, so
+    // its split-brain-safety (armed ⇒ a confirmation channel exists AND the grace spans >= 2 recheck
+    // cycles, so a healthy holder never self-fences between on-time replies) is validated HERE at boot —
+    // loud, never a silent mass-self-fence of healthy shards.
+    let realm_recheck_interval: u64 = env.parse("VD_REALM_RECHECK")?;
+    let self_fence_grace_ticks: u64 = env.parse_or("VD_SELF_FENCE_GRACE", 0)?;
+    vd_sim::directory::validate_self_fence_cadence(self_fence_grace_ticks, realm_recheck_interval)?;
     register_stub_shard(
         world,
         schedule,
@@ -62,15 +69,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Bounded in production: the input-conservation log is a metrics ring,
             // not an unbounded audit trail (SCALE-3).
             input_log_capacity: env.parse("VD_INPUT_LOG_CAP")?,
-            // How often to re-read the realm head to observe a lost lease (FENCE-1/5/8).
-            realm_recheck_interval: env.parse("VD_REALM_RECHECK")?,
+            // How often to re-read the realm head to observe a lost lease (FENCE-1/5/8) — ALSO the
+            // round-trip that re-arms RealmConfirmedAt for the proactive self-fence (D-3 Slice 5).
+            realm_recheck_interval,
             // D-3 lease-renewal heartbeat cadence (the holder's local copy of the orchestrator's
             // lease_renew_interval_ticks). Defaults INERT (0 = no heartbeat) until D-3 is switched on.
             lease_renew_interval_ticks: env.parse_or("VD_LEASE_RENEW_INTERVAL", 0)?,
-            // D-3 Slice 5 proactive self-fence grace (the holder's local copy of the orchestrator's
-            // self_fence_grace_ticks). Defaults INERT (0); requires VD_REALM_RECHECK > 0 as the
-            // confirmation channel. The split-brain-safe ordering is validated orchestrator-side.
-            self_fence_grace_ticks: env.parse_or("VD_SELF_FENCE_GRACE", 0)?,
+            // D-3 Slice 5 proactive self-fence grace (the holder's local copy of self_fence_grace_ticks).
+            // Defaults INERT (0). The grace-vs-ttl ordering is validated orchestrator-side; the
+            // grace-vs-recheck cadence (the no-mass-fence guard) is validated above at this node's boot.
+            self_fence_grace_ticks,
             // Per-datagram snapshot budget — partitioned so none exceeds the MTU (GW-1).
             snapshot_datagram_budget: snapshot_budget,
         },

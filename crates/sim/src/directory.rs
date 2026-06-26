@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use vd_core::{Fence, TransferId, UniverseTick};
+use vd_core::{Fence, TickId, TransferId, UniverseTick};
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 
 /// Directory-side operational parameters (ONE reviewed struct — never inline
@@ -132,6 +132,93 @@ impl DirectoryTuning {
         }
         Ok(())
     }
+}
+
+/// THE proactive self-fence predicate (D-3 Slice 5) — ONE source of truth for the split-brain-critical
+/// fence-rule-4 timing, shared by EVERY authority holder (the shard's `Realm`, the gateway's `Session`),
+/// so the two can never drift apart. A holder self-fences (hard-stops its own authority) iff ALL hold:
+///
+/// - `held` — it currently holds the lease (an unowned holder has nothing to fence);
+/// - `grace != 0` — the proactive timer is ARMED (`0` = INERT, the pre-D-3 default and every legacy rig);
+/// - `recheck != 0` — the round-trip CONFIRMATION channel exists (without periodic head re-reads there is
+///   no `confirmed` tick to measure against, so the timer must stay inert — never fire on a config that
+///   cannot observe its own liveness);
+/// - `local_tick - confirmed > grace` — the last round-trip confirmation is STALER than the grace, i.e.
+///   the holder has been out of contact with the orchestrator longer than fence rule 4 permits. Saturating
+///   so a (clock-skew) confirmation stamped in the future reads as zero staleness, never a panic.
+///
+/// `local_tick` MUST be the partition-surviving local clock (advances every `step_tick` regardless of
+/// `ClockSync`); `confirmed` advances ONLY on a round-trip that affirmed ownership, so it freezes under a
+/// partition while `local_tick` climbs. The split-brain-safe sizing `lease_ttl < grace <= lease_ttl +
+/// max_self_fence_grace` (the holder self-fences AFTER its lease lapses but BEFORE the orchestrator's
+/// reassign window opens) is enforced by [`DirectoryTuning::validate`]. Branchless bitwise `&` (HR5): every
+/// operand is one region with no short-circuit, so a single armed call covers them all and only the
+/// caller's `if` carries the two-arm branch.
+#[must_use]
+pub fn lease_self_fence_due(
+    held: bool,
+    grace: u64,
+    recheck: u64,
+    local_tick: TickId,
+    confirmed: TickId,
+) -> bool {
+    held & (grace != 0) & (recheck != 0) & (local_tick.0.saturating_sub(confirmed.0) > grace)
+}
+
+/// THE per-tick cadence guard (D-3) — ONE source for "is a `tick`-periodic action due THIS tick", shared
+/// by every lease-liveness producer (the shard's realm-recheck + Realm/Entity heartbeat, the gateway's
+/// Session renew + recheck) so the `interval == 0 ⇒ INERT` convention can never be written two ways. `true`
+/// iff the cadence is ARMED (`interval != 0` — `0` disables, the pre-D-3 default) AND `tick` lands on a
+/// multiple of it. The `&&` short-circuits so `is_multiple_of` is never called with a `0` divisor.
+#[must_use]
+pub fn due_this_tick(interval: u64, tick: u64) -> bool {
+    interval != 0 && tick.is_multiple_of(interval)
+}
+
+/// A mis-tuned proactive self-fence cadence — rejected LOUD at a NODE's boot (the shard/gateway bin calls
+/// [`validate_self_fence_cadence`] after env read), never a silent mass-self-fence of HEALTHY holders. The
+/// recheck cadence (`realm_recheck_interval` / `session_recheck_interval`) is a NODE-side knob the
+/// orchestrator never sees, so this check CANNOT live in [`DirectoryTuning::validate`] — it is the node's
+/// own guard, complementary to the orchestrator's `lease_ttl < grace <= lease_ttl + max` ordering chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SelfFenceCadenceError {
+    #[error(
+        "the proactive self-fence is ARMED (self_fence_grace_ticks = {grace}) but its confirmation \
+         channel is OFF (recheck interval = 0): with no round-trip to re-arm the `confirmed` stamp, \
+         every held lease would self-fence the instant the grace elapses"
+    )]
+    NoConfirmationChannel { grace: u64 },
+    #[error(
+        "self_fence_grace_ticks ({grace}) must be >= 2 * recheck interval ({recheck}) so a HEALTHY \
+         holder observes at least one full affirming round-trip well inside the grace: the `confirmed` \
+         stamp re-arms only once per recheck cadence, so a smaller grace lets it go stale past the \
+         deadline between on-time replies and a perfectly live holder self-fences with no partition"
+    )]
+    GraceBelowRecheckMargin { grace: u64, recheck: u64 },
+}
+
+/// Reject a mis-tuned proactive self-fence cadence at a node's boot (D-3 Slice 5). When the self-fence is
+/// ARMED (`grace != 0`) the confirmation channel MUST exist (`recheck != 0`) and the grace MUST span at
+/// least two recheck cycles (`grace >= 2 * recheck`) — so a healthy holder, whose `confirmed` stamp
+/// re-arms only once per recheck cadence (plus round-trip latency, assumed under one cadence), never
+/// crosses the deadline between on-time replies. INERT configs (`grace == 0`) always pass — there is no
+/// self-fence to mis-provision. This is the node-side complement to [`DirectoryTuning::validate`]'s
+/// orchestrator-side `lease_ttl < grace <= lease_ttl + max` chain (the node cannot see `lease_ttl`).
+///
+/// # Errors
+/// [`SelfFenceCadenceError`] when the self-fence is armed without a confirmation channel, or with a grace
+/// below the two-recheck margin.
+pub fn validate_self_fence_cadence(grace: u64, recheck: u64) -> Result<(), SelfFenceCadenceError> {
+    if grace == 0 {
+        return Ok(()); // INERT: no proactive self-fence to mis-provision
+    }
+    if recheck == 0 {
+        return Err(SelfFenceCadenceError::NoConfirmationChannel { grace });
+    }
+    if grace < recheck.saturating_mul(2) {
+        return Err(SelfFenceCadenceError::GraceBelowRecheckMargin { grace, recheck });
+    }
+    Ok(())
 }
 
 /// Outcome of a grant attempt (the wire reply is the resulting head record; this
@@ -713,6 +800,39 @@ mod tests {
         let _ = dir.grant(k1, shard(1), Fence(1), NOW);
         let keys: Vec<DirectoryKey> = dir.entries().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![k1, k2], "BTreeMap order, deterministic");
+    }
+
+    #[test]
+    fn due_this_tick_is_inert_at_zero_and_lands_on_multiples() {
+        // The shared cadence guard (D-3): disarmed at interval 0 (the short-circuit never calls
+        // is_multiple_of with a 0 divisor); otherwise true exactly on multiples of the interval.
+        assert!(!due_this_tick(0, 5), "interval 0 ⇒ INERT, never due");
+        assert!(due_this_tick(2, 4), "on a multiple of the interval ⇒ due");
+        assert!(due_this_tick(2, 0), "genesis tick 0 is a multiple of everything");
+        assert!(!due_this_tick(2, 5), "off a multiple ⇒ not due");
+    }
+
+    #[test]
+    fn validate_self_fence_cadence_guards_the_grace_against_the_recheck_cadence() {
+        // INERT (grace 0) always passes — no self-fence to mis-provision (recheck value irrelevant).
+        assert_eq!(validate_self_fence_cadence(0, 0), Ok(()));
+        assert_eq!(validate_self_fence_cadence(0, 200), Ok(()));
+        // Armed but NO confirmation channel ⇒ rejected (would self-fence the instant the grace elapses).
+        assert_eq!(
+            validate_self_fence_cadence(150, 0),
+            Err(SelfFenceCadenceError::NoConfirmationChannel { grace: 150 })
+        );
+        // Armed with too small a grace vs the recheck cadence ⇒ rejected (the review's mass-fence trip:
+        // grace 120 < 2 * recheck 200 = 400; a healthy holder would self-fence with no partition).
+        assert_eq!(
+            validate_self_fence_cadence(120, 200),
+            Err(SelfFenceCadenceError::GraceBelowRecheckMargin {
+                grace: 120,
+                recheck: 200
+            })
+        );
+        // Armed with the two-recheck margin ⇒ OK (the rigs' grace 5 vs recheck 2: 5 >= 4).
+        assert_eq!(validate_self_fence_cadence(5, 2), Ok(()));
     }
 
     // ---- D-3 Slice 0: DirectoryTuning::validate (the lease-liveness ordering chain) ----------------

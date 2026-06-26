@@ -170,6 +170,10 @@ fn build_cluster(
             tick_hz: 50,
             // D-3 INERT: the cluster scenarios do not exercise the session heartbeat (the D-3 cells do).
             lease_renew_interval_ticks: 0,
+            // D-3 Slice 5b INERT here (grace 0 vetoes the proactive self-fence; the self-fence cells set
+            // these explicitly). Pre-D-3 behavior: no recheck, no proactive fence.
+            session_recheck_interval: 0,
+            self_fence_grace_ticks: 0,
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs: TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS,

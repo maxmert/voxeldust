@@ -523,8 +523,8 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   saga-gated not frame-fence-enforced; the dest promote is currently autonomous and needs a real saga
   `Promoting` state; no collision system exists yet so 1d.5b lands the ghost FEED+registration, response @P5).
 
-### D-3 🟧 Lease lifecycle: slices 0–4 LANDED (config + heartbeat + flap fault + CSCALE-1 tracker + expiry reaper); only self-fence (5) owed (design wf_24c1ecc5, 6 slices)
-- **✅ LANDED (slices 0–4 of 6, all gate-green 100% Tier-A):**
+### D-3 🟩 Lease lifecycle COMPLETE: all 6 slices LANDED (config + heartbeat + flap fault + CSCALE-1 tracker + expiry reaper + self-fence-before-grant on BOTH the shard Realm and the gateway Session) (design wf_24c1ecc5)
+- **✅ LANDED (all 6 slices, all gate-green 100% Tier-A region+branch):**
   - **Slice 0 (5e73fdf) — config foundation:** `DirectoryTuning` + the lease-liveness knobs
     (`lease_renew_interval_ticks`, `min_renews_before_lapse`, `self_fence_grace_ticks`,
     `max_self_fence_grace_ticks`, `reaper_interval_ticks`, `recovery_grace_ticks`) + `LivenessTuning`
@@ -558,12 +558,27 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     `ceiling + recovery_grace_ticks` (belt-and-suspenders atop the RAM-empty tracker — the primary CAP
     freeze). `admin_snapshot.leases` surfaces lapsed-pending leases (negative `ticks_remaining`) — never a
     silent wedge. Focused review DONE_NO_CRITICAL (`wf_31119adb`).
-- **Still owed (slice 5):** **Slice 5 — self-fence-before-grant** (the proactive owner timer on the
-  partition-surviving `local_tick`: a holder whose lease provably lapsed `self_fence_grace_ticks` ago
-  hard-stops its OWN authority before the orchestrator's reassign-after window opens — the split-brain cure
-  the reactive `realm_recheck` poll cannot give). Gate-green; commit-ask. (Fold in the `due_this_tick`
-  cadence-guard DRY helper the holistic audit flagged.) Residual LOW (review `wf_31119adb`, defense-in-depth,
-  optional): a `unreachable_window_ticks < lease_ttl_ticks` validate cross-check.
+  - **Slice 5 (e528d26 shard + <gateway commit>) — self-fence-before-grant (the split-brain cure):** a
+    holder that has gone un-CONFIRMED past `self_fence_grace_ticks` (a partition from the orchestrator —
+    the reactive recheck reply never arrives) HARD-STOPS its OWN authority on the partition-surviving
+    `local_tick` BEFORE the orchestrator's reassign window opens. The split-brain-safe timer is
+    `local_tick - last_confirmed > grace`, keyed on the ROUND-TRIP confirmation (NOT the fire-and-forget
+    renewal emit, which keeps flowing under partition); it matches the audited Slice-0 validate chain
+    (`ttl < grace <= ttl + max`). **Shard (5a):** `RealmConfirmedAt` + `self_fence_lapsed_realm`
+    (RealmAuthority=None + drop transients). **Gateway (5b):** `SessionPhase::SelfFenced` +
+    `Session.confirmed_at` + the `HeadRead{Session}` recheck channel + `self_fence_lapsed_sessions` +
+    a reactive arm (foreign/absent head). A SelfFenced session is excluded from input/frames/renew/
+    recheck/re-drive; promotion to Active is AwaitingAttach-only so a `SessionAttached` straggler can
+    never resurrect it (the review CRITICAL). DRY: ONE shared `lease_self_fence_due` predicate + ONE
+    `due_this_tick` cadence guard (closes the holistic-audit DRY item) across shard + gateway. A node-side
+    `validate_self_fence_cadence` (grace armed ⇒ recheck channel exists AND `grace >= 2*recheck`) rejects
+    the mass-self-fence misconfig at boot (the review HIGH — the orchestrator can't see the node-side
+    recheck knob). Reviewed `wf_15a14bb0` (CRITICAL straggler-resurrection + HIGH cadence-guard found,
+    both fixed + re-verified SAFE).
+- **Residual / forward (NON-blocking):** (a) LOW defense-in-depth (review `wf_31119adb`): an
+  `unreachable_window_ticks < lease_ttl_ticks` orchestrator-side validate cross-check — distinct from the
+  node-side cadence guard now landed. (b) A SelfFenced gateway Session lingers inert until `Bye` /
+  the D-37/P3 ResumeTicket adoption re-homes it (the adoption path is unbuilt — D-37).
 - **✅ CSCALE-1 CLOSED (Slice 3, `68ec2d2`) — was: whole-codebase audit `wf_2de9063f`, HIGH.** The
   BEFORE-state (now historical): the D-7d dead-resolution used a kill-only `Inbound::NodeUnreachable` as its
   dead-vs-slow stand-in, so in io-prod a SINGLE recoverable write blip (a 20s idle-reap / VXLAN drop of a LIVE

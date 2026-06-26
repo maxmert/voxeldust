@@ -692,13 +692,9 @@ fn request_pending_grants(
         }
         Some(realm_fence) => {
             // Periodically re-read the realm head: the reply reveals a lost lease so
-            // the shard self-fences (the loss-reaction is otherwise unreachable).
-            if config.realm_recheck_interval > 0
-                && clock
-                    .local_tick
-                    .0
-                    .is_multiple_of(config.realm_recheck_interval)
-            {
+            // the shard self-fences (the loss-reaction is otherwise unreachable). It is ALSO the
+            // round-trip that re-arms `RealmConfirmedAt` for the proactive self-fence (D-3 Slice 5).
+            if crate::directory::due_this_tick(config.realm_recheck_interval, clock.local_tick.0) {
                 let op = DirectoryOp::HeadRead {
                     key: DirectoryKey::Realm(config.realm),
                 };
@@ -712,12 +708,7 @@ fn request_pending_grants(
             // alive on the holder's own LOCAL cadence (the orchestrator's reaper revokes a lapsed lease).
             // INERT when `lease_renew_interval_ticks == 0` (pre-D-3 default). A departing dot is excluded
             // (its lease is about to be revoked by the logout `LeaseRevoke`, not renewed).
-            if config.lease_renew_interval_ticks > 0
-                && clock
-                    .local_tick
-                    .0
-                    .is_multiple_of(config.lease_renew_interval_ticks)
-            {
+            if crate::directory::due_this_tick(config.lease_renew_interval_ticks, clock.local_tick.0) {
                 let renewals = std::iter::once((DirectoryKey::Realm(config.realm), realm_fence)).chain(
                     dots.0
                         .values()
@@ -2207,7 +2198,10 @@ fn self_fence_lapsed_realm(
     mut owned_transients: ResMut<OwnedTransients>,
     mut stats: ResMut<StubStats>,
 ) {
-    if realm_lease_lapsed(
+    // The split-brain-critical predicate is the ONE shared `lease_self_fence_due` (DRY across every
+    // authority holder — the shard's Realm here, the gateway's Session in connection-plane — so the
+    // fence-rule-4 timing can never drift between them). `held` = this shard holds its realm.
+    if crate::directory::lease_self_fence_due(
         authority.0.is_some(),
         config.self_fence_grace_ticks,
         config.realm_recheck_interval,
@@ -2218,17 +2212,6 @@ fn self_fence_lapsed_realm(
         self_fence_drop_transients(&mut owned_transients, &mut stats);
         stats.realm_self_fenced_lapsed += 1;
     }
-}
-
-/// The proactive self-fence predicate as a MONOMORPHIC, branchless shim (HR5, mirroring the bitwise
-/// `&`/`|` in `DirectoryTuning::validate`): every operand is a region with NO short-circuit, so a single
-/// armed evaluation covers them all and only the caller's `if` carries the two-arm branch. Self-fence
-/// iff ALL hold: the realm is HELD; the timer is armed (`grace != 0` — INERT at the pre-D-3 default and
-/// every single-shard rig); the confirmation channel EXISTS (`recheck != 0` — with no round-trips there
-/// is no `last_confirmed` to measure, so the timer must stay inert); and the last confirmation is STALER
-/// than the grace (`local - confirmed > grace`, saturating so a confirmed-in-the-future never panics).
-fn realm_lease_lapsed(held: bool, grace: u64, recheck: u64, local_tick: TickId, confirmed: TickId) -> bool {
-    held & (grace != 0) & (recheck != 0) & (local_tick.0.saturating_sub(confirmed.0) > grace)
 }
 
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
@@ -2823,16 +2806,17 @@ mod tests {
 
     #[test]
     fn realm_lease_lapsed_requires_held_armed_channel_and_stale() {
-        // The proactive self-fence predicate (HR5 branchless shim). Self-fence iff ALL hold: the realm
-        // is HELD, the timer is ARMED (grace != 0), the confirmation CHANNEL exists (recheck != 0), and
-        // the last confirmation is STALER than the grace. Each guard alone vetoes; the boundary
+        // The shared proactive self-fence predicate (HR5 branchless shim). Self-fence iff ALL hold: the
+        // realm is HELD, the timer is ARMED (grace != 0), the confirmation CHANNEL exists (recheck != 0),
+        // and the last confirmation is STALER than the grace. Each guard alone vetoes; the boundary
         // (`== grace`) is NOT lapsed (a strict `>`), so the holder keeps authority for the whole window.
+        use crate::directory::lease_self_fence_due;
         let now = TickId(100);
-        assert!(realm_lease_lapsed(true, 5, 2, now, TickId(94))); // 6 > 5 ⇒ lapsed
-        assert!(!realm_lease_lapsed(false, 5, 2, now, TickId(94))); // not held
-        assert!(!realm_lease_lapsed(true, 0, 2, now, TickId(94))); // timer disarmed (pre-D-3 default)
-        assert!(!realm_lease_lapsed(true, 5, 0, now, TickId(94))); // no confirmation channel
-        assert!(!realm_lease_lapsed(true, 5, 2, now, TickId(95))); // 100-95 = 5 == grace ⇒ within, holds
+        assert!(lease_self_fence_due(true, 5, 2, now, TickId(94))); // 6 > 5 ⇒ lapsed
+        assert!(!lease_self_fence_due(false, 5, 2, now, TickId(94))); // not held
+        assert!(!lease_self_fence_due(true, 0, 2, now, TickId(94))); // timer disarmed (pre-D-3 default)
+        assert!(!lease_self_fence_due(true, 5, 0, now, TickId(94))); // no confirmation channel
+        assert!(!lease_self_fence_due(true, 5, 2, now, TickId(95))); // 100-95 = 5 == grace ⇒ within, holds
     }
 
     #[test]

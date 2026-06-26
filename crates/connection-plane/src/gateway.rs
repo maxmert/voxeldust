@@ -28,7 +28,7 @@ use arc_swap::ArcSwap;
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::pose::FrameRef;
 use vd_core::rng::SplitMix64;
-use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TransferId};
+use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
@@ -110,6 +110,17 @@ pub struct GatewayConfig {
     /// copy of `DirectoryTuning::lease_renew_interval_ticks` (same env knob), so the producer gates on
     /// `local_tick` without reaching across the directory seam.
     pub lease_renew_interval_ticks: u64,
+    /// D-3 Slice 5b — how often (the gateway's LOCAL ticks) to re-read each Active session's `Session`
+    /// head: the ROUND-TRIP confirmation channel that re-arms `Session.confirmed_at` (the partition
+    /// detector). `0` = INERT (no recheck — the pre-D-3 default); mirrors the shard's
+    /// `realm_recheck_interval`. The proactive self-fence is inert without it (no round-trip to measure).
+    pub session_recheck_interval: u64,
+    /// D-3 Slice 5b — the proactive self-fence grace (the gateway's LOCAL ticks). When an Active session's
+    /// lease goes un-confirmed for longer than this (`local_tick - confirmed_at > grace` — a partition
+    /// from the orchestrator), the gateway hard-stops acting as that session's authority BEFORE the
+    /// orchestrator's reassign window opens. `0` = INERT (the pre-D-3 default). The gateway's local copy of
+    /// `DirectoryTuning::self_fence_grace_ticks`; the split-brain-safe ordering is validated orch-side.
+    pub self_fence_grace_ticks: u64,
     pub tuning: TransportTuning,
 }
 
@@ -282,6 +293,14 @@ enum SessionPhase {
     /// lives on `Session.subs` (the cold authority) + `SessionHot.subs` (the hot
     /// projection) — NOT here (1d.2a).
     Active { entity: EntityId },
+    /// D-3 Slice 5b — the gateway SELF-FENCED this session (fence rule 4): it lost contact with the
+    /// orchestrator (no `Session`-head round-trip within `self_fence_grace_ticks` — a partition), or a
+    /// reply revealed the lease reassigned/revoked, so it HARD-STOPS acting as the session's authority
+    /// BEFORE the orchestrator's reassign window opens. Input is dropped (the `Active`-only guard in
+    /// `route_client_input`), frames are skipped (`on_shard_frame`), the lease is no longer renewed, and
+    /// `drive_pending_sessions` leaves it be. It lingers inert until the client's connection ends (`Bye`)
+    /// or a future ResumeTicket adoption (D-37/P3) re-homes it — never double-served while fenced.
+    SelfFenced,
 }
 
 /// The cold authoritative record of ONE accepted subscription (the lifecycle truth; the
@@ -313,6 +332,12 @@ struct Session {
     fence: Fence,
     phase: SessionPhase,
     next_sub: u32,
+    /// D-3 Slice 5b — the `local_tick` of the last `Session`-head ROUND-TRIP confirmation (the reply that
+    /// affirmed THIS gateway still owns the session lease). The partition detector for the proactive
+    /// self-fence: set when the session goes `Active` (the attach IS a confirmation) and re-armed on every
+    /// affirming recheck reply; under a partition (no reply) it FREEZES while `local_tick` climbs, and
+    /// `lease_self_fence_due` fires once the gap exceeds the grace. Meaningful only while `Active`.
+    confirmed_at: TickId,
     /// The negotiated proto minor for this connection (the sender-gates-variants
     /// rule): minor-1+ variants like `UniverseRate` are emitted only when `>= 1`.
     negotiated_minor: u16,
@@ -367,7 +392,9 @@ impl GatewaySessions {
     pub fn entity_of(&self, session: SessionId) -> Option<EntityId> {
         self.by_session.get(&session).and_then(|s| match s.phase {
             SessionPhase::Active { entity, .. } => Some(entity),
-            SessionPhase::AwaitingDirectory | SessionPhase::AwaitingAttach => None,
+            SessionPhase::AwaitingDirectory
+            | SessionPhase::AwaitingAttach
+            | SessionPhase::SelfFenced => None,
         })
     }
 
@@ -532,6 +559,14 @@ pub struct GatewayStats {
     /// first, latest-wins) — the never-silent floor; nonzero only under a parked/stalled
     /// saga holding the cut open (D-23). The durable backstop is 1d/P3 (D-8).
     pub dest_inputs_dropped: u64,
+    /// D-3 Slice 5b — PROACTIVE Session self-fences: an Active session whose lease went un-confirmed past
+    /// `self_fence_grace_ticks` (a detected partition from the orchestrator) was hard-stopped. Ops
+    /// visibility / partition signal; `0` on the happy path and inert (`self_fence_grace_ticks == 0`).
+    pub sessions_self_fenced_lapsed: u64,
+    /// D-3 Slice 5b — REACTIVE Session self-fences: a `Session`-head recheck reply revealed the lease had
+    /// been reassigned/revoked (no longer this gateway at its fence), so the session was hard-stopped
+    /// promptly (the link-alive cure, vs the proactive timer's partition cure). `0` on the happy path.
+    pub sessions_self_fenced_revoked: u64,
 }
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
@@ -544,39 +579,85 @@ pub fn register_gateway(world: &mut World, schedule: &mut Schedule, config: Gate
     schedule.add_systems(
         (
             process_gateway_inbound,
+            self_fence_lapsed_sessions,
             drive_pending_sessions,
-            renew_session_leases,
+            renew_and_recheck_sessions,
         )
             .chain(),
     );
 }
 
-/// D-3 lease-liveness heartbeat (gateway half): re-send `LeaseRenew` for every Active session's
-/// `Session` key on the gateway's own LOCAL cadence, so the session lease never lapses while the client
-/// is connected (the orchestrator's reaper revokes a lapsed-and-confirmed-dead lease). ONE mechanism with
-/// the shard's Realm/Entity heartbeat (the shared `push_renewals` shim — HR3, never a match-on-shard-kind).
-/// INERT when `lease_renew_interval_ticks == 0` (the pre-D-3 default). Non-Active (still-logging-in)
-/// sessions have no lease to renew yet, so they are excluded.
-fn renew_session_leases(
+/// D-3 Slice 5b — the PROACTIVE Session self-fence (fence rule 4, the gateway analog of the shard's
+/// `self_fence_lapsed_realm`). For every Active session whose lease has gone un-confirmed past
+/// `self_fence_grace_ticks` of the gateway's own `local_tick` — a partition from the orchestrator, where
+/// the recheck reply never arrives — hard-stop acting as its authority (phase ⇒ `SelfFenced`) BEFORE the
+/// orchestrator's reassign window opens. Runs right after `process_gateway_inbound`, so a `Session`-head
+/// reply applied THIS tick (re-arming `confirmed_at`) pre-empts a spurious fence; and before
+/// `renew_and_recheck_sessions`, so a just-fenced session is neither renewed nor re-checked. INERT unless
+/// `self_fence_grace_ticks > 0` AND `session_recheck_interval > 0` (the shared `lease_self_fence_due`
+/// guards both). The hot input path is unaffected — `route_client_input`'s Active-only guard already
+/// drops a fenced session's datagrams, so no wait-free route teardown is needed.
+fn self_fence_lapsed_sessions(
+    config: Res<GatewayConfig>,
+    clock: Res<ClockSample>,
+    mut sessions: ResMut<GatewaySessions>,
+    mut stats: ResMut<GatewayStats>,
+) {
+    for session in sessions.by_session.values_mut() {
+        if vd_sim::directory::lease_self_fence_due(
+            matches!(session.phase, SessionPhase::Active { .. }),
+            config.self_fence_grace_ticks,
+            config.session_recheck_interval,
+            clock.local_tick,
+            session.confirmed_at,
+        ) {
+            session.phase = SessionPhase::SelfFenced;
+            stats.sessions_self_fenced_lapsed += 1;
+        }
+    }
+}
+
+/// D-3 lease-liveness producers (gateway half), each on the gateway's own LOCAL cadence:
+/// (1) the HEARTBEAT — re-send `LeaseRenew` for every Active session's `Session` key, so the lease never
+///     lapses while the client is connected (the orchestrator's reaper revokes a lapsed-and-confirmed-dead
+///     lease); ONE mechanism with the shard's Realm/Entity heartbeat (the shared `push_renewals` shim —
+///     HR3, never a match-on-shard-kind);
+/// (2) the RECHECK — re-read every Active session's `Session` head, the ROUND-TRIP CONFIRMATION channel
+///     whose affirming reply re-arms `Session.confirmed_at` (and whose foreign/absent reply triggers the
+///     reactive self-fence); mirrors the shard's `realm_recheck`, and is what makes the proactive
+///     `self_fence_lapsed_sessions` timer non-inert.
+/// Both cadences are independent and INERT at interval `0` (the pre-D-3 default). Non-Active sessions have
+/// no lease to renew/confirm, so both exclude them.
+fn renew_and_recheck_sessions(
     config: Res<GatewayConfig>,
     clock: Res<ClockSample>,
     sessions: Res<GatewaySessions>,
     mut outbox: ResMut<OutboundBox>,
 ) {
-    if config.lease_renew_interval_ticks == 0
-        || !clock
-            .local_tick
-            .0
-            .is_multiple_of(config.lease_renew_interval_ticks)
-    {
-        return;
+    let tick = clock.local_tick.0;
+    if vd_sim::directory::due_this_tick(config.lease_renew_interval_ticks, tick) {
+        let renewals = sessions
+            .by_session
+            .iter()
+            .filter(|(_, s)| matches!(s.phase, SessionPhase::Active { .. }))
+            .map(|(id, s)| (DirectoryKey::Session(*id), s.fence));
+        outbox.push_renewals(renewals, config.orchestrator);
     }
-    let renewals = sessions
-        .by_session
-        .iter()
-        .filter(|(_, s)| matches!(s.phase, SessionPhase::Active { .. }))
-        .map(|(id, s)| (DirectoryKey::Session(*id), s.fence));
-    outbox.push_renewals(renewals, config.orchestrator);
+    if vd_sim::directory::due_this_tick(config.session_recheck_interval, tick) {
+        for (id, _) in sessions
+            .by_session
+            .iter()
+            .filter(|(_, s)| matches!(s.phase, SessionPhase::Active { .. }))
+        {
+            push_directory(
+                &mut outbox,
+                config.orchestrator,
+                DirectoryOp::HeadRead {
+                    key: DirectoryKey::Session(*id),
+                },
+            );
+        }
+    }
 }
 
 /// ---------------------------------------------------------------------------
@@ -718,9 +799,9 @@ fn process_gateway_inbound(
             }
         } else if config.is_known_shard(from) {
             match class {
-                MsgClass::Control => {
-                    on_shard_control(from, bytes, &config, &mut sessions, &mut stats, &mut outbox)
-                }
+                MsgClass::Control => on_shard_control(
+                    from, bytes, &config, &clock, &mut sessions, &mut stats, &mut outbox,
+                ),
                 MsgClass::Snapshot => {
                     on_shard_frame(from, bytes, &mut sessions, &mut stats, &mut outbox);
                 }
@@ -896,6 +977,8 @@ fn on_client_control(
                     fence,
                     phase: SessionPhase::AwaitingDirectory,
                     next_sub: 0,
+                    // Armed at the Active transition (the attach); irrelevant while still logging in.
+                    confirmed_at: TickId(0),
                     negotiated_minor: negotiated.minor,
                     transfer: None,
                     subs: BTreeMap::new(),
@@ -1577,6 +1660,7 @@ fn on_shard_control(
     from: NodeId,
     bytes: &[u8],
     config: &GatewayConfig,
+    clock: &ClockSample,
     sessions: &mut GatewaySessions,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
@@ -1598,8 +1682,17 @@ fn on_shard_control(
                     // detach path already ran).
                     return;
                 };
-                if matches!(session.phase, SessionPhase::Active { .. }) {
-                    return; // duplicate attach reply (at-least-once): idempotent
+                // Promote ONLY from AwaitingAttach. A duplicate reply for an already-Active session is
+                // idempotent (as before); CRUCIALLY a late/duplicate `SessionAttached` straggler must
+                // NEVER resurrect a `SelfFenced` session (D-3 Slice 5b) — `SessionAttached` is re-emitted
+                // on every `AttachSession` retry and rides the gateway↔shard link, which can be HEALTHY
+                // while the gateway↔orchestrator link (that drove the self-fence) is partitioned, so a
+                // straggler can arrive after `Active → SelfFenced`. Re-promoting it would re-arm the grace
+                // clock and resume input/frame egress — re-opening the exact split-brain window the
+                // self-fence exists to close. (AwaitingDirectory — an attach before the grant — is
+                // likewise not promotable here.) This keeps `Active` monotonic-until-removal.
+                if !matches!(session.phase, SessionPhase::AwaitingAttach) {
+                    return;
                 }
                 // THE sole route-mutation primitive: one atomic store (P2 NOW drives this same
                 // `store_route` from `CommitAuthority`'s `store_commit`). Attach SETS a fresh
@@ -1607,6 +1700,9 @@ fn on_shard_control(
                 let authority = session.hot.route.load().authority;
                 store_route(&session.hot, authority, realm_fence, None);
                 session.phase = SessionPhase::Active { entity };
+                // D-3 Slice 5b: going Active IS a fresh round-trip confirmation (the directory granted
+                // and the shard attached) — arm the self-fence deadline from here.
+                session.confirmed_at = clock.local_tick;
             }
             // Open the login sub on `config.shard` at the realm fence — the FIRST `open_sub`
             // caller (the transfer dest is the second, 1d.2b). `open_sub` pushes
@@ -1704,6 +1800,12 @@ fn on_shard_frame(
             stats.frame_sub_desync += 1;
             continue;
         };
+        // D-3 Slice 5b: a SELF-FENCED session no longer acts as authority — it is served NO frames (its
+        // subs linger inert in the reverse index until the connection ends or a ResumeTicket adoption
+        // re-homes it). A still-attaching session has no subs and is never in this index. Active only.
+        if !matches!(session.phase, SessionPhase::Active { .. }) {
+            continue;
+        }
         // Resolve THIS session's sub + per-shard accepted fence off the wait-free hot `SubTable`,
         // then RELEASE that borrow (the values are `Copy`) so we may advance the cold watermark.
         // A subscriber-in-index ALWAYS has a `SubEntry` (republished together by `publish_subs`);
@@ -1762,12 +1864,25 @@ fn on_directory_reply(
     let Some(session) = sessions.by_session.get_mut(&session_id) else {
         return; // session left while the reply was in flight
     };
-    if !matches!(session.phase, SessionPhase::AwaitingDirectory) {
-        return; // duplicate head (at-least-once): already progressed
-    }
     let granted = record.is_some_and(|r| {
         r.authority == AuthorityRef::Gateway(identity.node_id) && r.fence == session.fence
     });
+    // D-3 Slice 5b: an Active session's `Session`-head reply is a RECHECK round-trip (not a mint). An
+    // affirming head RE-ARMS the proactive self-fence deadline (we just heard from the directory); a
+    // foreign/absent head means the lease was reassigned or reaped, so reactively SELF-FENCE now — the
+    // link-alive cure that complements the partition timer (mirrors the shard's reactive realm self-fence).
+    if matches!(session.phase, SessionPhase::Active { .. }) {
+        if granted {
+            session.confirmed_at = clock.local_tick;
+        } else {
+            session.phase = SessionPhase::SelfFenced;
+            stats.sessions_self_fenced_revoked += 1;
+        }
+        return;
+    }
+    if !matches!(session.phase, SessionPhase::AwaitingDirectory) {
+        return; // AwaitingAttach / already-SelfFenced: no obligation for this head
+    }
     if granted {
         // The mint is committed. Welcome the client; attach to the shard.
         session.phase = SessionPhase::AwaitingAttach;
@@ -1852,7 +1967,9 @@ fn drive_pending_sessions(
                     },
                 );
             }
-            SessionPhase::Active { .. } => {}
+            // Active needs no re-drive; a SelfFenced session is deliberately left alone (D-3 Slice 5b) —
+            // it is no longer renewed, re-checked, or re-attached, awaiting connection-end / adoption.
+            SessionPhase::Active { .. } | SessionPhase::SelfFenced => {}
         }
     }
 }
@@ -1896,6 +2013,8 @@ mod tests {
             session_seed: 7,
             tick_hz: 50,
             lease_renew_interval_ticks: 0,
+            session_recheck_interval: 0,
+            self_fence_grace_ticks: 0,
             tuning: TransportTuning {
                 max_sessions: 4,
                 max_buffered_inputs: 8,
@@ -2027,6 +2146,221 @@ mod tests {
                 in_transfer: None,
             }),
         })
+    }
+
+    /// A Session-head reply DENYING this gateway's ownership (record absent — e.g. the orchestrator's
+    /// reaper revoked the lapsed lease): drives both the reactive self-fence and the recheck channel.
+    fn absent_head(session: SessionId) -> InterShardFlow {
+        InterShardFlow::DirectoryReply(DirectoryReply::Head {
+            key: DirectoryKey::Session(session),
+            record: None,
+        })
+    }
+
+    /// A D-3 Slice-5b config: the recheck channel + proactive self-fence both ARMED (rig-local values;
+    /// the split-brain-safe `ttl < grace <= ttl + max` ordering is validated orchestrator-side).
+    fn self_fence_config() -> GatewayConfig {
+        GatewayConfig {
+            session_recheck_interval: 2,
+            self_fence_grace_ticks: 5,
+            ..config()
+        }
+    }
+
+    fn set_tick(rig: &mut Rig, tick: u64) {
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(tick);
+    }
+
+    fn session_active(rig: &Rig, sid: SessionId) -> bool {
+        rig.world
+            .resource::<GatewaySessions>()
+            .entity_of(sid)
+            .is_some()
+    }
+
+    #[test]
+    fn a_partitioned_gateway_proactively_self_fences_a_stale_session() {
+        // D-3 Slice 5b: an Active session whose `Session`-head goes un-confirmed past the grace (a
+        // partition from the orchestrator — no recheck reply) is hard-stopped BEFORE the orchestrator's
+        // reassign window, then served no input/frames. It is FENCED, not removed (the connection lingers).
+        let mut rig = Rig::new();
+        rig.world.insert_resource(self_fence_config());
+        let (sid, _) = rig.login(); // Active; confirmed_at armed to local_tick 1 at the attach
+        // Within the grace (local 6 - confirmed 1 = 5, NOT > 5): still Active.
+        set_tick(&mut rig, 6);
+        let _ = rig.tick(vec![]);
+        assert!(session_active(&rig, sid));
+        assert_eq!(rig.stats().sessions_self_fenced_lapsed, 0);
+        // Past the grace (local 7 - 1 = 6 > 5): SELF-FENCE.
+        set_tick(&mut rig, 7);
+        let _ = rig.tick(vec![]);
+        assert!(!session_active(&rig, sid), "the partitioned session self-fenced");
+        assert_eq!(rig.stats().sessions_self_fenced_lapsed, 1);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().len(),
+            1,
+            "fenced, not removed (awaits connection-end / adoption)"
+        );
+    }
+
+    #[test]
+    fn a_recheck_reply_re_arms_an_active_session_and_a_foreign_head_self_fences_it() {
+        // The reactive arm: an AFFIRMING recheck reply re-arms the deadline; a foreign/absent head
+        // (lease reassigned or reaped) self-fences at once — the link-alive cure beside the partition timer.
+        let mut rig = Rig::new();
+        rig.world.insert_resource(self_fence_config());
+        let (sid, _) = rig.login(); // confirmed_at = 1
+        set_tick(&mut rig, 4);
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]); // re-arm ⇒ confirmed_at 4
+        assert!(session_active(&rig, sid));
+        // At local 8 (8 - re-armed 4 = 4 <= 5) STILL Active — proof the reply re-armed the deadline
+        // (had `confirmed_at` stayed 1, 8 - 1 = 7 > 5 would have fenced it here).
+        set_tick(&mut rig, 8);
+        let _ = rig.tick(vec![]);
+        assert!(
+            session_active(&rig, sid),
+            "an affirming recheck reply re-armed the self-fence deadline"
+        );
+        assert_eq!(rig.stats().sessions_self_fenced_lapsed, 0);
+        // A foreign/absent head reactively self-fences.
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &absent_head(sid))]);
+        assert!(
+            !session_active(&rig, sid),
+            "a revoked-lease head reactively self-fences the session"
+        );
+        assert_eq!(rig.stats().sessions_self_fenced_revoked, 1);
+    }
+
+    #[test]
+    fn the_recheck_producer_re_reads_active_session_heads_on_cadence() {
+        // The confirmation channel: on the recheck cadence the gateway re-reads each Active session's
+        // `Session` head — the round-trip whose affirming reply re-arms `confirmed_at`.
+        let mut rig = Rig::new();
+        rig.world.insert_resource(self_fence_config()); // recheck every 2 ticks
+        let (sid, _) = rig.login();
+        set_tick(&mut rig, 4); // a recheck multiple; 4 - 1 = 3 within grace, so no self-fence here
+        let sends = rig.tick(vec![]);
+        // Compare against the exact expected bytes with BITWISE `&` (no short-circuit branch gaps — HR5).
+        let expected = postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::HeadRead {
+            key: DirectoryKey::Session(sid),
+        }))
+        .expect("encode");
+        let saw_head_read = sends.iter().any(|(to, class, bytes)| {
+            (*to == ORCH) & (*class == MsgClass::Saga) & (bytes.as_slice() == expected.as_slice())
+        });
+        assert!(
+            saw_head_read,
+            "an Active session's head is re-read on the recheck cadence"
+        );
+    }
+
+    #[test]
+    fn on_shard_frame_skips_a_self_fenced_session() {
+        // A self-fenced session lingers in the fan-out reverse index (its subs are not torn down) but
+        // is served NO frames — skipped cleanly via the phase gate (NOT a desync), watermark untouched.
+        let (mut sessions, sid, _) = one_active_session();
+        sessions
+            .by_session
+            .get_mut(&sid)
+            .expect("present")
+            .phase = SessionPhase::SelfFenced;
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        let frame = postcard::to_allocvec(&frame_msg(Fence(1), 9)).expect("encode");
+        on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
+        assert!(
+            outbox.0.is_empty(),
+            "a self-fenced session receives no forwarded frames"
+        );
+        assert_eq!(
+            stats.frame_sub_desync, 0,
+            "skipped via the Active-only phase gate, never counted a desync"
+        );
+        assert_eq!(
+            sessions.by_session[&sid].delivered.get(&SubId(0)),
+            None,
+            "no frame ⇒ the delivery watermark is untouched"
+        );
+    }
+
+    #[test]
+    fn a_session_head_for_an_awaiting_attach_session_carries_no_obligation() {
+        // After the mint grant the session is AwaitingAttach (the shard attach is in flight). A
+        // duplicate/late `Session`-head reply then is neither a fresh mint (AwaitingDirectory) nor a
+        // recheck (Active), so it is dropped with no effect (the at-least-once idempotency floor) — no
+        // second Welcome, no phase change, no mint refusal.
+        let mut rig = Rig::new();
+        let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let sid = *rig
+            .world
+            .resource::<GatewaySessions>()
+            .sessions()
+            .collect::<Vec<_>>()
+            .first()
+            .expect("session pending");
+        let granted = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]); // ⇒ AwaitingAttach
+        // filter+count evaluates the predicate on EVERY control (Welcome ⇒ kept, UniverseRate ⇒ dropped),
+        // so both arms of the `matches!` are covered (no `.any` short-circuit — HR5).
+        assert_eq!(
+            decode_controls(&granted, CLIENT)
+                .iter()
+                .filter(|m| matches!(m, ServerControlMsg::Welcome { .. }))
+                .count(),
+            1,
+            "the FIRST grant Welcomes the client exactly once"
+        );
+        let before = rig.stats();
+        let dup = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]); // duplicate head
+        assert!(
+            decode_controls(&dup, CLIENT).is_empty(),
+            "a duplicate head for an AwaitingAttach session re-sends NO Welcome"
+        );
+        assert_eq!(
+            rig.stats().session_mints_refused,
+            before.session_mints_refused,
+            "no mint refusal — the head simply carries no obligation"
+        );
+        assert!(
+            !session_active(&rig, sid),
+            "still AwaitingAttach (awaiting the shard's SessionAttached), not Active"
+        );
+    }
+
+    #[test]
+    fn a_session_attached_straggler_does_not_resurrect_a_self_fenced_session() {
+        // D-3 Slice 5b CRITICAL guard. `SessionAttached` is re-emitted on every `AttachSession` retry
+        // and rides the gateway↔shard link, which can be HEALTHY while the gateway↔orchestrator link
+        // (that drove the self-fence) is partitioned — so a straggler can land AFTER Active→SelfFenced.
+        // Re-promoting it would re-arm the grace clock and resume input/frames — re-opening the
+        // split-brain window. The attach arm promotes only from AwaitingAttach, so the fenced session
+        // stays inert (awaiting Bye / the future ResumeTicket adoption).
+        let mut rig = Rig::new();
+        rig.world.insert_resource(self_fence_config());
+        let (sid, _) = rig.login(); // Active; confirmed_at armed at the attach
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &absent_head(sid))]); // reactively self-fence
+        assert!(!session_active(&rig, sid), "the session is self-fenced");
+        let fenced_confirmed = rig.world.resource::<GatewaySessions>().by_session[&sid].confirmed_at;
+        // A late/duplicate SessionAttached straggler at a much later tick must be IGNORED.
+        set_tick(&mut rig, 42);
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+        assert!(
+            !session_active(&rig, sid),
+            "the straggler did NOT resurrect the fenced session to Active (no split-brain reopened)"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().by_session[&sid].confirmed_at,
+            fenced_confirmed,
+            "the self-fence deadline was NOT re-armed by the straggler"
+        );
     }
 
     fn decode_controls(sent: &[(NodeId, MsgClass, Vec<u8>)], to: NodeId) -> Vec<ServerControlMsg> {
@@ -4348,6 +4682,7 @@ mod tests {
                     entity: EntityId(77),
                 },
                 next_sub: 0,
+                confirmed_at: TickId(0),
                 negotiated_minor: 1,
                 transfer: None,
                 subs: BTreeMap::new(),
@@ -4542,6 +4877,7 @@ mod tests {
                     entity: EntityId(88),
                 },
                 next_sub: 0,
+                confirmed_at: TickId(0),
                 negotiated_minor: 1,
                 transfer: None,
                 subs: BTreeMap::new(),
