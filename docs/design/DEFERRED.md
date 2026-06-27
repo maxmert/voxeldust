@@ -172,34 +172,57 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   recovery; a starved delivery watermark needs a delivery-path nudge, a distinct mechanism).
 - **Source:** Slice-2a design `wf_9f22c70d` (finding #3); boundary-documented, not silently wedged.
 
-### D-37 🟥 Permanent participant-kill recovery: the forward re-home / abort-on-unreachable producer
-- **Missing:** when a transfer PARTICIPANT is permanently KILLED mid-flight (not crash+resurrect — the fabric's
-  at-least-once recovers that), the saga has no way to recover to a live, consistent owner. The Slice-2a Timeout
-  producer re-drives the lost step toward the DEAD node forever (it cannot tell dead from slow — D-3) and the saga
-  PARKS. Empirically pinned by the P3 Slice-1 crash matrix (`tests/tests/p3_crash_matrix.rs`):
-  - **kill SOURCE in Demoting** (post-commit): the directory committed to the dest; the Demote never acks; the dest
-    stays Ghost. `ParkedHalfOpen{authority_at: DEST}`.
-  - **kill DEST pre-freeze** (the design's "aborts to the live source" claim was REFUTED by the matrix): the dest is
-    NOT in the pre-freeze ack path (Prepared/CutConfirmed/SourceFrozen come from the gateway + source), so killing it
-    does NOT trigger a pre-freeze abort — the saga sails to the orchestrator's LOCAL commit-CAS (commits to the dest
-    regardless of liveness) and PARKS in Promoting (the dead dest cannot ack PromoteAck). `ParkedHalfOpen{DEST}`.
-    **Consequence: there is NO clean permanent-kill-to-LIVE-source cell** — killing the source/gateway makes THEM
-    dead (a `DeadOwnerOrphan`); the abort-to-live-source end state is reached only by a NON-kill abort (a spatial
-    rejection / a transient-fault pre-freeze timeout that leaves the source alive — P3 Slice 1b).
-  - **kill SOURCE pre-freeze** (Freezing): the freeze timeout aborts (`abort_with_thaw`, gateway-acked) + tombstones,
-    but the directory is left at the now-DEAD source (fence-neutral abort — `abort_clear` no longer bumps).
-    `DeadOwnerOrphan{SOURCE}` (a `HeldNowhere`: the dead owner holds nothing, so the fence value is moot here).
-- **Where:** `crates/node/src/saga_runtime.rs` (the `scan_deadlines` producer re-drives toward the dead node; no
-  abort-on-unreachable, no re-home). The harness makes these HONEST today: the dead-node-aware oracle
-  (`FaultFabric::is_dead`, `Topology::inspect_live`/`dead_nodes`, `oracle::verify_authority_unique_excluding`)
-  EXCLUDES the dead node's corpse claim, so a park/orphan surfaces as the true `HeldNowhere`/`RealmHeldNowhere`
-  orphan rather than a false-passing held@dead-node (or a false-RED legit park). It is OBSERVABLE, never silently wedged.
-- **When / proper:** a forward RE-HOME producer (re-drive the entity onto a LIVE shard / abort-to-a-live-owner),
-  gated on **D-3** (lease-lapse liveness — the real dead-vs-slow discriminator) + **D-6** (the durable saga WAL to
-  re-home from). Same root as the D-2 loss-of-autonomous-recovery + the killed-source-mid-Demoting case D-2 already
-  named as P3/Slice-2 scope. The orchestrator-crash row of the crash matrix is separately gated on D-6.
-- **Source:** P3 Slice-1 design `wf_540e3497` + the empirical crash matrix (which refuted the design's clean-abort
-  claim for kill-DEST-pre-freeze).
+### D-37 🟧 Permanent participant-kill recovery: ENTITY forward re-home LANDED (CELL 1 + CELL 2); CELL 3 standing re-home + Realm/Ship re-home owed (design wf_6efc70f1)
+- **✅ LANDED (Slices 0/1/2a/2b/2c, all gate-green 100% Tier-A region+branch; gated on D-3 + D-6, both landed):**
+  the FENCED FORWARD RE-HOME machinery — when a transfer PARTICIPANT is permanently KILLED mid-flight, the
+  orchestrator confirms it dead (D-3 `is_confirmed_dead`) and recovers the ENTITY to a LIVE owner instead of
+  re-driving toward a corpse forever. The fence-monotone invariant is load-bearing: every re-home commits at
+  `fence+1` through the ONE commit point (`commit_cas`), so a resurrected dead owner is strictly stale.
+  - **Slice 0 (f49cdda) CELL 1 — kill SOURCE in Demoting (post-commit):** the dest is the already-committed owner;
+    `(Demoting, SourceUnreachable) → Promoting` SELF-PROMOTES it (`scan_deadlines` injects SourceUnreachable once
+    the source is confirmed dead). End state `EntityRecoveredRealmOrphaned{entity_at: DEST}` (was `ParkedHalfOpen`).
+  - **Slice 1 (8a95899):** `ShardProfile::satisfies` (capability match, HR3) + `select_rehome_target` (lowest LIVE
+    capable shard, deterministic BTreeMap tie-break).
+  - **Slice 2a (f71cafb):** the DEDICATED `InterShardFlow::ReHome(ReHomeCmd)` arm + `ReHomeState::PoseOnly` payload
+    + `RE_HOME_STEP` + effect_class (user decision: a proper new arm, NOT a `Promote` reuse).
+  - **Slice 2b (be0170a):** the re-home FSM (`S::ReHoming` + `ReHomeTo` event + `ReHomeCommit`/`ReHomeAdopt` actions
+    + arms; `CasLost` → clean Aborted no-op) + the executor (commit_cas re-pointed at the target; emit the ReHome
+    adopt from the flushed pose).
+  - **Slice 2c (<2c commit>) CELL 2 — kill DEST pre-freeze:** the saga commits to the dead dest then FORWARD
+    re-homes — `rehome_event_for`'s `Promoting` branch (gated on the CURRENT directory owner's liveness, NOT the
+    stale `ctx.dest`, so it fires AT MOST once per owner-death — the fence never runs away) + `select_rehome_target`
+    + the roster (`SagaRuntimeRes.roster` from `OrchestratorConfig.roster`; the cluster maps stubs → empty profile)
+    + the stub `on_re_home` adopt (CREATES an Owned dot from the pose at a FRESH target — no ghost to flip). End
+    state `EntityRecoveredRealmOrphaned{entity_at: SHARD}` (DEST dead ⇒ SHARD the lowest live shard).
+- **Still RED (owed): kill SOURCE pre-freeze (Freezing) → `DeadOwnerOrphan{SOURCE}`** — the freeze timeout aborts
+  (`abort_with_thaw`, gateway-acked, fence-neutral `abort_clear`) + tombstones, leaving the directory at the now-DEAD
+  source with NO live saga. Recovery is the STANDING reaper-driven re-home (**Slice 3**): the reaper enqueues a
+  `PendingReHome` for a confirmed-dead + lapsed + unlocked Realm/Entity key (its D-37 boundary today LEAVES them) and
+  a fresh re-home saga drives it to a live target. The dead-aware oracle surfaces this honestly today
+  (`oracle::verify_authority_unique_excluding` excludes the corpse → the true `HeldNowhere`, never a false pass).
+- **Still owed (Slice 4):** generalize the re-home from Entity to **Realm/Ship** keys (ships/stations/cities are
+  Realms — PLAN.md:82,141) with `ReHomeState::PoseOnly` as the P7 state-reload seam; G-IDENTICAL on ≥2 ShardProfiles;
+  flip the cured cells to `SettledAt` once the dead owner's REALM also re-homes (the `RealmHeldNowhere` residual the
+  `EntityRecoveredRealmOrphaned` intermediate honestly surfaces).
+- **Deferred sub-items (accepted user-decided scope, 2c-UNREACHABLE today, recorded so the green gate is honest):**
+  - **The live-resurrected-stale-held RESURRECT test:** the harness CANNOT resurrect a killed node IN-PLACE
+    (`FaultFabric::kill` sets killed+crashed; `reregister` drops the old World → empty Dots, no stale claim survives).
+    A true resurrect-after-rehome test needs NEW harness Dot-seeding support. 2c ships the dead-aware-oracle
+    fence-monotone proof instead (the re-home moves authority uniquely past the corpse's fence).
+  - **The stub ENTITY-head self-fence twin:** `self_fence_lapsed_realm` (`stub.rs`) is REALM-keyed only; there is NO
+    periodic entity-head self-fence on a held Owned dot whose `Entity` directory head advanced past its held fence.
+    2c-UNREACHABLE (it requires the in-place resurrection the harness lacks; the dead-aware oracle excludes the
+    corpse), so a sound deferral — the `re_home_without_realm` path is where the entity-head twin would attach.
+  - **The PROD roster is EMPTY:** `crates/bins/src/bin/orchestrator.rs` leaves `OrchestratorConfig.roster` empty (no
+    per-shard-profile config knob wired — no-unilateral-deps; P3 is harness-driven). A prod re-home PARKS
+    (`select_rehome_target` → None) until that config lands. The in-process cluster builds its own roster, so the
+    crash-matrix proof is unaffected.
+  - **The D-36 starved-watermark park after re-home:** the re-homed entity at a fresh target has no gateway sub
+    delivering frames, so `DeliveredToObservers` may starve and the saga parks in `Promoting` (never Done). The entity
+    IS recovered (directory + held-set), so the cell end-state holds; the client-input re-route to the new target is
+    the connection-plane refinement owed with the ResumeTicket adoption ([[D-36]]).
+- **Source:** design `wf_6efc70f1` (judge-panel) + the empirical crash matrix; review `wf_688a65d9` (DONE_NO_CRITICAL
+  on the code; this ledger sync closes its HIGH ledger-honesty findings).
 
 ### D-38 🟧 HR4's literal G-IDENTICAL gate (ONE fixture, ≥2 shard kinds) is unbuilt — only the capability-DAG FOUNDATION landed
 - **LANDED (the foundation):** `crates/sim/src/capability.rs` has the validated `ShardProfile` capability DAG (private

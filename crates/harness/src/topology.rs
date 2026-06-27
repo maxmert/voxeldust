@@ -985,6 +985,7 @@ mod tests {
                 },
                 saga: vd_sim::saga::SagaTuning::default(),
                 liveness: vd_sim::saga::LivenessTuning::default(),
+                roster: std::collections::BTreeMap::new(),
             },
         );
         topo.add_node(Box::new(orch));

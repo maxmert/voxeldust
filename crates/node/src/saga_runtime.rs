@@ -47,6 +47,7 @@ use vd_core::{BatchId, EpochId, Fence, NodeId, TransferId, UniverseTick};
 use vd_sim::directory::{DirectoryCore, DirectoryTuning};
 use vd_sim::io::{Bytes, Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
+use vd_sim::capability::{CapRequest, ShardProfile};
 use vd_sim::saga::{
     self, AbortReason, LivenessTuning, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning,
 };
@@ -343,6 +344,12 @@ pub struct SagaRuntimeRes {
     /// tracker, which is the PRIMARY freeze: an empty tracker confirms nobody dead until fresh notices
     /// re-accrue). 0 at genesis (a fresh orchestrator has no stale leases to reap, so no freeze needed).
     liveness_quiesced_until: UniverseTick,
+    /// D-37 forward re-home target roster: `NodeId → ShardProfile` for the shards a re-home may land on,
+    /// set from `OrchestratorConfig.roster` (the cluster builder maps each stub shard to the empty
+    /// profile). RAM-only operational config (rebuilt on rehydrate, like `liveness`/`clock_peers`).
+    /// `select_rehome_target` reads it for the lowest LIVE capability-matched shard; an EMPTY roster
+    /// (`Default`) ⇒ no target ⇒ the saga stays parked (honest), which every legacy rig expects.
+    roster: BTreeMap<NodeId, ShardProfile>,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -391,6 +398,13 @@ impl SagaRuntimeRes {
     /// short blip stays below the threshold). Prod configures it via [`with_tunings`] / `OrchestratorConfig`.
     pub fn set_liveness_tuning(&mut self, liveness: LivenessTuning) {
         self.liveness.set_tuning(liveness);
+    }
+
+    /// Seed the D-37 re-home target roster (set in `register_orchestrator` from `OrchestratorConfig.roster`,
+    /// re-seeded on rehydrate). A test rig calls this to make a re-home target available; the default
+    /// (empty) roster makes `select_rehome_target` return `None` (the saga parks — honest).
+    pub fn set_roster(&mut self, roster: BTreeMap<NodeId, ShardProfile>) {
+        self.roster = roster;
     }
 
     /// Trigger a new transfer (create-on-trigger). `ctx.subject` MUST already be a directory
@@ -1186,6 +1200,7 @@ fn deadline_for(state: &SagaState, tuning: &SagaTuning) -> u64 {
 /// measured from `dead_observed_since` (the CSCALE-1 cure — a recoverable blip that clears in time never
 /// resolves a healthy dest); `dead_observed_since` is the per-saga budget anchor, NOT `since` (which
 /// re-armed to `now`), so the budget accrues across re-drives rather than resetting every fire.
+#[allow(clippy::too_many_arguments)] // the dead-aware decision needs the full saga + liveness + roster context
 fn rehome_event_for(
     state: &SagaState,
     ctx: &SagaCtx,
@@ -1193,6 +1208,9 @@ fn rehome_event_for(
     dead_observed_since: &mut Option<UniverseTick>,
     tuning: &SagaTuning,
     now: UniverseTick,
+    roster: &BTreeMap<NodeId, ShardProfile>,
+    req: &CapRequest,
+    subject_owner: NodeId,
 ) -> SagaEvent {
     match state {
         // D-7d transient batch hand-off: source-dead self-promotes the dest, dest-dead abandons the
@@ -1224,8 +1242,39 @@ fn rehome_event_for(
                 SagaEvent::Timeout
             }
         }
-        // Every other phase (pre-commit + the forward-only Swapping/Promoting/Releasing tail) → the
-        // idempotent Timeout re-drive. D-37 Slice 2 adds the `Promoting` dest-dead forward-re-home arm here.
+        // D-37 CELL 2: a POST-commit `Promoting` saga whose committed DEST is confirmed dead FORWARD
+        // re-homes onto a live capability-matched target — the dead dest can never `PromoteAck`, and
+        // (unlike CELL 1's Demoting source-death) there is no already-committed live owner to self-promote
+        // (the dest IS the committed owner). DESTRUCTIVE-budget gated exactly like the BatchHandoff dest-dead
+        // ladder (the CSCALE-1 cure: `dead_observed_since` so a recoverable blip that clears in time never
+        // re-homes a healthy dest). Once past budget, `select_rehome_target` picks the lowest live shard
+        // satisfying the subject's caps (`req` — empty for a P3 bare-point Entity, the D-31 KindDef seam):
+        // Some(target) ⇒ `ReHomeTo` (the FSM bumps the fence to `target`); None (no capable live shard —
+        // whole-pool death) ⇒ `Timeout`, the saga stays PARKED (honest RED, never a forced incapable re-home).
+        //
+        // ⚠️ The liveness check is on `subject_owner` — the CURRENT directory owner — NOT `ctx.dest` (the
+        // original, now-stale dest). After ONE re-home the directory names the LIVE target, so a later fire
+        // sees a LIVE owner ⇒ no re-home ⇒ the fence does NOT run away (the saga then merely re-drives /
+        // parks on the D-36 starved watermark, owed). Checking `ctx.dest` would re-home EVERY fire (it stays
+        // dead forever), bumping the fence past the journal-gated adopt into a FenceMismatch.
+        SagaState::Promoting { .. } => {
+            if liveness.is_confirmed_dead(subject_owner, now) {
+                let observed = *dead_observed_since.get_or_insert(now);
+                if now.0.saturating_sub(observed.0) >= tuning.abort_deadline_ticks {
+                    match select_rehome_target(req, roster, liveness, now) {
+                        Some(target) => SagaEvent::ReHomeTo { target },
+                        None => SagaEvent::Timeout, // no capable live target → stay parked
+                    }
+                } else {
+                    SagaEvent::Timeout // cheap re-drive while the abort budget accrues (dead dest won't ack)
+                }
+            } else {
+                *dead_observed_since = None; // dest healthy/recovered → clear stale budget, re-drive
+                SagaEvent::Timeout
+            }
+        }
+        // Every other phase (pre-commit + the forward-only Swapping/Releasing tail + the transient ReHoming
+        // CAS-in-flight) → the idempotent Timeout re-drive.
         _ => SagaEvent::Timeout,
     }
 }
@@ -1239,11 +1288,9 @@ fn rehome_event_for(
 /// node). Bitwise `&` (HR5, no short-circuit branch gap): both predicates are evaluated for every
 /// candidate (`satisfies` on a dead node is harmless). For a P3 bare-point entity `req` is empty, so the
 /// selection degenerates to "the lowest live shard"; the capability match future-proofs ship/voxel realms.
-// Wired into the standing re-home producer in Slice 2/3 (the consumer of the roster); fully unit-tested now.
-#[allow(dead_code)]
 fn select_rehome_target(
-    req: &vd_sim::capability::CapRequest,
-    roster: &std::collections::BTreeMap<NodeId, vd_sim::capability::ShardProfile>,
+    req: &CapRequest,
+    roster: &BTreeMap<NodeId, ShardProfile>,
     liveness: &LivenessTracker,
     now: UniverseTick,
 ) -> Option<NodeId> {
@@ -1268,15 +1315,28 @@ fn scan_deadlines(
     now: UniverseTick,
 ) {
     let tuning = runtime.tuning;
+    // Bound the re-home inputs ONCE outside the loop (BTreeMap is not Copy → shared ref; `req` is the
+    // subject's required caps — empty for a P3 bare-point Entity, the D-31 KindDef seam, one home no
+    // inline). `&runtime.roster` is a sound disjoint partial borrow alongside `runtime.sagas.iter_mut()`,
+    // exactly like `&runtime.liveness` below.
+    let roster = &runtime.roster;
+    let req = CapRequest::default();
     let mut due: Vec<(TransferId, SagaEvent)> = Vec::new();
     for (transfer, live) in runtime.sagas.iter_mut() {
         if now.0.saturating_sub(live.since.0) >= deadline_for(&live.state, &tuning) {
             live.since = now; // re-arm BEFORE delivery — one fire per window, never a per-tick storm
+            // The CURRENT directory owner of the subject (the re-home liveness check keys on THIS, not the
+            // stale `ctx.dest`, so a re-home fires AT MOST once — the next fire sees the live target). The
+            // `ctx.dest` fallback covers a (transient) subject with no directory record. `dir.head` is a
+            // shared reborrow disjoint from `runtime.sagas.iter_mut()` (dir is a separate param).
+            let subject_owner = dir
+                .head(live.ctx.subject)
+                .map_or(live.ctx.dest, |r| r.authority.node());
             // The dead-aware deadline event: a re-drive toward a CONFIRMED-DEAD participant becomes a
             // RESOLUTION instead of looping at a corpse forever. ALL branching lives in the monomorphic
             // `rehome_event_for` helper (see its doc) so this scan stays a branchless dispatch (HR5). The
-            // borrows are disjoint: `liveness` is a field of `runtime` disjoint from `sagas` (a sound
-            // partial borrow), and `state`/`ctx`/`dead_observed_since` are disjoint fields of `live`.
+            // borrows are disjoint: `liveness`/`roster` are fields of `runtime` disjoint from `sagas` (a
+            // sound partial borrow), and `state`/`ctx`/`dead_observed_since` are disjoint fields of `live`.
             let event = rehome_event_for(
                 &live.state,
                 &live.ctx,
@@ -1284,6 +1344,9 @@ fn scan_deadlines(
                 &mut live.dead_observed_since,
                 &tuning,
                 now,
+                roster,
+                &req,
+                subject_owner,
             );
             due.push((*transfer, event));
         }
@@ -1711,6 +1774,7 @@ mod tests {
             },
             saga: SagaTuning::default(),
             liveness: LivenessTuning::default(),
+            roster: BTreeMap::new(),
         }
     }
 
@@ -3213,6 +3277,49 @@ mod tests {
             Some(NodeId(3)),
             "an empty bare-point req is satisfied by a live stub shard"
         );
+    }
+
+    #[test]
+    fn rehome_event_for_promoting_dead_dest_rehomes_past_budget_else_redrives() {
+        // D-37 CELL 2 producer — the 4 corners of the Promoting-dead-dest branch (HR5: all covered here in
+        // the monomorphic helper). ctx: source=SOURCE(2), dest=DEST(3). abort_deadline=24 (SagaTuning::default).
+        let tuning = SagaTuning::default();
+        let c = ctx(DurabilityClass::Durable, Fence(1));
+        let promoting = SagaState::Promoting {
+            new_fence: Fence(2),
+            promote_acked: false,
+            dest_delivered: false,
+        };
+        let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
+        let roster: BTreeMap<NodeId, ShardProfile> = [(NodeId(9), empty)].into_iter().collect();
+        let req = CapRequest::default();
+        let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1
+
+        // (i) dest HEALTHY (not confirmed dead) → Timeout, and a stale budget is cleared.
+        let mut dos = Some(UniverseTick(5));
+        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(30), &roster, &req, DEST);
+        assert_eq!(ev, SagaEvent::Timeout);
+        assert_eq!(dos, None, "a healthy dest clears the stale abort budget");
+
+        // Confirm DEST dead (n == 1 → one notice confirms).
+        liveness.record_unreachable(DEST, UniverseTick(0));
+        // (ii) dest DEAD but WITHIN the abort budget → cheap Timeout re-drive (budget anchored at first fire).
+        let mut dos = None;
+        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(0), &roster, &req, DEST);
+        assert_eq!(ev, SagaEvent::Timeout);
+        assert_eq!(dos, Some(UniverseTick(0)), "the abort budget anchors on the first dead observation");
+        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(10), &roster, &req, DEST);
+        assert_eq!(ev, SagaEvent::Timeout, "still within the 24-tick budget at tick 10");
+
+        // (iii) dest DEAD, PAST budget, a capable LIVE target exists → ReHomeTo{target}.
+        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &roster, &req, DEST);
+        assert_eq!(ev, SagaEvent::ReHomeTo { target: NodeId(9) }, "past budget → forward re-home to the live target");
+
+        // (iv) dest DEAD, PAST budget, NO capable live target (empty roster) → Timeout (stay PARKED, honest).
+        let empty_roster: BTreeMap<NodeId, ShardProfile> = BTreeMap::new();
+        let mut dos = Some(UniverseTick(0));
+        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &empty_roster, &req, DEST);
+        assert_eq!(ev, SagaEvent::Timeout, "no capable live target → the saga stays parked (honest)");
     }
 
     #[test]

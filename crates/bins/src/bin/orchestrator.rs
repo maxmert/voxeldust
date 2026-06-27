@@ -122,6 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             directory,
             saga,
             liveness,
+            // D-37: EMPTY in prod for now (ledgered DEFERRED.md D-37) — a re-home parks until the
+            // per-shard-profile roster config lands (P3 is harness-driven; the cluster builder wires its
+            // own roster from the shard list). No env knob added yet (no-unilateral-deps).
+            roster: std::collections::BTreeMap::new(),
         },
     );
 

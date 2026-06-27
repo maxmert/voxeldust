@@ -28,10 +28,10 @@ use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
-    DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd,
-    STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP,
-    TRANSIENT_COMPLETE_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck,
-    TransferEnvelope, TransientHandoff, TransientItem, TransitionPayload,
+    DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP,
+    ReHomeCmd, ReHomeState, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP,
+    TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
+    TransferAck, TransferEnvelope, TransientHandoff, TransientItem, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -473,6 +473,19 @@ pub struct StubStats {
     /// the Promote) — DROPPED as a counted no-op (degrade, never panic), the saga re-drives. 0 in P2
     /// (no realm-revoke producer); reachable only at P8/P10 realm mobility (the re-drive is owed).
     pub promote_without_realm: u64,
+    /// D-37 forward re-home ADOPTS: a `ReHome` CREATED an Owned dot at the target from `ReHomeState`
+    /// (no pre-existing ghost — the target is fresh, unlike a `Promote` flip). `> 0` proves CELL-2
+    /// recovery actually adopted the re-homed entity.
+    pub re_home_adopted: u64,
+    /// `ReHome` REDELIVERIES (already-journaled `(transfer, RE_HOME_STEP)`) — a counted re-ack-only no-op
+    /// (at-least-once). 0 in a healthy single-delivery run.
+    pub re_home_redelivered: u64,
+    /// `ReHome` for a non-Entity subject (no `transfer_subject_entity`) — a counted no-op (still acks).
+    /// 0 in P3 (CELL-2 re-homes an Entity); reachable when Realm/Ship re-home lands (Slice 4).
+    pub re_home_no_entity: u64,
+    /// `ReHome` that arrived while this target does NOT hold its realm — DROPPED as a counted no-op
+    /// (degrade, never panic; the re-home target normally holds its realm, committed by the orchestrator).
+    pub re_home_without_realm: u64,
     /// SOURCE `GhostFlow::Delta` (1d.5b.3b) APPLIED — the fed pose + `GhostRefresh` written into the
     /// retained ghost dot. The headline ghost-feed counter.
     pub ghost_delta_applied: u64,
@@ -1477,6 +1490,105 @@ fn promote_apply(
     );
 }
 
+/// D-37 forward re-home ADOPT (the journal-gate + UNCONDITIONAL-ack shell, modelled on `on_saga_promote`).
+/// The fresh target RECEIVES a `ReHome` after the orchestrator re-homed a permanently-killed owner's
+/// committed entity here; it CREATES the entity as an Owned dot from the carried pose (no pre-existing
+/// ghost to flip — unlike `Promote`'s `Ghost→Owned`). Acks `PromoteAck` UNCONDITIONALLY (outside the
+/// journal gate) — the saga's `Promoting` release gate needs the ack even on a redelivery, else it wedges.
+#[allow(clippy::too_many_arguments)]
+fn on_re_home(
+    cmd: ReHomeCmd,
+    config: &StubConfig,
+    clock: &ClockSample,
+    dots: &mut Dots,
+    applied: &mut AppliedSteps,
+    registration: &mut GhostColliderRegistration,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let transfer = cmd.transfer; // `ReHomeCmd` is Clone-not-Copy (the pose payload) — capture before the move
+    match applied.journal_step(transfer, RE_HOME_STEP) {
+        StepOutcome::FirstApply => re_home_apply(cmd, config, clock, dots, registration, stats, outbox),
+        StepOutcome::AlreadyApplied => stats.re_home_redelivered += 1,
+    }
+    outbox.push_flow(
+        config.orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::SagaAck(TransferControlAck::PromoteAck { transfer }),
+    );
+}
+
+/// The D-37 re-home effect (monomorphic so every branch is covered ONCE here — HR5). DIVERGES from
+/// `promote_apply` by CONSTRUCTING an Owned dot from the payload pose rather than flipping a ghost: the
+/// re-home target is FRESH (the killed dest never replicated a ghost here). A non-Entity subject is a
+/// counted no-op (`re_home_no_entity`). The created dot is clientless (no session route — the client
+/// re-subscribes via the D-37/D-36 connection-plane path, owed): `AccountId(0)` + the orchestrator as an
+/// inert reply sentinel, `granted` so it simulates + emits frames, born `Owned` at `cmd.new_fence`.
+fn re_home_apply(
+    cmd: ReHomeCmd,
+    config: &StubConfig,
+    clock: &ClockSample,
+    dots: &mut Dots,
+    registration: &mut GhostColliderRegistration,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let Some(entity) = cmd.subject.transfer_subject_entity() else {
+        stats.re_home_no_entity += 1;
+        return;
+    };
+    // Never trust the network: sanitize the carried pose to finite at this ingress. (P7 grows
+    // `ReHomeState::Snapshot` — this `let` becomes a `match` whose new arm needs its own coverage. TODO.)
+    let ReHomeState::PoseOnly(raw) = cmd.state;
+    let pose = raw.sanitized();
+    // Deterministic clientless session key (entity id ↦ session) so seed-replay stays byte-identical and
+    // the oracle held-set sees exactly one Owned dot for this entity.
+    let session = SessionId(entity.0);
+    dots.0.insert(
+        session,
+        Dot {
+            entity,
+            account: AccountId(0), // orphan: no client account until the session re-homes (D-37/D-36)
+            session_fence: Fence::GENESIS,
+            gateway: config.orchestrator, // inert reply sentinel — push_session_reply is never called here
+            granted: true,
+            input_active: false,
+            adopting: false,
+            authority: Authority::Owned {
+                fence: cmd.new_fence,
+            },
+            departing: false,
+            entity_fence: cmd.new_fence,
+            pose,
+            yaw: 0.0,
+            pitch: 0.0,
+            last_applied_seq: None,
+        },
+    );
+    stats.re_home_adopted += 1;
+    // Register the (re-home) source as a ghost-neighbor + SPAWN its ghost — the target (owner) now drives
+    // the GhostFlow collider feed to it, exactly as `promote_apply` does. A Spawn to a possibly-dead
+    // source is harmless FireAndForget (HR1: the shard cannot see the liveness set — never special-case it).
+    registration.0.insert(
+        entity,
+        GhostNeighbor {
+            source: cmd.source,
+            seq: 0,
+            anchor: pose.pos,
+        },
+    );
+    outbox.push_flow(
+        cmd.source,
+        MsgClass::GhostReliable,
+        &InterShardFlow::Ghost(GhostFlow::Spawn {
+            entity,
+            pose,
+            source_fence: cmd.new_fence,
+            since_tick: clock.local_tick,
+        }),
+    );
+}
+
 /// Refresh a hosted ghost dot from a fed pose (1d.5b.3b): write the (sanitized) pose INTO `dot.pose`
 /// and advance the kinematic mirror via `AuthorityCmd::GhostRefresh` (fence-monotone; a stale
 /// `source_fence` is refused). FG-2: the dot IS the single authority/pose truth — this is the only
@@ -2308,6 +2420,17 @@ fn on_directory_reply(
                 stats,
                 outbox,
             );
+            return;
+        }
+        // D-37 forward re-home ADOPT (the target creates the entity Owned from the carried pose). The
+        // realm guard mirrors Promote (the re-home target is committed by the orchestrator CAS so it
+        // normally holds its realm; the guard is a counted degrade-never-panic no-op, never an unwrap).
+        Ok(InterShardFlow::ReHome(cmd)) => {
+            let Some(_realm_fence) = authority.0 else {
+                stats.re_home_without_realm += 1;
+                return;
+            };
+            on_re_home(cmd, config, clock, dots, applied, registration, stats, outbox);
             return;
         }
         Ok(_) => return,
@@ -5176,6 +5299,106 @@ mod tests {
     }
 
     #[test]
+    fn on_re_home_creates_an_owned_dot_from_the_pose_acks_and_spawns_the_ghost() {
+        // D-37 CELL 2 adopt: the FRESH target receives a `ReHome` and CREATES an Owned dot from the pose
+        // (no pre-existing ghost to flip, unlike Promote). Acks PromoteAck, registers + Spawns the source
+        // ghost, but emits NO SubscriptionReady (clientless until the session re-homes — D-37/D-36).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.set_local_tick(5); // pins the Spawn's since_tick deterministically
+        let source = NodeId(99);
+        let session = SessionId(SUBJECT.0); // the deterministic clientless session key
+        let sent = rig.tick(vec![re_home_msg(Fence(2), source, DirectoryKey::Entity(SUBJECT))]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&session].authority,
+            Authority::Owned { fence: Fence(2) },
+            "the re-home CREATES an Owned dot born at the new fence"
+        );
+        assert_eq!(rig.world.resource::<Dots>().0[&session].entity, SUBJECT);
+        assert_eq!(rig.world.resource::<StubStats>().re_home_adopted, 1);
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::PromoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "PromoteAck is sent: {sent:?}"
+        );
+        assert!(
+            gw_replies(&sent).is_empty(),
+            "a clientless re-home announces NO SubscriptionReady"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<GhostColliderRegistration>()
+                .0
+                .get(&SUBJECT)
+                .map(|n| n.source),
+            Some(source),
+            "the source ghost-neighbor is registered"
+        );
+        assert!(
+            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Spawn {
+                entity: SUBJECT,
+                pose: crossing_pose().sanitized(),
+                source_fence: Fence(2),
+                since_tick: vd_core::TickId(5),
+            })),
+            "the source ghost is Spawned at the re-homed pose + the new fence: {sent:?}"
+        );
+
+        // Redelivery: re-ack only, NO re-adopt (journal AlreadyApplied ⇒ re_home_apply not entered).
+        let sent = rig.tick(vec![re_home_msg(Fence(2), source, DirectoryKey::Entity(SUBJECT))]);
+        assert_eq!(rig.world.resource::<StubStats>().re_home_redelivered, 1);
+        assert_eq!(
+            rig.world.resource::<StubStats>().re_home_adopted,
+            1,
+            "no re-adopt on redelivery (re_home_apply gated on FirstApply)"
+        );
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(7)
+            }
+        ));
+    }
+
+    #[test]
+    fn on_re_home_no_ops_for_a_non_entity_subject_or_a_target_without_its_realm() {
+        // re_home_apply BAILS (still acks) on a non-Entity subject; the dispatch BAILS (no adopt) when the
+        // target does not hold its realm — both counted degrade-never-panic no-ops.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let sent = rig.tick(vec![re_home_msg(
+            Fence(2),
+            NodeId(99),
+            DirectoryKey::Realm(config().realm),
+        )]);
+        assert_eq!(rig.world.resource::<StubStats>().re_home_no_entity, 1);
+        assert_eq!(rig.world.resource::<StubStats>().re_home_adopted, 0);
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::PromoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "a non-Entity re-home still acks (never wedges the saga)"
+        );
+
+        // A re-home delivered while the target does NOT hold its realm (no grant_realm) → no adopt.
+        let mut rig2 = Rig::new();
+        let _ = rig2.tick(vec![re_home_msg(
+            Fence(2),
+            NodeId(99),
+            DirectoryKey::Entity(SUBJECT),
+        )]);
+        assert_eq!(rig2.world.resource::<StubStats>().re_home_without_realm, 1);
+        assert_eq!(rig2.world.resource::<StubStats>().re_home_adopted, 0);
+    }
+
+    #[test]
     fn the_dest_feed_pass_streams_monotone_deltas_and_skips_unowned_registrations() {
         // 1d.5b.3b: feed_source_ghosts streams GhostFlow::Delta to each registered neighbor whose
         // entity is OWNED here, with a MONOTONE seq; a registration with no Owned dot is skipped.
@@ -5823,6 +6046,21 @@ mod tests {
                 subject: DirectoryKey::Entity(SUBJECT),
                 new_fence,
                 step_id: PROMOTE_STEP,
+                source,
+            }),
+        )
+    }
+
+    fn re_home_msg(new_fence: Fence, source: NodeId, subject: DirectoryKey) -> Inbound {
+        wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::ReHome(ReHomeCmd {
+                transfer: TransferId(7),
+                subject,
+                new_fence,
+                step_id: RE_HOME_STEP,
+                state: ReHomeState::PoseOnly(crossing_pose()),
                 source,
             }),
         )

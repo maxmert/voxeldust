@@ -4,7 +4,7 @@
 //! Standing rule: every phase ADDS scenarios; nothing is deleted. The accumulated
 //! suite re-running green is the release gate for every later phase.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use vd_connection_plane::gateway::{
     GatewayConfig, GatewayStats, TransportTuning, register_gateway,
 };
@@ -26,7 +26,7 @@ use vd_node::app::{NodeConfig, build_app};
 use vd_node::follower::register_clock_follower;
 use vd_node::orchestrator::{DirectoryRes, OrchestratorConfig, register_orchestrator_with_store};
 use vd_node::saga_runtime::{ActiveTransfer, SagaRuntimeRes};
-use vd_sim::capability::NodeKind;
+use vd_sim::capability::{CapRequest, NodeKind, ShardProfile};
 use vd_sim::directory::DirectoryTuning;
 use vd_sim::io::mem::MemStore;
 use vd_sim::saga::{LivenessTuning, SagaCtx};
@@ -98,7 +98,7 @@ pub fn dest_stub_config() -> StubConfig {
 /// The cluster orchestrator's config (shared by `build_cluster` + the D-6 orchestrator-kill rebuild, so
 /// a rebuilt orchestrator is built IDENTICALLY — same reserve_chunk/tuning → a clean recover).
 #[must_use]
-pub fn orch_config(clock_peers: Vec<NodeId>) -> OrchestratorConfig {
+pub fn orch_config(clock_peers: Vec<NodeId>, roster: BTreeMap<NodeId, ShardProfile>) -> OrchestratorConfig {
     OrchestratorConfig {
         epoch: EpochId(1),
         reserve_chunk: 1024,
@@ -112,7 +112,16 @@ pub fn orch_config(clock_peers: Vec<NodeId>) -> OrchestratorConfig {
         // D-3: kill-equivalent (n == 1) so the existing crash cells confirm a permanent kill on the
         // first NodeUnreachable; the CSCALE-1 flap cells override to n == 3 via set_liveness_tuning.
         liveness: vd_sim::saga::LivenessTuning::default(),
+        // D-37: the re-home target roster (the D-6 rebuild passes the IDENTICAL one → clean recover).
+        roster,
     }
+}
+
+/// D-37: the re-home target roster for a stub cluster — every stub shard maps to the EMPTY profile (a
+/// bare-point P3 shard has no voxel/block caps). `select_rehome_target` picks the lowest LIVE one.
+fn stub_roster(shard_ids: impl IntoIterator<Item = NodeId>) -> BTreeMap<NodeId, ShardProfile> {
+    let empty = ShardProfile::build(CapRequest::default()).expect("empty profile is coherent");
+    shard_ids.into_iter().map(|id| (id, empty)).collect()
 }
 
 fn build_cluster(
@@ -136,10 +145,11 @@ fn build_cluster(
     // D-6: the orchestrator is built against a durable Store. Normal clusters pass a fresh (genesis)
     // `MemStore` (transparent); the D-6 orchestrator-kill driver passes a RETAINED handle so a rebuilt
     // orchestrator re-hydrates the SAME committed WAL.
+    let roster = stub_roster(shards.iter().map(|(id, _)| *id));
     register_orchestrator_with_store(
         world,
         schedule,
-        &orch_config(clock_peers),
+        &orch_config(clock_peers, roster),
         Box::new(orch_store),
     );
     topo.add_node(Box::new(orch));
@@ -1211,7 +1221,9 @@ pub fn rebuild_orchestrator(topo: &mut Topology, fabric: &FaultFabric, store: Me
     register_orchestrator_with_store(
         world,
         schedule,
-        &orch_config(vec![GATEWAY, SHARD, DEST]),
+        // D-6 rebuild: the IDENTICAL roster the original cluster used ({SHARD, DEST} stub shards) so the
+        // rebuilt orchestrator recovers to the same re-home config (a clean recover).
+        &orch_config(vec![GATEWAY, SHARD, DEST], stub_roster([SHARD, DEST])),
         Box::new(store),
     );
     topo.replace_node(Box::new(orch));

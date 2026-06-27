@@ -35,6 +35,11 @@ pub struct OrchestratorConfig {
     /// confirms a healthy peer dead); in-process rigs use `LivenessTuning::default()` (kill-equivalent
     /// `n == 1`, so the existing crash cells keep their behavior).
     pub liveness: vd_sim::saga::LivenessTuning,
+    /// D-37 forward re-home target roster: `NodeId → ShardProfile` for the shards a re-home may land on.
+    /// The cluster builder maps each stub shard to the empty profile; the prod bin leaves it EMPTY for
+    /// now (ledgered — prod re-home parks until the per-shard-profile roster config lands; P3 is
+    /// harness-driven). An empty roster ⇒ `select_rehome_target` returns `None` ⇒ the saga stays parked.
+    pub roster: std::collections::BTreeMap<NodeId, vd_sim::capability::ShardProfile>,
 }
 
 /// The directory, resource-wrapped (single writer: this node's schedule).
@@ -82,7 +87,7 @@ pub fn register_orchestrator_with_store(
     cfg: &OrchestratorConfig,
     store: Box<dyn Store + Send + Sync>,
 ) {
-    let (clock, directory, runtime) = match crate::saga_runtime::rehydrate(
+    let (clock, directory, mut runtime) = match crate::saga_runtime::rehydrate(
         store.as_ref(),
         cfg.reserve_chunk,
         cfg.saga,
@@ -106,6 +111,9 @@ pub fn register_orchestrator_with_store(
             )
         }
     };
+    // D-37: seed the re-home target roster (RAM-only operational config — re-seeded on recover too, like
+    // clock_peers; the dead-vs-slow tracker rebuilds empty but its config survives). Single-point wiring.
+    runtime.set_roster(cfg.roster.clone());
     world.insert_resource(UniverseClockRes(clock));
     world.insert_resource(DirectoryRes(directory));
     world.insert_resource(ClockPeers(cfg.clock_peers.clone()));
@@ -328,6 +336,7 @@ mod tests {
             },
             saga: vd_sim::saga::SagaTuning::default(),
             liveness: vd_sim::saga::LivenessTuning::default(),
+            roster: std::collections::BTreeMap::new(),
         }
     }
 

@@ -84,17 +84,19 @@ fn p3_crash_resurrect_dest_in_promoting_recovers_and_commits() {
     assert_end_state(&mut topo, entity, &dead, EndState::SettledAt(DEST));
 }
 
-/// DEFERRED D-37 (honest RED) — the EMPIRICAL correction to the design's "kill-DEST-pre-freeze aborts
-/// to the live source" claim, which the matrix REFUTED: the dest is NOT in the pre-freeze ack path
-/// (Prepared/CutConfirmed/SourceFrozen come from the GATEWAY + SOURCE), so killing it pre-freeze does
-/// NOT trigger a pre-freeze abort. The saga sails through to the orchestrator's LOCAL commit-CAS
-/// (which commits to the dest regardless of its liveness), then PARKS in Promoting — the dead dest can
-/// never ack PromoteAck. So the directory committed to a dead dest = `ParkedHalfOpen{DEST}`. There is
-/// NO clean permanent-kill-to-LIVE-source cell (killing the source/gateway makes THEM dead); the
-/// abort-to-live-source path is a NON-kill abort (a spatial rejection / a transient-fault pre-freeze
-/// timeout, P3 Slice 1b). The dead-aware oracle surfaces this honestly; the forward re-home is D-37.
+/// D-37 Slice 2c (CELL 2, the FORWARD-re-home cure) — the matrix REFUTED the design's "kill-DEST-pre-freeze
+/// aborts to the live source" claim: the dest is NOT in the pre-freeze ack path, so killing it pre-freeze
+/// does NOT trigger a pre-freeze abort. The saga sails to the orchestrator's LOCAL commit-CAS (committing
+/// to the dest regardless of liveness), then would PARK in Promoting — the dead dest can never PromoteAck.
+/// Now the orchestrator confirms the dest dead (D-3) and, past the abort budget, FORWARD re-homes the
+/// committed entity onto a live capability-matched shard (`select_rehome_target` picks the lowest live
+/// shard — here SHARD, since DEST is dead): ReHomeCommit bumps the fence past the dead dest (fence-monotone
+/// — a resurrected corpse would be strictly stale), the live SHARD adopts the entity Owned from the pose.
+/// The ENTITY recovers to SHARD. The dead DEST's REALM stays orphaned (the standing realm re-home is owed
+/// Slice 3/4), so the cell is `EntityRecoveredRealmOrphaned{entity_at: SHARD}` until Slice 4 flips it to
+/// SettledAt. (Was honest-RED `ParkedHalfOpen{DEST}` before D-37; gated on D-3 + D-6, both landed.)
 #[test]
-fn p3_kill_dest_pre_freeze_commits_to_the_dead_dest_then_parks() {
+fn p3_kill_dest_pre_freeze_forward_rehomes_to_a_live_shard() {
     let (mut topo, entity, dead) = run_fault_scenario(
         SEED,
         Scenario {
@@ -114,7 +116,7 @@ fn p3_kill_dest_pre_freeze_commits_to_the_dead_dest_then_parks() {
         &mut topo,
         entity,
         &dead,
-        EndState::ParkedHalfOpen { authority_at: DEST },
+        EndState::EntityRecoveredRealmOrphaned { entity_at: SHARD },
     );
 }
 
