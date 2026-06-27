@@ -558,6 +558,21 @@ pub fn start(ctx: &SagaCtx) -> (SagaState, Vec<SagaAction>) {
     }
 }
 
+/// D-37 Slice 3: the initial state for a STANDING forward re-home — a saga created OUTSIDE a transfer
+/// (by the reaper) to recover a subject whose committed owner was permanently KILLED (lease lapsed, key
+/// unlocked, no live saga). It ARMS in `ReHoming{target}` (the chosen live capability-matched shard) —
+/// the standing analogue of the in-flight CELL-1/2 re-home — but the CONSERVATIVE Slice-3 split PARKS
+/// here with NO `ReHomeCommit`: a pre-freeze death has NO flushed pose, and the adopt state is
+/// unrecoverable until the RealmId-keyed redb lands (D-6/P7). Slice 4 turns the empty action list into
+/// `vec![ReHomeCommit{expected: prev_fence, target}]` + fills the adopt — committing authority off the
+/// corpse and reconstructing the dot TOGETHER, so authority never names a node that cannot hold the dot.
+/// Branchless (HR5): a standing re-home is always a Durable per-key recovery (transient batches are never
+/// standing-re-homed — they live and die in a single realm), so there is no class fan-out here.
+#[must_use]
+pub fn start_rehome(target: NodeId, prev_fence: Fence) -> (SagaState, Vec<SagaAction>) {
+    (SagaState::ReHoming { target, prev_fence }, vec![])
+}
+
 /// THE transition function. Total over (state, event); unknown combinations are
 /// idempotent no-ops (at-least-once delivery makes duplicates routine, not errors).
 #[must_use]
@@ -2259,6 +2274,23 @@ mod tests {
             vec![SagaAction::Promote {
                 new_fence: Fence(6)
             }]
+        );
+    }
+
+    #[test]
+    fn start_rehome_arms_parked_in_rehoming() {
+        // D-37 Slice 3: the STANDING re-home constructor arms in ReHoming{target, prev_fence} with NO
+        // actions (the CONSERVATIVE split parks — no ReHomeCommit/adopt until Slice 4 reloads the pose from
+        // the RealmId-keyed redb). prev_fence is carried as the future ReHomeCommit CAS expectation.
+        assert_eq!(
+            start_rehome(NodeId(9), Fence(5)),
+            (
+                SagaState::ReHoming {
+                    target: NodeId(9),
+                    prev_fence: Fence(5),
+                },
+                vec![],
+            ),
         );
     }
 

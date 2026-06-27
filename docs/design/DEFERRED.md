@@ -204,12 +204,36 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     `A::ReHomeAdopt → target` (re-read from `flushed_pose`, idempotent at the target) instead of `A::Promote →
     ctx.dest` (the confirmed-dead original dest). So the re-home adopt no longer depends on transport at-least-once —
     `scan_deadlines` drives the re-solicit. Closes the SECOND producer-less phase [[D-6]] precondition 1 named.
-- **Still RED (owed): kill SOURCE pre-freeze (Freezing) → `DeadOwnerOrphan{SOURCE}`** — the freeze timeout aborts
-  (`abort_with_thaw`, gateway-acked, fence-neutral `abort_clear`) + tombstones, leaving the directory at the now-DEAD
-  source with NO live saga. Recovery is the STANDING reaper-driven re-home (**Slice 3**): the reaper enqueues a
-  `PendingReHome` for a confirmed-dead + lapsed + unlocked Realm/Entity key (its D-37 boundary today LEAVES them) and
-  a fresh re-home saga drives it to a live target. The dead-aware oracle surfaces this honestly today
-  (`oracle::verify_authority_unique_excluding` excludes the corpse → the true `HeldNowhere`, never a false pass).
+- **✅ Slice 3a LANDED — the STANDING re-home CONTROL PATH (kill SOURCE pre-freeze, CELL 3):** the freeze timeout
+  aborts (`abort_with_thaw`, gateway-acked, fence-neutral `abort_clear`) + tombstones, leaving the directory at the
+  now-DEAD source, UNLOCKED, with NO live saga. The expiry reaper (`reap_lapsed_leases`) now, on a confirmed-dead +
+  lapsed + UNLOCKED **`Entity`** key, enqueues a `PendingReHome` (RAM within-barrier hand-off; the durable artifacts
+  are the locked record + the armed saga, so a kill-9 in the enqueue→drain window is covered by the reaper
+  re-detecting the still-dead UNLOCKED record on reboot — no new WAL family). `process_rehome_starts` then picks a
+  LIVE capability-matched target (`select_rehome_target`), LOCKS the key (`lock_transfer` — so the next sweep skips
+  it), and ARMS a fresh saga that PARKS in `ReHoming{target}` via `saga::start_rehome`. CONSERVATIVE split: authority
+  STAYS at the dead owner (no CAS), NOTHING is emitted (HR1: no fabricated pose — `flushed_pose: None`). A LOCKED
+  Entity is left to its owning saga; Realm/Ship still LEFT (Slice 4). NO live target (whole-pool death) → the entry
+  DROPS, the reaper retries next sweep (interval-paced, never a forced incapable re-home). The re-home `TransferId` is
+  deterministically derived (FNV over `(subject, prev_fence)`, namespaced `0x37` — never collides with a
+  client/gateway id). Proven by 5 deterministic unit tests (`saga::start_rehome_arms_parked_in_rehoming`;
+  `reap_in_freezing_orphan_enqueues_a_pending_rehome_and_arms_a_parked_saga`; `reaper_leaves_a_locked_dead_entity_*`;
+  `process_rehome_parks_when_no_live_target`; `process_rehome_skips_an_already_locked_key`), 100% Tier-A region+branch.
+- **Owed — Slice 3b (the crash-matrix flip):** wire Slice-3a into the `p3_crash_matrix` CELL-3 cell — a CELL-3-SPECIFIC
+  cluster tuning (non-zero `reaper_interval_ticks` + short `lease_ttl_ticks`; NOT a global change, else other cells
+  spuriously lapse) so the reaper fires in the full kill scenario, plus a quiesce that runs PAST the lease-lapse +
+  reaper sweep (the current `live_sagas == 0` break fires when the abort tombstones, BEFORE the re-home arms). Then
+  flip `p3_kill_source_in_freezing_*` from `DeadOwnerOrphan{SOURCE}` to `ParkedHalfOpen{SOURCE}` (the existing
+  asserter fits: directory at the dead node + a live parked saga + the oracle's `HeldNowhere`). Until 3b, the crash
+  matrix CELL 3 honestly stays `DeadOwnerOrphan` (the cluster reaper is INERT at `interval == 0`, so the Slice-3a
+  machinery does not fire there — accurate, not stale). The dead-aware oracle surfaces the orphan honestly throughout.
+- **Still owed (Slice 4):** generalize the re-home from Entity to **Realm/Ship** keys (ships/stations/cities are
+  Realms — PLAN.md:82,141) — the reaper's Realm/Ship arm + the Realm adopt effect + D-33 N+1 CAS for ships — AND turn
+  `start_rehome`'s empty action list into `ReHomeCommit{expected: prev_fence, target}` (the CAS off the corpse,
+  fence-monotone) + the entity ADOPT via `ReHomeState::Snapshot` (the new owner opens the RealmId-keyed redb made
+  single-writer by the CAS — HR1-clean, never the sealed dead store; D-6/P7); G-IDENTICAL on ≥2 ShardProfiles; flip
+  the cured cells to `SettledAt` once the dead owner's REALM also re-homes (the `RealmHeldNowhere` residual the
+  `EntityRecoveredRealmOrphaned` intermediate honestly surfaces).
 - **Still owed (Slice 4):** generalize the re-home from Entity to **Realm/Ship** keys (ships/stations/cities are
   Realms — PLAN.md:82,141) with `ReHomeState::PoseOnly` as the P7 state-reload seam; G-IDENTICAL on ≥2 ShardProfiles;
   flip the cured cells to `SettledAt` once the dead owner's REALM also re-homes (the `RealmHeldNowhere` residual the

@@ -42,8 +42,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
-use vd_core::pose::StampedPose;
-use vd_core::{BatchId, EpochId, Fence, NodeId, TransferId, UniverseTick};
+use vd_core::pose::{RealmId, StampedPose};
+use vd_core::{BatchId, EpochId, Fence, NodeId, SessionId, TransferId, UniverseTick};
 use vd_sim::directory::{DirectoryCore, DirectoryTuning};
 use vd_sim::io::{Bytes, Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
@@ -193,6 +193,25 @@ struct PendingStart {
     gateway: NodeId,
 }
 
+/// D-37 Slice 3: a STANDING re-home detected by the expiry reaper — an `Entity` key whose committed
+/// owner is confirmed-dead, lease lapsed, and key UNLOCKED (no live saga). Enqueued by
+/// [`reap_lapsed_leases`] and drained the SAME tick by [`process_rehome_starts`] (a within-barrier
+/// hand-off, RAM-only). It is NOT separately WAL'd: the durable artifacts are the locked directory
+/// record + the armed re-home saga (both persisted in the same group-commit barrier); a kill-9 in the
+/// enqueue→drain window loses only this RAM list, and on reboot the reaper re-detects the still-dead,
+/// still-UNLOCKED record (the directory IS the durable trigger) and re-enqueues — idempotent recovery
+/// with no new WAL family. Carries only REAL recoverable values (no fabricated pose — HR1: the dead
+/// owner's store is sealed; the dot reconstruction is owed Slice 4/D-6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingReHome {
+    /// The orphaned `Entity` directory key to recover.
+    subject: DirectoryKey,
+    /// The confirmed-dead committed owner (the re-home `source`/provenance; the CAS expectation owner).
+    dead_owner: NodeId,
+    /// The fence the dead owner was committed at — Slice 4's `ReHomeCommit` CAS expectation (`fence+1`).
+    prev_fence: Fence,
+}
+
 /// D-3 dead-vs-slow EVIDENCE for one peer: how many CONSECUTIVE `NodeUnreachable` notices (no
 /// intervening successful inbound) have been observed toward it, and when the run STARTED — the
 /// abort-budget anchor, PRESERVED across the run (never re-armed per notice, unlike the saga's `since`).
@@ -271,6 +290,11 @@ impl LivenessTracker {
 pub struct SagaRuntimeRes {
     sagas: BTreeMap<TransferId, LiveSaga>,
     pending: Vec<PendingStart>,
+    /// D-37 Slice 3: standing re-homes the reaper detected THIS sweep, drained the same tick by
+    /// [`process_rehome_starts`]. RAM-only (a within-barrier hand-off): see [`PendingReHome`] for why
+    /// no WAL family is needed (the locked record + armed saga are the durable artifacts; the reaper
+    /// re-detects on reboot). Always empty BETWEEN ticks (drained at the end of every barrier).
+    pending_rehome: Vec<PendingReHome>,
     /// Typed client-facing rejections awaiting the surfacing system. BOUNDED ring
     /// (`REJECTION_LEDGER_CAP`): the PROPER consumer — the typed rejection→client channel —
     /// lands at Slice 1c.9 (CPO-4) and drains via `std::mem::take` (lifetime ONE cycle,
@@ -1300,6 +1324,114 @@ fn select_rehome_target(
         .map(|(node, _)| *node)
 }
 
+/// D-37 Slice 3: a DETERMINISTIC, replay-stable `TransferId` for an orchestrator-minted STANDING re-home.
+/// FNV-1a over the postcard bytes of `(subject, prev_fence)` into the low 120 bits, tagged with a fixed
+/// high byte (`0x37`, the D-37 namespace) so it can NEVER collide with a client/gateway-assigned
+/// `TransferId` (those are minted small + sequential in the connection plane, never with this tag). Pure +
+/// branchless (HR5: no rng, no default hasher — the byte-identical seed-replay canary forbids both); the
+/// same orphan + fence always derives the same id, so a re-attempt after a lost RAM enqueue is idempotent.
+/// One orphan re-homes at most once per fence (the `in_transfer` lock dedups), so per-`(subject, fence)`
+/// uniqueness suffices.
+fn rehome_transfer_id(subject: DirectoryKey, prev_fence: Fence) -> TransferId {
+    const FNV_OFFSET: u128 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u128 = 0x0000_0100_0000_01b3;
+    const REHOME_TAG: u128 = 0x37u128 << 120;
+    const LOW_120: u128 = (1u128 << 120) - 1;
+    let seed = postcard::to_allocvec(&(subject, prev_fence)).expect("encode rehome id seed");
+    let mut h = FNV_OFFSET;
+    for b in seed {
+        h = (h ^ u128::from(b)).wrapping_mul(FNV_PRIME);
+    }
+    TransferId(REHOME_TAG | (h & LOW_120))
+}
+
+/// D-37 Slice 3: build the `SagaCtx` for a STANDING re-home. REAL fields carry the recovery: `subject`
+/// (the orphan), `expected_fence = prev_fence` (Slice-4's `ReHomeCommit` CAS expectation, `fence+1`),
+/// `source = dead_owner` (the `ReHome` envelope's provenance), `dest = target` (the selected live shard),
+/// `class = Durable` (a standing re-home is always a durable per-key recovery — transient batches live and
+/// die in one realm, never standing-re-homed). PLACEHOLDER fields — the `ReHome` envelope carries NO
+/// session/realm and the Slice-4 adopt sources the entity's session/realm/pose from the RealmId-keyed
+/// checkpoint reload (D-6/P7), NOT this ctx — so `session`/`from_realm`/`to_realm` are NEVER read by the
+/// re-home path; they are derived from the entity for replay-determinism + the shared WAL snapshot shape.
+fn rehome_ctx(subject: DirectoryKey, prev_fence: Fence, dead_owner: NodeId, target: NodeId) -> SagaCtx {
+    // Slice 3 only re-homes Entity keys (the reaper leaves Realm/Ship for Slice 4), so this is always Some.
+    let entity = subject
+        .transfer_subject_entity()
+        .expect("a standing re-home subject is an Entity key")
+        .0;
+    SagaCtx {
+        transfer: rehome_transfer_id(subject, prev_fence),
+        // PLACEHOLDERS (never read by the re-home — see the doc above): entity-derived for determinism.
+        session: SessionId(entity),
+        from_realm: RealmId::System(entity as u64),
+        to_realm: RealmId::System(entity as u64),
+        // REAL recovery fields.
+        subject,
+        expected_fence: prev_fence,
+        source: dead_owner,
+        dest: target,
+        class: vd_core::entity_kind::DurabilityClass::Durable,
+        needs_provision: false,
+    }
+}
+
+/// D-37 Slice 3: drain the standing re-home queue the reaper filled THIS sweep (a same-tick within-barrier
+/// hand-off) and ARM each through the ONE machinery. For each orphan: pick a LIVE capability-matched target
+/// (`select_rehome_target`); `None` (whole-pool death / no spare capacity) DROPS the entry — the reaper
+/// re-detects the still-unlocked record next sweep and retries once a target appears (interval-paced, never
+/// a tight spin, never a forced incapable re-home). `lock_transfer` makes the armed saga the SOLE owner of
+/// the key's transfer lifecycle (so the next reaper sweep SKIPS it via the `in_transfer` gate — no
+/// re-detection churn); `false` = already locked → skip (one key → one re-home saga). The saga ARMS via
+/// `saga::start_rehome` and PARKS in `ReHoming` (CONSERVATIVE Slice-3 split: no `ReHomeCommit`, no adopt —
+/// authority stays at the dead owner because a pre-flush death has no recoverable pose until the
+/// RealmId-keyed redb lands, D-6/P7/Slice 4). `run_to_quiescence` + `commit_result` PERSIST the parked saga
+/// (durable across kill-9; on reboot it rehydrates and the locked record keeps the reaper off it). Runs
+/// inside the D-6 group-commit barrier right after the reaper, so the lock + the armed saga are durable the
+/// SAME tick. NO fabricated pose (HR1: the dead owner's store is sealed; `flushed_pose: None`).
+fn process_rehome_starts(
+    runtime: &mut SagaRuntimeRes,
+    dir: &mut DirectoryCore,
+    outbox: &mut OutboundBox,
+    epoch: EpochId,
+    now: UniverseTick,
+) {
+    let req = CapRequest::default();
+    for PendingReHome {
+        subject,
+        dead_owner,
+        prev_fence,
+    } in std::mem::take(&mut runtime.pending_rehome)
+    {
+        let Some(target) = select_rehome_target(&req, &runtime.roster, &runtime.liveness, now) else {
+            continue; // no live capable shard → drop; the reaper re-detects + retries next sweep (honest)
+        };
+        let transfer = rehome_transfer_id(subject, prev_fence);
+        if !dir.lock_transfer(subject, transfer) {
+            continue; // already locked (a concurrent arm / a prior sweep's saga) → one key, one re-home
+        }
+        let ctx = rehome_ctx(subject, prev_fence, dead_owner, target);
+        let (state, actions) = saga::start_rehome(target, prev_fence);
+        runtime.sagas.insert(
+            transfer,
+            LiveSaga {
+                ctx,
+                state,
+                // No client egress in the re-home tail (the adopt is shard→shard); `dead_owner` is an
+                // inert provenance placeholder, never read while parked or in the Slice-4 adopt.
+                gateway: dead_owner,
+                since: now,
+                flushed_pose: None, // HR1: the dead owner's store is sealed; the adopt pose is owed Slice 4
+                dead_observed_since: None,
+            },
+        );
+        // Parks immediately (start_rehome emits no actions); run_to_quiescence + commit_result PERSIST the
+        // ReHoming snapshot so the armed re-home survives an orchestrator kill-9 (rehydrates parked).
+        let (final_state, tombstone, rejected, batch_gos) =
+            run_to_quiescence(&ctx, dead_owner, state, actions, dir, outbox, epoch, now, None);
+        commit_result(runtime, transfer, final_state, tombstone, rejected, batch_gos, now);
+    }
+}
+
 /// THE Slice 2a TIMEOUT PRODUCER (the R1 cure): inject `SagaEvent::Timeout` into every live saga whose
 /// `now - since` reached its phase deadline, so a lost saga-ack RE-DRIVES (post-commit) or ABORTS
 /// (pre-freeze) instead of PARKING forever. Phase-agnostic — ONE scan, ONE injected event; the FSM's
@@ -1408,15 +1540,20 @@ fn should_reap(
     true
 }
 
-/// D-3 Slice 4: the orchestrator expiry REAPER. Once per `reaper_interval_ticks` (re-armed via
-/// `last_reap_tick`, never per tick — an O(directory) sweep), revoke every lapsed-AND-confirmed-dead lease.
-/// SCOPE (the D-37 boundary): FULLY REVOKE a dead `Session` key (the client reconnects via its ResumeTicket
-/// — a well-defined path), but LEAVE a dead `Realm`/`Entity`/`Ship` key for D-37's forward re-home —
-/// revoking a player's ship realm into `HeldNowhere` would freeze the ship forever (the durable re-home is
-/// owed, ledgered). Collect-then-act (the immutable `entries()` borrow ends before the `revoke` mutation).
+/// D-3 Slice 4 + D-37 Slice 3: the orchestrator expiry REAPER. Once per `reaper_interval_ticks` (re-armed
+/// via `last_reap_tick`, never per tick — an O(directory) sweep), resolve every lapsed-AND-confirmed-dead
+/// lease, fanned out by key family:
+/// - **`Session`** → FULLY REVOKE (the client reconnects via its ResumeTicket — a well-defined path).
+/// - **`Entity` (UNLOCKED)** → enqueue a STANDING re-home (D-37 Slice 3): recovered onto a live shard via
+///   [`process_rehome_starts`], NOT revoked — revoking would `HeldNowhere`-strand the entity. A LOCKED
+///   `Entity` (a saga already owns the key, e.g. an in-flight CELL-1/2 re-home) is LEFT to that saga.
+/// - **`Realm`/`Ship`** → LEFT (the durable Realm/Ship re-home is owed Slice 4; the dead realm is the honest
+///   `RealmHeldNowhere` residual — revoking a player's ship realm would freeze the ship forever).
+///
+/// Collect-then-act (the immutable `entries()` borrow ends before the `revoke`/`pending_rehome` mutations).
 /// INERT when `reaper_interval_ticks == 0` (the pre-D-3 default). Runs INSIDE the D-6 group-commit barrier
-/// (before the directory reconcile) so a revoke is captured by the same tick's reconcile + commit (durable
-/// — a reaped record never resurrects on a kill-9). `revoke` refuses a transfer-locked key (a saga owns it).
+/// (before the directory reconcile, and immediately before `process_rehome_starts`) so a revoke / a locked +
+/// armed re-home is captured by the same tick's reconcile + commit (durable — never resurrects on a kill-9).
 fn reap_lapsed_leases(runtime: &mut SagaRuntimeRes, dir: &mut DirectoryCore, now: UniverseTick) {
     let interval = dir.tuning().reaper_interval_ticks;
     if (interval == 0) | (now.0.saturating_sub(runtime.last_reap_tick.0) < interval) {
@@ -1424,18 +1561,28 @@ fn reap_lapsed_leases(runtime: &mut SagaRuntimeRes, dir: &mut DirectoryCore, now
     }
     runtime.last_reap_tick = now;
     let quiesced_until = runtime.liveness_quiesced_until;
-    // SESSION keys only (Realm/Entity/Ship re-home is D-37): collect the reapable ones, then revoke.
-    let reapable: Vec<(DirectoryKey, Fence)> = dir
-        .entries()
-        .filter(|(key, record)| {
-            matches!(key, DirectoryKey::Session(_))
-                && should_reap(record, now, &runtime.liveness, quiesced_until)
-        })
-        .map(|(key, record)| (*key, record.fence))
-        .collect();
-    for (key, fence) in reapable {
+    // ONE pass over the lapsed-AND-confirmed-dead leases; collect per family, then act.
+    let mut to_revoke: Vec<(DirectoryKey, Fence)> = Vec::new();
+    let mut to_rehome: Vec<PendingReHome> = Vec::new();
+    for (key, record) in dir.entries() {
+        if !should_reap(record, now, &runtime.liveness, quiesced_until) {
+            continue;
+        }
+        match key {
+            DirectoryKey::Session(_) => to_revoke.push((*key, record.fence)),
+            DirectoryKey::Entity(_) if record.in_transfer.is_none() => to_rehome.push(PendingReHome {
+                subject: *key,
+                dead_owner: record.authority.node(),
+                prev_fence: record.fence,
+            }),
+            // A LOCKED Entity (a saga owns it) | Realm | Ship → left for the owning saga / Slice 4.
+            DirectoryKey::Entity(_) | DirectoryKey::Realm(_) | DirectoryKey::Ship(_) => {}
+        }
+    }
+    for (key, fence) in to_revoke {
         let _ = dir.revoke(key, fence);
     }
+    runtime.pending_rehome.extend(to_rehome);
 }
 
 /// The orchestrator saga-runtime system: process new triggers, FIRE due deadlines (Slice 2a), then
@@ -1562,6 +1709,12 @@ pub fn drive_sagas(
     // single commit (the revoke is durable this tick; a reaped record never resurrects on a kill-9 — the
     // COMP-2 guarantee). It mutates the directory in RAM; the reconcile then persists the post-reap RAM.
     reap_lapsed_leases(&mut runtime, &mut dir.0, now);
+    // D-37 Slice 3: ARM the standing re-homes the reaper just enqueued — SAME tick, still inside the
+    // barrier, so the `lock_transfer` + the armed parked saga are captured by the reconcile + commit below
+    // (durable this tick; on a kill-9 mid-window the RAM queue is lost but the still-dead UNLOCKED record
+    // makes the reaper re-detect on reboot — see `PendingReHome`). Must run AFTER the reaper (it drains what
+    // the reaper enqueued) and BEFORE the reconcile (so the lock/saga persist this tick).
+    process_rehome_starts(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
     // D-6 GROUP-COMMIT BARRIER: stage every saga/go-token write recorded this tick (drained from
     // `pending_writes`), snapshot the DIRECTORY (the independent key family) + the durable clock ceiling,
     // then ONE `commit()` — the ~1-fsync/tick durability point (io-prod batches it off-tick later). This
@@ -2832,6 +2985,184 @@ mod tests {
         assert!(
             dir.head(DirectoryKey::Session(SessionId(1))).is_some(),
             "a sweep below the reaper interval since the last is skipped"
+        );
+    }
+
+    #[test]
+    fn reap_in_freezing_orphan_enqueues_a_pending_rehome_and_arms_a_parked_saga() {
+        // D-37 Slice 3 (CELL 3): a confirmed-dead + lapsed + UNLOCKED Entity orphan (the post-abort residual
+        // of a SOURCE killed in Freezing) is DETECTED by the reaper (ENQUEUED, not revoked) and ARMED by
+        // process_rehome_starts — a fresh re-home saga PARKS in ReHoming{target} (the lowest live capable
+        // shard), the key is LOCKED (so the next sweep skips it), authority STAYS at the dead owner
+        // (conservative — no CAS), and NOTHING is emitted (HR1: no fabricated pose/adopt — owed Slice 4).
+        // Proves detection + capability-matched target selection + the durable parked saga + no fabrication.
+        // Reverting the reaper Entity arm / process_rehome_starts / start_rehome turns this RED.
+        let dead = NodeId(5);
+        let target = NodeId(9);
+        let entity = DirectoryKey::Entity(subject_eid());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10,
+            reaper_interval_ticks: 8,
+            ..DirectoryTuning::default()
+        });
+        let _ = dir.grant(entity, AuthorityRef::Shard(dead), Fence(3), UniverseTick(0)); // lease_expires = 10
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // n = 1
+        runtime.set_roster(
+            [(
+                target,
+                ShardProfile::build(CapRequest::default()).expect("empty profile"),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        runtime.liveness.record_unreachable(dead, UniverseTick(50)); // dead CONFIRMED (n = 1)
+
+        // REAP: the orphan is ENQUEUED (not revoked); the directory record is untouched.
+        reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+        assert_eq!(
+            runtime.pending_rehome,
+            vec![PendingReHome {
+                subject: entity,
+                dead_owner: dead,
+                prev_fence: Fence(3),
+            }],
+            "the reaper enqueues the orphan for a standing re-home (does NOT revoke it)"
+        );
+
+        // ARM: a fresh re-home saga parks in ReHoming{target}; the key is locked; authority STAYS at corpse.
+        let mut outbox = OutboundBox::default();
+        process_rehome_starts(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(100));
+        assert!(
+            runtime.pending_rehome.is_empty(),
+            "the queue is drained the same tick (within-barrier hand-off)"
+        );
+        let transfer = rehome_transfer_id(entity, Fence(3));
+        let live = runtime
+            .sagas
+            .get(&transfer)
+            .expect("a fresh re-home saga was armed");
+        assert_eq!(
+            live.state,
+            SagaState::ReHoming {
+                target,
+                prev_fence: Fence(3),
+            },
+            "the saga parks in ReHoming at the selected live target"
+        );
+        let head = dir.head(entity).expect("the orphan record is still present");
+        assert_eq!(
+            head.authority,
+            AuthorityRef::Shard(dead),
+            "authority STAYS at the dead owner (conservative — no CAS, no HeldNowhere strand)"
+        );
+        assert_eq!(head.fence, Fence(3), "no fence bump (no ReHomeCommit until Slice 4)");
+        assert!(
+            head.in_transfer.is_some(),
+            "the key is LOCKED by the armed re-home saga (the next reaper sweep skips it)"
+        );
+        assert!(
+            outbox.0.is_empty(),
+            "NO fabrication: a parked standing re-home emits no ReHome envelope (the adopt is owed Slice 4)"
+        );
+    }
+
+    #[test]
+    fn reaper_leaves_a_locked_dead_entity_for_its_owning_saga() {
+        // D-37 Slice 3: an Entity that is dead + lapsed but IN-TRANSFER-LOCKED (a live saga — e.g. an
+        // in-flight CELL-1/2 re-home — owns the key) is NOT standing-re-homed; the owning saga's own recovery
+        // handles it. Covers the reaper Entity-arm GUARD false branch (in_transfer.is_some()).
+        let dead = NodeId(5);
+        let entity = DirectoryKey::Entity(subject_eid());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10,
+            reaper_interval_ticks: 8,
+            ..DirectoryTuning::default()
+        });
+        let _ = dir.grant(entity, AuthorityRef::Shard(dead), Fence(3), UniverseTick(0));
+        assert!(
+            dir.lock_transfer(entity, TransferId(1)),
+            "a live saga locks the key"
+        );
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        runtime.liveness.record_unreachable(dead, UniverseTick(50));
+        reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+        assert!(
+            runtime.pending_rehome.is_empty(),
+            "a LOCKED dead Entity is left to its owning saga, never standing-re-homed"
+        );
+    }
+
+    #[test]
+    fn process_rehome_parks_when_no_live_target() {
+        // D-37 Slice 3: with NO live capable shard (empty roster — whole-pool death) select_rehome_target
+        // returns None and process_rehome_starts DROPS the entry: no saga, key stays UNLOCKED so the reaper
+        // re-detects + retries next sweep (interval-paced, never a forced incapable re-home). Covers None.
+        let dead = NodeId(5);
+        let entity = DirectoryKey::Entity(subject_eid());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10,
+            reaper_interval_ticks: 8,
+            ..DirectoryTuning::default()
+        });
+        let _ = dir.grant(entity, AuthorityRef::Shard(dead), Fence(3), UniverseTick(0));
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // EMPTY roster (default)
+        runtime.liveness.record_unreachable(dead, UniverseTick(50));
+        reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+        assert_eq!(runtime.pending_rehome.len(), 1, "the orphan was detected + enqueued");
+        let mut outbox = OutboundBox::default();
+        process_rehome_starts(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(100));
+        assert_eq!(
+            runtime.live(),
+            0,
+            "no live target → no saga armed (the entry is dropped, retried next sweep)"
+        );
+        assert!(
+            dir.head(entity)
+                .expect("record present")
+                .in_transfer
+                .is_none(),
+            "the key stays UNLOCKED so the reaper re-detects + retries once a target appears"
+        );
+    }
+
+    #[test]
+    fn process_rehome_skips_an_already_locked_key() {
+        // D-37 Slice 3: if the orphan key is ALREADY locked (a concurrent arm / a prior sweep's saga) when
+        // process_rehome_starts drains it, lock_transfer returns false and the entry is skipped — one key,
+        // one re-home saga. Covers the lock-false arm.
+        let dead = NodeId(5);
+        let target = NodeId(9);
+        let entity = DirectoryKey::Entity(subject_eid());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10,
+            reaper_interval_ticks: 8,
+            ..DirectoryTuning::default()
+        });
+        let _ = dir.grant(entity, AuthorityRef::Shard(dead), Fence(3), UniverseTick(0));
+        assert!(
+            dir.lock_transfer(entity, TransferId(1)),
+            "pre-lock by another saga"
+        );
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        runtime.set_roster(
+            [(
+                target,
+                ShardProfile::build(CapRequest::default()).expect("empty profile"),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        runtime.pending_rehome.push(PendingReHome {
+            subject: entity,
+            dead_owner: dead,
+            prev_fence: Fence(3),
+        });
+        let mut outbox = OutboundBox::default();
+        process_rehome_starts(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(100));
+        assert_eq!(
+            runtime.live(),
+            0,
+            "the already-locked key is skipped — no second re-home saga"
         );
     }
 
