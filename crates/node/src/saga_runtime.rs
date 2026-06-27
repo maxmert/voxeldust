@@ -3389,6 +3389,70 @@ mod tests {
     }
 
     #[test]
+    fn a_rehomed_promoting_redrives_the_adopt_to_the_live_target_via_scan_deadlines() {
+        // D-37 Slice 2d END-TO-END — the SELF-SUFFICIENT re-drive proven through the FULL producer chain
+        // (scan_deadlines → rehome_event_for → deliver → FSM Some-arm → emit_rehome), NOT just the FSM unit.
+        // A Promoting saga that ALREADY re-homed (`rehome_target: Some(target)`, the directory naming the
+        // LIVE target at the bumped fence) is driven past the redrive deadline → rehome_event_for returns
+        // Timeout (the owner is alive, keyed on `dir.head` not `ctx.dest`) → the FSM Some-arm emits
+        // A::ReHomeAdopt → emit_rehome RE-SENDS the dedicated ReHome to the target from the stashed pose.
+        // This proves the ORCHESTRATOR OWNS the adopt re-drive (no transport at-least-once needed) and is
+        // the regression guard the CELL-2 crash matrix LACKS: the matrix's FIRST adopt lands over the perfect
+        // FaultFabric link so it never runs this arm — reverting the Some-arm to always-Promote leaves the
+        // matrix green but REDs this test (it would aim a Promote at the dead `ctx.dest`, not a ReHome at the
+        // live target). Fence-monotone holds: re-driving the ADOPT re-bumps nothing (only ReHomeCommit bumps).
+        let target = NodeId(9);
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive deadline = 8
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
+        });
+        // POST-re-home directory state: the subject is committed to the LIVE target at the bumped Fence(2).
+        let _ = dir.grant(subject(), AuthorityRef::Shard(target), Fence(2), UniverseTick(0));
+        inject_saga(
+            &mut runtime,
+            SagaState::Promoting {
+                new_fence: Fence(2),
+                promote_acked: false,
+                dest_delivered: false,
+                rehome_target: Some(target),
+            },
+            UniverseTick(0),
+        );
+        stash_flush(&mut runtime, XFER, flushed_pose()); // the adopt payload, re-read on every re-drive
+        // The producer drives the DUE saga (now=8 >= redrive 8); a LIVE owner ⇒ Timeout (not ReHomeTo).
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(8));
+        // The dedicated ReHome adopt was RE-EMITTED to the live target from the stashed pose.
+        let expected = InterShardFlow::ReHome(ReHomeCmd {
+            transfer: XFER,
+            subject: subject(),
+            new_fence: Fence(2),
+            step_id: RE_HOME_STEP,
+            state: ReHomeState::PoseOnly(flushed_pose()),
+            source: SOURCE,
+        });
+        assert!(
+            flows_to_node(&outbox, target).contains(&expected),
+            "the re-drive re-sent the dedicated ReHome adopt to the live target: {:?}",
+            outbox.0
+        );
+        // NOT a Promote at the (dead) original dest — the explicit regression guard for the Some-arm.
+        assert!(
+            flows_to_node(&outbox, DEST).is_empty(),
+            "the re-drive does NOT aim a Promote at the dead original dest: {:?}",
+            outbox.0
+        );
+        // Re-driving the ADOPT re-bumps nothing; the saga stays live (forward-only re-drive).
+        assert_eq!(
+            dir.head(subject()).expect("subject recorded").fence,
+            Fence(2),
+            "re-driving the adopt does not re-bump the fence (only ReHomeCommit bumps)"
+        );
+        assert_eq!(runtime.live(), 1, "the re-drive keeps the saga live");
+    }
+
+    #[test]
     fn rehome_adopt_is_a_loud_no_op_for_a_non_entity_subject_or_missing_pose() {
         // build_rehome / emit_rehome gate on an Entity subject AND a stashed pose (mirrors build/emit_
         // crossing) so the executor ReHomeAdopt arm stays branchless (HR5). A Realm subject (no

@@ -237,10 +237,17 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     directory names the live target (`rehome_event_for` → `Timeout`). The re-home adopt no longer leans on the
     FaultFabric's at-least-once redelivery — saga recovery is SELF-SUFFICIENT. Closes the SECOND producer-less phase
     that [[D-6]] precondition 1 named; that additive FSM-field fix is now the proven template for AwaitAdopt's owed
-    egress. Covered by `a_rehomed_promoting_timeout_redrives_the_adopt_to_the_live_target` (FSM) + the CELL-2 matrix.
+    egress. Covered by `a_rehomed_promoting_timeout_redrives_the_adopt_to_the_live_target` (FSM Some-arm) +
+    `a_rehomed_promoting_redrives_the_adopt_to_the_live_target_via_scan_deadlines` (the END-TO-END producer chain:
+    scan_deadlines → rehome_event_for → deliver → emit_rehome re-sends the ReHome to the live target, NOT a Promote to
+    the dead dest). The CELL-2 crash matrix does NOT exercise this re-drive — its first adopt lands over the perfect
+    FaultFabric link, so reverting the Some-arm leaves the matrix green; those two targeted tests RED instead (the
+    regression guard the matrix lacks — empirically confirmed, review `wf_a401ca14`).
 - **Source:** design `wf_6efc70f1` (judge-panel) + the empirical crash matrix; review `wf_688a65d9` (DONE_NO_CRITICAL
   on the code) + holistic audit `wf_dd38151d` (DONE_NO_CRITICAL; surfaced the re-home-adopt producer-less-phase HIGH,
-  ledgered above); this ledger sync closes their HIGH ledger-honesty findings.
+  cured by Slice 2d) + Slice-2d focused review `wf_a401ca14` (DONE_NO_CRITICAL; its MEDIUM — the re-drive lacked an
+  end-to-end guard, the crash matrix passing it via fabric redelivery — closed by the two targeted re-drive tests +
+  this honest test-credit). This ledger sync closes their ledger-honesty findings.
 
 ### D-38 🟧 HR4's literal G-IDENTICAL gate (ONE fixture, ≥2 shard kinds) is unbuilt — only the capability-DAG FOUNDATION landed
 - **LANDED (the foundation):** `crates/sim/src/capability.rs` has the validated `ShardProfile` capability DAG (private
