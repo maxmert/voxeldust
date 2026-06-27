@@ -281,6 +281,14 @@ pub enum SagaState {
         new_fence: Fence,
         promote_acked: bool,
         dest_delivered: bool,
+        /// D-37 Slice 2d: `Some(target)` iff this `Promoting` was reached via a forward RE-HOME
+        /// (`ReHoming → CasWon`), carrying the LIVE re-home target so a `Promoting` `Timeout`
+        /// re-drives the dedicated `A::ReHomeAdopt → target` (the SELF-SUFFICIENT orchestrator
+        /// re-drive egress) instead of `A::Promote → ctx.dest` — which is the confirmed-dead
+        /// original dest a re-home fired BECAUSE of. `None` for a normal demote-promote `Promoting`
+        /// (the Timeout re-emits the ordered Promote). Without this field the re-home ADOPT was a
+        /// producer-less phase leaning on transport at-least-once (DEFERRED D-6 precondition 1 / D-37).
+        rehome_target: Option<NodeId>,
     },
     /// D-37 forward re-home: the committed owner was permanently KILLED, so the saga is re-targeting the
     /// subject onto a LIVE capability-matched shard `target`. `ReHomeCommit` is in flight (the directory
@@ -833,6 +841,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 new_fence,
                 promote_acked: false,
                 dest_delivered,
+                rehome_target: None,
             },
             vec![A::Promote { new_fence }],
         ),
@@ -858,6 +867,7 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 new_fence,
                 promote_acked: false,
                 dest_delivered,
+                rehome_target: None,
             },
             vec![A::Promote { new_fence }],
         ),
@@ -886,28 +896,37 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             S::Promoting {
                 new_fence,
                 dest_delivered,
+                rehome_target,
                 ..
             },
             E::PromoteAcked,
-        ) => promoting_advance(ctx, new_fence, true, dest_delivered),
+        ) => promoting_advance(ctx, new_fence, true, dest_delivered, rehome_target),
         (
             S::Promoting {
                 new_fence,
                 promote_acked,
+                rehome_target,
                 ..
             },
             E::DestDelivered,
-        ) => promoting_advance(ctx, new_fence, promote_acked, true),
+        ) => promoting_advance(ctx, new_fence, promote_acked, true, rehome_target),
         // A Promoting timeout RE-EMITS the ordered Promote (idempotent at the dest — promotes_redelivered),
         // never aborts. ✅ Slice 2a: `scan_deadlines` drives this in production (redrive_deadline_ticks).
         // ⚠️ a STARVED delivery watermark (the dest never latches `DeliveredToObservers`) is a DIFFERENT
         // wedge the producer cannot cure — re-driving Promote re-acks PromoteAck but cannot re-arm the
         // standing watermark (owed, P3 — DEFERRED D-36); the producer cures lost saga-ACKS only.
+        // ✅ D-37 Slice 2d: a RE-HOMED Promoting (`rehome_target = Some`) re-drives the DEDICATED ReHome
+        // ADOPT to the LIVE `target`, NOT `A::Promote` to the confirmed-dead `ctx.dest` (which a re-home
+        // fired BECAUSE of) — the SELF-SUFFICIENT orchestrator re-drive egress that stops the re-home adopt
+        // depending on transport at-least-once (closes DEFERRED D-6 precondition 1's re-home half / D-37).
+        // Re-emission is idempotent at the target (`on_re_home` journal-gates `RE_HOME_STEP` →
+        // re_home_redelivered, re-acks PromoteAck). A normal Promoting (`None`) re-emits the ordered Promote.
         (
             S::Promoting {
                 new_fence,
                 promote_acked,
                 dest_delivered,
+                rehome_target,
             },
             E::Timeout,
         ) => (
@@ -915,8 +934,12 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 new_fence,
                 promote_acked,
                 dest_delivered,
+                rehome_target,
             },
-            vec![A::Promote { new_fence }],
+            match rehome_target {
+                Some(target) => vec![A::ReHomeAdopt { new_fence, target }],
+                None => vec![A::Promote { new_fence }],
+            },
         ),
         // ---- D-37 forward re-home: the committed owner was permanently KILLED ------------------------
         // The producer (scan_deadlines) confirmed the committed dest dead in Promoting, the abort budget
@@ -945,6 +968,9 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
                 new_fence,
                 promote_acked: false,
                 dest_delivered: false,
+                // D-37 Slice 2d: carry the LIVE target so a Promoting Timeout re-drives the ReHome
+                // adopt HERE, not Promote to the dead dest — the re-home's self-sufficient re-drive.
+                rehome_target: Some(target),
             },
             vec![A::ReHomeAdopt { new_fence, target }],
         ),
@@ -1029,6 +1055,7 @@ fn promoting_advance(
     new_fence: Fence,
     promote_acked: bool,
     dest_delivered: bool,
+    rehome_target: Option<NodeId>,
 ) -> (SagaState, Vec<SagaAction>) {
     match (promote_acked, dest_delivered) {
         (true, true) => (
@@ -1039,11 +1066,14 @@ fn promoting_advance(
                 src: ctx.source,
             })],
         ),
+        // Stay in Promoting recording the condition that just arrived — preserving `rehome_target`
+        // so a re-homed saga's later Timeout still re-drives the adopt to the live target (D-37 2d).
         _ => (
             SagaState::Promoting {
                 new_fence,
                 promote_acked,
                 dest_delivered,
+                rehome_target,
             },
             vec![],
         ),
@@ -2077,6 +2107,7 @@ mod tests {
                 new_fence: Fence(6),
                 promote_acked: false,
                 dest_delivered: false,
+                rehome_target: None,
             }
         );
         assert_eq!(
@@ -2095,6 +2126,7 @@ mod tests {
                 new_fence: Fence(6),
                 promote_acked: true,
                 dest_delivered: false,
+                rehome_target: None,
             }
         );
         assert!(acts.is_empty(), "promote-ack alone holds the source sub");
@@ -2126,6 +2158,7 @@ mod tests {
             new_fence: Fence(6),
             promote_acked: false,
             dest_delivered: false,
+            rehome_target: None,
         };
         let (state, acts) = step(&c, promoting, SagaEvent::DestDelivered);
         assert_eq!(
@@ -2134,6 +2167,7 @@ mod tests {
                 new_fence: Fence(6),
                 promote_acked: false,
                 dest_delivered: true,
+                rehome_target: None,
             }
         );
         assert!(acts.is_empty(), "delivery alone holds the source sub");
@@ -2178,6 +2212,7 @@ mod tests {
                 new_fence: Fence(6),
                 promote_acked: false,
                 dest_delivered: true,
+                rehome_target: None,
             },
             "the latched delivery is carried into Promoting"
         );
@@ -2215,6 +2250,7 @@ mod tests {
                 new_fence: Fence(6),
                 promote_acked: false,
                 dest_delivered: true,
+                rehome_target: None,
             },
             "a confirmed-dead source self-promotes the committed dest, carrying dest_delivered forward"
         );
@@ -2237,6 +2273,7 @@ mod tests {
             new_fence: Fence(6),
             promote_acked: false,
             dest_delivered: false,
+            rehome_target: None,
         };
         let (state, acts) = step(&c, promoting, SagaEvent::ReHomeTo { target: NodeId(9) });
         assert_eq!(
@@ -2253,7 +2290,8 @@ mod tests {
                 target: NodeId(9),
             }]
         );
-        // CasWon: the directory now names the target at the bumped fence → adopt there, re-enter Promoting.
+        // CasWon: the directory now names the target at the bumped fence → adopt there, re-enter Promoting
+        // carrying `rehome_target: Some(target)` (D-37 2d) so a later Timeout re-drives the adopt here.
         let (state, acts) = step(&c, state, SagaEvent::CasWon { new_fence: Fence(7) });
         assert_eq!(
             state,
@@ -2261,6 +2299,7 @@ mod tests {
                 new_fence: Fence(7),
                 promote_acked: false,
                 dest_delivered: false,
+                rehome_target: Some(NodeId(9)),
             }
         );
         assert_eq!(
@@ -2314,6 +2353,7 @@ mod tests {
             new_fence: Fence(6),
             promote_acked: true,
             dest_delivered: false,
+            rehome_target: None,
         };
         let (state, acts) = step(&c, promoting, SagaEvent::Timeout);
         assert_eq!(state, promoting, "the acked flags survive the re-drive");
@@ -2322,6 +2362,33 @@ mod tests {
             vec![SagaAction::Promote {
                 new_fence: Fence(6)
             }]
+        );
+    }
+
+    #[test]
+    fn a_rehomed_promoting_timeout_redrives_the_adopt_to_the_live_target() {
+        // D-37 Slice 2d: the SELF-SUFFICIENT re-home re-drive egress. A Promoting reached via a forward
+        // re-home carries `rehome_target: Some(target)`, so a Timeout re-emits the dedicated `ReHomeAdopt`
+        // to the LIVE target — NOT `A::Promote` to the confirmed-dead `ctx.dest` (which the re-home fired
+        // BECAUSE of). This is what gives the re-home adopt an orchestrator re-drive instead of leaning on
+        // transport at-least-once (DEFERRED D-6 precondition 1 / D-37). Covers the `Some` arm of the Timeout
+        // branch (the `None` arm is covered above). The state survives the re-drive unchanged (idempotent).
+        let c = ctx(false);
+        let rehomed = SagaState::Promoting {
+            new_fence: Fence(7),
+            promote_acked: false,
+            dest_delivered: false,
+            rehome_target: Some(NodeId(9)),
+        };
+        let (state, acts) = step(&c, rehomed, SagaEvent::Timeout);
+        assert_eq!(state, rehomed, "the re-home target survives the re-drive");
+        assert_eq!(
+            acts,
+            vec![SagaAction::ReHomeAdopt {
+                new_fence: Fence(7),
+                target: NodeId(9),
+            }],
+            "a re-homed Promoting Timeout re-drives the adopt to the live target, not Promote to the dead dest"
         );
     }
 

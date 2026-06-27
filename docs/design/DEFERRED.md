@@ -170,15 +170,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   (`saga.rs` `promoting_advance`). The stall is admin-visible (climbing `now - since`), NEVER silently wedged.
 - **When / proper:** **P3** — a re-poke of the delivery path / rising-edge watermark (the producer drives saga-ack
   recovery; a starved delivery watermark needs a delivery-path nudge, a distinct mechanism).
-- **⚠️ Forward note (holistic audit `wf_dd38151d`):** the Slice-2a producer's `Promote` re-drive presumes `ctx.dest`
-  is LIVE. After a D-37 CELL-2 re-home the committed owner is the re-home `target`, but `Promoting` keeps `ctx.dest`
-  (the now-dead original dest), so the re-drive aims at a corpse AND cannot re-arm the adopt — the producer-less-phase
-  gap ledgered in [[D-6]] precondition 1. Carrying `target` in `Promoting` (the D-6 cure) also corrects this re-drive
-  aim, so the two fixes are the same additive FSM change.
+- **✅ Forward note RESOLVED (Slice 2d, was holistic audit `wf_dd38151d`):** the Slice-2a producer's `Promote`
+  re-drive presumes `ctx.dest` is LIVE; after a D-37 CELL-2 re-home it would aim at the now-dead original dest. Slice
+  2d carries `rehome_target` in `Promoting`, so a re-homed `Promoting` Timeout re-drives `A::ReHomeAdopt → target` (the
+  live re-home target), never `Promote → ctx.dest`. The starved-DELIVERY-watermark wedge above is the DISTINCT
+  remaining D-36 item (the producer re-drives the saga-ACK; a starved watermark still needs a delivery-path nudge).
 - **Source:** Slice-2a design `wf_9f22c70d` (finding #3); boundary-documented, not silently wedged.
 
 ### D-37 🟧 Permanent participant-kill recovery: ENTITY forward re-home LANDED (CELL 1 + CELL 2); CELL 3 standing re-home + Realm/Ship re-home owed (design wf_6efc70f1)
-- **✅ LANDED (Slices 0/1/2a/2b/2c, all gate-green 100% Tier-A region+branch; gated on D-3 + D-6, both landed):**
+- **✅ LANDED (Slices 0/1/2a/2b/2c/2d, all gate-green 100% Tier-A region+branch; gated on D-3 + D-6, both landed):**
   the FENCED FORWARD RE-HOME machinery — when a transfer PARTICIPANT is permanently KILLED mid-flight, the
   orchestrator confirms it dead (D-3 `is_confirmed_dead`) and recovers the ENTITY to a LIVE owner instead of
   re-driving toward a corpse forever. The fence-monotone invariant is load-bearing: every re-home commits at
@@ -199,6 +199,11 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     + the roster (`SagaRuntimeRes.roster` from `OrchestratorConfig.roster`; the cluster maps stubs → empty profile)
     + the stub `on_re_home` adopt (CREATES an Owned dot from the pose at a FRESH target — no ghost to flip). End
     state `EntityRecoveredRealmOrphaned{entity_at: SHARD}` (DEST dead ⇒ SHARD the lowest live shard).
+  - **Slice 2d (`<2d>`) the re-home adopt's SELF-SUFFICIENT re-drive egress (holistic audit `wf_dd38151d` HIGH):**
+    `SagaState::Promoting` gained `rehome_target: Option<NodeId>`; a re-homed `Promoting` (Some) Timeout re-drives
+    `A::ReHomeAdopt → target` (re-read from `flushed_pose`, idempotent at the target) instead of `A::Promote →
+    ctx.dest` (the confirmed-dead original dest). So the re-home adopt no longer depends on transport at-least-once —
+    `scan_deadlines` drives the re-solicit. Closes the SECOND producer-less phase [[D-6]] precondition 1 named.
 - **Still RED (owed): kill SOURCE pre-freeze (Freezing) → `DeadOwnerOrphan{SOURCE}`** — the freeze timeout aborts
   (`abort_with_thaw`, gateway-acked, fence-neutral `abort_clear`) + tombstones, leaving the directory at the now-DEAD
   source with NO live saga. Recovery is the STANDING reaper-driven re-home (**Slice 3**): the reaper enqueues a
@@ -226,15 +231,13 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     delivering frames, so `DeliveredToObservers` may starve and the saga parks in `Promoting` (never Done). The entity
     IS recovered (directory + held-set), so the cell end-state holds; the client-input re-route to the new target is
     the connection-plane refinement owed with the ResumeTicket adoption ([[D-36]]).
-  - **The re-home ADOPT has no orchestrator re-drive egress (holistic audit `wf_dd38151d`, HIGH):** `A::ReHomeAdopt`
-    is emitted ONCE (`ReHoming → CasWon`); the re-entered `Promoting` drops the re-home `target`, so a `Promoting`
-    Timeout re-drives `A::Promote → ctx.dest` (the dead original dest), never the adopt → the live target. Forward
-    progress of the adopt thus rests on the FaultFabric's at-least-once redelivery — CELL 2 passes because the FABRIC
-    redelivers the adopt until the target drains it, NOT because the saga re-drives it. INERT today (prod roster empty
-    ⇒ re-home PARKS; mesh+redb unlanded), never a split-brain (the CAS already named `target` at `fence+1`) — at worst
-    a uniquely-owned-but-not-yet-adopted entity. **Ledgered as the SECOND producer-less phase in [[D-6]] precondition
-    1; the egress fix (carry `target` in `Promoting`) is additive and lands with that precondition — before the
-    at-most-once mesh / redb / any rolling deploy.**
+  - **✅ The re-home ADOPT now has an orchestrator re-drive egress (Slice 2d, was holistic audit `wf_dd38151d` HIGH):**
+    a re-homed `Promoting` carries `rehome_target: Some(target)`, so a `Promoting` Timeout re-drives `A::ReHomeAdopt →
+    target` (the live target) NOT `A::Promote → ctx.dest` (the dead original dest); `scan_deadlines` drives it once the
+    directory names the live target (`rehome_event_for` → `Timeout`). The re-home adopt no longer leans on the
+    FaultFabric's at-least-once redelivery — saga recovery is SELF-SUFFICIENT. Closes the SECOND producer-less phase
+    that [[D-6]] precondition 1 named; that additive FSM-field fix is now the proven template for AwaitAdopt's owed
+    egress. Covered by `a_rehomed_promoting_timeout_redrives_the_adopt_to_the_live_target` (FSM) + the CELL-2 matrix.
 - **Source:** design `wf_6efc70f1` (judge-panel) + the empirical crash matrix; review `wf_688a65d9` (DONE_NO_CRITICAL
   on the code) + holistic audit `wf_dd38151d` (DONE_NO_CRITICAL; surfaced the re-home-adopt producer-less-phase HIGH,
   ledgered above); this ledger sync closes their HIGH ledger-honesty findings.
@@ -729,29 +732,23 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   No production deployment until then.
 - **⚠️ Three io-prod / real-deploy PRECONDITIONS (audit `wf_7cc86404`, all HIGH, none break P2/P3 correctness —
   proven against the in-process MemStore + harness at-least-once model the S0–S5 cells run on):**
-  1. **TWO producer-less saga phases recover ONLY via transport REDELIVERY the production `MeshTransport` does not
-     provide** (the second added by holistic audit `wf_dd38151d`). A producer-less phase has NO `scan_deadlines`
-     re-drive egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a
-     receiver crash); the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop):
-     - **`BatchHandoff::AwaitAdopt`** (saga.rs:563-571,631-634): the dest adopts off the source's envelope; the
-       orchestrator only awaits `BatchAdopted`.
-     - **The D-37 re-home ADOPT** (`A::ReHomeAdopt`, emitted ONCE on the `ReHoming → CasWon` edge, saga.rs ~943-950):
-       after CELL 2 re-enters `Promoting`, the FSM DROPS the re-home `target`, so a `Promoting` Timeout re-drives
-       `A::Promote → ctx.dest` (the confirmed-dead original dest, saga_runtime.rs Promote executor) — NEVER the adopt
-       → the live `target`. INERT today (prod roster empty ⇒ re-home PARKS; the harness redelivers the adopt so CELL 2
-       passes via the fabric, NOT a saga re-drive; mesh+redb unlanded); NEVER violates authority-uniqueness (the
-       directory CAS already named `target` at `fence+1`) — at worst a uniquely-owned-but-not-yet-adopted entity
-       stranded at a directory-recorded owner that has not run `re_home_apply`.
-     **Owed cure (preferred, both): a real re-solicit egress on Timeout** so saga recovery is SELF-SUFFICIENT and
-     stops depending on an un-promised transport property — for `AwaitAdopt` the orchestrator re-prompts the source to
-     re-emit the `TransientBatch` (or the dest to re-ack); for the re-home adopt, CARRY `target` in `Promoting` (or a
-     `ReHomedPromoting{target}` variant) so the Timeout re-emits `A::ReHomeAdopt → target` — a designed additive slice
-     (one FSM field + one executor branch + a unit test that a re-homed `Promoting` Timeout targets `target`, not
-     `ctx.dest`; full architecture first per the no-hack rule). Alternative: a sender-side durable outbox /
-     retry-until-acked transport layer (identity_persistence.md:122). **WHEN: before the redb backend / any real
-     rolling deploy.** Until then, producer-less-phase orchestrator/peer-crash recovery is proven ONLY vs the
-     FaultFabric. (The `Promoting` `Promote` re-drive presuming a LIVE `ctx.dest` is the same root the re-home `target`
-     drop exposes — see [[D-36]].)
+  1. **`BatchHandoff::AwaitAdopt` recovery depends on transport REDELIVERY the production `MeshTransport` does not
+     provide** (the ONE remaining producer-less-phase gap). A producer-less phase has NO `scan_deadlines` re-drive
+     egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash);
+     the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop). `AwaitAdopt`
+     (saga.rs:563-571,631-634): the dest adopts off the source's envelope; the orchestrator only awaits `BatchAdopted`.
+     **Owed cure (preferred): a real re-solicit egress on Timeout** (orchestrator re-prompts the source to re-emit the
+     `TransientBatch`, or the dest to re-ack) so saga recovery is SELF-SUFFICIENT and stops depending on an un-promised
+     transport property — a designed slice (NEW saga action + shard handler, full architecture first per the no-hack
+     rule). Alternative: a sender-side durable outbox / retry-until-acked transport (identity_persistence.md:122).
+     **✅ The D-37 re-home ADOPT was the SECOND such phase (holistic audit `wf_dd38151d`) — now CURED in Slice 2d
+     (commit `<2d>`):** a re-homed `Promoting` carries `rehome_target: Some(target)`, so a `Promoting` Timeout
+     re-drives `A::ReHomeAdopt → target` (the live target) NOT `A::Promote → ctx.dest` (the dead original dest a
+     re-home fired BECAUSE of); `rehome_event_for`'s `Promoting` branch returns `Timeout` once the directory names the
+     live target, so `scan_deadlines` drives the re-solicit. That additive FSM-field fix (one `Promoting` field + the
+     Timeout-arm branch + `a_rehomed_promoting_timeout_redrives_the_adopt_to_the_live_target`) is the PROVEN TEMPLATE
+     for `AwaitAdopt`'s owed egress. **WHEN (`AwaitAdopt`): before the redb backend / any real rolling deploy.** Until
+     then, `AwaitAdopt` orchestrator/peer-crash recovery is proven ONLY vs the FaultFabric.
   2. **Directory RECONCILE is a per-TICK O(directory) delete-all + put-all + fsync, even on fully idle ticks**
      (saga_runtime.rs:1187-1203). Correctness-safe; a write-amplification cliff at MMO directory scale (per-Session/
      Entity/Realm/Ship rows). **Owed: io-prod replaces the full reconcile with INCREMENTAL per-mutation deletes

@@ -2990,6 +2990,7 @@ mod tests {
                 new_fence: Fence(2),
                 promote_acked: false,
                 dest_delivered: false,
+                rehome_target: None,
             },
             SagaState::ReHoming {
                 target: NodeId(4),
@@ -3289,6 +3290,7 @@ mod tests {
             new_fence: Fence(2),
             promote_acked: false,
             dest_delivered: false,
+            rehome_target: None,
         };
         let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
         let roster: BTreeMap<NodeId, ShardProfile> = [(NodeId(9), empty)].into_iter().collect();
@@ -3342,6 +3344,7 @@ mod tests {
                 new_fence: Fence(1),
                 promote_acked: false,
                 dest_delivered: false,
+                rehome_target: None,
             },
             UniverseTick(0),
         );
@@ -3435,6 +3438,7 @@ mod tests {
                 new_fence: Fence(1),
                 promote_acked: false,
                 dest_delivered: false,
+                rehome_target: None,
             },
             UniverseTick(0),
         );

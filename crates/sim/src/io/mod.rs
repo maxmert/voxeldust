@@ -268,13 +268,12 @@ pub trait Clock {
 /// (redelivery-until-acked, surviving a receiver crash), while the io-prod `MeshTransport` is
 /// at-most-once (a send to a down peer surfaces `NodeUnreachable` and is dropped). Saga forward
 /// progress must therefore NOT depend on this trait redelivering a message lost to a peer restart —
-/// `scan_deadlines` re-drives every saga phase that HAS orchestrator egress; the TWO phases that do
-/// NOT are the ledgered gap (DEFERRED.md D-6 precondition 1): `BatchHandoff::AwaitAdopt` (the dest
-/// adopts off the source's envelope) and the D-37 re-home ADOPT (`A::ReHomeAdopt` is emitted once on
-/// the `ReHoming → CasWon` edge — a re-homed `Promoting` saga's Timeout re-drives `Promote → ctx.dest`,
-/// the confirmed-dead original dest, never the adopt → the live target). Both share the owed cure (a
-/// re-solicit egress, or a sender-side durable outbox), owed before the redb backend / a real rolling
-/// deploy; until then both are proven ONLY vs the `FaultFabric`'s at-least-once redelivery.
+/// `scan_deadlines` re-drives every saga phase that HAS orchestrator egress. The D-37 re-home ADOPT
+/// gained that egress in Slice 2d (a re-homed `Promoting` carries `rehome_target`, so its Timeout
+/// re-drives `A::ReHomeAdopt → target` — not `Promote → ctx.dest`), leaving `BatchHandoff::AwaitAdopt`
+/// (the dest adopts off the source's envelope) as the ONE remaining producer-less phase (DEFERRED.md
+/// D-6 precondition 1), whose owed cure (the same re-solicit-egress pattern, or a sender-side durable
+/// outbox) is owed before the redb backend / a real rolling deploy.
 pub trait Transport {
     /// Enqueue an outbound message toward `to`.
     fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError>;
