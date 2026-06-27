@@ -124,6 +124,28 @@ fn stub_roster(shard_ids: impl IntoIterator<Item = NodeId>) -> BTreeMap<NodeId, 
     shard_ids.into_iter().map(|id| (id, empty)).collect()
 }
 
+/// The default orchestrator directory tuning: a long lease, the REAPER INERT (interval 0). Every cluster
+/// uses this EXCEPT the D-37 standing-re-home cell ([`reaping_directory_tuning`]) — keeping the reaper
+/// CELL-3-SPECIFIC so a short lease does not spuriously lapse + reap the other crash cells' live owners.
+fn default_directory_tuning() -> DirectoryTuning {
+    DirectoryTuning {
+        lease_ttl_ticks: 1_000,
+        ..DirectoryTuning::default()
+    }
+}
+
+/// D-37 Slice 3b: the CELL-3-SPECIFIC directory tuning that ARMS the standing re-home — a SHORT lease (the
+/// dead source's Entity lease is already lapsed by the time it is confirmed dead) + a non-zero reaper
+/// interval (the sweep that detects the lapsed + confirmed-dead + unlocked orphan and arms its re-home).
+/// Deliberately NOT the cluster default (a short global lease would lapse + perturb every other cell).
+fn reaping_directory_tuning() -> DirectoryTuning {
+    DirectoryTuning {
+        lease_ttl_ticks: 16,
+        reaper_interval_ticks: 8,
+        ..DirectoryTuning::default()
+    }
+}
+
 fn build_cluster(
     fabric: &FaultFabric,
     max_sessions: usize,
@@ -131,6 +153,7 @@ fn build_cluster(
     shards: Vec<(NodeId, StubConfig)>,
     stagger: StaggerPlan,
     orch_store: MemStore,
+    directory: DirectoryTuning,
 ) -> Topology {
     let mut topo = Topology::new(fabric.clone(), stagger);
 
@@ -146,12 +169,11 @@ fn build_cluster(
     // `MemStore` (transparent); the D-6 orchestrator-kill driver passes a RETAINED handle so a rebuilt
     // orchestrator re-hydrates the SAME committed WAL.
     let roster = stub_roster(shards.iter().map(|(id, _)| *id));
-    register_orchestrator_with_store(
-        world,
-        schedule,
-        &orch_config(clock_peers, roster),
-        Box::new(orch_store),
-    );
+    // D-37 Slice 3b: override the directory tuning (reaper/lease) — most clusters pass the inert default;
+    // the standing-re-home cell passes the reaping tuning.
+    let mut oc = orch_config(clock_peers, roster);
+    oc.directory = directory;
+    register_orchestrator_with_store(world, schedule, &oc, Box::new(orch_store));
     topo.add_node(Box::new(orch));
 
     let mut gateway = build_app(
@@ -220,6 +242,7 @@ pub fn p1_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
         vec![(SHARD, stub_config())],
         StaggerPlan::lockstep(),
         MemStore::new(), // a fresh (genesis) store — this cluster is not rebuilt
+        default_directory_tuning(),
     )
 }
 
@@ -235,6 +258,23 @@ pub fn p2_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
         vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
         StaggerPlan::lockstep(),
         MemStore::new(), // a fresh (genesis) store — this cluster is not rebuilt
+        default_directory_tuning(),
+    )
+}
+
+/// D-37 Slice 3b: the P2 transfer cluster with the REAPING directory tuning (short lease + non-zero reaper
+/// interval) so the standing reaper-driven re-home (CELL 3) actually fires in the full kill scenario.
+/// Identical to [`p2_cluster`] otherwise. CELL-3-specific (the other crash cells keep the inert default).
+#[must_use]
+pub fn p2_cluster_reaping(fabric: &FaultFabric, max_sessions: usize) -> Topology {
+    build_cluster(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD, DEST],
+        vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
+        StaggerPlan::lockstep(),
+        MemStore::new(),
+        reaping_directory_tuning(),
     )
 }
 
@@ -251,6 +291,7 @@ pub fn p2_cluster_durable_orch(fabric: &FaultFabric, max_sessions: usize) -> (To
         vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
         StaggerPlan::lockstep(),
         store.clone(),
+        default_directory_tuning(),
     );
     (topo, store)
 }
@@ -271,6 +312,7 @@ pub fn p2_cluster_staggered(
         vec![(SHARD, stub_config()), (DEST, dest_stub_config())],
         stagger,
         MemStore::new(), // a fresh (genesis) store — this cluster is not rebuilt
+        default_directory_tuning(),
     )
 }
 
@@ -681,6 +723,12 @@ pub struct Scenario {
     pub at_phase: &'static str,
     pub crash_when: CrashWhen,
     pub fault: Fault,
+    /// D-37 Slice 3b: this cell expects the STANDING reaper-driven re-home (CELL 3 — a pre-freeze SOURCE
+    /// kill leaves a dead-owner orphan no live saga heals). When set, the scenario uses the REAPING cluster
+    /// ([`p2_cluster_reaping`]: short lease + non-zero reaper interval) and runs the FULL quiesce window
+    /// (the aborted saga tombstones BEFORE the reaper arms the re-home, so an early `live_sagas == 0` break
+    /// would exit before the parked re-home saga is armed). Every other cell leaves this `false`.
+    pub standing_rehome: bool,
 }
 
 /// The asserted end state of a scenario. Data-carrying (not 3 bare arms) so the deferred D-37 cells
@@ -753,7 +801,13 @@ fn fault_entity_record(reports: &[(NodeId, InspectReport)], entity: EntityId) ->
 #[must_use]
 pub fn run_fault_scenario(seed: u64, sc: Scenario) -> (Topology, EntityId, BTreeSet<NodeId>) {
     let fabric = FaultFabric::new(seed, 2);
-    let mut topo = p2_cluster(&fabric, 8);
+    // D-37 Slice 3b: the standing-re-home cell needs the REAPING cluster (short lease + reaper) so the
+    // orphan is detected + re-homed post-kill; every other cell uses the inert-reaper default.
+    let mut topo = if sc.standing_rehome {
+        p2_cluster_reaping(&fabric, 8)
+    } else {
+        p2_cluster(&fabric, 8)
+    };
     topo.add_node(Box::new(p1_client(
         &fabric,
         FAULT_CLIENT,
@@ -807,9 +861,12 @@ pub fn run_fault_scenario(seed: u64, sc: Scenario) -> (Topology, EntityId, BTree
         Fault::Kill => fabric.kill(sc.victim),
     }
     // QUIESCE: settle to terminal, or cap (a D-37 parked cell never quiesces — the assert handles it).
+    // D-37 Slice 3b: a standing-re-home cell must NOT break at the FIRST `live_sagas == 0` — the aborted
+    // saga tombstones (live 0) BEFORE the reaper detects the lapsed orphan + arms the re-home (live 1 again,
+    // parked) a few sweeps later. Run the FULL window so the parked re-home saga is armed by the end.
     for _ in 0..120 {
         topo.step();
-        if live_sagas(&mut topo) == 0 {
+        if !sc.standing_rehome && live_sagas(&mut topo) == 0 {
             break;
         }
     }

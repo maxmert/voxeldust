@@ -33,6 +33,7 @@ fn p3_crash_matrix_is_byte_identical_under_one_seed() {
                 at_phase: "Demoting",
                 crash_when: CrashWhen::PostInject,
                 fault: Fault::CrashResurrect { after: 2 },
+                standing_rehome: false,
             },
         );
         (topo.inspect_all(), topo.trace_bytes(), entity, dead)
@@ -57,6 +58,7 @@ fn p3_crash_resurrect_source_in_demoting_recovers_and_commits() {
             at_phase: "Demoting",
             crash_when: CrashWhen::PostInject,
             fault: Fault::CrashResurrect { after: 2 },
+            standing_rehome: false,
         },
     );
     assert!(
@@ -78,6 +80,7 @@ fn p3_crash_resurrect_dest_in_promoting_recovers_and_commits() {
             at_phase: "Promoting",
             crash_when: CrashWhen::PostInject,
             fault: Fault::CrashResurrect { after: 2 },
+            standing_rehome: false,
         },
     );
     assert!(dead.is_empty(), "the crashed dest was resurrected");
@@ -105,6 +108,7 @@ fn p3_kill_dest_pre_freeze_forward_rehomes_to_a_live_shard() {
             at_phase: "Preparing",
             crash_when: CrashWhen::PostInject, // unused for Kill, but a valid cell coordinate
             fault: Fault::Kill,
+            standing_rehome: false,
         },
     );
     assert_eq!(
@@ -138,6 +142,7 @@ fn p3_kill_source_in_demoting_self_promotes_the_committed_dest() {
             at_phase: "Demoting",
             crash_when: CrashWhen::PostInject,
             fault: Fault::Kill,
+            standing_rehome: false,
         },
     );
     assert_eq!(
@@ -153,15 +158,22 @@ fn p3_kill_source_in_demoting_self_promotes_the_committed_dest() {
     );
 }
 
-/// DEFERRED D-37 (honest RED): PERMANENT KILL of the SOURCE while it is FREEZING (PRE-commit). The
-/// SourceFrozen ack never comes (source dead) → the freeze timeout fires `abort_with_thaw` (the
-/// compensators are gateway-acked) → terminal Aborted → `abort_clear` clears the lock (FENCE-NEUTRAL —
-/// no bump) + tombstones the saga. But the CAS never ran, so authority never moved off the SOURCE —
-/// which is now a CORPSE: `DeadOwnerOrphan{SOURCE}` (saga terminal, lock clear, directory at a dead
-/// owner). The dead-aware oracle surfaces the exact orphan. (This is why "abort to the live source"
-/// is NOT reachable by a permanent SOURCE kill — the aborted-to owner is dead.)
+/// D-37 Slice 3 (CELL 3, the STANDING reaper-driven re-home): PERMANENT KILL of the SOURCE while it is
+/// FREEZING (PRE-commit). The SourceFrozen ack never comes (source dead) → the freeze timeout fires
+/// `abort_with_thaw` (compensators gateway-acked) → terminal Aborted → `abort_clear` clears the lock
+/// (FENCE-NEUTRAL) + tombstones the saga. The CAS never ran, so authority never moved off the SOURCE —
+/// now a CORPSE, the directory at a dead UNLOCKED owner with NO live saga (the pre-Slice-3
+/// `DeadOwnerOrphan`). Slice 3a's machinery now recovers it: once the source is confirmed dead (D-3) and
+/// its short-lease Entity record has lapsed, the expiry REAPER detects the orphan and ARMS a fresh
+/// standing re-home — a saga PARKED in `ReHoming` at a LIVE capability-matched target, the key re-LOCKED.
+/// CONSERVATIVE Slice-3 split: authority STAYS at the dead owner (no CAS) and NOTHING is fabricated
+/// (HR1 — a pre-flush death has no recoverable pose; the dot ADOPT is owed Slice 4/D-6), so the cell is
+/// `ParkedHalfOpen{SOURCE}` (a LIVE parked re-home saga, directory still at the dead owner — the
+/// dead-aware oracle surfaces the exact `HeldNowhere` orphan, never a false pass). Slice 4 moves authority
+/// (the `ReHomeCommit` CAS off the corpse) + reloads the state, flipping this to `EntityRecoveredRealmOrphaned`
+/// then `SettledAt`. (Was honest-RED `DeadOwnerOrphan{SOURCE}` before Slice 3.)
 #[test]
-fn p3_kill_source_in_freezing_tombstones_to_a_dead_owner_orphan() {
+fn p3_kill_source_in_freezing_arms_a_standing_rehome() {
     let (mut topo, entity, dead) = run_fault_scenario(
         SEED,
         Scenario {
@@ -170,6 +182,7 @@ fn p3_kill_source_in_freezing_tombstones_to_a_dead_owner_orphan() {
             at_phase: "Freezing",
             crash_when: CrashWhen::PostInject,
             fault: Fault::Kill,
+            standing_rehome: true,
         },
     );
     assert_eq!(
@@ -181,7 +194,7 @@ fn p3_kill_source_in_freezing_tombstones_to_a_dead_owner_orphan() {
         &mut topo,
         entity,
         &dead,
-        EndState::DeadOwnerOrphan {
+        EndState::ParkedHalfOpen {
             authority_at: SHARD,
         },
     );

@@ -687,6 +687,7 @@ fn p3_transient_source_kill_self_promotes_the_dest_zero_loss() {
             at_phase: AT_AWAIT_RELEASE,
             crash_when: CrashWhen::PostStep, // ignored for a permanent Kill
             fault: Fault::Kill,
+            standing_rehome: false, // transients never standing-re-home (they live + die in one realm)
         },
     );
     assert_transient_end_state(
@@ -723,6 +724,7 @@ fn p3_transient_dest_kill_abandons_within_budget() {
             at_phase: AT_AWAIT_PROMOTE,
             crash_when: CrashWhen::PostStep, // ignored for a permanent Kill
             fault: Fault::Kill,
+            standing_rehome: false, // transients never standing-re-home (they live + die in one realm)
         },
     );
     assert_transient_end_state(
@@ -761,6 +763,7 @@ fn p3_transient_source_crash_resurrect_completes_without_resolving() {
             at_phase: AT_AWAIT_RELEASE,
             crash_when: CrashWhen::PostStep,
             fault: Fault::CrashResurrect { after: 12 }, // > redrive deadline (8) → Timeout re-drive fires
+            standing_rehome: false, // transients never standing-re-home (they live + die in one realm)
         },
     );
     assert!(dead.is_empty(), "the resurrected source is not a dead node");

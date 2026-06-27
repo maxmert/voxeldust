@@ -219,14 +219,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   client/gateway id). Proven by 5 deterministic unit tests (`saga::start_rehome_arms_parked_in_rehoming`;
   `reap_in_freezing_orphan_enqueues_a_pending_rehome_and_arms_a_parked_saga`; `reaper_leaves_a_locked_dead_entity_*`;
   `process_rehome_parks_when_no_live_target`; `process_rehome_skips_an_already_locked_key`), 100% Tier-A region+branch.
-- **Owed — Slice 3b (the crash-matrix flip):** wire Slice-3a into the `p3_crash_matrix` CELL-3 cell — a CELL-3-SPECIFIC
-  cluster tuning (non-zero `reaper_interval_ticks` + short `lease_ttl_ticks`; NOT a global change, else other cells
-  spuriously lapse) so the reaper fires in the full kill scenario, plus a quiesce that runs PAST the lease-lapse +
-  reaper sweep (the current `live_sagas == 0` break fires when the abort tombstones, BEFORE the re-home arms). Then
-  flip `p3_kill_source_in_freezing_*` from `DeadOwnerOrphan{SOURCE}` to `ParkedHalfOpen{SOURCE}` (the existing
-  asserter fits: directory at the dead node + a live parked saga + the oracle's `HeldNowhere`). Until 3b, the crash
-  matrix CELL 3 honestly stays `DeadOwnerOrphan` (the cluster reaper is INERT at `interval == 0`, so the Slice-3a
-  machinery does not fire there — accurate, not stale). The dead-aware oracle surfaces the orphan honestly throughout.
+- **✅ Slice 3b LANDED — the crash-matrix flip:** Slice-3a is now wired into the `p3_crash_matrix` CELL-3 cell. A
+  CELL-3-SPECIFIC reaping cluster (`p2_cluster_reaping`: non-zero `reaper_interval_ticks` + short `lease_ttl_ticks` —
+  NOT a global change; the other cells keep the inert default so a short lease never spuriously lapses + reaps their
+  live owners) makes the reaper fire in the full kill scenario, and the `Scenario.standing_rehome` flag runs the FULL
+  quiesce window (the early `live_sagas == 0` break is skipped — the aborted saga tombstones BEFORE the reaper arms
+  the re-home). `p3_kill_source_in_freezing_arms_a_standing_rehome` now asserts `ParkedHalfOpen{SOURCE}` (the existing
+  asserter: a LIVE parked re-home saga + the directory at the dead node + the dead-aware oracle's exact `HeldNowhere`
+  — never a false pass). The byte-identical seed-replay canary still holds (the re-home is deterministic). Was
+  `DeadOwnerOrphan{SOURCE}` before Slice 3.
 - **Still owed (Slice 4):** generalize the re-home from Entity to **Realm/Ship** keys (ships/stations/cities are
   Realms — PLAN.md:82,141) — the reaper's Realm/Ship arm + the Realm adopt effect + D-33 N+1 CAS for ships — AND turn
   `start_rehome`'s empty action list into `ReHomeCommit{expected: prev_fence, target}` (the CAS off the corpse,
