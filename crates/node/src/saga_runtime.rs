@@ -1554,6 +1554,18 @@ fn should_reap(
 /// INERT when `reaper_interval_ticks == 0` (the pre-D-3 default). Runs INSIDE the D-6 group-commit barrier
 /// (before the directory reconcile, and immediately before `process_rehome_starts`) so a revoke / a locked +
 /// armed re-home is captured by the same tick's reconcile + commit (durable — never resurrects on a kill-9).
+/// Whether a LIVE saga already owns this subject key's recovery. The standing re-home MUST consult this,
+/// not just `record.in_transfer`: `commit_cas` CLEARS `in_transfer` at the commit point while a
+/// POST-commit `Promoting`/`ReHoming` saga lives on (it re-homes a dead committed owner via
+/// `scan_deadlines`), so a dead-owner key can be UNLOCKED yet still owned by an in-flight saga. Without
+/// this check the reaper would arm a SECOND re-home on that key — a double recovery-arm that steals the
+/// lock and leaks a parked saga (audit `wf_3b9eb7f0`). This makes "one re-home arm per key" an ENFORCED
+/// invariant (the in_transfer lock alone does not, post-commit). O(live sagas) per reapable key — the
+/// reaper is interval-paced; a subject→saga index is the MMO-scale optimization, not built now.
+fn subject_has_live_saga(sagas: &BTreeMap<TransferId, LiveSaga>, subject: DirectoryKey) -> bool {
+    sagas.values().any(|s| s.ctx.subject == subject)
+}
+
 fn reap_lapsed_leases(runtime: &mut SagaRuntimeRes, dir: &mut DirectoryCore, now: UniverseTick) {
     let interval = dir.tuning().reaper_interval_ticks;
     if (interval == 0) | (now.0.saturating_sub(runtime.last_reap_tick.0) < interval) {
@@ -1570,12 +1582,21 @@ fn reap_lapsed_leases(runtime: &mut SagaRuntimeRes, dir: &mut DirectoryCore, now
         }
         match key {
             DirectoryKey::Session(_) => to_revoke.push((*key, record.fence)),
-            DirectoryKey::Entity(_) if record.in_transfer.is_none() => to_rehome.push(PendingReHome {
-                subject: *key,
-                dead_owner: record.authority.node(),
-                prev_fence: record.fence,
-            }),
-            // A LOCKED Entity (a saga owns it) | Realm | Ship → left for the owning saga / Slice 4.
+            // Standing re-home a dead-owner Entity ONLY when it is BOTH unlocked AND has no live saga: a
+            // post-commit `Promoting` saga's key is UNLOCKED (commit_cas cleared the lock) yet still owned
+            // by that in-flight saga (which re-homes it itself) — arming a second re-home here would
+            // double-arm + leak. Bitwise `&` (HR5: both predicates always evaluated, no short-circuit gap).
+            DirectoryKey::Entity(_)
+                if record.in_transfer.is_none() & !subject_has_live_saga(&runtime.sagas, *key) =>
+            {
+                to_rehome.push(PendingReHome {
+                    subject: *key,
+                    dead_owner: record.authority.node(),
+                    prev_fence: record.fence,
+                });
+            }
+            // A LOCKED Entity, an Entity a live saga still owns, a Realm, or a Ship → left for the owning
+            // saga / Slice 4 (never double-armed).
             DirectoryKey::Entity(_) | DirectoryKey::Realm(_) | DirectoryKey::Ship(_) => {}
         }
     }
@@ -3089,6 +3110,44 @@ mod tests {
         assert!(
             runtime.pending_rehome.is_empty(),
             "a LOCKED dead Entity is left to its owning saga, never standing-re-homed"
+        );
+    }
+
+    #[test]
+    fn reaper_leaves_a_dead_entity_a_live_post_commit_saga_still_owns() {
+        // AUDIT wf_3b9eb7f0 (HIGH): commit_cas CLEARS in_transfer at the commit point, so a POST-commit
+        // Promoting saga's key is UNLOCKED yet still owned by that live in-flight saga (which re-homes the
+        // dead committed owner ITSELF via scan_deadlines). The reaper must NOT arm a SECOND standing
+        // re-home on it — it cross-checks runtime.sagas (`subject_has_live_saga`), not just in_transfer, so
+        // "one re-home arm per key" is an ENFORCED invariant. Reverting the `& !subject_has_live_saga`
+        // guard turns this RED (the reaper would double-arm + leak a parked saga). Covers the
+        // subject_has_live_saga TRUE arm + the guard's has-live-saga false branch.
+        let dead = NodeId(5);
+        let entity = DirectoryKey::Entity(subject_eid());
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10,
+            reaper_interval_ticks: 8,
+            ..DirectoryTuning::default()
+        });
+        // The committed key is UNLOCKED (a post-commit saga — commit_cas cleared in_transfer)...
+        let _ = dir.grant(entity, AuthorityRef::Shard(dead), Fence(3), UniverseTick(0));
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        // ...but a LIVE Promoting saga still owns the subject (ctx.subject == entity).
+        inject_saga(
+            &mut runtime,
+            SagaState::Promoting {
+                new_fence: Fence(3),
+                promote_acked: false,
+                dest_delivered: false,
+                rehome_target: None,
+            },
+            UniverseTick(0),
+        );
+        runtime.liveness.record_unreachable(dead, UniverseTick(50));
+        reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+        assert!(
+            runtime.pending_rehome.is_empty(),
+            "an unlocked dead-owner Entity a LIVE saga still owns is NOT double-armed (cross-checks sagas)"
         );
     }
 

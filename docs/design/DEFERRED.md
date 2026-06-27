@@ -212,9 +212,14 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   re-detecting the still-dead UNLOCKED record on reboot — no new WAL family). `process_rehome_starts` then picks a
   LIVE capability-matched target (`select_rehome_target`), LOCKS the key (`lock_transfer` — so the next sweep skips
   it), and ARMS a fresh saga that PARKS in `ReHoming{target}` via `saga::start_rehome`. CONSERVATIVE split: authority
-  STAYS at the dead owner (no CAS), NOTHING is emitted (HR1: no fabricated pose — `flushed_pose: None`). A LOCKED
-  Entity is left to its owning saga; Realm/Ship still LEFT (Slice 4). NO live target (whole-pool death) → the entry
-  DROPS, the reaper retries next sweep (interval-paced, never a forced incapable re-home). The re-home `TransferId` is
+  STAYS at the dead owner (no CAS), NOTHING is emitted (HR1: no fabricated pose — `flushed_pose: None`). NO live target
+  (whole-pool death) → the entry DROPS, the reaper retries next sweep (interval-paced, never a forced incapable
+  re-home). **The reaper arms ONLY a dead-owner Entity that is BOTH `in_transfer`-unlocked AND has NO live saga
+  (`subject_has_live_saga` cross-checks `runtime.sagas`, audit `wf_3b9eb7f0`):** `commit_cas` CLEARS the lock at the
+  commit point while a POST-commit `Promoting`/`ReHoming` saga lives on (it re-homes a dead committed owner ITSELF
+  via `scan_deadlines`), so an unlocked key can still be saga-owned — the cross-check makes "one re-home arm per key"
+  an ENFORCED invariant (the lock alone does not, post-commit), preventing a double-arm + a leaked parked saga. A
+  LOCKED Entity, an unlocked Entity a live saga still owns, and Realm/Ship are all LEFT (Slice 4 / the owning saga). The re-home `TransferId` is
   deterministically derived (FNV over `(subject, prev_fence)`, namespaced `0x37` — never collides with a
   client/gateway id). Proven by 5 deterministic unit tests (`saga::start_rehome_arms_parked_in_rehoming`;
   `reap_in_freezing_orphan_enqueues_a_pending_rehome_and_arms_a_parked_saga`; `reaper_leaves_a_locked_dead_entity_*`;
@@ -469,9 +474,13 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   named on the directory `in_transfer` field (DEAD — cleared at commit-CAS) CANNOT live on a `vd-sim` shard (it cannot
   see the orchestrator live-saga set; the dependency rule forbids sim→node — full-audit `wf_3fee0260` skeptics 4/4).
   The shard-LOCAL stand-in is STRUCTURAL: the source tears down ONLY a retained `Ghost` dot (a RE-OWNED `Owned` dot is
-  refused — `remove_retained_ghost`), the destroy-edge sizing keeps band-exit post-release, and the orchestrator
-  one-saga-per-key lock prevents a concurrent same-key saga. The proper orchestrator-side gate + ghost-lifecycle crash
-  recovery are owed at **Slice-2** / **D-6**. **⚠️ saga `(Demoting, DestDelivered)` latch arm is
+  refused — `remove_retained_ghost`), and the destroy-edge sizing keeps band-exit post-release. **⚠️ Correction
+  (audit `wf_3b9eb7f0`):** the `in_transfer` lock does NOT by itself prevent a concurrent same-key saga POST-commit
+  (`commit_cas` CLEARS it at the commit point — as this entry's own note above states) — so "one saga per key" was
+  OVERSTATED as a lock guarantee. For the reaper-driven STANDING re-home it is now an ENFORCED invariant via
+  `subject_has_live_saga` (the reaper cross-checks `runtime.sagas`, not just `in_transfer`); the GENERAL
+  orchestrator-side one-saga-per-key gate (+ a harness one-saga-per-subject-key oracle) + ghost-lifecycle crash
+  recovery remain owed at **Slice-2** / **D-6**. **⚠️ saga `(Demoting, DestDelivered)` latch arm is
   now PRODUCTION-DEAD** (with the relocated SubscriptionReady the dest sub/frames cannot exist while the saga is in
   Demoting — `DestDelivered` can only arrive in Promoting+); kept as a defensive/harness-only arm (annotated in
   `saga.rs`; its `an_early_delivery_in_demoting` test injects the event directly, so HR5 coverage holds).
@@ -729,7 +738,24 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
-### D-6 🟧 Durable saga WAL: S0–S5 LANDED (persist+recover ENGINE + e2e orchestrator kill-9 cells); the redb backend + 3 io-prod preconditions owed
+### D-6 🟧 Durable saga WAL: S0–S5 LANDED (persist+recover ENGINE + e2e orchestrator kill-9 cells); the redb backend IN PROGRESS (Slice P3-PERSIST-1)
+- **▶ Slice P3-PERSIST-1 — the redb backend (design `wf_83d5a428`, judge-panel of 4; user-decided: Store A redb
+  now + single-file/split-ready-seam):** ONE generic `RedbStore` behind the frozen `sim::io::Store` seam in
+  `crates/io-prod/src/store.rs`, wired to the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling); the
+  shard per-RealmId Store B (P6/P7) reuses the SAME type verbatim (variance is DATA — path + keyspace — never CODE,
+  HR3). Sub-slices: **✅ C1 LANDED (`63b637d`)** — the SYNCHRONOUS durable backend (commit() = one redb
+  WriteTransaction + inline fsync; staged-retained-on-error fail-safe; 6 durability tests across a real reopen; redb
+  2.6.3 into the lock, the keep-list Store lib's first consumer; NOT yet wired → inline fsync blocks no tick).
+  **OWED: C2** = the OFF-TICK fsync writer thread + `last_durable` persist-before-effect gate (the sim thread never
+  blocks on disk) — lands BEFORE the wiring; **D** = wire `RedbStore` into the orchestrator bin (replace the
+  loud-non-durable `MemStore`) + the process-tier SIGKILL-mid-fsync crash proof (Tier-B ratcheted floor); **A** =
+  precondition #3 (`WAL_FORMAT_VERSION` + `universe_epoch_id` byte + fallible quarantining decode replacing the bare
+  `.expect` decodes) + the `StoreKey::Tombstone` family; **B** = precondition #2 (incremental directory reconcile +
+  idle-tick dirty-guard, with a test-only delete-all-then-put differential oracle). The C1 backend does NOT directly
+  unblock D-37 Slice 4 (that needs Store B + P7 `player_ckpt`, genuinely P6/P7); precondition **#1** (the
+  `BatchHandoff::AwaitAdopt` re-solicit egress) stays OWED as the immediate post-redb fast-follow (a durable Store A
+  ALONE does not make prod kill-9 recovery work — the at-most-once `MeshTransport` boot-warn clause STAYS until #1
+  lands). [[D-37]] Slice 4 + [[D-36]] unaffected.
 - **✅ S0–S3 LANDED (design `wf_0f8321dc`, doc `d6_saga_wal.md`):** the orchestrator now durably persists its
   saga set + go-tokens + directory + clock ceiling through the `sim::io::Store` seam (`MemStore` staged/committed
   two-tier; redb is the io-prod backend, DEFERRED — NO new dep). `commit_result` stages the QUIESCENT
