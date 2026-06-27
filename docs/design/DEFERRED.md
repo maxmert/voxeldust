@@ -235,10 +235,6 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   single-writer by the CAS — HR1-clean, never the sealed dead store; D-6/P7); G-IDENTICAL on ≥2 ShardProfiles; flip
   the cured cells to `SettledAt` once the dead owner's REALM also re-homes (the `RealmHeldNowhere` residual the
   `EntityRecoveredRealmOrphaned` intermediate honestly surfaces).
-- **Still owed (Slice 4):** generalize the re-home from Entity to **Realm/Ship** keys (ships/stations/cities are
-  Realms — PLAN.md:82,141) with `ReHomeState::PoseOnly` as the P7 state-reload seam; G-IDENTICAL on ≥2 ShardProfiles;
-  flip the cured cells to `SettledAt` once the dead owner's REALM also re-homes (the `RealmHeldNowhere` residual the
-  `EntityRecoveredRealmOrphaned` intermediate honestly surfaces).
 - **Deferred sub-items (accepted user-decided scope, 2c-UNREACHABLE today, recorded so the green gate is honest):**
   - **The live-resurrected-stale-held RESURRECT test:** the harness CANNOT resurrect a killed node IN-PLACE
     (`FaultFabric::kill` sets killed+crashed; `reregister` drops the old World → empty Dots, no stale claim survives).
