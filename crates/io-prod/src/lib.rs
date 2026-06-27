@@ -32,6 +32,7 @@
 pub mod admin;
 pub mod mesh;
 pub mod runtime;
+pub mod store;
 pub mod trust;
 
 use std::net::SocketAddr;
