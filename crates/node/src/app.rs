@@ -100,24 +100,60 @@ pub fn build_app<T: Transport>(cfg: NodeConfig, transport: T) -> ShardNode<T> {
     }
 }
 
+/// The mid-tick handoff (D-beta): the [`TickReport`] fields FIXED by
+/// [`run_schedule`](ShardNode::run_schedule) before the outbox is flushed. Opaque by design — a
+/// durability-aware bin holds it across a wait-for-durable, then hands it to
+/// [`flush_outbox`](ShardNode::flush_outbox), without inspecting it. No derives: it is never formatted
+/// or compared, so it adds no coverable surface (HR5).
+pub struct TickPrologue {
+    tick: TickId,
+    drained: usize,
+    unreachable: usize,
+}
+
 impl<T: Transport> ShardNode<T> {
-    /// THE deterministic unit of progress. Synchronous by construction.
-    pub fn step_tick(&mut self) -> TickReport {
+    /// The FIRST half of a tick (D-beta): advance the local tick, drain inbound, and run the schedule —
+    /// which, on the orchestrator, includes the group-commit barrier that STAGES + submits this tick's
+    /// durable batch. The outbox is NOT sent here; that is [`flush_outbox`](Self::flush_outbox), split out
+    /// so a durability-aware bin can interpose a wait-for-durable between the two (persist-before-effect:
+    /// no effect leaves the node before the state authorizing it is durable — D-gamma's parked-flush). The
+    /// returned [`TickPrologue`] carries the report fields fixed before the flush.
+    pub fn run_schedule(&mut self) -> TickPrologue {
         self.tick = self.tick.next();
         set_local_tick(&mut self.world, self.tick);
         let (drained, unreachable) = drain_phase(&mut self.transport, &mut self.world);
         self.schedule.run(&mut self.world);
+        TickPrologue {
+            tick: self.tick,
+            drained,
+            unreachable,
+        }
+    }
+
+    /// The SECOND half of a tick (D-beta): flush the outbox the schedule staged and assemble the
+    /// [`TickReport`]. Takes the [`TickPrologue`] from [`run_schedule`](Self::run_schedule). Split so a
+    /// durability-aware bin can wait for the prior tick's batch to be durable BEFORE this send.
+    pub fn flush_outbox(&mut self, prologue: TickPrologue) -> TickReport {
         let (sent, backpressured, staging_shed, reliable_shed) =
             flush_phase(&mut self.transport, &mut self.world);
         TickReport {
-            tick: self.tick,
-            drained,
+            tick: prologue.tick,
+            drained: prologue.drained,
             sent,
             backpressured,
             staging_shed,
             reliable_shed,
-            unreachable,
+            unreachable: prologue.unreachable,
         }
+    }
+
+    /// THE deterministic unit of progress. Synchronous by construction. A thin wrapper running
+    /// [`run_schedule`](Self::run_schedule) then [`flush_outbox`](Self::flush_outbox) back-to-back —
+    /// byte-for-byte the pre-split single phase (the in-process harness + MemStore path, which needs no
+    /// durability interposition). The durable-orchestrator bin calls the two halves directly instead.
+    pub fn step_tick(&mut self) -> TickReport {
+        let prologue = self.run_schedule();
+        self.flush_outbox(prologue)
     }
 
     #[must_use]
