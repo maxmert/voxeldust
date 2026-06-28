@@ -2,8 +2,10 @@
 //! in-module unit test to the design-named INTEGRATION location so the closed-set
 //! guarantee is a per-release gate, not a convention (audit SEAL-2).
 //!
-//! The closed taxonomy `InterShardFlow{Ghost,Transfer,Directory,Saga,SagaAck,
-//! DirectoryReply}` is the ONLY shape that crosses a shard boundary; every arm has a
+//! The closed taxonomy `InterShardFlow` (the FULL current 15-arm set — see `wire/src/lib.rs`
+//! for the canonical enumeration; this header does NOT re-list it to avoid a second copy that
+//! drifts, the exact staleness the `arm_tripwire` below structurally prevents) is the ONLY
+//! shape that crosses a shard boundary; every arm has a
 //! coherent `EffectClass`, and every SIDE-EFFECTING arm carries an idempotency key (so
 //! an authority-gating payload can never ride a fire-and-forget channel). Two compile-
 //! time tripwires keep this gate honest as arms are added: the exhaustive `match` in

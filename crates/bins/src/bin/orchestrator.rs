@@ -187,11 +187,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(_) => None,
     };
+    let writer_channel_depth = env.parse_or(
+        "VD_STORE_CHANNEL_DEPTH",
+        StoreTuning::default().writer_channel_depth,
+    )?;
+    // Reject 0 LOUD: a 0-depth (rendezvous) channel couples the sim thread to the fsync — the exact
+    // off-tick property C2 exists to provide. Never a silent mis-config (audit wf_ed40e95e MEDIUM).
+    if writer_channel_depth == 0 {
+        return Err(
+            "VD_STORE_CHANNEL_DEPTH must be >= 1 — a 0 (rendezvous) channel couples the sim thread to the \
+             off-tick fsync, defeating C2. Refusing to boot."
+                .into(),
+        );
+    }
     let store_tuning = StoreTuning {
-        writer_channel_depth: env.parse_or(
-            "VD_STORE_CHANNEL_DEPTH",
-            StoreTuning::default().writer_channel_depth,
-        )?,
+        writer_channel_depth,
         #[cfg(feature = "store-test-hooks")]
         pause_on_key_prefix: sentinel.as_ref().map(|(_, prefix, _)| prefix.clone()),
         #[cfg(feature = "store-test-hooks")]
@@ -247,9 +257,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // batch (the wait IS the disk-stall back-pressure, and fails LOUD if the writer died — a refusal is
     // never a loss). No effect ever leaves the orchestrator before the state authorizing it is durable.
     //
-    // The parked seq is THIS tick's batch because the group-commit barrier ALWAYS stages the Clock key
-    // (`saga_runtime` drive_sagas tail), so `commit()` submits every tick ⇒ `last_submitted` advances every
-    // tick (never the stale prior seq). SHUTDOWN: this is an unconditional loop (killed by signal), so the
+    // WHY gating on `last_submitted()` is correct (and stays correct under the owed idle-fsync-skip,
+    // DEFERRED.md D-6 #2 — holistic audit `wf_ed40e95e`): every flushed effect depends on a PAST-or-same-tick
+    // commit, and a same-tick state change STAGES a durable delta (the directory dirty-set / saga pending_writes)
+    // ⇒ is submitted ⇒ reflected in `last_submitted`; a past commit is ≤ `last_submitted` by definition. So
+    // `last_submitted()` at flush time ALWAYS covers the flushed tick's effect-state. Today the barrier also
+    // stages the Clock key every tick, so `last_submitted` advances every tick — but even if a future write-amp
+    // pass skips that on a FULLY IDLE tick, an idle tick has no state-dependent egress (only loss-tolerant
+    // ClockSync, gated on the durable clock CEILING), so the gate holds. SHUTDOWN: this is an unconditional loop
+    // (killed by signal), so the
     // final parked outbox is never flushed and `RedbStore::Drop`'s graceful join never runs — recovery
     // covers it: rehydrate restores the last durable state + the Slice-2a producer re-drives every saga
     // command idempotently. (All egress today is saga commands [re-driven] + loss-tolerant ClockSync; a

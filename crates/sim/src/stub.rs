@@ -1439,9 +1439,14 @@ fn promote_apply(
         return;
     };
     if !applied.is_applied(cmd.transfer, STUB_CROSSING_STEP) {
-        // The crossing pose has not landed yet — flipping now would emit a poseless origin frame.
-        // DEFER: the saga's `Promoting`-timeout re-emits the Promote (no production producer yet —
-        // Slice-2; the saga's causal order makes this unreachable in the happy path).
+        // The crossing pose has not landed yet — flipping now would emit a poseless origin frame. DEFER.
+        // ⚠️ RECOVERY (DEFERRED.md D-6 #1, the durable entity-STATE crossing as a producer-less phase):
+        // re-driving the PROMOTE does NOT cure a crossing that the at-most-once mesh LOST — Promote only
+        // re-acks + re-defers here. The lost-crossing case needs the CROSSING re-driven (a Demoting/Promoting
+        // Timeout that also re-emits `EmitCrossing`, idempotent via this `STUB_CROSSING_STEP` journal dedup —
+        // the proven D-37-2d template) OR the owed redelivering transport. Under the harness at-least-once
+        // FaultFabric the crossing always redelivers, so this DEFER is reached only as the transient
+        // promote-before-crossing race, never a permanent wedge; the permanent case is a deploy precondition.
         stats.promote_before_crossing += 1;
         return;
     }

@@ -302,6 +302,45 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **Source:** the b0304ca holistic audit `wf_2e97cbe7` (the most substantive of four noted minors — the one hard rule
   whose literal gate is owed-at-first-feature rather than already-green).
 
+### D-39 🟧 Three orphaned-but-additive responsibilities — design-mandated, unbuilt, and (until now) UNLEDGERED (holistic audit `wf_ed40e95e`)
+All three are ADDITIVE at their feature phase (no landed byte/decision changes shape) — the DEFECT was their absence
+from this registry, invisible to the "a phase isn't done until its DEFERRED entries flip green" gate (the same
+honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lands with a green-gate pin.
+1. **Cross-shard BLOCK-EDIT / world-mutation forward-to-realm-owner routing.** PLAN.md:100 binding mandate
+   ("cross-shard block edits are FORWARDED to the realm owner — single-writer redb, never written locally") +
+   `integration.json` orphaned[3]. No code, no `ClientControlMsg` world-mutation arm, unrepresentable in the gateway's
+   single-authority `route_input`. ⚠️ RISK: a P6 implementer writes the edit locally on the authority shard = the exact
+   HR1-forbidden anti-pattern. **Owed (P6):** a reliable discrete edit action + gateway realm-ownership resolution via
+   the directory `Realm` key (reuse the [[D-32]] `coordinator_of` resolver) + the `InterShardFlow::BlockEdit` carrier
+   (a reserved arm; additive). WHEN: P6 (block edits + persistence).
+2. **Gateway↔shard CONNECTION POOL (`pool_size_K`).** `connection_plane.md` §3 (Attack-2.minor) specifies K conns/pair;
+   the mesh currently uses a single reliable stream per pair (which CORRECTLY satisfies `transfer_protocol.md` §1.4 —
+   the down-grade here corrects an over-claim). A landed design knob, unimplemented + unledgered. NOT a pre-feature
+   blocker, but should land before any multi-shard scale/load run. WHEN: P6-scale / the first multi-shard soak.
+3. **Warp `AwaitProvision` child-saga machinery.** The FSM has a bare `vec![]` stop where `AWAIT_PROVISION` belongs —
+   no `ProvisionIntent` persist-before-spawn, no Spawn-Resolver, no de-provision compensation, and no dedicated ledger
+   entry. **Owed (P10):** the full provisioning child saga per PLAN.md (persist-intent-before-spawn; self-terminating
+   unwanted pods; idle-GC). WHEN: P10 (warp + provisioning). Additive — the saga FSM already fans out at CasWon/CasLost.
+4. **Space STATIONS / planet-CITIES have no `RealmId`/`FrameRef`/`ShardProfile` representation yet** (`core/src/pose.rs`
+   `RealmId` = Planet/System/Ship; `sim/src/capability.rs` the 5 canonical kinds) — the design names them Realms built
+   from blocks but there is no station/city kind. Additive when P8 (ships/stations) lands (a new `RealmId` arm + a
+   `ShardProfile` capability config — zero new transfer code, HR2/HR3); ledgered now so it is not discovered late.
+   WHEN: P8.
+
+### D-40 🟧 Tier-B PROCESS-tier coverage %c-merge for the spawned node BINARIES (the deeper half of the HR5 Tier-B ratchet)
+- **✅ LANDED (the io-prod half):** the `coverage-io-prod` recipe enforces a RATCHETED regions floor (`tier_b_floor`,
+  currently 90, baseline ~92.5%) on io-prod's OWN in-process unit tests — deterministic (no SIGKILL counter loss), wired
+  into `gate` via `coverage`. This closes the holistic-audit `wf_da9e2be2` HIGH: io-prod (the live crash-durability +
+  mesh path) now has a real, non-theater coverage signal that cannot regress silently.
+- **OWED (the binaries half):** the full process-tier merge — instrument the spawned node BINARIES (orchestrator /
+  gateway / shard / client) under `LLVM_PROFILE_FILE=…%p-%m%c` (continuous mode MANDATORY: the harness SIGKILLs them, so
+  an atexit flush is lost), merge across the children, and report a ratcheted floor. `orch-crash-cov` already accumulates
+  the profraws via `--no-report` but has NO `report --fail-under` step; the `process_parity`/`dev_cluster_smoke`/
+  `client_load` binaries are likewise uninstrumented. **Owed: a `coverage-process` recipe (show-env + the %c merge +
+  `report --fail-under` at a ratcheted floor) folded into `coverage`/`gate`.** Honestly never 100% (a SIGKILL can lose
+  the final flush — exactly why it is a ratcheted FLOOR, not a 100% gate). WHEN: the process-tier coverage slice (a
+  coverage-infra pass; not blocking — the io-prod logic is already floored in-process).
+
 ### D-1 🟩 Transfer abort clears the directory lock (Slice 2a)
 - **✅ CLOSED (Slice 2a):** the terminal `Aborted` edge now emits `SagaAction::ClearTransferLock` →
   `DirectoryCore::abort_clear(subject, transfer)` — the STALE-FENCE re-read (a CAS-loser/aborter's `expected_fence`
@@ -456,7 +495,10 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   (owner) detects band-exit in `feed_source_ghosts` — the owned entity's distance from the crossing ANCHOR (captured at
   promote on `GhostNeighbor.anchor`; immutable bookkeeping, FG-2-clean — the live pose is still read from the `Dot`)
   leaves the seed-derived overlap band (`OverlapBand::for_motion(move_speed·dt)`, velocity-safe, NEW in
-  `core/geometry.rs`) — and emits `GhostFlow::Despawn` (RELIABLE carrier; a lost Despawn would leak the collider) +
+  `core/geometry.rs`) — and emits `GhostFlow::Despawn` (RELIABLE carrier; ⚠️ over the AT-MOST-ONCE prod mesh a lost
+  Despawn LEAKS a permanent phantom — the dest deregisters same-pass + the source has no re-detection, so there is NO
+  producer to re-send: a self-emitting frozen ghost (render) + a phantom collider forever. Tracked as the FOURTH
+  instance of D-6 #1's producer-less-flow CLASS; the redelivering transport / a source staleness reaper is the cure) +
   DEREGISTERS the feed (`GhostColliderRegistration`). The source `on_ghost_flow` Despawn arm now TEARS DOWN: removes
   the `SourceGhostMirror` entry AND the retained ghost DOT (the source stops self-emitting + being a collider) —
   IDEMPOTENT + counted (`ghost_despawns` / `ghost_despawn_no_host` / dest `ghost_band_exits`). Strictly POST-release
@@ -572,8 +614,13 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   poll torn out). (ii) Because the dest adopts LATE under
   promote-before-demote (the crossing, emitted at CAS, races ahead of the dest's `OpenInputSlot`→`HeadRead`→flip),
   the dest BUFFERS the crossing (`PendingCrossings`) and drains it at the adopt flip — a 1c.8-model workaround for
-  the adopt-ordering race, not the permanent design. (iii) The crossing is NOT gated on its dest ack: the saga
-  reaches `Done` whether or not the crossing landed (the source self-fence is independent of the crossing). The
+  the adopt-ordering race, not the permanent design. (iii) The crossing is NOT gated on its dest ack: the SAGA
+  reaches `Done` whether or not the crossing landed (the source self-fence is independent of the crossing). ⚠️
+  CORRECTED (holistic audit `wf_ed40e95e`): this is STALE re: gateway visibility — since the 1d.5b.3b relocation
+  moved the dest read-sub announce INTO `promote_apply` behind the crossing-landed gate (stub.rs:1460), the gateway's
+  `DeliveredToObservers` watermark NOW depends on the crossing landing, so a crossing LOST over the at-most-once mesh
+  parks `Promoting` forever (see D-6 #1's third producer-less phase). The saga FSM still reaches `Done` source-side,
+  but the dest does not become Owned — the wedge is real over the prod transport, masked by the FaultFabric. The
   proper tear-out (b) SUBSUMES all three: the saga-pushed ordered `Demote` retains the source as a ghost until the
   dest is fully ready (pose INCLUDED, gated on the crossing ack), at which point the dest buffer AND the
   cooperative poll AND the net-new flush-beside-poll layering all retire into one fence-enforced handoff.
@@ -770,10 +817,11 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   tick-(i+1) reconcile scan may observe S_{i-1} OR S_{i-2} depending on the writer's async progress, and a STALE scan
   that misses a row resurrects the COMP-2 zombie row on recover. Therefore the INCREMENTAL per-mutation reconcile
   (precondition #2) is CORRECTNESS-load-bearing (it stages each revoke's delete at revoke-time with NO read-back, so
-  the race never arms) and a **HARD Slice-D-BLOCKING precondition of the RedbStore swap — NOT the write-amp-only
-  optimization it was framed as.** LATENT today: the orchestrator uses MemStore, whose SYNCHRONOUS commit makes the
-  scan read the latest-committed (no race); the race arms only when RedbStore is wired (Slice D). The 4/5 boot-only
-  scan consumers (rehydrate) are unaffected — a fresh open reads a quiescent redb. (Alternatives to #2 if ever
+  the race never arms) and was a **HARD Slice-D-BLOCKING precondition of the RedbStore swap — NOT the write-amp-only
+  optimization it was framed as.** ✅ RESOLVED: D-alpha (commit `02db31d`) landed the incremental per-mutation
+  reconcile (no read-back), so the race never arms — and the orchestrator bin now wires `RedbStore` (D-gamma,
+  `orchestrator.rs` `RedbStore::open`), no longer MemStore. The 4/5 boot-only scan consumers (rehydrate) are
+  unaffected — a fresh open reads a quiescent redb. (Alternatives to #2 if ever
   needed: flush/watermark-gate the scan, or reconcile from a pure-RAM directory snapshot with no read-back.) The
   durability watermark reaches the bin via a SIDECAR `DurabilityHandle` returned
   ALONGSIDE the `Box<dyn Store>` from `open()` — the FROZEN infallible `sim::io::Store` seam + `commit()`'s `()`
@@ -880,14 +928,28 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   the ANTI-THEATER twin rebuilds against a FRESH empty store and recovers NOTHING (proves the retained WAL is
   load-bearing, not in-process World survival). NB the cell uses `crash` (restart-able) not `kill` (permanent),
   because recovery of the producer-less `AwaitAdopt` phase depends on the held redelivery — see the ⚠️ below.
-- **⚠️ The prod orchestrator BINARY is NON-DURABLE** (`crates/bins/src/bin/orchestrator.rs` injects a fresh
-  in-memory `MemStore`): a restart resets the clock + loses in-flight transfers. LOUD `tracing::warn` at boot
-  (audit D6-ROB-1) — now also names the transport-redelivery dependency below — until the redb backend swaps in.
-  No production deployment until then.
+- **✅ The prod orchestrator BINARY is now DURABLE** (D-gamma, `crates/bins/src/bin/orchestrator.rs`
+  `RedbStore::open` from `VD_STORE_PATH`): a restart RE-HYDRATES (clock resumes forward, in-flight transfers
+  restore + re-drive). The boot `tracing::warn` is NARROWED to the one remaining deploy precondition (the
+  at-most-once transport / the producer-less-phase egress below). No production deployment until that lands.
 - **⚠️ Three io-prod / real-deploy PRECONDITIONS (audit `wf_7cc86404`, all HIGH, none break P2/P3 correctness —
   proven against the in-process MemStore + harness at-least-once model the S0–S5 cells run on):**
-  1. **`BatchHandoff::AwaitAdopt` recovery depends on transport REDELIVERY the production `MeshTransport` does not
-     provide** (the ONE remaining producer-less-phase gap). A producer-less phase has NO `scan_deadlines` re-drive
+  1. **A CLASS of PRODUCER-LESS FLOWS depends on transport REDELIVERY the production `MeshTransport` does not
+     provide.** ⚠️ THE ROOT, stated as a class (not a fixed count — three holistic audits each surfaced another
+     instance, `wf_dd38151d`/`wf_ed40e95e`/`wf_259d14c0`): the at-most-once `MeshTransport` (mesh.rs:357-395 —
+     `NodeUnreachable`-and-drop; a buffered-but-unacked reliable frame is lost SILENTLY, only the in-flight frame
+     bounces) breaks ANY flow whose sole delivery is one emission with no re-driving producer. Known instances:
+     **(saga phases, scan_deadlines-re-drivable)** `AwaitAdopt`, the D-37 re-home adopt (CURED, Slice 2d), the durable
+     entity-STATE crossing; **(direct shard↔shard GhostFlow, NO saga / NO scan_deadlines at all)** the one-shot
+     ghost BAND-EXIT `Despawn` (dest emits once + deregisters same-pass, stub.rs:2606/2632; a lost Despawn leaks a
+     self-emitting phantom source ghost — render + collider — forever; `wf_259d14c0`). **THE ROOT CURE for the WHOLE
+     class is the redelivering / retry-until-acked `MeshTransport`** (identity_persistence.md:122) — ONE fix, all
+     instances; the per-flow re-solicit egresses below are INTERIM band-aids (and the GhostFlow instance has no saga
+     to attach one to, so for it the transport fix or a source-side staleness reaper is the ONLY cure). A real-mesh
+     transfer-WITH-band-exit + crossing-loss process test is owed alongside (the at-least-once FaultFabric masks the
+     whole class — `dev_cluster_smoke` covers bring-up + SIGKILL only). **WHEN: the whole class lands before any real
+     multi-shard rolling deploy.** Per-instance detail follows.
+     **(1a) `BatchHandoff::AwaitAdopt`** — the first-identified instance. A producer-less phase has NO `scan_deadlines` re-drive
      egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash);
      the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop). `AwaitAdopt`
      (saga.rs:563-571,631-634): the dest adopts off the source's envelope; the orchestrator only awaits `BatchAdopted`.
@@ -903,12 +965,45 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
      Timeout-arm branch + `a_rehomed_promoting_timeout_redrives_the_adopt_to_the_live_target`) is the PROVEN TEMPLATE
      for `AwaitAdopt`'s owed egress. **WHEN (`AwaitAdopt`): before the redb backend / any real rolling deploy.** Until
      then, `AwaitAdopt` orchestrator/peer-crash recovery is proven ONLY vs the FaultFabric.
-  2. **Directory RECONCILE is a per-TICK O(directory) delete-all + put-all + fsync, even on fully idle ticks**
-     (saga_runtime.rs:1187-1203). Correctness-safe; a write-amplification cliff at MMO directory scale (per-Session/
-     Entity/Realm/Ship rows). **Owed: io-prod replaces the full reconcile with INCREMENTAL per-mutation deletes
-     (threaded from `serve_directory` + `commit_cas`, as the :1185 comment names) + a dirty-guard that skips the
-     directory write (and the fsync if nothing else staged) on an unmutated tick + a SCALE soak guard (large stable
-     directory, zero transfers). WHEN: the redb backend swap.**
+     **➕ THIRD producer-less phase (holistic audit `wf_ed40e95e`): the durable entity-STATE crossing.**
+     `EmitCrossing` (the dest's authoritative pose) is emitted at `CasWon→Swapping` (saga.rs ~:681) and re-emitted
+     ONLY by the Swapping-Timeout arm (~:833); once the saga advances Swapping→Demoting→Promoting NOTHING re-emits it
+     (Demoting-Timeout re-emits Demote; Promoting-Timeout re-emits Promote/ReHomeAdopt). Over the at-most-once mesh a
+     single LOST crossing ⇒ the dest never journals `STUB_CROSSING_STEP`, `promote_apply` DEFERS Ghost→Owned forever
+     (stub.rs:1441) yet acks `PromoteAck`, so the gateway's `DeliveredToObservers` never latches and the saga parks
+     in `Promoting` (the R1 wedge). Masked in every cell by the FaultFabric's at-least-once redelivery (the stub.rs:1443
+     DEFER is reached only as the transient promote-before-crossing race there, never a permanent wedge). **Owed cure:
+     the SAME 2d template — a Demoting/Promoting Timeout that ALSO re-emits `EmitCrossing` (idempotent via the dest
+     `STUB_CROSSING_STEP` journal dedup, exactly as the Swapping-Timeout arm), OR gate Promoting→Releasing on a
+     crossing-applied ack — and it is SUBSUMED by the redelivering transport (the ONE root cure for the whole class
+     above, the DRY choice). WHEN: with `AwaitAdopt` (the same deploy precondition).** The
+     stub.rs:1443 pin is corrected to name this; the D-2 1d.1-layering note (iii) below is corrected (the crossing IS
+     now load-bearing for `DeliveredToObservers` since the 1d.5b.3b sub-announce relocation).
+     **➕ FOURTH instance — DIRECT GhostFlow, NOT a saga phase (holistic audit `wf_259d14c0`): the one-shot ghost
+     BAND-EXIT `Despawn`.** On band exit the DEST owner emits `GhostFlow::Despawn` ONCE on the rising edge
+     (stub.rs:2606) and deregisters the feed in the SAME pass (stub.rs:2632); the SOURCE tears down its retained ghost
+     ONLY on RECEIVING that Despawn (stub.rs:1695) — it has no band-exit detection of its own. Over the at-most-once
+     mesh a single LOST Despawn ⇒ the source's retained ghost LEAKS FOREVER: it keeps self-emitting its frozen
+     last-Owned pose (`is_retained_ghost`) AND stays a kinematic collider — a permanent phantom render source + a
+     phantom cross-boundary collider (violating "players physically collide"). Distinct from the saga phases: there is
+     NO saga + NO `scan_deadlines`, so a per-saga re-solicit (cure a) CANNOT cover it. **Owed cure: the redelivering
+     transport (it rides `GhostReliable`, so the root fix subsumes it), OR a dest "departing-tier" re-emit-until-acked,
+     OR a source-side retained-ghost STALENESS REAPER (tear down a retained ghost that has received no Delta for N
+     ticks).** WHEN: with the class (the same deploy precondition). DEFERRED.md .3c (the `GhostFlow::Despawn` note ~:498)
+     previously said only "a lost Despawn would leak the collider" — it now names the at-most-once + one-shot +
+     dest-deregisters + no-producer = permanent-phantom consequence.
+  2. **Idle-tick fsync-skip (write-amp).** ✅ The O(directory) delete-all+put-all reconcile is GONE — D-alpha (commit
+     `02db31d`) landed the INCREMENTAL per-mutation `dirty`-delta drain (`directory.rs` `take_dirty` →
+     `saga_runtime.rs` barrier, no read-back), curing both the write-amp cliff AND the COMP-2 race. STILL OWED: skip
+     the durable write + fsync entirely on a FULLY IDLE tick (today the barrier unconditionally stages the Clock key
+     every tick, so it submits + fsyncs every tick). ⚠️ SAFETY (holistic audit `wf_ed40e95e` HIGH, RESOLVED-as-safe):
+     the parked-flush persist-before-effect gate stays correct under this skip — an idle tick has no state change, so
+     it stages no durable delta AND produces no state-DEPENDENT egress (only the loss-tolerant `ClockSync`, which
+     depends on the durable clock CEILING persisted at reservation, not this tick's batch). `last_submitted()` at
+     flush time therefore ALWAYS covers every flushed effect's state (effects depend on past-or-same-tick commits; a
+     same-tick state change stages a delta ⇒ is submitted ⇒ reflected in `last_submitted`). The fsync-skip implementer
+     MUST only skip when `staged` is empty (≡ no state change). + a SCALE soak guard (large stable directory, zero
+     transfers). WHEN: a later write-amp pass (NOT blocking — correctness already holds).**
   3. **Durable WAL records carry NO schema version** (saga_runtime.rs:124-150 snapshot structs; bare
      `postcard::from_bytes(...).expect` decodes at :833/:848/:856/:873). Safe in-process (same binary wrote the
      bytes); a one-way boot-panic door the instant redb persists across a rolling deploy with a changed

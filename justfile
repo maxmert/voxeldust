@@ -30,11 +30,20 @@ coverage-fast:
         missed=t['count']-t['covered']; \
         sys.exit(0 if missed==0 else print(f'BRANCH GATE: {missed} missed branches ({t[\"percent\"]:.2f}%)') or 1)"
 
-# Pre-merge: full coverage incl. (once io-prod exists) the process-tier merge via
-# `show-env` + LLVM_PROFILE_FILE %p-%m%c (continuous mode is MANDATORY: the harness
-# SIGKILLs processes; without %c their profile counters are silently lost).
-coverage: coverage-fast
-    @echo "process-tier coverage merge lands with io-prod (P3); Tier-B ratcheted floor applies then"
+# io-prod Tier-B RATCHETED FLOOR (HR5: io-prod is process-tier, never 100% — a SIGKILL can lose the final
+# counter flush). This measures io-prod's OWN in-process unit tests (deterministic — no SIGKILL counter loss)
+# and fails under a recorded floor, so the crash-durability (RedbStore) + mesh (quinn) code can never regress
+# in coverage silently. The floor is conservative (below the ~92% measured baseline, absorbing quinn-loopback
+# timing variance) and RATCHETS UP — raise it as coverage stabilizes/improves, never lower it. The DEEPER
+# process-tier %c merge (the spawned node BINARIES via `orch-crash-cov`) is owed (DEFERRED.md D-40).
+tier_b_floor := "90"
+coverage-io-prod:
+    cargo +{{coverage_toolchain}} llvm-cov -p vd-io-prod --fail-under-regions {{tier_b_floor}}
+
+# Pre-merge: Tier-A 100% + the io-prod Tier-B ratcheted floor. The full process-tier %c merge (the spawned
+# node binaries via `show-env` + LLVM_PROFILE_FILE %p-%m%c — continuous mode is MANDATORY since the harness
+# SIGKILLs processes) is the DEEPER owed piece (DEFERRED.md D-40); `orch-crash-cov` already accumulates it.
+coverage: coverage-fast coverage-io-prod
 
 # Open the HTML region report to SEE the uncovered region.
 coverage-html:
