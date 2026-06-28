@@ -106,13 +106,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // boot. A non-empty file is RE-HYDRATED (clock resumes forward, directory + in-flight sagas restore +
     // re-drive); an empty/new file is genesis. The off-tick writer fsyncs off the tick thread (C2).
     let store_path = PathBuf::from(env.string("VD_STORE_PATH")?);
-    let tmp = std::env::temp_dir();
-    let under_temp = store_path.starts_with(&tmp) || store_path.starts_with("/tmp");
-    // VD_STORE_EPHEMERAL_OK (present = opt-in) is the EXPLICIT dev/test escape: a throwaway local cluster
-    // legitimately stores under $TMPDIR (cleaned by `dev-cluster down`). Production OMITS it, so a temp-dir
-    // path is a HARD boot reject (HR1: durable state on a persistent volume, never the old /tmp data-loss
-    // bug) — never a silent ephemeral production deployment.
-    let ephemeral_ok = env.string("VD_STORE_EPHEMERAL_OK").is_ok();
+    // Create the parent FIRST so the ephemeral check can canonicalize it (resolve symlinks).
+    if let Some(parent) = store_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    // HR1 EPHEMERAL GUARD. Canonicalize the store's parent + the temp dir so symlinked spellings collapse
+    // to one form (macOS `/tmp`→`/private/tmp`, `/var`→`/private/var`) before the prefix test, and reject
+    // the canonical temp roots explicitly. ⚠️ A prefix DENY-list cannot enumerate every ephemeral mount;
+    // the production-grade enforcement is a durable-root ALLOW-list (a `VD_STORE_DURABLE_ROOT` the deploy
+    // points at its mounted volume), OWED WITH the deploy preconditions (DEFERRED.md D-6 #1 / redelivering
+    // transport — there is no production deploy yet). Until then this courtesy guard + the REQUIRED
+    // `VD_STORE_PATH` (no in-memory fallback) is the dev-safety net against the old `/tmp` data-loss bug.
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let tmp = canon(&std::env::temp_dir());
+    let probe = match store_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => canon(parent),
+        None => store_path.clone(),
+    };
+    let under_temp = probe.starts_with(&tmp)
+        || probe.starts_with("/tmp")
+        || probe.starts_with("/private/tmp");
+    // VD_STORE_EPHEMERAL_OK is the EXPLICIT dev/test escape (a throwaway local cluster legitimately stores
+    // under $TMPDIR, cleaned by `dev-cluster down`). STRICT parse — a present-but-unrecognized value is a
+    // LOUD config error, never a fail-OPEN footgun (`=0`/`=false` must NOT silently disable the guard).
+    let ephemeral_ok = match env.string("VD_STORE_EPHEMERAL_OK") {
+        Err(_) => false, // absent = off (production-safe default)
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => true,
+            "0" | "false" | "no" | "" => false,
+            other => {
+                return Err(format!(
+                    "VD_STORE_EPHEMERAL_OK={other:?} is not a boolean (use 1/true/yes or 0/false/no)"
+                )
+                .into());
+            }
+        },
+    };
     if under_temp && !ephemeral_ok {
         return Err(format!(
             "VD_STORE_PATH ({}) is under a temp dir ({}) — durable orchestrator state (directory + saga \
@@ -129,9 +158,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              dev/test cluster; recovery survives a restart but NOT a host reboot / tmp reap. Never production.",
             store_path.display()
         );
-    }
-    if let Some(parent) = store_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
     }
     let store_tuning = StoreTuning {
         writer_channel_depth: env
@@ -186,6 +212,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // writer ~always finishes within one tick at 50Hz, so the deferred flush waits on an already-durable
     // batch (the wait IS the disk-stall back-pressure, and fails LOUD if the writer died — a refusal is
     // never a loss). No effect ever leaves the orchestrator before the state authorizing it is durable.
+    //
+    // The parked seq is THIS tick's batch because the group-commit barrier ALWAYS stages the Clock key
+    // (`saga_runtime` drive_sagas tail), so `commit()` submits every tick ⇒ `last_submitted` advances every
+    // tick (never the stale prior seq). SHUTDOWN: this is an unconditional loop (killed by signal), so the
+    // final parked outbox is never flushed and `RedbStore::Drop`'s graceful join never runs — recovery
+    // covers it: rehydrate restores the last durable state + the Slice-2a producer re-drives every saga
+    // command idempotently. (All egress today is saga commands [re-driven] + loss-tolerant ClockSync; a
+    // future RELIABLE non-re-driven effect would need a graceful-shutdown flush, owed if/when one lands.)
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
     let mut parked: Option<(TickPrologue, u64)> = None;
     loop {

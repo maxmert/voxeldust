@@ -824,16 +824,28 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     of the oracle: faithful Store ⇒ incremental==full ON REDB) + a handle unit test; process tier (process_parity /
     dev_cluster_smoke / client_load) GREEN on the real RedbStore-backed orchestrator over QUIC. The boot-warn is
     NARROWED to the one remaining precondition (at-most-once transport). io-prod Tier-B; Tier-A still 100%.
+    **3-lens focused review (persist-before-effect / concurrency / env-robustness) — NO CRITICAL/HIGH in the
+    ordering or concurrency (lost-wakeup + graceful-shutdown false-panic both REFUTED); fixes landed:** the writer
+    now publishes death on ANY exit incl. a panic-unwind (`WriterExitSignal` Drop-guard) and `commit` FAILS LOUD
+    (panic) on a disconnected channel instead of silently retaining (closing a latent persist-before-effect hole
+    when the writer dies caught-up); `VD_STORE_EPHEMERAL_OK` is STRICT-parsed (a present-but-unrecognized value is
+    a loud error, never fail-open); the ephemeral guard CANONICALIZES (collapses `/tmp`→`/private/tmp`,
+    `/var`→`/private/var`) + rejects `/private/tmp`; the bin-side flush-gate stall now counts in
+    `backpressure_stalls()`; the Clock-key/seq invariant + shutdown-relies-on-re-drive are documented in the loop.
   - **⏭ D-delta NEXT** — the process-tier SIGKILL-mid-fsync crash proof (`crates/bins/tests/`) via a feature-gated
     writer-pause hook + the anti-theater fresh-empty twin + `%c` continuous-mode coverage merge (Tier-B ratcheted
-    floor).
+    floor); FOLD IN the boot-reject process test (a `/tmp` path + no `VD_STORE_EPHEMERAL_OK` ⇒ non-zero exit,
+    locking the safety guard's reject arm — review LOW).
   - **STILL OWED after Slice D** (separate items, ledgered): precondition **#1** (the `BatchHandoff::AwaitAdopt`
     re-solicit egress — a durable Store A ALONE does not make prod kill-9 recovery work; the at-most-once
     `MeshTransport` boot-warn clause STAYS until #1 lands); precondition **#3** (`WAL_FORMAT_VERSION` +
     `universe_epoch_id` byte + fallible quarantining decode replacing the bare `.expect` decodes) + the
     `StoreKey::Tombstone` family; the **durable-outbox** refinement (a permanent-fsync-fault re-drive that loses
-    nothing). The redb backend does NOT directly unblock [[D-37]] Slice 4 (needs Store B + P7 `player_ckpt`, P6/P7);
-    [[D-36]] unaffected.
+    nothing); the **durable-root ALLOW-list** (review HIGH: a prefix deny-list cannot enumerate every ephemeral
+    mount — the production enforcement is a `VD_STORE_DURABLE_ROOT` the deploy points at its mounted volume, with
+    `VD_STORE_EPHEMERAL_OK` the sole escape; owed WITH the deploy preconditions, no production deploy yet); a
+    graceful-shutdown flush (only needed once a RELIABLE non-re-driven egress exists — none today). The redb
+    backend does NOT directly unblock [[D-37]] Slice 4 (needs Store B + P7 `player_ckpt`, P6/P7); [[D-36]] unaffected.
 - **✅ S0–S3 LANDED (design `wf_0f8321dc`, doc `d6_saga_wal.md`):** the orchestrator now durably persists its
   saga set + go-tokens + directory + clock ceiling through the `sim::io::Store` seam (`MemStore` staged/committed
   two-tier; redb is the io-prod backend, DEFERRED — NO new dep). `commit_result` stages the QUIESCENT

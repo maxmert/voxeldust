@@ -145,6 +145,12 @@ impl DurabilityHandle {
     /// died before reaching `seq` (a refusal is never a loss). At ~50Hz with the one-tick defer this is
     /// ~always already durable (returns immediately); a real wait IS the disk-stall back-pressure.
     pub fn wait_durable_through(&self, seq: u64) {
+        if self.last_durable.load(Ordering::Acquire) < seq {
+            // A bin-side disk stall (the parked-flush gate had to block) — count it so the SAME disk-stall
+            // back-pressure is observable via `backpressure_stalls()` whether it lands on commit's
+            // block-on-prior or here on the flush gate (review wf_D-gamma LOW).
+            self.fsync_backpressure.fetch_add(1, Ordering::Relaxed);
+        }
         park_until_durable(seq, &self.last_durable, &self.durable_cv, || {
             !self.writer_alive.load(Ordering::Acquire)
         });
@@ -268,6 +274,25 @@ fn park_until_durable(
 /// the seam for a future depth>1 mode), apply+fsync in ONE txn, then bump `last_durable` (Release) +
 /// notify. On a fsync error the watermark is NOT bumped → the persist-before-effect gate stalls LOUD,
 /// never a silent effect loss (the owed refinement is a bounded retry). Exits when the sender is dropped.
+/// Publishes writer DEATH on EVERY exit of `run_writer` — clean return, permanent-fault break, OR a
+/// panic-unwind (the latter would otherwise leave `writer_alive == true` forever and hang every waiter past
+/// the liveness backstop, since the escape reads the still-`true` flag — review wf_D-gamma LOW). Drop sets
+/// the flag false (the handle's only liveness signal) then wakes any parked waiter so the fail-loud escape
+/// fires promptly rather than at the next `WRITER_WAIT_POLL`.
+struct WriterExitSignal {
+    writer_alive: Arc<AtomicBool>,
+    durable_cv: Arc<(Mutex<()>, Condvar)>,
+}
+
+impl Drop for WriterExitSignal {
+    fn drop(&mut self) {
+        self.writer_alive.store(false, Ordering::Release);
+        let (lock, cv) = &*self.durable_cv;
+        let _g = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        cv.notify_all();
+    }
+}
+
 fn run_writer(
     db: Arc<Database>,
     rx: Receiver<(u64, Batch)>,
@@ -275,6 +300,13 @@ fn run_writer(
     durable_cv: Arc<(Mutex<()>, Condvar)>,
     writer_alive: Arc<AtomicBool>,
 ) {
+    // The guard publishes death on ANY exit below (incl. an unexpected panic-unwind), so the liveness
+    // escape can never miss it. Holds its own `durable_cv` clone; the loop keeps the original for the
+    // per-batch success notify.
+    let _exit = WriterExitSignal {
+        writer_alive,
+        durable_cv: Arc::clone(&durable_cv),
+    };
     'drain: while let Ok((first_seq, first)) = rx.recv() {
         let mut max_seq = first_seq;
         let mut merged = first;
@@ -308,15 +340,9 @@ fn run_writer(
             std::thread::sleep(WRITER_FSYNC_RETRY_BACKOFF);
         }
     }
-    // SINGLE exit (permanent fault OR graceful sender-drop): publish death so the `DurabilityHandle`'s
-    // `park_until_durable` liveness escape fires (it has no `JoinHandle` to probe), then WAKE any parked
-    // waiter so it observes the death promptly rather than at the next `WRITER_WAIT_POLL` backstop. On a
-    // graceful shutdown nobody is waiting; on a permanent fault the bin's gate panics loud (a refusal is
-    // never a loss). `RedbStore`'s own wait still uses its `JoinHandle::is_finished` — unchanged.
-    writer_alive.store(false, Ordering::Release);
-    let (lock, cv) = &*durable_cv;
-    let _g = lock.lock().unwrap_or_else(PoisonError::into_inner);
-    cv.notify_all();
+    // Death (permanent fault OR graceful sender-drop) is published by `_exit`'s Drop here — see
+    // `WriterExitSignal`. On a graceful shutdown nobody is waiting; on a permanent fault the gate panics
+    // loud (a refusal is never a loss; recovery rehydrates + re-drives).
 }
 
 impl RedbStore {
@@ -498,12 +524,17 @@ impl Store for RedbStore {
                 self.next_seq = seq;
                 self.last_submitted.store(seq, Ordering::Release);
             }
-            Err(SendError((_, b))) => {
-                tracing::error!(
-                    "RedbStore: writer channel disconnected (writer died) — staged batch retained; the \
-                     durability gate will fail loud"
+            Err(SendError(_)) => {
+                // The channel is disconnected ⇒ the writer thread is GONE while the store is live. FAIL
+                // LOUD here, do NOT retain-and-return: a silent retain lets the sim believe it persisted
+                // (and, if the writer died caught-up, leaves the bin's parked seq stale ⇒ a not-yet-durable
+                // effect would flush — the persist-before-effect hole review wf_D-gamma found). The
+                // block-on-prior escape only fires when durable-BEHIND, so it cannot be relied on here. A
+                // panic is a refusal, never a loss: recovery rehydrates the last durable state + re-drives.
+                panic!(
+                    "RedbStore: the durable writer thread died (commit channel disconnected) — refusing to \
+                     run on un-persistable state (a refusal is never a loss; recovery rehydrates + re-drives)"
                 );
-                self.staged = b;
             }
         }
     }
@@ -733,10 +764,13 @@ mod tests {
         // (PUTs, within-window last-write-wins, DELETEs, multi-prefix, an idle commit) against BOTH and
         // compares each prefix scan after every window; a reopen proves the equivalence survives a kill-9.
         use vd_sim::io::mem::MemStore;
+        // One staged op: a key + (Some=put / None=delete). Aliased so the window literal is not a
+        // clippy::type_complexity violation.
+        type KvOp<'a> = (&'a [u8], Option<&'a [u8]>);
         let path = temp_path();
         let (mut redb, h) = open(&path);
         let mut mem = MemStore::new();
-        let windows: &[&[(&[u8], Option<&[u8]>)]] = &[
+        let windows: &[&[KvOp]] = &[
             &[
                 (b"\x03a", Some(b"v1")),
                 (b"\x03b", Some(b"v2")),
