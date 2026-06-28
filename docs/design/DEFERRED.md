@@ -764,9 +764,18 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   (counted: `DurabilityHandle::backpressure_stalls`, incremented when a `commit` actually waits); the drain-coalesce
   loop is kept only as the seam for a future depth>1 mode (vestigial at depth-1). The block uses a `Mutex`+`Condvar`
   the writer notifies (park, not hot-spin); the `AtomicU64` stays the lock-free source of truth. Depth-1 is a C2
-  INVARIANT (not a Slice-D discipline): it bounds crash-loss to ≤1 batch AND makes the per-tick reconcile scan read
-  exactly T-1 by construction — so redb-range scan stays (NO in-RAM mirror; verified 4/5 scan consumers are boot-only,
-  the 5th reads prior-committed). The durability watermark reaches the bin via a SIDECAR `DurabilityHandle` returned
+  INVARIANT: it bounds crash-loss to ≤1 batch. **⚠️ CORRECTION (review `wf_186fc41d`):** the earlier claim that
+  block-on-prior makes the per-tick reconcile scan read "exactly T-1 by construction" is FALSE — the OFF-TICK writer
+  RACES the reconcile's redb `begin_read` (which sees only PRE-call commits); block-on-prior waits for S_{i-1}, so the
+  tick-(i+1) reconcile scan may observe S_{i-1} OR S_{i-2} depending on the writer's async progress, and a STALE scan
+  that misses a row resurrects the COMP-2 zombie row on recover. Therefore the INCREMENTAL per-mutation reconcile
+  (precondition #2) is CORRECTNESS-load-bearing (it stages each revoke's delete at revoke-time with NO read-back, so
+  the race never arms) and a **HARD Slice-D-BLOCKING precondition of the RedbStore swap — NOT the write-amp-only
+  optimization it was framed as.** LATENT today: the orchestrator uses MemStore, whose SYNCHRONOUS commit makes the
+  scan read the latest-committed (no race); the race arms only when RedbStore is wired (Slice D). The 4/5 boot-only
+  scan consumers (rehydrate) are unaffected — a fresh open reads a quiescent redb. (Alternatives to #2 if ever
+  needed: flush/watermark-gate the scan, or reconcile from a pure-RAM directory snapshot with no read-back.) The
+  durability watermark reaches the bin via a SIDECAR `DurabilityHandle` returned
   ALONGSIDE the `Box<dyn Store>` from `open()` — the FROZEN infallible `sim::io::Store` seam + `commit()`'s `()`
   signature stay BYTE-FOR-BYTE unchanged (MemStore + the sole caller + the deterministic harness churn ZERO). `Drop`
   joins the writer (flushes pending — graceful shutdown loses nothing). `flush_blocking()` + a `StoreTuning {
@@ -779,9 +788,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   hook, mirroring io-prod's `BridgeControl`):** the explicit block-on-prior-depth + backpressure-count + the
   in-process fault-injection crash analog (drop the in-flight batch = crash case 2/3) — block-on-prior makes those
   hard to trigger deterministically without a pause gate; the AUTHORITATIVE crash proof is the Slice-D process-tier
-  real-SIGKILL cell anyway. **Owed refinement: writer fsync-error retry/durable-outbox**
-  (C2's first cut logs LOUDLY + does not bump `last_durable` on a fsync error → the gate stalls loud, no silent EFFECT
-  loss; a bounded retry recovers a transient blip — ledgered, not C2-blocking). **PvP rationale:** the orchestrator is
+  real-SIGKILL cell anyway. **✅ Writer-fault HARDENING LANDED (review `wf_186fc41d` findings 1/2/4):** the writer
+  RETRIES a failed fsync `WRITER_FSYNC_MAX_RETRIES`x (it still HOLDS `merged` — a TRANSIENT blip recovers losing
+  nothing), then EXITS on a permanent fault; `wait_durable_through` now `wait_timeout`s + detects a DEAD writer
+  (`JoinHandle::is_finished`) → PANICS LOUD rather than silently hang the synchronous orchestrator thread; the commit
+  retain arms now log LOUD (no silent retain). **Still-owed refinement: a durable OUTBOX** — on a PERMANENT fsync
+  give-up the consumed batch CONTENT is dropped (a regression vs C1's staged-RETAIN); the fix is a WAL-of-the-batch
+  (a mere in-memory retry has nothing to retry once `commit()` `mem::took` + sent). Not C2-blocking: recovery
+  rehydrates the last durable state (one all-or-nothing txn, no split-brain) + the Slice-2a producer re-drives
+  idempotently — the outbox only AVOIDS that re-drive. **PvP rationale:** the orchestrator is
   NOT the combat hot path (hit-reg is shard+gateway, P5/P11) — it is only on the TRANSFER/authority path; the
   PvP-critical property is never duplicating/wedging a player mid-transfer, which A guarantees by construction; deeper
   pipelines (B/C) trade durability for throughput the batch-bounded single orchestrator does not need (the real

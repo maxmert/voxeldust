@@ -36,10 +36,24 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crossbeam_channel::{Receiver, SendError, Sender, bounded};
 use redb::{Database, ReadableTableMetadata, TableDefinition};
 use vd_sim::io::{Bytes, Store, bytes};
+
+/// The writer retries a failed fsync this many times (a TRANSIENT disk blip recovers) before declaring the
+/// durable store unwritable + EXITING (a PERMANENT fault → the persist-before-effect gate fails LOUD via the
+/// liveness escape, never a silent hang). The writer still HOLDS the merged batch across retries, so a
+/// transient retry loses nothing; only a permanent give-up drops it (loud, and recovery re-drives — the
+/// owed durable-outbox refinement would avoid even that re-drive).
+const WRITER_FSYNC_MAX_RETRIES: u32 = 3;
+/// Backoff between fsync retries (a brief pause so a momentary disk hiccup clears).
+const WRITER_FSYNC_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+/// The block-on-prior / `flush_blocking` wait re-checks writer LIVENESS at this cadence (the writer's
+/// notify handles the prompt happy-path wake; this is only the backstop that detects a DEAD writer so the
+/// synchronous orchestrator thread fails loud instead of hanging forever).
+const WRITER_WAIT_POLL: Duration = Duration::from_millis(100);
 
 /// The ONE key/value table. The keyspace is the EXACT flat, prefix-tagged `StoreKey` bytes the
 /// orchestrator already writes through the [`Store`] seam (one prefix byte per family), so `scan(prefix)`
@@ -198,13 +212,29 @@ fn run_writer(
             }
             max_seq = seq;
         }
-        if apply_batch(&db, &merged) {
-            last_durable.store(max_seq, Ordering::Release);
-            let (lock, cv) = &*durable_cv;
-            let _g = lock.lock().unwrap_or_else(PoisonError::into_inner);
-            cv.notify_all();
+        // Retry the fsync (the writer still HOLDS `merged`, so a TRANSIENT disk blip recovers losing
+        // nothing); a PERMANENT fault EXITS the writer so the persist-before-effect gate fails LOUD (the
+        // liveness escape in `wait_durable_through` panics rather than hang the orchestrator).
+        let mut attempt = 0u32;
+        loop {
+            if apply_batch(&db, &merged) {
+                last_durable.store(max_seq, Ordering::Release);
+                let (lock, cv) = &*durable_cv;
+                let _g = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                cv.notify_all();
+                break;
+            }
+            attempt += 1;
+            if attempt >= WRITER_FSYNC_MAX_RETRIES {
+                tracing::error!(
+                    "vd-store-writer: fsync failed {attempt}x for batch up to seq {max_seq} — the durable \
+                     store is unwritable; EXITING so the persist-before-effect gate fails LOUD (panics) \
+                     rather than hang. Recovery rehydrates the last durable state + re-drives idempotently."
+                );
+                return; // writer dies → `wait_durable_through` detects via `is_finished` + panics loud
+            }
+            std::thread::sleep(WRITER_FSYNC_RETRY_BACKOFF);
         }
-        // else: logged LOUD in apply_batch; watermark NOT bumped → the gate stalls (no silent effect loss).
     }
 }
 
@@ -294,6 +324,12 @@ impl RedbStore {
 
     /// Park (not hot-spin) until `last_durable >= target`. Fast-path the common already-durable case; on a
     /// miss, lock + re-check + condvar-wait (the writer notifies under the same lock — no lost wakeup).
+    ///
+    /// LIVENESS ESCAPE (review `wf_186fc41d`): the writer notifies promptly on the happy path, but a writer
+    /// that DIED (panicked, or EXITED on a permanent fsync fault) can never bump `last_durable` — so we
+    /// `wait_timeout` and, on a timeout with no progress, fail LOUD if the writer has finished, rather than
+    /// hang the synchronous orchestrator thread forever. A refusal is never a loss: recovery rehydrates the
+    /// last durable state + the Slice-2a producer re-drives idempotently.
     fn wait_durable_through(&self, target: u64) {
         if self.last_durable.load(Ordering::Acquire) >= target {
             return;
@@ -301,7 +337,20 @@ impl RedbStore {
         let (lock, cv) = &*self.durable_cv;
         let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
         while self.last_durable.load(Ordering::Acquire) < target {
-            guard = cv.wait(guard).unwrap_or_else(PoisonError::into_inner);
+            let (g, res) = cv
+                .wait_timeout(guard, WRITER_WAIT_POLL)
+                .unwrap_or_else(PoisonError::into_inner);
+            guard = g;
+            if res.timed_out()
+                && self.last_durable.load(Ordering::Acquire) < target
+                && self.writer.as_ref().is_some_and(JoinHandle::is_finished)
+            {
+                drop(guard);
+                panic!(
+                    "RedbStore: the durable writer thread died without reaching seq {target} — refusing to \
+                     hang the orchestrator (a refusal is never a loss; recovery rehydrates + re-drives)"
+                );
+            }
         }
     }
 }
@@ -358,18 +407,28 @@ impl Store for RedbStore {
         let tx = match &self.submit_tx {
             Some(tx) => tx.clone(),
             None => {
-                self.staged = batch; // no sender (shutdown) → retain (fail-safe)
+                // No sender (only reachable mid-Drop) → retain (fail-safe). LOUD: a retained batch with no
+                // writer is an alert, never a silent no-op (review wf_186fc41d).
+                tracing::error!("RedbStore: commit with no writer (post-Drop) — staged batch retained");
+                self.staged = batch;
                 return;
             }
         };
         // Block-on-prior guarantees the prior batch was drained, so the depth slot is free → this send does
-        // not block. A disconnected channel (writer gone) → retain the batch (a refusal is never a loss).
+        // not block. A disconnected channel (writer DIED) → retain the batch (a refusal is never a loss) +
+        // fail LOUD; the next block-on-prior's liveness escape then panics rather than hang.
         match tx.send((seq, batch)) {
             Ok(()) => {
                 self.next_seq = seq;
                 self.last_submitted = seq;
             }
-            Err(SendError((_, b))) => self.staged = b,
+            Err(SendError((_, b))) => {
+                tracing::error!(
+                    "RedbStore: writer channel disconnected (writer died) — staged batch retained; the \
+                     durability gate will fail loud"
+                );
+                self.staged = b;
+            }
         }
     }
 }
