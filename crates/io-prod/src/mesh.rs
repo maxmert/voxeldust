@@ -22,13 +22,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use vd_core::{MsgId, NodeId};
 use vd_sim::io::{BoundedInbox, Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
 
 use crate::trust::ClusterTrust;
-use crate::{ProdIoError, WireFrame, write_wireframe};
+use crate::{DatagramFrame, DedupState, ProdIoError, write_wireframe};
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -88,6 +88,9 @@ impl MeshConfig {
 /// The shared bounded inbox: reader/writer tasks push, the sim thread drains. The
 /// Mutex is only ever held for a queue push/drain — never across an await.
 type SharedInbox = Arc<Mutex<BoundedInbox>>;
+/// Mesh-level (per-node) receiver dedup, shared across every connection so a peer's reconnect-replay
+/// is deduped against what an earlier connection already delivered (R-1).
+type SharedDedup = Arc<Mutex<DedupState>>;
 
 /// Transport honesty counters — every dropped datagram is COUNTED, never silent
 /// (audit GW-1: the design's never-silent rule). Surfaced via [`MeshControl::stats`].
@@ -242,6 +245,15 @@ pub fn spawn_mesh(
 
     let inbox: SharedInbox = Arc::new(Mutex::new(BoundedInbox::new(cfg.inbound_capacity)));
     let stats = Arc::new(MeshStats::default());
+    let dedup: SharedDedup = Arc::new(Mutex::new(DedupState::default()));
+    // R-1 sender process-epoch: this node's incarnation, stamped on every outgoing RELIABLE frame so
+    // a peer's receiver resets its dedup high-water when THIS node restarts (the sender-restart
+    // seq-reset fix). Process-start wall-clock nanos is monotone across restarts under a sane clock;
+    // the robust durable boot-counter is the owed upgrade with the durable-outbox tier (R-6).
+    let incarnation = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
 
     // Accept loop: a Semaphore caps concurrently-served connections so a connection
     // flood cannot task-flood the node (TRANSPORT-4). Each connection serves BOTH
@@ -249,6 +261,7 @@ pub fn spawn_mesh(
     let accept_endpoint = endpoint.clone();
     let accept_inbox = Arc::clone(&inbox);
     let accept_stats = Arc::clone(&stats);
+    let accept_dedup = Arc::clone(&dedup);
     let permits = Arc::new(tokio::sync::Semaphore::new(
         cfg.max_inbound_connections.max(1),
     ));
@@ -259,12 +272,13 @@ pub fn spawn_mesh(
             };
             let inbox = Arc::clone(&accept_inbox);
             let stats = Arc::clone(&accept_stats);
+            let dedup = Arc::clone(&accept_dedup);
             tokio::spawn(async move {
                 let _permit = permit; // held for the connection's lifetime
                 let Ok(connection) = incoming.await else {
                     return; // handshake failed (foreign trust): drop, never serve
                 };
-                serve_connection(connection, inbox, stats).await;
+                serve_connection(connection, inbox, stats, dedup).await;
             });
         }
     });
@@ -285,6 +299,7 @@ pub fn spawn_mesh(
             stats: Arc::clone(&stats),
             backoff_min: cfg.redial_backoff_min,
             backoff_max: cfg.redial_backoff_max,
+            incarnation,
         }));
         lanes.insert(peer, PeerLane { tx });
     }
@@ -306,23 +321,26 @@ async fn serve_connection(
     connection: quinn::Connection,
     inbox: SharedInbox,
     stats: Arc<MeshStats>,
+    dedup: SharedDedup,
 ) {
     let stream_conn = connection.clone();
     let stream_inbox = Arc::clone(&inbox);
     let stream_stats = Arc::clone(&stats);
-    // Reliable streams.
+    let stream_dedup = Arc::clone(&dedup);
+    // Reliable streams (R-1 at-least-once dedup applied per reliable frame).
     let streams = tokio::spawn(async move {
         while let Ok(recv) = stream_conn.accept_uni().await {
             let inbox = Arc::clone(&stream_inbox);
             let stats = Arc::clone(&stream_stats);
+            let dedup = Arc::clone(&stream_dedup);
             tokio::spawn(async move {
-                crate::read_frames_into(recv, &inbox, &stats).await;
+                crate::read_frames_into(recv, &inbox, &stats, &dedup).await;
             });
         }
     });
-    // Unreliable datagrams on the same connection.
+    // Unreliable datagrams on the same connection — BARE frame, NO dedup (latest-wins, R2).
     while let Ok(datagram) = connection.read_datagram().await {
-        if let Ok(frame) = postcard::from_bytes::<WireFrame>(&datagram) {
+        if let Ok(frame) = postcard::from_bytes::<DatagramFrame>(&datagram) {
             push_inbox(
                 &inbox,
                 &stats,
@@ -347,6 +365,8 @@ struct PeerWriter {
     stats: Arc<MeshStats>,
     backoff_min: Duration,
     backoff_max: Duration,
+    /// This node's process-epoch, stamped on every outgoing reliable frame (R-1).
+    incarnation: u64,
 }
 
 /// One peer's writer: drains its lane in FIFO order, dialing on demand, with
@@ -358,6 +378,10 @@ async fn peer_writer(mut w: PeerWriter) {
     let mut connection: Option<quinn::Connection> = None;
     let mut reliable_stream: Option<quinn::SendStream> = None;
     let mut backoff = w.backoff_min;
+    // Per-(this-peer, class) monotone reliable sequence (R-1), starting at 1. Persists across re-dials
+    // within this process (a reconnect REPLAYS the same seqs — R-3); resets only on a PROCESS restart
+    // (a fresh peer_writer + a higher `incarnation`). Keyed by class: independent reliable lanes.
+    let mut next_seq: BTreeMap<MsgClass, u64> = BTreeMap::new();
     while let Some(frame) = w.rx.recv().await {
         let sent = write_frame(
             &w.endpoint,
@@ -365,6 +389,8 @@ async fn peer_writer(mut w: PeerWriter) {
             &mut connection,
             &mut reliable_stream,
             w.local,
+            w.incarnation,
+            &mut next_seq,
             &frame,
             &w.stats,
         )
@@ -403,6 +429,8 @@ async fn write_frame(
     connection: &mut Option<quinn::Connection>,
     reliable_stream: &mut Option<quinn::SendStream>,
     local: NodeId,
+    incarnation: u64,
+    next_seq: &mut BTreeMap<MsgClass, u64>,
     frame: &OutFrame,
     stats: &MeshStats,
 ) -> Result<(), ()> {
@@ -426,13 +454,20 @@ async fn write_frame(
                 *reliable_stream = Some(conn.open_uni().await.map_err(|_| ())?);
             }
             let send = reliable_stream.as_mut().ok_or(())?;
-            write_wireframe(send, local, frame.class, &frame.bytes).await
+            // R-1: assign the per-(this-peer, class) monotone seq (starts at 1) + stamp the
+            // incarnation. (R-2 will buffer the frame here for ack-driven reconnect replay; R-1
+            // assigns the seq + writes — a break still loses the frame, same as today, but the
+            // receiver-side dedup scaffolding is now in place.)
+            let counter = next_seq.entry(frame.class).or_insert(0);
+            *counter += 1;
+            let seq = *counter;
+            write_wireframe(send, local, frame.class, incarnation, seq, &frame.bytes).await
         }
         Reliability::Unreliable => {
             // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a
-            // stream concept). TooLarge is a loud failure of the caller's framing, not a transport
-            // error to bounce.
-            let payload = postcard::to_allocvec(&WireFrame {
+            // stream concept) and carry the BARE DatagramFrame (no seq/incarnation — latest-wins,
+            // zero hot-path overhead, R2). TooLarge is a loud failure of the caller's framing.
+            let payload = postcard::to_allocvec(&DatagramFrame {
                 from: local,
                 class: frame.class,
                 bytes: frame.bytes.to_vec(),

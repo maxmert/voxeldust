@@ -48,13 +48,71 @@ use crate::trust::{ClusterTrust, TrustError};
 /// stream frame (`[u32_be total_len][u8 codec_flags][payload]`). io-prod routes ALL stream framing
 /// through `wire::framing` (the ONE codec/framing home — HR3 + the `codec_flags` reserved-bit
 /// forward-compat path); the cap is `wire::framing::MAX_STREAM_FRAME_BYTES`.
+///
+/// RELIABLE frames only. Carries the R-1 at-least-once metadata: `incarnation` (the SENDER's
+/// process-epoch — a restart bumps it so the receiver resets its dedup high-water) + `seq` (a
+/// per-(dest,class) monotone sequence so the receiver dedups replays by high-water). NOT
+/// postcard-additive — this is `pub(crate)` in io-prod (NOT a `vd-wire` contract), so both ends
+/// upgrade in lockstep; do not rely on field-append interop (postcard is non-self-describing).
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct WireFrame {
     from: NodeId,
     class: MsgClass,
+    /// Sender process-epoch (R-1): the receiver resets its per-(peer,class) dedup high-water when it
+    /// sees a higher incarnation (a sender restart) — the fix for the sender-restart seq-reset hole.
+    incarnation: u64,
+    /// Per-(dest,class) monotone sequence (R-1), starting at 1. The receiver dedups by high-water
+    /// (a reconnect-replayed frame with `seq <= delivered` is dropped). `0` is never a live seq.
+    seq: u64,
     /// The on-wire payload is a plain `Vec<u8>` (the seam's `Bytes = Arc<[u8]>` is
     /// an in-process sharing optimization; it converts at the serialize boundary).
     bytes: Vec<u8>,
+}
+
+/// The UNRELIABLE datagram payload (R-1): BARE — no `incarnation`/`seq`. The 20Hz latest-wins
+/// snapshot/input datagrams carry ZERO reliability metadata so the redelivery work adds no overhead
+/// to the PvP hot path (R2). Split from [`WireFrame`] precisely so the hot path stays minimal.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DatagramFrame {
+    from: NodeId,
+    class: MsgClass,
+    bytes: Vec<u8>,
+}
+
+/// Receiver-side at-least-once DEDUP (R-1). Per-(peer,class): the sender's last-seen `incarnation`
+/// and the highest contiguous `seq` delivered. Lives at the MESH level (one per node, shared across
+/// every connection) so a sender's RECONNECT-replay is deduped against what an EARLIER connection
+/// already delivered — a per-connection map would re-deliver the whole replayed window. The reliable
+/// uni stream is FIFO and replay is ascending, so the high-water test is exact (no gaps reach here).
+#[derive(Debug, Default)]
+pub(crate) struct DedupState {
+    delivered: std::collections::BTreeMap<(NodeId, MsgClass), (u64, u64)>, // (peer,class) -> (incarnation, last_seq)
+}
+
+/// THE dedup verdict (R-1) — monomorphic, straight-line (HR5(a)). `true` = ACCEPT (deliver this
+/// frame), `false` = DROP (a stale-incarnation or already-delivered replay/dup). A HIGHER incarnation
+/// RESETS the high-water (the sender restarted); a LOWER incarnation is a stale old-process frame
+/// (drop); the same incarnation dedups by strictly-increasing `seq`.
+pub(crate) fn dedup_accept(
+    state: &mut DedupState,
+    from: NodeId,
+    class: MsgClass,
+    incarnation: u64,
+    seq: u64,
+) -> bool {
+    let entry = state.delivered.entry((from, class)).or_insert((0, 0));
+    if incarnation > entry.0 {
+        *entry = (incarnation, seq);
+        return true;
+    }
+    if incarnation < entry.0 {
+        return false;
+    }
+    if seq > entry.1 {
+        entry.1 = seq;
+        return true;
+    }
+    false
 }
 
 #[derive(Debug)]
@@ -323,11 +381,15 @@ pub(crate) async fn write_wireframe(
     send: &mut quinn::SendStream,
     local: NodeId,
     class: MsgClass,
+    incarnation: u64,
+    seq: u64,
     bytes: &[u8],
 ) -> Result<(), ()> {
     let payload = postcard::to_allocvec(&WireFrame {
         from: local,
         class,
+        incarnation,
+        seq,
         bytes: bytes.to_vec(),
     })
     .map_err(|_| ())?;
@@ -365,7 +427,10 @@ async fn write_frame(
     let Some(send) = stream.as_mut() else {
         return Err(());
     };
-    write_wireframe(send, local, frame.class, &frame.bytes).await
+    // The in-process loopback BRIDGE (test pairs) needs no at-least-once: it never loses a frame,
+    // so it sends incarnation/seq = 0 and the bridge reader does not dedup. Redelivery is a mesh-only
+    // concern (the at-most-once QUIC carrier); the bridge already models at-least-once by construction.
+    write_wireframe(send, local, frame.class, 0, 0, &frame.bytes).await
 }
 
 pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<Inbound>) {
@@ -390,8 +455,28 @@ pub(crate) async fn read_frames_into(
     mut recv: quinn::RecvStream,
     inbox: &std::sync::Arc<std::sync::Mutex<vd_sim::io::BoundedInbox>>,
     stats: &mesh::MeshStats,
+    dedup: &std::sync::Arc<std::sync::Mutex<DedupState>>,
 ) {
     while let Some(frame) = read_one_wireframe(&mut recv).await {
+        // R-1 at-least-once DEDUP (mesh-level, persistent across this peer's connections): drop a
+        // replayed/stale frame BEFORE it reaches the sim, so the sim sees each reliable message
+        // exactly once. Inert in a healthy run (monotone seq, no dups); only a reconnect-replay
+        // (R-3) or a stale-incarnation frame is dropped here. (R-2 will also re-ACK a dropped dup.)
+        let accept = {
+            let mut state = dedup
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            dedup_accept(
+                &mut state,
+                frame.from,
+                frame.class,
+                frame.incarnation,
+                frame.seq,
+            )
+        };
+        if !accept {
+            continue;
+        }
         // Through the ONE surfacing chokepoint (a dropped RELIABLE frame here is the loudest case
         // of all — this is the reliable-stream reader).
         mesh::push_inbox(
@@ -402,6 +487,101 @@ pub(crate) async fn read_frames_into(
                 class: frame.class,
                 bytes: vd_sim::io::bytes(frame.bytes),
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    //! R-1 receiver dedup verdict (the at-least-once core). The reliable uni stream is FIFO + a
+    //! reconnect replays ascending, so the high-water test is exact; the incarnation guard fixes the
+    //! sender-restart seq-reset (a higher incarnation resets the high-water).
+    use super::{DedupState, dedup_accept};
+    use vd_core::NodeId;
+    use vd_sim::io::MsgClass;
+
+    const P: NodeId = NodeId(7);
+    const C: MsgClass = MsgClass::Saga;
+    const INC: u64 = 1000; // a realistic sender incarnation
+
+    #[test]
+    fn first_frame_and_in_order_run_are_accepted() {
+        let mut s = DedupState::default();
+        assert!(
+            dedup_accept(&mut s, P, C, INC, 1),
+            "first frame accepted (resets from genesis)"
+        );
+        assert!(dedup_accept(&mut s, P, C, INC, 2));
+        assert!(
+            dedup_accept(&mut s, P, C, INC, 3),
+            "monotone run all accepted (inert healthy path)"
+        );
+    }
+
+    #[test]
+    fn a_replayed_or_duplicate_seq_is_dropped() {
+        let mut s = DedupState::default();
+        assert!(dedup_accept(&mut s, P, C, INC, 1));
+        assert!(dedup_accept(&mut s, P, C, INC, 2));
+        assert!(
+            !dedup_accept(&mut s, P, C, INC, 2),
+            "exact replay of the last seq dropped"
+        );
+        assert!(!dedup_accept(&mut s, P, C, INC, 1), "older replay dropped");
+        assert!(
+            dedup_accept(&mut s, P, C, INC, 3),
+            "the next fresh seq still accepted after the dups"
+        );
+    }
+
+    #[test]
+    fn a_higher_incarnation_resets_the_high_water_sender_restart() {
+        let mut s = DedupState::default();
+        assert!(
+            dedup_accept(&mut s, P, C, INC, 5),
+            "delivered up to seq 5 at INC"
+        );
+        // Sender restarts: higher incarnation, seq resets to 1. Without the guard this would be
+        // dropped as <= 5; WITH the guard it resets + accepts (the load-bearing fix).
+        assert!(
+            dedup_accept(&mut s, P, C, INC + 1, 1),
+            "fresh incarnation seq 1 accepted (reset)"
+        );
+        assert!(dedup_accept(&mut s, P, C, INC + 1, 2));
+        assert!(
+            !dedup_accept(&mut s, P, C, INC + 1, 1),
+            "and dedup resumes within the new incarnation"
+        );
+    }
+
+    #[test]
+    fn a_stale_lower_incarnation_frame_is_dropped() {
+        let mut s = DedupState::default();
+        assert!(
+            dedup_accept(&mut s, P, C, INC + 1, 1),
+            "current incarnation established"
+        );
+        assert!(
+            !dedup_accept(&mut s, P, C, INC, 9),
+            "a frame from an OLD process incarnation is dropped"
+        );
+    }
+
+    #[test]
+    fn peer_and_class_are_independent_lanes() {
+        let mut s = DedupState::default();
+        assert!(dedup_accept(&mut s, P, C, INC, 1));
+        assert!(
+            dedup_accept(&mut s, P, MsgClass::Control, INC, 1),
+            "a different class is its own lane"
+        );
+        assert!(
+            dedup_accept(&mut s, NodeId(8), C, INC, 1),
+            "a different peer is its own lane"
+        );
+        assert!(
+            !dedup_accept(&mut s, P, C, INC, 1),
+            "the original (P,Saga) lane still dedups"
         );
     }
 }
