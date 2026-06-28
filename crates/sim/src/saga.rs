@@ -160,7 +160,9 @@ impl Default for LivenessTuning {
 /// A mis-tuned [`LivenessTuning`] — rejected LOUD at boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LivenessTuningError {
-    #[error("n_consecutive_unreachable must be >= 1 (0 would confirm a peer dead with no evidence)")]
+    #[error(
+        "n_consecutive_unreachable must be >= 1 (0 would confirm a peer dead with no evidence)"
+    )]
     ZeroConsecutive,
     #[error(
         "unreachable_window_ticks ({window}) must be >= n_consecutive_unreachable ({n}) * \
@@ -401,7 +403,9 @@ pub enum SagaEvent {
     /// `Promoting → ReHoming{target}`. The producer carries the chosen `target` (the pure FSM cannot
     /// select — selection needs the roster + liveness); a `None` selection injects nothing (the saga
     /// stays parked, honest, never a forced re-home).
-    ReHomeTo { target: NodeId },
+    ReHomeTo {
+        target: NodeId,
+    },
 }
 
 /// What the wrapper must do after a step. The saga never performs effects itself.
@@ -2324,7 +2328,13 @@ mod tests {
         );
         // CasWon: the directory now names the target at the bumped fence → adopt there, re-enter Promoting
         // carrying `rehome_target: Some(target)` (D-37 2d) so a later Timeout re-drives the adopt here.
-        let (state, acts) = step(&c, state, SagaEvent::CasWon { new_fence: Fence(7) });
+        let (state, acts) = step(
+            &c,
+            state,
+            SagaEvent::CasWon {
+                new_fence: Fence(7),
+            },
+        );
         assert_eq!(
             state,
             SagaState::Promoting {

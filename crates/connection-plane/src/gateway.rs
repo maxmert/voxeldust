@@ -800,7 +800,13 @@ fn process_gateway_inbound(
         } else if config.is_known_shard(from) {
             match class {
                 MsgClass::Control => on_shard_control(
-                    from, bytes, &config, &clock, &mut sessions, &mut stats, &mut outbox,
+                    from,
+                    bytes,
+                    &config,
+                    &clock,
+                    &mut sessions,
+                    &mut stats,
+                    &mut outbox,
                 ),
                 MsgClass::Snapshot => {
                     on_shard_frame(from, bytes, &mut sessions, &mut stats, &mut outbox);
@@ -2194,7 +2200,10 @@ mod tests {
         // Past the grace (local 7 - 1 = 6 > 5): SELF-FENCE.
         set_tick(&mut rig, 7);
         let _ = rig.tick(vec![]);
-        assert!(!session_active(&rig, sid), "the partitioned session self-fenced");
+        assert!(
+            !session_active(&rig, sid),
+            "the partitioned session self-fenced"
+        );
         assert_eq!(rig.stats().sessions_self_fenced_lapsed, 1);
         assert_eq!(
             rig.world.resource::<GatewaySessions>().len(),
@@ -2259,11 +2268,7 @@ mod tests {
         // A self-fenced session lingers in the fan-out reverse index (its subs are not torn down) but
         // is served NO frames — skipped cleanly via the phase gate (NOT a desync), watermark untouched.
         let (mut sessions, sid, _) = one_active_session();
-        sessions
-            .by_session
-            .get_mut(&sid)
-            .expect("present")
-            .phase = SessionPhase::SelfFenced;
+        sessions.by_session.get_mut(&sid).expect("present").phase = SessionPhase::SelfFenced;
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
         let frame = postcard::to_allocvec(&frame_msg(Fence(1), 9)).expect("encode");
@@ -2339,7 +2344,8 @@ mod tests {
         let (sid, _) = rig.login(); // Active; confirmed_at armed at the attach
         let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &absent_head(sid))]); // reactively self-fence
         assert!(!session_active(&rig, sid), "the session is self-fenced");
-        let fenced_confirmed = rig.world.resource::<GatewaySessions>().by_session[&sid].confirmed_at;
+        let fenced_confirmed =
+            rig.world.resource::<GatewaySessions>().by_session[&sid].confirmed_at;
         // A late/duplicate SessionAttached straggler at a much later tick must be IGNORED.
         set_tick(&mut rig, 42);
         let _ = rig.tick(vec![wire(
@@ -5598,13 +5604,15 @@ mod tests {
         let renewed_sessions = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<SessionId> {
             sent.iter()
                 .filter(|(to, _, _)| *to == ORCH)
-                .filter_map(|(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
-                    Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew {
-                        key: DirectoryKey::Session(s),
-                        ..
-                    })) => Some(s),
-                    _ => None,
-                })
+                .filter_map(
+                    |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                        Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew {
+                            key: DirectoryKey::Session(s),
+                            ..
+                        })) => Some(s),
+                        _ => None,
+                    },
+                )
                 .collect()
         };
 

@@ -155,7 +155,8 @@ fn p1_parity_real_binaries_over_quic() {
     trust.write_der_dir(&trust_dir).expect("trust dir");
     // D-6: the orchestrator's durable Store (temp scratch ⇒ VD_STORE_EPHEMERAL_OK via orchestrator_env).
     // Remove any stale file from a recycled-pid prior run so this parity spawn boots at genesis.
-    let orch_store = std::env::temp_dir().join(format!("vd-parity-{}-orch.redb", std::process::id()));
+    let orch_store =
+        std::env::temp_dir().join(format!("vd-parity-{}-orch.redb", std::process::id()));
     let _ = std::fs::remove_file(&orch_store);
     let orch_store = orch_store.display().to_string();
 

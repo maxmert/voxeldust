@@ -849,7 +849,10 @@ mod tests {
         // is_multiple_of with a 0 divisor); otherwise true exactly on multiples of the interval.
         assert!(!due_this_tick(0, 5), "interval 0 ⇒ INERT, never due");
         assert!(due_this_tick(2, 4), "on a multiple of the interval ⇒ due");
-        assert!(due_this_tick(2, 0), "genesis tick 0 is a multiple of everything");
+        assert!(
+            due_this_tick(2, 0),
+            "genesis tick 0 is a multiple of everything"
+        );
         assert!(!due_this_tick(2, 5), "off a multiple ⇒ not due");
     }
 

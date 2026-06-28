@@ -376,9 +376,15 @@ mod tests {
     fn satisfies_matches_voxel_geometry_and_required_booleans() {
         // An EMPTY request (a bare P3 point entity in empty space) is satisfied by ANY profile.
         let stub = ShardProfile::build(CapRequest::default()).expect("empty profile is coherent");
-        assert!(stub.satisfies(&CapRequest::default()), "empty req ⇒ a bare stub satisfies");
+        assert!(
+            stub.satisfies(&CapRequest::default()),
+            "empty req ⇒ a bare stub satisfies"
+        );
         let planet = profiles::planet().expect("planet"); // Spherical voxel
-        assert!(planet.satisfies(&CapRequest::default()), "empty req ⇒ a planet satisfies too");
+        assert!(
+            planet.satisfies(&CapRequest::default()),
+            "empty req ⇒ a planet satisfies too"
+        );
 
         // VOXEL GEOMETRY must match EXACTLY (a ship's Cartesian realm can never re-home onto a Spherical
         // shard, and vice-versa).
@@ -390,9 +396,18 @@ mod tests {
             voxel: Some(VoxelGeometry::Cartesian),
             ..CapRequest::default()
         };
-        assert!(!stub.satisfies(&spherical), "a stub (no voxel) cannot host a voxel realm");
-        assert!(planet.satisfies(&spherical), "a Spherical planet hosts a Spherical realm");
-        assert!(!planet.satisfies(&cartesian), "a Spherical planet cannot host a Cartesian realm");
+        assert!(
+            !stub.satisfies(&spherical),
+            "a stub (no voxel) cannot host a voxel realm"
+        );
+        assert!(
+            planet.satisfies(&spherical),
+            "a Spherical planet hosts a Spherical realm"
+        );
+        assert!(
+            !planet.satisfies(&cartesian),
+            "a Spherical planet cannot host a Cartesian realm"
+        );
         assert!(
             profiles::ship().expect("ship").satisfies(&cartesian),
             "a Cartesian ship hosts a Cartesian realm"
@@ -403,7 +418,10 @@ mod tests {
             signal_relay: true,
             ..CapRequest::default()
         };
-        assert!(!planet.satisfies(&needs_relay), "a planet lacks signal_relay ⇒ not satisfied");
+        assert!(
+            !planet.satisfies(&needs_relay),
+            "a planet lacks signal_relay ⇒ not satisfied"
+        );
         assert!(
             profiles::galaxy().expect("galaxy").satisfies(&needs_relay),
             "a galaxy relay provides signal_relay ⇒ satisfied"

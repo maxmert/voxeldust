@@ -218,7 +218,8 @@ fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
     let trust_dir = std::env::temp_dir().join(format!("vd-orchcrash-fresh-{}", std::process::id()));
     let trust = ClusterTrust::generate("vd-orchcrash-fresh").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
-    let store = std::env::temp_dir().join(format!("vd-orchcrash-fresh-{}.redb", std::process::id()));
+    let store =
+        std::env::temp_dir().join(format!("vd-orchcrash-fresh-{}.redb", std::process::id()));
     let _ = std::fs::remove_file(&store);
     let common = common_env(&trust_dir.display().to_string(), &DEV);
     let addrs = ClusterAddrs {

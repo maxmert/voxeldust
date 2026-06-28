@@ -22,11 +22,11 @@ use vd_core::pose::RealmId;
 use vd_core::{Fence, UniverseTick};
 #[cfg(feature = "store-test-hooks")]
 use vd_node::orchestrator::DirectoryRes;
-#[cfg(feature = "store-test-hooks")]
-use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 use vd_sim::capability::NodeKind;
 use vd_sim::directory::DirectoryTuning;
 use vd_wire::admin::AdminSnapshot;
+#[cfg(feature = "store-test-hooks")]
+use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 
 struct Published(Arc<ArcSwap<AdminSnapshot>>);
 
@@ -87,7 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lease_ttl_ticks: env.parse("VD_LEASE_TTL")?,
         lease_renew_interval_ticks: env
             .parse_or("VD_LEASE_RENEW_INTERVAL", d3.lease_renew_interval_ticks)?,
-        min_renews_before_lapse: env.parse_or("VD_MIN_RENEWS_BEFORE_LAPSE", d3.min_renews_before_lapse)?,
+        min_renews_before_lapse: env
+            .parse_or("VD_MIN_RENEWS_BEFORE_LAPSE", d3.min_renews_before_lapse)?,
         self_fence_grace_ticks: env.parse_or("VD_SELF_FENCE_GRACE", d3.self_fence_grace_ticks)?,
         max_self_fence_grace_ticks: env
             .parse_or("VD_MAX_SELF_FENCE_GRACE", d3.max_self_fence_grace_ticks)?,
@@ -134,9 +135,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(parent) => canon(parent),
         None => store_path.clone(),
     };
-    let under_temp = probe.starts_with(&tmp)
-        || probe.starts_with("/tmp")
-        || probe.starts_with("/private/tmp");
+    let under_temp =
+        probe.starts_with(&tmp) || probe.starts_with("/tmp") || probe.starts_with("/private/tmp");
     // VD_STORE_EPHEMERAL_OK is the EXPLICIT dev/test escape (a throwaway local cluster legitimately stores
     // under $TMPDIR, cleaned by `dev-cluster down`). STRICT parse — a present-but-unrecognized value is a
     // LOUD config error, never a fail-OPEN footgun (`=0`/`=false` must NOT silently disable the guard).
@@ -188,8 +188,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => None,
     };
     let store_tuning = StoreTuning {
-        writer_channel_depth: env
-            .parse_or("VD_STORE_CHANNEL_DEPTH", StoreTuning::default().writer_channel_depth)?,
+        writer_channel_depth: env.parse_or(
+            "VD_STORE_CHANNEL_DEPTH",
+            StoreTuning::default().writer_channel_depth,
+        )?,
         #[cfg(feature = "store-test-hooks")]
         pause_on_key_prefix: sentinel.as_ref().map(|(_, prefix, _)| prefix.clone()),
         #[cfg(feature = "store-test-hooks")]

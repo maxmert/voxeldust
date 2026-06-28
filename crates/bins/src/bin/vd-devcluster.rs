@@ -31,8 +31,7 @@ use std::time::{Duration, Instant};
 
 use vd_bins::{
     Cluster, ClusterAddrs, DEV, ORCH_STORE_NAME, RUNFILE_NAME, TRUST_DIR_NAME, admin_get_body,
-    common_env,
-    dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env, sh_quote, shard_env,
+    common_env, dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env, sh_quote, shard_env,
     slot_workdir,
 };
 use vd_core::NodeId;
@@ -163,7 +162,10 @@ fn up_inner(
     // runfile (SIGKILL reaper) the INSTANT its child exists, before the next spawn.
     let mut cluster = Cluster::new();
     for (name, node_env) in [
-        ("vd-orchestrator", orchestrator_env(&addrs, &DEV, &store_str)),
+        (
+            "vd-orchestrator",
+            orchestrator_env(&addrs, &DEV, &store_str),
+        ),
         (
             "vd-gateway",
             gateway_env(&addrs, &clients, &auth_pubkey, &DEV),

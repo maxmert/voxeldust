@@ -32,7 +32,8 @@ fn a_temp_store_without_ephemeral_ok_refuses_to_boot() {
         .write_der_dir(&trust_dir)
         .expect("trust dir");
     // A temp-dir store path (the guard's reject target) — with the dev escape STRIPPED.
-    let temp_store = std::env::temp_dir().join(format!("vd-bootreject-{}.redb", std::process::id()));
+    let temp_store =
+        std::env::temp_dir().join(format!("vd-bootreject-{}.redb", std::process::id()));
     let mut node_env = orchestrator_env(&addrs, &DEV, &temp_store.display().to_string());
     node_env.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK");
     let common = common_env(&trust_dir.display().to_string(), &DEV);

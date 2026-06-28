@@ -79,12 +79,7 @@ impl OutboundBox {
     /// idempotent-by-fence at `DirectoryCore::renew` and loss-tolerant (the next heartbeat covers a drop).
     pub fn push_renewals<I>(&mut self, keys: I, orchestrator: NodeId)
     where
-        I: IntoIterator<
-            Item = (
-                vd_wire::seams::directory::DirectoryKey,
-                vd_core::Fence,
-            ),
-        >,
+        I: IntoIterator<Item = (vd_wire::seams::directory::DirectoryKey, vd_core::Fence)>,
     {
         for (key, fence) in keys {
             self.push_flow(

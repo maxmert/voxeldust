@@ -601,7 +601,11 @@ mod tests {
         // No saga has been triggered, so the (present) saga runtime renders an empty
         // list — the saga view is populated from real state, never fabricated (AAA-1).
         assert_eq!(snap.sagas, vec![]);
-        assert_eq!(snap.leases, vec![], "no records ⇒ no lease-health rows (D-3)");
+        assert_eq!(
+            snap.leases,
+            vec![],
+            "no records ⇒ no lease-health rows (D-3)"
+        );
 
         // A granted lease appears in the dump.
         let mut requester = hub.register(SHARD, 64);

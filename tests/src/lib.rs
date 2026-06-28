@@ -98,7 +98,10 @@ pub fn dest_stub_config() -> StubConfig {
 /// The cluster orchestrator's config (shared by `build_cluster` + the D-6 orchestrator-kill rebuild, so
 /// a rebuilt orchestrator is built IDENTICALLY — same reserve_chunk/tuning → a clean recover).
 #[must_use]
-pub fn orch_config(clock_peers: Vec<NodeId>, roster: BTreeMap<NodeId, ShardProfile>) -> OrchestratorConfig {
+pub fn orch_config(
+    clock_peers: Vec<NodeId>,
+    roster: BTreeMap<NodeId, ShardProfile>,
+) -> OrchestratorConfig {
     OrchestratorConfig {
         epoch: EpochId(1),
         reserve_chunk: 1024,
@@ -638,7 +641,9 @@ pub fn dest_unreachable_resolutions(topo: &mut Topology) -> u64 {
 #[must_use]
 pub fn liveness_notices(topo: &mut Topology) -> u64 {
     with_orchestrator(topo, |orch| {
-        orch.world_mut().resource::<SagaRuntimeRes>().liveness_notices()
+        orch.world_mut()
+            .resource::<SagaRuntimeRes>()
+            .liveness_notices()
     })
 }
 
@@ -935,7 +940,8 @@ pub fn assert_end_state(
             // set — the AbortTransfer compensator tore the dest ghost down. Catches a leaked teardown that
             // the uniqueness check (which excludes Ghosts) would miss — load-bearing for a future
             // signal-grant / compound abort that is likelier to leak.
-            verify_authority_settled(&reports).expect("settled after the abort (no leaked dest ghost)");
+            verify_authority_settled(&reports)
+                .expect("settled after the abort (no leaked dest ghost)");
         }
         EndState::ParkedHalfOpen { authority_at } => {
             let reports = topo.inspect_all();

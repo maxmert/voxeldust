@@ -44,10 +44,10 @@ use bevy_ecs::prelude::{Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
 use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{BatchId, EpochId, Fence, NodeId, SessionId, TransferId, UniverseTick};
+use vd_sim::capability::{CapRequest, ShardProfile};
 use vd_sim::directory::{DirectoryCore, DirectoryTuning};
 use vd_sim::io::{Bytes, Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
-use vd_sim::capability::{CapRequest, ShardProfile};
 use vd_sim::saga::{
     self, AbortReason, LivenessTuning, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning,
 };
@@ -258,7 +258,8 @@ impl LivenessTracker {
             consecutive: 0,
             first_unreachable_tick: now,
         });
-        if now.0.saturating_sub(ev.first_unreachable_tick.0) > self.tuning.unreachable_window_ticks {
+        if now.0.saturating_sub(ev.first_unreachable_tick.0) > self.tuning.unreachable_window_ticks
+        {
             *ev = UnreachEvidence {
                 consecutive: 1,
                 first_unreachable_tick: now,
@@ -1362,7 +1363,12 @@ fn rehome_transfer_id(subject: DirectoryKey, prev_fence: Fence) -> TransferId {
 /// session/realm and the Slice-4 adopt sources the entity's session/realm/pose from the RealmId-keyed
 /// checkpoint reload (D-6/P7), NOT this ctx — so `session`/`from_realm`/`to_realm` are NEVER read by the
 /// re-home path; they are derived from the entity for replay-determinism + the shared WAL snapshot shape.
-fn rehome_ctx(subject: DirectoryKey, prev_fence: Fence, dead_owner: NodeId, target: NodeId) -> SagaCtx {
+fn rehome_ctx(
+    subject: DirectoryKey,
+    prev_fence: Fence,
+    dead_owner: NodeId,
+    target: NodeId,
+) -> SagaCtx {
     // Slice 3 only re-homes Entity keys (the reaper leaves Realm/Ship for Slice 4), so this is always Some.
     let entity = subject
         .transfer_subject_entity()
@@ -1411,7 +1417,8 @@ fn process_rehome_starts(
         prev_fence,
     } in std::mem::take(&mut runtime.pending_rehome)
     {
-        let Some(target) = select_rehome_target(&req, &runtime.roster, &runtime.liveness, now) else {
+        let Some(target) = select_rehome_target(&req, &runtime.roster, &runtime.liveness, now)
+        else {
             continue; // no live capable shard → drop; the reaper re-detects + retries next sweep (honest)
         };
         let transfer = rehome_transfer_id(subject, prev_fence);
@@ -1435,9 +1442,18 @@ fn process_rehome_starts(
         );
         // Parks immediately (start_rehome emits no actions); run_to_quiescence + commit_result PERSIST the
         // ReHoming snapshot so the armed re-home survives an orchestrator kill-9 (rehydrates parked).
-        let (final_state, tombstone, rejected, batch_gos) =
-            run_to_quiescence(&ctx, dead_owner, state, actions, dir, outbox, epoch, now, None);
-        commit_result(runtime, transfer, final_state, tombstone, rejected, batch_gos, now);
+        let (final_state, tombstone, rejected, batch_gos) = run_to_quiescence(
+            &ctx, dead_owner, state, actions, dir, outbox, epoch, now, None,
+        );
+        commit_result(
+            runtime,
+            transfer,
+            final_state,
+            tombstone,
+            rejected,
+            batch_gos,
+            now,
+        );
     }
 }
 
@@ -2084,11 +2100,9 @@ mod tests {
                     ORCH,
                     MsgClass::Saga,
                     vd_sim::io::bytes(
-                        postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::LeaseGrant {
-                            key,
-                            owner,
-                            fence,
-                        }))
+                        postcard::to_allocvec(&InterShardFlow::Directory(
+                            DirectoryOp::LeaseGrant { key, owner, fence },
+                        ))
                         .expect("encode"),
                     ),
                 )
@@ -2104,10 +2118,9 @@ mod tests {
                     ORCH,
                     MsgClass::Saga,
                     vd_sim::io::bytes(
-                        postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
-                            key,
-                            fence,
-                        }))
+                        postcard::to_allocvec(&InterShardFlow::Directory(
+                            DirectoryOp::LeaseRevoke { key, fence },
+                        ))
                         .expect("encode"),
                     ),
                 )
@@ -2924,7 +2937,11 @@ mod tests {
         // the barrier stages for a directory row ([DIRECTORY] ++ postcard(key)) or the writer pause misses.
         let key = DirectoryKey::Realm(RealmId::System(42));
         let bytes = directory_store_key(&key);
-        assert_eq!(bytes[0], StoreKey::DIRECTORY, "leads with the DIRECTORY family tag");
+        assert_eq!(
+            bytes[0],
+            StoreKey::DIRECTORY,
+            "leads with the DIRECTORY family tag"
+        );
         assert_eq!(
             &bytes[1..],
             &postcard::to_allocvec(&key).expect("encode")[..],
@@ -2994,9 +3011,7 @@ mod tests {
         // The recovered runtime confirms a peer dead only after 3 notices (the n = 1 default would confirm
         // on the first) — proving the configured margin survived the kill-9 recover.
         let mut runtime = rig.orch.world_mut().resource_mut::<SagaRuntimeRes>();
-        runtime
-            .liveness
-            .record_unreachable(SOURCE, UniverseTick(1));
+        runtime.liveness.record_unreachable(SOURCE, UniverseTick(1));
         assert!(
             !runtime.liveness.is_confirmed_dead(SOURCE, UniverseTick(1)),
             "the recovered orchestrator kept its configured n = 3 margin, not the n = 1 default"
@@ -3025,7 +3040,12 @@ mod tests {
         // All three hold → reap (lapsed at 90 < now 100; dead confirmed; quiesce elapsed).
         assert!(should_reap(&rec(dead, 90), now, &liveness, quiesced));
         // (1) NOT past the quiesce freeze → no reap.
-        assert!(!should_reap(&rec(dead, 90), now, &liveness, UniverseTick(150)));
+        assert!(!should_reap(
+            &rec(dead, 90),
+            now,
+            &liveness,
+            UniverseTick(150)
+        ));
         // (2) NOT lapsed (lease_expires >= now) → no reap.
         assert!(!should_reap(&rec(dead, 200), now, &liveness, quiesced));
         // (3) NOT confirmed dead (a node with no unreachable evidence) → no reap.
@@ -3182,7 +3202,13 @@ mod tests {
 
         // ARM: a fresh re-home saga parks in ReHoming{target}; the key is locked; authority STAYS at corpse.
         let mut outbox = OutboundBox::default();
-        process_rehome_starts(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(100));
+        process_rehome_starts(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(100),
+        );
         assert!(
             runtime.pending_rehome.is_empty(),
             "the queue is drained the same tick (within-barrier hand-off)"
@@ -3200,13 +3226,19 @@ mod tests {
             },
             "the saga parks in ReHoming at the selected live target"
         );
-        let head = dir.head(entity).expect("the orphan record is still present");
+        let head = dir
+            .head(entity)
+            .expect("the orphan record is still present");
         assert_eq!(
             head.authority,
             AuthorityRef::Shard(dead),
             "authority STAYS at the dead owner (conservative — no CAS, no HeldNowhere strand)"
         );
-        assert_eq!(head.fence, Fence(3), "no fence bump (no ReHomeCommit until Slice 4)");
+        assert_eq!(
+            head.fence,
+            Fence(3),
+            "no fence bump (no ReHomeCommit until Slice 4)"
+        );
         assert!(
             head.in_transfer.is_some(),
             "the key is LOCKED by the armed re-home saga (the next reaper sweep skips it)"
@@ -3297,9 +3329,19 @@ mod tests {
         let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // EMPTY roster (default)
         runtime.liveness.record_unreachable(dead, UniverseTick(50));
         reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
-        assert_eq!(runtime.pending_rehome.len(), 1, "the orphan was detected + enqueued");
+        assert_eq!(
+            runtime.pending_rehome.len(),
+            1,
+            "the orphan was detected + enqueued"
+        );
         let mut outbox = OutboundBox::default();
-        process_rehome_starts(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(100));
+        process_rehome_starts(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(100),
+        );
         assert_eq!(
             runtime.live(),
             0,
@@ -3347,7 +3389,13 @@ mod tests {
             prev_fence: Fence(3),
         });
         let mut outbox = OutboundBox::default();
-        process_rehome_starts(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(100));
+        process_rehome_starts(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(100),
+        );
         assert_eq!(
             runtime.live(),
             0,
@@ -3778,7 +3826,12 @@ mod tests {
         // Empty roster ⇒ None (no target — the caller leaves the saga PARKED, honest RED).
         let none_roster: BTreeMap<NodeId, ShardProfile> = BTreeMap::new();
         assert_eq!(
-            select_rehome_target(&CapRequest::default(), &none_roster, &liveness, UniverseTick(0)),
+            select_rehome_target(
+                &CapRequest::default(),
+                &none_roster,
+                &liveness,
+                UniverseTick(0)
+            ),
             None
         );
         // A roster of only INCAPABLE shards for a voxel req ⇒ None (never a forced incapable re-home).
@@ -3794,7 +3847,12 @@ mod tests {
         );
         // But for the P3 EMPTY (bare-point) req, that same live stub IS the target.
         assert_eq!(
-            select_rehome_target(&CapRequest::default(), &only_stub, &liveness, UniverseTick(0)),
+            select_rehome_target(
+                &CapRequest::default(),
+                &only_stub,
+                &liveness,
+                UniverseTick(0)
+            ),
             Some(NodeId(3)),
             "an empty bare-point req is satisfied by a live stub shard"
         );
@@ -3819,7 +3877,17 @@ mod tests {
 
         // (i) dest HEALTHY (not confirmed dead) → Timeout, and a stale budget is cleared.
         let mut dos = Some(UniverseTick(5));
-        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(30), &roster, &req, DEST);
+        let ev = rehome_event_for(
+            &promoting,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(30),
+            &roster,
+            &req,
+            DEST,
+        );
         assert_eq!(ev, SagaEvent::Timeout);
         assert_eq!(dos, None, "a healthy dest clears the stale abort budget");
 
@@ -3827,21 +3895,77 @@ mod tests {
         liveness.record_unreachable(DEST, UniverseTick(0));
         // (ii) dest DEAD but WITHIN the abort budget → cheap Timeout re-drive (budget anchored at first fire).
         let mut dos = None;
-        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(0), &roster, &req, DEST);
+        let ev = rehome_event_for(
+            &promoting,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(0),
+            &roster,
+            &req,
+            DEST,
+        );
         assert_eq!(ev, SagaEvent::Timeout);
-        assert_eq!(dos, Some(UniverseTick(0)), "the abort budget anchors on the first dead observation");
-        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(10), &roster, &req, DEST);
-        assert_eq!(ev, SagaEvent::Timeout, "still within the 24-tick budget at tick 10");
+        assert_eq!(
+            dos,
+            Some(UniverseTick(0)),
+            "the abort budget anchors on the first dead observation"
+        );
+        let ev = rehome_event_for(
+            &promoting,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(10),
+            &roster,
+            &req,
+            DEST,
+        );
+        assert_eq!(
+            ev,
+            SagaEvent::Timeout,
+            "still within the 24-tick budget at tick 10"
+        );
 
         // (iii) dest DEAD, PAST budget, a capable LIVE target exists → ReHomeTo{target}.
-        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &roster, &req, DEST);
-        assert_eq!(ev, SagaEvent::ReHomeTo { target: NodeId(9) }, "past budget → forward re-home to the live target");
+        let ev = rehome_event_for(
+            &promoting,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(24),
+            &roster,
+            &req,
+            DEST,
+        );
+        assert_eq!(
+            ev,
+            SagaEvent::ReHomeTo { target: NodeId(9) },
+            "past budget → forward re-home to the live target"
+        );
 
         // (iv) dest DEAD, PAST budget, NO capable live target (empty roster) → Timeout (stay PARKED, honest).
         let empty_roster: BTreeMap<NodeId, ShardProfile> = BTreeMap::new();
         let mut dos = Some(UniverseTick(0));
-        let ev = rehome_event_for(&promoting, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &empty_roster, &req, DEST);
-        assert_eq!(ev, SagaEvent::Timeout, "no capable live target → the saga stays parked (honest)");
+        let ev = rehome_event_for(
+            &promoting,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(24),
+            &empty_roster,
+            &req,
+            DEST,
+        );
+        assert_eq!(
+            ev,
+            SagaEvent::Timeout,
+            "no capable live target → the saga stays parked (honest)"
+        );
     }
 
     #[test]
@@ -3857,7 +3981,12 @@ mod tests {
             ..DirectoryTuning::default()
         });
         // The subject is committed to the (now-dead) DEST at Fence(1) — the re-home CAS expectation.
-        let _ = dir.grant(subject(), AuthorityRef::Shard(DEST), Fence(1), UniverseTick(0));
+        let _ = dir.grant(
+            subject(),
+            AuthorityRef::Shard(DEST),
+            Fence(1),
+            UniverseTick(0),
+        );
         inject_saga(
             &mut runtime,
             SagaState::Promoting {
@@ -3928,7 +4057,12 @@ mod tests {
             ..DirectoryTuning::default()
         });
         // POST-re-home directory state: the subject is committed to the LIVE target at the bumped Fence(2).
-        let _ = dir.grant(subject(), AuthorityRef::Shard(target), Fence(2), UniverseTick(0));
+        let _ = dir.grant(
+            subject(),
+            AuthorityRef::Shard(target),
+            Fence(2),
+            UniverseTick(0),
+        );
         inject_saga(
             &mut runtime,
             SagaState::Promoting {
@@ -3942,7 +4076,13 @@ mod tests {
         stash_flush(&mut runtime, XFER, flushed_pose()); // the adopt payload, re-read on every re-drive
         // The producer drives the DUE saga (now=8 >= redrive 8); a LIVE owner ⇒ Timeout (not ReHomeTo).
         let mut outbox = OutboundBox::default();
-        scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(8));
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8),
+        );
         // The dedicated ReHome adopt was RE-EMITTED to the live target from the stashed pose.
         let expected = InterShardFlow::ReHome(ReHomeCmd {
             transfer: XFER,
@@ -3996,7 +4136,13 @@ mod tests {
         );
         // emit_rehome's None arm: a non-Entity re-home adopt emits NOTHING (the LOUD no-op).
         let mut outbox = OutboundBox::default();
-        emit_rehome(&realm_ctx, Fence(2), NodeId(9), Some(flushed_pose()), &mut outbox);
+        emit_rehome(
+            &realm_ctx,
+            Fence(2),
+            NodeId(9),
+            Some(flushed_pose()),
+            &mut outbox,
+        );
         assert!(
             outbox.0.is_empty(),
             "a non-Entity re-home adopt emits no envelope"
@@ -4014,8 +4160,18 @@ mod tests {
             ..DirectoryTuning::default()
         });
         // Drive the head AHEAD (Fence 2 @ SOURCE) of the saga's expectation (Fence 1) — someone else won.
-        let _ = dir.grant(subject(), AuthorityRef::Shard(DEST), Fence(1), UniverseTick(0));
-        let _ = dir.commit_cas(subject(), Fence(1), AuthorityRef::Shard(SOURCE), UniverseTick(0));
+        let _ = dir.grant(
+            subject(),
+            AuthorityRef::Shard(DEST),
+            Fence(1),
+            UniverseTick(0),
+        );
+        let _ = dir.commit_cas(
+            subject(),
+            Fence(1),
+            AuthorityRef::Shard(SOURCE),
+            UniverseTick(0),
+        );
         inject_saga(
             &mut runtime,
             SagaState::Promoting {
@@ -4037,14 +4193,22 @@ mod tests {
             XFER,
             SagaEvent::ReHomeTo { target: NodeId(9) },
         );
-        assert_eq!(runtime.live(), 0, "the re-home loser tombstoned (clean no-op)");
+        assert_eq!(
+            runtime.live(),
+            0,
+            "the re-home loser tombstoned (clean no-op)"
+        );
         let head = dir.head(subject()).expect("subject still recorded");
         assert_eq!(
             head.authority,
             AuthorityRef::Shard(SOURCE),
             "the CAS winner still owns the entity"
         );
-        assert_eq!(head.fence, Fence(2), "the re-home CAS did not bump (it lost)");
+        assert_eq!(
+            head.fence,
+            Fence(2),
+            "the re-home CAS did not bump (it lost)"
+        );
         assert!(
             flows_to_node(&outbox, NodeId(9)).is_empty(),
             "no ReHome adopt is emitted to the target when the CAS is lost"
@@ -4078,9 +4242,7 @@ mod tests {
         // zero-loss self-promote is NOT abort-gated, so it fires on the first due scan once confirmed
         // (n == 1 in the default liveness tuning → one NodeUnreachable confirms).
         let mut runtime = mk();
-        runtime
-            .liveness
-            .record_unreachable(SOURCE, UniverseTick(8));
+        runtime.liveness.record_unreachable(SOURCE, UniverseTick(8));
         let mut outbox = OutboundBox::default();
         scan_deadlines(
             &mut runtime,
@@ -4233,7 +4395,9 @@ mod tests {
             .liveness
             .record_unreachable(NodeId(9), UniverseTick(1));
         assert!(
-            !runtime.liveness.is_confirmed_dead(NodeId(9), UniverseTick(1)),
+            !runtime
+                .liveness
+                .is_confirmed_dead(NodeId(9), UniverseTick(1)),
             "after re-tuning to n = 3, one notice is below the confirmation threshold"
         );
     }

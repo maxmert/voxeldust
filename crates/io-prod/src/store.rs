@@ -401,8 +401,11 @@ impl RedbStore {
         let path = path.as_ref().to_path_buf();
         let db = Arc::new(Database::create(&path).map_err(|e| StoreError::Open(e.to_string()))?);
         // Materialize the table on a genesis file so `scan` is a clean empty read — one tiny txn at boot.
-        let txn = db.begin_write().map_err(|e| StoreError::Txn(e.to_string()))?;
-        txn.open_table(KV).map_err(|e| StoreError::Txn(e.to_string()))?;
+        let txn = db
+            .begin_write()
+            .map_err(|e| StoreError::Txn(e.to_string()))?;
+        txn.open_table(KV)
+            .map_err(|e| StoreError::Txn(e.to_string()))?;
         txn.commit().map_err(|e| StoreError::Txn(e.to_string()))?;
 
         let (tx, rx) = bounded::<(u64, Batch)>(tuning.writer_channel_depth);
@@ -539,7 +542,8 @@ impl Store for RedbStore {
             .expect("RedbStore::scan: range fault — refusing to degrade to empty");
         let mut out = Vec::new();
         for entry in range {
-            let (k, v) = entry.expect("RedbStore::scan: mid-range read fault — refusing to truncate");
+            let (k, v) =
+                entry.expect("RedbStore::scan: mid-range read fault — refusing to truncate");
             let key = k.value();
             if !key.starts_with(prefix) {
                 break; // sorted: the prefix run has ended
@@ -571,7 +575,9 @@ impl Store for RedbStore {
             None => {
                 // No sender (only reachable mid-Drop) → retain (fail-safe). LOUD: a retained batch with no
                 // writer is an alert, never a silent no-op (review wf_186fc41d).
-                tracing::error!("RedbStore: commit with no writer (post-Drop) — staged batch retained");
+                tracing::error!(
+                    "RedbStore: commit with no writer (post-Drop) — staged batch retained"
+                );
                 self.staged = batch;
                 return;
             }
@@ -725,7 +731,10 @@ mod tests {
             s.delete(b"k");
             s.commit();
             s.flush_blocking();
-            assert!(s.scan(b"k").is_empty(), "a committed delete removes the key");
+            assert!(
+                s.scan(b"k").is_empty(),
+                "a committed delete removes the key"
+            );
         }
         {
             let (s, _h) = open(&path);
@@ -806,12 +815,18 @@ mod tests {
         s.put(b"\x03k", &b(b"v"));
         s.commit();
         let seq = h.last_submitted();
-        assert_eq!(seq, 1, "one batch submitted, watermark visible through the handle");
+        assert_eq!(
+            seq, 1,
+            "one batch submitted, watermark visible through the handle"
+        );
         h.wait_durable_through(seq); // parks until durable (or returns immediately on the fast path)
         assert!(h.is_durable_through(seq), "durable after the wait");
         assert_eq!(h.durable_through(), seq);
         drop(s); // Drop joins the writer → it exits → liveness flips false (handle keeps the shared flag)
-        assert!(!h.writer_alive(), "the writer is gone after the store drops");
+        assert!(
+            !h.writer_alive(),
+            "the writer is gone after the store drops"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -839,7 +854,7 @@ mod tests {
             &[(b"\x03a", Some(b"v1b")), (b"\x03a", Some(b"v1c"))], // last-write-wins on \x03a
             &[(b"\x03b", None)],                                   // delete
             &[],                                                   // idle commit (nothing staged)
-            &[(b"\x03c", Some(b"v3")), (b"\x01s", None)],          // a put + a delete across prefixes
+            &[(b"\x03c", Some(b"v3")), (b"\x01s", None)], // a put + a delete across prefixes
         ];
         for window in windows {
             for (k, v) in *window {
@@ -898,7 +913,10 @@ mod tests {
         s.put(b"\x01a", &b(b"v"));
         s.commit();
         h.wait_durable_through(h.last_submitted());
-        assert!(!marker.exists(), "a non-sentinel batch must NOT pause the writer");
+        assert!(
+            !marker.exists(),
+            "a non-sentinel batch must NOT pause the writer"
+        );
         assert_eq!(s.scan(b"\x01a"), vec![(b"\x01a".to_vec(), b(b"v"))]);
 
         // The sentinel batch: submitted (last_submitted bumps) but the writer parks BEFORE fsync, so it
@@ -914,12 +932,18 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(parked, "the writer parked on the sentinel batch (marker written)");
+        assert!(
+            parked,
+            "the writer parked on the sentinel batch (marker written)"
+        );
         assert!(
             !h.is_durable_through(submitted),
             "the sentinel batch is submitted but NOT durable (paused pre-fsync)"
         );
-        assert!(h.durable_through() < submitted, "durable watermark lags the parked batch");
+        assert!(
+            h.durable_through() < submitted,
+            "durable watermark lags the parked batch"
+        );
 
         // The parked writer NEVER returns, so Drop's join would hang — leak the store (the process exits
         // and reaps the thread; temp_path() is unique so the held file lock collides with nothing).

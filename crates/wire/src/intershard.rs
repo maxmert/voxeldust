@@ -893,8 +893,15 @@ mod tests {
         });
         let bytes = postcard::to_allocvec(&rehome).expect("encode");
         let decoded: InterShardFlow = postcard::from_bytes(&bytes).expect("decode");
-        assert_eq!(decoded, rehome.clone(), "ReHome survives a postcard roundtrip");
-        assert!(format!("{rehome:?}").contains("ReHome"), "Debug renders the arm");
+        assert_eq!(
+            decoded,
+            rehome.clone(),
+            "ReHome survives a postcard roundtrip"
+        );
+        assert!(
+            format!("{rehome:?}").contains("ReHome"),
+            "Debug renders the arm"
+        );
         // RE_HOME_STEP is its own phase, disjoint from the route-swap (0–10) + transient (11–15) steps.
         for other in [
             FLUSH_SOURCE_STEP,

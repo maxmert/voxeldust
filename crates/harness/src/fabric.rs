@@ -845,10 +845,19 @@ mod tests {
                     Inbound::Wire { .. } => {} // the B->A message, delivered normally
                 }
             }
-            assert!(fabric.conservation_holds(), "conservation during flap at {t}");
-            assert!(!fabric.is_dead(B), "B stays ALIVE through the flap (recover, not kill)");
+            assert!(
+                fabric.conservation_holds(),
+                "conservation during flap at {t}"
+            );
+            assert!(
+                !fabric.is_dead(B),
+                "B stays ALIVE through the flap (recover, not kill)"
+            );
         }
-        assert!(notices >= 1, "the sender observed at least one NodeUnreachable blip");
+        assert!(
+            notices >= 1,
+            "the sender observed at least one NodeUnreachable blip"
+        );
         // After the window heals: the SAME subject auto-redelivers to the receiver EXACTLY once (recover,
         // not loss). Ack what the receiver drains each tick (the at-least-once commit), so it is not
         // re-delivered — a fixed loop (no early break) keeps every iteration's branch covered.
@@ -858,7 +867,10 @@ mod tests {
             delivered += b.drain_inbound().len();
             fabric.ack_survivor(B);
         }
-        assert_eq!(delivered, 1, "the subject delivers exactly once after the flap heals");
+        assert_eq!(
+            delivered, 1,
+            "the subject delivers exactly once after the flap heals"
+        );
         assert!(fabric.conservation_holds());
     }
 

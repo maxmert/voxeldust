@@ -721,13 +721,17 @@ fn request_pending_grants(
             // alive on the holder's own LOCAL cadence (the orchestrator's reaper revokes a lapsed lease).
             // INERT when `lease_renew_interval_ticks == 0` (pre-D-3 default). A departing dot is excluded
             // (its lease is about to be revoked by the logout `LeaseRevoke`, not renewed).
-            if crate::directory::due_this_tick(config.lease_renew_interval_ticks, clock.local_tick.0) {
-                let renewals = std::iter::once((DirectoryKey::Realm(config.realm), realm_fence)).chain(
-                    dots.0
-                        .values()
-                        .filter(|d| d.granted && !d.departing)
-                        .map(|d| (DirectoryKey::Entity(d.entity), d.entity_fence)),
-                );
+            if crate::directory::due_this_tick(
+                config.lease_renew_interval_ticks,
+                clock.local_tick.0,
+            ) {
+                let renewals = std::iter::once((DirectoryKey::Realm(config.realm), realm_fence))
+                    .chain(
+                        dots.0
+                            .values()
+                            .filter(|d| d.granted && !d.departing)
+                            .map(|d| (DirectoryKey::Entity(d.entity), d.entity_fence)),
+                    );
                 outbox.push_renewals(renewals, config.orchestrator);
             }
         }
@@ -1508,7 +1512,9 @@ fn on_re_home(
 ) {
     let transfer = cmd.transfer; // `ReHomeCmd` is Clone-not-Copy (the pose payload) — capture before the move
     match applied.journal_step(transfer, RE_HOME_STEP) {
-        StepOutcome::FirstApply => re_home_apply(cmd, config, clock, dots, registration, stats, outbox),
+        StepOutcome::FirstApply => {
+            re_home_apply(cmd, config, clock, dots, registration, stats, outbox)
+        }
         StepOutcome::AlreadyApplied => stats.re_home_redelivered += 1,
     }
     outbox.push_flow(
@@ -2430,7 +2436,16 @@ fn on_directory_reply(
                 stats.re_home_without_realm += 1;
                 return;
             };
-            on_re_home(cmd, config, clock, dots, applied, registration, stats, outbox);
+            on_re_home(
+                cmd,
+                config,
+                clock,
+                dots,
+                applied,
+                registration,
+                stats,
+                outbox,
+            );
             return;
         }
         Ok(_) => return,
@@ -2969,14 +2984,29 @@ mod tests {
         rig.set_local_tick(6);
         let _ = rig.tick(vec![]);
         assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)));
-        assert_eq!(rig.world.resource::<StubStats>().realm_self_fenced_lapsed, 0);
-        assert!(rig.world.resource::<OwnedTransients>().0.contains_key(&debris));
+        assert_eq!(
+            rig.world.resource::<StubStats>().realm_self_fenced_lapsed,
+            0
+        );
+        assert!(
+            rig.world
+                .resource::<OwnedTransients>()
+                .0
+                .contains_key(&debris)
+        );
 
         // Past the grace (local 7 - confirmed 1 = 6 > 5): SELF-FENCE — authority dropped, transient lost.
         rig.set_local_tick(7);
         let _ = rig.tick(vec![]);
-        assert_eq!(rig.world.resource::<RealmAuthority>().0, None, "authority hard-stopped");
-        assert_eq!(rig.world.resource::<StubStats>().realm_self_fenced_lapsed, 1);
+        assert_eq!(
+            rig.world.resource::<RealmAuthority>().0,
+            None,
+            "authority hard-stopped"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().realm_self_fenced_lapsed,
+            1
+        );
         assert_eq!(
             rig.world.resource::<StubStats>().transients_dropped,
             1,
@@ -2990,8 +3020,16 @@ mod tests {
         rig.grant_realm();
         rig.set_local_tick(11);
         let _ = rig.tick(vec![]);
-        assert_eq!(rig.world.resource::<RealmAuthority>().0, Some(Fence(1)), "re-grant re-armed the timer");
-        assert_eq!(rig.world.resource::<StubStats>().realm_self_fenced_lapsed, 1, "no second self-fence");
+        assert_eq!(
+            rig.world.resource::<RealmAuthority>().0,
+            Some(Fence(1)),
+            "re-grant re-armed the timer"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().realm_self_fenced_lapsed,
+            1,
+            "no second self-fence"
+        );
     }
 
     #[test]
@@ -4046,15 +4084,15 @@ mod tests {
         let renew_keys = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<DirectoryKey> {
             sent.iter()
                 .filter(|(to, _, _)| *to == ORCH)
-                .filter_map(|(_, _, b)| {
-                    match postcard::from_bytes::<InterShardFlow>(b) {
+                .filter_map(
+                    |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
                         Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew { key, fence })) => {
                             assert_eq!(fence, Fence(1), "renews at the held fence");
                             Some(key)
                         }
                         _ => None,
-                    }
-                })
+                    },
+                )
                 .collect()
         };
         // A multiple tick renews the Realm + the granted, non-departing entity ONLY.
@@ -5308,7 +5346,11 @@ mod tests {
         rig.set_local_tick(5); // pins the Spawn's since_tick deterministically
         let source = NodeId(99);
         let session = SessionId(SUBJECT.0); // the deterministic clientless session key
-        let sent = rig.tick(vec![re_home_msg(Fence(2), source, DirectoryKey::Entity(SUBJECT))]);
+        let sent = rig.tick(vec![re_home_msg(
+            Fence(2),
+            source,
+            DirectoryKey::Entity(SUBJECT),
+        )]);
         assert_eq!(
             rig.world.resource::<Dots>().0[&session].authority,
             Authority::Owned { fence: Fence(2) },
@@ -5349,7 +5391,11 @@ mod tests {
         );
 
         // Redelivery: re-ack only, NO re-adopt (journal AlreadyApplied ⇒ re_home_apply not entered).
-        let sent = rig.tick(vec![re_home_msg(Fence(2), source, DirectoryKey::Entity(SUBJECT))]);
+        let sent = rig.tick(vec![re_home_msg(
+            Fence(2),
+            source,
+            DirectoryKey::Entity(SUBJECT),
+        )]);
         assert_eq!(rig.world.resource::<StubStats>().re_home_redelivered, 1);
         assert_eq!(
             rig.world.resource::<StubStats>().re_home_adopted,

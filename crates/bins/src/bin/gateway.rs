@@ -43,7 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // mis-tuned config can never silently mass-self-fence healthy sessions.
     let session_recheck_interval: u64 = env.parse_or("VD_SESSION_RECHECK", 0)?;
     let self_fence_grace_ticks: u64 = env.parse_or("VD_SELF_FENCE_GRACE", 0)?;
-    vd_sim::directory::validate_self_fence_cadence(self_fence_grace_ticks, session_recheck_interval)?;
+    vd_sim::directory::validate_self_fence_cadence(
+        self_fence_grace_ticks,
+        session_recheck_interval,
+    )?;
     register_gateway(
         world,
         schedule,

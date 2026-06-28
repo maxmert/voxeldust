@@ -73,13 +73,20 @@ fn p3_orchestrator_kill_9_recovers_a_durable_player_post_commit() {
     let mut out = run_orch_kill_durable(0xD6_D002, "Demoting", true);
     // RECOVERY EVIDENCE: the post-commit saga came back from the retained WAL, not the dropped World.
     assert!(
-        out.recovered_states.iter().any(|s| s.starts_with("Demoting")),
+        out.recovered_states
+            .iter()
+            .any(|s| s.starts_with("Demoting")),
         "the rebuilt orchestrator re-hydrated the in-flight durable saga from its durable store: {:?}",
         out.recovered_states,
     );
     // END STATE: AUTHORITY-UNIQUE + settled + the avatar held once at DEST (the dead-aware oracle sees no
     // dead nodes — the orchestrator is alive again).
-    assert_end_state(&mut out.topo, out.subject, &out.dead, EndState::SettledAt(DEST));
+    assert_end_state(
+        &mut out.topo,
+        out.subject,
+        &out.dead,
+        EndState::SettledAt(DEST),
+    );
 }
 
 /// ANTI-THEATER control (durable): the SAME post-commit kill-9, but rebuilt against a FRESH (empty) store.
@@ -109,11 +116,18 @@ fn p3_orchestrator_kill_9_pre_commit_aborts_a_durable_player_back_to_the_live_so
     let mut out = run_orch_kill_durable(0xD6_D004, "Freezing", true);
     // RECOVERY EVIDENCE: the pre-commit saga came back from the retained WAL (then the abort deadline fires).
     assert!(
-        out.recovered_states.iter().any(|s| s.starts_with("Freezing")),
+        out.recovered_states
+            .iter()
+            .any(|s| s.starts_with("Freezing")),
         "the rebuilt orchestrator re-hydrated the pre-commit durable saga from its durable store: {:?}",
         out.recovered_states,
     );
     // END STATE: aborted to the LIVE source, no loss — and (the fix's proof) NO fence divergence: the
     // `AbortedToSource` asserter now also runs AUTHORITY-UNIQUE (FENCE-9), which would RED on a bumped fence.
-    assert_end_state(&mut out.topo, out.subject, &out.dead, EndState::AbortedToSource);
+    assert_end_state(
+        &mut out.topo,
+        out.subject,
+        &out.dead,
+        EndState::AbortedToSource,
+    );
 }
