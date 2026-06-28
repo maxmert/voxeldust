@@ -53,6 +53,10 @@ dev-control = []
 # Bevy-free + fast: `--features render` pulls vd-client-render (the ~8.8 GB Bevy dep) and
 # enables the `client --window` mode. The default + dev-control builds contain no Bevy.
 render = ["dep:vd-client-render", "dep:vd-client-harness"]
+# TEST-ONLY (D-6 D-delta): forwards vd-io-prod/store-test-hooks so the orchestrator binary the crash test
+# spawns carries the writer-pause hook. NON-default + ABSENT from release (a compile fact). The
+# `orchestrator_crash` test is `#![cfg(feature = "store-test-hooks")]` and built via this flag.
+store-test-hooks = ["vd-io-prod/store-test-hooks"]
 
 [dependencies]
 vd-core = { workspace = true }

@@ -118,6 +118,15 @@ impl StoreKey {
     }
 }
 
+/// The EXACT durable store-key bytes the group-commit barrier stages for a directory row
+/// (`[DIRECTORY_TAG] ++ postcard(key)`). Public so a process-tier crash test (D-6 D-delta) can compute the
+/// SAME bytes the barrier will persist for a planted grant — the content-keyed writer pause then fires on
+/// exactly that batch, with zero key-byte drift (the encoding lives in ONE place, [`StoreKey::bytes`]).
+#[must_use]
+pub fn directory_store_key(key: &DirectoryKey) -> Vec<u8> {
+    StoreKey::Directory(*key).bytes()
+}
+
 /// The durable snapshot of one live saga (D-6) — exactly the serializable [`LiveSaga`] fields, persisted
 /// at `commit_result`'s write-back (the SINGLE point that knows the true QUIESCENT `final_state`: since
 /// `IssueCommitCas` is a same-tick DIRECT call, `CommittingCas` is never a quiescent phase, so anchoring
@@ -2907,6 +2916,20 @@ mod tests {
         // KILL-9 + REBUILD: rehydrate restores from the incremental durable set; entries() still equals it.
         rig.rebuild();
         assert_incremental_matches_full_reconcile(&mut rig);
+    }
+
+    #[test]
+    fn directory_store_key_is_the_directory_family_tag_plus_postcard() {
+        // D-delta: the crash test computes the sentinel pause prefix via this shim; it MUST equal the bytes
+        // the barrier stages for a directory row ([DIRECTORY] ++ postcard(key)) or the writer pause misses.
+        let key = DirectoryKey::Realm(RealmId::System(42));
+        let bytes = directory_store_key(&key);
+        assert_eq!(bytes[0], StoreKey::DIRECTORY, "leads with the DIRECTORY family tag");
+        assert_eq!(
+            &bytes[1..],
+            &postcard::to_allocvec(&key).expect("encode")[..],
+            "tail is postcard(key)"
+        );
     }
 
     #[test]

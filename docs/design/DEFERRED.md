@@ -738,7 +738,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
-### D-6 🟧 Durable saga WAL: S0–S5 LANDED (persist+recover ENGINE + e2e orchestrator kill-9 cells); the redb backend IN PROGRESS (Slice P3-PERSIST-1)
+### D-6 🟧 Durable saga WAL: S0–S5 + the redb backend (Slice P3-PERSIST-1: C1/C2 + Slice D α/β/γ/δ) LANDED — orchestrator crash-durable & SIGKILL-mid-fsync-proven; only the deploy preconditions (#1 AwaitAdopt egress / redelivering transport, #3 WAL version+Tombstone, durable-outbox, durable-root allow-list) remain OWED
 - **▶ Slice P3-PERSIST-1 — the redb backend (design `wf_83d5a428`, judge-panel of 4; user-decided: Store A redb
   now + single-file/split-ready-seam):** ONE generic `RedbStore` behind the frozen `sim::io::Store` seam in
   `crates/io-prod/src/store.rs`, TARGETING the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling — the
@@ -832,10 +832,20 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     a loud error, never fail-open); the ephemeral guard CANONICALIZES (collapses `/tmp`→`/private/tmp`,
     `/var`→`/private/var`) + rejects `/private/tmp`; the bin-side flush-gate stall now counts in
     `backpressure_stalls()`; the Clock-key/seq invariant + shutdown-relies-on-re-drive are documented in the loop.
-  - **⏭ D-delta NEXT** — the process-tier SIGKILL-mid-fsync crash proof (`crates/bins/tests/`) via a feature-gated
-    writer-pause hook + the anti-theater fresh-empty twin + `%c` continuous-mode coverage merge (Tier-B ratcheted
-    floor); FOLD IN the boot-reject process test (a `/tmp` path + no `VD_STORE_EPHEMERAL_OK` ⇒ non-zero exit,
-    locking the safety guard's reject arm — review LOW).
+  - **✅ D-delta LANDED** — the process-tier SIGKILL-mid-fsync crash proof. A content-keyed writer-pause hook
+    (`store-test-hooks` feature, ABSENT from release; `StoreTuning.pause_on_key_prefix` + a marker file written
+    by the writer thread itself — the honest, decoupled "submitted-but-pre-fsync window is open" signal, since
+    the bin loop BLOCKS on the persist-before-effect gate the instant the sentinel batch fails to become durable
+    and so cannot signal). The orchestrator (under the feature, `VD_STORE_TEST_SENTINEL_SEED`) plants a distinct
+    realm grant B once the shard's realm A is already in a PRIOR batch ⇒ block-on-prior makes A durable BEFORE
+    B is submitted; the writer parks on B pre-fsync. `orchestrator_crash` SIGKILLs in that window
+    (`Child::kill`+`wait`, no zombie race) and proves on restart: A present, B LOST (the ≤1-batch claim), clock
+    resumes FORWARD, no zombie saga / orphan lock — plus the ANTI-THEATER twin (the same `cluster_bootstrapped`
+    predicate is FALSE on a fresh store). `boot_guard` (no feature) locks the HR1 ephemeral-store guard's reject
+    AND accept arms (closes the review LOW). `directory_store_key` shim (vd-node) gives the test the exact
+    barrier key-bytes (no drift; covered by a Tier-A unit test). `just orch-crash` recipe + `orch-crash-cov`
+    (`%c` continuous-mode merge for the SIGKILLed child) + `store-test-hooks` in `lint-combos`, `orch-crash`
+    wired into `gate`. io-prod/bins Tier-B; Tier-A still 100%. **Slice D COMPLETE.**
   - **STILL OWED after Slice D** (separate items, ledgered): precondition **#1** (the `BatchHandoff::AwaitAdopt`
     re-solicit egress — a durable Store A ALONE does not make prod kill-9 recovery work; the at-most-once
     `MeshTransport` boot-warn clause STAYS until #1 lands); precondition **#3** (`WAL_FORMAT_VERSION` +

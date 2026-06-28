@@ -54,11 +54,35 @@ lint-combos:
     cargo clippy -p vd-bins --features dev-control --all-targets -- -D warnings
     cargo clippy -p vd-bins --features render --all-targets -- -D warnings
     cargo clippy -p vd-bins --features dev-control,render --all-targets -- -D warnings
+    cargo clippy -p vd-bins --features store-test-hooks --all-targets -- -D warnings
 
 # SCALE-1 (the K-client load/collapse gate): K real dev-control clients log into one
 # cluster concurrently — fan-out + per-client routing proven at the per-slot client cap.
 client-load:
     cargo test -p vd-bins --features dev-control --test client_load
+
+# D-6 D-delta: the orchestrator durability crash gates. `orchestrator_crash` is the SIGKILL-mid-fsync proof
+# (a real kill-9 while a directory grant sits submitted-but-pre-fsync loses <=1 batch + recovers
+# consistently); it builds the orchestrator binary WITH the writer-pause hook (`store-test-hooks`).
+# `boot_guard` (always compiled) locks the HR1 ephemeral-store boot guard's reject + accept arms. Serial
+# (each spawns a real cluster + SIGKILLs a process).
+orch-crash:
+    cargo test -p vd-bins --features store-test-hooks --test orchestrator_crash -- --test-threads=1
+    cargo test -p vd-bins --test boot_guard -- --test-threads=1
+
+# The Tier-B (ratcheted-floor) coverage variant: the SIGKILLed orchestrator child's counters survive ONLY
+# in %c CONTINUOUS mode (the mmapped profraw is updated in place; no atexit flush after a SIGKILL). %p-%m
+# keep the two orchestrator boots (+ shard) distinct; the child INHERITS LLVM_PROFILE_FILE from this test
+# process (spawn_node forwards the parent env). Fold into the process-tier `coverage` merge (P3) when it lands.
+orch-crash-cov:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source <(cargo +{{coverage_toolchain}} llvm-cov show-env --export-prefix --branch)
+    export LLVM_PROFILE_FILE="$(dirname "$LLVM_PROFILE_FILE")/vd-orchcrash-%p-%m%c.profraw"
+    cargo +{{coverage_toolchain}} llvm-cov --no-report --branch \
+        -p vd-bins --features store-test-hooks --test orchestrator_crash -- --test-threads=1
+    cargo +{{coverage_toolchain}} llvm-cov --no-report --branch \
+        -p vd-bins --test boot_guard -- --test-threads=1
 
 # SPIKE-2a (the route-swap hot-path gate): the gateway 20Hz route decision stays wait-free
 # + torn-read-free under a concurrent route.store publisher, p99 < 50us. RELEASE build (a
@@ -88,7 +112,7 @@ render-smoke:
 # Everything a merge requires (render-smoke is GPU-required + local; spike2a is a release
 # build — both are documented in their recipes). fmt-check FAILS on drift (run `just fmt`
 # to fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load spike2a render-smoke coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a render-smoke coverage
 
 # One-time setup helper.
 coverage-setup:

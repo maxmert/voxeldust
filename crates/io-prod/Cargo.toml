@@ -5,6 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Production ShardIo implementations: quinn QUIC transport bridged to the synchronous step_tick via crossbeam queues (reader/writer tasks). Tier-B coverage (process-tier, ratcheted floor)."
 
+[features]
+default = []
+# TEST-ONLY (D-6 D-delta): the off-tick RedbStore writer-pause hook for the process-tier SIGKILL-mid-fsync
+# crash proof. ABSENT from release builds (a compile fact, mirroring vd-bins `dev-control`) — the pause field
+# + park code only exist under this flag. Enabled by the crash test via `vd-bins/store-test-hooks`.
+store-test-hooks = []
+
 [dependencies]
 vd-core = { workspace = true }
 vd-sim = { workspace = true }

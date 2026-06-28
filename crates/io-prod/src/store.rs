@@ -66,20 +66,39 @@ const KV: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 /// A staged fsync window: `Some` = put, `None` = delete (last-write-wins per key).
 type Batch = BTreeMap<Vec<u8>, Option<Bytes>>;
 
-/// Operational tuning for the redb writer (ONE config struct — no inline magic numbers).
-#[derive(Clone, Copy, Debug)]
+/// Operational tuning for the redb writer (ONE config struct — no inline magic numbers). `Copy` in release;
+/// under `store-test-hooks` it carries owned test-pause fields (so `Copy` is gated off — release stays `Copy`).
+#[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "store-test-hooks"), derive(Copy))]
 pub struct StoreTuning {
     /// Bounded depth of the staged-batch hand-off channel. The EFFECTIVE in-flight depth is ONE
     /// (commit-blocks-on-prior); this is a small slack so a `send` never blocks the sim thread even
     /// momentarily mid-fsync, and the seam for a future depth>1 mode. NEVER set 0 (a rendezvous channel
     /// would couple the sim thread to the fsync).
     pub writer_channel_depth: usize,
+    /// TEST-ONLY (D-6 D-delta; feature `store-test-hooks`, ABSENT from release). When `Some(prefix)`, the
+    /// off-tick writer BLOCKS FOREVER before fsyncing the FIRST batch whose key-set contains a key starting
+    /// with `prefix` (the planted sentinel) — so the process can be SIGKILLed in a deterministic
+    /// submitted-but-pre-fsync window. Content-keyed, NOT seq-keyed: the per-tick Clock-key churn cannot
+    /// trip it early; it fires on exactly the batch carrying the sentinel.
+    #[cfg(feature = "store-test-hooks")]
+    pub pause_on_key_prefix: Option<Vec<u8>>,
+    /// TEST-ONLY: the marker file the writer creates the instant it parks — the crash test's HONEST,
+    /// decoupled "window is open" signal, written by the WRITER thread itself (independent of the bin loop,
+    /// which BLOCKS on the persist-before-effect gate the instant the sentinel batch fails to become durable,
+    /// so it can never publish the signal). Existence ⟺ sentinel batch submitted but not yet fsynced.
+    #[cfg(feature = "store-test-hooks")]
+    pub pause_marker_path: Option<PathBuf>,
 }
 
 impl Default for StoreTuning {
     fn default() -> Self {
         Self {
             writer_channel_depth: 2,
+            #[cfg(feature = "store-test-hooks")]
+            pause_on_key_prefix: None,
+            #[cfg(feature = "store-test-hooks")]
+            pause_marker_path: None,
         }
     }
 }
@@ -293,12 +312,33 @@ impl Drop for WriterExitSignal {
     }
 }
 
+/// TEST-ONLY (feature `store-test-hooks`, ABSENT from release — the D-6 D-delta SIGKILL-mid-fsync proof).
+/// If a planted sentinel prefix is configured and the merged batch carries it, announce the open
+/// submitted-but-pre-fsync window via the marker file (written by THIS writer thread — the bin loop is
+/// already blocked on the persist-before-effect gate and cannot signal), then BLOCK FOREVER. The process
+/// is meant to be SIGKILLed here; `park` (looped against spurious wakeups) blocks with no busy-spin.
+#[cfg(feature = "store-test-hooks")]
+fn maybe_pause_before_fsync(prefix: Option<&[u8]>, marker: Option<&Path>, merged: &Batch) {
+    let Some(prefix) = prefix else { return };
+    if !merged.keys().any(|k| k.starts_with(prefix)) {
+        return;
+    }
+    if let Some(marker) = marker {
+        let _ = std::fs::write(marker, b"paused\n");
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
 fn run_writer(
     db: Arc<Database>,
     rx: Receiver<(u64, Batch)>,
     last_durable: Arc<AtomicU64>,
     durable_cv: Arc<(Mutex<()>, Condvar)>,
     writer_alive: Arc<AtomicBool>,
+    #[cfg(feature = "store-test-hooks")] pause_prefix: Option<Vec<u8>>,
+    #[cfg(feature = "store-test-hooks")] pause_marker: Option<PathBuf>,
 ) {
     // The guard publishes death on ANY exit below (incl. an unexpected panic-unwind), so the liveness
     // escape can never miss it. Holds its own `durable_cv` clone; the loop keeps the original for the
@@ -316,6 +356,10 @@ fn run_writer(
             }
             max_seq = seq;
         }
+        // TEST-ONLY pause BEFORE fsync (content-keyed). Coalescing above is harmless: under depth-1 the
+        // sentinel batch is alone, and even a coalesced merge still carries the sentinel prefix ⇒ still pauses.
+        #[cfg(feature = "store-test-hooks")]
+        maybe_pause_before_fsync(pause_prefix.as_deref(), pause_marker.as_deref(), &merged);
         // Retry the fsync (the writer still HOLDS `merged`, so a TRANSIENT disk blip recovers losing
         // nothing); a PERMANENT fault EXITS the writer so the persist-before-effect gate fails LOUD (the
         // liveness escape in `park_until_durable` panics rather than hang the orchestrator).
@@ -372,9 +416,25 @@ impl RedbStore {
             let last_durable = Arc::clone(&last_durable);
             let durable_cv = Arc::clone(&durable_cv);
             let writer_alive = Arc::clone(&writer_alive);
+            #[cfg(feature = "store-test-hooks")]
+            let pause_prefix = tuning.pause_on_key_prefix.clone();
+            #[cfg(feature = "store-test-hooks")]
+            let pause_marker = tuning.pause_marker_path.clone();
             std::thread::Builder::new()
                 .name("vd-store-writer".into())
-                .spawn(move || run_writer(db, rx, last_durable, durable_cv, writer_alive))
+                .spawn(move || {
+                    run_writer(
+                        db,
+                        rx,
+                        last_durable,
+                        durable_cv,
+                        writer_alive,
+                        #[cfg(feature = "store-test-hooks")]
+                        pause_prefix,
+                        #[cfg(feature = "store-test-hooks")]
+                        pause_marker,
+                    )
+                })
                 .map_err(|e| StoreError::Spawn(e.to_string()))?
         };
         let handle = DurabilityHandle {
@@ -816,5 +876,54 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// D-6 D-delta: the feature-gated writer-pause hook (the SIGKILL-mid-fsync proof's mechanism). A
+    /// NON-sentinel batch fsyncs normally; the FIRST batch carrying the sentinel prefix parks the writer
+    /// BEFORE fsync (marker written, batch submitted-but-never-durable) — the deterministic crash window.
+    #[cfg(feature = "store-test-hooks")]
+    #[test]
+    fn the_writer_pauses_before_fsync_only_on_the_sentinel_batch() {
+        let path = temp_path();
+        let marker = path.with_extension("paused");
+        let _ = std::fs::remove_file(&marker);
+        let tuning = StoreTuning {
+            writer_channel_depth: 2,
+            pause_on_key_prefix: Some(b"\x09SENT".to_vec()),
+            pause_marker_path: Some(marker.clone()),
+        };
+        let (mut s, h) = RedbStore::open(&path, tuning).expect("open with pause hook");
+
+        // A non-sentinel batch fsyncs normally — no pause, no marker.
+        s.put(b"\x01a", &b(b"v"));
+        s.commit();
+        h.wait_durable_through(h.last_submitted());
+        assert!(!marker.exists(), "a non-sentinel batch must NOT pause the writer");
+        assert_eq!(s.scan(b"\x01a"), vec![(b"\x01a".to_vec(), b(b"v"))]);
+
+        // The sentinel batch: submitted (last_submitted bumps) but the writer parks BEFORE fsync, so it
+        // never becomes durable, and the marker appears (the crash test's decoupled observable).
+        s.put(b"\x09SENTINEL", &b(b"x"));
+        s.commit();
+        let submitted = h.last_submitted();
+        let mut parked = false;
+        for _ in 0..500 {
+            if marker.exists() {
+                parked = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(parked, "the writer parked on the sentinel batch (marker written)");
+        assert!(
+            !h.is_durable_through(submitted),
+            "the sentinel batch is submitted but NOT durable (paused pre-fsync)"
+        );
+        assert!(h.durable_through() < submitted, "durable watermark lags the parked batch");
+
+        // The parked writer NEVER returns, so Drop's join would hang — leak the store (the process exits
+        // and reaps the thread; temp_path() is unique so the held file lock collides with nothing).
+        std::mem::forget(s);
+        let _ = std::fs::remove_file(&marker);
     }
 }

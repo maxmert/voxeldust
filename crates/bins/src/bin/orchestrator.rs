@@ -13,6 +13,17 @@ use vd_io_prod::store::{RedbStore, StoreTuning};
 use vd_io_prod::trust::ClusterTrust;
 use vd_node::app::{NodeConfig, TickPrologue, build_app};
 use vd_node::orchestrator::{OrchestratorConfig, admin_snapshot, register_orchestrator_with_store};
+// D-6 D-delta (feature `store-test-hooks`, ABSENT from release): the crash-proof sentinel inject.
+#[cfg(feature = "store-test-hooks")]
+use vd_bins::SHARD;
+#[cfg(feature = "store-test-hooks")]
+use vd_core::pose::RealmId;
+#[cfg(feature = "store-test-hooks")]
+use vd_core::{Fence, UniverseTick};
+#[cfg(feature = "store-test-hooks")]
+use vd_node::orchestrator::DirectoryRes;
+#[cfg(feature = "store-test-hooks")]
+use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 use vd_sim::capability::NodeKind;
 use vd_sim::directory::DirectoryTuning;
 use vd_wire::admin::AdminSnapshot;
@@ -159,9 +170,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             store_path.display()
         );
     }
+    // D-6 D-delta sentinel (feature-gated): VD_STORE_TEST_SENTINEL_SEED enables the SIGKILL-mid-fsync
+    // scenario — the orchestrator plants a distinct Realm grant whose durable store-key the writer pauses
+    // on (pre-fsync) so the crash test can SIGKILL it in a deterministic submitted-but-not-durable window.
+    // The pause-key bytes are computed via the ONE barrier encoder (no drift); the marker rides the store path.
+    #[cfg(feature = "store-test-hooks")]
+    let sentinel = match env.string("VD_STORE_TEST_SENTINEL_SEED") {
+        Ok(s) => {
+            let seed: u64 = s
+                .parse()
+                .map_err(|_| format!("VD_STORE_TEST_SENTINEL_SEED is not a u64: {s:?}"))?;
+            let key = DirectoryKey::Realm(RealmId::System(seed));
+            let prefix = vd_node::saga_runtime::directory_store_key(&key);
+            let marker = store_path.with_extension("paused");
+            Some((key, prefix, marker))
+        }
+        Err(_) => None,
+    };
     let store_tuning = StoreTuning {
         writer_channel_depth: env
             .parse_or("VD_STORE_CHANNEL_DEPTH", StoreTuning::default().writer_channel_depth)?,
+        #[cfg(feature = "store-test-hooks")]
+        pause_on_key_prefix: sentinel.as_ref().map(|(_, prefix, _)| prefix.clone()),
+        #[cfg(feature = "store-test-hooks")]
+        pause_marker_path: sentinel.as_ref().map(|(_, _, marker)| marker.clone()),
     };
     let (store, durability) = RedbStore::open(&store_path, store_tuning)?;
     // The Store is now durable; the REMAINING production precondition (DEFERRED.md D-6) is the transport:
@@ -222,12 +254,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // future RELIABLE non-re-driven effect would need a graceful-shutdown flush, owed if/when one lands.)
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
     let mut parked: Option<(TickPrologue, u64)> = None;
+    #[cfg(feature = "store-test-hooks")]
+    let mut sentinel_injected = false;
     loop {
         // Flush the PREVIOUS tick's outbox now that its batch is durable. The world outbox still holds only
         // that tick's sends (this runs before the next run_schedule refills it), so the defer is exact.
         if let Some((prologue, seq)) = parked.take() {
             durability.wait_durable_through(seq);
             let _ = node.flush_outbox(prologue);
+        }
+        // D-delta: inject the sentinel grant ONCE, the first tick a shard's realm (grant A) is already in
+        // the directory — i.e. in a PRIOR tick's batch, so by block-on-prior A is durable BEFORE this tick's
+        // sentinel batch (B) is even submitted. The next run_schedule stages B; the writer pauses pre-fsync.
+        #[cfg(feature = "store-test-hooks")]
+        if let Some((key, _, _)) = sentinel.as_ref()
+            && !sentinel_injected
+        {
+            let mut dir = node.world_mut().resource_mut::<DirectoryRes>();
+            let a_durable = dir.0.entries().any(|(k, r)| {
+                matches!(k, DirectoryKey::Realm(_)) && matches!(r.authority, AuthorityRef::Shard(_))
+            });
+            if a_durable {
+                dir.0
+                    .grant(*key, AuthorityRef::Shard(SHARD), Fence(1), UniverseTick(0));
+                sentinel_injected = true;
+            }
         }
         // Advance: run this tick's schedule (commit() submits this tick's batch); park its seq for next tick.
         let prologue = node.run_schedule();
