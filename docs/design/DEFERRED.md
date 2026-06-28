@@ -743,9 +743,14 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   now + single-file/split-ready-seam):** ONE generic `RedbStore` behind the frozen `sim::io::Store` seam in
   `crates/io-prod/src/store.rs`, wired to the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling); the
   shard per-RealmId Store B (P6/P7) reuses the SAME type verbatim (variance is DATA — path + keyspace — never CODE,
-  HR3). Sub-slices: **✅ C1 LANDED (`63b637d`)** — the SYNCHRONOUS durable backend (commit() = one redb
-  WriteTransaction + inline fsync; staged-retained-on-error fail-safe; 6 durability tests across a real reopen; redb
+  HR3). Sub-slices: **✅ C1 LANDED (`63b637d`, + fail-loud hardening from audit `wf_66cb8f06`)** — the SYNCHRONOUS
+  durable backend (commit() = one redb WriteTransaction + inline fsync; 6 durability tests across a real reopen; redb
   2.6.3 into the lock, the keep-list Store lib's first consumer; NOT yet wired → inline fsync blocks no tick).
+  **FAIL-LOUD ADAPTER CONTRACT** (the infallible `Store` seam must never degrade a redb fault to a silent wrong
+  answer): a READ fault in `scan`/`is_empty` PANICS (a silent empty would make `rehydrate` misread a faulting
+  non-empty store as GENESIS = clock-reset + orphaned-WAL data loss — the re-audit `wf_66cb8f06` HIGH, now cured); a
+  WRITE fault in `commit` is ALL-OR-NOTHING + RETAINS the staged batch (a per-key apply error aborts the txn, never a
+  partial fsync — the re-audit MEDIUM, matching MemStore's all-or-nothing fold). A refusal is never a loss.
   **OWED: C2** = the OFF-TICK fsync writer thread + `last_durable` persist-before-effect gate (the sim thread never
   blocks on disk) — lands BEFORE the wiring; **D** = wire `RedbStore` into the orchestrator bin (replace the
   loud-non-durable `MemStore`) + the process-tier SIGKILL-mid-fsync crash proof (Tier-B ratcheted floor); **A** =

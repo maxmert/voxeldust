@@ -14,6 +14,13 @@
 //! persist-before-effect gate (the design's threading model) BEFORE the orchestrator wiring (Slice D), so
 //! the sim thread never blocks on disk.
 //!
+//! FAIL-LOUD ADAPTER CONTRACT (audit `wf_66cb8f06`): the `sim::io::Store` seam is deliberately INFALLIBLE
+//! (`scan` returns a `Vec`, `commit`/`put`/`delete` return `()`), so this adapter must NEVER degrade a
+//! fallible redb I/O fault into a silent wrong answer. A durable READ fault (`scan`/`is_empty`) PANICS —
+//! a silent empty would let `rehydrate` misread a faulting non-empty store as genesis (clock reset + data
+//! loss). A WRITE fault (`commit`) is ALL-OR-NOTHING + RETAINS the staged batch (never a partial fsync,
+//! never a silent drop). A refusal is never a loss.
+//!
 //! Tier-B (HR5): io-prod is excluded from the 100% region+branch gate; the redb adapter is process-tier
 //! covered at a ratcheted floor. The in-process durability tests here give high happy-path coverage; the
 //! SIGKILL-mid-fsync crash proof lands with the process tier (Slice D).
@@ -77,15 +84,24 @@ impl RedbStore {
 
     /// Whether anything is durably committed — the genesis-vs-recover discriminator (parallels
     /// `MemStore::is_empty`): a genesis store has an empty KV table. Staged-but-uncommitted does not count.
+    ///
+    /// FAIL-LOUD on a durable read fault (the fail-loud adapter contract — audit `wf_66cb8f06`): a transient
+    /// read fault must NEVER degrade to `true`, because `rehydrate` reads this as GENESIS and would reset the
+    /// universe clock to 0 + boot an empty directory over a non-empty store (silent data loss / split-brain).
+    /// A panic is fail-safe (a refusal is never a loss); the seam stays infallible.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let Ok(txn) = self.db.begin_read() else {
-            return true;
-        };
-        let Ok(table) = txn.open_table(KV) else {
-            return true;
-        };
-        table.len().unwrap_or(0) == 0
+        let txn = self
+            .db
+            .begin_read()
+            .expect("RedbStore::is_empty: durable read fault — refusing to degrade to genesis");
+        let table = txn
+            .open_table(KV)
+            .expect("RedbStore::is_empty: open_table fault — refusing to degrade to genesis");
+        table
+            .len()
+            .expect("RedbStore::is_empty: len fault — refusing to degrade to genesis")
+            == 0
     }
 
     /// The store's file path (a reopen in tests / a clean re-attach by the bin).
@@ -105,20 +121,23 @@ impl Store for RedbStore {
     }
 
     fn scan(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Bytes)> {
-        let Ok(txn) = self.db.begin_read() else {
-            return Vec::new();
-        };
-        let Ok(table) = txn.open_table(KV) else {
-            return Vec::new();
-        };
-        let Ok(range) = table.range(prefix..) else {
-            return Vec::new();
-        };
+        // FAIL-LOUD on a durable read fault (audit wf_66cb8f06): the seam's `scan` is infallible (Vec, no
+        // Result), so a SILENT empty would let `rehydrate` misread a FAULTING non-empty store as genesis
+        // (clock reset + orphaned WAL = data loss). Panic instead — a refusal is never a loss. (Only a
+        // genuine I/O/corruption fault reaches these `expect`s; a true-empty store yields an empty range.)
+        let txn = self
+            .db
+            .begin_read()
+            .expect("RedbStore::scan: begin_read fault — refusing to degrade to empty");
+        let table = txn
+            .open_table(KV)
+            .expect("RedbStore::scan: open_table fault — refusing to degrade to empty");
+        let range = table
+            .range(prefix..)
+            .expect("RedbStore::scan: range fault — refusing to degrade to empty");
         let mut out = Vec::new();
         for entry in range {
-            let Ok((k, v)) = entry else {
-                break;
-            };
+            let (k, v) = entry.expect("RedbStore::scan: mid-range read fault — refusing to truncate");
             let key = k.value();
             if !key.starts_with(prefix) {
                 break; // sorted: the prefix run has ended
@@ -153,7 +172,13 @@ impl Store for RedbStore {
                     None => table.remove(key.as_slice()).map(|_| ()),
                 };
                 if let Err(e) = applied {
-                    tracing::error!("RedbStore: apply failed for one key: {e}");
+                    // ALL-OR-NOTHING (seam contract item 2 — audit wf_66cb8f06): a per-key apply error
+                    // ABORTS the whole batch. Returning here drops `table` then `txn` UNCOMMITTED (redb
+                    // rollback) and leaves `self.staged` intact → retried next commit. A partial fsync
+                    // would violate atomicity + risk a torn directory/saga state. Fail-safe, matching
+                    // MemStore's infallible all-or-nothing fold.
+                    tracing::error!("RedbStore: apply failed, aborting txn + retaining staged batch: {e}");
+                    return;
                 }
             }
         }
