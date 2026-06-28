@@ -249,6 +249,17 @@ pub enum RevokeOutcome {
 pub struct DirectoryCore {
     records: BTreeMap<DirectoryKey, OwnerRecord>,
     tuning: DirectoryTuning,
+    /// D-6 (D-alpha) the per-tick DURABILITY DELTA: every key whose persisted snapshot CHANGED since the
+    /// last group-commit. `Some(record)` ⇒ the row must be PUT at this value; `None` ⇒ the row was REMOVED
+    /// and must be DELETEd. Every mutator arm that actually touches `records` records its post-state here
+    /// (NO-CHANGE arms — `Refused`/`Lost`/`false`/`UnknownKey` — stage nothing); the group-commit barrier
+    /// drains it ONCE per tick via [`take_dirty`](Self::take_dirty) straight into the same `commit()`.
+    /// Within-tick collapse is automatic (last write to a key wins via `BTreeMap::insert`), so N renews of
+    /// one key in a tick cost ONE staged delta. This REPLACES the old O(directory) delete-all-then-
+    /// put-current reconcile: the store already holds every prior tick's snapshot, so persisting only this
+    /// tick's deltas reconstructs the byte-identical durable set (the test-only differential oracle pins
+    /// incremental == full). `restore` starts it EMPTY — restored rows are already durable, owing no delta.
+    dirty: BTreeMap<DirectoryKey, Option<OwnerRecord>>,
 }
 
 impl DirectoryCore {
@@ -257,6 +268,7 @@ impl DirectoryCore {
         DirectoryCore {
             records: BTreeMap::new(),
             tuning,
+            dirty: BTreeMap::new(),
         }
     }
 
@@ -281,7 +293,25 @@ impl DirectoryCore {
         DirectoryCore {
             records: records.into_iter().collect(),
             tuning,
+            dirty: BTreeMap::new(),
         }
+    }
+
+    /// D-6 (D-alpha) drain this tick's durable directory deltas (`key → Some(put)|None(delete)`), clearing
+    /// the set. The group-commit barrier calls this ONCE per tick; the drained deltas stage straight into
+    /// the same `commit()`, so the durable Directory family always matches RAM at the commit point. Empty
+    /// between ticks with no directory mutation (the barrier then stages nothing — the per-family no-write
+    /// guard, the write-amp win over the old full reconcile).
+    #[must_use]
+    pub fn take_dirty(&mut self) -> BTreeMap<DirectoryKey, Option<OwnerRecord>> {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// Whether any durable directory delta is pending this tick (an assert/oracle hook; the barrier drains
+    /// unconditionally). `false` exactly when no mutator changed a row since the last [`take_dirty`].
+    #[must_use]
+    pub fn has_dirty(&self) -> bool {
+        !self.dirty.is_empty()
     }
 
     /// Assign authority at `fence`. Idempotent by fence; refuses stale fences,
@@ -296,15 +326,14 @@ impl DirectoryCore {
         let lease_expires = UniverseTick(now.0.saturating_add(self.tuning.lease_ttl_ticks));
         match self.records.get_mut(&key) {
             None => {
-                self.records.insert(
-                    key,
-                    OwnerRecord {
-                        authority: owner,
-                        fence,
-                        lease_expires,
-                        in_transfer: None,
-                    },
-                );
+                let record = OwnerRecord {
+                    authority: owner,
+                    fence,
+                    lease_expires,
+                    in_transfer: None,
+                };
+                self.records.insert(key, record);
+                self.dirty.insert(key, Some(record)); // new row → durable PUT
                 GrantOutcome::Granted
             }
             Some(record) => {
@@ -312,8 +341,10 @@ impl DirectoryCore {
                     return GrantOutcome::Refused { current: *record };
                 }
                 if fence == record.fence && owner == record.authority {
-                    // Idempotent re-grant: refresh the lease, change nothing else.
+                    // Idempotent re-grant: refresh the lease, change nothing else. The lease_expires DID
+                    // change, so it is a durable delta (the lease is part of the persisted record).
                     record.lease_expires = lease_expires;
+                    self.dirty.insert(key, Some(*record));
                     return GrantOutcome::Granted;
                 }
                 if fence <= record.fence {
@@ -325,6 +356,7 @@ impl DirectoryCore {
                     lease_expires,
                     in_transfer: None,
                 };
+                self.dirty.insert(key, Some(*record)); // owner/fence changed → durable PUT
                 GrantOutcome::Granted
             }
         }
@@ -337,6 +369,10 @@ impl DirectoryCore {
         match self.records.get_mut(&key) {
             Some(record) if record.fence == fence => {
                 record.lease_expires = UniverseTick(now.0.saturating_add(ttl));
+                // D-alpha decision A: the lease HEARTBEAT participates — the refreshed lease_expires is a
+                // durable delta so a kill-9 cannot resurrect a lease at a stale expiry the reaper would
+                // misjudge. Within-tick collapse keeps repeated renews of one key to a single staged delta.
+                self.dirty.insert(key, Some(*record));
                 true
             }
             _ => false,
@@ -354,6 +390,7 @@ impl DirectoryCore {
                     return RevokeOutcome::Refused { current: *record };
                 }
                 self.records.remove(&key);
+                self.dirty.insert(key, None); // row removed → durable DELETE (the COMP-2 anti-zombie)
                 RevokeOutcome::Revoked
             }
         }
@@ -365,6 +402,7 @@ impl DirectoryCore {
         match self.records.get_mut(&key) {
             Some(record) if record.in_transfer.is_none() => {
                 record.in_transfer = Some(transfer);
+                self.dirty.insert(key, Some(*record)); // in_transfer set → durable PUT
                 true
             }
             _ => false,
@@ -397,6 +435,7 @@ impl DirectoryCore {
                         lease_expires: UniverseTick(now.0.saturating_add(ttl)),
                         in_transfer: None,
                     };
+                    self.dirty.insert(key, Some(*record)); // THE commit point → durable PUT
                     CasOutcome::Won { new_fence }
                 }
                 None => CasOutcome::Lost {
@@ -424,6 +463,7 @@ impl DirectoryCore {
                 Some(new_fence) => {
                     record.fence = new_fence;
                     record.in_transfer = None;
+                    self.dirty.insert(key, Some(*record)); // fence bumped + lock cleared → durable PUT
                     CasOutcome::Won { new_fence }
                 }
                 None => CasOutcome::Lost {
@@ -454,6 +494,7 @@ impl DirectoryCore {
         match self.records.get_mut(&key) {
             Some(record) if record.in_transfer == Some(transfer) => {
                 record.in_transfer = None;
+                self.dirty.insert(key, Some(*record)); // lock cleared (fence-neutral) → durable PUT
                 CasOutcome::Won {
                     new_fence: record.fence,
                 }
@@ -907,6 +948,200 @@ mod tests {
                 grace: 151,
                 max: 50,
             })
+        );
+    }
+
+    // ── D-6 (D-alpha): the per-tick durability DELTA set ─────────────────────────────────────────────
+    // Every mutator arm that CHANGES a row stages a delta (`Some` = PUT, `None` = DELETE); every NO-CHANGE
+    // arm (Refused/Lost/false/UnknownKey) stages NOTHING. The group-commit barrier drains the set once per
+    // tick; these pins guarantee the incremental reconcile carries exactly the rows that moved.
+
+    #[test]
+    fn grant_fresh_stages_a_put_of_the_new_record() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        assert!(dir.has_dirty(), "a fresh grant is a durable change");
+        let head = dir.head(key()).expect("record");
+        let dirty = dir.take_dirty();
+        assert_eq!(
+            dirty.get(&key()),
+            Some(&Some(head)),
+            "the staged PUT is the current record"
+        );
+        assert!(!dir.has_dirty(), "take_dirty cleared the set");
+        assert!(dir.take_dirty().is_empty(), "a second drain is empty");
+    }
+
+    #[test]
+    fn grant_idempotent_lease_refresh_stages_a_put() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.take_dirty(); // clear the create
+        let _ = dir.grant(key(), shard(1), Fence(1), UniverseTick(80)); // re-grant: lease moves
+        let head = dir.head(key()).expect("record");
+        assert_eq!(head.lease_expires, UniverseTick(180));
+        assert_eq!(
+            dir.take_dirty().get(&key()),
+            Some(&Some(head)),
+            "the refreshed lease is a durable delta"
+        );
+    }
+
+    #[test]
+    fn grant_higher_fence_replace_stages_the_new_owner() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.take_dirty();
+        let _ = dir.grant(key(), shard(2), Fence(5), NOW);
+        let head = dir.head(key()).expect("record");
+        assert_eq!(head.fence, Fence(5));
+        assert_eq!(dir.take_dirty().get(&key()), Some(&Some(head)));
+    }
+
+    #[test]
+    fn grant_refused_arms_stage_nothing() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(5), NOW);
+        let _ = dir.take_dirty();
+        // equal-fence different-owner, and stale-fence — both Refused.
+        let _ = dir.grant(key(), shard(2), Fence(5), NOW);
+        let _ = dir.grant(key(), shard(2), Fence(4), NOW);
+        assert!(!dir.has_dirty(), "a refused grant changes no row");
+        // refused-while-locked is the third Refused arm (in_transfer.is_some()).
+        let _ = dir.lock_transfer(key(), TransferId(1));
+        let _ = dir.take_dirty();
+        let _ = dir.grant(key(), shard(9), Fence(99), NOW);
+        assert!(!dir.has_dirty(), "a grant onto a locked key changes no row");
+    }
+
+    #[test]
+    fn renew_match_stages_a_put_mismatch_stages_nothing() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.take_dirty();
+        assert!(dir.renew(key(), Fence(1), UniverseTick(80)));
+        let head = dir.head(key()).expect("record");
+        assert_eq!(
+            dir.take_dirty().get(&key()),
+            Some(&Some(head)),
+            "decision A: the heartbeat renew is a durable delta"
+        );
+        assert!(!dir.renew(key(), Fence(99), NOW), "fence mismatch");
+        assert!(!dir.has_dirty(), "a no-op renew stages nothing");
+    }
+
+    #[test]
+    fn lock_transfer_stages_a_put_relock_stages_nothing() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.take_dirty();
+        assert!(dir.lock_transfer(key(), TransferId(1)));
+        let head = dir.head(key()).expect("record");
+        assert_eq!(head.in_transfer, Some(TransferId(1)));
+        assert_eq!(dir.take_dirty().get(&key()), Some(&Some(head)));
+        assert!(!dir.lock_transfer(key(), TransferId(2)), "already locked");
+        assert!(!dir.has_dirty(), "a refused lock stages nothing");
+    }
+
+    #[test]
+    fn commit_cas_won_stages_lost_stages_nothing() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.take_dirty();
+        let _ = dir.commit_cas(key(), Fence(1), shard(2), NOW); // Won: flips owner, bumps fence
+        let head = dir.head(key()).expect("record");
+        assert_eq!(head.authority, shard(2));
+        assert_eq!(dir.take_dirty().get(&key()), Some(&Some(head)));
+        let _ = dir.commit_cas(key(), Fence(1), shard(3), NOW); // stale expected → Lost
+        assert!(!dir.has_dirty(), "a lost CAS changes no row");
+    }
+
+    #[test]
+    fn abort_cas_won_stages_the_bumped_unlocked_record() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.lock_transfer(key(), TransferId(1));
+        let _ = dir.take_dirty();
+        let _ = dir.abort_cas(key(), Fence(1)); // Won: bumps fence, clears lock
+        let head = dir.head(key()).expect("record");
+        assert_eq!(head.in_transfer, None);
+        assert_eq!(head.fence, Fence(2));
+        assert_eq!(dir.take_dirty().get(&key()), Some(&Some(head)));
+        let _ = dir.abort_cas(key(), Fence(1)); // stale → Lost
+        assert!(!dir.has_dirty());
+    }
+
+    #[test]
+    fn abort_clear_won_stages_the_unlocked_record_redrive_stages_nothing() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.lock_transfer(key(), TransferId(7));
+        let _ = dir.take_dirty();
+        let _ = dir.abort_clear(key(), TransferId(7)); // Won: clears lock, fence-neutral
+        let head = dir.head(key()).expect("record");
+        assert_eq!(head.in_transfer, None);
+        assert_eq!(head.fence, Fence(1), "abort_clear is fence-neutral");
+        assert_eq!(dir.take_dirty().get(&key()), Some(&Some(head)));
+        let _ = dir.abort_clear(key(), TransferId(7)); // lock already cleared → Lost
+        assert!(!dir.has_dirty(), "a re-driven terminal stages nothing");
+    }
+
+    #[test]
+    fn revoke_stages_a_delete_refused_stages_nothing() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        let _ = dir.take_dirty();
+        assert_eq!(dir.revoke(key(), Fence(1)), RevokeOutcome::Revoked);
+        assert_eq!(
+            dir.take_dirty().get(&key()),
+            Some(&None),
+            "revoke stages a DELETE (the COMP-2 anti-zombie)"
+        );
+        // wrong-fence refuse + unknown-key on a now-absent record stage nothing.
+        let _ = dir.grant(key(), shard(1), Fence(3), NOW);
+        let _ = dir.take_dirty();
+        let _ = dir.revoke(key(), Fence(99)); // Refused
+        let _ = dir.revoke(DirectoryKey::Realm(RealmId::Planet(1)), Fence(1)); // UnknownKey
+        assert!(!dir.has_dirty());
+    }
+
+    #[test]
+    fn cas_on_a_missing_key_stages_nothing() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.commit_cas(key(), Fence(1), shard(1), NOW); // None → Lost
+        let _ = dir.abort_cas(key(), Fence(1)); // None → Lost
+        let _ = dir.abort_clear(key(), TransferId(1)); // None → Lost
+        assert!(!dir.has_dirty(), "a CAS on an absent key changes no row");
+    }
+
+    #[test]
+    fn within_tick_changes_to_one_key_collapse_to_one_delta() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(key(), shard(1), Fence(1), NOW);
+        assert!(dir.renew(key(), Fence(1), UniverseTick(80)));
+        assert!(dir.lock_transfer(key(), TransferId(1)));
+        let head = dir.head(key()).expect("record");
+        let dirty = dir.take_dirty();
+        assert_eq!(dirty.len(), 1, "three mutations on one key → one delta");
+        assert_eq!(
+            dirty.get(&key()),
+            Some(&Some(head)),
+            "the last write wins (locked, lease-refreshed)"
+        );
+    }
+
+    #[test]
+    fn restore_starts_with_no_pending_deltas() {
+        let rec = OwnerRecord {
+            authority: shard(1),
+            fence: Fence(3),
+            lease_expires: UniverseTick(200),
+            in_transfer: None,
+        };
+        let dir = DirectoryCore::restore(TUNING, [(key(), rec)]);
+        assert!(
+            !dir.has_dirty(),
+            "restored rows are already durable — they owe no delta"
         );
     }
 }

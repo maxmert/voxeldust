@@ -394,7 +394,9 @@ impl Store for RedbStore {
         // BLOCK-ON-PRIOR (the depth-1 invariant + the back-pressure for approach A): wait until the
         // PREVIOUS batch is durable before submitting the next. ~always already true at 50Hz; a real wait
         // (counted) only under a disk stall — durability over liveness, the PvP-correct trade. This bounds
-        // in-flight to ≤1 batch, so crash-loss is ≤1 batch AND the per-tick reconcile scan reads exactly T-1.
+        // in-flight to ≤1 batch, so crash-loss is ≤1 batch. (D-alpha made the directory reconcile INCREMENTAL
+        // — a `dirty`-delta drain that never reads the store back — so the off-tick writer no longer races a
+        // reconcile read: the prior "scan reads T-1" coupling is GONE, leaving crash-loss bounding the sole job.)
         if self.last_durable.load(Ordering::Acquire) < self.last_submitted {
             self.fsync_backpressure.fetch_add(1, Ordering::Relaxed);
             self.wait_durable_through(self.last_submitted);

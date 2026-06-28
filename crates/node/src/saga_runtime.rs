@@ -1726,9 +1726,10 @@ pub fn drive_sagas(
         }
     }
     // D-3 Slice 4: the expiry REAPER runs at the HEAD of the barrier — BEFORE the directory reconcile below
-    // — so a revoke it makes is captured by the SAME tick's delete-all-then-put-current reconcile + the
-    // single commit (the revoke is durable this tick; a reaped record never resurrects on a kill-9 — the
-    // COMP-2 guarantee). It mutates the directory in RAM; the reconcile then persists the post-reap RAM.
+    // — so a revoke it makes lands in the SAME tick's `dirty` delta set and is captured by the incremental
+    // reconcile + the single commit (the revoke is durable this tick as a DELETE; a reaped record never
+    // resurrects on a kill-9 — the COMP-2 guarantee). It mutates the directory in RAM; the reconcile then
+    // drains the delta set the mutation recorded.
     reap_lapsed_leases(&mut runtime, &mut dir.0, now);
     // D-37 Slice 3: ARM the standing re-homes the reaper just enqueued — SAME tick, still inside the
     // barrier, so the `lock_transfer` + the armed parked saga are captured by the reconcile + commit below
@@ -1737,8 +1738,9 @@ pub fn drive_sagas(
     // the reaper enqueued) and BEFORE the reconcile (so the lock/saga persist this tick).
     process_rehome_starts(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
     // D-6 GROUP-COMMIT BARRIER: stage every saga/go-token write recorded this tick (drained from
-    // `pending_writes`), snapshot the DIRECTORY (the independent key family) + the durable clock ceiling,
-    // then ONE `commit()` — the ~1-fsync/tick durability point (io-prod batches it off-tick later). This
+    // `pending_writes`), stage this tick's incremental DIRECTORY deltas (the independent key family) + the
+    // durable clock ceiling, then ONE `commit()` — the ~1-fsync/tick durability point (io-prod batches it
+    // off-tick later). This
     // runs at the END of the schedule, BEFORE the node's flush phase sends `outbox`, so no effect leaves
     // the orchestrator before the state authorizing it is durable (persist-before-effect). The directory
     // reconcile + the saga writes commit in the SAME barrier ⇒ the durable saga set and directory are
@@ -1750,27 +1752,29 @@ pub fn drive_sagas(
             None => store.0.delete(&key),
         }
     }
-    // RECONCILE the durable Directory family with RAM (audit COMP-2): DELETE every durable row, then PUT
-    // every CURRENT one. A put-only snapshot only GROWS — a REVOKED record (a logged-out / departed owner
-    // removed from RAM via `LeaseRevoke`, `directory.rs` `revoke`) would otherwise be RESURRECTED at its
-    // stale owner+fence by `rehydrate`'s `restore` on the next kill-9 = a zombie authority record
-    // (split-brain on the exact recover path D-6 cures). The directory is mutated across TWO systems
-    // (serve_directory + drive_sagas), so the reconcile lives HERE — the one place with both the store +
-    // the directory — rather than threading a per-remove delete through serve_directory (which has no
-    // `pending_writes`). The MemStore staged map is last-write-wins, so a still-present key's
-    // delete-then-put nets to the put; a vanished key's lone delete stands. O(directory) at
-    // single-orchestrator P3; io-prod does incremental (a per-mutation delete co-located with the WAL).
-    for (key_bytes, _) in store.0.scan(&[StoreKey::DIRECTORY]) {
-        store.0.delete(&key_bytes);
-    }
-    for (key, record) in dir.0.entries() {
-        let snapshot = DirSnapshot {
-            key: *key,
-            record: *record,
-        };
-        store
-            .0
-            .put(&StoreKey::Directory(*key).bytes(), &encode(&snapshot));
+    // RECONCILE the durable Directory family with RAM, INCREMENTALLY (D-alpha; audit COMP-2): stage ONLY
+    // the rows this tick actually CHANGED — `DirectoryCore` records each in its `dirty` delta set (`Some` ⇒
+    // PUT the new snapshot, `None` ⇒ DELETE the removed row). The store already holds every prior tick's
+    // snapshot, so the union of (durable state ⊕ this tick's deltas) is byte-identical to the old full
+    // delete-all-then-put-current reconcile (the test-only differential oracle pins this). The `None`/DELETE
+    // arm is the COMP-2 anti-zombie: a REVOKED record (a logged-out / departed owner removed from RAM via
+    // `LeaseRevoke`, `directory.rs` `revoke`, OR a reaped dead lease above) is DELETED durably, so
+    // `rehydrate`'s `restore` cannot resurrect it at its stale owner+fence on the next kill-9 (split-brain
+    // on the exact recover path D-6 cures). The directory is mutated across TWO systems (serve_directory +
+    // drive_sagas) but `dirty` accumulates across BOTH within the tick, so the single drain HERE — the one
+    // place with both the store + the directory — captures every change. Within-tick collapse is automatic
+    // (last write to a key wins), so N renews of one key cost ONE staged delta. O(changes) not O(directory):
+    // a quiescent tick stages nothing (the write-amp win that makes the off-tick `RedbStore` writer viable).
+    for (key, change) in dir.0.take_dirty() {
+        match change {
+            Some(record) => {
+                let snapshot = DirSnapshot { key, record };
+                store
+                    .0
+                    .put(&StoreKey::Directory(key).bytes(), &encode(&snapshot));
+            }
+            None => store.0.delete(&StoreKey::Directory(key).bytes()),
+        }
     }
     store.0.put(
         &StoreKey::Clock.bytes(),
@@ -2055,6 +2059,46 @@ mod tests {
                                 fence,
                             },
                         ))
+                        .expect("encode"),
+                    ),
+                )
+                .expect("sent");
+            self.settle();
+        }
+
+        /// Grant an ARBITRARY directory key/owner/fence through the seam (the D-alpha oracle drives
+        /// multiple keys + a higher-fence owner replace; `grant_subject` is the `subject()`+SOURCE special
+        /// case). Routes through `serve_directory` → `DirectoryCore::grant` like any shard request.
+        fn grant_key(&mut self, key: DirectoryKey, owner: AuthorityRef, fence: Fence) {
+            self.source
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::LeaseGrant {
+                            key,
+                            owner,
+                            fence,
+                        }))
+                        .expect("encode"),
+                    ),
+                )
+                .expect("sent");
+            self.settle();
+        }
+
+        /// Revoke an arbitrary directory key at its exact fence (the logout / departed path; the D-alpha
+        /// oracle uses it to drive the DELETE arm of the incremental reconcile).
+        fn revoke_key(&mut self, key: DirectoryKey, fence: Fence) {
+            self.source
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
+                            key,
+                            fence,
+                        }))
                         .expect("encode"),
                     ),
                 )
@@ -2800,6 +2844,69 @@ mod tests {
             1,
             "batch_go_writes restored from the map len, NOT re-incremented through the +=1 (G-TIER decouple)"
         );
+    }
+
+    /// D-6 (D-alpha) DIFFERENTIAL ORACLE: assert the durable Directory family produced by the INCREMENTAL
+    /// `dirty`-delta reconcile is byte-for-byte identical to a FULL delete-all-then-put-current reconcile.
+    /// The full reconcile is, by construction, exactly the encoded snapshot of every CURRENT entry — so the
+    /// expected map is computed directly from `entries()`. Any arm that changed a row without staging its
+    /// delta (a stale durable snapshot, or a phantom row never deleted) shows up here as a mismatch.
+    fn assert_incremental_matches_full_reconcile(rig: &mut Rig) {
+        let actual: BTreeMap<Vec<u8>, Vec<u8>> = rig
+            .store
+            .scan(&[StoreKey::DIRECTORY])
+            .into_iter()
+            .map(|(k, v)| (k, v.to_vec()))
+            .collect();
+        let expected: BTreeMap<Vec<u8>, Vec<u8>> = rig
+            .orch
+            .world_mut()
+            .resource::<DirectoryRes>()
+            .0
+            .entries()
+            .map(|(k, r)| {
+                (
+                    StoreKey::Directory(*k).bytes(),
+                    encode(&DirSnapshot {
+                        key: *k,
+                        record: *r,
+                    })
+                    .to_vec(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "incremental reconcile diverged from the full reconcile"
+        );
+    }
+
+    #[test]
+    fn incremental_directory_reconcile_equals_a_full_reconcile_byte_for_byte() {
+        // Drive PUT-new / PUT-refresh / PUT-replace / DELETE through the REAL group-commit barrier and pin
+        // the differential oracle after each settle; the kill-9 rebuild proves rehydrate round-trips the
+        // incremental durable set with no divergence (the load-bearing COMP-2 correctness for D-gamma).
+        let other = DirectoryKey::Realm(RealmId::System(7));
+        let mut rig = Rig::new();
+
+        // PUT-new, two distinct keys → a multi-row durable family.
+        rig.grant_subject(Fence(1));
+        rig.grant_key(other, AuthorityRef::Shard(DEST), Fence(1));
+        assert_incremental_matches_full_reconcile(&mut rig);
+
+        // PUT-refresh (idempotent re-grant moves the lease) then PUT-replace (higher fence, new owner) —
+        // both must OVERWRITE the prior durable snapshot, never leave a stale one behind.
+        rig.grant_subject(Fence(1));
+        rig.grant_key(subject(), AuthorityRef::Shard(DEST), Fence(7));
+        assert_incremental_matches_full_reconcile(&mut rig);
+
+        // DELETE: revoke the second key (the COMP-2 anti-zombie path through the barrier).
+        rig.revoke_key(other, Fence(1));
+        assert_incremental_matches_full_reconcile(&mut rig);
+
+        // KILL-9 + REBUILD: rehydrate restores from the incremental durable set; entries() still equals it.
+        rig.rebuild();
+        assert_incremental_matches_full_reconcile(&mut rig);
     }
 
     #[test]
