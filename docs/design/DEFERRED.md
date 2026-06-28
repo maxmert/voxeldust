@@ -752,9 +752,42 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   non-empty store as GENESIS = clock-reset + orphaned-WAL data loss — the re-audit `wf_66cb8f06` HIGH, now cured); a
   WRITE fault in `commit` is ALL-OR-NOTHING + RETAINS the staged batch (a per-key apply error aborts the txn, never a
   partial fsync — the re-audit MEDIUM, matching MemStore's all-or-nothing fold). A refusal is never a loss.
-  **OWED: C2** = the OFF-TICK fsync writer thread + `last_durable` persist-before-effect gate (the sim thread never
-  blocks on disk) — lands BEFORE the wiring; **D** = wire `RedbStore` into the orchestrator bin (replace the
-  loud-non-durable `MemStore`) + the process-tier SIGKILL-mid-fsync crash proof (Tier-B ratcheted floor); **A** =
+  **✅ C2 LANDED (design `wf_caad488e`, judge-panel 9/9/9; user-decided approach A for PvP: see below).** The OFF-TICK
+  fsync so the sim thread never blocks on disk. APPROACH A = COMMIT-BLOCKS-ON-PRIOR (depth-1
+  pipeline): a single named `vd-store-writer` thread + a BOUNDED crossbeam channel; `commit()` BLOCKS until the
+  PREVIOUS batch is durable (≈0 wait at 50Hz; correct counted back-pressure under a disk stall — durability over
+  liveness), then `mem::take`s the staged map + assigns a monotone seq + sends `(seq, batch)` + RETURNS (never touches
+  disk on the sim thread); the writer `recv()` + `try_recv()` drain-COALESCES into ONE redb
+  WriteTransaction + fsync, then bumps `last_durable: Arc<AtomicU64>` (Release) + notifies a condvar. **IMPL
+  REFINEMENT (caught in C2):** under depth-1 the channel can NEVER fill (block-on-prior throttles before a 2nd batch
+  submits), so the design's channel-Full back-pressure path was DEAD — block-on-prior ITSELF is the back-pressure
+  (counted: `DurabilityHandle::backpressure_stalls`, incremented when a `commit` actually waits); the drain-coalesce
+  loop is kept only as the seam for a future depth>1 mode (vestigial at depth-1). The block uses a `Mutex`+`Condvar`
+  the writer notifies (park, not hot-spin); the `AtomicU64` stays the lock-free source of truth. Depth-1 is a C2
+  INVARIANT (not a Slice-D discipline): it bounds crash-loss to ≤1 batch AND makes the per-tick reconcile scan read
+  exactly T-1 by construction — so redb-range scan stays (NO in-RAM mirror; verified 4/5 scan consumers are boot-only,
+  the 5th reads prior-committed). The durability watermark reaches the bin via a SIDECAR `DurabilityHandle` returned
+  ALONGSIDE the `Box<dyn Store>` from `open()` — the FROZEN infallible `sim::io::Store` seam + `commit()`'s `()`
+  signature stay BYTE-FOR-BYTE unchanged (MemStore + the sole caller + the deterministic harness churn ZERO). `Drop`
+  joins the writer (flushes pending — graceful shutdown loses nothing). `flush_blocking()` + a `StoreTuning {
+  writer_channel_depth }` (no magic numbers). Crash proof (all 4 SIGKILL cases SAFE): an effect leaves ONLY after the
+  bin observes `last_durable >= seq_T` (Variant-A deferred-by-one-tick flush, Slice D), and `last_durable` bumps ONLY
+  after the fsync (Release→Acquire happens-before) — so every shipped effect is durable-justified; the converse is the
+  safe direction (recovery re-derives idempotently). C2 ships the PRIMITIVE + accessors + 8 DETERMINISTIC tests (the
+  adapted durability/contract tests with `flush_blocking`, the watermark-advances-per-batch test, and the
+  Drop-joins-the-writer-and-flushes-pending graceful-shutdown test). **Owed tests (need a `#[cfg(test)]` writer-pause
+  hook, mirroring io-prod's `BridgeControl`):** the explicit block-on-prior-depth + backpressure-count + the
+  in-process fault-injection crash analog (drop the in-flight batch = crash case 2/3) — block-on-prior makes those
+  hard to trigger deterministically without a pause gate; the AUTHORITATIVE crash proof is the Slice-D process-tier
+  real-SIGKILL cell anyway. **Owed refinement: writer fsync-error retry/durable-outbox**
+  (C2's first cut logs LOUDLY + does not bump `last_durable` on a fsync error → the gate stalls loud, no silent EFFECT
+  loss; a bounded retry recovers a transient blip — ledgered, not C2-blocking). **PvP rationale:** the orchestrator is
+  NOT the combat hot path (hit-reg is shard+gateway, P5/P11) — it is only on the TRANSFER/authority path; the
+  PvP-critical property is never duplicating/wedging a player mid-transfer, which A guarantees by construction; deeper
+  pipelines (B/C) trade durability for throughput the batch-bounded single orchestrator does not need (the real
+  scale lever is the per-Realm PARALLEL fsync pool for Store B, already designed). **D** = wire `RedbStore` into the
+  orchestrator bin (replace the loud-non-durable `MemStore`) + split `step_tick` into run/flush for the Variant-A
+  deferred-flush gate + the process-tier SIGKILL-mid-fsync crash proof (Tier-B ratcheted floor); **A** =
   precondition #3 (`WAL_FORMAT_VERSION` + `universe_epoch_id` byte + fallible quarantining decode replacing the bare
   `.expect` decodes) + the `StoreKey::Tombstone` family; **B** = precondition #2 (incremental directory reconcile +
   idle-tick dirty-guard, with a test-only delete-all-then-put differential oracle). The C1 backend does NOT directly
