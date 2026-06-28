@@ -30,7 +30,8 @@ use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    Cluster, ClusterAddrs, DEV, RUNFILE_NAME, TRUST_DIR_NAME, admin_get_body, common_env,
+    Cluster, ClusterAddrs, DEV, ORCH_STORE_NAME, RUNFILE_NAME, TRUST_DIR_NAME, admin_get_body,
+    common_env,
     dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env, sh_quote, shard_env,
     slot_workdir,
 };
@@ -153,12 +154,16 @@ fn up_inner(
     // when CA-1 lands.
     let clients = client_book(ports)?;
     let common = common_env(&trust_str, &DEV);
+    // D-6: the orchestrator's durable Store lives IN the slot work dir (so `down` reaps it with the slot).
+    // Under $TMPDIR ⇒ ephemeral; `orchestrator_env` sets VD_STORE_EPHEMERAL_OK so the bin's HR1 guard
+    // allows it. A restart RECOVERS (clock resumes forward, in-flight sagas re-drive); `down` wipes it.
+    let store_str = work.join(ORCH_STORE_NAME).display().to_string();
 
     // Spawn into a RAII guard (graceful-failure reaper); record each pid into the
     // runfile (SIGKILL reaper) the INSTANT its child exists, before the next spawn.
     let mut cluster = Cluster::new();
     for (name, node_env) in [
-        ("vd-orchestrator", orchestrator_env(&addrs, &DEV)),
+        ("vd-orchestrator", orchestrator_env(&addrs, &DEV, &store_str)),
         (
             "vd-gateway",
             gateway_env(&addrs, &clients, &auth_pubkey, &DEV),

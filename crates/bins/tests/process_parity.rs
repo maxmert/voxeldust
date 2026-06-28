@@ -153,6 +153,11 @@ fn p1_parity_real_binaries_over_quic() {
     let trust_dir = std::env::temp_dir().join(format!("vd-parity-{}", std::process::id()));
     let trust = ClusterTrust::generate("vd-parity").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
+    // D-6: the orchestrator's durable Store (temp scratch ⇒ VD_STORE_EPHEMERAL_OK via orchestrator_env).
+    // Remove any stale file from a recycled-pid prior run so this parity spawn boots at genesis.
+    let orch_store = std::env::temp_dir().join(format!("vd-parity-{}-orch.redb", std::process::id()));
+    let _ = std::fs::remove_file(&orch_store);
+    let orch_store = orch_store.display().to_string();
 
     // The cluster contract is the SHARED vd_bins source of truth — the exact env,
     // params, roster, dev identity, and peer-book the launcher uses. If they ever
@@ -179,7 +184,7 @@ fn p1_parity_real_binaries_over_quic() {
         "vd-orchestrator",
         spawn(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV),
+            orchestrator_env(&addrs, &DEV, &orch_store),
         ),
     );
     cluster.push(
@@ -300,6 +305,7 @@ fn p1_parity_real_binaries_over_quic() {
     // Exactly: 1 realm + 2 sessions + 2 entities = 5 records, every one fenced.
     assert_eq!(entries.len(), 5, "directory dump: {entries:?}");
     let _ = std::fs::remove_dir_all(&trust_dir);
+    let _ = std::fs::remove_file(&orch_store);
 }
 
 /// A raw HTTP/1.1 GET returning parsed JSON (what `curl` would do at 2am).

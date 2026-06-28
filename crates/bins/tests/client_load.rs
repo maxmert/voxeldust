@@ -62,6 +62,10 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
     let trust_dir = std::env::temp_dir().join(format!("vd-load-{}", std::process::id()));
     let trust = vd_io_prod::trust::ClusterTrust::generate("vd-load").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
+    // D-6: the orchestrator's durable Store (temp scratch ⇒ VD_STORE_EPHEMERAL_OK via orchestrator_env).
+    let orch_store = std::env::temp_dir().join(format!("vd-load-{}-orch.redb", std::process::id()));
+    let _ = std::fs::remove_file(&orch_store);
+    let orch_store = orch_store.display().to_string();
 
     let addrs = ClusterAddrs {
         orchestrator: orch_addr,
@@ -84,7 +88,7 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         "vd-orchestrator",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV),
+            orchestrator_env(&addrs, &DEV, &orch_store),
         ),
     );
     guard.push(
@@ -192,6 +196,7 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
     );
 
     let _ = std::fs::remove_dir_all(&trust_dir);
+    let _ = std::fs::remove_file(&orch_store);
 }
 
 /// The orchestrator admin directory's `authority` column (what a 2am `curl` shows).
@@ -235,6 +240,10 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
     let trust_dir = std::env::temp_dir().join(format!("vd-wait-{}", std::process::id()));
     let trust = vd_io_prod::trust::ClusterTrust::generate("vd-wait").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
+    // D-6: the orchestrator's durable Store (temp scratch ⇒ VD_STORE_EPHEMERAL_OK via orchestrator_env).
+    let orch_store = std::env::temp_dir().join(format!("vd-wait-{}-orch.redb", std::process::id()));
+    let _ = std::fs::remove_file(&orch_store);
+    let orch_store = orch_store.display().to_string();
 
     let addrs = ClusterAddrs {
         orchestrator: orch_addr,
@@ -252,7 +261,7 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
         "vd-orchestrator",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV),
+            orchestrator_env(&addrs, &DEV, &orch_store),
         ),
     );
     nodes.push(
@@ -365,4 +374,5 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
     }
 
     let _ = std::fs::remove_dir_all(&trust_dir);
+    let _ = std::fs::remove_file(&orch_store);
 }

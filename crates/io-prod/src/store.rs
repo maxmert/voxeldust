@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -104,7 +104,16 @@ pub enum StoreError {
 #[derive(Clone)]
 pub struct DurabilityHandle {
     last_durable: Arc<AtomicU64>,
+    /// The seq of the last batch `commit()` submitted (shared with `RedbStore`). The bin records this after
+    /// each `run_schedule` and waits on it before flushing that tick's outbox (persist-before-effect).
+    last_submitted: Arc<AtomicU64>,
     fsync_backpressure: Arc<AtomicU64>,
+    /// The writer's durability notify — so the bin's [`wait_durable_through`](Self::wait_durable_through)
+    /// PARKS (not hot-spins) under a disk stall, sharing the writer's wake.
+    durable_cv: Arc<(Mutex<()>, Condvar)>,
+    /// `true` while the off-tick writer lives; `false` once it has EXITED. The handle has no `JoinHandle`,
+    /// so this flag is its liveness signal for the fail-loud escape.
+    writer_alive: Arc<AtomicBool>,
 }
 
 impl DurabilityHandle {
@@ -117,6 +126,28 @@ impl DurabilityHandle {
     #[must_use]
     pub fn durable_through(&self) -> u64 {
         self.last_durable.load(Ordering::Acquire)
+    }
+    /// The seq of the last batch `commit()` submitted — the bin records it after each tick's `run_schedule`
+    /// and gates that tick's outbox flush on it (Slice D parked-flush). `0` before the first commit.
+    #[must_use]
+    pub fn last_submitted(&self) -> u64 {
+        self.last_submitted.load(Ordering::Acquire)
+    }
+    /// Whether the off-tick writer thread is still alive. `false` once it has EXITED (graceful shutdown or a
+    /// permanent fsync fault) — the bin's [`wait_durable_through`](Self::wait_durable_through) uses this to
+    /// fail LOUD rather than hang on a dead writer.
+    #[must_use]
+    pub fn writer_alive(&self) -> bool {
+        self.writer_alive.load(Ordering::Acquire)
+    }
+    /// Block until every batch through `seq` is durable — THE persist-before-effect gate the bin calls
+    /// before flushing a tick's outbox. Parks on the writer's notify (no hot-spin); fails LOUD if the writer
+    /// died before reaching `seq` (a refusal is never a loss). At ~50Hz with the one-tick defer this is
+    /// ~always already durable (returns immediately); a real wait IS the disk-stall back-pressure.
+    pub fn wait_durable_through(&self, seq: u64) {
+        park_until_durable(seq, &self.last_durable, &self.durable_cv, || {
+            !self.writer_alive.load(Ordering::Acquire)
+        });
     }
     /// How many `commit()`s had to STALL on the previous fsync (the back-pressure counter — 0 on a healthy
     /// run; `> 0` means the disk could not keep up with the tick rate, the correct durability-over-liveness
@@ -143,8 +174,10 @@ pub struct RedbStore {
     submit_tx: Option<Sender<(u64, Batch)>>,
     /// Monotone batch sequence (the last value ASSIGNED to a submitted batch).
     next_seq: u64,
-    /// The seq of the last SUCCESSFULLY-submitted batch (commit-blocks-on-prior waits for this to be durable).
-    last_submitted: u64,
+    /// The seq of the last SUCCESSFULLY-submitted batch (commit-blocks-on-prior waits for this to be
+    /// durable). SHARED with the [`DurabilityHandle`] (`Arc<AtomicU64>`) so the bin reads it without the
+    /// store — the sidecar seam that keeps `Store` frozen.
+    last_submitted: Arc<AtomicU64>,
     /// The highest fsynced seq (bumped by the writer, Release). The lock-free source of truth.
     last_durable: Arc<AtomicU64>,
     /// Count of commits that stalled on the previous fsync (back-pressure observable).
@@ -152,6 +185,10 @@ pub struct RedbStore {
     /// The writer notifies on each `last_durable` bump so block-on-prior / `flush_blocking` PARK (not hot
     /// spin) under a disk stall. The atomic stays the source of truth; the mutex guards only the condvar.
     durable_cv: Arc<(Mutex<()>, Condvar)>,
+    /// `true` while the writer lives; set `false` by the writer on its single EXIT. THE liveness signal for
+    /// both durability waits (this store's and the handle's, which has no `JoinHandle` to probe). The
+    /// `JoinHandle` below stays only for Drop's graceful join.
+    writer_alive: Arc<AtomicBool>,
     writer: Option<JoinHandle<()>>,
 }
 
@@ -193,6 +230,40 @@ fn apply_batch(db: &Database, batch: &Batch) -> bool {
     }
 }
 
+/// Park (not hot-spin) until `last_durable >= target`. The shared core of BOTH durability waits — the
+/// `RedbStore`'s own (Drop/tests, liveness via its `JoinHandle`) and the bin-side [`DurabilityHandle`]'s
+/// (the persist-before-effect gate, liveness via the shared `writer_alive` flag it can read without the
+/// handle). Fast-path the common already-durable case; on a miss, lock + re-check + condvar-wait (the writer
+/// notifies under the same lock — no lost wakeup). The `WRITER_WAIT_POLL` timeout is the liveness backstop:
+/// on a timeout with no progress AND a dead writer (`is_writer_dead()`), fail LOUD rather than hang the
+/// synchronous caller forever — a refusal is never a loss; recovery rehydrates the last durable state + the
+/// Slice-2a producer re-drives idempotently.
+fn park_until_durable(
+    target: u64,
+    last_durable: &AtomicU64,
+    durable_cv: &(Mutex<()>, Condvar),
+    is_writer_dead: impl Fn() -> bool,
+) {
+    if last_durable.load(Ordering::Acquire) >= target {
+        return;
+    }
+    let (lock, cv) = durable_cv;
+    let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    while last_durable.load(Ordering::Acquire) < target {
+        let (g, res) = cv
+            .wait_timeout(guard, WRITER_WAIT_POLL)
+            .unwrap_or_else(PoisonError::into_inner);
+        guard = g;
+        if res.timed_out() && last_durable.load(Ordering::Acquire) < target && is_writer_dead() {
+            drop(guard);
+            panic!(
+                "RedbStore: the durable writer thread died without reaching seq {target} — refusing to \
+                 hang the caller (a refusal is never a loss; recovery rehydrates + re-drives)"
+            );
+        }
+    }
+}
+
 /// The off-tick writer loop: drain a batch (coalescing any already-queued ones — vestigial under depth-1,
 /// the seam for a future depth>1 mode), apply+fsync in ONE txn, then bump `last_durable` (Release) +
 /// notify. On a fsync error the watermark is NOT bumped → the persist-before-effect gate stalls LOUD,
@@ -202,8 +273,9 @@ fn run_writer(
     rx: Receiver<(u64, Batch)>,
     last_durable: Arc<AtomicU64>,
     durable_cv: Arc<(Mutex<()>, Condvar)>,
+    writer_alive: Arc<AtomicBool>,
 ) {
-    while let Ok((first_seq, first)) = rx.recv() {
+    'drain: while let Ok((first_seq, first)) = rx.recv() {
         let mut max_seq = first_seq;
         let mut merged = first;
         while let Ok((seq, batch)) = rx.try_recv() {
@@ -214,7 +286,7 @@ fn run_writer(
         }
         // Retry the fsync (the writer still HOLDS `merged`, so a TRANSIENT disk blip recovers losing
         // nothing); a PERMANENT fault EXITS the writer so the persist-before-effect gate fails LOUD (the
-        // liveness escape in `wait_durable_through` panics rather than hang the orchestrator).
+        // liveness escape in `park_until_durable` panics rather than hang the orchestrator).
         let mut attempt = 0u32;
         loop {
             if apply_batch(&db, &merged) {
@@ -231,11 +303,20 @@ fn run_writer(
                      store is unwritable; EXITING so the persist-before-effect gate fails LOUD (panics) \
                      rather than hang. Recovery rehydrates the last durable state + re-drives idempotently."
                 );
-                return; // writer dies → `wait_durable_through` detects via `is_finished` + panics loud
+                break 'drain; // writer dies → the SINGLE exit below marks it dead + wakes waiters
             }
             std::thread::sleep(WRITER_FSYNC_RETRY_BACKOFF);
         }
     }
+    // SINGLE exit (permanent fault OR graceful sender-drop): publish death so the `DurabilityHandle`'s
+    // `park_until_durable` liveness escape fires (it has no `JoinHandle` to probe), then WAKE any parked
+    // waiter so it observes the death promptly rather than at the next `WRITER_WAIT_POLL` backstop. On a
+    // graceful shutdown nobody is waiting; on a permanent fault the bin's gate panics loud (a refusal is
+    // never a loss). `RedbStore`'s own wait still uses its `JoinHandle::is_finished` — unchanged.
+    writer_alive.store(false, Ordering::Release);
+    let (lock, cv) = &*durable_cv;
+    let _g = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    cv.notify_all();
 }
 
 impl RedbStore {
@@ -256,20 +337,26 @@ impl RedbStore {
 
         let (tx, rx) = bounded::<(u64, Batch)>(tuning.writer_channel_depth);
         let last_durable = Arc::new(AtomicU64::new(0));
+        let last_submitted = Arc::new(AtomicU64::new(0));
         let fsync_backpressure = Arc::new(AtomicU64::new(0));
         let durable_cv = Arc::new((Mutex::new(()), Condvar::new()));
+        let writer_alive = Arc::new(AtomicBool::new(true));
         let writer = {
             let db = Arc::clone(&db);
             let last_durable = Arc::clone(&last_durable);
             let durable_cv = Arc::clone(&durable_cv);
+            let writer_alive = Arc::clone(&writer_alive);
             std::thread::Builder::new()
                 .name("vd-store-writer".into())
-                .spawn(move || run_writer(db, rx, last_durable, durable_cv))
+                .spawn(move || run_writer(db, rx, last_durable, durable_cv, writer_alive))
                 .map_err(|e| StoreError::Spawn(e.to_string()))?
         };
         let handle = DurabilityHandle {
             last_durable: Arc::clone(&last_durable),
+            last_submitted: Arc::clone(&last_submitted),
             fsync_backpressure: Arc::clone(&fsync_backpressure),
+            durable_cv: Arc::clone(&durable_cv),
+            writer_alive: Arc::clone(&writer_alive),
         };
         let store = RedbStore {
             db,
@@ -277,10 +364,11 @@ impl RedbStore {
             staged: BTreeMap::new(),
             submit_tx: Some(tx),
             next_seq: 0,
-            last_submitted: 0,
+            last_submitted,
             last_durable,
             fsync_backpressure,
             durable_cv,
+            writer_alive,
             writer: Some(writer),
         };
         Ok((store, handle))
@@ -313,13 +401,13 @@ impl RedbStore {
     /// flush on `handle.is_durable_through(seq)` (the persist-before-effect gate, wired in Slice D).
     #[must_use]
     pub fn last_submitted(&self) -> u64 {
-        self.last_submitted
+        self.last_submitted.load(Ordering::Acquire)
     }
 
-    /// Block until every submitted batch is durable. Used by `Drop` (graceful shutdown) + the tests; the
-    /// bin uses the non-blocking [`DurabilityHandle`] watermark instead (never blocks the tick thread).
+    /// Block until every submitted batch is durable. Used by the tests; the bin uses the
+    /// [`DurabilityHandle`]'s own `wait_durable_through` (same park) gating the per-tick outbox flush.
     pub fn flush_blocking(&self) {
-        self.wait_durable_through(self.last_submitted);
+        self.wait_durable_through(self.last_submitted.load(Ordering::Acquire));
     }
 
     /// Park (not hot-spin) until `last_durable >= target`. Fast-path the common already-durable case; on a
@@ -331,27 +419,12 @@ impl RedbStore {
     /// hang the synchronous orchestrator thread forever. A refusal is never a loss: recovery rehydrates the
     /// last durable state + the Slice-2a producer re-drives idempotently.
     fn wait_durable_through(&self, target: u64) {
-        if self.last_durable.load(Ordering::Acquire) >= target {
-            return;
-        }
-        let (lock, cv) = &*self.durable_cv;
-        let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-        while self.last_durable.load(Ordering::Acquire) < target {
-            let (g, res) = cv
-                .wait_timeout(guard, WRITER_WAIT_POLL)
-                .unwrap_or_else(PoisonError::into_inner);
-            guard = g;
-            if res.timed_out()
-                && self.last_durable.load(Ordering::Acquire) < target
-                && self.writer.as_ref().is_some_and(JoinHandle::is_finished)
-            {
-                drop(guard);
-                panic!(
-                    "RedbStore: the durable writer thread died without reaching seq {target} — refusing to \
-                     hang the orchestrator (a refusal is never a loss; recovery rehydrates + re-drives)"
-                );
-            }
-        }
+        // ONE liveness signal shared with the handle: the `writer_alive` flag the writer clears on its single
+        // exit (the `JoinHandle` stays only for Drop's join). The shared park core handles the fast-path, the
+        // condvar wait, and the fail-loud escape.
+        park_until_durable(target, &self.last_durable, &self.durable_cv, || {
+            !self.writer_alive.load(Ordering::Acquire)
+        });
     }
 }
 
@@ -397,9 +470,10 @@ impl Store for RedbStore {
         // in-flight to ≤1 batch, so crash-loss is ≤1 batch. (D-alpha made the directory reconcile INCREMENTAL
         // — a `dirty`-delta drain that never reads the store back — so the off-tick writer no longer races a
         // reconcile read: the prior "scan reads T-1" coupling is GONE, leaving crash-loss bounding the sole job.)
-        if self.last_durable.load(Ordering::Acquire) < self.last_submitted {
+        let last_submitted = self.last_submitted.load(Ordering::Acquire);
+        if self.last_durable.load(Ordering::Acquire) < last_submitted {
             self.fsync_backpressure.fetch_add(1, Ordering::Relaxed);
-            self.wait_durable_through(self.last_submitted);
+            self.wait_durable_through(last_submitted);
         }
         if self.staged.is_empty() {
             return; // idle tick: nothing to submit
@@ -422,7 +496,7 @@ impl Store for RedbStore {
         match tx.send((seq, batch)) {
             Ok(()) => {
                 self.next_seq = seq;
-                self.last_submitted = seq;
+                self.last_submitted.store(seq, Ordering::Release);
             }
             Err(SendError((_, b))) => {
                 tracing::error!(
@@ -625,6 +699,87 @@ mod tests {
                 "Drop joined the writer + fsynced the pending batch (graceful shutdown loses nothing)"
             );
             assert_eq!(s.scan(b"k"), vec![(b"k".to_vec(), b(b"v"))]);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_handle_reports_submitted_durable_and_liveness() {
+        // Slice D: the bin gates each tick's outbox flush on the SIDECAR handle. Exercise the new surface —
+        // last_submitted (the parked seq), wait_durable_through (the persist-before-effect park), and
+        // writer_alive (the fail-loud liveness, which flips false once the writer exits on Drop's join).
+        let path = temp_path();
+        let (mut s, h) = open(&path);
+        assert_eq!(h.last_submitted(), 0, "nothing submitted at genesis");
+        assert!(h.writer_alive(), "the writer is spawned");
+        s.put(b"\x03k", &b(b"v"));
+        s.commit();
+        let seq = h.last_submitted();
+        assert_eq!(seq, 1, "one batch submitted, watermark visible through the handle");
+        h.wait_durable_through(seq); // parks until durable (or returns immediately on the fast path)
+        assert!(h.is_durable_through(seq), "durable after the wait");
+        assert_eq!(h.durable_through(), seq);
+        drop(s); // Drop joins the writer → it exits → liveness flips false (handle keeps the shared flag)
+        assert!(!h.writer_alive(), "the writer is gone after the store drops");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn redbstore_is_byte_identical_to_memstore_under_the_store_seam() {
+        // The RedbStore ARM of the D-alpha differential oracle. The node oracle proves the directory
+        // reconcile LOGIC is correct on a faithful Store (MemStore); this proves RedbStore IS faithful —
+        // byte-for-byte the same put/delete/commit/scan semantics as the proptested MemStore — so the two
+        // compose to incremental-reconcile == full-reconcile ON REDB. Drives a reconcile-shaped op sequence
+        // (PUTs, within-window last-write-wins, DELETEs, multi-prefix, an idle commit) against BOTH and
+        // compares each prefix scan after every window; a reopen proves the equivalence survives a kill-9.
+        use vd_sim::io::mem::MemStore;
+        let path = temp_path();
+        let (mut redb, h) = open(&path);
+        let mut mem = MemStore::new();
+        let windows: &[&[(&[u8], Option<&[u8]>)]] = &[
+            &[
+                (b"\x03a", Some(b"v1")),
+                (b"\x03b", Some(b"v2")),
+                (b"\x01s", Some(b"saga")),
+            ],
+            &[(b"\x03a", Some(b"v1b")), (b"\x03a", Some(b"v1c"))], // last-write-wins on \x03a
+            &[(b"\x03b", None)],                                   // delete
+            &[],                                                   // idle commit (nothing staged)
+            &[(b"\x03c", Some(b"v3")), (b"\x01s", None)],          // a put + a delete across prefixes
+        ];
+        for window in windows {
+            for (k, v) in *window {
+                match v {
+                    Some(val) => {
+                        redb.put(k, &b(val));
+                        mem.put(k, &b(val));
+                    }
+                    None => {
+                        redb.delete(k);
+                        mem.delete(k);
+                    }
+                }
+            }
+            redb.commit();
+            mem.commit();
+            h.wait_durable_through(h.last_submitted());
+            for prefix in [b"\x03".as_slice(), b"\x01".as_slice()] {
+                assert_eq!(
+                    redb.scan(prefix),
+                    mem.scan(prefix),
+                    "RedbStore diverged from MemStore after a window"
+                );
+            }
+        }
+        // REOPEN (the kill-9 round-trip): the durable RedbStore state still equals MemStore's final state.
+        drop(redb);
+        let (redb2, _h2) = open(&path);
+        for prefix in [b"\x03".as_slice(), b"\x01".as_slice()] {
+            assert_eq!(
+                redb2.scan(prefix),
+                mem.scan(prefix),
+                "RedbStore lost or changed durable state across a reopen"
+            );
         }
         let _ = std::fs::remove_file(&path);
     }

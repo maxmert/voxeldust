@@ -2,15 +2,17 @@
 //! endpoint (the 2am `curl`). The admin snapshot is republished after every tick
 //! through a lock-free cell — the HTTP task never touches the sim thread.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use vd_io_prod::admin::{SnapshotSource, admin_router};
 use vd_io_prod::mesh::{MeshConfig, spawn_mesh};
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
+use vd_io_prod::store::{RedbStore, StoreTuning};
 use vd_io_prod::trust::ClusterTrust;
-use vd_node::app::{NodeConfig, build_app};
-use vd_node::orchestrator::{OrchestratorConfig, admin_snapshot, register_orchestrator};
+use vd_node::app::{NodeConfig, TickPrologue, build_app};
+use vd_node::orchestrator::{OrchestratorConfig, admin_snapshot, register_orchestrator_with_store};
 use vd_sim::capability::NodeKind;
 use vd_sim::directory::DirectoryTuning;
 use vd_wire::admin::AdminSnapshot;
@@ -98,21 +100,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
     };
     liveness.validate()?;
-    // D-6 (audit D6-ROB-1): the WAL engine is built, but `register_orchestrator` injects a fresh
-    // IN-MEMORY `MemStore` (the durable redb backend is owed io-prod). So THIS BINARY is NON-DURABLE: a
-    // restart resets universe time to tick 0 and loses every in-flight transfer. LOUD at boot (never a
-    // silent non-durable production path — ROB-2 discipline) until io-prod swaps in the durable store.
-    // TWO production preconditions are owed (DEFERRED.md D-6), not just the Store: (1) the durable redb
-    // WAL backend; (2) a transport that REDELIVERS an in-flight ack across a receiver restart — the
-    // `MeshTransport` is at-most-once today, so a producer-less recovery phase (`AwaitAdopt`) would wedge
-    // on a real kill-9 even WITH a durable store. Recovery is proven only vs the harness at-least-once model.
+    // D-6 Slice D: the DURABLE redb Store (Store A — directory + saga WAL + clock ceiling). HR1: durable
+    // state lives on a PERSISTENT volume keyed by path, NEVER under /tmp (the old /tmp/{shard_id} data-loss
+    // bug). VD_STORE_PATH is REQUIRED (no silent in-memory fallback) and a temp path is REJECTED LOUD at
+    // boot. A non-empty file is RE-HYDRATED (clock resumes forward, directory + in-flight sagas restore +
+    // re-drive); an empty/new file is genesis. The off-tick writer fsyncs off the tick thread (C2).
+    let store_path = PathBuf::from(env.string("VD_STORE_PATH")?);
+    let tmp = std::env::temp_dir();
+    let under_temp = store_path.starts_with(&tmp) || store_path.starts_with("/tmp");
+    // VD_STORE_EPHEMERAL_OK (present = opt-in) is the EXPLICIT dev/test escape: a throwaway local cluster
+    // legitimately stores under $TMPDIR (cleaned by `dev-cluster down`). Production OMITS it, so a temp-dir
+    // path is a HARD boot reject (HR1: durable state on a persistent volume, never the old /tmp data-loss
+    // bug) — never a silent ephemeral production deployment.
+    let ephemeral_ok = env.string("VD_STORE_EPHEMERAL_OK").is_ok();
+    if under_temp && !ephemeral_ok {
+        return Err(format!(
+            "VD_STORE_PATH ({}) is under a temp dir ({}) — durable orchestrator state (directory + saga \
+             WAL + clock ceiling) MUST live on a persistent volume (HR1; the old /tmp data-loss bug). Set \
+             VD_STORE_EPHEMERAL_OK=1 ONLY for a throwaway dev/test cluster. Refusing to boot.",
+            store_path.display(),
+            tmp.display()
+        )
+        .into());
+    }
+    if under_temp {
+        tracing::warn!(
+            "orchestrator durable store is under a TEMP dir ({}) with VD_STORE_EPHEMERAL_OK set — this is a \
+             dev/test cluster; recovery survives a restart but NOT a host reboot / tmp reap. Never production.",
+            store_path.display()
+        );
+    }
+    if let Some(parent) = store_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let store_tuning = StoreTuning {
+        writer_channel_depth: env
+            .parse_or("VD_STORE_CHANNEL_DEPTH", StoreTuning::default().writer_channel_depth)?,
+    };
+    let (store, durability) = RedbStore::open(&store_path, store_tuning)?;
+    // The Store is now durable; the REMAINING production precondition (DEFERRED.md D-6) is the transport:
+    // the mesh is at-most-once, so a producer-less recovery phase (`AwaitAdopt`) could wedge on a real
+    // kill-9 even WITH this durable store — recovery is proven vs the harness at-least-once model. A
+    // redelivering transport is owed before a rolling production deploy.
     tracing::warn!(
-        "orchestrator is NON-DURABLE (in-memory Store) AND the mesh transport is at-most-once: a restart \
-         RESETS universe time and LOSES all in-flight transfers, and even with a durable store a \
-         producer-less recovery phase can wedge without transport redelivery. The redb WAL backend AND a \
-         redelivering transport are owed (io-prod). Do not run a production deployment until both land."
+        "orchestrator durable store at {} (redb, off-tick fsync). REMAINING production precondition \
+         (DEFERRED.md D-6): the mesh transport is at-most-once, so a producer-less recovery phase \
+         (AwaitAdopt) could wedge on a real kill-9 even with this durable store; a redelivering transport \
+         is owed before a rolling production deploy.",
+        store_path.display()
     );
-    register_orchestrator(
+    register_orchestrator_with_store(
         world,
         schedule,
         &OrchestratorConfig {
@@ -127,6 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // own roster from the shard list). No env knob added yet (no-unilateral-deps).
             roster: std::collections::BTreeMap::new(),
         },
+        Box::new(store),
     );
 
     // The admin endpoint: republished after every tick, served off-thread.
@@ -142,9 +180,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("admin endpoint serves");
     });
 
+    // PERSIST-BEFORE-EFFECT (Slice D parked-flush): split each tick into run_schedule (stages + submits
+    // this tick's durable batch via the group-commit barrier) and flush_outbox (sends the tick's egress),
+    // and DEFER the outbox by one tick — flush tick T's sends only after batch T is durable. The off-tick
+    // writer ~always finishes within one tick at 50Hz, so the deferred flush waits on an already-durable
+    // batch (the wait IS the disk-stall back-pressure, and fails LOUD if the writer died — a refusal is
+    // never a loss). No effect ever leaves the orchestrator before the state authorizing it is durable.
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
+    let mut parked: Option<(TickPrologue, u64)> = None;
     loop {
-        let _ = node.step_tick();
+        // Flush the PREVIOUS tick's outbox now that its batch is durable. The world outbox still holds only
+        // that tick's sends (this runs before the next run_schedule refills it), so the defer is exact.
+        if let Some((prologue, seq)) = parked.take() {
+            durability.wait_durable_through(seq);
+            let _ = node.flush_outbox(prologue);
+        }
+        // Advance: run this tick's schedule (commit() submits this tick's batch); park its seq for next tick.
+        let prologue = node.run_schedule();
+        parked = Some((prologue, durability.last_submitted()));
         cell.store(Arc::new(admin_snapshot(node.world_mut())));
         let _ = pacer.wait();
     }

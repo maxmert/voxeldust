@@ -742,7 +742,7 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 - **▶ Slice P3-PERSIST-1 — the redb backend (design `wf_83d5a428`, judge-panel of 4; user-decided: Store A redb
   now + single-file/split-ready-seam):** ONE generic `RedbStore` behind the frozen `sim::io::Store` seam in
   `crates/io-prod/src/store.rs`, TARGETING the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling — the
-  actual bin wiring lands in Slice D; the prod orchestrator is still MemStore + the loud non-durable boot-warn); the
+  the bin wiring landed in Slice D-gamma — the prod orchestrator now opens `RedbStore` from `VD_STORE_PATH`; the
   shard per-RealmId Store B (P6/P7) reuses the SAME type verbatim (variance is DATA — path + keyspace — never CODE,
   HR3). Sub-slices: **✅ C1 LANDED (`63b637d`, + fail-loud hardening from audit `wf_66cb8f06`)** — the SYNCHRONOUS
   durable backend (commit() = one redb WriteTransaction + inline fsync; 6 durability tests across a real reopen; redb
@@ -800,16 +800,40 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   NOT the combat hot path (hit-reg is shard+gateway, P5/P11) — it is only on the TRANSFER/authority path; the
   PvP-critical property is never duplicating/wedging a player mid-transfer, which A guarantees by construction; deeper
   pipelines (B/C) trade durability for throughput the batch-bounded single orchestrator does not need (the real
-  scale lever is the per-Realm PARALLEL fsync pool for Store B, already designed). **D** = wire `RedbStore` into the
-  orchestrator bin (replace the loud-non-durable `MemStore`) + split `step_tick` into run/flush for the Variant-A
-  deferred-flush gate + the process-tier SIGKILL-mid-fsync crash proof (Tier-B ratcheted floor); **A** =
-  precondition #3 (`WAL_FORMAT_VERSION` + `universe_epoch_id` byte + fallible quarantining decode replacing the bare
-  `.expect` decodes) + the `StoreKey::Tombstone` family; **B** = precondition #2 (incremental directory reconcile +
-  idle-tick dirty-guard, with a test-only delete-all-then-put differential oracle). The C1 backend does NOT directly
-  unblock D-37 Slice 4 (that needs Store B + P7 `player_ckpt`, genuinely P6/P7); precondition **#1** (the
-  `BatchHandoff::AwaitAdopt` re-solicit egress) stays OWED as the immediate post-redb fast-follow (a durable Store A
-  ALONE does not make prod kill-9 recovery work — the at-most-once `MeshTransport` boot-warn clause STAYS until #1
-  lands). [[D-37]] Slice 4 + [[D-36]] unaffected.
+  scale lever is the per-Realm PARALLEL fsync pool for Store B, already designed). **Slice D (design `wf_2d4ab8d4`,
+  decision A — renew participates) is wiring the durable bin in 4 gate-green sub-slices:**
+  - **✅ D-alpha LANDED (`02db31d`)** — precondition #2, the INCREMENTAL directory reconcile. `DirectoryCore` carries
+    a per-tick `dirty: BTreeMap<DirectoryKey, Option<OwnerRecord>>` delta set (every actual-row-change arm of
+    grant/renew/revoke/lock/commit/abort_cas/abort_clear stages `Some`=PUT / `None`=DELETE; no-change arms stage
+    nothing; within-tick collapse free); the group-commit barrier drains `take_dirty()` straight into the same
+    `commit()`, REPLACING the O(directory) delete-all-then-put-current scan. This CURES the COMP-2 race the C2 review
+    surfaced: the reconcile no longer READS the store back, so the off-tick writer can never race a reconcile read
+    (the prior "scan reads T-1" coupling is gone). 14 directory unit pins + a saga_runtime DIFFERENTIAL ORACLE
+    (incremental == full, byte-for-byte, across PUT-new/refresh/replace/DELETE + a kill-9 rebuild). 100% Tier-A.
+  - **✅ D-beta LANDED (`de911e1`)** — split `step_tick` into `run_schedule()` (stages+submits the durable batch) +
+    `flush_outbox(TickPrologue)` (sends the egress); `step_tick` is a thin back-to-back wrapper (harness/MemStore
+    path BYTE-FOR-BYTE unchanged). The seam the Variant-A deferred-flush needs. 100% Tier-A.
+  - **✅ D-gamma LANDED** — wire `RedbStore` into the orchestrator bin. `VD_STORE_PATH` REQUIRED (no in-memory
+    fallback) + HR1 persistent-volume guard (a `/tmp`/`$TMPDIR` path is a HARD boot reject unless the explicit
+    dev/test `VD_STORE_EPHEMERAL_OK` opt-in is set — `orchestrator_env` sets it for dev clusters + the process
+    tests, whose stores live in the slot work dir reaped by `down`). The PARKED-FLUSH loop: defer tick T's outbox
+    until batch T is durable (`DurabilityHandle::wait_durable_through` parks on the writer notify, fails LOUD if the
+    writer died) — persist-before-effect, the wait IS the disk-stall back-pressure (~0 at 50Hz). `DurabilityHandle`
+    gained `last_submitted()` / `writer_alive()` / `wait_durable_through()` (the shared `park_until_durable` core +
+    a `writer_alive` flag the writer clears on its single exit). RedbStore≡MemStore differential (the RedbStore arm
+    of the oracle: faithful Store ⇒ incremental==full ON REDB) + a handle unit test; process tier (process_parity /
+    dev_cluster_smoke / client_load) GREEN on the real RedbStore-backed orchestrator over QUIC. The boot-warn is
+    NARROWED to the one remaining precondition (at-most-once transport). io-prod Tier-B; Tier-A still 100%.
+  - **⏭ D-delta NEXT** — the process-tier SIGKILL-mid-fsync crash proof (`crates/bins/tests/`) via a feature-gated
+    writer-pause hook + the anti-theater fresh-empty twin + `%c` continuous-mode coverage merge (Tier-B ratcheted
+    floor).
+  - **STILL OWED after Slice D** (separate items, ledgered): precondition **#1** (the `BatchHandoff::AwaitAdopt`
+    re-solicit egress — a durable Store A ALONE does not make prod kill-9 recovery work; the at-most-once
+    `MeshTransport` boot-warn clause STAYS until #1 lands); precondition **#3** (`WAL_FORMAT_VERSION` +
+    `universe_epoch_id` byte + fallible quarantining decode replacing the bare `.expect` decodes) + the
+    `StoreKey::Tombstone` family; the **durable-outbox** refinement (a permanent-fsync-fault re-drive that loses
+    nothing). The redb backend does NOT directly unblock [[D-37]] Slice 4 (needs Store B + P7 `player_ckpt`, P6/P7);
+    [[D-36]] unaffected.
 - **✅ S0–S3 LANDED (design `wf_0f8321dc`, doc `d6_saga_wal.md`):** the orchestrator now durably persists its
   saga set + go-tokens + directory + clock ceiling through the `sim::io::Store` seam (`MemStore` staged/committed
   two-tier; redb is the io-prod backend, DEFERRED — NO new dep). `commit_result` stages the QUIESCENT
