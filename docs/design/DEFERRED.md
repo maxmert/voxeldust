@@ -741,7 +741,8 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
 ### D-6 🟧 Durable saga WAL: S0–S5 LANDED (persist+recover ENGINE + e2e orchestrator kill-9 cells); the redb backend IN PROGRESS (Slice P3-PERSIST-1)
 - **▶ Slice P3-PERSIST-1 — the redb backend (design `wf_83d5a428`, judge-panel of 4; user-decided: Store A redb
   now + single-file/split-ready-seam):** ONE generic `RedbStore` behind the frozen `sim::io::Store` seam in
-  `crates/io-prod/src/store.rs`, wired to the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling); the
+  `crates/io-prod/src/store.rs`, TARGETING the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling — the
+  actual bin wiring lands in Slice D; the prod orchestrator is still MemStore + the loud non-durable boot-warn); the
   shard per-RealmId Store B (P6/P7) reuses the SAME type verbatim (variance is DATA — path + keyspace — never CODE,
   HR3). Sub-slices: **✅ C1 LANDED (`63b637d`, + fail-loud hardening from audit `wf_66cb8f06`)** — the SYNCHRONOUS
   durable backend (commit() = one redb WriteTransaction + inline fsync; 6 durability tests across a real reopen; redb
