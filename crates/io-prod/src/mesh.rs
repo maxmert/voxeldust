@@ -28,7 +28,7 @@ use vd_core::{MsgId, NodeId};
 use vd_sim::io::{BoundedInbox, Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
 
 use crate::trust::ClusterTrust;
-use crate::{ProdIoError, WireFrame, write_wireframe};
+use crate::{DatagramFrame, ProdIoError, write_wireframe};
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -322,7 +322,7 @@ async fn serve_connection(
     });
     // Unreliable datagrams on the same connection.
     while let Ok(datagram) = connection.read_datagram().await {
-        if let Ok(frame) = postcard::from_bytes::<WireFrame>(&datagram) {
+        if let Ok(frame) = postcard::from_bytes::<DatagramFrame>(&datagram) {
             push_inbox(
                 &inbox,
                 &stats,
@@ -430,9 +430,9 @@ async fn write_frame(
         }
         Reliability::Unreliable => {
             // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a
-            // stream concept). TooLarge is a loud failure of the caller's framing, not a transport
-            // error to bounce.
-            let payload = postcard::to_allocvec(&WireFrame {
+            // stream concept) and carry the BARE DatagramFrame (R1' hot/cold split — no reliability
+            // metadata on the 20Hz path). TooLarge is a loud failure of the caller's framing.
+            let payload = postcard::to_allocvec(&DatagramFrame {
                 from: local,
                 class: frame.class,
                 bytes: frame.bytes.to_vec(),

@@ -44,16 +44,33 @@ use vd_sim::io::{Bytes, Inbound, MsgClass, SendError, Transport};
 
 use crate::trust::{ClusterTrust, TrustError};
 
-/// The on-stream frame payload: a postcard of this struct, carried inside the `wire::framing`
+/// The RELIABLE on-stream frame payload: a postcard of this struct, carried inside the `wire::framing`
 /// stream frame (`[u32_be total_len][u8 codec_flags][payload]`). io-prod routes ALL stream framing
 /// through `wire::framing` (the ONE codec/framing home — HR3 + the `codec_flags` reserved-bit
 /// forward-compat path); the cap is `wire::framing::MAX_STREAM_FRAME_BYTES`.
+///
+/// R1' (the redelivering-transport hot/cold split): this type rides the RELIABLE uni-stream path ONLY.
+/// The at-least-once metadata (incarnation/epoch/seq) is added to THIS type in R2'/R3' — it can grow
+/// without touching the unreliable hot path because that path now has its own [`DatagramFrame`].
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct WireFrame {
     from: NodeId,
     class: MsgClass,
     /// The on-wire payload is a plain `Vec<u8>` (the seam's `Bytes = Arc<[u8]>` is
     /// an in-process sharing optimization; it converts at the serialize boundary).
+    bytes: Vec<u8>,
+}
+
+/// The UNRELIABLE datagram payload (R1'): a BARE `{from, class, bytes}` carried QUIC-datagram-delimited
+/// (NO `wire::framing` stream framing — `codec_flags` is a stream concept). Split from [`WireFrame`] so
+/// the 20Hz latest-wins snapshot/input/ghost-delta hot path carries ZERO reliability metadata and never
+/// touches the (future) dedup state — the PvP hot path stays byte-for-byte what it is today (R2). It is
+/// CURRENTLY byte-identical to `WireFrame` (a `serialize_bytes_match` test pins that), and stays bare as
+/// `WireFrame` grows its at-least-once fields in R2'/R3'.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DatagramFrame {
+    from: NodeId,
+    class: MsgClass,
     bytes: Vec<u8>,
 }
 
@@ -402,6 +419,34 @@ pub(crate) async fn read_frames_into(
                 class: frame.class,
                 bytes: vd_sim::io::bytes(frame.bytes),
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::{DatagramFrame, WireFrame};
+    use vd_core::NodeId;
+    use vd_sim::io::MsgClass;
+
+    #[test]
+    fn datagram_frame_is_byte_identical_to_the_pre_split_reliable_frame() {
+        // R1' hot/cold split: the 20Hz datagram payload must NOT change on the wire. DatagramFrame is
+        // the exact {from,class,bytes} shape WireFrame had on the datagram path before the split, so the
+        // PvP hot path + the path-MTU budget are unchanged (R2). WireFrame grows seq/incarnation in
+        // R2'/R3'; the datagram path stays bare BECAUSE it now uses this separate type.
+        let (from, class, bytes) = (NodeId(42), MsgClass::Snapshot, vec![1u8, 2, 3, 4, 5]);
+        let dg = postcard::to_allocvec(&DatagramFrame {
+            from,
+            class,
+            bytes: bytes.clone(),
+        })
+        .expect("postcard encodes DatagramFrame");
+        let wf = postcard::to_allocvec(&WireFrame { from, class, bytes })
+            .expect("postcard encodes WireFrame");
+        assert_eq!(
+            dg, wf,
+            "DatagramFrame must encode byte-identically to the pre-split datagram WireFrame (zero hot-path wire change)"
         );
     }
 }
