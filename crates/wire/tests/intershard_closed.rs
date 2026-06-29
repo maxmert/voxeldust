@@ -206,6 +206,7 @@ fn every_arm() -> Vec<InterShardFlow> {
         // DEDICATED arm carrying the `ReHomeState` payload, never a `Promote` reuse (no-repurpose).
         InterShardFlow::ReHome(vd_wire::intershard::ReHomeCmd {
             transfer: TransferId(10),
+            universe_epoch: EpochId(1),
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             new_fence: Fence(6),
             step_id: vd_wire::intershard::RE_HOME_STEP,

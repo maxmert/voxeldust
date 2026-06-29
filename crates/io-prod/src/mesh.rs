@@ -152,6 +152,8 @@ struct PeerLane {
     tx: tokio::sync::mpsc::Sender<OutFrame>,
 }
 
+/// DRY pin (audit `wf_2c963246`): byte-identical to `lib.rs`'s `OutboundFrame`; unify into ONE crate-root
+/// struct in R2'/R3' so the loopback bridge and the mesh writer cannot drift their frame envelope.
 struct OutFrame {
     to: NodeId,
     class: MsgClass,

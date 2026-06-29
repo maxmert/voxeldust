@@ -25,7 +25,7 @@ use vd_core::glam::DVec3;
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::rng::SplitMix64;
-use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
+use vd_core::{AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
     DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP,
@@ -446,6 +446,18 @@ pub struct StubStats {
     /// `Transfer` envelopes whose payload kind 1d.1 does not consume (`InitialSpawn` /
     /// `TransientBatch`) — a counted no-op, never a panic. 0 in a 1d.1 crossing run.
     pub crossings_unhandled: u64,
+    /// `Transfer` envelopes carrying a `universe_epoch` that does NOT match this shard's current
+    /// clock epoch — REFUSED at ingress (never applied, never buffered, never acked). The
+    /// transfer_protocol §3.3 fail-safe: "a leg whose epoch_id mismatches the current epoch is
+    /// discarded, not resumed — no entity placed at a stale celestial position" (the R6/R7
+    /// epoch-reset class the rebuild exists to kill). The source stamps `clock.epoch` on every
+    /// envelope; pre-this-gate the field was carried-but-unread at the receiver. Mirrors the
+    /// follower clock's `epoch_mismatches` counted-ignore. 0 in any single-epoch run (P3 runs one
+    /// persisted orchestrator epoch that never resets mid-run); becomes load-bearing once a clean
+    /// re-genesis or a delayed redelivery (the owed redelivering transport) can carry a prior-epoch
+    /// envelope across a restart. `schema_version` version-floor validation rides the TLV-blob
+    /// handshake owed at D-31 (a distinct, deliberately-deferred concern).
+    pub crossings_epoch_mismatch: u64,
     /// SOURCE self-fence redeliveries that found the dot ALREADY demoted to a Ghost — a counted
     /// no-op (the idempotency guard's taken arm). 1d.4b retains the source as a Ghost instead of
     /// `dots.remove`, so a second foreign-owner reply must NOT re-demote; this proves the guard.
@@ -486,6 +498,15 @@ pub struct StubStats {
     /// `ReHome` that arrived while this target does NOT hold its realm — DROPPED as a counted no-op
     /// (degrade, never panic; the re-home target normally holds its realm, committed by the orchestrator).
     pub re_home_without_realm: u64,
+    /// `ReHome` adopt carrying a `universe_epoch` that does NOT match this shard's current clock epoch —
+    /// REFUSED at ingress (never journaled/adopted/acked). The transfer_protocol §3.3 fail-safe applied
+    /// UNIFORMLY to the SECOND pose-placing ingress (the first is the crossing →
+    /// [`StubStats::crossings_epoch_mismatch`]); mirrors it exactly. 0 in any single-epoch run (P3 runs one
+    /// persisted orchestrator epoch that never resets mid-run); load-bearing once a clean re-genesis or a
+    /// delayed redelivery (the owed redelivering transport) can carry a prior-epoch `ReHomeCmd` across a
+    /// restart — exactly the player/ship re-home + P7 checkpoint-reload paths that must never place an
+    /// entity at a stale celestial position.
+    pub re_home_epoch_mismatch: u64,
     /// SOURCE `GhostFlow::Delta` (1d.5b.3b) APPLIED — the fed pose + `GhostRefresh` written into the
     /// retained ghost dot. The headline ghost-feed counter.
     pub ghost_delta_applied: u64,
@@ -1515,6 +1536,17 @@ fn on_re_home(
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
+    // §3.3 epoch fail-safe, UNIFORM with the crossing ingress (`on_transfer_envelope`): a re-home adopt
+    // carrying a `universe_epoch` that does not match this shard's current epoch is REFUSED — never
+    // journaled, adopted, or acked — so no entity is reconstructed at a stale celestial position. The
+    // re-home is the SECOND pose-placing ingress; guarding it here makes §3.3 cover BOTH. A cross-epoch
+    // re-home is a defunct OLD-epoch saga (only reachable across a re-genesis / a delayed redelivery): NOT
+    // acking is correct — the current-epoch orchestrator is not waiting on it (same rationale as the
+    // crossing arm's no-ack-on-mismatch).
+    if cmd.universe_epoch != clock.epoch {
+        stats.re_home_epoch_mismatch += 1;
+        return;
+    }
     let transfer = cmd.transfer; // `ReHomeCmd` is Clone-not-Copy (the pose payload) — capture before the move
     match applied.journal_step(transfer, RE_HOME_STEP) {
         StepOutcome::FirstApply => {
@@ -1788,6 +1820,7 @@ fn flush_target(dot: &Dot, entity: EntityId) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn on_transfer_envelope(
     env: TransferEnvelope,
+    current_epoch: EpochId,
     config: &StubConfig,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
@@ -1796,6 +1829,19 @@ fn on_transfer_envelope(
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
+    // transfer_protocol §3.3 fail-safe: a crossing leg whose `universe_epoch` does not match this
+    // shard's current epoch is REFUSED — discarded, never applied/buffered/acked — so no entity is
+    // ever placed at a stale celestial position. Checked here (before the payload match) so it
+    // covers every payload of THIS (`Transfer`) arm — durable crossing, transient batch, initial spawn —
+    // and a stale-epoch envelope cannot even strand a `PendingCrossings` entry. The OTHER pose-placing
+    // ingress, `on_re_home` (the `InterShardFlow::ReHome` arm), carries the SAME guard, so §3.3 is UNIFORM
+    // across both. Counted + fail-loud, mirroring the follower clock's `epoch_mismatches` counted-ignore.
+    // (Epoch is exact-match by construction — unlike `schema_version`, a version FLOOR owed at D-31's
+    // TLV-blob handshake.)
+    if env.universe_epoch != current_epoch {
+        stats.crossings_epoch_mismatch += 1;
+        return;
+    }
     let (entity, pose) = match env.payload {
         TransitionPayload::StubCrossing { entity, pose, .. } => (entity, pose),
         // D-7: the DEST adopts a transient batch into its uncounted `Arriving` tier + acks
@@ -2371,6 +2417,7 @@ fn on_directory_reply(
         Ok(InterShardFlow::Transfer(env)) => {
             on_transfer_envelope(
                 env,
+                clock.epoch,
                 config,
                 dots,
                 applied,
@@ -6108,6 +6155,7 @@ mod tests {
             MsgClass::Saga,
             &InterShardFlow::ReHome(ReHomeCmd {
                 transfer: TransferId(7),
+                universe_epoch: vd_core::EpochId(1),
                 subject,
                 new_fence,
                 step_id: RE_HOME_STEP,
@@ -6424,6 +6472,88 @@ mod tests {
         assert!(
             !acked(&sent, TransferId(7)),
             "an unhandled payload is not acked"
+        );
+    }
+
+    #[test]
+    fn a_stale_epoch_crossing_is_refused() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]);
+        // A crossing minted under epoch 2 while this shard's clock epoch is 1 (the rig default) — a
+        // delayed redelivery across a re-genesis, or a clock-desync bug. Refused at the ingress
+        // BEFORE the payload match and BEFORE find-dot: counted, never applied, never buffered,
+        // never acked (transfer_protocol §3.3 fail-safe — no entity placed at a stale celestial
+        // position). This exercises the mismatch arm of the epoch gate; every other crossing test
+        // exercises the match arm (rig clock epoch == envelope epoch == EpochId(1)).
+        let env = InterShardFlow::Transfer(TransferEnvelope {
+            transfer_id: TransferId(7),
+            universe_epoch: vd_core::EpochId(2),
+            schema_version: vd_wire::intershard::TRANSFER_SCHEMA_VERSION,
+            fence: Fence(2),
+            step_id: STUB_CROSSING_STEP,
+            class: vd_core::entity_kind::DurabilityClass::Durable,
+            payload: TransitionPayload::StubCrossing {
+                entity: SUBJECT,
+                from_realm: FROM_REALM,
+                to_realm: TO_REALM,
+                pose: crossing_pose(),
+                state: vec![],
+            },
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &env)]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_epoch_mismatch,
+            1
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
+        assert_eq!(rig.world.resource::<StubStats>().crossings_buffered, 0);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].pose.pos,
+            DVec3::ZERO,
+            "a stale-epoch crossing does not move the dot"
+        );
+        assert!(
+            !acked(&sent, TransferId(7)),
+            "a stale-epoch crossing is not acked"
+        );
+    }
+
+    #[test]
+    fn a_stale_epoch_re_home_is_refused() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let session = SessionId(SUBJECT.0); // the deterministic clientless re-home session key
+        // A re-home minted under epoch 2 while this shard's clock epoch is 1 (the rig default) — a delayed
+        // redelivery across a re-genesis. Refused at the ingress BEFORE journal/adopt/ack: counted, no dot
+        // created, no PromoteAck. The §3.3 fail-safe, UNIFORM with the crossing arm
+        // (a_stale_epoch_crossing_is_refused). Exercises the mismatch arm of the re-home epoch gate; every
+        // other re-home test exercises the match arm (rig clock epoch == cmd epoch == EpochId(1)).
+        let env = InterShardFlow::ReHome(ReHomeCmd {
+            transfer: TransferId(7),
+            universe_epoch: vd_core::EpochId(2),
+            subject: DirectoryKey::Entity(SUBJECT),
+            new_fence: Fence(2),
+            step_id: RE_HOME_STEP,
+            state: ReHomeState::PoseOnly(crossing_pose()),
+            source: NodeId(99),
+        });
+        let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &env)]);
+        assert_eq!(rig.world.resource::<StubStats>().re_home_epoch_mismatch, 1);
+        assert_eq!(rig.world.resource::<StubStats>().re_home_adopted, 0);
+        assert!(
+            !rig.world.resource::<Dots>().0.contains_key(&session),
+            "a stale-epoch re-home creates no dot"
+        );
+        assert!(
+            !saga_ack_to_orch(
+                &sent,
+                TransferControlAck::PromoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "a stale-epoch re-home is not acked"
         );
     }
 

@@ -74,6 +74,9 @@ pub(crate) struct DatagramFrame {
     bytes: Vec<u8>,
 }
 
+/// The sim-thread→writer queue item for the loopback bridge. DRY pin (audit `wf_2c963246`): byte-identical
+/// to `mesh.rs`'s `OutFrame` — unify both into ONE crate-root struct in R2'/R3' (when the at-least-once
+/// seq/incarnation/epoch metadata lands on the reliable path), so the two transports cannot drift.
 #[derive(Debug)]
 struct OutboundFrame {
     to: NodeId,

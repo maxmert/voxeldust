@@ -629,11 +629,13 @@ fn build_rehome(
     ctx: &SagaCtx,
     new_fence: Fence,
     flush_pose: Option<StampedPose>,
+    epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let _entity = ctx.subject.transfer_subject_entity()?;
     let pose = flush_pose?;
     Some(InterShardFlow::ReHome(ReHomeCmd {
         transfer: ctx.transfer,
+        universe_epoch: epoch,
         subject: ctx.subject,
         new_fence,
         step_id: RE_HOME_STEP,
@@ -650,9 +652,10 @@ fn emit_rehome(
     new_fence: Fence,
     target: NodeId,
     flush_pose: Option<StampedPose>,
+    epoch: EpochId,
     outbox: &mut OutboundBox,
 ) {
-    match build_rehome(ctx, new_fence, flush_pose) {
+    match build_rehome(ctx, new_fence, flush_pose, epoch) {
         Some(rehome) => outbox.push_flow(target, MsgClass::Saga, &rehome),
         None => tracing::warn!(
             transfer = ctx.transfer.0,
@@ -784,7 +787,7 @@ fn run_to_quiescence(
                 // pose. The Some/None branch lives in `emit_rehome` (unit-tested both ways), so this arm
                 // stays a branchless dispatch (HR5). Pure egress (the target's `PromoteAck` rides back).
                 SagaAction::ReHomeAdopt { new_fence, target } => {
-                    emit_rehome(ctx, new_fence, target, flush_pose, outbox);
+                    emit_rehome(ctx, new_fence, target, flush_pose, epoch, outbox);
                 }
                 // D-7: the batched `TransientGo` go-token IS the transient commit point (HR2 — the
                 // SAME `CasWon` feedback as the durable CAS, fanned out by `commit_action`, NEVER a
@@ -4024,6 +4027,7 @@ mod tests {
         // The DEDICATED ReHome adopt (NOT a Promote) was emitted to the target from the stashed pose.
         let expected = InterShardFlow::ReHome(ReHomeCmd {
             transfer: XFER,
+            universe_epoch: EpochId(1),
             subject: subject(),
             new_fence: Fence(2),
             step_id: RE_HOME_STEP,
@@ -4086,6 +4090,7 @@ mod tests {
         // The dedicated ReHome adopt was RE-EMITTED to the live target from the stashed pose.
         let expected = InterShardFlow::ReHome(ReHomeCmd {
             transfer: XFER,
+            universe_epoch: EpochId(1),
             subject: subject(),
             new_fence: Fence(2),
             step_id: RE_HOME_STEP,
@@ -4122,16 +4127,16 @@ mod tests {
             ..ctx(DurabilityClass::Durable, Fence(1))
         };
         assert!(
-            build_rehome(&realm_ctx, Fence(2), Some(flushed_pose())).is_none(),
+            build_rehome(&realm_ctx, Fence(2), Some(flushed_pose()), EpochId(1)).is_none(),
             "non-Entity subject ⇒ None"
         );
         let entity_ctx = ctx(DurabilityClass::Durable, Fence(1)); // subject() is an Entity
         assert!(
-            build_rehome(&entity_ctx, Fence(2), None).is_none(),
+            build_rehome(&entity_ctx, Fence(2), None, EpochId(1)).is_none(),
             "missing flushed pose ⇒ None"
         );
         assert!(
-            build_rehome(&entity_ctx, Fence(2), Some(flushed_pose())).is_some(),
+            build_rehome(&entity_ctx, Fence(2), Some(flushed_pose()), EpochId(1)).is_some(),
             "Entity subject + a stashed pose ⇒ Some"
         );
         // emit_rehome's None arm: a non-Entity re-home adopt emits NOTHING (the LOUD no-op).
@@ -4141,6 +4146,7 @@ mod tests {
             Fence(2),
             NodeId(9),
             Some(flushed_pose()),
+            EpochId(1),
             &mut outbox,
         );
         assert!(

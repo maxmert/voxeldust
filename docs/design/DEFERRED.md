@@ -26,6 +26,22 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   path it is produced as `vec![]` (the pose crosses as a TYPED field on the crossing, not through the trait). There is
   no kind-generic serialize, no spawn-from-tags reconstruction, no `precondition` spatial gate, and crucially no
   `rebind_refs` (the method that re-homes a ship's `ChildOf` passengers and a block's frame anchor at the dest).
+  The envelope's sibling `schema_version: u16` field (`wire/src/intershard.rs` `TransferEnvelope`) is likewise
+  stamped-but-unvalidated at the receiver today — the per-kind version-FLOOR check (writer-N+1/reader-N, the
+  `kind_blob_evolution` gate) is part of THIS seam and lands with the TLV blob (1d.6). By contrast the
+  `universe_epoch` sibling is an EXACT-match fail-safe that is NOT deferred: it is validated NOW at BOTH
+  pose-placing ingresses — the crossing (`sim/src/stub.rs` `on_transfer_envelope` → `crossings_epoch_mismatch`)
+  AND the D-37 forward re-home adopt (`sim/src/stub.rs` `on_re_home` → `re_home_epoch_mismatch`; `ReHomeCmd`
+  gained a `universe_epoch` field, stamped by `build_rehome`) — so transfer_protocol §3.3 ("no entity placed at a
+  stale celestial position") is UNIFORM across every pose-placing leg (audits `wf_032b80eb` + `wf_2c963246` H1).
+  **Cold-start ordering caveat (audit `wf_2c963246`, MEDIUM):** the stub schedule does NOT explicitly order
+  `observe_clock_syncs` (the follower) `.before` the inbound dispatch (unlike the orchestrator's explicit `.chain` in
+  `orchestrator.rs`), so a crossing/re-home processed on a tick before the FIRST `ClockSync` (epoch still default
+  `EpochId(0)`) would be FALSE-rejected against a valid in-epoch leg. Self-healing (the saga re-drives at-least-once
+  and is accepted once the epoch syncs) + practically unreachable (a Transfer/ReHome arrives many ticks after
+  login→grants→sync), so MEDIUM — but make the ordering explicit (`.before(process_inbound)`, matching the
+  orchestrator) when the stub schedule is next touched, so the fail-closed gate's epoch-known precondition is
+  structural rather than insertion-order luck.
 - **WHY this is an INTERIM, not a defect (the deferral is sound):** the trait's methods have NOTHING to do yet. Only
   single-dot Players cross today, and a Player's entire transferable state is its pose — already carried as a TYPED
   `pose` field on the `StubCrossing` (never the opaque blob). `rebind_refs` has no refs to rebind until a COMPOUND kind
@@ -312,7 +328,14 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
    single-authority `route_input`. ⚠️ RISK: a P6 implementer writes the edit locally on the authority shard = the exact
    HR1-forbidden anti-pattern. **Owed (P6):** a reliable discrete edit action + gateway realm-ownership resolution via
    the directory `Realm` key (reuse the [[D-32]] `coordinator_of` resolver) + the `InterShardFlow::BlockEdit` carrier
-   (a reserved arm; additive). WHEN: P6 (block edits + persistence).
+   (a reserved arm; additive). WHEN: P6 (block edits + persistence). **Second consumer (audit `wf_2c963246`, P11):**
+   the SAME reliable client→shard discrete-action carrier is what the PvP FIRE trigger needs — `action_bits`
+   (`crates/wire/src/channels.rs`) rides the UNRELIABLE latest-wins `InputDatagram` today, and its own comment
+   promises "discrete world-mutating actions ride reliable channels (v1.1)", a channel that does NOT yet exist.
+   Hitscan/projectile hit-reg must never LOSE a fire event, so P11 combat reuses this ONE reliable C→S arm (the
+   `ClientControlMsg` discrete-action family + the exhaustive-match `MsgClass` extension — additive, never a
+   per-feature fork; the SAME build-once shared infra as block-edit). Pin the `channels.rs` `action_bits` comment to
+   name combat as the second consumer so the "v1.1" promise is ledgered, not floating.
 2. **Gateway↔shard CONNECTION POOL (`pool_size_K`).** `connection_plane.md` §3 (Attack-2.minor) specifies K conns/pair;
    the mesh currently uses a single reliable stream per pair (which CORRECTLY satisfies `transfer_protocol.md` §1.4 —
    the down-grade here corrects an over-claim). A landed design knob, unimplemented + unledgered. NOT a pre-feature
@@ -326,6 +349,14 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
    from blocks but there is no station/city kind. Additive when P8 (ships/stations) lands (a new `RealmId` arm + a
    `ShardProfile` capability config — zero new transfer code, HR2/HR3); ledgered now so it is not discovered late.
    WHEN: P8.
+5. **Gateway subscriptions are keyed by shard `NodeId` — one sub per (session, shard).** `gateway.rs`
+   `subs: BTreeMap<NodeId, SubRecord>` + `SubTable::lookup(shard)` + the shard-keyed snapshot tag bake the
+   ONE-realm-per-shard assumption into the routing KEY (CONSISTENT with today's design — planets are single-cluster,
+   ships get their own shard — so additive, NOT a defect now). But a STATION shard hosting multiple docked-ship realms
+   a client renders at once (the natural .4 station model) would collapse them into one sub (`open_sub` on the same
+   shard `NodeId` overwrites the prior `SubRecord`). If any shard ever hosts >1 client-subscribed realm, the `by_shard`
+   sub key + the shard-keyed snapshot must become `(shard, realm/sub)`-keyed — a route-identity + snapshot-tag +
+   `open_sub`/`close_sub` change. WHEN: P8 (with .4). Source: audit `wf_032b80eb` (integration-1).
 
 ### D-40 🟧 Tier-B PROCESS-tier coverage %c-merge for the spawned node BINARIES (the deeper half of the HR5 Tier-B ratchet)
 - **✅ LANDED (the io-prod half):** the `coverage-io-prod` recipe enforces a RATCHETED regions floor (`tier_b_floor`,
@@ -1201,13 +1232,40 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   `on_client_input` Buffer arm, `apply_commit` drain, `TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS`).
 - **Source:** 1c design `wf_f3eae69e` + Slice 1c.5 (the cap-with-fill resolution) + the 1c.5 audit `wf_e3397eb2`.
 
-### D-9 🟥 Snapshot emit is full-world + double-encoded (no AoI / delta)
-- **Missing:** `emit_frames` sends the full world every tick with no interest filter, and
-  `partition_entities` re-encodes every entity twice per tick — the dominant per-tick CPU/bandwidth cost.
-- **Where:** `crates/sim/src/stub.rs` (`emit_frames`); `crates/wire/src/channels.rs` (`partition_entities`).
-- **When / proper:** the **P2 interest-management slice** — per-sub relevance sets + delta/baseline encoding;
-  the throwaway sizing allocation dies in the same refactor. Negligible at current volumes (a few dots).
-- **Source:** whole-codebase audit `wf_43fea0dd` (SCALE-B).
+### D-9 🟥 Snapshot emit is whole-realm broadcast + double-encoded — NO within-realm per-entity AoI (the load-bearing hundreds-in-one-location seam; see [[D-41]])
+- **Missing:** `emit_frames` builds ONE `Vec<EntitySnap>` from EVERY emitting dot in the realm (filtered only by
+  the authority-state `emits()` + the MTU budget, NEVER by observer) and the gateway `on_shard_frame` re-tags ONE
+  shared `Arc` body per `SubId` and refcount-fans IDENTICAL bytes to every subscriber (the SCALE-1 optimization).
+  There is NO per-entity relevance/AoI filter anywhere, so every client in a location receives every other entity's
+  pose every tick. `partition_entities` additionally re-encodes every entity twice per tick (a sizing pass + the
+  per-chunk encode). At **hundreds of users in ONE location** (one realm, one shard, one sub) this is
+  O(entities×clients) ≈ N× the necessary per-client bytes at 20 Hz — the canonical dense-crowd / firefight wall.
+- **NOT covered by the cross-shard InterestSet:** `connection_plane.md:189` / `PLAN.md:141` interest governs which
+  SHARDS a session subscribes to + ghost-band membership between neighbor shards — it CANNOT cull co-located players
+  who all share one shard/realm/sub. Also DISTINCT from [[D-4]](a) (client-side `DeliveredView` eviction of
+  band-departed entities via `EventMsg::EntityRemoved` — render cleanup, not the shard-emit/gateway-fanout) and from
+  [[D-24]](d) SCALE-FANOUT-COPY (only the per-frame `subscribers_of` `Vec` alloc — the smaller issue).
+- **Where:** `crates/sim/src/stub.rs` (`emit_frames` ~2710); `crates/connection-plane/src/gateway.rs`
+  (`on_shard_frame` ~1798); `crates/wire/src/channels.rs` (`partition_entities` double-encode).
+- **Shape of the fix (a RESHAPE of the emit/sub model, NOT a free delta layer and NOT a from-studs rewrite):** push
+  interest INTO the shard as a per-cell / interest-group spatial index so `emit_frames` produces per-interest-group
+  snapshots; the gateway still Arc-shares ONE body per GROUP (re-key "one body per sub" → "one body per cell") so
+  SCALE-1's technique is PRESERVED. The double-encode dies in the same refactor. This composes with the per-cell
+  grid [[D-41]] needs for a possible region split. **Scope precisely (audit `wf_2c963246`):** only the
+  CLIENT-FACING `SnapshotDatagram` wire shape stays FROZEN; the INTERNAL shard→gateway seam DOES change — the shard
+  must emit per-cell bodies (a new appended field/arm on `ShardToGateway::Frame` — postcard append-safe, as
+  `SubscriptionReady` already did) AND the gateway must learn each session's cell membership (a session→cell index;
+  today session→sub is keyed 1:1 by shard `NodeId`). That is the SAME re-key as [[D-39]] sub-bullet 5
+  ((shard) → (shard,cell/sub)), so D-9 and D-39.5 are ONE coupled slice — still additive (no landed decision undone,
+  the Arc-share survives), just not "a shard-local index under a frozen wire". A P6 implementer must budget BOTH.
+- **When / proper:** RE-DATED — the original "the P2 interest-management slice" label is STALE (P2's transfer gates
+  landed without it; the project is now ~P3 and AoI is unbuilt, so the "a phase isn't done until its DEFERRED entries
+  flip" gate could not catch it). Lands with the real interest work (the P6 InterestSet schedule, or earlier if the
+  dense-crowd target is prioritized), and MUST be measured before any hundreds-in-one-location / dense-PvP load run.
+- **Owed gate (load-tests-when-applicable):** an N-in-one-realm load fixture (today's largest is 32 sessions,
+  `tests/tests/p1_gates.rs`) asserting per-client snapshot bytes scale with VISIBLE-NEIGHBOR count, not realm
+  population — converts "negligible, trust me" into a measured floor.
+- **Source:** whole-codebase audits `wf_43fea0dd` (SCALE-B) + `wf_032b80eb` (PvP/large-scale: H1, the within-realm AoI gap).
 
 ### D-10 🟥 Per-node honesty counters exist on every node but are unobservable at runtime (only the orchestrator publishes)
 - **Missing:** the COUNTERS now exist on every node — gateway (`GatewayStats.undecodable`/`inputs_*`),
@@ -1346,7 +1404,57 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 
 ## PERF / SCALE (negligible now; land with the slice that makes them matter)
 
-### D-24 🟥 Per-tick inbound/session rescans (gateway/orchestrator) — (SCALE-CUTDECODE-1 🟩 resolved 1c.3)
+### D-41 🟥 "Hundreds of users in ONE location" (the user's headline target + PvP-at-scale) is not expressible in the radial-SOI realm/band model — a DECISION owed before P4/P5/P6 harden the single-anchor/single-writer/single-cluster assumptions
+- **The gap:** every spatial partition in the base is a RADIAL SHELL around a body centre — `RealmId` is one-owner-per-body
+  (`core/src/pose.rs` Planet/System/Ship), `OverlapBand` edges derive from an SOI radius (`core/src/geometry.rs`
+  `for_planet_soi`/`for_system_soi`/`for_motion`; `segment_shell_crossing` tests `|p|<=r`), `DirectoryKey::Realm` is
+  whole-realm with a single-key `commit_cas` (`sim/src/directory.rs`), a shard holds ONE `config.realm`, and a second
+  cluster on one planet is a binding HARD ERROR (`sealed_shards.md:236`, `PLAN.md:42`). So splitting ONE crowd across
+  shards — with cross-boundary collision/ghosts the way the SOI machinery does it BETWEEN bodies — has no representation:
+  no non-radial interior boundary, no second `SurfaceAnchor`, no sub-realm/region directory key. The design's stated load
+  target everywhere is "dozens" (`PLAN.md:181`, `transfer_protocol.md:283`, `identity_persistence.md:113`); the user's
+  "hundreds in one location" target had NO ledger entry until now.
+- **WHY this is a decision, NOT a crisis (nothing landed is wrong):** the load-bearing pieces are UNBUILT — `FrameSpace`
+  lands P4/P5, the single-cluster assertion lands P6, per-realm single-writer redb is not wired into a real planet shard
+  yet. The transfer/ghost/saga KERNEL already moves individual entities cross-shard with ghosts and is geometry-AGNOSTIC;
+  per-`Entity(EntityId)` authority is already SEPARABLE from per-`Realm` ownership; `OverlapBand` already carries 3
+  constructors and grows boundary shapes additively. So the missing piece is an ADDITIVE future subsystem the base does
+  not foreclose — but it WILL be foreclosed if P4/P5/P6 harden single-anchor/single-writer/single-cluster before the
+  decision is made.
+- **DISTINCT from [[D-32]]:** D-32 partitions the directory keyspace BETWEEN realms across N orchestrators and explicitly
+  keeps "no cross-key transaction ever spans regions" (`transfer_protocol.md:283`) — that is INTER-realm. D-41 is
+  INTRA-realm: splitting ONE realm's live sim + cross-boundary collision across shards. The `(RealmId, region-range)`
+  intra-realm sharding exists only as design prose (`sealed_shards.md:236,379`) with no pin and no seam shape — this entry
+  closes that honesty hole.
+- **The DECISION owed before P4 (vertical vs horizontal):**
+  - **(a) Vertical (one beefy shard):** parallelize `step_tick` + the rapier solver (rapier ISLANDS / sub-stepping)
+    WHILE preserving the byte-identical-replay determinism gate (single-threaded today guarantees it — a parallel solve
+    needs a deterministic merge) and the integer-quantized physics→control boundary; SPIKE this BEFORE P5 commits to one
+    single-threaded rapier context (`node/src/app.rs:93,121` — the per-tick compute ceiling for hundreds of colliding
+    capsules). Set a benched per-shard colliding-player budget so "hundreds" has a defined shard count.
+  - **(b) Horizontal (intra-realm region shards):** a multi-anchor `FrameSpace`, a `(RealmId, region-range)` directory
+    key, and a NON-radial inter-region band type distinct from SOI. If chosen, plant the degenerate-now seam shapes (a
+    region-range component on `DirectoryKey` that is whole-realm today; a `FrameSpace` that admits >1 anchor defaulting to
+    one; an inter-region band type) so the future split is populate-the-field, not a band/RealmId/directory rewrite — the
+    [[D-32]]/[[D-34]] `coordinator_of`/`home_shard` discipline.
+- **Synchronized-crowd CROSSING (the dynamic side — fleet/raid/evac/PvP boundary churn):** a Durable crowd moving across a
+  boundary TOGETHER produces one saga + one single-key CAS PER player (only Transient kinds have the batched
+  `TransientGo` token — `sealed_shards.md:255`). **NOTE (audit `wf_2c963246` precision):** the group-commit fsync is
+  ALREADY amortized to ~1/tick by the barrier (`saga_runtime.rs` drains a whole tick's directory mutations + saga
+  snapshots into ONE `Store::commit()`), so this is NOT fsync amplification — the real surge cost is O(N) per-player
+  saga state-machines + single-key CASes plus the O(live-sagas)/tick `scan_deadlines` walk ([[D-3]] already flags the
+  deadline-index fix). Decide, when load-testing the transfer path with a SYNCHRONIZED N-player crossing, whether the
+  orchestrator can DRAIN O(N) per-player sagas/CASes within the tick budget during a surge (a saga-throughput /
+  commit-pipeline-depth question — the same one the single-orchestrator soak below covers), NOT a per-player-fsync one.
+- **Single-orchestrator interim soak (owed NOW, before the [[D-32]]/[[D-3]] N-orchestrator era):** add a saga-throughput
+  soak (N concurrent durable sagas on distinct keys + a transient burst) asserting the orchestrator drains within tick
+  budget and `scan_deadlines`(O(live-sagas)/tick) + the reaper(O(directory)) stay bounded — index them by a deadline-ordered
+  structure ([[D-3]] already flags this). Proves the single-orchestrator interim holds through P3–P10 and turns "partition
+  later" into a measured-headroom decision.
+- **Pin (exists-to-be-flipped):** flips 🟩 when the vertical-vs-horizontal path is chosen + recorded here AND (if horizontal)
+  the degenerate seam shapes are planted, BEFORE P4/P5/P6 harden the single-anchor/single-writer/single-cluster code.
+- **Source:** whole-codebase audit `wf_032b80eb` (PvP + large-scale: H2 partition; the rapier/step_tick ceiling; the
+  synchronized-crossing batch gap; the single-orchestrator interim soak).
 - **SCALE-CUTDECODE-1 🟩 RESOLVED in Slice 1c.3:** `on_cut_marker` no longer full-decodes every input — it calls
   `vd_wire::session_flow::peek_is_cut_marker`, reading only the `(seq, is_cut_marker)` postcard prefix
   (`[varint seq][1 canonical bool byte]`) off the head, never the body.

@@ -344,6 +344,12 @@ pub struct PromoteCmd {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReHomeCmd {
     pub transfer: TransferId,
+    /// The universe epoch this adopt was minted under (mirrors [`TransferEnvelope::universe_epoch`]).
+    /// The re-home target REFUSES a command whose epoch mismatches its current clock epoch
+    /// (transfer_protocol §3.3 fail-safe — no entity reconstructed at a stale celestial position). The
+    /// re-home adopt is the SECOND pose-placing ingress (the first is the crossing), so this makes the
+    /// §3.3 guard UNIFORM across both. Stamped by the orchestrator at `build_rehome` from its clock.
+    pub universe_epoch: EpochId,
     pub subject: DirectoryKey,
     pub new_fence: Fence,
     pub step_id: u32,
@@ -862,6 +868,7 @@ mod tests {
         // arm (never reuses Promote — the no-repurpose discipline; the target adopts state, not a ghost).
         let rehome = InterShardFlow::ReHome(ReHomeCmd {
             transfer: TransferId(11),
+            universe_epoch: EpochId(1),
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             new_fence: Fence(6),
             step_id: RE_HOME_STEP,
@@ -885,6 +892,7 @@ mod tests {
     fn rehome_arm_and_payload_roundtrip() {
         let rehome = InterShardFlow::ReHome(ReHomeCmd {
             transfer: TransferId(11),
+            universe_epoch: EpochId(1),
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             new_fence: Fence(6),
             step_id: RE_HOME_STEP,

@@ -23,7 +23,8 @@ pub const BASE_SOI_RADIUS: f64 = 100.0;
 pub const SOI_LUMINOSITY_SCALE: f64 = 200.0;
 
 /// Minimum band-width safety factor: `(outer - inner) >= v_rel · dt · K_SAFETY`
-/// (design value K ≥ 2; `TransferTuning` may raise it per deployment, never lower).
+/// (design value K ≥ 2; a per-deployment band-tuning config — owed with the D-2 band
+/// geometry at P4/P5 — may raise it, never lower. No `TransferTuning` struct exists yet).
 pub const K_SAFETY: f64 = 2.0;
 
 /// Band-edge factors from the per-class band table (`transfer_protocol.md` §1.3).
