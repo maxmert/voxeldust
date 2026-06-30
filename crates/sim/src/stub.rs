@@ -1506,6 +1506,12 @@ fn promote_apply(
     // source ghost a live collider + the render seamless. `feed_source_ghosts` streams Delta after.
     // The ANCHOR is THIS promote pose (= the crossed pose, the boundary the entity entered through):
     // the dest measures band membership from here and Despawns the ghost on band-exit (1d.5b.3c).
+    // ⚠️ DRY PIN: this GhostNeighbor-insert + GhostFlow::Spawn block is byte-identical to `re_home_apply`'s
+    // tail. They are deliberately NOT yet extracted (the bodies ABOVE diverge — promote flips Ghost→Owned +
+    // announces SubscriptionReady, re-home builds a fresh Owned dot). EXTRACT a shared
+    // `register_and_spawn_source_ghost` helper WHEN [[D-39]].6 (the ghost combat-state blob — a new GhostFlow
+    // variant) or the band-driven multi-neighbor generalization edits the Spawn/anchor shape, so the change
+    // touches ONE place. Until then, edit BOTH sites in lockstep.
     registration.0.insert(
         entity,
         GhostNeighbor {
@@ -1618,6 +1624,8 @@ fn re_home_apply(
     // Register the (re-home) source as a ghost-neighbor + SPAWN its ghost — the target (owner) now drives
     // the GhostFlow collider feed to it, exactly as `promote_apply` does. A Spawn to a possibly-dead
     // source is harmless FireAndForget (HR1: the shard cannot see the liveness set — never special-case it).
+    // ⚠️ DRY PIN: byte-identical to `promote_apply`'s tail — see the extract-at-[[D-39]].6 note there; edit
+    // BOTH sites in lockstep until extracted.
     registration.0.insert(
         entity,
         GhostNeighbor {

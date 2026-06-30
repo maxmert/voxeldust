@@ -364,8 +364,12 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
    forwarding the fire-event to B's owner. ADDITIVE (GhostFlow is INTERNAL mesh wire, kind-generic kernel): lands as a
    NEW `GhostFlow` VARIANT (a FIELD-append to Spawn/Delta is NOT postcard-safe — `channels.rs` append rule), read-only
    display state; the authoritative hit is applied at the ghost's OWNER via the D-39.1 forward path. WHEN: P11 combat
-   (or P5 if cross-boundary collision-response needs it earlier). Pinned in the `GhostFlow` doc-comment. Source: audit
-   `wf_fd6a4b9d` (pvp-readiness).
+   (or P5 if cross-boundary collision-response needs it earlier). Pinned in the `GhostFlow` doc-comment. **Lockstep
+   site (audit `wf_9f26b8cb`):** the GhostNeighbor-insert + `GhostFlow::Spawn` emit is byte-identical in BOTH
+   `promote_apply` and `re_home_apply` (`sim/src/stub.rs`, DRY-pinned at both); when this blob lands its new variant,
+   EXTRACT a shared `register_and_spawn_source_ghost` helper so the field-append touches ONE place (re_home_apply is
+   exercised only by the D-37 kill-cell tests, not the happy-path gate, so an un-extracted edit silently drifts).
+   Also feeds [[D-42]] (the rewind reads this combat state). Source: audit `wf_fd6a4b9d` (pvp-readiness).
 
 ### D-40 🟧 Tier-B PROCESS-tier coverage %c-merge for the spawned node BINARIES (the deeper half of the HR5 Tier-B ratchet)
 - **✅ LANDED (the io-prod half):** the `coverage-io-prod` recipe enforces a RATCHETED regions floor (`tier_b_floor`,
@@ -1459,16 +1463,30 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   ADD, the cell already carried) — the earlier integrator used `local` (which ZEROES the cell, a latent teleport
   foot-gun + a false "preserved" comment); that was fixed in THIS slice by adding `map_offset` + switching the
   integrator to it. The cell-WRITE sites (`transfer_frame`'s `LatticePos::local(new_pos)` — plant-item 2; the
-  ghost band-exit anchor `stub.rs` `ghost_band_exited`; `world_pos`/`RenderPose` which drops the cell at
-  `interp::sample`) are NOT yet cell-aware: each REPLACES its provisional cell-0 write with destination-cell math at
-  P4/P5+ — additive (no landed decision undone) but a body-REWRITE at the site, not a free delta. Items (2)-(5) remain owed.
+  `world_pos`/`RenderPose` which drops the cell at `interp::sample`) are NOT yet cell-aware: each REPLACES its
+  provisional cell-0 write with destination-cell math at P4/P5+ — additive (no landed decision undone) but a
+  body-REWRITE at the site, not a free delta. **Distinct cell-READ sites that gain cell-aware re-basing ADDITIVELY
+  (no provisional cell-0 write to replace — audit `wf_9f26b8cb` precision):** `GhostNeighbor.anchor` (`stub.rs`, a
+  bare `DVec3` captured at promote/re-home) + `ghost_band_exited`'s `(pose.pos.offset() - anchor).length()` distance
+  — these only READ `.offset()`, so the P4/P5 re-centering slice converts the anchor to a `LatticePos` + the
+  band-exit to a cell-aware difference at the SAME time it converts the interp + `transfer_frame` (named here so the
+  re-centering implementer does not miss this second offset-only site, the cross-region-collision band geometry).
+  Items (2)-(5) remain owed.
 - **DEFER (additive once the shapes exist):** galaxy/quadrant/universe `FrameRef` levels + ly-cells (P10); the
   multi-anchor `FrameSpace` MACHINERY (P4/P5); N>1 live sim + the density rebalancer + region-store redb sharding + the
   cross-region GhostFlow runtime consumer (gated on the single-orchestrator soak below + a benched per-shard
   colliding-player budget); the cross-region collision-RESPONSE solver + its seam-straddling single-authority tie-break
   RULE (P5; NAMED now: exactly ONE region-shard resolves any straddling contact — rapier is never re-simulated
   cross-host); the Signal arm (P9, rides the planted band). The VERTICAL path (parallel rapier islands) stays the
-  per-shard compute fallback, SPIKE'd before P5 if a benched system hits the single-rapier ceiling.
+  per-shard compute fallback, SPIKE'd before P5 if a benched system hits the single-rapier ceiling. **A STANDING
+  cross-region overlap needs an `AuthorityChanged` producer for the OWNED sub (audit `wf_9f26b8cb`):** one entity
+  owned by region-shard A also appears as a ghost in region-shard B's snapshot, so a client subscribed to BOTH subs
+  receives it twice; `DeliveredView::chosen_subs` (`client/src/view.rs`) de-dups via `AuthorityChanged`-else-lowest-sub
+  — the right mechanism — but `AuthorityChanged{entity,sub}` is produced TODAY only by the transfer route-swap
+  (`gateway` `apply_commit`/`store_commit`), so a standing (no-transfer-in-flight) overlap falls back to "lowest sub"
+  (not authority-correct — the ghost-sub could win, rendering a stale kinematic ghost over the owned pose). Owed: a
+  steady-state `AuthorityChanged` producer for the owner-sub + the "owner beats ghost" rule; ADDITIVE (the view-side
+  consumer already generalizes to N subs), lands with the region-split client work — load-bearing for multi-mesh-render.
 - **The gap (the original problem this resolves):** every spatial partition in the base is a RADIAL SHELL around a body centre — `RealmId` is one-owner-per-body
   (`core/src/pose.rs` Planet/System/Ship), `OverlapBand` edges derive from an SOI radius (`core/src/geometry.rs`
   `for_planet_soi`/`for_system_soi`/`for_motion`; `segment_shell_crossing` tests `|p|<=r`), `DirectoryKey::Realm` is
@@ -1517,8 +1535,45 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   later" into a measured-headroom decision.
 - **Pin (exists-to-be-flipped):** direction is now RESOLVED (above); flips 🟩 when plant-now items (1)-(5) land as
   reviewed shapes (degenerate-to-today, proptested) BEFORE P4/P5/P6 harden the single-anchor/single-writer/single-cluster code.
+- **⚠️ MECHANICAL-GUARD GAP (audit `wf_9f26b8cb`, owed before P4/P5/P6):** plant-items (2)-(5) are pinned ONLY in prose
+  doc-comments today — there is NO exists-to-be-flipped TEST, so the "a phase isn't done until its DEFERRED entries flip"
+  gate cannot mechanically catch a P4/P5/P6 slice that hardens single-anchor/single-cluster (e.g. introduces the P6
+  single-cluster HARD ERROR per `sealed_shards.md:236`) WITHOUT first softening it to per-region. OWED with the P4/P5
+  re-centering work: add exists-to-be-flipped tripwire tests that go RED when the hardening lands without the seam — e.g.
+  the P6 single-cluster HARD-ERROR's introduction GATED behind a test proving >1 anchor is representable (the per-region-soft
+  form); and (same class) the `action_bits`-is-inert interim ([[D-39]].1) gets a unit test asserting two `InputDatagram`s
+  differing ONLY in `action_bits` integrate to identical poses today (flips when the reliable discrete-action arm consumes
+  it), so a regression cannot silently gate PvP fire-reg onto the lossy datagram. Converts the prose obligation into the
+  mechanical green-gate the rest of DEFERRED relies on.
 - **Source:** whole-codebase audit `wf_032b80eb` (PvP + large-scale: H2 partition; the rapier/step_tick ceiling; the
   synchronized-crossing batch gap; the single-orchestrator interim soak) + design brief `wf_c4157f73` + impl-plan `wf_73c0d67f`.
+
+### D-42 🟥 Server-side LAG-COMPENSATION (pose-history rewind for hit-registration) has NO home — the one PvP pillar absent from code AND every design doc (audit `wf_9f26b8cb`)
+- **The gap:** the binding standards mandate NO client prediction + players physically COLLIDE + a 100-150 ms interpolation
+  buffer (`PLAN.md:32`). With those three together, what a shooter sees of a victim is 100-150 ms (2-3 ticks) in the PAST,
+  so fair server-authoritative hitscan/projectile hit-reg REQUIRES the authoritative shard to REWIND the victim's collision
+  body to where it was at the shooter's render instant ("favor the shooter" — standard for every no-prediction authoritative
+  shooter). The code keeps ONLY the current pose per entity (`Dot.pose: StampedPose`, `Dots: BTreeMap<SessionId, Dot>` —
+  `sim/src/stub.rs`); no shard buffers past authoritative poses, and there is NO design-doc or DEFERRED treatment (the only
+  "lag compensation" string in the tree is in `docs/audit/rust_netcode.json` describing a REJECTED library's feature). Every
+  OTHER PvP pillar (D-39.1 reliable fire carrier, D-39.6 ghost combat-state blob, the applied_damage TLV) IS ledgered with a
+  green-gate pin; lag-comp is the one invisible to the "a phase isn't done until its DEFERRED entries flip" gate.
+- **WHY ADDITIVE, not rework:** no landed code contradicts it — `Dot` simply GAINS a bounded per-entity pose-history ring +
+  a rewind-on-fire path keyed by the fire event's source/client tick. The wire ALREADY carries the timestamps a rewind keys
+  on (`SnapshotDatagram.source_tick/universe_tick`; `GhostFlow::Delta.source_tick/seq`). So nothing is undone — it is a new
+  consumer + a ring. MEDIUM (not CRITICAL): nothing is broken at 943a51e; the risk is a LATE, cross-shard-entangled retrofit
+  at P11 with no reserved shape.
+- **The cross-shard wrinkle (why it is non-trivial-additive — pin the shape NOW so P11 is not painted into a corner):** when
+  shooter and victim are on DIFFERENT shards the victim is a GHOST on the shooter's shard (lossy `GhostFlow::Delta` @20Hz),
+  so the rewind must reconcile the shooter shard's local ghost history vs the victim OWNER shard's authoritative history. The
+  authoritative rewind happens at the VICTIM'S OWNER shard (the [[D-39]].1 hit-forward target) using ITS history; the shooter
+  shard's ghost history validates only the shooter's claimed aim. So [[D-39]].6 (the ghost combat-state blob) + .1 (the fire
+  carrier) must stay shaped to FEED a rewind.
+- **When / proper:** **P11 combat.** Dependency: [[D-39]].1 reliable fire carrier + [[D-39]].6 ghost combat blob. A bounded
+  per-entity authoritative-pose ring sized to `interp_buffer_ms + max ghost-feed staleness` (a `TransportTuning`/`TransferTuning`
+  config field — NO magic number). Pinning it now is ZERO code; it keeps the GhostFlow/fire-carrier shapes honest about feeding
+  a rewind. Flips 🟩 when the ring + the rewind-on-fire path + the cross-shard owner-rewind rule land at P11.
+- **Source:** holistic audit `wf_9f26b8cb` (PvP lens — the only genuinely-unledgered PvP subsystem).
 
 ### D-24 🟥 Per-tick inbound/session rescans (gateway/orchestrator) — (SCALE-CUTDECODE-1 🟩 resolved 1c.3)
 - **SCALE-CUTDECODE-1 🟩 RESOLVED in Slice 1c.3:** `on_cut_marker` no longer full-decodes every input — it calls
