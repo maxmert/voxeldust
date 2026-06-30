@@ -13,9 +13,9 @@
 //! - Connections are cached per peer; a broken connection is dropped and re-dialed
 //!   on the next frame (fail fast while down, recover without operator action).
 //!
-//! Peer identity: `WireFrame::from` is sender-asserted and trustworthy ONLY because
-//! every link is mutually authenticated against the cluster trust — identity is
-//! never derived from source addresses (R2).
+//! Peer identity: the frame `from` (`ReliableFrame`/`DatagramFrame`) is sender-asserted and trustworthy
+//! ONLY because every link is mutually authenticated against the cluster trust — identity is never
+//! derived from source addresses (R2).
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

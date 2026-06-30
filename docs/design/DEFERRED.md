@@ -980,7 +980,7 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   proven against the in-process MemStore + harness at-least-once model the S0–S5 cells run on):**
   1. **A CLASS of PRODUCER-LESS FLOWS depends on transport REDELIVERY the production `MeshTransport` does not
      provide.** ⚠️ THE ROOT, stated as a class (not a fixed count — three holistic audits each surfaced another
-     instance, `wf_dd38151d`/`wf_ed40e95e`/`wf_259d14c0`): the at-most-once `MeshTransport` (mesh.rs:357-395 —
+     instance, `wf_dd38151d`/`wf_ed40e95e`/`wf_259d14c0`): the at-most-once `MeshTransport` (`mesh.rs` `peer_writer` —
      `NodeUnreachable`-and-drop; a buffered-but-unacked reliable frame is lost SILENTLY, only the in-flight frame
      bounces) breaks ANY flow whose sole delivery is one emission with no re-driving producer. Known instances:
      **(saga phases, scan_deadlines-re-drivable)** `AwaitAdopt`, the D-37 re-home adopt (CURED, Slice 2d), the durable
@@ -993,6 +993,19 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      transfer-WITH-band-exit + crossing-loss process test is owed alongside (the at-least-once FaultFabric masks the
      whole class — `dev_cluster_smoke` covers bring-up + SIGKILL only). **WHEN: the whole class lands before any real
      multi-shard rolling deploy.** Per-instance detail follows.
+     **✅ ROOT-CURE PROGRESS (the redelivering `MeshTransport`, plan in memory `project_redelivering_transport_plan`,
+     impl-plan `wf_ab2d6e53`): R-1' (commit 6f4614d) + R-2a (commit 4bf9b06) LANDED, gate-green.** R-1' split the hot
+     20Hz datagram path into a bare `DatagramFrame` (byte-identical, zero PvP cost); R-2a grew the reliable frame to
+     `ReliableFrame{from,class,incarnation:u64,epoch:u32,seq:u64,bytes}` (the at-least-once header, BELOW the frozen
+     `Transport` seam) + unified the duplicated `OutFrame`. The header is INERT today — stamped 0/0/per-stream-seq, the
+     receiver decodes + delivers as before, so the mesh is STILL AT-MOST-ONCE (no behaviour change; audit `wf_374b4376`
+     DONE_NO_CRITICAL). **OWED to flip this 🟩:** R-2b (the sender `ReliableLaneSender` lane FSM — retry buffer,
+     buffer-first seq, per-(peer,class) streams, epoch-bump-replay, `process_incarnation`), R-3' (the receiver
+     contiguity verdict + cumulative acks — R-2b+R-3' are ONE correctness unit), R-4' (shed-loud backpressure), R-5'
+     (the `mesh_under_loss.rs` real-mesh capstone that proves exactly-once under an injected connection break + flips
+     this leg green). The loopback bridge keeps its simple per-stream seq (single-stream test infra; it does NOT get
+     the lane FSM, so its guarantee stays the QUIC intra-stream one). R-6 = durable outbox + durable boot-counter
+     incarnation (P6/P7).
      **(1a) `BatchHandoff::AwaitAdopt`** — the first-identified instance. A producer-less phase has NO `scan_deadlines` re-drive
      egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash);
      the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop). `AwaitAdopt`

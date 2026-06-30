@@ -8,7 +8,7 @@
 //! ```text
 //! ┌─ tokio reader task ─┐  crossbeam   ┌─ SIM THREAD (no tokio) ─┐  crossbeam  ┌─ writer thread ─┐
 //! │ quinn recv stream → │ ─inbound──►  │ step_tick(): drain,     │ ─outbound─► │ drains, quinn   │
-//! │ decode WireFrame    │              │ react, enqueue sends    │  (BOUNDED)  │ send; on failure│
+//! │ decode ReliableFrame│              │ react, enqueue sends    │  (BOUNDED)  │ send; on failure│
 //! └─────────────────────┘              │ NEVER awaits            │             │ → enqueue       │
 //!                                      └─────────────────────────┘             │ NodeUnreachable │
 //!                                                                              │ into INBOUND    │
@@ -23,8 +23,8 @@
 //!   TLS in both directions, NEVER certificate-verification skipping (which was
 //!   audit finding R7's enabler). Per-node certificates from a real CA land at P3+
 //!   behind the same seam.
-//! - Peer identity in `WireFrame::from` is sender-asserted; it is trustworthy only
-//!   because the channel is mutually authenticated — the design forbids ever
+//! - Peer identity in `ReliableFrame::from` (and `DatagramFrame::from`) is sender-asserted; it is
+//!   trustworthy only because the channel is mutually authenticated — the design forbids ever
 //!   deriving identity from source addresses (R2).
 //!
 //! Coverage: Tier-B — exercised by the process tier; ratcheted floor, never 100% (HR5).
@@ -62,12 +62,17 @@ use crate::trust::{ClusterTrust, TrustError};
 pub(crate) struct ReliableFrame {
     from: NodeId,
     class: MsgClass,
-    /// Sender process-epoch (R2'). Today seeded from `MeshConfig::process_incarnation`; the durable
-    /// monotone boot-counter that survives a clock rewind is R-6 (P6/P7).
+    /// Sender process-epoch (a higher value ⇒ the sender restarted ⇒ the receiver resets its dedup
+    /// state — the sender-restart seq-reset cure). **Stamped a literal `0` through R-2a (inert — no
+    /// receiver reads it).** R-2b seeds it from a per-process incarnation source (a `MeshConfig`
+    /// process-epoch field, threaded through the sender lane FSM); the durable monotone boot-counter
+    /// that survives a clock rewind is R-6 (P6/P7).
     incarnation: u64,
-    /// Per-(peer,class) redial counter (R2' cross-stream-race cure).
+    /// Per-(peer,class) redial counter — the R-2'/R-3' cross-stream-race cure. **Stamped `0` through
+    /// R-2a; bumped on a write-error re-dial once the sender lane FSM lands (R-2b).**
     epoch: u32,
-    /// Per-(peer,class) monotone sequence (R2' buffer-first assignment).
+    /// Per-(peer,class) monotone sequence. Through R-2a a simple per-stream counter (reset on a fresh
+    /// stream); R-2b replaces it with the buffer-first lane assignment (assign + retain THEN write).
     seq: u64,
     /// The on-wire payload is a plain `Vec<u8>` (the seam's `Bytes = Arc<[u8]>` is
     /// an in-process sharing optimization; it converts at the serialize boundary).
@@ -75,11 +80,13 @@ pub(crate) struct ReliableFrame {
 }
 
 /// The UNRELIABLE datagram payload (R1'): a BARE `{from, class, bytes}` carried QUIC-datagram-delimited
-/// (NO `wire::framing` stream framing — `codec_flags` is a stream concept). Split from [`WireFrame`] so
-/// the 20Hz latest-wins snapshot/input/ghost-delta hot path carries ZERO reliability metadata and never
-/// touches the (future) dedup state — the PvP hot path stays byte-for-byte what it is today (R2). It is
-/// CURRENTLY byte-identical to `WireFrame` (a `serialize_bytes_match` test pins that), and stays bare as
-/// `WireFrame` grows its at-least-once fields in R2'/R3'.
+/// (NO `wire::framing` stream framing — `codec_flags` is a stream concept). The former `WireFrame` was
+/// split into THIS bare datagram type + the reliable [`ReliableFrame`] so the 20Hz latest-wins
+/// snapshot/input/ghost-delta hot path carries ZERO reliability metadata and never touches the (future)
+/// dedup state — the PvP hot path stays byte-for-byte what it is today (R2). It stays the bare
+/// `{from,class,bytes}` shape — `datagram_frame_stays_the_bare_pre_split_shape_distinct_from_reliable`
+/// pins it byte-identical to the bare `(from,class,bytes)` tuple AND distinct from `ReliableFrame` (which
+/// grows the at-least-once incarnation/epoch/seq fields), so the hot/cold split stays real.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DatagramFrame {
     from: NodeId,
