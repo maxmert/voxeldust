@@ -357,6 +357,15 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
    shard `NodeId` overwrites the prior `SubRecord`). If any shard ever hosts >1 client-subscribed realm, the `by_shard`
    sub key + the shard-keyed snapshot must become `(shard, realm/sub)`-keyed — a route-identity + snapshot-tag +
    `open_sub`/`close_sub` change. WHEN: P8 (with .4). Source: audit `wf_032b80eb` (integration-1).
+6. **Ghost-carried replicated combat-STATE blob (health/shield/anim/pilot-flags).** `transfer_protocol.md:107` binds
+   that ghosts carry a small replicated blob alongside pose; the shipped `GhostFlow::Spawn`/`Delta`
+   (`crates/wire/src/intershard.rs`) carry pose + fences ONLY. Cross-boundary PvP (A on shard 1 shoots B, a ghost
+   owned by shard 2) needs B's combat state on A's shard to render the health/downed state + gate a hit before
+   forwarding the fire-event to B's owner. ADDITIVE (GhostFlow is INTERNAL mesh wire, kind-generic kernel): lands as a
+   NEW `GhostFlow` VARIANT (a FIELD-append to Spawn/Delta is NOT postcard-safe — `channels.rs` append rule), read-only
+   display state; the authoritative hit is applied at the ghost's OWNER via the D-39.1 forward path. WHEN: P11 combat
+   (or P5 if cross-boundary collision-response needs it earlier). Pinned in the `GhostFlow` doc-comment. Source: audit
+   `wf_fd6a4b9d` (pvp-readiness).
 
 ### D-40 🟧 Tier-B PROCESS-tier coverage %c-merge for the spawned node BINARIES (the deeper half of the HR5 Tier-B ratchet)
 - **✅ LANDED (the io-prod half):** the `coverage-io-prod` recipe enforces a RATCHETED regions floor (`tier_b_floor`,
@@ -1404,8 +1413,63 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 
 ## PERF / SCALE (negligible now; land with the slice that makes them matter)
 
-### D-41 🟥 "Hundreds of users in ONE location" (the user's headline target + PvP-at-scale) is not expressible in the radial-SOI realm/band model — a DECISION owed before P4/P5/P6 harden the single-anchor/single-writer/single-cluster assumptions
-- **The gap:** every spatial partition in the base is a RADIAL SHELL around a body centre — `RealmId` is one-owner-per-body
+### D-41 🟧 "Hundreds of users in ONE location" — DIRECTION RESOLVED (adaptive-hierarchical-horizontal + tiered-i64 coordinate base); plant-now seams owed before P4/P5/P6 harden the single-anchor/single-writer/single-cluster assumptions
+- **RESOLVED (user-confirmed, Jun 2026):** the direction is **adaptive-per-realm HIERARCHICAL HORIZONTAL** partitioning
+  (universe→quadrant→galaxy→system→planet/city→sub-region; the split factor is per-location `ShardProfile` capability
+  DATA — small planet=1 shard, dense city-hub=N, big planet ~6-8; ships are mobile nested frames traversing it via the
+  SAME transfer/saga/ghost kernel). The crux is the **coordinate base, not the topology** (the topology seams are
+  verified additive). Decided base: a **TIERED INTEGER lattice** — a position is an `i64` CELL anchor + a bounded f64
+  local OFFSET (floating-origin model); the FINE tier (star system + everything inside: planets, ships, cities,
+  sub-regions) uses `i64`@**mm** (spans ~1 ly radius, mm-exact, sub-micron locally), the COARSE tier
+  (galaxy/quadrant/universe = the nav/warp/star MAP, never physics) uses `i64`@**ly or AU**; the integer TYPE is uniform
+  `i64`, the UNIT is keyed by the `FrameRef` tier. Cross-frame/cross-shard re-base is EXACT INTEGER arithmetic
+  (intra-tier = subtract cell anchors; inter-tier = exact mm↔ly conversion at the DISCRETE SOI/warp transfer) — zero
+  drift, bit-deterministic (serves the byte-identical-replay gate), so "an error of several cm never occurs" holds BY
+  CONSTRUCTION where things interact (within a system). The enabling fact: the **star system is the largest
+  *interaction* domain** — nothing collides between stars, inter-system travel is warp (a discrete transfer) — so
+  cm-exactness is bounded to a system, exactly where the fine lattice lives. Substrate = `glam::I64Vec3` (already a
+  dep); HAND-ROLL `LatticePos` in vd-core (`big_space` is a math/recenter REFERENCE only, NOT a dep — f32 + Bevy-coupled
+  + no determinism). Designs: brief `wf_c4157f73`, impl-plan `wf_73c0d67f`.
+- **PLANT-IN-THE-BASE-NOW (before P4/P5/P6 — behaviour-identical by default: every world at cell 0, offset == today's f64 pos):**
+  (1) `StampedPose.pos` → an `i64`-cell + bounded-f64-offset lattice (THE single most important plant — it rides the
+  FROZEN wire that P4 physics / P5 rapier / the client render path / every transfer+ghost+snapshot harden against;
+  deferring = the ~14-file wire rewrite this entry exists to prevent); (2) exact-integer re-base in `transfer_frame` +
+  `origin_cell` on the non-wire `FramePlacement`; (3) ONE config home (per-tier unit + cell_edge as a power-of-two number
+  of mm) + a margin assertion + a drift-free proptest (normalize round-trips; re-base A→B→A returns the exact cell;
+  inter-tier conversion exact+reversible); (4) the shared-anchor-per-location CONTRACT + a >1-anchor-capable `FrameSpace`
+  shape (default 1; soften the single-cluster HARD ERROR to per-region) — the mechanism for bit-exact cross-region
+  no-prediction collision; (5) a degenerate `RegionId{WHOLE}` on the realm/directory key (single-key `commit_cas`
+  unchanged) + a non-radial `OverlapBand` constructor (degenerate-unused); close D-39.4 (Station/City realm kinds). Plus
+  [[D-9]] per-cell AoI (owed REGARDLESS — same grid primitive as the region split). HR5: the cell↔offset
+  split/normalize are MONOMORPHIC branchless helpers; DETERMINISM: the integer is authoritative/replayed, the f64 offset
+  is derived/tolerance-only (never a float op in the authoritative path).
+- **✅ LANDED (plant-now item 1 — the frozen-wire SHAPE; impl-plan `wf_73c0d67f`):** `StampedPose.pos` is now
+  `LatticePos { cell: I64Vec3 (private), offset: DVec3 (private) }` (`core/src/pose.rs`), constructed at the cell
+  origin via `LatticePos::local`, moved-in-frame via the cell-PRESERVING `LatticePos::map_offset`, and read via
+  `.offset()` — behaviour-IDENTICAL through P3 (cell is always ZERO, offset == the old f64 `pos`), verified by the
+  full suite + a non-zero-cell postcard round-trip proving the integer cell rides the frozen wire bit-exact. The
+  ~20-site migration (core/sim/client/harness/wire/tests) landed as ONE atomic build-green slice (Tier-A 100%).
+  **Smallest-correct scoping:** only the WIRE SHAPE landed (the before-P4-critical part, cheapest now before features
+  multiply the sites); the lattice MATH — `normalize`/cell-crossing + the per-`FrameRef` tier unit (FINE i64@mm /
+  COARSE i64@AU) + `cell_edge` config + the exact inter-tier (mm↔AU) conversion + per-tick re-centering (the
+  bounded-offset invariant) + cross-cell interp rebasing — is DEFERRED to its first consumer (**P4/P5 re-centering**
+  is the first producer of a non-zero cell; galaxy ly-cells at P10). **"PURE-ADDITIVE then" — precisely (audit
+  `wf_fd6a4b9d` HIGH):** the WIRE is additive (no shape change); the cell-PRESERVING move sites (`stub.rs` integrator
+  via `map_offset`, `pose.rs` `advanced_ballistic`/`sanitized`) are additive at P4/P5 (re-centering is a `.normalize()`
+  ADD, the cell already carried) — the earlier integrator used `local` (which ZEROES the cell, a latent teleport
+  foot-gun + a false "preserved" comment); that was fixed in THIS slice by adding `map_offset` + switching the
+  integrator to it. The cell-WRITE sites (`transfer_frame`'s `LatticePos::local(new_pos)` — plant-item 2; the
+  ghost band-exit anchor `stub.rs` `ghost_band_exited`; `world_pos`/`RenderPose` which drops the cell at
+  `interp::sample`) are NOT yet cell-aware: each REPLACES its provisional cell-0 write with destination-cell math at
+  P4/P5+ — additive (no landed decision undone) but a body-REWRITE at the site, not a free delta. Items (2)-(5) remain owed.
+- **DEFER (additive once the shapes exist):** galaxy/quadrant/universe `FrameRef` levels + ly-cells (P10); the
+  multi-anchor `FrameSpace` MACHINERY (P4/P5); N>1 live sim + the density rebalancer + region-store redb sharding + the
+  cross-region GhostFlow runtime consumer (gated on the single-orchestrator soak below + a benched per-shard
+  colliding-player budget); the cross-region collision-RESPONSE solver + its seam-straddling single-authority tie-break
+  RULE (P5; NAMED now: exactly ONE region-shard resolves any straddling contact — rapier is never re-simulated
+  cross-host); the Signal arm (P9, rides the planted band). The VERTICAL path (parallel rapier islands) stays the
+  per-shard compute fallback, SPIKE'd before P5 if a benched system hits the single-rapier ceiling.
+- **The gap (the original problem this resolves):** every spatial partition in the base is a RADIAL SHELL around a body centre — `RealmId` is one-owner-per-body
   (`core/src/pose.rs` Planet/System/Ship), `OverlapBand` edges derive from an SOI radius (`core/src/geometry.rs`
   `for_planet_soi`/`for_system_soi`/`for_motion`; `segment_shell_crossing` tests `|p|<=r`), `DirectoryKey::Realm` is
   whole-realm with a single-key `commit_cas` (`sim/src/directory.rs`), a shard holds ONE `config.realm`, and a second
@@ -1426,7 +1490,7 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   INTRA-realm: splitting ONE realm's live sim + cross-boundary collision across shards. The `(RealmId, region-range)`
   intra-realm sharding exists only as design prose (`sealed_shards.md:236,379`) with no pin and no seam shape — this entry
   closes that honesty hole.
-- **The DECISION owed before P4 (vertical vs horizontal):**
+- **The options weighed (HORIZONTAL chosen — see RESOLVED above; VERTICAL kept as the per-shard compute fallback):**
   - **(a) Vertical (one beefy shard):** parallelize `step_tick` + the rapier solver (rapier ISLANDS / sub-stepping)
     WHILE preserving the byte-identical-replay determinism gate (single-threaded today guarantees it — a parallel solve
     needs a deterministic merge) and the integer-quantized physics→control boundary; SPIKE this BEFORE P5 commits to one
@@ -1451,10 +1515,12 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   budget and `scan_deadlines`(O(live-sagas)/tick) + the reaper(O(directory)) stay bounded — index them by a deadline-ordered
   structure ([[D-3]] already flags this). Proves the single-orchestrator interim holds through P3–P10 and turns "partition
   later" into a measured-headroom decision.
-- **Pin (exists-to-be-flipped):** flips 🟩 when the vertical-vs-horizontal path is chosen + recorded here AND (if horizontal)
-  the degenerate seam shapes are planted, BEFORE P4/P5/P6 harden the single-anchor/single-writer/single-cluster code.
+- **Pin (exists-to-be-flipped):** direction is now RESOLVED (above); flips 🟩 when plant-now items (1)-(5) land as
+  reviewed shapes (degenerate-to-today, proptested) BEFORE P4/P5/P6 harden the single-anchor/single-writer/single-cluster code.
 - **Source:** whole-codebase audit `wf_032b80eb` (PvP + large-scale: H2 partition; the rapier/step_tick ceiling; the
-  synchronized-crossing batch gap; the single-orchestrator interim soak).
+  synchronized-crossing batch gap; the single-orchestrator interim soak) + design brief `wf_c4157f73` + impl-plan `wf_73c0d67f`.
+
+### D-24 🟥 Per-tick inbound/session rescans (gateway/orchestrator) — (SCALE-CUTDECODE-1 🟩 resolved 1c.3)
 - **SCALE-CUTDECODE-1 🟩 RESOLVED in Slice 1c.3:** `on_cut_marker` no longer full-decodes every input — it calls
   `vd_wire::session_flow::peek_is_cut_marker`, reading only the `(seq, is_cut_marker)` postcard prefix
   (`[varint seq][1 canonical bool byte]`) off the head, never the body.

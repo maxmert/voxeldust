@@ -73,12 +73,12 @@ fn assert_debris_on_ballistic_trajectory(topo: &mut Topology, debris: EntityId, 
         (dest_pose.universe_tick.0 - TRANSIENT_SEED_TICK0.0) as f64 * dest_stub_config().tick_dt_s;
     let expected = TRANSIENT_SEED_POS0 + vel * dt_s;
     assert!(
-        (dest_pose.pos - expected).length() < 1.0e-6,
+        (dest_pose.pos.offset() - expected).length() < 1.0e-6,
         "debris off its ballistic trajectory: got {:?}, expected {expected:?} (dt_s={dt_s})",
         dest_pose.pos
     );
     assert!(
-        (dest_pose.pos - TRANSIENT_SEED_POS0).length() > 1.0,
+        (dest_pose.pos.offset() - TRANSIENT_SEED_POS0).length() > 1.0,
         "the debris actually MOVED from its origin (a static check would be vacuous)"
     );
 }

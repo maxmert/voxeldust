@@ -129,7 +129,9 @@ pub struct InputDatagram {
     /// Look delta (yaw, pitch) in radians.
     pub look: [f32; 2],
     /// Momentary action bits (jump, interact, ...); discrete WORLD-MUTATING actions
-    /// ride reliable channels instead (v1.1).
+    /// ride reliable channels instead (v1.1). That owed reliable client→shard discrete-action arm
+    /// has TWO consumers — P6 block-edit-forward AND P11 PvP fire-registration (DEFERRED D-39.1);
+    /// it is build-once shared infra, never a per-feature fork (HR3).
     pub action_bits: u32,
 }
 

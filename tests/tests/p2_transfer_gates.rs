@@ -397,11 +397,11 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
          adopt-default DEST frame (seed 8) — a dropped crossing would leave seed 8: {dest_pose:?}",
     );
     assert!(
-        dest_pose.pos.is_finite(),
+        dest_pose.pos.offset().is_finite(),
         "the crossed pose is finite (sanitized at the dest ingress): {dest_pose:?}",
     );
     assert_ne!(
-        dest_pose.pos,
+        dest_pose.pos.offset(),
         DVec3::ZERO,
         "the crossed pose is the walked source pose, not the origin-adopt default",
     );

@@ -11,7 +11,7 @@
 //! sanity-bounds and uses it (authority never depends on cross-binary float
 //! reproducibility).
 
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec3, I64Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{EntityId, UniverseTick};
@@ -81,11 +81,69 @@ impl FrameRef {
     }
 }
 
+/// A frame-local position as an integer CELL anchor + a bounded f64 local OFFSET — the
+/// tiered-integer coordinate base (D-41). The `cell` is the authoritative, bit-deterministic
+/// integer truth (an `i64` lattice; the FINE tier — star system and inward — is millimetres, the
+/// COARSE tier — galaxy and out — a coarser unit, keyed by [`FrameRef`] tier); the `offset` is the
+/// small f64 displacement WITHIN one cell, so float precision stays sub-micron locally regardless of
+/// how far the frame sits from the universe origin. Cross-frame/cross-shard re-basing is exact
+/// integer cell arithmetic (zero drift, bit-deterministic) — the cure for f64-absolute drift
+/// (~131 km/ULP at galaxy scale).
+///
+/// **Planted now; math owed (D-41).** Through P3 every pose is `cell == ZERO` and `offset` carries
+/// the full frame-local f64 position — BEHAVIOUR-IDENTICAL to the pre-lattice `pos: DVec3`. The wire
+/// SHAPE is planted now (this rides the frozen [`StampedPose`]) so the future realization — non-zero
+/// cells, the normalize/cell-crossing math, the per-`FrameRef`-tier unit, and the exact inter-tier
+/// (mm↔AU) conversion at the SOI/warp transfer — is PURE-ADDITIVE (no wire change) when its first
+/// consumer lands (P4/P5 re-centering; P10 galaxy). It is not built yet (smallest-correct: no
+/// production caller exists until then). Fields are private so all construction flows through one
+/// point ([`LatticePos::local`] today) and the bounded-offset invariant has a single future home.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LatticePos {
+    cell: I64Vec3,
+    offset: DVec3,
+}
+
+impl LatticePos {
+    /// A position expressed purely as a frame-local offset, at the cell origin (`cell == ZERO`).
+    /// THE constructor used everywhere through P3 — behaviour-identical to the old `pos: DVec3`.
+    #[must_use]
+    pub fn local(offset: DVec3) -> LatticePos {
+        LatticePos {
+            cell: I64Vec3::ZERO,
+            offset,
+        }
+    }
+
+    /// The frame-local f64 offset — what physics / rendering / interpolation work in (small and
+    /// cm-exact). Reads go through this accessor so a future integer-offset migration stays
+    /// one-type-local.
+    #[must_use]
+    pub fn offset(self) -> DVec3 {
+        self.offset
+    }
+
+    /// Map the frame-local offset while PRESERVING the integer cell anchor — the cell-stable in-frame
+    /// move (the per-tick integrator and any local displacement). [`LatticePos::local`] resets the cell
+    /// to `ZERO`; this is the cell-preserving sibling, so a mutation site OUTSIDE vd-core keeps the
+    /// anchor (closing the forced-cell-zeroing footgun). Through P3 the cell is `ZERO`, so this equals
+    /// the old `pos = pos + delta`; once P4/P5 re-centering lands, re-bucketing a drifted offset back
+    /// into the cell is a PURE ADDITION here (a `.normalize()` on the result) — the cell is already
+    /// carried, so the re-centering is genuinely additive at this site, not a clobber-and-replace.
+    #[must_use]
+    pub fn map_offset(self, f: impl FnOnce(DVec3) -> DVec3) -> LatticePos {
+        LatticePos {
+            cell: self.cell,
+            offset: f(self.offset),
+        }
+    }
+}
+
 /// A pose + motion state bound to one frame at one analytic-clock instant.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StampedPose {
     pub frame: FrameRef,
-    pub pos: DVec3,
+    pub pos: LatticePos,
     pub vel: DVec3,
     pub orient: DQuat,
     pub universe_tick: UniverseTick,
@@ -97,7 +155,7 @@ impl StampedPose {
     pub fn at_rest(frame: FrameRef, pos: DVec3, universe_tick: UniverseTick) -> StampedPose {
         StampedPose {
             frame,
-            pos,
+            pos: LatticePos::local(pos),
             vel: DVec3::ZERO,
             orient: DQuat::IDENTITY,
             universe_tick,
@@ -115,7 +173,12 @@ impl StampedPose {
     pub fn sanitized(self) -> StampedPose {
         StampedPose {
             frame: self.frame,
-            pos: finite_or_zero(self.pos),
+            // Sanitize the local offset; the integer cell is exact (an i64 cannot be non-finite),
+            // so it passes through — preserving any future non-zero cell anchor.
+            pos: LatticePos {
+                cell: self.pos.cell,
+                offset: finite_or_zero(self.pos.offset),
+            },
             vel: finite_or_zero(self.vel),
             orient: if self.orient.is_finite() {
                 self.orient
@@ -138,7 +201,13 @@ impl StampedPose {
     ) -> StampedPose {
         StampedPose {
             frame: self.frame,
-            pos: self.pos + self.vel * dt_s + 0.5 * accel * dt_s * dt_s,
+            // Closed-form advance of the frame-local offset; the cell anchor is preserved (ballistic
+            // re-advance is within one frame — cell crossing is the deferred P4/P5 re-centering,
+            // galaxy ly-cells at P10).
+            pos: LatticePos {
+                cell: self.pos.cell,
+                offset: self.pos.offset + self.vel * dt_s + 0.5 * accel * dt_s * dt_s,
+            },
             vel: self.vel + accel * dt_s,
             orient: self.orient,
             universe_tick: new_tick,
@@ -227,7 +296,7 @@ mod tests {
         // An all-finite pose passes through unchanged.
         let good = StampedPose {
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            pos: DVec3::new(1.0, 2.0, 3.0),
+            pos: LatticePos::local(DVec3::new(1.0, 2.0, 3.0)),
             vel: DVec3::new(-1.0, 0.0, 4.0),
             orient: DQuat::from_rotation_y(0.5),
             universe_tick: UniverseTick(7),
@@ -237,13 +306,13 @@ mod tests {
         // collapses to identity. Frame + tick are preserved.
         let bad = StampedPose {
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            pos: DVec3::new(f64::NAN, 2.0, f64::INFINITY),
+            pos: LatticePos::local(DVec3::new(f64::NAN, 2.0, f64::INFINITY)),
             vel: DVec3::new(1.0, f64::NEG_INFINITY, 3.0),
             orient: DQuat::from_xyzw(f64::NAN, 0.0, 0.0, 1.0),
             universe_tick: UniverseTick(7),
         };
         let s = bad.sanitized();
-        assert_eq!(s.pos, DVec3::new(0.0, 2.0, 0.0));
+        assert_eq!(s.pos.offset(), DVec3::new(0.0, 2.0, 0.0));
         assert_eq!(s.vel, DVec3::new(1.0, 0.0, 3.0));
         assert_eq!(s.orient, DQuat::IDENTITY);
         assert_eq!(s.frame, bad.frame);
@@ -254,7 +323,7 @@ mod tests {
     fn ballistic_advance_is_exact_kinematics() {
         let p0 = StampedPose {
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            pos: DVec3::new(0.0, 100.0, 0.0),
+            pos: LatticePos::local(DVec3::new(0.0, 100.0, 0.0)),
             vel: DVec3::new(10.0, 0.0, 0.0),
             orient: DQuat::IDENTITY,
             universe_tick: UniverseTick(0),
@@ -262,7 +331,7 @@ mod tests {
         let g = DVec3::new(0.0, -2.0, 0.0);
         let p1 = p0.advanced_ballistic(g, 3.0, UniverseTick(60));
         // x = x0 + v*t; y = y0 + 0.5*a*t^2; v_y = a*t
-        assert_eq!(p1.pos, DVec3::new(30.0, 100.0 - 9.0, 0.0));
+        assert_eq!(p1.pos.offset(), DVec3::new(30.0, 100.0 - 9.0, 0.0));
         assert_eq!(p1.vel, DVec3::new(10.0, -6.0, 0.0));
         assert_eq!(p1.universe_tick, UniverseTick(60));
         assert_eq!(p1.frame, p0.frame);
@@ -273,7 +342,7 @@ mod tests {
         // Advancing 2s then 3s equals advancing 5s (closed form, no accumulation drift).
         let p0 = StampedPose {
             frame: FrameRef::GalaxySpace,
-            pos: DVec3::new(1.0, 2.0, 3.0),
+            pos: LatticePos::local(DVec3::new(1.0, 2.0, 3.0)),
             vel: DVec3::new(-1.0, 0.5, 2.0),
             orient: DQuat::IDENTITY,
             universe_tick: UniverseTick(0),
@@ -283,7 +352,7 @@ mod tests {
             .advanced_ballistic(a, 2.0, UniverseTick(40))
             .advanced_ballistic(a, 3.0, UniverseTick(100));
         let whole = p0.advanced_ballistic(a, 5.0, UniverseTick(100));
-        assert!((split.pos - whole.pos).length() < 1e-9);
+        assert!((split.pos.offset() - whole.pos.offset()).length() < 1e-9);
         assert!((split.vel - whole.vel).length() < 1e-12);
     }
 
@@ -291,7 +360,7 @@ mod tests {
     fn stamped_pose_serde_roundtrip() {
         let p = StampedPose {
             frame: FrameRef::ShipLocal { ship: ship_id() },
-            pos: DVec3::new(4.0, 5.0, 6.0),
+            pos: LatticePos::local(DVec3::new(4.0, 5.0, 6.0)),
             vel: DVec3::new(0.1, 0.2, 0.3),
             orient: DQuat::from_xyzw(0.0, 1.0, 0.0, 0.0),
             universe_tick: UniverseTick(77),
@@ -299,5 +368,50 @@ mod tests {
         let bytes = postcard::to_allocvec(&p).expect("encode");
         let back: StampedPose = postcard::from_bytes(&bytes).expect("decode");
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn lattice_local_is_cell_zero_with_offset_passthrough() {
+        let v = DVec3::new(1.5, -2.5, 3.5);
+        let lp = LatticePos::local(v);
+        assert_eq!(lp.offset(), v);
+        assert_eq!(lp.cell, I64Vec3::ZERO);
+    }
+
+    #[test]
+    fn lattice_map_offset_preserves_the_cell_while_mapping_the_offset() {
+        // The cell-PRESERVING in-frame move (the integrator uses this). Through P3 the cell is ZERO
+        // so movement tests cannot distinguish it from `local`; this guards the cell-preservation
+        // BEHAVIOUR directly with a non-zero cell, so a future refactor cannot silently re-introduce
+        // the cell-zeroing foot-gun (audit wf_fd6a4b9d).
+        let lp = LatticePos {
+            cell: I64Vec3::new(5, -7, 11),
+            offset: DVec3::new(1.0, 2.0, 3.0),
+        };
+        let moved = lp.map_offset(|o| o + DVec3::new(0.25, -0.5, 0.75));
+        assert_eq!(moved.cell, I64Vec3::new(5, -7, 11));
+        assert_eq!(moved.offset(), DVec3::new(1.25, 1.5, 3.75));
+    }
+
+    #[test]
+    fn stamped_pose_serde_carries_a_nonzero_cell_exactly() {
+        // The load-bearing plant: the i64 cell anchor rides the FROZEN wire bit-exact, so the future
+        // non-zero-cell realization (P10) is additive — no wire rewrite. Through P3 cell is always
+        // ZERO; this proves a non-zero cell would round-trip if/when it lands.
+        let p = StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 3 },
+            pos: LatticePos {
+                cell: I64Vec3::new(5, -7, 11),
+                offset: DVec3::new(0.25, -0.5, 0.75),
+            },
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(9),
+        };
+        let bytes = postcard::to_allocvec(&p).expect("encode");
+        let back: StampedPose = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(back, p);
+        assert_eq!(back.pos.cell, I64Vec3::new(5, -7, 11));
+        assert_eq!(back.pos.offset(), DVec3::new(0.25, -0.5, 0.75));
     }
 }

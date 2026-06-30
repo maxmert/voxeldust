@@ -209,8 +209,12 @@ impl DeliveredView {
     /// hull entity's LIVE pose — `hull.pos + hull.orient * interior.pos` — sampled at the
     /// SAME `cursor` so interior and hull agree in time ("walk inside a flying ship", P8);
     /// until a hull is delivered (no ships pre-P8) the lookup is `None` and the interior
-    /// renders at its frame origin. This is THE single chokepoint for that composition (and
-    /// the P10 galaxy ly-cell offset). Never panics; always finite (poses sanitized at ingress).
+    /// renders at its frame origin. This is THE single chokepoint for that composition. (The P10
+    /// galaxy ly-cell offset is OWED here, NOT free: `RenderPose.pos` is a render-local `DVec3` and
+    /// `EntityTrack::sample` already drops the `LatticePos` cell, so composing the ly-cell needs a
+    /// `cell` on `RenderPose` — or a cell-rebase in `sample` — landing with the D-41 cross-cell interp
+    /// rebasing; the one-level chokepoint SHAPE is right, the cell DATA is owed.) Never panics; always
+    /// finite (poses sanitized at ingress).
     ///
     /// ⚠️ TIME-coherent only, NOT version-matched (DEFERRED D-35). When the ship rides its own
     /// shard (P8), hull + interior arrive on DIFFERENT lossy subs; §8.1 (`transfer_protocol.md`,
@@ -483,12 +487,11 @@ mod tests {
         // A corrupt sender ships NaN/Inf coordinates; the view must sanitize them at
         // ingress so the renderer never gets a poisoned transform.
         let mut view = DeliveredView::default();
-        let mut pose = StampedPose::at_rest(
+        let pose = StampedPose::at_rest(
             FrameRef::SystemSpace { system_seed: 1 },
-            DVec3::new(f64::NAN, 1.0, 0.0),
+            DVec3::new(f64::NAN, 1.0, f64::INFINITY),
             UniverseTick(10),
         );
-        pose.pos.z = f64::INFINITY;
         view.on_snapshot(
             &s(SubId(0)),
             SnapshotDatagram {

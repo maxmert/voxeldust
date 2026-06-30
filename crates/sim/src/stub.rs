@@ -1193,7 +1193,13 @@ fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &
     // the client's nav/camera invert the SAME definition (no hand-re-encoded drift).
     let axes = kinematics::local_axes_from_movement(input.movement);
     let step = dot.pose.orient * axes * (config.move_speed_mps * config.tick_dt_s);
-    dot.pose.pos += step;
+    // Integrate the frame-local offset, PRESERVING the cell anchor (`map_offset`, NOT `local` which
+    // would zero it). Through P3 cell is ZERO so this is the full local position += step,
+    // behaviour-identical to the pre-lattice `pos += step` (D-41); the per-tick normalize/re-centering
+    // that re-buckets a drifted offset back into the cell (the bounded-offset invariant) lands with
+    // P4/P5 re-centering (galaxy ly-cells at P10), and is a PURE ADDITION here (a `.normalize()` on the
+    // result) because the cell is already carried — NOT a clobber-and-replace.
+    dot.pose.pos = dot.pose.pos.map_offset(|o| o + step);
     dot.pose.vel = step / config.tick_dt_s;
     dot.pose.universe_tick = clock.universe_tick;
 }
@@ -1505,7 +1511,7 @@ fn promote_apply(
         GhostNeighbor {
             source: cmd.source,
             seq: 0,
-            anchor: pose.pos,
+            anchor: pose.pos.offset(),
         },
     );
     outbox.push_flow(
@@ -1617,7 +1623,7 @@ fn re_home_apply(
         GhostNeighbor {
             source: cmd.source,
             seq: 0,
-            anchor: pose.pos,
+            anchor: pose.pos.offset(),
         },
     );
     outbox.push_flow(
@@ -2688,7 +2694,7 @@ fn feed_source_ghosts(
 /// ghost was SPAWNED in-band at the crossing (distance 0 = a member), so `was_member` is always `true`.
 #[must_use]
 fn ghost_band_exited(band: &OverlapBand, anchor: DVec3, pose: &StampedPose) -> bool {
-    !band.update_membership(true, (pose.pos - anchor).length())
+    !band.update_membership(true, (pose.pos.offset() - anchor).length())
 }
 
 /// Whether a hosted ghost has a LIVE feed (1d.5b.3b): has-ever-been-fed-and-not-despawned (the
@@ -2803,6 +2809,7 @@ fn emit_frames(
 mod tests {
     use super::*;
     use crate::capability::NodeKind;
+    use vd_core::pose::LatticePos; // only the tests construct a LatticePos directly; prod uses .map_offset/.offset
     use vd_core::{MsgId, UniverseTick};
     use vd_wire::intershard::{DEMOTE_STEP, FLUSH_SOURCE_STEP, STUB_CROSSING_STEP};
 
@@ -3133,7 +3140,7 @@ mod tests {
         let _ = rig.tick(vec![]);
         let owned = rig.world.resource::<OwnedTransients>();
         assert_eq!(
-            owned.0[&held].pose.pos,
+            owned.0[&held].pose.pos.offset(),
             DVec3::new(1.0, 0.0, 0.0),
             "the held debris advanced by vel·dt (10 · 0.1)"
         );
@@ -3143,12 +3150,12 @@ mod tests {
             "re-stamped to now"
         );
         assert_eq!(
-            owned.0[&arriving].pose.pos,
+            owned.0[&arriving].pose.pos.offset(),
             DVec3::ZERO,
             "the uncounted Arriving tier is NOT advanced"
         );
         assert_eq!(
-            owned.0[&departing].pose.pos,
+            owned.0[&departing].pose.pos.offset(),
             DVec3::ZERO,
             "the uncounted Departing tier is NOT advanced"
         );
@@ -4482,8 +4489,11 @@ mod tests {
         let _ = rig.tick(vec![input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         let expected_step = 2.0 * 0.05; // speed * dt
-        assert!((dot.pose.pos.z + expected_step).abs() < 1e-12, "moved -Z");
-        assert_eq!(dot.pose.pos.x, 0.0);
+        assert!(
+            (dot.pose.pos.offset().z + expected_step).abs() < 1e-12,
+            "moved -Z"
+        );
+        assert_eq!(dot.pose.pos.offset().x, 0.0);
         assert_eq!(dot.last_applied_seq, Some(1));
         assert_eq!(
             rig.world.resource::<InputLog>().applied(),
@@ -4508,8 +4518,11 @@ mod tests {
         )]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         let expected_step = 2.0 * 0.05;
-        assert!((dot.pose.pos.x + expected_step).abs() < 1e-6, "moved -X");
-        assert!(dot.pose.pos.z.abs() < 1e-6);
+        assert!(
+            (dot.pose.pos.offset().x + expected_step).abs() < 1e-6,
+            "moved -X"
+        );
+        assert!(dot.pose.pos.offset().z.abs() < 1e-6);
     }
 
     #[test]
@@ -4539,10 +4552,13 @@ mod tests {
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         let expected_step = 2.0 * 0.05;
         assert!(
-            (dot.pose.pos.x - expected_step).abs() < 1e-12,
+            (dot.pose.pos.offset().x - expected_step).abs() < 1e-12,
             "clamped strafe"
         );
-        assert!((dot.pose.pos.y - expected_step).abs() < 1e-12, "vertical");
+        assert!(
+            (dot.pose.pos.offset().y - expected_step).abs() < 1e-12,
+            "vertical"
+        );
     }
 
     #[test]
@@ -4623,7 +4639,11 @@ mod tests {
             [f32::INFINITY, 0.0],
         )]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
-        assert_eq!(dot.pose.pos, vd_core::glam::DVec3::ZERO, "pose untouched");
+        assert_eq!(
+            dot.pose.pos.offset(),
+            vd_core::glam::DVec3::ZERO,
+            "pose untouched"
+        );
         // Split asserts (no `&&` short-circuit branch — the HR5 coverage discipline).
         assert_eq!(dot.yaw, 0.0, "yaw untouched");
         assert_eq!(dot.pitch, 0.0, "pitch untouched");
@@ -4637,9 +4657,12 @@ mod tests {
             vec![(SESSION, Some(1), DiscardReason::NonFiniteInput)]
         );
         let dot = rig.world.resource::<Dots>().0[&SESSION];
-        assert!(dot.pose.pos.is_finite(), "authoritative pose finite");
         assert!(
-            dot.pose.pos.z < 0.0,
+            dot.pose.pos.offset().is_finite(),
+            "authoritative pose finite"
+        );
+        assert!(
+            dot.pose.pos.offset().z < 0.0,
             "the finite input integrated (moved -Z)"
         );
     }
@@ -5748,14 +5771,14 @@ mod tests {
 
         // BAND-EXIT: move the owned dot well past the destroy edge from the crossing anchor. The band
         // is `for_motion(move_speed*dt)` = `for_motion(0.1)`, destroy_above = 20*0.1 = 2.0 m; +3 m exits.
-        let exit_pos = crossing_pose().pos + DVec3::new(3.0, 0.0, 0.0);
+        let exit_pos = crossing_pose().pos.offset() + DVec3::new(3.0, 0.0, 0.0);
         rig.world
             .resource_mut::<Dots>()
             .0
             .get_mut(&SESSION)
             .expect("the owned dot")
             .pose
-            .pos = exit_pos;
+            .pos = LatticePos::local(exit_pos);
         let sent = rig.tick(vec![]);
         assert!(
             flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Despawn {
@@ -6254,7 +6277,11 @@ mod tests {
         // (b) AFTER applying seq 1: the pose moved and the watermark is Some(1).
         let _ = rig.tick(vec![input_for(SESSION, 1, GATEWAY)]);
         let dot1 = rig.world.resource::<Dots>().0[&SESSION];
-        assert_ne!(dot1.pose.pos, DVec3::ZERO, "the dot moved on input");
+        assert_ne!(
+            dot1.pose.pos.offset(),
+            DVec3::ZERO,
+            "the dot moved on input"
+        );
         let sent1 = rig.tick(vec![flush_msg(entity)]);
         assert_eq!(
             to_orch(&sent1),
@@ -6356,7 +6383,7 @@ mod tests {
         );
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
-            dot.pose.pos,
+            dot.pose.pos.offset(),
             DVec3::ZERO,
             "buffered, not applied (still adopting)"
         );
@@ -6435,7 +6462,7 @@ mod tests {
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
-            dot.pose.pos,
+            dot.pose.pos.offset(),
             DVec3::ZERO,
             "a stale crossing does not move the dot"
         );
@@ -6510,7 +6537,7 @@ mod tests {
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
         assert_eq!(rig.world.resource::<StubStats>().crossings_buffered, 0);
         assert_eq!(
-            rig.world.resource::<Dots>().0[&SESSION].pose.pos,
+            rig.world.resource::<Dots>().0[&SESSION].pose.pos.offset(),
             DVec3::ZERO,
             "a stale-epoch crossing does not move the dot"
         );

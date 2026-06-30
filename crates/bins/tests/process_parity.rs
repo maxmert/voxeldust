@@ -248,7 +248,7 @@ fn p1_parity_real_binaries_over_quic() {
                 walker
                     .poses
                     .get(&own)
-                    .is_some_and(|p| p.pos.distance(DVec3::ZERO) > 0.5)
+                    .is_some_and(|p| p.pos.offset().distance(DVec3::ZERO) > 0.5)
             });
         if done {
             break;
@@ -283,7 +283,7 @@ fn p1_parity_real_binaries_over_quic() {
         .own_entity
         .expect("authority announced to the idle dot");
     assert_eq!(
-        idle.poses[&idle_own].pos,
+        idle.poses[&idle_own].pos.offset(),
         DVec3::ZERO,
         "the idle dot never moved"
     );

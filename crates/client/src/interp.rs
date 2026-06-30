@@ -110,10 +110,15 @@ impl EntityTrack {
     pub fn sample(&self, cursor: f64) -> RenderPose {
         let prev_time = tick_to_f64(self.prev.universe_tick);
         let current_time = tick_to_f64(self.current.universe_tick);
+        // Blend the frame-local offsets (RenderPose is render-local DVec3). Through P3 cell is ZERO so
+        // the offset is the full frame-local position; prev/current share a cell so the lerp is valid.
+        // Cross-cell interpolation (rebasing prev into current's cell, or collapsing the window on a
+        // same-frame cell change the way `observe` does on a frame change) lands WITH P4/P5 re-centering
+        // — the first producer of a non-zero cell — galaxy ly-cells at P10. D-41.
         let pos = lerp_at_game_time(
-            self.prev.pos,
+            self.prev.pos.offset(),
             prev_time,
-            self.current.pos,
+            self.current.pos.offset(),
             current_time,
             cursor,
             DVec3::lerp,

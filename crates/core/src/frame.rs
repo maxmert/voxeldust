@@ -17,7 +17,7 @@
 use glam::{DQuat, DVec3};
 
 use crate::ids::UniverseTick;
-use crate::pose::{FrameRef, StampedPose};
+use crate::pose::{FrameRef, LatticePos, StampedPose};
 
 /// Where a frame's origin sits — and how it moves — relative to the COMMON PARENT at a
 /// universe tick. A rigid placement: position, velocity, orientation, angular velocity.
@@ -103,9 +103,14 @@ pub fn transfer_frame(
         .placement(to, pose.universe_tick)
         .ok_or(FrameError::UnknownDestFrame)?;
 
-    // 1. Lift the local pose into the common parent frame.
-    let world_pos = from.origin + from.orientation * pose.pos;
-    let lever = from.orientation * pose.pos;
+    // 1. Lift the local pose into the common parent frame. (P1-P3: cell is ZERO, so `offset()` is the
+    // full frame-local position. The exact-integer cross-cell re-base — lift source cell+offset at the
+    // source tier, re-quantize `new_pos` into the DEST frame's cell at its tier unit, replacing the
+    // provisional `LatticePos::local(new_pos)` cell-0 write below — lands WITH P4/P5 re-centering, galaxy
+    // ly-cells at P10. D-41 plant-item 2 ["exact-integer re-base in transfer_frame"].)
+    let local = pose.pos.offset();
+    let world_pos = from.origin + from.orientation * local;
+    let lever = from.orientation * local;
     let world_vel =
         from.velocity + from.orientation * pose.vel + from.angular_velocity.cross(lever);
     let world_orient = from.orientation * pose.orient;
@@ -119,7 +124,7 @@ pub fn transfer_frame(
 
     Ok(StampedPose {
         frame: to,
-        pos: new_pos,
+        pos: LatticePos::local(new_pos),
         vel: new_vel,
         orient: new_orient.normalize(),
         universe_tick: pose.universe_tick,
@@ -152,7 +157,7 @@ mod tests {
     fn pose_in(frame: FrameRef, pos: DVec3, vel: DVec3) -> StampedPose {
         StampedPose {
             frame,
-            pos,
+            pos: LatticePos::local(pos),
             vel,
             orient: DQuat::IDENTITY,
             universe_tick: UniverseTick(100),
@@ -199,7 +204,7 @@ mod tests {
         let p = pose_in(sys(), DVec3::new(1000.0, 0.0, 0.0), DVec3::ZERO);
         let got = transfer_frame(&p, planet(), &ctx).expect("transformed");
         assert!(
-            got.pos.length() < 1e-9,
+            got.pos.offset().length() < 1e-9,
             "at the planet origin: {:?}",
             got.pos
         );
@@ -236,7 +241,7 @@ mod tests {
         let in_planet = transfer_frame(&original, planet(), &ctx).expect("to planet");
         let back = transfer_frame(&in_planet, sys(), &ctx).expect("back to system");
         assert!(
-            (back.pos - original.pos).length() < 1e-9,
+            (back.pos.offset() - original.pos.offset()).length() < 1e-9,
             "pos round-trips: {:?} vs {:?}",
             back.pos,
             original.pos
@@ -268,7 +273,7 @@ mod tests {
         let p = pose_in(sys(), DVec3::new(1.0, 0.0, 0.0), DVec3::ZERO);
         let got = transfer_frame(&p, planet(), &ctx).expect("rotated");
         assert!(
-            (got.pos - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-9,
+            (got.pos.offset() - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-9,
             "rotated into frame axes: {:?}",
             got.pos
         );
@@ -294,7 +299,7 @@ mod tests {
         // A CROSS-frame transfer invokes the DetCtx placement lookup.
         let p = pose_in(sys(), DVec3::new(2.0, 0.0, 0.0), DVec3::ZERO);
         let got = transfer_frame(&p, planet(), &ctx).expect("cross-frame via DetCtx");
-        assert!(got.pos.length() < 1e-9, "at the planet origin");
+        assert!(got.pos.offset().length() < 1e-9, "at the planet origin");
         assert_eq!(FramePlacement::identity().origin, DVec3::ZERO);
         assert_eq!(
             FramePlacement::moving(DVec3::X, DVec3::Y).velocity,

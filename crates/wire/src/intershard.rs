@@ -389,6 +389,13 @@ pub struct TransientHandoff {
 }
 
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
+///
+/// OWED (DEFERRED D-39.6, P11 combat): cross-boundary PvP needs ghosts to carry a small read-only
+/// replicated combat-STATE blob (health/shield/anim/pilot-flags, per `transfer_protocol.md:107`) so a
+/// shard rendering a ghost owned by another shard can show its health/downed state and gate a hit
+/// before forwarding the fire-event to the owner. Today Spawn/Delta carry pose+fences only; the blob
+/// lands as a NEW GhostFlow VARIANT (a field-append to Spawn/Delta is NOT postcard-safe), read-only
+/// display state — the authoritative hit is still applied at the ghost's OWNER (D-39.1 forward path).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GhostFlow {
     /// RELIABLE delivery ([`MsgClass::GhostReliable`]): the ghost-host inserts a kinematic ghost (a

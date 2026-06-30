@@ -74,7 +74,7 @@ fn p1_dod_two_dots_log_in_walk_and_see_each_other() {
     let own = walker.own_entity.expect("authority announced");
     let own_pose = walker.poses[&own];
     assert!(
-        own_pose.pos.distance(DVec3::ZERO) > 0.5,
+        own_pose.pos.offset().distance(DVec3::ZERO) > 0.5,
         "the walker's delivered pose moved: {:?}",
         own_pose.pos
     );
@@ -82,7 +82,7 @@ fn p1_dod_two_dots_log_in_walk_and_see_each_other() {
     assert_eq!(idle.poses.len(), 2, "the idle dot sees the walker too");
     let idle_own = idle.own_entity.expect("authority announced");
     assert_eq!(
-        idle.poses[&idle_own].pos,
+        idle.poses[&idle_own].pos.offset(),
         DVec3::ZERO,
         "the idle dot never moved"
     );

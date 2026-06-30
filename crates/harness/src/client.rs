@@ -542,7 +542,7 @@ mod tests {
         send_snapshot(&mut gw, &snapshot(SubId(0), 5, 1.0));
         fabric.pump(TickId(3));
         let _ = client.step();
-        assert_eq!(client.view.poses[&EntityId(7)].pos.x, 1.0);
+        assert_eq!(client.view.poses[&EntityId(7)].pos.offset().x, 1.0);
         // A STRICTLY older frame and a foreign sub both drop. A SECOND chunk of the
         // SAME tick (frame 5) carrying a DIFFERENT entity is a partitioned sibling
         // (§6.3) and MUST land — even arriving after frame 5's first chunk — or a
@@ -555,12 +555,12 @@ mod tests {
         fabric.pump(TickId(4));
         let _ = client.step();
         assert_eq!(
-            client.view.poses[&EntityId(7)].pos.x,
+            client.view.poses[&EntityId(7)].pos.offset().x,
             2.0,
             "the newest frame for entity 7 wins"
         );
         assert_eq!(
-            client.view.poses[&EntityId(8)].pos.x,
+            client.view.poses[&EntityId(8)].pos.offset().x,
             7.0,
             "the same-tick sibling chunk's entity landed (no MTU-partition loss)"
         );
@@ -660,7 +660,7 @@ mod tests {
         send_snapshot(&mut gw, &snapshot(SubId(0), 1, 1.0));
         fabric.pump(TickId(4));
         let _ = client.step();
-        assert_eq!(client.view.poses[&EntityId(7)].pos.x, 1.0);
+        assert_eq!(client.view.poses[&EntityId(7)].pos.offset().x, 1.0);
         // Now close the HELD sub: it leaves the set, and a later same-sub datagram is no longer
         // admitted (a foreign sub now).
         send_control(
@@ -677,7 +677,7 @@ mod tests {
         fabric.pump(TickId(6));
         let _ = client.step();
         assert_eq!(
-            client.view.poses[&EntityId(7)].pos.x,
+            client.view.poses[&EntityId(7)].pos.offset().x,
             1.0,
             "a datagram on the closed sub is dropped (no longer admitted)"
         );

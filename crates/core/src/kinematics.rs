@@ -133,7 +133,7 @@ pub fn advance_continuity(
 mod tests {
     use super::*;
     use crate::entity_kind::ContinuityModel;
-    use crate::pose::{FrameRef, StampedPose};
+    use crate::pose::{FrameRef, LatticePos, StampedPose};
 
     #[test]
     fn advance_continuity_ballistic_moves_others_stamp_only() {
@@ -141,7 +141,7 @@ mod tests {
         // the tick without moving. Covers BOTH match arms (D-7b).
         let pose0 = StampedPose {
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            pos: DVec3::new(1.0, 2.0, 3.0),
+            pos: LatticePos::local(DVec3::new(1.0, 2.0, 3.0)),
             vel: DVec3::new(10.0, 0.0, -5.0),
             orient: glam::DQuat::IDENTITY,
             universe_tick: crate::UniverseTick(100),
@@ -155,7 +155,11 @@ mod tests {
             2.0,
             target,
         );
-        assert_eq!(ball.pos, DVec3::new(21.0, 2.0, -7.0), "advanced by vel·dt");
+        assert_eq!(
+            ball.pos.offset(),
+            DVec3::new(21.0, 2.0, -7.0),
+            "advanced by vel·dt"
+        );
         assert_eq!(ball.vel, pose0.vel, "constant velocity (accel ZERO)");
         assert_eq!(ball.universe_tick, target);
         // Non-zero accel exercises the ½a·dt² + a·dt terms.
@@ -167,7 +171,7 @@ mod tests {
             target,
         );
         assert_eq!(
-            ball_a.pos,
+            ball_a.pos.offset(),
             DVec3::new(21.0, 4.0, -7.0),
             "+ ½·1·2² = +2 on Y"
         );
