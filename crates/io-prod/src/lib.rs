@@ -49,13 +49,26 @@ use crate::trust::{ClusterTrust, TrustError};
 /// through `wire::framing` (the ONE codec/framing home — HR3 + the `codec_flags` reserved-bit
 /// forward-compat path); the cap is `wire::framing::MAX_STREAM_FRAME_BYTES`.
 ///
-/// R1' (the redelivering-transport hot/cold split): this type rides the RELIABLE uni-stream path ONLY.
-/// The at-least-once metadata (incarnation/epoch/seq) is added to THIS type in R2'/R3' — it can grow
-/// without touching the unreliable hot path because that path now has its own [`DatagramFrame`].
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct WireFrame {
+/// R2' (the redelivering-transport at-least-once layer): this RELIABLE frame carries the redelivery
+/// metadata BELOW the frozen `Transport` seam (sim/node never see it). `incarnation` is the SENDER's
+/// process-epoch (a higher value = the sender restarted ⇒ the receiver resets its dedup state); `epoch`
+/// is a per-(peer,class) REDIAL counter (bumped on a write error + stream re-dial — the cross-stream-race
+/// cure: a straggler on an OLD stream carries the OLD epoch and is dropped BEFORE it can touch the
+/// high-water); `seq` is the per-(peer,class) monotone sequence. The bare unreliable hot path uses
+/// [`DatagramFrame`] and carries NONE of this (zero PvP-hot-path cost — R1'). The receiver's contiguity
+/// verdict (the dedup/replay state machine) lands in R3'; through R2' the receiver decodes the grown
+/// frame and DELIVERS as before (the new fields are inert), so the wire grows behaviour-identically.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct ReliableFrame {
     from: NodeId,
     class: MsgClass,
+    /// Sender process-epoch (R2'). Today seeded from `MeshConfig::process_incarnation`; the durable
+    /// monotone boot-counter that survives a clock rewind is R-6 (P6/P7).
+    incarnation: u64,
+    /// Per-(peer,class) redial counter (R2' cross-stream-race cure).
+    epoch: u32,
+    /// Per-(peer,class) monotone sequence (R2' buffer-first assignment).
+    seq: u64,
     /// The on-wire payload is a plain `Vec<u8>` (the seam's `Bytes = Arc<[u8]>` is
     /// an in-process sharing optimization; it converts at the serialize boundary).
     bytes: Vec<u8>,
@@ -74,15 +87,18 @@ pub(crate) struct DatagramFrame {
     bytes: Vec<u8>,
 }
 
-/// The sim-thread→writer queue item for the loopback bridge. DRY pin (audit `wf_2c963246`): byte-identical
-/// to `mesh.rs`'s `OutFrame` — unify both into ONE crate-root struct in R2'/R3' (when the at-least-once
-/// seq/incarnation/epoch metadata lands on the reliable path), so the two transports cannot drift.
+/// The sim-thread→writer queue item, shared by BOTH io-prod transports (the loopback `ProdTransport`
+/// bridge and the `mesh` `MeshTransport`) so their frame envelope cannot drift — the ONE crate-root
+/// struct that unifies the formerly-duplicated `OutboundFrame`/`OutFrame` (audit `wf_2c963246` DRY pin,
+/// closed in R2'). It is the SEAM-LEVEL envelope (`Bytes` + the FIFO `MsgId`); the at-least-once
+/// redelivery metadata (incarnation/epoch/seq) is stamped BELOW here, on the [`ReliableFrame`] at the
+/// write boundary, never on this queue item (the unreliable hot path never gets that metadata).
 #[derive(Debug)]
-struct OutboundFrame {
-    to: NodeId,
-    class: MsgClass,
-    bytes: Bytes,
-    msg_id: MsgId,
+pub(crate) struct OutFrame {
+    pub(crate) to: NodeId,
+    pub(crate) class: MsgClass,
+    pub(crate) bytes: Bytes,
+    pub(crate) msg_id: MsgId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -98,7 +114,7 @@ pub enum ProdIoError {
 /// Sim-thread side of the bridge. Implements [`Transport`] over the crossbeam queues.
 pub struct ProdTransport {
     local: NodeId,
-    outbound_tx: Sender<OutboundFrame>,
+    outbound_tx: Sender<OutFrame>,
     inbound_rx: Receiver<Inbound>,
     next_msg_id: u64,
 }
@@ -106,7 +122,7 @@ pub struct ProdTransport {
 impl Transport for ProdTransport {
     fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
         let msg_id = MsgId(self.next_msg_id);
-        match self.outbound_tx.try_send(OutboundFrame {
+        match self.outbound_tx.try_send(OutFrame {
             to,
             class,
             bytes,
@@ -257,7 +273,7 @@ fn spawn_bridge(
     outbound_capacity: usize,
     paused_writer: bool,
 ) -> (ProdTransport, BridgeControl) {
-    let (outbound_tx, outbound_rx) = bounded::<OutboundFrame>(outbound_capacity);
+    let (outbound_tx, outbound_rx) = bounded::<OutFrame>(outbound_capacity);
     let (inbound_tx, inbound_rx) = unbounded::<Inbound>();
 
     // Reader task: accept the peer's uni stream, decode frames, feed the inbound queue.
@@ -306,7 +322,7 @@ fn spawn_writer(
     handle: tokio::runtime::Handle,
     local: NodeId,
     conn: quinn::Connection,
-    outbound_rx: Receiver<OutboundFrame>,
+    outbound_rx: Receiver<OutFrame>,
     inbound_tx: Sender<Inbound>,
     gate: Option<Receiver<()>>,
 ) {
@@ -318,8 +334,13 @@ fn spawn_writer(
                 let _ = gate.recv();
             }
             let mut stream: Option<quinn::SendStream> = None;
+            // The bridge is reliable single-stream test infra (the SPIKE-0a loopback). It stamps a
+            // monotone per-stream `seq` so its `ReliableFrame`s are well-formed, with `incarnation`/`epoch`
+            // 0 — the bridge's receiver (`read_frames`) ignores the redelivery metadata through R2'; the
+            // per-(peer,class) lane FSM (retry buffer + replay) lives on the production `mesh` transport.
+            let mut seq = 0u64;
             while let Ok(frame) = outbound_rx.recv() {
-                let wrote = handle.block_on(write_frame(&conn, &mut stream, local, &frame));
+                let wrote = handle.block_on(write_frame(&conn, &mut stream, local, &frame, &mut seq));
                 if wrote.is_err() {
                     // Surface the failure in-band; drop the broken stream so the next
                     // frame re-attempts (and fails fast while the connection is dead).
@@ -335,19 +356,26 @@ fn spawn_writer(
         .expect("spawn writer thread");
 }
 
-/// Frame + write ONE `WireFrame` on a reliable uni stream — the SHARED stream-write for BOTH the
-/// bridge and the mesh transport, routed through `wire::framing::frame_payload` so the
-/// `codec_flags` discipline + cap live in ONE home (HR3). The framed bytes already include the
-/// length prefix, so it is a single `write_all`.
-pub(crate) async fn write_wireframe(
+/// Frame + write ONE [`ReliableFrame`] on a reliable uni stream — the SHARED stream-write for BOTH the
+/// bridge and the mesh transport, routed through `wire::framing::frame_payload` so the `codec_flags`
+/// discipline + cap live in ONE home (HR3). The framed bytes already include the length prefix, so it is
+/// a single `write_all`. The caller supplies the at-least-once header (`incarnation`/`epoch`/`seq`) — the
+/// mesh lane FSM from its per-(peer,class) state, the bridge a monotone per-stream `seq` with 0 epoch/incarnation.
+pub(crate) async fn write_reliable_frame(
     send: &mut quinn::SendStream,
-    local: NodeId,
+    from: NodeId,
     class: MsgClass,
+    incarnation: u64,
+    epoch: u32,
+    seq: u64,
     bytes: &[u8],
 ) -> Result<(), ()> {
-    let payload = postcard::to_allocvec(&WireFrame {
-        from: local,
+    let payload = postcard::to_allocvec(&ReliableFrame {
+        from,
         class,
+        incarnation,
+        epoch,
+        seq,
         bytes: bytes.to_vec(),
     })
     .map_err(|_| ())?;
@@ -355,12 +383,12 @@ pub(crate) async fn write_wireframe(
     send.write_all(&framed).await.map_err(|_| ())
 }
 
-/// Read ONE `wire::framing` stream frame off a uni stream and decode its `WireFrame` — the SHARED
-/// stream-read for the bridge AND the mesh transport (collapsing the previously-duplicated read
-/// loops). Returns `None` on clean EOF OR any framing / decode error (the caller stops reading the
-/// stream, exactly as before). The cap is checked on `total_len` BEFORE the body is allocated, so a
-/// forged oversize header cannot OOM; `frame_body_payload` then applies the reserved-bit reject.
-async fn read_one_wireframe(recv: &mut quinn::RecvStream) -> Option<WireFrame> {
+/// Read ONE `wire::framing` stream frame off a uni stream and decode its [`ReliableFrame`] — the SHARED
+/// stream-read for the bridge AND the mesh transport (the ONE read home). Returns `None` on clean EOF OR
+/// any framing / decode error (the caller stops reading the stream). The cap is checked on `total_len`
+/// BEFORE the body is allocated, so a forged oversize header cannot OOM; `frame_body_payload` then
+/// applies the reserved-bit reject.
+pub(crate) async fn read_one_reliable_frame(recv: &mut quinn::RecvStream) -> Option<ReliableFrame> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await.ok()?;
     let total_len = u32::from_be_bytes(len_buf);
@@ -370,26 +398,32 @@ async fn read_one_wireframe(recv: &mut quinn::RecvStream) -> Option<WireFrame> {
     let mut body = vec![0u8; total_len as usize];
     recv.read_exact(&mut body).await.ok()?;
     let payload = vd_wire::framing::frame_body_payload(&body).ok()?;
-    postcard::from_bytes::<WireFrame>(payload).ok()
+    postcard::from_bytes::<ReliableFrame>(payload).ok()
 }
 
 async fn write_frame(
     conn: &quinn::Connection,
     stream: &mut Option<quinn::SendStream>,
     local: NodeId,
-    frame: &OutboundFrame,
+    frame: &OutFrame,
+    seq: &mut u64,
 ) -> Result<(), ()> {
     if stream.is_none() {
         *stream = Some(conn.open_uni().await.map_err(|_| ())?);
+        *seq = 0; // a fresh stream restarts the bridge's monotone sequence
     }
     let Some(send) = stream.as_mut() else {
         return Err(());
     };
-    write_wireframe(send, local, frame.class, &frame.bytes).await
+    let this_seq = *seq;
+    *seq += 1;
+    write_reliable_frame(send, local, frame.class, 0, 0, this_seq, &frame.bytes).await
 }
 
 pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<Inbound>) {
-    while let Some(frame) = read_one_wireframe(&mut recv).await {
+    // R2': decode the grown ReliableFrame; the redelivery metadata (incarnation/epoch/seq) is INERT here
+    // — the bridge delivers every frame as before. The contiguity dedup/verdict lands in R3' (mesh side).
+    while let Some(frame) = read_one_reliable_frame(&mut recv).await {
         if inbound_tx
             .send(Inbound::Wire {
                 from: frame.from,
@@ -405,13 +439,14 @@ pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<
 
 /// Read reliable frames off a uni stream into a shared bounded inbox (the mesh transport's receive
 /// path; bounding makes a slow consumer drop stale frames rather than OOM). Same `wire::framing`
-/// read as [`read_frames`], surfacing through the bounded-inbox chokepoint.
+/// read as [`read_frames`], surfacing through the bounded-inbox chokepoint. R2': the redelivery
+/// metadata is INERT here (delivered as before); R3' inserts the contiguity verdict before `push_inbox`.
 pub(crate) async fn read_frames_into(
     mut recv: quinn::RecvStream,
     inbox: &std::sync::Arc<std::sync::Mutex<vd_sim::io::BoundedInbox>>,
     stats: &mesh::MeshStats,
 ) {
-    while let Some(frame) = read_one_wireframe(&mut recv).await {
+    while let Some(frame) = read_one_reliable_frame(&mut recv).await {
         // Through the ONE surfacing chokepoint (a dropped RELIABLE frame here is the loudest case
         // of all — this is the reliable-stream reader).
         mesh::push_inbox(
@@ -428,16 +463,18 @@ pub(crate) async fn read_frames_into(
 
 #[cfg(test)]
 mod frame_tests {
-    use super::{DatagramFrame, WireFrame};
+    use super::{DatagramFrame, ReliableFrame};
     use vd_core::NodeId;
     use vd_sim::io::MsgClass;
 
     #[test]
-    fn datagram_frame_is_byte_identical_to_the_pre_split_reliable_frame() {
-        // R1' hot/cold split: the 20Hz datagram payload must NOT change on the wire. DatagramFrame is
-        // the exact {from,class,bytes} shape WireFrame had on the datagram path before the split, so the
-        // PvP hot path + the path-MTU budget are unchanged (R2). WireFrame grows seq/incarnation in
-        // R2'/R3'; the datagram path stays bare BECAUSE it now uses this separate type.
+    fn datagram_frame_stays_the_bare_pre_split_shape_distinct_from_reliable() {
+        // R1'/R2' hot/cold split: the 20Hz datagram payload must remain EXACTLY {from,class,bytes} —
+        // postcard encodes a struct as its fields IN ORDER, so `DatagramFrame` must encode byte-identically
+        // to the bare tuple `(from, class, bytes)`. This is the frozen golden (no hand-computed bytes): a
+        // future field-add to `DatagramFrame` breaks it, proving NO reliability metadata ever leaks onto the
+        // PvP hot path. The reliable `ReliableFrame` now carries incarnation/epoch/seq, so it is DELIBERATELY
+        // no longer byte-identical to the datagram — asserted distinct so the split is real.
         let (from, class, bytes) = (NodeId(42), MsgClass::Snapshot, vec![1u8, 2, 3, 4, 5]);
         let dg = postcard::to_allocvec(&DatagramFrame {
             from,
@@ -445,11 +482,24 @@ mod frame_tests {
             bytes: bytes.clone(),
         })
         .expect("postcard encodes DatagramFrame");
-        let wf = postcard::to_allocvec(&WireFrame { from, class, bytes })
-            .expect("postcard encodes WireFrame");
+        let bare =
+            postcard::to_allocvec(&(from, class, bytes.clone())).expect("postcard encodes the bare tuple");
         assert_eq!(
-            dg, wf,
-            "DatagramFrame must encode byte-identically to the pre-split datagram WireFrame (zero hot-path wire change)"
+            dg, bare,
+            "the datagram payload stays the bare {{from,class,bytes}} shape — zero hot-path reliability metadata"
+        );
+        let reliable = postcard::to_allocvec(&ReliableFrame {
+            from,
+            class,
+            incarnation: 0,
+            epoch: 0,
+            seq: 0,
+            bytes,
+        })
+        .expect("postcard encodes ReliableFrame");
+        assert_ne!(
+            dg, reliable,
+            "ReliableFrame carries redelivery metadata — deliberately NOT byte-identical to the datagram"
         );
     }
 }

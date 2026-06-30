@@ -28,7 +28,7 @@ use vd_core::{MsgId, NodeId};
 use vd_sim::io::{BoundedInbox, Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
 
 use crate::trust::ClusterTrust;
-use crate::{DatagramFrame, ProdIoError, write_wireframe};
+use crate::{DatagramFrame, OutFrame, ProdIoError, write_reliable_frame};
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -150,15 +150,6 @@ pub(crate) fn push_inbox(inbox: &SharedInbox, stats: &MeshStats, event: Inbound)
 
 struct PeerLane {
     tx: tokio::sync::mpsc::Sender<OutFrame>,
-}
-
-/// DRY pin (audit `wf_2c963246`): byte-identical to `lib.rs`'s `OutboundFrame`; unify into ONE crate-root
-/// struct in R2'/R3' so the loopback bridge and the mesh writer cannot drift their frame envelope.
-struct OutFrame {
-    to: NodeId,
-    class: MsgClass,
-    bytes: Bytes,
-    msg_id: MsgId,
 }
 
 /// The sim-thread side: implements [`Transport`] over per-peer bounded queues.
@@ -359,6 +350,10 @@ struct PeerWriter {
 async fn peer_writer(mut w: PeerWriter) {
     let mut connection: Option<quinn::Connection> = None;
     let mut reliable_stream: Option<quinn::SendStream> = None;
+    // R2': the per-stream monotone sequence stamped on each reliable frame. (R-2a keeps the
+    // pre-existing one-stream-per-peer model; the per-(peer,class) retry-buffer lane FSM replaces this
+    // counter in the next sub-step.) Reset to 0 whenever a fresh stream is opened.
+    let mut reliable_seq = 0u64;
     let mut backoff = w.backoff_min;
     while let Some(frame) = w.rx.recv().await {
         let sent = write_frame(
@@ -366,6 +361,7 @@ async fn peer_writer(mut w: PeerWriter) {
             w.addr,
             &mut connection,
             &mut reliable_stream,
+            &mut reliable_seq,
             w.local,
             &frame,
             &w.stats,
@@ -404,6 +400,7 @@ async fn write_frame(
     addr: SocketAddr,
     connection: &mut Option<quinn::Connection>,
     reliable_stream: &mut Option<quinn::SendStream>,
+    reliable_seq: &mut u64,
     local: NodeId,
     frame: &OutFrame,
     stats: &MeshStats,
@@ -423,12 +420,17 @@ async fn write_frame(
     match frame.class.reliability() {
         Reliability::Reliable => {
             // Reliable frames ride a persistent uni stream, framed through the ONE wire::framing
-            // home (codec_flags + cap) via the shared writer — never hand-rolled here (HR3).
+            // home (codec_flags + cap) via the shared writer — never hand-rolled here (HR3). R2': a
+            // monotone per-stream `seq` is stamped (incarnation/epoch 0 in R-2a — the receiver's
+            // contiguity verdict is R3'); a fresh stream restarts the sequence.
             if reliable_stream.is_none() {
                 *reliable_stream = Some(conn.open_uni().await.map_err(|_| ())?);
+                *reliable_seq = 0;
             }
             let send = reliable_stream.as_mut().ok_or(())?;
-            write_wireframe(send, local, frame.class, &frame.bytes).await
+            let this_seq = *reliable_seq;
+            *reliable_seq += 1;
+            write_reliable_frame(send, local, frame.class, 0, 0, this_seq, &frame.bytes).await
         }
         Reliability::Unreliable => {
             // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a
