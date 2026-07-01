@@ -417,6 +417,16 @@ struct ReliableLaneSender {
     /// prefix retires; `replay_batch` (via `retry.values()`) then starts at `base`, so the first replayed
     /// frame is always `<= receiver_hw + 1` (Accept-or-Dedup, never a Gap).
     base: u64,
+    /// R-4a: consecutive FAILED replay CYCLES on THIS lane since its last successful (re)dial-and-write.
+    /// Bumped by EXACTLY ONE `on_replay_failed` per lane whose OWN replay failed during a redial cycle (NEVER
+    /// the connection-drop fan-out — a shared blip is ONE event, not N lane failures: the C2 cure), reset by
+    /// `on_replay_ok` when THIS lane's own write/replay completes (per-lane, never a blanket for-all: the H2
+    /// cure). A transient blip that recovers before `confirm_unreachable_after_retries` ⇒ ZERO bounce.
+    consecutive_failures: u32,
+    /// R-4a: the `MsgId` of the newest frame this lane sent — the `undelivered` id the threshold-gated
+    /// `confirm_and_maybe_bounce` carries (the timer-driven bounce has no `OutFrame` to source one from).
+    /// `None` until the lane sends its first frame (a never-sent lane never bounces).
+    last_msg_id: Option<MsgId>,
 }
 
 impl ReliableLaneSender {
@@ -428,7 +438,30 @@ impl ReliableLaneSender {
             next_seq: 0,
             retry: BTreeMap::new(),
             base: 0,
+            consecutive_failures: 0,
+            last_msg_id: None,
         }
+    }
+
+    /// R-4a: bump the consecutive-failure count (saturating) — called EXACTLY once per lane whose own
+    /// replay attempt failed during a redial cycle, never from the connection-drop fan-out (the C2 cure).
+    fn on_replay_failed(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+
+    /// R-4a: reset the consecutive-failure count — called ONLY for a lane whose own write/replay just
+    /// completed Ok, never a blanket for-all reset (the H2 cure).
+    fn on_replay_ok(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    /// R-4a: this lane OWES a redelivery iff its stream is closed AND its unacked window is non-empty. The
+    /// retransmit-timer guard is `any lane owes` — a PER-LANE property, decoupled from connection state (the
+    /// C1 cure: a sibling lane re-opening on a fresh send must not disarm the redelivery THIS lane still owes).
+    /// A lane whose stream is OPEN but whose acks silently stopped does NOT owe here — that live-but-stuck
+    /// dead-ack-path case is R-4b's shed job (`retry_bytes` cap + `reliable_acked`-stuck alarm), NOT the timer.
+    fn owes_redelivery(&self) -> bool {
+        self.stream.is_none() && !self.retry.is_empty()
     }
 
     /// Retire the acked prefix on a cumulative [`AckFrame`] entry (R-3'). Ignores an ack minted against a
@@ -685,6 +718,7 @@ pub fn spawn_mesh(
             backoff_max: cfg.redial_backoff_max,
             incarnation: cfg.process_incarnation,
             connections: Arc::clone(&connections),
+            reliability: cfg.reliability,
         }));
         lanes.insert(peer, PeerLane { tx });
     }
@@ -937,6 +971,8 @@ struct PeerWriter {
     /// This node's dialed-connection registry — this writer inserts its connection on dial (for
     /// [`MeshControl::drop_connections`]).
     connections: ConnRegistry,
+    /// The at-least-once redelivery tuning (R-4a reads `confirm_unreachable_after_retries`).
+    reliability: MeshReliabilityTuning,
 }
 
 /// One peer's writer: drains its lane in FIFO order, dialing on demand, with
@@ -955,9 +991,15 @@ async fn peer_writer(mut w: PeerWriter) {
     // by the next cumulative one — never a stale lower ack winning). Re-created per dial, aborted on drop.
     let (ack_tx, mut ack_rx) = watch::channel::<Option<AckFrame>>(None);
     let mut ack_reader: Option<JoinHandle<()>> = None;
+    // R-4a retransmit timer: reusable, pinned. Disarmed = a far-future deadline the guard never polls; armed
+    // by an error path, re-driven when it fires. This is what closes the idle-after-blip gap — a lane that
+    // blips then goes quiet is re-driven off THIS clock, not off the next OutFrame.
+    let retransmit = tokio::time::sleep(w.backoff_max);
+    tokio::pin!(retransmit);
+    let mut counting = false;
     loop {
         tokio::select! {
-            biased; // drain acks first so the retry buffer retires promptly (never starve the ack path)
+            biased; // 1) acks retire promptly  2) new sends  3) retransmit LAST
             changed = ack_rx.changed() => {
                 if changed.is_ok()
                     && let Some(ack) = ack_rx.borrow_and_update().clone()
@@ -994,29 +1036,28 @@ async fn peer_writer(mut w: PeerWriter) {
                 )
                 .await;
                 match sent {
-                    Ok(()) => backoff = w.backoff_min,
-                    Err(()) => {
-                        // FULL connection drop — REQUIRED for old-stream cleanup: dropping the quinn
-                        // Connection tears down its streams, which terminates the RECEIVER's per-stream
-                        // reader tasks. NEVER downgrade this to a stream-only reset without adding a
-                        // receiver-side stream reaper (DEFERRED: the stream-only-error optimization).
-                        connection = None;
-                        // The ack-reader lived on the dead connection: abort it before re-dial (no task
-                        // leak, no stale reader racing a late ack into the watch — the epoch guard + the
-                        // monotone base double-cover a straggler ack anyway).
-                        if let Some(h) = ack_reader.take() {
-                            h.abort();
+                    Ok(()) => {
+                        backoff = w.backoff_min;
+                        // This lane's own write succeeded ⇒ reset ONLY its failure counter (per-lane, H2).
+                        if let Some(l) = lanes.get_mut(&frame.class) {
+                            l.on_replay_ok();
                         }
-                        // Every lane's stream lived on the dead connection: reset each + bump its epoch, so
-                        // the next send per lane re-dials, re-opens, and REPLAYS its unacked window under the
-                        // new epoch (the cross-stream-race cure). The epoch bump (recovery) is DISTINCT from
-                        // the backoff sleep (anti-connect-storm) below.
-                        for lane in lanes.values_mut() {
-                            lane.on_write_error();
-                        }
-                        // Reliable senders are waiting on an ack path; tell them the peer is unreachable.
-                        // (R-4' refines this to confirmed-dead-after-N-retries; R-3' keeps the per-frame
-                        // bounce.) Unreliable (datagram) loss is silent by design.
+                    }
+                    Err(WriteFail::Down) => {
+                        // The connection/write died: tear it down + arm the retransmit timer. The bounce is
+                        // NOT here — it is threshold-gated on the timer replay (a blip that recovers before
+                        // `confirm_unreachable_after_retries` ⇒ ZERO bounce). The inline backoff `sleep`
+                        // R-3' had is REMOVED (it blocked the whole select — acks/sends couldn't drain during
+                        // backoff); the timer IS the non-blocking backoff clock now.
+                        handle_connection_drop(&mut connection, &mut ack_reader, &mut lanes);
+                        retransmit.as_mut().reset(tokio::time::Instant::now() + backoff);
+                        counting = true;
+                        backoff = (backoff * 2).min(w.backoff_max);
+                    }
+                    Err(WriteFail::Shed) => {
+                        // The frame was REJECTED (oversize; nothing retained; the connection may be fine).
+                        // Bounce once so the caller learns it did not deliver — a PERMANENT reject, not a
+                        // transient blip, so NOT threshold-gated. No timer arm, no connection drop.
                         if frame.class.reliability() == Reliability::Reliable {
                             push_inbox(
                                 &w.inbox,
@@ -1028,12 +1069,41 @@ async fn peer_writer(mut w: PeerWriter) {
                                 },
                             );
                         }
-                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+            () = &mut retransmit, if any_lane_owes(&lanes) => {
+                // Idle-after-blip re-drive: dial-if-down, then replay EVERY owing lane's window — no new frame.
+                let outcome = replay_lanes(
+                    &w.endpoint,
+                    w.dest,
+                    w.addr,
+                    &mut connection,
+                    &mut lanes,
+                    &mut ack_reader,
+                    &ack_tx,
+                    &w.connections,
+                    w.reliability,
+                    &w.inbox,
+                    &w.stats,
+                )
+                .await;
+                match outcome {
+                    ReplayOutcome::AllOk => backoff = w.backoff_min,
+                    ReplayOutcome::SomeFailed => {
+                        // replay_lanes already bumped/reset per-lane counters + bounced any lane past the
+                        // threshold (§1.5). Just grow the backoff + re-arm for the next redial attempt.
+                        retransmit.as_mut().reset(tokio::time::Instant::now() + backoff);
+                        counting = true;
                         backoff = (backoff * 2).min(w.backoff_max);
                     }
                 }
             }
         }
+        // ONE edge-triggered re-evaluation per iteration (H1 cure): arm iff a lane is owed and no live
+        // deadline is counting; disarm once every lane has drained. An error arm above already set a live
+        // deadline (counting=true) ⇒ this leaves it untouched.
+        rearm_retransmit(retransmit.as_mut(), &mut counting, &lanes, backoff, w.backoff_max);
     }
     // Loop exit = the per-peer channel closed = clean shutdown; abort the ack-reader, then lane streams drop
     // here (quinn implicit-finish on the still-live connection, or no-op on an already-dead one).
@@ -1063,6 +1133,219 @@ async fn ack_reader_task(connection: quinn::Connection, ack_tx: watch::Sender<Op
     }
 }
 
+/// How a `write_frame` attempt failed (R-4a). `Down` = the connection/write died ⇒ drop the connection +
+/// arm the retransmit timer; `Shed` = the frame was REJECTED (oversize now; buffer-full in R-4b) ⇒ nothing
+/// retained, the connection may be fine, bounce once but do NOT arm the timer or drop the connection.
+enum WriteFail {
+    Down,
+    Shed,
+}
+
+/// The result of one retransmit-timer replay pass (R-4a).
+enum ReplayOutcome {
+    AllOk,
+    SomeFailed,
+}
+
+/// R-4a: does ANY lane owe a redelivery (closed stream + non-empty window)? The retransmit-timer guard —
+/// a PER-LANE property, NOT `connection.is_none()` (the C1 cure: a sibling lane re-opening on a fresh send
+/// leaves this true for a still-owing lane, so its redelivery is never disarmed).
+fn any_lane_owes(lanes: &BTreeMap<MsgClass, ReliableLaneSender>) -> bool {
+    lanes.values().any(ReliableLaneSender::owes_redelivery)
+}
+
+/// R-4a: the ONE edge-triggered re-evaluation of the retransmit timer, run at the TAIL of every peer_writer
+/// loop iteration (the H1 cure — a single deterministic re-derivation from live lane state, never a
+/// self-contradictory per-arm arm/disarm). `counting` guards against pushing back an already-live deadline
+/// (which would stall retransmit) and against leaving an owed lane with no armed timer.
+fn rearm_retransmit(
+    timer: std::pin::Pin<&mut tokio::time::Sleep>,
+    counting: &mut bool,
+    lanes: &BTreeMap<MsgClass, ReliableLaneSender>,
+    backoff: Duration,
+    backoff_max: Duration,
+) {
+    let owed = any_lane_owes(lanes);
+    if owed && !*counting {
+        timer.reset(tokio::time::Instant::now() + backoff); // just became owed ⇒ arm
+        *counting = true;
+    } else if !owed && *counting {
+        timer.reset(tokio::time::Instant::now() + backoff_max); // drained ⇒ disarm to a harmless far deadline
+        *counting = false;
+    }
+    // owed && counting ⇒ leave the live deadline UNTOUCHED (pushing it back would stall retransmit).
+}
+
+/// R-4a: on a `WriteFail::Down`, tear the dead connection down so the next dial re-establishes it. Drops the
+/// connection (terminating its streams + the receiver's per-stream readers), aborts the ack-reader (no leak,
+/// no stale ack racing the fresh watch), and `on_write_error`s every lane (stream=None + epoch bump — the
+/// cross-stream-race cure). Does NOT bounce or touch the failure counters — the bounce is threshold-gated in
+/// `confirm_and_maybe_bounce` on the timer replay path (a blip that recovers ⇒ zero bounce, the C2 inversion).
+fn handle_connection_drop(
+    connection: &mut Option<quinn::Connection>,
+    ack_reader: &mut Option<JoinHandle<()>>,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+) {
+    *connection = None;
+    if let Some(h) = ack_reader.take() {
+        h.abort();
+    }
+    for lane in lanes.values_mut() {
+        lane.on_write_error();
+    }
+}
+
+/// R-4a: alarm the saga/`LivenessTracker` iff THIS lane has failed `confirm_unreachable_after_retries`
+/// CONSECUTIVE replay cycles (a transient blip that recovers first ⇒ ZERO bounce). Re-bounces past the
+/// threshold to keep the tracker fresh; the re-bounce CADENCE is the peer_writer backoff (each replay cycle
+/// is one backoff apart, growing to `backoff_max`), so it can never out-produce the `BoundedInbox` drain and
+/// evict a genuine reliable inbound — no explicit coalesce state needed (DRY). A never-sent lane (no
+/// `last_msg_id`) never bounces.
+fn confirm_and_maybe_bounce(
+    lane: &ReliableLaneSender,
+    reliability: MeshReliabilityTuning,
+    inbox: &SharedInbox,
+    stats: &MeshStats,
+    to: NodeId,
+    class: MsgClass,
+) {
+    if lane.consecutive_failures >= reliability.confirm_unreachable_after_retries
+        && let Some(msg_id) = lane.last_msg_id
+    {
+        push_inbox(
+            inbox,
+            stats,
+            Inbound::NodeUnreachable {
+                to,
+                class,
+                undelivered: msg_id,
+            },
+        );
+    }
+}
+
+/// R-4a: dial the peer on demand (the ONE dial home, shared by `write_frame` + `replay_lanes` so the
+/// ack-reader teardown/respawn + the lane-stream reset can never drift). On a fresh dial: register the
+/// connection (drop_connections), abort any prior ack-reader + spawn a new one on THIS connection, reset
+/// every lane's stream (the old streams died with the old connection). `Ok` iff the connection is up
+/// (already-up = a no-op); `Err` on a dial failure.
+#[allow(clippy::too_many_arguments)] // writer state threaded explicitly
+async fn ensure_connection(
+    endpoint: &quinn::Endpoint,
+    dest: NodeId,
+    addr: SocketAddr,
+    connection: &mut Option<quinn::Connection>,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    ack_reader: &mut Option<JoinHandle<()>>,
+    ack_tx: &watch::Sender<Option<AckFrame>>,
+    connections: &ConnRegistry,
+) -> Result<(), ()> {
+    if connection.is_some() {
+        return Ok(());
+    }
+    // SNI is pinned to the cluster-trust SAN; identity comes from mTLS, not DNS.
+    let conn = endpoint
+        .connect(addr, "localhost")
+        .map_err(|_| ())?
+        .await
+        .map_err(|_| ())?;
+    connections
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(dest, conn.clone());
+    if let Some(h) = ack_reader.take() {
+        h.abort();
+    }
+    *ack_reader = Some(tokio::spawn(ack_reader_task(conn.clone(), ack_tx.clone())));
+    *connection = Some(conn);
+    for lane in lanes.values_mut() {
+        lane.stream = None;
+    }
+    Ok(())
+}
+
+/// R-4a: (re)open ONE owing lane's uni stream and write its full `replay_batch()` (re-stamped at the current
+/// epoch) — the redelivery of the unacked window, NO new assign. Mirrors `write_frame`'s reopen block minus
+/// the assign; the buffer-first + receiver-dedup guarantees make a replay idempotent.
+async fn replay_one_lane(conn: &quinn::Connection, lane: &mut ReliableLaneSender) -> Result<(), ()> {
+    let mut send = conn.open_uni().await.map_err(|_| ())?;
+    send.write_all(&[STREAM_KIND_DATA]).await.map_err(|_| ())?;
+    lane.stream = Some(send);
+    let batch = lane.replay_batch();
+    let send = lane.stream.as_mut().ok_or(())?;
+    for f in &batch {
+        write_reliable_frame(send, f.from, f.class, f.incarnation, f.epoch, f.seq, &f.bytes)
+            .await
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+/// R-4a: the retransmit-timer body — re-drive EVERY owing lane's unacked window WITHOUT waiting for a new
+/// `OutFrame` (closing the idle-after-blip gap). Dial-if-down (a dial failure fails every owing lane), then
+/// replay each owing lane; a lane's own replay Ok ⇒ `on_replay_ok`, Err ⇒ `on_replay_failed` +
+/// `confirm_and_maybe_bounce` (per-lane, the C2/H2 cure). A mid-pass write error means the connection died:
+/// stop the pass and tear the connection down so the NEXT timer fire re-dials — the remaining owing lanes
+/// stay owed and are re-driven then.
+#[allow(clippy::too_many_arguments)] // writer state threaded explicitly
+async fn replay_lanes(
+    endpoint: &quinn::Endpoint,
+    dest: NodeId,
+    addr: SocketAddr,
+    connection: &mut Option<quinn::Connection>,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    ack_reader: &mut Option<JoinHandle<()>>,
+    ack_tx: &watch::Sender<Option<AckFrame>>,
+    connections: &ConnRegistry,
+    reliability: MeshReliabilityTuning,
+    inbox: &SharedInbox,
+    stats: &MeshStats,
+) -> ReplayOutcome {
+    if ensure_connection(endpoint, dest, addr, connection, lanes, ack_reader, ack_tx, connections)
+        .await
+        .is_err()
+    {
+        // Dial failed: every owing lane failed this cycle.
+        for (&class, lane) in lanes.iter_mut() {
+            if lane.owes_redelivery() {
+                lane.on_replay_failed();
+                confirm_and_maybe_bounce(lane, reliability, inbox, stats, dest, class);
+            }
+        }
+        return ReplayOutcome::SomeFailed;
+    }
+    let mut all_ok = true;
+    let mut conn_died = false;
+    {
+        let Some(conn) = connection.as_ref() else {
+            return ReplayOutcome::SomeFailed;
+        };
+        for (&class, lane) in lanes.iter_mut() {
+            if !lane.owes_redelivery() || conn_died {
+                continue; // already-open lanes untouched; once the conn dies, leave the rest owed for next fire
+            }
+            match replay_one_lane(conn, lane).await {
+                Ok(()) => lane.on_replay_ok(),
+                Err(()) => {
+                    lane.on_replay_failed();
+                    confirm_and_maybe_bounce(lane, reliability, inbox, stats, dest, class);
+                    all_ok = false;
+                    conn_died = true; // a write error = a dead connection; the rest fail the same way
+                }
+            }
+        }
+    }
+    if conn_died {
+        // Drop the dead connection (now that the `conn` borrow has ended) so the next fire re-dials.
+        handle_connection_drop(connection, ack_reader, lanes);
+    }
+    if all_ok {
+        ReplayOutcome::AllOk
+    } else {
+        ReplayOutcome::SomeFailed
+    }
+}
+
 /// Ensure a connection (dial on demand) and write one frame on the carrier its class mandates. The
 /// reliable arm is the R-2b lane FSM; the unreliable arm is the unchanged bare-datagram hot path.
 ///
@@ -1083,71 +1366,65 @@ async fn write_frame(
     incarnation: u64,
     frame: &OutFrame,
     stats: &MeshStats,
-) -> Result<(), ()> {
-    if connection.is_none() {
-        // SNI is pinned to the cluster-trust SAN; identity comes from mTLS, not DNS.
-        let conn = endpoint
-            .connect(addr, "localhost")
-            .map_err(|_| ())?
-            .await
-            .map_err(|_| ())?;
-        // Register the dialed connection for drop_connections (latest-wins on redial ⇒ bounded).
-        connections
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(dest, conn.clone());
-        // Spawn the child ack-reader on THIS connection (acks ride back on the same conn). Abort any prior
-        // reader first (belt-and-suspenders — the write-error path already aborts, but a caller might redial
-        // without one), so there is never more than one reader per lane feeding the watch.
-        if let Some(h) = ack_reader.take() {
-            h.abort();
-        }
-        *ack_reader = Some(tokio::spawn(ack_reader_task(conn.clone(), ack_tx.clone())));
-        *connection = Some(conn);
-        // A fresh connection invalidates every lane's stream (the old ones died with the old conn).
-        for lane in lanes.values_mut() {
-            lane.stream = None;
-        }
-    }
-    let conn = connection.as_ref().ok_or(())?;
-
+) -> Result<(), WriteFail> {
     match frame.class.reliability() {
         Reliability::Reliable => {
-            // Route to the class lane (lazily created at THIS process incarnation, epoch 0).
-            let lane = lanes
-                .entry(frame.class)
-                .or_insert_with(|| ReliableLaneSender::new(incarnation));
-
-            // BUFFER-FIRST: assign + retain BEFORE any write. A failed write below NEVER rolls back the
-            // seq (no burned seq, no gap). The ONE frame object lives in `lane.retry`. `assign_and_retain`
-            // also performs the OVERSIZE REJECT on the FRAMED size (the envelope + codec byte can push a
-            // near-cap payload over `MAX_STREAM_FRAME_BYTES`): an un-framable frame can NEVER be sent, so
-            // retaining it would poison the lane forever (replayed-and-failed every redial). On that
-            // rejection it returns `Err` WITHOUT retaining ⇒ shed-count + bounce + return, nothing in
-            // `retry`. `reliable_shed` is the one R-2b-live counter.
-            let seq = match lane.assign_and_retain(local, frame.class, &frame.bytes) {
-                Ok(seq) => seq,
-                Err(()) => {
-                    stats.reliable_shed.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(
-                        "reliable frame (payload {}) would exceed MAX_STREAM_FRAME_BYTES framed; \
-                         rejected (counted, not retained)",
-                        frame.bytes.len()
-                    );
-                    return Err(()); // ⇒ peer_writer bounces NodeUnreachable; nothing retained
+            // BUFFER-FIRST, BEFORE any connection work: create the lane, capture the id, assign + retain. A
+            // first-dial failure to a dead peer then leaves the frame RETAINED (the retransmit timer re-drives
+            // it) and the confirm bounce has an id — a failed dial NEVER silently drops the frame. A failed
+            // write below NEVER rolls back the seq (no burned seq, no gap); the ONE frame object lives in
+            // `lane.retry`. `assign_and_retain` also performs the OVERSIZE REJECT on the FRAMED size (the
+            // envelope + codec byte can push a near-cap payload over `MAX_STREAM_FRAME_BYTES`): an un-framable
+            // frame can NEVER be sent, so retaining it would poison the lane forever; it returns `Err` WITHOUT
+            // retaining ⇒ shed-count + Shed (peer_writer bounces), nothing in `retry`.
+            let seq = {
+                let lane = lanes
+                    .entry(frame.class)
+                    .or_insert_with(|| ReliableLaneSender::new(incarnation));
+                match lane.assign_and_retain(local, frame.class, &frame.bytes) {
+                    Ok(seq) => {
+                        // R-4a: remember the id ONLY of a RETAINED frame, so the threshold-gated confirm
+                        // bounce (which has no OutFrame) can never carry the id of a rejected/never-retained
+                        // (oversize) frame — that frame already got its own immediate Shed bounce (post-impl
+                        // review wf_b1d0610c).
+                        lane.last_msg_id = Some(frame.msg_id);
+                        seq
+                    }
+                    Err(()) => {
+                        stats.reliable_shed.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            "reliable frame (payload {}) would exceed MAX_STREAM_FRAME_BYTES framed; \
+                             rejected (counted, not retained)",
+                            frame.bytes.len()
+                        );
+                        // A PERMANENT reject (never framable) — the Shed arm bounces once, does NOT arm the
+                        // timer or drop the (healthy) connection.
+                        return Err(WriteFail::Shed);
+                    }
                 }
             };
+
+            // Dial on demand through the ONE dial home (shared with the retransmit path's replay_lanes). A
+            // dial failure ⇒ Down; the frame is already retained above ⇒ the timer re-drives it.
+            ensure_connection(endpoint, dest, addr, connection, lanes, ack_reader, ack_tx, connections)
+                .await
+                .map_err(|()| WriteFail::Down)?;
+            let conn = connection.as_ref().ok_or(WriteFail::Down)?;
+            // Re-fetch the lane: a fresh dial in ensure_connection reset every lane's `stream` to None.
+            let lane = lanes.get_mut(&frame.class).ok_or(WriteFail::Down)?;
 
             // STRUCTURAL if/else — NO fall-through (the CRITICAL double-write cure):
             if lane.stream.is_none() {
                 // (re)opened stream: write EXACTLY replay_batch(), which by construction includes the
                 // just-assigned frame as its HIGHEST entry ⇒ the new frame is written exactly once,
                 // inside the batch. Never falls through to the steady-state write below.
-                let mut send = conn.open_uni().await.map_err(|_| ())?;
+                let mut send = conn.open_uni().await.map_err(|_| WriteFail::Down)?;
                 // Tag the DATA stream ONCE, before any frame — consumed by serve_data_stream's read_exact(1)
                 // BEFORE the framing loop, never inside frame_payload (read_one_reliable_frame stays byte-
                 // identical, so the loopback bridge that shares it is unaffected).
-                send.write_all(&[STREAM_KIND_DATA]).await.map_err(|_| ())?;
+                send.write_all(&[STREAM_KIND_DATA])
+                    .await
+                    .map_err(|_| WriteFail::Down)?;
                 lane.stream = Some(send);
                 let batch = lane.replay_batch();
                 debug_assert_eq!(
@@ -1155,7 +1432,7 @@ async fn write_frame(
                     Some(seq),
                     "buffer-first invariant: the just-assigned frame is the highest replay entry"
                 );
-                let send = lane.stream.as_mut().ok_or(())?;
+                let send = lane.stream.as_mut().ok_or(WriteFail::Down)?;
                 for f in &batch {
                     write_reliable_frame(
                         send,
@@ -1167,14 +1444,14 @@ async fn write_frame(
                         &f.bytes,
                     )
                     .await
-                    .map_err(|_| ())?;
+                    .map_err(|_| WriteFail::Down)?;
                 }
                 Ok(())
             } else {
                 // steady state: stream open ⇒ write ONLY the new frame (NEVER the backlog). Read the
                 // single frame object back out of `retry`, copying its fields so the immutable borrow of
                 // `retry` ends before the mutable borrow of `stream`.
-                let nf = lane.retry.get(&seq).ok_or(())?;
+                let nf = lane.retry.get(&seq).ok_or(WriteFail::Down)?;
                 let (f_from, f_class, f_inc, f_epoch, f_bytes) = (
                     nf.from,
                     nf.class,
@@ -1182,11 +1459,18 @@ async fn write_frame(
                     nf.epoch,
                     nf.bytes.clone(),
                 );
-                let send = lane.stream.as_mut().ok_or(())?;
-                write_reliable_frame(send, f_from, f_class, f_inc, f_epoch, seq, &f_bytes).await
+                let send = lane.stream.as_mut().ok_or(WriteFail::Down)?;
+                write_reliable_frame(send, f_from, f_class, f_inc, f_epoch, seq, &f_bytes)
+                    .await
+                    .map_err(|_| WriteFail::Down)
             }
         }
         Reliability::Unreliable => {
+            // Dial on demand (the ONE dial home). No retain, no bounce — datagram loss is latest-wins.
+            ensure_connection(endpoint, dest, addr, connection, lanes, ack_reader, ack_tx, connections)
+                .await
+                .map_err(|()| WriteFail::Down)?;
+            let conn = connection.as_ref().ok_or(WriteFail::Down)?;
             // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a
             // stream concept) and carry the BARE DatagramFrame (R1' hot/cold split — no reliability
             // metadata on the 20Hz path). TooLarge is a loud failure of the caller's framing.
@@ -1195,7 +1479,7 @@ async fn write_frame(
                 class: frame.class,
                 bytes: frame.bytes.to_vec(),
             })
-            .map_err(|_| ())?;
+            .map_err(|_| WriteFail::Down)?;
             if conn
                 .max_datagram_size()
                 .is_none_or(|max| payload.len() > max)
@@ -1215,7 +1499,7 @@ async fn write_frame(
             // connection is an Err that triggers re-dial.
             match conn.send_datagram(payload.into()) {
                 Ok(()) => Ok(()),
-                Err(quinn::SendDatagramError::ConnectionLost(_)) => Err(()),
+                Err(quinn::SendDatagramError::ConnectionLost(_)) => Err(WriteFail::Down),
                 Err(_) => {
                     // Unsupported/too-large/queue-full: drop (latest-wins), stay up.
                     stats.datagrams_dropped_send.fetch_add(1, Ordering::Relaxed);
@@ -1718,6 +2002,59 @@ mod tests {
                 "retry stays exactly base..next_seq (step {step})"
             );
         }
+    }
+
+    // ---- Pure R-4a lane-owes / failure-counter tests (the retransmit-timer guard + confirm-dead core) ----
+
+    #[test]
+    fn a_lane_owes_redelivery_iff_stream_closed_and_window_non_empty() {
+        let mut lane = ReliableLaneSender::new(1);
+        assert!(
+            !lane.owes_redelivery(),
+            "a fresh lane (empty window) owes nothing"
+        );
+        lane.assign_and_retain(FROM, CLASS, b"x").expect("fits");
+        assert!(
+            lane.owes_redelivery(),
+            "closed stream + non-empty window ⇒ owes a redelivery"
+        );
+        lane.on_ack(1, 0, 0); // retire the only frame
+        assert!(
+            !lane.owes_redelivery(),
+            "a drained window owes nothing (the timer stops)"
+        );
+    }
+
+    #[test]
+    fn lane_failure_counter_bumps_saturating_and_resets_per_lane() {
+        let mut lane = ReliableLaneSender::new(1);
+        assert_eq!(lane.consecutive_failures, 0);
+        lane.on_replay_failed();
+        lane.on_replay_failed();
+        assert_eq!(lane.consecutive_failures, 2, "one bump per failed replay");
+        lane.on_replay_ok();
+        assert_eq!(
+            lane.consecutive_failures, 0,
+            "a lane's OWN Ok resets ONLY its counter (the H2 cure)"
+        );
+    }
+
+    #[test]
+    fn any_lane_owes_reflects_the_owing_lanes() {
+        let mut lanes: BTreeMap<MsgClass, ReliableLaneSender> = BTreeMap::new();
+        assert!(!any_lane_owes(&lanes), "no lanes ⇒ nothing owes");
+        let mut lane = ReliableLaneSender::new(1);
+        lane.assign_and_retain(FROM, CLASS, b"x").expect("fits");
+        lanes.insert(CLASS, lane);
+        assert!(any_lane_owes(&lanes), "an owing lane ⇒ the timer guard is live");
+        lanes
+            .get_mut(&CLASS)
+            .expect("lane")
+            .on_ack(1, 0, 0); // drain it
+        assert!(
+            !any_lane_owes(&lanes),
+            "a drained lane ⇒ the timer guard goes false"
+        );
     }
 
     fn runtime() -> tokio::runtime::Runtime {

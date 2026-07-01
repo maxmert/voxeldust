@@ -1019,11 +1019,23 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      IDLE-after-blip lane — a lone `GhostReliable` Despawn that blips then goes quiet — leaves its unacked tail in
      `lane.retry` (buffer-first; the receiver ledger survives) but does NOT re-drive it until the next reliable send on
      that lane re-dials. There is no sender-side retransmit TIMER yet (`peer_writer`'s select has only ack + rx arms).
-     **STILL OWED to flip this fully 🟩:** R-4' (the retransmit/redial TIMER = the `confirm_unreachable_after_retries`
-     consumer that re-drives an idle lane's retry buffer + shed-loud backpressure + `retry_bytes`; also suppresses the
-     spurious per-frame `NodeUnreachable` a blip currently emits), R-5' (the `mesh_under_loss.rs` real-mesh capstone
-     driving an actual PRODUCER-LESS flow — a raw `GhostReliable` Despawn — across the break, PROVING the idle-after-blip
-     re-drive, retiring the per-flow band-aids). The loopback bridge keeps its simple
+     **✅ R-4a LANDED (this commit; design+3-review wf_40f7b3eb caught 3 CRITICALs pre-code, post-impl review wf_b1d0610c
+     SHIP): the sender-side retransmit/redial TIMER + per-lane confirm-dead — the idle-after-blip gap is CLOSED.** A
+     `peer_writer` 3rd biased-select arm (guarded by the PER-LANE `any_lane_owes`, the C1 cure — NOT `connection.is_none()`)
+     re-drives an idle lane's retry buffer off the sender's own clock (no follow-up send needed); the R-3' inline
+     `sleep(backoff).await` is REMOVED (the backoff IS the timer deadline, non-blocking). `confirm_unreachable_after_retries`
+     is now consumed: a per-lane `consecutive_failures` (bumped ONLY on a lane's OWN failed replay — the C2 cure, never the
+     connection-drop fan-out; reset per-lane — the H2 cure) gates the `NodeUnreachable` bounce, so a blip that RECOVERS =
+     ZERO bounce (proven by `an_idle_after_blip_lone_frame_is_re_driven_by_the_timer` + the zero-bounce blip test); a
+     genuinely-dead peer still bounces after N. Buffer-first-before-dial: a first-dial failure leaves the frame RETAINED +
+     re-driven (never a silent drop). io-prod Tier-B 93.44% ≥ 90. **STILL OWED to flip this fully 🟩:** R-4b (shed-loud +
+     `retry_bytes` byte-cap = producer-backpressure-when-full, the only loss-safe shed since the receiver is strictly
+     contiguous — the M1 unbounded-growth cure), R-4c (`LivenessTuning::validate_against(&SagaTuning)` — the geometric-backoff
+     confirm-ticks ≤ abort_deadline invariant, boot-asserted, the C3 cure), R-4d (MeshStats→`/metrics` MetricsSource, M4),
+     R-4e (N-peer real-QUIC load test, L7 — also the natural home for a `replay_lanes` conn_died-mid-pass coverage test:
+     the dial-succeeds-then-write-fails arm is Tier-B-uncovered today, floor still met, review wf_b1d0610c LOW). R-5' (the
+     `mesh_under_loss.rs` real-mesh capstone driving an actual PRODUCER-LESS flow — a raw `GhostReliable` Despawn — across
+     the break, PROVING the idle-after-blip re-drive end-to-end, retiring the per-flow band-aids). The loopback bridge keeps its simple
      per-stream seq (single-stream test infra; NO lane FSM). R-6 = durable outbox + durable boot-counter incarnation
      (P6/P7). **R-2b cross-slice contracts (binding for R-3'):** (a) the receiver MUST dedup by (peer,class,incarnation,
      seq) EPOCH-AGNOSTICALLY — epoch gates ONLY the high-water-advance race, never seq retirement; a torn frame is

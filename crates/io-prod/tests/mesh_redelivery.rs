@@ -130,16 +130,16 @@ fn happy_burst_acks_retire_the_whole_window_reliable_acked_reaches_n() {
 fn a_drop_connections_blip_mid_burst_delivers_exactly_once() {
     // The transient-blip lever: close A's dialed connection WHILE the writer is actively draining a burst.
     // A re-dials, bumps its epoch, and REPLAYS its un-acked window; every frame arrives EXACTLY ONCE despite
-    // the break (the D-6 #1 producer-less-flow cure), and the disruption is real (a mid-flight write hits the
-    // dead connection ⇒ a NodeUnreachable bounce — R-3' bounces per failed write; R-4' will suppress it).
+    // the break (the D-6 #1 producer-less-flow cure), and — R-4a — the recovering blip bounces ZERO spurious
+    // NodeUnreachable (the peer is alive so the first re-dial recovers before `confirm_unreachable_after_retries`).
     // NOTE: the acks flow promptly (per-frame), so at the instant of the blip the retry window is small and
     // mostly un-delivered — the replay re-covers only the un-acked tail. That is OPTIMAL (don't resend what's
     // acked), so `dedup_drop` is NOT asserted (it fires only in the narrow delivered-but-un-acked race — its
     // logic is proven deterministically by the pure `classify_dedups_*` unit test). What IS deterministic and
-    // asserted here: no loss, no dup, and a real connection break.
-    // SCOPE (review wf_a909be64): phase-2 keeps traffic flowing AFTER the blip, which supplies the re-dial
-    // TRIGGER that fires the replay. The IDLE-after-blip case (a lone frame that blips then goes quiet) needs
-    // the R-4' sender-side retransmit timer and is proven by R-5' (`mesh_under_loss.rs`) — NOT covered here.
+    // asserted here: no loss, no dup, and R-4a's zero-spurious-bounce blip tolerance.
+    // SCOPE: phase-2 keeps traffic flowing AFTER the blip (the send path also re-dials). The IDLE-after-blip
+    // case (a lone frame that blips then goes quiet) is now re-driven by the R-4a retransmit TIMER off the
+    // sender's own clock — covered by `an_idle_after_blip_lone_frame_is_re_driven_by_the_timer` below.
     const N: usize = 100; // < 256 so a single-byte payload is a unique per-frame id
     let rt = runtime();
     let trust = ClusterTrust::generate("vd-mesh-redeliver").expect("trust");
@@ -182,15 +182,19 @@ fn a_drop_connections_blip_mid_burst_delivers_exactly_once() {
         "exactly-once across the blip: no loss, no dup"
     );
 
-    // The blip disrupted at least one in-flight send — proof the delivery survived a REAL connection break.
+    // R-4a BLIP-TOLERANCE: the peer is alive (only the connection blipped), so the first re-dial recovers
+    // and NO lane ever reaches `confirm_unreachable_after_retries` consecutive failures ⇒ ZERO spurious
+    // NodeUnreachable bounces. (Under R-3' this bounced once per in-flight failed write; R-4a's threshold-
+    // gated confirm is exactly the "a blip = zero bounce" cure.) A genuinely-dead peer still bounces after
+    // N retries — covered by the lib test `a_dead_peer_never_blocks_traffic_to_live_peers`.
     let unreachable = a
         .drain_inbound()
         .into_iter()
         .filter(|e| matches!(e, Inbound::NodeUnreachable { .. }))
         .count();
-    assert!(
-        unreachable >= 1,
-        "the blip must have disrupted at least one send (redelivery engaged)"
+    assert_eq!(
+        unreachable, 0,
+        "a recovering blip must bounce ZERO NodeUnreachable (R-4a confirm-dead-after-N)"
     );
     // The epoch/replay kept contiguity — no frame was ever a MUST-BE-0 gap.
     assert_eq!(ctl_b.stats().gap_drop, 0, "gap_drop must stay 0 across the blip");
@@ -198,6 +202,53 @@ fn a_drop_connections_blip_mid_burst_delivers_exactly_once() {
     assert!(
         ctl_a.local_addr().is_ok(),
         "the endpoint stayed bound across drop_connections"
+    );
+}
+
+#[test]
+fn an_idle_after_blip_lone_frame_is_re_driven_by_the_timer() {
+    // THE R-4a cure (the gap the R-3' post-impl review found): a lone reliable frame that blips then goes
+    // QUIET (no follow-up send) is re-driven off the sender's own retransmit TIMER. Under R-3' the re-dial +
+    // replay fired ONLY inside a new send's dial block, so an idle-after-blip frame stranded in the retry
+    // buffer indefinitely. Here exactly ONE frame is sent after the blip and then the lane IDLES: the ONLY
+    // path to its delivery is the R-4a timer.
+    let rt = runtime();
+    let trust = ClusterTrust::generate("vd-mesh-redeliver").expect("trust");
+    let (addr_a, addr_b) = (reserve(), reserve());
+    let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
+    let (mut a, ctl_a) = node(rt.handle(), &trust, A, addr_a, &book, Duration::from_millis(20), 1);
+    let (mut b, _ctl_b) = node(rt.handle(), &trust, B, addr_b, &book, Duration::from_millis(20), 1);
+
+    // Establish the connection with one delivered frame.
+    send_reliable(&mut a, B, 0);
+    let mut got = Vec::new();
+    wait_until(
+        || {
+            drain_wire_values(&mut b, &mut got);
+            got.contains(&0)
+        },
+        "the first frame never arrived",
+    );
+
+    // Blip, and let the close land (so the lone frame's initial write PROVABLY hits the dead connection ⇒
+    // WriteFail::Down ⇒ the timer is armed).
+    ctl_a.drop_connections();
+    std::thread::sleep(Duration::from_millis(150));
+
+    // The LONE frame, then IDLE — no further sends. Only the R-4a retransmit timer can deliver it.
+    send_reliable(&mut a, B, 1);
+    wait_until(
+        || {
+            drain_wire_values(&mut b, &mut got);
+            got.contains(&1)
+        },
+        "the idle-after-blip lone frame was NEVER re-driven (the R-4a timer gap the review found)",
+    );
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec![0, 1],
+        "both frames delivered exactly once across the idle-after-blip re-drive"
     );
 }
 
