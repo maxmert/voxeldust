@@ -1057,15 +1057,27 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      @ default confirm=3 × geometric backoff 50ms→5s) FASTER than the saga's DESTRUCTIVE abort, which is DOUBLE-gated
      (`is_confirmed_dead` AND `abort_deadline_ticks`=1.2s from `dead_observed_since`) and strictly downstream — the transport
      can only make evidence accrue, never abort independently. (3) The only live-but-slow abort (pre-freeze Timeout, saga.rs
-     ~621/641/665) is liveness-INDEPENDENT and PRE-DATES R-4a. **AUDIT-REFINED OWED ITEMS (fold into the named slices):**
-     [→R-4c, supersedes the current check] `LivenessTuning::validate` today cross-checks `unreachable_window_ticks >= n *
-     retry_delay_ticks_hint` — a LINEAR span against a hand-entered hint DISCONNECTED from the mesh's GEOMETRIC backoff; R-4c's
-     `validate_against` must assert the GEOMETRIC worst-case confirm latency (sum of the backoff series to `confirm_unreachable_after_retries`,
-     capped at `backoff_max`) in ticks ≤ `abort_deadline_ticks` AND `unreachable_window_ticks >=` the geometric (not linear)
-     worst-case notice spacing (the L2 re-confirmation-after-a-long-dead-stretch hole: once bounces spread past the window at
-     backoff_max, each late notice resets the run to consecutive=1). [→R-4c, M2] env-plumb the transport clock
-     (`VD_MESH_CONFIRM_RETRIES`/`VD_MESH_BACKOFF_MIN_MS`/`_MAX_MS`, or `MeshConfig::from_env`) — today all bins hardcode
-     `MeshReliabilityTuning::default()`, so `validate_against` has only ONE tunable side. [→R-4c/R-4d, M3 — a REAL gap R-4b
+     ~621/641/665) is liveness-INDEPENDENT and PRE-DATES R-4a.
+     **✅ R-4c LANDED (this commit; design+3-review wf_dd37d7a5 caught a CRITICAL + HIGH pre-code — the naive formula summed the
+     WRONG series segment): `LivenessTuning::validate_against` — the GEOMETRIC cross-config invariant, boot-asserted in the
+     orchestrator (the ONE process holding both clocks).** Pure Tier-A fns in saga.rs: `backoff_series_sum(lo,hi)` (half-open
+     window of the redial series `min(backoff_min·2^(i-1), backoff_max)`), `duration_to_ticks_ceil` (ceiling, div-by-zero-guarded),
+     `transport_run_spread_ticks(N,n)` = the ticks spread of the n-notice run at fires N..N+n-1 = series `[N+1, N+n)` — the LATE
+     near-cap segment (the CRITICAL fix: the naive `[1,n)` early-segment gave 7 ticks vs the real 24 @ 20Hz, a 3.4x-too-narrow
+     window that would orphan a genuinely-dead peer). `validate_against(confirm_retries, backoff_min, backoff_max, tick_hz)`
+     asserts `unreachable_window_ticks >= run_spread` (raw args ⇒ NO sim→io-prod edge; supersedes the coarse linear `validate()`
+     window floor). Orchestrator reads the ACTUAL `mesh_cfg.reliability.confirm_unreachable_after_retries`/`redial_backoff_min/max`
+     + hoisted `VD_TICK_HZ`, cross-validates LOUD after `liveness.validate()`. Dev 50Hz n=3 → run_spread 60 ≤ window 64 (a real
+     4-tick margin, gate-surfaced). **SCOPED-DOWN from the vetted design (2 deliberate deviations, ledgered below):** (i) DROPPED
+     the check-(b) abort-vs-confirm ordering invariant — the audit PROVED a live-but-slow peer emits ZERO transport bounces (never
+     reaches confirmation), so check-b's "false-abandon" premise has no real path, and the abort grace (1.2s) comfortably covers
+     the ~400-800ms redial cadence at confirmation time; the abort-grace adequacy is a SOFT tuning concern (revisit if a
+     recovering-blip-on-a-5s-backoff case ever bites), NOT a hard invariant. (ii) DEFERRED the M2 transport env-plumb
+     (`VD_MESH_*`) — check-a validates against the ACTUAL (default) `mesh_cfg` the mesh runs with, so the invariant WORKS today;
+     the env-plumb only adds tuning the transport side (an operator convenience) and lands as a small follow-up. **AUDIT-REFINED
+     OWED ITEMS (fold into the named slices):** [→R-4c follow-up, M2] env-plumb the transport clock
+     (`VD_MESH_CONFIRM_RETRIES`/`VD_MESH_BACKOFF_MIN_MS`/`_MAX_MS`, or `MeshConfig::from_env`) so `validate_against` has TWO
+     tunable sides (today it validates the tunable saga window against the default transport backoff). [→R-4c/R-4d, M3 — a REAL gap R-4b
      INTRODUCED] a `WriteFail::Shed` bounce (BufferFull/Unframable) pushes `Inbound::NodeUnreachable` BYTE-IDENTICAL to a
      dead-peer bounce, and `saga_runtime` `record_unreachable`s it UNCONDITIONALLY — a BufferFull shed toward an inbound-QUIET
      peer (a frozen source shard) can accrue to `n_consecutive_unreachable` and FALSE-confirm a live-but-ack-stalled peer.

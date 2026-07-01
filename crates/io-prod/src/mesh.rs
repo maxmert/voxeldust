@@ -89,11 +89,12 @@ pub const DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES: u32 = 3;
 /// At-least-once redelivery tuning — the ONE config home for the redelivering transport (no inline
 /// literals at use sites). Plain (not `Serialize`): operational tuning, never persisted.
 ///
-/// ⚠️ R-2b CONSUMER NOTE: only `retry_buffer_max_bytes`'s constraint is structurally relevant in R-2b
-/// (it bounds the cap). `ack_idle_flush_interval` (the ack cadence) and `confirm_unreachable_after_retries`
-/// (blip-tolerance) are validated at boot now but NOT YET CONSUMED — R-2b still bounces `NodeUnreachable`
-/// per failed frame. Their behaviour lands with R-3' (acks) / R-4' (confirmed-dead-after-N); do not expect
-/// blip-tolerance from `confirm_unreachable_after_retries` until R-4'.
+/// CONSUMER NOTE: all three are now LIVE — `retry_buffer_max_bytes` bounds the retry buffer (R-4b BufferFull
+/// shed), `ack_idle_flush_interval` paces the cumulative-ack flush (R-3' `ack_egress`), and
+/// `confirm_unreachable_after_retries` is the blip-tolerance threshold `confirm_and_maybe_bounce` (R-4a) gates
+/// the `NodeUnreachable` bounce on (a blip that recovers before N ⇒ zero bounce). R-4c cross-validates this
+/// threshold + the redial backoff against the orchestrator saga liveness window at boot
+/// (`LivenessTuning::validate_against`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeshReliabilityTuning {
     /// Per-lane unacked-retry-buffer byte ceiling (R-4b, the shed point). Must be at least one MAXIMAL FRAMED

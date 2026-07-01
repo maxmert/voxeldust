@@ -45,18 +45,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let trust = ClusterTrust::from_der_dir(std::path::Path::new(&env.string("VD_TRUST_DIR")?))?;
-    let (transport, _control) = spawn_mesh(
-        runtime.handle(),
-        &trust,
-        &MeshConfig::new(
-            local,
-            env.parse("VD_BIND")?,
-            env.peer_book("VD_PEERS")?,
-            env.parse("VD_OUTBOUND_CAP")?,
-            // R-2b: per-process incarnation stamped on reliable frames (default 0; R-6 durable counter).
-            env.parse_or("VD_PROCESS_INCARNATION", 0)?,
-        ),
-    )?;
+    // Named so R-4c can cross-validate the SAME transport redial backoff the mesh runs with (below).
+    let mesh_cfg = MeshConfig::new(
+        local,
+        env.parse("VD_BIND")?,
+        env.peer_book("VD_PEERS")?,
+        env.parse("VD_OUTBOUND_CAP")?,
+        // R-2b: per-process incarnation stamped on reliable frames (default 0; R-6 durable counter).
+        env.parse_or("VD_PROCESS_INCARNATION", 0)?,
+    );
+    let (transport, _control) = spawn_mesh(runtime.handle(), &trust, &mesh_cfg)?;
     let mut node = build_app(
         NodeConfig {
             node_id: local,
@@ -114,6 +112,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
     };
     liveness.validate()?;
+    // R-4c: the orchestrator is the ONE process holding BOTH the transport redial backoff (the mesh it just
+    // spawned) and the saga liveness window — cross-validate them LOUD. Nothing else asserts the two clocks
+    // are ordered: a `VD_LIVENESS_WINDOW` narrower than the GEOMETRIC backoff spread of the confirmation run
+    // lets `record_unreachable` reset the run before the n-th notice, so a genuinely-dead peer is NEVER
+    // confirmed dead (the never-confirm strand) — the coarse `validate()` linear check (a hand-entered
+    // `retry_delay_ticks_hint` disconnected from the real backoff) does NOT catch it.
+    let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
+    liveness.validate_against(
+        mesh_cfg.reliability.confirm_unreachable_after_retries,
+        mesh_cfg.redial_backoff_min,
+        mesh_cfg.redial_backoff_max,
+        tick_hz,
+    )?;
     // D-6 Slice D: the DURABLE redb Store (Store A — directory + saga WAL + clock ceiling). HR1: durable
     // state lives on a PERSISTENT volume keyed by path, NEVER under /tmp (the old /tmp/{shard_id} data-loss
     // bug). VD_STORE_PATH is REQUIRED (no silent in-memory fallback) and a temp path is REJECTED LOUD at
@@ -272,7 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // covers it: rehydrate restores the last durable state + the Slice-2a producer re-drives every saga
     // command idempotently. (All egress today is saga commands [re-driven] + loss-tolerant ClockSync; a
     // future RELIABLE non-re-driven effect would need a graceful-shutdown flush, owed if/when one lands.)
-    let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
+    let mut pacer = TickPacer::new(tick_hz); // R-4c hoisted VD_TICK_HZ (also feeds validate_against)
     let mut parked: Option<(TickPrologue, u64)> = None;
     #[cfg(feature = "store-test-hooks")]
     let mut sentinel_injected = false;

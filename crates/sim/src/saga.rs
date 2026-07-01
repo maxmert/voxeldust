@@ -20,6 +20,8 @@
 //! Source authority is retained until the CAS wins — a failed/slow destination
 //! always returns the player to a live source (B2: never "warp into nothing").
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::RealmId;
@@ -197,6 +199,117 @@ impl LivenessTuning {
                 n: self.n_consecutive_unreachable,
                 retry: self.retry_delay_ticks_hint,
                 span,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// R-4c: sum interval indices `[lo, hi)` (1-based, half-open) of the io-prod peer_writer redial series
+/// `interval(i) = min(backoff_min * 2^(i-1), backoff_max)` — the WALL-CLOCK spacing between successive redial
+/// attempts (traced against mesh.rs: the initial write-error arms the timer at the UN-doubled `backoff_min`
+/// = interval(1), and each subsequent failed replay doubles, capped at `backoff_max`). Pure, monomorphic,
+/// straight-line (HR5(a)): the cap is `Duration::min` (no `if`); the growth is `saturating_mul` (a >=~31-bit
+/// doubling saturates and is pinned by the same cap — never a shift/overflow UB). `lo >= hi` yields ZERO.
+fn backoff_series_sum(lo: u32, hi: u32, backoff_min: Duration, backoff_max: Duration) -> Duration {
+    let mut step = backoff_min.min(backoff_max);
+    // Advance `step` to interval(lo) WITHOUT summing the skipped `[1, lo)` prefix (cap-pinned, so a large
+    // `lo` costs at most `lo` saturating doublings, never UB).
+    for _ in 1..lo {
+        step = step.saturating_mul(2).min(backoff_max);
+    }
+    let mut sum = Duration::ZERO;
+    for _ in lo..hi {
+        sum = sum.saturating_add(step);
+        step = step.saturating_mul(2).min(backoff_max);
+    }
+    sum
+}
+
+/// R-4c: ceiling-divide a `Duration` into whole universe ticks at `tick_hz`. CEILING — a partial tick still
+/// costs a full tick of budget, so the returned latency is never truncated BELOW what the saga must survive.
+/// `tick_hz == 0` clamps to 1 (matches the pacer's `tick_hz.max(1)`, one physical convention, no div-by-zero).
+/// u128 headroom saturates to `u64::MAX` on an (unreachable-in-practice) enormous `Duration`.
+fn duration_to_ticks_ceil(d: Duration, tick_hz: u32) -> u64 {
+    let hz = u128::from(tick_hz.max(1));
+    let ticks = d.as_nanos().saturating_mul(hz).div_ceil(1_000_000_000u128);
+    u64::try_from(ticks).unwrap_or(u64::MAX)
+}
+
+/// R-4c: the whole-tick SPREAD of the `n_consecutive` `NodeUnreachable` notices the orchestrator observes
+/// for a genuinely-dead peer. The transport's FIRST bounce fires on redial-fire `confirm_retries` (= N), and
+/// one notice fires per subsequent redial, so the run spans fires N..N+n-1 — its inter-notice gaps are the
+/// intervals at indices `[N+1, N+n)` (the LATE, near-`backoff_max` segment of the series, NOT the early
+/// `[1, n)` segment — the segment choice is the whole point of the check). `n <= 1` yields ZERO (no spread).
+fn transport_run_spread_ticks(
+    confirm_retries: u32,
+    n_consecutive: u32,
+    backoff_min: Duration,
+    backoff_max: Duration,
+    tick_hz: u32,
+) -> u64 {
+    let lo = confirm_retries.saturating_add(1);
+    let hi = confirm_retries.saturating_add(n_consecutive); // (N+1) + (n-1) = N+n, exclusive
+    duration_to_ticks_ceil(backoff_series_sum(lo, hi, backoff_min, backoff_max), tick_hz)
+}
+
+/// R-4c cross-config error: the saga liveness WINDOW (ticks) and the transport redial backoff (wall-clock),
+/// validated in isolation elsewhere, are mutually MIS-ORDERED. Fail-loud at orchestrator boot (the ONE
+/// process holding both). Equality-comparable (HR5(d)) so tests assert the whole struct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LivenessCrossTuningError {
+    #[error(
+        "unreachable_window_ticks ({window}) must be >= the transport re-bounce SPREAD of an \
+         {n}-notice confirmation run ({run_spread} ticks at {tick_hz} Hz): the orchestrator observes the \
+         run on redial fires confirm_retries+1..+{n}, whose inter-notice gaps are the LATE (near \
+         backoff_max) backoff intervals — a narrower window lets record_unreachable reset the run before \
+         the n-th notice, so is_confirmed_dead NEVER fires and a genuinely-dead peer is orphaned"
+    )]
+    WindowNarrowerThanRunSpread {
+        window: u64,
+        run_spread: u64,
+        n: u32,
+        tick_hz: u32,
+    },
+}
+
+impl LivenessTuning {
+    /// R-4c: cross-validate this saga-side liveness window against the RAW io-prod transport redial backoff
+    /// (`MeshReliabilityTuning::confirm_unreachable_after_retries` + `MeshConfig::redial_backoff_min/max`),
+    /// passed as primitives so vd-sim needs NO io-prod dependency (the dependency rule forbids sim→io-prod).
+    /// Called at orchestrator boot AFTER `validate()` — the ONE cross-config gate (nothing else asserts the
+    /// two clocks are ordered). It supersedes the coarse LINEAR `validate()` window floor (which cross-checks
+    /// a hand-entered `retry_delay_ticks_hint` DISCONNECTED from the real GEOMETRIC backoff) with the EXACT
+    /// geometric spread: `unreachable_window_ticks` must span the LATE-segment gaps of the confirmation run,
+    /// else `record_unreachable` resets the run and the peer is never confirmed dead (the never-confirm strand
+    /// — the CRITICAL the design review caught, where the naive check summed the early segment and passed a
+    /// 3.4x-too-narrow window). NOTE (scoped to R-4c): the confirm-dead-vs-abort ordering is a NON-invariant
+    /// at these budgets (a live-but-slow peer emits ZERO transport bounces — it never reaches confirmation;
+    /// audit wf_9d72e38c), so no abort-deadline cross-check is asserted here; the abort-grace tuning is a soft
+    /// follow-up.
+    ///
+    /// # Errors
+    /// [`LivenessCrossTuningError::WindowNarrowerThanRunSpread`] if the window cannot hold the run.
+    pub fn validate_against(
+        &self,
+        confirm_retries: u32,
+        backoff_min: Duration,
+        backoff_max: Duration,
+        tick_hz: u32,
+    ) -> Result<(), LivenessCrossTuningError> {
+        let run_spread = transport_run_spread_ticks(
+            confirm_retries,
+            self.n_consecutive_unreachable,
+            backoff_min,
+            backoff_max,
+            tick_hz,
+        );
+        if self.unreachable_window_ticks < run_spread {
+            return Err(LivenessCrossTuningError::WindowNarrowerThanRunSpread {
+                window: self.unreachable_window_ticks,
+                run_spread,
+                n: self.n_consecutive_unreachable,
+                tick_hz,
             });
         }
         Ok(())
@@ -1796,6 +1909,107 @@ mod tests {
                 span: 6,
             })
         );
+    }
+
+    #[test]
+    fn r4c_backoff_series_sum_windows() {
+        let (min, max) = (Duration::from_millis(50), Duration::from_secs(5));
+        // interval(i) = min(50ms * 2^(i-1), 5s): 50,100,200,400,800,1600,3200,(6400->5000),5000,...
+        assert_eq!(backoff_series_sum(1, 4, min, max), Duration::from_millis(350)); // 50+100+200
+        assert_eq!(backoff_series_sum(1, 9, min, max), Duration::from_millis(11350)); // ...+5000(capped)
+        // Empty window (lo >= hi) is ZERO — a single notice has no spread.
+        assert_eq!(backoff_series_sum(3, 3, min, max), Duration::ZERO);
+        assert_eq!(backoff_series_sum(5, 2, min, max), Duration::ZERO);
+        // The LATE segment [4,6) = 400+800 (the run-spread gaps); the [1,4) prefix is advanced, not summed.
+        assert_eq!(backoff_series_sum(4, 6, min, max), Duration::from_millis(1200));
+        // A far window sits entirely at the cap.
+        assert_eq!(backoff_series_sum(9, 11, min, max), Duration::from_secs(10)); // 5000 + 5000
+    }
+
+    #[test]
+    fn r4c_series_saturates_on_a_huge_index_never_panics() {
+        let (min, max) = (Duration::from_millis(50), Duration::from_secs(5));
+        // indices 1-7 = 6350ms, indices 8-40 (33 gaps) at the 5s cap = 165000ms.
+        assert_eq!(backoff_series_sum(1, 41, min, max), Duration::from_millis(171350));
+        // A large `lo` prefix-advance still saturates cleanly.
+        assert_eq!(backoff_series_sum(35, 40, min, max), Duration::from_secs(25)); // 5 gaps at the cap
+    }
+
+    #[test]
+    fn r4c_duration_to_ticks_ceil_rounds_up_and_guards_zero_hz() {
+        assert_eq!(duration_to_ticks_ceil(Duration::from_millis(350), 20), 7); // exact 7.0
+        assert_eq!(duration_to_ticks_ceil(Duration::from_millis(351), 20), 8); // 7.02 -> ceil 8
+        assert_eq!(duration_to_ticks_ceil(Duration::ZERO, 20), 0);
+        // tick_hz == 0 clamps to 1 (no div-by-zero) — identical to 1 Hz.
+        assert_eq!(
+            duration_to_ticks_ceil(Duration::from_secs(3), 0),
+            duration_to_ticks_ceil(Duration::from_secs(3), 1)
+        );
+        // An enormous Duration saturates to u64::MAX (exercises the try_from Err arm).
+        assert_eq!(duration_to_ticks_ceil(Duration::from_secs(u64::MAX), 2), u64::MAX);
+    }
+
+    #[test]
+    fn r4c_run_spread_sums_the_late_segment() {
+        let (min, max) = (Duration::from_millis(50), Duration::from_secs(5));
+        // The CRITICAL fix: the n-notice run spans redial fires N..N+n-1, whose gaps are indices [N+1, N+n)
+        // — the LATE (near-cap) segment. N=3,n=3: gaps at 4,5 = 400+800 = 1200ms = 24 ticks @ 20Hz (NOT the 7
+        // the naive early-segment [1,n) bug would report — the 3.4x under-estimate the review caught).
+        assert_eq!(transport_run_spread_ticks(3, 3, min, max, 20), 24);
+        assert_eq!(transport_run_spread_ticks(3, 3, min, max, 50), 60);
+        // A run that starts past the cap: gaps at 9,10 = 5000+5000 = 200 ticks @ 20Hz.
+        assert_eq!(transport_run_spread_ticks(8, 3, min, max, 20), 200);
+        // A single notice (or zero) has no spread.
+        assert_eq!(transport_run_spread_ticks(3, 1, min, max, 20), 0);
+        assert_eq!(transport_run_spread_ticks(3, 0, min, max, 20), 0);
+    }
+
+    #[test]
+    fn r4c_validate_against_window_vs_run_spread() {
+        let (min, max) = (Duration::from_millis(50), Duration::from_secs(5));
+        let prod = |window: u64| LivenessTuning {
+            n_consecutive_unreachable: 3,
+            unreachable_window_ticks: window,
+            retry_delay_ticks_hint: 2,
+        };
+        // Prod n=3, window 64 >= run_spread 24 @ 20Hz -> Ok.
+        assert_eq!(prod(64).validate_against(3, min, max, 20), Ok(()));
+        // The DEV/kill-only default (n=1) has zero run-spread -> always Ok.
+        assert_eq!(LivenessTuning::default().validate_against(3, min, max, 20), Ok(()));
+        // A narrow window (20 < 24) is REJECTED — the never-confirm strand the naive check missed.
+        assert_eq!(
+            prod(20).validate_against(3, min, max, 20),
+            Err(LivenessCrossTuningError::WindowNarrowerThanRunSpread {
+                window: 20,
+                run_spread: 24,
+                n: 3,
+                tick_hz: 20,
+            })
+        );
+        // Boundary: window == run_spread passes; window == run_spread - 1 fails (the `<` off-by-one guard).
+        assert_eq!(prod(24).validate_against(3, min, max, 20), Ok(()));
+        assert_eq!(
+            prod(23).validate_against(3, min, max, 20),
+            Err(LivenessCrossTuningError::WindowNarrowerThanRunSpread {
+                window: 23,
+                run_spread: 24,
+                n: 3,
+                tick_hz: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn r4c_cross_tuning_error_display_names_its_fields() {
+        let s = LivenessCrossTuningError::WindowNarrowerThanRunSpread {
+            window: 20,
+            run_spread: 24,
+            n: 3,
+            tick_hz: 20,
+        }
+        .to_string();
+        assert!(s.contains("20"), "display names the window: {s}");
+        assert!(s.contains("24"), "display names the run_spread: {s}");
     }
 
     #[test]
