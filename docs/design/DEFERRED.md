@@ -1046,7 +1046,46 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      `mesh_under_loss.rs` real-mesh capstone driving an actual PRODUCER-LESS flow — a raw `GhostReliable` Despawn — across
      the break, PROVING the idle-after-blip re-drive end-to-end, retiring the per-flow band-aids). The loopback bridge keeps its simple
      per-stream seq (single-stream test infra; NO lane FSM). R-6 = durable outbox + durable boot-counter incarnation
-     (P6/P7). **R-2b cross-slice contracts (binding for R-3'):** (a) the receiver MUST dedup by (peer,class,incarnation,
+     (P6/P7).
+     **✅ POST-R-4b HOLISTIC AUDIT (wf_9d72e38c, DONE_NO_CRITICAL — 0 CRITICAL, 0 in-scope-unaddressed HIGH; confirm-dead +
+     shed COMPOSE cleanly with the saga LivenessTracker, frozen seam intact, 20Hz hot path zero-cost). SHARPEST QUESTION
+     DECISIVELY RESOLVED: at the DEFAULT tuning there is NO confirm-dead-vs-saga-abort live hazard — R-4c is DEFENSE-IN-DEPTH
+     (a mis-tuning guard), NOT a fix for a live strand.** The proof (keep in the R-4c PR): (1) a live-but-slow peer emits ZERO
+     transport bounces — `owes_redelivery` needs `stream.is_none()`, a connected-but-slow peer keeps `stream.is_some()` so the
+     timer never fires + `consecutive_failures` stays 0 (ack-lag is R-4b's shed job, which does NOT feed the LivenessTracker);
+     "slow" and "unreachable" are STRUCTURALLY DISJOINT transport states. (2) For a DEAD peer the transport confirms (~0.35–1.55s
+     @ default confirm=3 × geometric backoff 50ms→5s) FASTER than the saga's DESTRUCTIVE abort, which is DOUBLE-gated
+     (`is_confirmed_dead` AND `abort_deadline_ticks`=1.2s from `dead_observed_since`) and strictly downstream — the transport
+     can only make evidence accrue, never abort independently. (3) The only live-but-slow abort (pre-freeze Timeout, saga.rs
+     ~621/641/665) is liveness-INDEPENDENT and PRE-DATES R-4a. **AUDIT-REFINED OWED ITEMS (fold into the named slices):**
+     [→R-4c, supersedes the current check] `LivenessTuning::validate` today cross-checks `unreachable_window_ticks >= n *
+     retry_delay_ticks_hint` — a LINEAR span against a hand-entered hint DISCONNECTED from the mesh's GEOMETRIC backoff; R-4c's
+     `validate_against` must assert the GEOMETRIC worst-case confirm latency (sum of the backoff series to `confirm_unreachable_after_retries`,
+     capped at `backoff_max`) in ticks ≤ `abort_deadline_ticks` AND `unreachable_window_ticks >=` the geometric (not linear)
+     worst-case notice spacing (the L2 re-confirmation-after-a-long-dead-stretch hole: once bounces spread past the window at
+     backoff_max, each late notice resets the run to consecutive=1). [→R-4c, M2] env-plumb the transport clock
+     (`VD_MESH_CONFIRM_RETRIES`/`VD_MESH_BACKOFF_MIN_MS`/`_MAX_MS`, or `MeshConfig::from_env`) — today all bins hardcode
+     `MeshReliabilityTuning::default()`, so `validate_against` has only ONE tunable side. [→R-4c/R-4d, M3 — a REAL gap R-4b
+     INTRODUCED] a `WriteFail::Shed` bounce (BufferFull/Unframable) pushes `Inbound::NodeUnreachable` BYTE-IDENTICAL to a
+     dead-peer bounce, and `saga_runtime` `record_unreachable`s it UNCONDITIONALLY — a BufferFull shed toward an inbound-QUIET
+     peer (a frozen source shard) can accrue to `n_consecutive_unreachable` and FALSE-confirm a live-but-ack-stalled peer.
+     Non-triggering at default (clear-on-ack fires on ANY inbound Wire; a shed is one-shot per new send, no timer/counter), but
+     the clean cure is a DISTINCT `Inbound::SendShed` arm the saga routes to a METRIC, never to `record_unreachable` (an
+     additive `Inbound` seam change → frozen-wire review). Scope BEFORE a real deploy. [→R-4d, M4] the 7+ `MeshStats` counters
+     (`reliable_shed`/`reliable_acked`-stuck-at-0=dead-ack-path/`gap_drop`=MUST-BE-0/…) are BLIND in prod — every bin discards
+     `_control`, `/metrics` serves hardcoded 0, `metric_names::ALL` omits them; wire `MeshControl::stats()` via a `MetricsSource`
+     BEFORE any soak (a soak with invisible alarms proves nothing). [→R-4e, M6+cloud] make R-4e REAL-QUIC (not the loopback
+     bridge) with (a) a CORRELATED multi-peer outage (drop ≥50% simultaneously) asserting `inbound_dropped_reliable`≈0 for
+     surviving-peer traffic — else coalesce confirm-dead to ONE notice/peer/window or give NodeUnreachable a priority lane; (b) a
+     pod-reschedule/address-change scenario (L5: `peer_writer` captures `addr` once at spawn — a moved peer is dialed stale
+     forever; recovery needs address re-plumb); (c) the H2 RecvLedger-lock contention MEASUREMENT. [→R-6, CLOUD-BLOCKING,
+     SHARPENED] confirm-dead AMPLIFIES the M3-incarnation wall-clock hazard: a CrashLooping peer is confirmed-dead (correct) but
+     its fast-restart reliable traffic is silently Dedup/Stale-dropped ⇒ clear-on-ack never fires ⇒ a split-brain-ish stall; the
+     durable monotone boot-counter is a HARD precondition before ANY real deploy, not a dev residual. [→P9] pin an
+     `intershard.rs` Signal forward-note: R-4b's BufferFull shed is PRODUCER-BACKPRESSURE (not infinite reliable buffering) — a
+     cross-shard Signal fan-out (radio/functional-block-to-leased-subscribers) must claim its OWN shed-degrade policy + its own
+     `MsgClass`, never inherit a silent `NodeUnreachable`.
+     **R-2b cross-slice contracts (binding for R-3'):** (a) the receiver MUST dedup by (peer,class,incarnation,
      seq) EPOCH-AGNOSTICALLY — epoch gates ONLY the high-water-advance race, never seq retirement; a torn frame is
      discarded wholesale (`read_one_reliable_frame` already None-on-short-read). (b) The per-class lane split REMOVES
      cross-class ordering on a link — every reliable consumer must be order-INDEPENDENT across classes (verified for the
