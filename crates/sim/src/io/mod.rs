@@ -258,17 +258,29 @@ pub trait Clock {
 /// 1. `send` never blocks and never performs network I/O on the calling thread.
 /// 2. `send` returns `Err(QueueFull)` exactly when the bounded outbound queue is
 ///    saturated; an accepted send is assigned the next FIFO [`MsgId`].
-/// 3. Messages accepted toward one peer are delivered in FIFO order (or surface as
-///    `NodeUnreachable`, also in order).
+/// 3. Messages accepted toward one peer WITHIN a single `MsgClass` (a `(peer,class)` lane) are
+///    delivered in FIFO order (or surface as `NodeUnreachable`, also in order). **ACROSS classes there
+///    is NO ordering guarantee** — the io-prod mesh rides one QUIC stream per `(peer,class)` so a stalled
+///    class never head-of-line-blocks another, so every reliable consumer MUST be order-INDEPENDENT
+///    across classes (a cross-class ordering dependence must ride the SAME class). CAVEAT: the mem
+///    `FaultFabric` still drains one node-wide FIFO across all classes, so a cross-class-order-dependent
+///    consumer passes in-process yet reorders on the real mesh — R-5' pins this with a parity test
+///    (audit `wf_d0a91a43` H1).
 /// 4. `drain_inbound` returns everything delivered since the previous drain, in
 ///    delivery order, without blocking.
 ///
-/// ⚠️ DELIVERY SEMANTICS are NOT yet uniform across impls and are a ledgered io-prod precondition
-/// (DEFERRED.md D-6, the producer-less-recovery gap): the harness `FaultFabric` is at-least-once
-/// (redelivery-until-acked, surviving a receiver crash), while the io-prod `MeshTransport` is
-/// at-most-once (a send to a down peer surfaces `NodeUnreachable` and is dropped). Saga forward
-/// progress must therefore NOT depend on this trait redelivering a message lost to a peer restart —
-/// `scan_deadlines` re-drives every saga phase that HAS orchestrator egress. The D-37 re-home ADOPT
+/// ⚠️ DELIVERY SEMANTICS (R-3' UPDATE, DEFERRED.md D-6): the io-prod `MeshTransport` is now AT-LEAST-ONCE
+/// across a connection blip FOR A `(peer,class)` LANE THAT KEEPS CARRYING TRAFFIC (per-lane seq +
+/// retry-buffer replay + a receiver contiguity ledger). Two residuals keep the
+/// saga-must-not-depend-on-transport-redelivery rule BINDING until R-4'/R-5': (a) an IDLE-after-blip lane's
+/// un-acked tail is RETAINED but not re-driven without the R-4' retransmit timer; (b) the receiver dedup
+/// ledger is RAM-only, so a receiver restart wipes it. So transport dedup is BEST-EFFORT WITHIN A RECEIVER
+/// INCARNATION — durable cross-restart exactly-once is the APPLICATION's job (the redb-persisted
+/// `(correlation_id, step_id)` `applied_steps`; the HR2 decode-to-Default ban). The harness `FaultFabric` is
+/// unconditionally at-least-once (redelivery-until-acked, surviving a receiver crash) — the STRICTER oracle.
+/// Saga forward progress must therefore NOT depend on this trait redelivering a message lost to a peer
+/// restart or an idle-after-blip lane — `scan_deadlines` re-drives every saga phase that HAS orchestrator
+/// egress. The D-37 re-home ADOPT
 /// gained that egress in Slice 2d (a re-homed `Promoting` carries `rehome_target`, so its Timeout
 /// re-drives `A::ReHomeAdopt → target` — not `Promote → ctx.dest`), leaving `BatchHandoff::AwaitAdopt`
 /// (the dest adopts off the source's envelope) as the ONE remaining producer-less phase (DEFERRED.md

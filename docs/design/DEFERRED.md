@@ -1071,6 +1071,36 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      `last_sent` per connection). IF R-6's durable-incarnation work ever lets one accepted connection be REUSED across a
      sender restart (two incarnations on one connection), this must move `incarnation` INTO `AckEntry` (per-class) or the
      sender's `on_ack` silently rejects the mismatched entries = a dead-ack-path (retry grows to the R-4' shed), not loss.
+     **R-3' HOLISTIC AUDIT owed items (wf_d0a91a43, DONE_NO_CRITICAL — 0 CRITICAL, 2 latent HIGH correctness-first-deferred
+     with LEDGER-not-rework; the transport COMPOSES soundly + advances the end-goal). LOAD-BEARING (synth: "must not be
+     lost"):** **[H2, P3-load scaling]** the `RecvLedger` is ONE node-wide `Mutex<BTreeMap<(NodeId,MsgClass),RecvState>>`
+     locked on EVERY reliable inbound frame (held across the nested inbox lock) — the wrong GRANULARITY for
+     hundreds-in-one-location: it reintroduces a node-wide receive-plane serialization point the SEND lanes don't have
+     (contradicts the mesh.rs:6-8 per-peer-isolation promise for the RX direction). NOT a correctness bug (short hold, fine
+     P1/P2/P3); the clean fix when due = key the outer map's Mutex PER-PEER (`serve_connection` already = one peer) + drop
+     the ledger lock before `push_inbox` (snapshot verdict, re-lock only on the rare reliable-drop rollback). Measure it
+     under the load test (below); do NOT rework before P3-load. **[M4, before any real soak/deploy]** the 7 never-silent
+     `MeshStats` counters (incl. `reliable_acked` stuck-at-0 = DEAD-ACK-PATH alert, `gap_drop` = MUST-BE-0) are NOT on the
+     ops surface — `metric_names::ALL` omits them, `render_metrics_shell` hardcodes 0, and NO bin feeds `MeshControl::stats()`
+     to `/metrics`. So the alarms the design promises are invisible in prod (a `tracing::warn` only). Additive fix (off the
+     frozen seam + hot path, sequence with R-4'/R-5' as ONE ops slice): add the 7 names to the review-gated `metric_names::ALL`
+     + a `MetricsSource` trait mirroring `SnapshotSource` reading `stats()` + the `BoundedInbox` tallies; the shard/gateway/orch
+     bins hold their `MeshControl` and feed `/metrics`. **CORRECTLY-OWED (named future slices):** [H1→R-5'] the mem `FaultFabric`
+     preserves cross-class FIFO but the mesh does NOT — pin with a process-parity test (or per-class-split the fabric) so a
+     cross-class-order-dependent consumer REDs in-process (contract now in the `Transport` seam doc). [M3→R-6, CLOUD-BLOCKING]
+     `VD_PROCESS_INCARNATION` = wall-clock-ms is UNSAFE under k8s (CrashLoopBackOff restarts sub-second ⇒ EQUAL incarnation ⇒
+     silent-Dedup LOSS; NTP/reschedule clock-skew ⇒ LOWER ⇒ StaleIncarnation-drops all restarted traffic) — R-6's durable
+     monotone boot-counter is a HARD precondition on the SAME gate as the AwaitAdopt egress before ANY real deploy, NOT a "dev
+     residual". [L7→R-4'/R-5', load-test mandate] `mesh_redelivery.rs` is 2-node/1-class/1-lane — add an N-peer (16-64)
+     sustained-reliable-into-one-node test (no-loss/no-dup, `reliable_acked` keeps pace, no RX-plane collapse under a
+     wall-clock bound); it's the companion to R-5' `mesh_under_loss.rs` and the test that empirically surfaces H2. [M2→R-5'
+     belt-and-suspenders] add a source-side retained-ghost STALENESS REAPER for the one-shot `GhostFlow::Despawn` band-exit
+     (#4 below) — it has NO saga so a per-saga re-solicit structurally cannot reach it, and a lost Despawn = a phantom
+     cross-boundary COLLIDER (violates players-physically-collide). [L4→R-6] promote the `AckFrame` single-incarnation to a
+     NAMED R-6 acceptance item (move `incarnation` into `AckEntry` per-class OR prove one-conn-one-incarnation holds under
+     durable-incarnation connection-reuse). [L5→provisioning slice] `peer_writer`'s `addr` is captured once at spawn — a
+     NodeId that moves IP needs the writer to RE-READ its address (not just re-dial), so the dynamic-address (CA-1/orch
+     provisioning) slice must re-plumb the address, not only the connection.
      **(1a) `BatchHandoff::AwaitAdopt`** — the first-identified instance. A producer-less phase has NO `scan_deadlines` re-drive
      egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash);
      the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop). `AwaitAdopt`
