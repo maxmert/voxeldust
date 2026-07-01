@@ -26,6 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             env.parse("VD_BIND")?,
             env.peer_book("VD_PEERS")?,
             env.parse("VD_OUTBOUND_CAP")?,
+            // R-2b: per-process incarnation stamped on reliable frames (default 0; the durable
+            // monotone boot-counter lands at R-6). The dev cluster sets it per launch (DEFERRED D-6).
+            env.parse_or("VD_PROCESS_INCARNATION", 0)?,
         ),
     )?;
     let mut node = build_app(

@@ -28,7 +28,7 @@ use vd_core::{MsgId, NodeId};
 use vd_sim::io::{BoundedInbox, Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
 
 use crate::trust::ClusterTrust;
-use crate::{DatagramFrame, OutFrame, ProdIoError, write_reliable_frame};
+use crate::{DatagramFrame, OutFrame, ProdIoError, ReliableFrame, write_reliable_frame};
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -50,6 +50,82 @@ pub struct MeshConfig {
     /// a dead host — TRANSPORT-3). Backoff doubles from `min` up to `max`.
     pub redial_backoff_min: Duration,
     pub redial_backoff_max: Duration,
+    /// This process's incarnation, stamped on every reliable frame (R-2b). A higher value tells a
+    /// receiver the sender RESTARTED (⇒ reset its dedup high-water — the sender-restart seq-reset cure).
+    /// Bins pass `VD_PROCESS_INCARNATION` (default 0 in dev/tests); R-6 (P6/P7) makes it a durable
+    /// monotone boot-counter that survives a clock rewind.
+    pub process_incarnation: u64,
+    /// The at-least-once redelivery tuning (R-2b). `validate`d loud at `spawn_mesh` boot.
+    pub reliability: MeshReliabilityTuning,
+}
+
+/// Default per-lane unacked-retry-buffer ceiling (R-4' shed point; counted in R-2b). 4 MiB.
+pub const DEFAULT_RETRY_BUFFER_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Default cadence at which a receiver flushes a lone cumulative ack (R-3'); a lone damage/death/
+/// despawn is acked within this even without follow-up traffic. 50 ms.
+pub const DEFAULT_ACK_IDLE_FLUSH: Duration = Duration::from_millis(50);
+/// Default replays-before-a-hard-`NodeUnreachable`-bounce (R-4'): a transient blip costs ZERO bounce;
+/// only a peer that fails this many consecutive replays is declared unreachable.
+pub const DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES: u32 = 3;
+
+/// At-least-once redelivery tuning — the ONE config home for the redelivering transport (no inline
+/// literals at use sites). Plain (not `Serialize`): operational tuning, never persisted.
+///
+/// ⚠️ R-2b CONSUMER NOTE: only `retry_buffer_max_bytes`'s constraint is structurally relevant in R-2b
+/// (it bounds the cap). `ack_idle_flush_interval` (the ack cadence) and `confirm_unreachable_after_retries`
+/// (blip-tolerance) are validated at boot now but NOT YET CONSUMED — R-2b still bounces `NodeUnreachable`
+/// per failed frame. Their behaviour lands with R-3' (acks) / R-4' (confirmed-dead-after-N); do not expect
+/// blip-tolerance from `confirm_unreachable_after_retries` until R-4'.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeshReliabilityTuning {
+    /// Per-lane unacked-retry-buffer byte ceiling. The R-4' shed point (counted in R-2b); must be at
+    /// least one max-size frame or a single large reliable frame could never be retained.
+    pub retry_buffer_max_bytes: usize,
+    /// Cadence for flushing a lone cumulative ack (R-3'). Must be > 0 (a 0 timer would busy-spin).
+    pub ack_idle_flush_interval: Duration,
+    /// Consecutive failed replays before a hard `NodeUnreachable` bounce (R-4'). Must be ≥ 1.
+    pub confirm_unreachable_after_retries: u32,
+}
+
+impl Default for MeshReliabilityTuning {
+    fn default() -> Self {
+        MeshReliabilityTuning {
+            retry_buffer_max_bytes: DEFAULT_RETRY_BUFFER_MAX_BYTES,
+            ack_idle_flush_interval: DEFAULT_ACK_IDLE_FLUSH,
+            confirm_unreachable_after_retries: DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES,
+        }
+    }
+}
+
+/// A `MeshReliabilityTuning` field out of range — surfaced loud at `spawn_mesh` boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MeshReliabilityTuningError {
+    #[error("retry_buffer_max_bytes must be >= the max stream frame size")]
+    RetryBufferTooSmall,
+    #[error("ack_idle_flush_interval must be > 0")]
+    AckFlushZero,
+    #[error("confirm_unreachable_after_retries must be >= 1")]
+    ConfirmRetriesZero,
+}
+
+impl MeshReliabilityTuning {
+    /// Reject an out-of-range field (fail-loud at boot). Branchless-faithful: one `if` per arm, in
+    /// order, each returning its specific typed error (HR5(d) — equality-comparable, no `matches!`).
+    ///
+    /// # Errors
+    /// The specific [`MeshReliabilityTuningError`] for the first out-of-range field.
+    pub fn validate(&self) -> Result<(), MeshReliabilityTuningError> {
+        if self.retry_buffer_max_bytes < vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize {
+            return Err(MeshReliabilityTuningError::RetryBufferTooSmall);
+        }
+        if self.ack_idle_flush_interval.is_zero() {
+            return Err(MeshReliabilityTuningError::AckFlushZero);
+        }
+        if self.confirm_unreachable_after_retries < 1 {
+            return Err(MeshReliabilityTuningError::ConfirmRetriesZero);
+        }
+        Ok(())
+    }
 }
 
 /// The dest node's `BoundedInbox` capacity for a given per-peer outbound depth — the SINGLE
@@ -71,6 +147,7 @@ impl MeshConfig {
         bind: SocketAddr,
         peers: BTreeMap<NodeId, SocketAddr>,
         outbound_capacity: usize,
+        process_incarnation: u64,
     ) -> MeshConfig {
         MeshConfig {
             local,
@@ -81,6 +158,8 @@ impl MeshConfig {
             max_inbound_connections: 256,
             redial_backoff_min: Duration::from_millis(50),
             redial_backoff_max: Duration::from_secs(5),
+            process_incarnation,
+            reliability: MeshReliabilityTuning::default(),
         }
     }
 }
@@ -109,6 +188,23 @@ pub struct MeshStats {
     /// Unreliable inbound events evicted/dropped by a full BoundedInbox (latest-wins
     /// back-pressure — by design under load; the counter is the observability surface).
     pub inbound_dropped_unreliable: AtomicU64,
+    // --- R-2b at-least-once redelivery counters (the design's never-silent rule) ---
+    /// RECEIVER: a reliable frame whose `incarnation` is BELOW the lane's recorded incarnation —
+    /// a straggler from a since-restarted sender, dropped + counted (R-3'; 0 until then).
+    pub stale_incarnation_drop: AtomicU64,
+    /// RECEIVER: a reliable frame on an OLD `epoch` (a straggler from a pre-redial stream), dropped
+    /// BEFORE it can touch the high-water — the cross-stream-race cure (R-3'; 0 until then).
+    pub stale_epoch_drop: AtomicU64,
+    /// RECEIVER: a reliable frame at or below the high-water — an expected replay, deduped + counted
+    /// so the sim never sees a dup (R-3'; 0 until then).
+    pub dedup_drop: AtomicU64,
+    /// RECEIVER: a reliable frame leaving a contiguity GAP (`seq > hw+1`) — a MUST-BE-0 alert (the
+    /// wire epoch keeps it genuinely 0; R-3', 0 until then).
+    pub gap_drop: AtomicU64,
+    /// SENDER: a reliable frame SHED — in R-2b this fires for a per-frame payload that exceeds the
+    /// max stream frame size (un-framable ⇒ rejected, never retained, bounced `NodeUnreachable`).
+    /// R-4' adds the bounded-retry-buffer total shed on the same counter.
+    pub reliable_shed: AtomicU64,
 }
 
 /// A snapshot of the mesh counters (loads the atomics).
@@ -118,6 +214,11 @@ pub struct MeshStatsSnapshot {
     pub datagrams_dropped_send: u64,
     pub inbound_dropped_reliable: u64,
     pub inbound_dropped_unreliable: u64,
+    pub stale_incarnation_drop: u64,
+    pub stale_epoch_drop: u64,
+    pub dedup_drop: u64,
+    pub gap_drop: u64,
+    pub reliable_shed: u64,
 }
 
 /// THE inbound-push chokepoint: applies the BoundedInbox overflow policy AND surfaces
@@ -145,6 +246,107 @@ pub(crate) fn push_inbox(inbox: &SharedInbox, stats: &MeshStats, event: Inbound)
                 .fetch_add(1, Ordering::Relaxed);
         }
         None => {}
+    }
+}
+
+/// One reliable send LANE — the per-(peer,class) at-least-once sender FSM (R-2b). Lazily created on
+/// the first reliable frame for a class to a peer. ALL FSM logic (seq assign, retain, replay framing,
+/// ack-retire) is SYNCHRONOUS + unit-testable WITHOUT tokio/quinn; only the stream open/write (in
+/// `write_frame`) is async. One stream per class so a stalled class never head-of-line-blocks another.
+struct ReliableLaneSender {
+    /// THIS lane's QUIC uni stream. `None` until the first send opens it; reset to `None` on any write
+    /// error (re-opened lazily on the next send after the peer re-dial).
+    stream: Option<quinn::SendStream>,
+    /// The sender's process-incarnation, stamped on every frame (constant for the lane's life). R-3'
+    /// reads it to reset the receiver's dedup state when the sender restarts.
+    incarnation: u64,
+    /// Per-lane redial counter, bumped on EVERY write error (the cross-stream-race cure: an OLD-stream
+    /// straggler carries the OLD epoch ⇒ R-3' drops it BEFORE it advances the high-water). Starts 0.
+    epoch: u32,
+    /// Next seq to ASSIGN — monotone, NEVER reset, NEVER rolled back on a failed write (buffer-first ⇒
+    /// a burned write leaves no gap and re-uses no seq).
+    next_seq: u64,
+    /// Unacked frames keyed by seq. `BTreeMap` ⇒ ascending key = ascending seq = exact replay order;
+    /// holds the FULLY-BUILT [`ReliableFrame`] so replay re-stamps `epoch` only. R-2b has no ack
+    /// PRODUCER, so this never drains at runtime (the ledgered non-draining-retry window R-2b→R-3'/R-4').
+    /// The cumulative-ack RETIRE (`on_ack` + a `base` watermark) and the byte-total for the buffer SHED
+    /// (`retry_bytes`) are the sender half of the R-3'/R-4' protocols and land WITH their consumers —
+    /// not added speculatively here.
+    retry: BTreeMap<u64, ReliableFrame>,
+}
+
+impl ReliableLaneSender {
+    fn new(incarnation: u64) -> ReliableLaneSender {
+        ReliableLaneSender {
+            stream: None,
+            incarnation,
+            epoch: 0,
+            next_seq: 0,
+            retry: BTreeMap::new(),
+        }
+    }
+
+    /// BUFFER-FIRST: stamp a NEW seq, build the frame at `(incarnation, epoch, seq)`, and — IF it frames
+    /// within the cap — retain it + advance `next_seq`, returning the assigned SEQ. Returns `Err(())`
+    /// WITHOUT retaining or advancing `next_seq` if the framed `ReliableFrame` would exceed
+    /// `MAX_STREAM_FRAME_BYTES`. The check is on the ENCODED frame (the envelope varints + codec byte can
+    /// push a near-cap payload over the cap), routed through the ONE codec/framing home `encode_frame`
+    /// (HR3) — NOT the raw payload length. An un-framable frame must NEVER enter `retry`: it can never be
+    /// sent, so it would poison the lane (replayed-and-failed every redial, a permanent contiguity wall).
+    /// There is exactly ONE frame object (in `retry`), which the write path reads back — a frame can never
+    /// be written from two objects. Pure: no I/O; a write failure AFTER a successful assign never rolls
+    /// it back (the no-burned-seq guarantee).
+    fn assign_and_retain(
+        &mut self,
+        from: NodeId,
+        class: MsgClass,
+        bytes: &[u8],
+    ) -> Result<u64, ()> {
+        let seq = self.next_seq;
+        // Build the frame stamped at the WORST-CASE epoch (`u32::MAX`, a 5-byte varint) for the framing
+        // CHECK: `replay_batch` re-stamps a retained frame to an ever-HIGHER epoch on each redial, and the
+        // epoch varint grows from 1 byte (epoch 0) to 5 bytes (>= 2^28). Checking at `u32::MAX` guarantees
+        // an ACCEPTED frame frames within the cap at EVERY future re-stamp — so a near-cap frame can never
+        // overflow on the replay path (the relocated-poison residual, audit `wf_93fc5909` re-verify). The
+        // REAL epoch is set below before retaining; the same one frame object (ONE `bytes` clone) is reused.
+        let mut frame = ReliableFrame {
+            from,
+            class,
+            incarnation: self.incarnation,
+            epoch: u32::MAX,
+            seq,
+            bytes: bytes.to_vec(),
+        };
+        // Reject on the FRAMED size, before retaining (the same encode+frame the write performs).
+        vd_wire::framing::encode_frame(&frame).map_err(|_| ())?;
+        frame.epoch = self.epoch; // the real epoch for retention + the first write
+        self.retry.insert(seq, frame);
+        self.next_seq += 1;
+        Ok(seq)
+    }
+
+    /// Write-error recovery: drop the stream + bump the epoch (DISTINCT from the peer-writer's anti-storm
+    /// backoff sleep). `wrapping_add` is unreachable in practice — 2^32 redials on one lane at the 50 ms
+    /// backoff floor is ~6.8 years of continuous flapping, and R-4' `confirm_unreachable_after_retries`
+    /// kills the lane long before — but it is wrapping (never a panic) rather than a debug overflow.
+    fn on_write_error(&mut self) {
+        self.stream = None;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    /// The ascending replay set after a re-dial: every retained frame RE-STAMPED with the CURRENT
+    /// (already-bumped) epoch, ORIGINAL seq preserved. `BTreeMap` value order = ascending seq. When the
+    /// stream was just (re)opened this is the COMPLETE write set — it INCLUDES the just-assigned frame
+    /// as its highest entry (assign-then-replay ordering), so the new frame is written exactly once
+    /// inside the batch (the CRITICAL double-write cure).
+    fn replay_batch(&self) -> Vec<ReliableFrame> {
+        self.retry
+            .values()
+            .map(|f| ReliableFrame {
+                epoch: self.epoch,
+                ..f.clone()
+            })
+            .collect()
     }
 }
 
@@ -196,6 +398,11 @@ impl MeshControl {
                 .stats
                 .inbound_dropped_unreliable
                 .load(Ordering::Relaxed),
+            stale_incarnation_drop: self.stats.stale_incarnation_drop.load(Ordering::Relaxed),
+            stale_epoch_drop: self.stats.stale_epoch_drop.load(Ordering::Relaxed),
+            dedup_drop: self.stats.dedup_drop.load(Ordering::Relaxed),
+            gap_drop: self.stats.gap_drop.load(Ordering::Relaxed),
+            reliable_shed: self.stats.reliable_shed.load(Ordering::Relaxed),
         }
     }
 }
@@ -209,6 +416,11 @@ pub fn spawn_mesh(
     trust: &ClusterTrust,
     cfg: &MeshConfig,
 ) -> Result<(MeshTransport, MeshControl), ProdIoError> {
+    // FAIL LOUD before binding the endpoint or spawning any task: a mis-tuned redelivery layer must
+    // never come up half-configured (R-2b). This is the FIRST statement.
+    cfg.reliability
+        .validate()
+        .map_err(|e| ProdIoError::Tuning(e.to_string()))?;
     // Shared transport tuning: keepalive holds connections open across idle ticks,
     // a bounded idle timeout reaps a truly-dead half-open connection, and a uni-stream
     // cap bounds per-connection reader tasks (TRANSPORT-3/4/8).
@@ -278,6 +490,7 @@ pub fn spawn_mesh(
             stats: Arc::clone(&stats),
             backoff_min: cfg.redial_backoff_min,
             backoff_max: cfg.redial_backoff_max,
+            incarnation: cfg.process_incarnation,
         }));
         lanes.insert(peer, PeerLane { tx });
     }
@@ -340,6 +553,8 @@ struct PeerWriter {
     stats: Arc<MeshStats>,
     backoff_min: Duration,
     backoff_max: Duration,
+    /// This process's incarnation, stamped on every reliable frame this lane sends (R-2b).
+    incarnation: u64,
 }
 
 /// One peer's writer: drains its lane in FIFO order, dialing on demand, with
@@ -348,21 +563,19 @@ struct PeerWriter {
 /// `NodeUnreachable` on hard failure; unreliable frames ride datagrams (latest-wins:
 /// loss is correct, no bounce).
 async fn peer_writer(mut w: PeerWriter) {
+    // ONE peer-level connection (shared across classes) + ONE FSM lane per reliable class. A reliable
+    // OutFrame routes to its class lane; unreliable rides datagrams on the shared connection.
     let mut connection: Option<quinn::Connection> = None;
-    let mut reliable_stream: Option<quinn::SendStream> = None;
-    // R2': the per-stream monotone sequence stamped on each reliable frame. (R-2a keeps the
-    // pre-existing one-stream-per-peer model; the per-(peer,class) retry-buffer lane FSM replaces this
-    // counter in the next sub-step.) Reset to 0 whenever a fresh stream is opened.
-    let mut reliable_seq = 0u64;
+    let mut lanes: BTreeMap<MsgClass, ReliableLaneSender> = BTreeMap::new();
     let mut backoff = w.backoff_min;
     while let Some(frame) = w.rx.recv().await {
         let sent = write_frame(
             &w.endpoint,
             w.addr,
             &mut connection,
-            &mut reliable_stream,
-            &mut reliable_seq,
+            &mut lanes,
             w.local,
+            w.incarnation,
             &frame,
             &w.stats,
         )
@@ -370,10 +583,21 @@ async fn peer_writer(mut w: PeerWriter) {
         match sent {
             Ok(()) => backoff = w.backoff_min,
             Err(()) => {
+                // FULL connection drop — REQUIRED for old-stream cleanup: dropping the quinn
+                // Connection tears down its streams, which terminates the RECEIVER's per-stream
+                // reader tasks. NEVER downgrade this to a stream-only reset without adding a
+                // receiver-side stream reaper (DEFERRED: the stream-only-error optimization).
                 connection = None;
-                reliable_stream = None;
-                // Reliable senders are waiting on an ack path; tell them the peer is
-                // unreachable. Unreliable (datagram) loss is silent by design.
+                // Every lane's stream lived on the dead connection: reset each + bump its epoch, so
+                // the next send per lane re-dials, re-opens, and REPLAYS its unacked window under the
+                // new epoch (the cross-stream-race cure). The epoch bump (recovery) is DISTINCT from
+                // the backoff sleep (anti-connect-storm) below.
+                for lane in lanes.values_mut() {
+                    lane.on_write_error();
+                }
+                // Reliable senders are waiting on an ack path; tell them the peer is unreachable.
+                // (R-4' refines this to confirmed-dead-after-N-retries; R-2b keeps the per-frame
+                // bounce.) Unreliable (datagram) loss is silent by design.
                 if frame.class.reliability() == Reliability::Reliable {
                     push_inbox(
                         &w.inbox,
@@ -390,18 +614,24 @@ async fn peer_writer(mut w: PeerWriter) {
             }
         }
     }
+    // Loop exit = the per-peer channel closed = clean shutdown; lane streams drop here (quinn
+    // implicit-finish on the still-live connection, or no-op on an already-dead one).
 }
 
-/// Ensure a connection (dial on demand) and write one frame on the carrier its
-/// class mandates.
+/// Ensure a connection (dial on demand) and write one frame on the carrier its class mandates. The
+/// reliable arm is the R-2b lane FSM; the unreliable arm is the unchanged bare-datagram hot path.
+///
+/// ⚠️ CANCEL-SAFETY: NEVER wrap this in `tokio::time::timeout`/`select!` — a cancelled `write_all`
+/// would leave a half-written frame on a `Some` stream. A send deadline must be internal + an explicit
+/// `on_write_error`. The only cancel point in the writer is the `w.rx.recv()` await above.
 #[allow(clippy::too_many_arguments)] // writer state threaded explicitly
 async fn write_frame(
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
     connection: &mut Option<quinn::Connection>,
-    reliable_stream: &mut Option<quinn::SendStream>,
-    reliable_seq: &mut u64,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
     local: NodeId,
+    incarnation: u64,
     frame: &OutFrame,
     stats: &MeshStats,
 ) -> Result<(), ()> {
@@ -413,24 +643,83 @@ async fn write_frame(
             .await
             .map_err(|_| ())?;
         *connection = Some(conn);
-        *reliable_stream = None;
+        // A fresh connection invalidates every lane's stream (the old ones died with the old conn).
+        for lane in lanes.values_mut() {
+            lane.stream = None;
+        }
     }
     let conn = connection.as_ref().ok_or(())?;
 
     match frame.class.reliability() {
         Reliability::Reliable => {
-            // Reliable frames ride a persistent uni stream, framed through the ONE wire::framing
-            // home (codec_flags + cap) via the shared writer — never hand-rolled here (HR3). R2': a
-            // monotone per-stream `seq` is stamped (incarnation/epoch 0 in R-2a — the receiver's
-            // contiguity verdict is R3'); a fresh stream restarts the sequence.
-            if reliable_stream.is_none() {
-                *reliable_stream = Some(conn.open_uni().await.map_err(|_| ())?);
-                *reliable_seq = 0;
+            // Route to the class lane (lazily created at THIS process incarnation, epoch 0).
+            let lane = lanes
+                .entry(frame.class)
+                .or_insert_with(|| ReliableLaneSender::new(incarnation));
+
+            // BUFFER-FIRST: assign + retain BEFORE any write. A failed write below NEVER rolls back the
+            // seq (no burned seq, no gap). The ONE frame object lives in `lane.retry`. `assign_and_retain`
+            // also performs the OVERSIZE REJECT on the FRAMED size (the envelope + codec byte can push a
+            // near-cap payload over `MAX_STREAM_FRAME_BYTES`): an un-framable frame can NEVER be sent, so
+            // retaining it would poison the lane forever (replayed-and-failed every redial). On that
+            // rejection it returns `Err` WITHOUT retaining ⇒ shed-count + bounce + return, nothing in
+            // `retry`. `reliable_shed` is the one R-2b-live counter.
+            let seq = match lane.assign_and_retain(local, frame.class, &frame.bytes) {
+                Ok(seq) => seq,
+                Err(()) => {
+                    stats.reliable_shed.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "reliable frame (payload {}) would exceed MAX_STREAM_FRAME_BYTES framed; \
+                         rejected (counted, not retained)",
+                        frame.bytes.len()
+                    );
+                    return Err(()); // ⇒ peer_writer bounces NodeUnreachable; nothing retained
+                }
+            };
+
+            // STRUCTURAL if/else — NO fall-through (the CRITICAL double-write cure):
+            if lane.stream.is_none() {
+                // (re)opened stream: write EXACTLY replay_batch(), which by construction includes the
+                // just-assigned frame as its HIGHEST entry ⇒ the new frame is written exactly once,
+                // inside the batch. Never falls through to the steady-state write below.
+                let send = conn.open_uni().await.map_err(|_| ())?;
+                lane.stream = Some(send);
+                let batch = lane.replay_batch();
+                debug_assert_eq!(
+                    batch.last().map(|f| f.seq),
+                    Some(seq),
+                    "buffer-first invariant: the just-assigned frame is the highest replay entry"
+                );
+                let send = lane.stream.as_mut().ok_or(())?;
+                for f in &batch {
+                    write_reliable_frame(
+                        send,
+                        f.from,
+                        f.class,
+                        f.incarnation,
+                        f.epoch,
+                        f.seq,
+                        &f.bytes,
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                }
+                Ok(())
+            } else {
+                // steady state: stream open ⇒ write ONLY the new frame (NEVER the backlog). Read the
+                // single frame object back out of `retry`, copying its fields so the immutable borrow of
+                // `retry` ends before the mutable borrow of `stream`.
+                let nf = lane.retry.get(&seq).ok_or(())?;
+                let (f_from, f_class, f_inc, f_epoch, f_bytes) = (
+                    nf.from,
+                    nf.class,
+                    nf.incarnation,
+                    nf.epoch,
+                    nf.bytes.clone(),
+                );
+                let send = lane.stream.as_mut().ok_or(())?;
+                write_reliable_frame(send, f_from, f_class, f_inc, f_epoch, seq, &f_bytes).await
             }
-            let send = reliable_stream.as_mut().ok_or(())?;
-            let this_seq = *reliable_seq;
-            *reliable_seq += 1;
-            write_reliable_frame(send, local, frame.class, 0, 0, this_seq, &frame.bytes).await
         }
         Reliability::Unreliable => {
             // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a
@@ -517,6 +806,232 @@ mod tests {
 
     const DEADLINE: Duration = Duration::from_secs(20);
 
+    // ---- Pure ReliableLaneSender FSM tests (no tokio/quinn — the at-least-once correctness core) ----
+
+    const FROM: NodeId = NodeId(1);
+    const CLASS: MsgClass = MsgClass::Saga;
+
+    #[test]
+    fn sender_assigns_monotone_seq_and_retains() {
+        let mut lane = ReliableLaneSender::new(7);
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"a"), Ok(0));
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"bb"), Ok(1));
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ccc"), Ok(2));
+        assert_eq!(lane.next_seq, 3);
+        assert_eq!(
+            lane.retry.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            lane.retry[&1].bytes, b"bb",
+            "the retained frame holds its payload"
+        );
+        // Frames are stamped with the lane's incarnation + current epoch (0).
+        let f0 = &lane.retry[&0];
+        assert_eq!((f0.incarnation, f0.epoch, f0.seq), (7, 0, 0));
+    }
+
+    #[test]
+    fn write_error_does_not_roll_back_seq() {
+        // BUFFER-FIRST: a failed write (modelled by on_write_error after an assign) never burns or
+        // re-uses a seq — the next assign is the next monotone value, at the bumped epoch.
+        let mut lane = ReliableLaneSender::new(0);
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"x"), Ok(0));
+        lane.on_write_error();
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"y"), Ok(1)); // not reused 0, not skipped 2
+        assert_eq!(
+            lane.retry[&1].epoch, 1,
+            "the post-error assign carries the bumped epoch"
+        );
+        assert_eq!(lane.retry.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test]
+    fn replay_batch_is_ascending_seq_with_current_epoch() {
+        let mut lane = ReliableLaneSender::new(0);
+        for b in [b"a".as_slice(), b"b", b"c"] {
+            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+        }
+        lane.on_write_error(); // epoch -> 1
+        let batch = lane.replay_batch();
+        assert_eq!(
+            batch.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(
+            batch.iter().all(|f| f.epoch == 1),
+            "re-stamped with the current epoch"
+        );
+        assert_eq!(batch[1].bytes, b"b", "original seq+payload preserved");
+        lane.on_write_error(); // epoch -> 2
+        assert!(
+            lane.replay_batch().iter().all(|f| f.epoch == 2),
+            "replay tracks the LIVE epoch (idempotent re-stamp)"
+        );
+    }
+
+    #[test]
+    fn replay_batch_restamps_latest_epoch_after_two_bumps_with_intervening_assign() {
+        // No stale-epoch frame leaks into a fresh replay even when assigns interleave with bumps.
+        let mut lane = ReliableLaneSender::new(0);
+        lane.assign_and_retain(FROM, CLASS, b"0").expect("fits"); // seq0 @ e0
+        lane.assign_and_retain(FROM, CLASS, b"1").expect("fits"); // seq1 @ e0
+        lane.on_write_error(); // e1
+        lane.assign_and_retain(FROM, CLASS, b"2").expect("fits"); // seq2 @ e1
+        lane.on_write_error(); // e2
+        let batch = lane.replay_batch();
+        assert_eq!(
+            batch.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(
+            batch.iter().all(|f| f.epoch == 2),
+            "ALL entries re-stamped at the latest epoch"
+        );
+    }
+
+    #[test]
+    fn the_open_branch_write_set_equals_retry_exactly_once() {
+        // The CRITICAL double-write cure (sender side): replay_batch() — the write set when a stream
+        // is (re)opened — contains EACH retained seq EXACTLY once, with the just-assigned seq present
+        // exactly once and LAST (so the steady-state path never re-writes it).
+        let mut lane = ReliableLaneSender::new(0);
+        lane.assign_and_retain(FROM, CLASS, b"0").expect("fits");
+        lane.on_write_error();
+        let new_seq = lane.assign_and_retain(FROM, CLASS, b"1").expect("fits");
+        let batch = lane.replay_batch();
+        let seqs: Vec<u64> = batch.iter().map(|f| f.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![0, 1],
+            "each retained seq exactly once, ascending"
+        );
+        assert_eq!(
+            seqs.iter().filter(|&&s| s == new_seq).count(),
+            1,
+            "new seq exactly once"
+        );
+        assert_eq!(
+            batch.last().map(|f| f.seq),
+            Some(new_seq),
+            "new seq is last"
+        );
+    }
+
+    #[test]
+    fn retry_keys_are_contiguous_below_next_seq() {
+        // R-2b has no ack producer, so `retry` never drains: keys are 0..next_seq (the ledgered
+        // non-draining-retry window). The cumulative-ack RETIRE (`on_ack`/`base`) + its tests land WITH
+        // the R-3' ack producer; the byte-total for the buffer SHED lands with R-4'.
+        let mut lane = ReliableLaneSender::new(0);
+        for b in [b"a".as_slice(), b"b", b"c"] {
+            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+        }
+        lane.on_write_error();
+        lane.assign_and_retain(FROM, CLASS, b"d").expect("fits");
+        assert_eq!(
+            lane.retry.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert!(
+            lane.retry.keys().all(|&k| k < lane.next_seq),
+            "all retry keys < next_seq"
+        );
+    }
+
+    #[test]
+    fn an_unframable_reliable_frame_is_rejected_not_retained() {
+        // The cap is on the FRAMED size (envelope varints + codec byte), NOT the raw payload — a payload
+        // at exactly MAX frames OVER the cap. assign must REJECT it without retaining or burning a seq:
+        // an un-framable frame can never be sent, so retaining it would poison the lane (replayed-and-
+        // failed every redial). (Regression for the off-by-the-header poison window, audit wf_93fc5909.)
+        let mut lane = ReliableLaneSender::new(7);
+        let at_cap = vec![0u8; vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize];
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, &at_cap), Err(()));
+        assert!(
+            lane.retry.is_empty(),
+            "an un-framable frame is NOT retained"
+        );
+        assert_eq!(lane.next_seq, 0, "a rejected assign does not burn a seq");
+        // The lane is NOT poisoned: a normal frame after a rejection assigns cleanly at seq 0.
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ok"), Ok(0));
+    }
+
+    #[test]
+    fn an_accepted_frame_stays_framable_at_every_replay_epoch() {
+        // assign checks at epoch=u32::MAX, so a frame it ACCEPTS frames within the cap at EVERY replay
+        // re-stamp (replay only raises the epoch). GUARD: find the LARGEST near-cap payload assign accepts,
+        // then re-stamp the retained frame to u32::MAX and confirm it STILL frames. Removing the
+        // worst-case-epoch headroom (checking at the live epoch instead) would accept a larger payload that
+        // overflows once replay re-stamps it — the relocated poison (audit wf_93fc5909). incarnation =
+        // u64::MAX for the worst-case envelope too.
+        let max = vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize;
+        let accepted = (0..48)
+            .map(|d| max - d)
+            .find(|&n| {
+                ReliableLaneSender::new(u64::MAX)
+                    .assign_and_retain(FROM, CLASS, &vec![0u8; n])
+                    .is_ok()
+            })
+            .expect("some near-cap payload is accepted");
+        let mut lane = ReliableLaneSender::new(u64::MAX);
+        let seq = lane
+            .assign_and_retain(FROM, CLASS, &vec![0u8; accepted])
+            .expect("accepted");
+        let mut replayed = lane.retry[&seq].clone();
+        replayed.epoch = u32::MAX;
+        assert!(
+            vd_wire::framing::encode_frame(&replayed).is_ok(),
+            "an accepted near-cap frame must still frame at the max replay epoch"
+        );
+    }
+
+    #[test]
+    fn sibling_error_does_not_leak_epoch_into_a_fresh_lane() {
+        // Lazy lane creation always starts epoch 0 — a sibling class's write error never bleeds into
+        // a freshly-created lane.
+        let mut a = ReliableLaneSender::new(5);
+        a.assign_and_retain(FROM, MsgClass::Control, b"x")
+            .expect("fits");
+        a.on_write_error(); // A -> epoch 1
+        let mut b = ReliableLaneSender::new(5);
+        b.assign_and_retain(FROM, MsgClass::Saga, b"y")
+            .expect("fits");
+        assert_eq!(
+            b.retry[&0].epoch, 0,
+            "a fresh lane starts at epoch 0, never a sibling's"
+        );
+    }
+
+    #[test]
+    fn reliability_tuning_validate_rejects_each_zeroed_field() {
+        assert_eq!(MeshReliabilityTuning::default().validate(), Ok(()));
+        let too_small = MeshReliabilityTuning {
+            retry_buffer_max_bytes: 0,
+            ..MeshReliabilityTuning::default()
+        };
+        assert_eq!(
+            too_small.validate().expect_err("rejected"),
+            MeshReliabilityTuningError::RetryBufferTooSmall
+        );
+        let flush_zero = MeshReliabilityTuning {
+            ack_idle_flush_interval: Duration::ZERO,
+            ..MeshReliabilityTuning::default()
+        };
+        assert_eq!(
+            flush_zero.validate().expect_err("rejected"),
+            MeshReliabilityTuningError::AckFlushZero
+        );
+        let confirm_zero = MeshReliabilityTuning {
+            confirm_unreachable_after_retries: 0,
+            ..MeshReliabilityTuning::default()
+        };
+        assert_eq!(
+            confirm_zero.validate().expect_err("rejected"),
+            MeshReliabilityTuningError::ConfirmRetriesZero
+        );
+    }
+
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -553,7 +1068,7 @@ mod tests {
             let (t, c) = spawn_mesh(
                 handle,
                 trust,
-                &MeshConfig::new(id, addr, book.clone(), capacity),
+                &MeshConfig::new(id, addr, book.clone(), capacity, 0),
             )
             .expect("mesh node");
             transports.push(t);
@@ -860,6 +1375,123 @@ mod tests {
                 ),
                 "snapshot datagram: {msg:?}"
             );
+        }
+    }
+
+    /// R-2b: TWO reliable classes to the SAME live peer ride SEPARATE per-(peer,class) uni streams on
+    /// one connection — both arrive with no loss/dup. This is the regression guard the process tier
+    /// (gateway↔orchestrator carries Saga+Membership; gateway↔shard carries Control+Saga) implicitly
+    /// depends on; no prior unit test exercised the multi-stream-per-connection path. The per-class
+    /// split REMOVES cross-class ordering, so either RELATIVE arrival order is acceptable (asserted).
+    #[test]
+    fn two_reliable_classes_to_one_live_peer_both_arrive() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let (mut nodes, _controls) = cluster(rt.handle(), &trust, 2, 64);
+        nodes[0]
+            .send(NodeId(2), MsgClass::Control, vec![0xC0].into())
+            .expect("control enqueued");
+        nodes[0]
+            .send(NodeId(2), MsgClass::Saga, vec![0x5A].into())
+            .expect("saga enqueued");
+        let got = wait_for(&mut nodes[1], |g| {
+            g.iter()
+                .filter(|m| matches!(m, Inbound::Wire { .. }))
+                .count()
+                >= 2
+        });
+        // Both classes landed exactly once (no loss, no dup), in EITHER relative order.
+        let mut by_class: BTreeMap<MsgClass, Vec<u8>> = BTreeMap::new();
+        for msg in &got {
+            if let Inbound::Wire { class, bytes, .. } = msg {
+                by_class.insert(*class, bytes.to_vec());
+            }
+        }
+        assert_eq!(by_class.get(&MsgClass::Control), Some(&vec![0xC0]));
+        assert_eq!(by_class.get(&MsgClass::Saga), Some(&vec![0x5A]));
+        assert_eq!(got.len(), 2, "exactly two reliable frames, no duplication");
+    }
+
+    /// R-2b: a reliable frame whose FRAMED size exceeds the cap is REJECTED before retention (counted on
+    /// `reliable_shed`, bounced `NodeUnreachable`), so it can never poison the lane. The payload is EXACTLY
+    /// `MAX_STREAM_FRAME_BYTES` — IN the off-by-the-header poison window (the framed envelope pushes it over
+    /// the cap) that the prior raw-payload `> MAX` check let slip through to wedge the lane (audit
+    /// `wf_93fc5909`). The follow-up normal frame proves the lane is NOT poisoned — it still delivers — and
+    /// exercises the reconnect-resets-an-existing-lane-stream path.
+    #[test]
+    fn an_oversize_reliable_frame_is_rejected_and_the_lane_survives() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let (mut nodes, controls) = cluster(rt.handle(), &trust, 2, 8);
+        // Exactly MAX: raw len is NOT > MAX (the old buggy check passed it), but framed (envelope + codec
+        // byte) IS over the cap, so the framed-size check rejects it.
+        let at_cap =
+            vd_sim::io::bytes(vec![0u8; vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize]);
+        nodes[0]
+            .send(NodeId(2), MsgClass::Saga, at_cap)
+            .expect("enqueued (the bound is on the framed size, not the queue)");
+        let started = Instant::now();
+        loop {
+            if controls[0].stats().reliable_shed >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "the over-cap reliable frame was never shed-counted"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The caller learns it did not deliver (bounced).
+        let bounced = wait_for(&mut nodes[0], |g| {
+            g.iter()
+                .any(|m| matches!(m, Inbound::NodeUnreachable { .. }))
+        });
+        assert!(
+            bounced.iter().any(|m| matches!(
+                m,
+                Inbound::NodeUnreachable {
+                    class: MsgClass::Saga,
+                    ..
+                }
+            )),
+            "over-cap reliable bounces NodeUnreachable for its class"
+        );
+        // THE LANE IS NOT POISONED: a normal Saga frame on the same lane still delivers exactly once.
+        nodes[0]
+            .send(NodeId(2), MsgClass::Saga, vec![0x77].into())
+            .expect("normal frame enqueued");
+        let got = wait_for(&mut nodes[1], |g| {
+            g.iter().any(|m| matches!(m, Inbound::Wire { .. }))
+        });
+        assert!(
+            got.iter().any(|m| matches!(
+                m,
+                Inbound::Wire { class: MsgClass::Saga, bytes, .. } if bytes.as_ref() == [0x77]
+            )),
+            "the lane survived the over-cap rejection: the next reliable frame delivers"
+        );
+    }
+
+    /// R-2b: a mis-tuned reliability field is rejected LOUD at `spawn_mesh` boot — before the endpoint
+    /// binds or any task spawns.
+    #[test]
+    fn spawn_mesh_rejects_a_zero_reliability_field() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let mut cfg = MeshConfig::new(
+            NodeId(1),
+            "127.0.0.1:0".parse().expect("addr"),
+            BTreeMap::new(),
+            8,
+            0,
+        );
+        cfg.reliability.retry_buffer_max_bytes = 0; // below one max frame ⇒ invalid
+        // `match` (not `expect_err`): the Ok type `(MeshTransport, MeshControl)` is not `Debug`. The Ok
+        // arm panics without formatting, so the validation must fail loud BEFORE any endpoint binds.
+        match spawn_mesh(rt.handle(), &trust, &cfg) {
+            Err(ProdIoError::Tuning(_)) => {}
+            Err(other) => panic!("expected a Tuning error, got {other:?}"),
+            Ok(_) => panic!("a zero tuning field must be rejected at boot"),
         }
     }
 }

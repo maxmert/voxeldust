@@ -90,6 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             loopback(args.client_quic),
             peers,
             CLIENT_OUTBOUND_CAP,
+            // R-2b: a fresh process per client launch; 0 is correct here. NOTE: once R-3' dedup is
+            // live, a crashed client reconnecting at incarnation 0 collides with its prior session's
+            // buffered frames at the gateway — R-6's durable boot-counter / R-3' session reset close it.
+            0,
         ),
     )?;
     let core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);

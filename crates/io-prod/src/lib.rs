@@ -116,6 +116,10 @@ pub enum ProdIoError {
     Connect(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A `MeshReliabilityTuning` field is out of range — rejected at `spawn_mesh` boot BEFORE the
+    /// endpoint binds or any task spawns (a mis-tuned redelivery layer must fail loud, R-2b).
+    #[error("reliability tuning: {0}")]
+    Tuning(String),
 }
 
 /// Sim-thread side of the bridge. Implements [`Transport`] over the crossbeam queues.
@@ -347,7 +351,8 @@ fn spawn_writer(
             // per-(peer,class) lane FSM (retry buffer + replay) lives on the production `mesh` transport.
             let mut seq = 0u64;
             while let Ok(frame) = outbound_rx.recv() {
-                let wrote = handle.block_on(write_frame(&conn, &mut stream, local, &frame, &mut seq));
+                let wrote =
+                    handle.block_on(write_frame(&conn, &mut stream, local, &frame, &mut seq));
                 if wrote.is_err() {
                     // Surface the failure in-band; drop the broken stream so the next
                     // frame re-attempts (and fails fast while the connection is dead).
@@ -489,8 +494,8 @@ mod frame_tests {
             bytes: bytes.clone(),
         })
         .expect("postcard encodes DatagramFrame");
-        let bare =
-            postcard::to_allocvec(&(from, class, bytes.clone())).expect("postcard encodes the bare tuple");
+        let bare = postcard::to_allocvec(&(from, class, bytes.clone()))
+            .expect("postcard encodes the bare tuple");
         assert_eq!(
             dg, bare,
             "the datagram payload stays the bare {{from,class,bytes}} shape — zero hot-path reliability metadata"

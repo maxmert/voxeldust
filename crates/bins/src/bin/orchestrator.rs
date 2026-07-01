@@ -53,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             env.parse("VD_BIND")?,
             env.peer_book("VD_PEERS")?,
             env.parse("VD_OUTBOUND_CAP")?,
+            // R-2b: per-process incarnation stamped on reliable frames (default 0; R-6 durable counter).
+            env.parse_or("VD_PROCESS_INCARNATION", 0)?,
         ),
     )?;
     let mut node = build_app(

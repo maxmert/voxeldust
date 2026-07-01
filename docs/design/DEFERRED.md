@@ -994,18 +994,42 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      whole class — `dev_cluster_smoke` covers bring-up + SIGKILL only). **WHEN: the whole class lands before any real
      multi-shard rolling deploy.** Per-instance detail follows.
      **✅ ROOT-CURE PROGRESS (the redelivering `MeshTransport`, plan in memory `project_redelivering_transport_plan`,
-     impl-plan `wf_ab2d6e53`): R-1' (commit 6f4614d) + R-2a (commit 4bf9b06) LANDED, gate-green.** R-1' split the hot
-     20Hz datagram path into a bare `DatagramFrame` (byte-identical, zero PvP cost); R-2a grew the reliable frame to
-     `ReliableFrame{from,class,incarnation:u64,epoch:u32,seq:u64,bytes}` (the at-least-once header, BELOW the frozen
-     `Transport` seam) + unified the duplicated `OutFrame`. The header is INERT today — stamped 0/0/per-stream-seq, the
-     receiver decodes + delivers as before, so the mesh is STILL AT-MOST-ONCE (no behaviour change; audit `wf_374b4376`
-     DONE_NO_CRITICAL). **OWED to flip this 🟩:** R-2b (the sender `ReliableLaneSender` lane FSM — retry buffer,
-     buffer-first seq, per-(peer,class) streams, epoch-bump-replay, `process_incarnation`), R-3' (the receiver
-     contiguity verdict + cumulative acks — R-2b+R-3' are ONE correctness unit), R-4' (shed-loud backpressure), R-5'
-     (the `mesh_under_loss.rs` real-mesh capstone that proves exactly-once under an injected connection break + flips
-     this leg green). The loopback bridge keeps its simple per-stream seq (single-stream test infra; it does NOT get
-     the lane FSM, so its guarantee stays the QUIC intra-stream one). R-6 = durable outbox + durable boot-counter
-     incarnation (P6/P7).
+     design+review `wf_2a366f96`): R-1' (6f4614d) + R-2a (4bf9b06) + R-2b (this commit) LANDED, gate-green.** R-1' split
+     the hot 20Hz path into a bare `DatagramFrame` (byte-identical, zero PvP cost); R-2a grew the reliable frame to
+     `ReliableFrame{from,class,incarnation:u64,epoch:u32,seq:u64,bytes}` + unified `OutFrame`. **R-2b = the SENDER lane
+     FSM:** `ReliableLaneSender` (per-(peer,class), lazy) with BUFFER-FIRST seq (assign+retain THEN write — a failed
+     write never burns a seq) + epoch-bump-replay on a re-dial (replay the unacked window ascending re-stamped at the
+     new epoch — the cross-stream-race cure) + the per-frame OVERSIZE reject (un-framable ⇒ `reliable_shed` + bounce,
+     never retained, so it can't poison the lane); `peer_writer` owns one peer-level connection + the lane map, full
+     connection drop on a write error. `MeshReliabilityTuning` (validate-loud at boot) + `process_incarnation` (a 5th
+     `MeshConfig::new` arg; bins read `VD_PROCESS_INCARNATION`) + 5 never-silent `MeshStats` counters. **A pre-impl
+     adversarial design review (`wf_2a366f96`) caught a CRITICAL (a replay-vs-new-frame double-write — the SAME silent-dup
+     class that got the FIRST R-1 attempt reverted) + 4 HIGH BEFORE any code; the structural `if stream.is_none() {
+     write replay_batch() } else { write only new }` (no fall-through) designs it out.** **SMALLEST-CORRECT DEVIATION
+     from the vetted design:** the cumulative-ack RETIRE (`on_ack`+`base`) is the sender half of the R-3' ack protocol
+     and the buffer byte-SHED (`retry_bytes`) is R-4' — they have NO R-2b runtime consumer, so they land WITH their
+     consumers (not shipped dead/`#[allow(dead_code)]`). So R-2b's retry buffer GROWS un-drained (the non-draining
+     window below). The header is STILL not READ by the receiver, so the mesh is STILL AT-MOST-ONCE (no behaviour
+     change; io-prod Tier-B 93.52%). **OWED to flip this 🟩:** R-3' (the receiver contiguity verdict — incarnation/
+     epoch/contiguity dedup — + the cumulative-ack PRODUCER + `on_ack`/`base`; R-2b+R-3' are ONE correctness unit),
+     R-4' (shed-loud backpressure + `retry_bytes` + confirmed-dead-after-N-retries), R-5' (the `mesh_under_loss.rs`
+     real-mesh capstone proving exactly-once under an injected connection break). The loopback bridge keeps its simple
+     per-stream seq (single-stream test infra; NO lane FSM). R-6 = durable outbox + durable boot-counter incarnation
+     (P6/P7). **R-2b cross-slice contracts (binding for R-3'):** (a) the receiver MUST dedup by (peer,class,incarnation,
+     seq) EPOCH-AGNOSTICALLY — epoch gates ONLY the high-water-advance race, never seq retirement; a torn frame is
+     discarded wholesale (`read_one_reliable_frame` already None-on-short-read). (b) The per-class lane split REMOVES
+     cross-class ordering on a link — every reliable consumer must be order-INDEPENDENT across classes (verified for the
+     gateway dispatch; a cross-class ordering dependence must ride the SAME class, never the transport). (c) The full
+     connection drop on a write error is REQUIRED for old-stream cleanup — never downgrade to a stream-only reset
+     without a receiver-side stream reaper (the stream-only-error optimization is deferred). (d) The dev-cluster tooling
+     (`scripts/`+`vd-devcluster`) must export a per-launch `VD_PROCESS_INCARNATION` BEFORE R-3' lands, else the first dev
+     restart-after-R-3' silently drops fresh frames (incarnation collision) and looks like a transport bug. **R-2b
+     coverage scope (post-impl review `wf_93fc5909`, which caught + I FIXED an off-by-the-header oversize poison-window
+     CRITICAL before commit):** the SENDER FSM correctness (buffer-first, replay-batch exactly-once, the framed-oversize
+     reject incl. the boundary, the reconnect-resets-an-existing-lane path) is proven by the io-prod unit+integration
+     tests (mesh.rs 94.70%). The LIVE end-to-end multi-frame replay over a REAL redial (a peer that drops then RECOVERS
+     mid-stream) needs `MeshControl::drop_connections()` — R-3'/R-5' (`kill()` cannot blip-recover) — so that
+     end-to-end proof is the R-5' `mesh_under_loss.rs` capstone, NOT an R-2b gap.
      **(1a) `BatchHandoff::AwaitAdopt`** — the first-identified instance. A producer-less phase has NO `scan_deadlines` re-drive
      egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash);
      the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop). `AwaitAdopt`
