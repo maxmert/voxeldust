@@ -994,7 +994,10 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      whole class — `dev_cluster_smoke` covers bring-up + SIGKILL only). **WHEN: the whole class lands before any real
      multi-shard rolling deploy.** Per-instance detail follows.
      **✅ ROOT-CURE PROGRESS (the redelivering `MeshTransport`, plan in memory `project_redelivering_transport_plan`,
-     design+review `wf_2a366f96`): R-1' (6f4614d) + R-2a (4bf9b06) + R-2b (this commit) LANDED, gate-green.** R-1' split
+     designs `wf_2a366f96`/`wf_b469b353`): R-1' (6f4614d) + R-2a (4bf9b06) + R-2b (aae1f3c) + R-3' (this commit) LANDED,
+     gate-green. The mesh is now AT-LEAST-ONCE across a connection blip FOR A LANE THAT KEEPS CARRYING TRAFFIC — a reliable
+     frame survives a `drop_connections` break and arrives EXACTLY ONCE (proven end-to-end in `mesh_redelivery.rs`); the
+     idle-after-blip re-drive is the still-owed R-4' timer (KNOWN GAP below, data retained not lost).** R-1' split
      the hot 20Hz path into a bare `DatagramFrame` (byte-identical, zero PvP cost); R-2a grew the reliable frame to
      `ReliableFrame{from,class,incarnation:u64,epoch:u32,seq:u64,bytes}` + unified `OutFrame`. **R-2b = the SENDER lane
      FSM:** `ReliableLaneSender` (per-(peer,class), lazy) with BUFFER-FIRST seq (assign+retain THEN write — a failed
@@ -1009,11 +1012,18 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      from the vetted design:** the cumulative-ack RETIRE (`on_ack`+`base`) is the sender half of the R-3' ack protocol
      and the buffer byte-SHED (`retry_bytes`) is R-4' — they have NO R-2b runtime consumer, so they land WITH their
      consumers (not shipped dead/`#[allow(dead_code)]`). So R-2b's retry buffer GROWS un-drained (the non-draining
-     window below). The header is STILL not READ by the receiver, so the mesh is STILL AT-MOST-ONCE (no behaviour
-     change; io-prod Tier-B 93.52%). **OWED to flip this 🟩:** R-3' (the receiver contiguity verdict — incarnation/
-     epoch/contiguity dedup — + the cumulative-ack PRODUCER + `on_ack`/`base`; R-2b+R-3' are ONE correctness unit),
-     R-4' (shed-loud backpressure + `retry_bytes` + confirmed-dead-after-N-retries), R-5' (the `mesh_under_loss.rs`
-     real-mesh capstone proving exactly-once under an injected connection break). The loopback bridge keeps its simple
+     window below). **R-3' NOW READS the header + drains the retry buffer (see the R-3' paragraph below), so the mesh is
+     AT-LEAST-ONCE across a connection blip WHEN TRAFFIC CONTINUES ON THE (peer,class) LANE** (the re-dial + `replay_batch`
+     of the unacked window fires inside `write_frame`'s `connection.is_none()` block, which the next reliable send
+     triggers). **KNOWN GAP (post-impl review `wf_a909be64`, HIGH → chartered to R-4'/R-5', data RETAINED not lost):** an
+     IDLE-after-blip lane — a lone `GhostReliable` Despawn that blips then goes quiet — leaves its unacked tail in
+     `lane.retry` (buffer-first; the receiver ledger survives) but does NOT re-drive it until the next reliable send on
+     that lane re-dials. There is no sender-side retransmit TIMER yet (`peer_writer`'s select has only ack + rx arms).
+     **STILL OWED to flip this fully 🟩:** R-4' (the retransmit/redial TIMER = the `confirm_unreachable_after_retries`
+     consumer that re-drives an idle lane's retry buffer + shed-loud backpressure + `retry_bytes`; also suppresses the
+     spurious per-frame `NodeUnreachable` a blip currently emits), R-5' (the `mesh_under_loss.rs` real-mesh capstone
+     driving an actual PRODUCER-LESS flow — a raw `GhostReliable` Despawn — across the break, PROVING the idle-after-blip
+     re-drive, retiring the per-flow band-aids). The loopback bridge keeps its simple
      per-stream seq (single-stream test infra; NO lane FSM). R-6 = durable outbox + durable boot-counter incarnation
      (P6/P7). **R-2b cross-slice contracts (binding for R-3'):** (a) the receiver MUST dedup by (peer,class,incarnation,
      seq) EPOCH-AGNOSTICALLY — epoch gates ONLY the high-water-advance race, never seq retirement; a torn frame is
@@ -1021,15 +1031,46 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      cross-class ordering on a link — every reliable consumer must be order-INDEPENDENT across classes (verified for the
      gateway dispatch; a cross-class ordering dependence must ride the SAME class, never the transport). (c) The full
      connection drop on a write error is REQUIRED for old-stream cleanup — never downgrade to a stream-only reset
-     without a receiver-side stream reaper (the stream-only-error optimization is deferred). (d) The dev-cluster tooling
-     (`scripts/`+`vd-devcluster`) must export a per-launch `VD_PROCESS_INCARNATION` BEFORE R-3' lands, else the first dev
-     restart-after-R-3' silently drops fresh frames (incarnation collision) and looks like a transport bug. **R-2b
+     without a receiver-side stream reaper (the stream-only-error optimization is deferred). (d) ✅ SATISFIED in R-3':
+     `common_env` (bins/src/lib.rs) exports a per-launch wall-clock-ms `VD_PROCESS_INCARNATION` so a dev restart comes up
+     at a strictly-higher incarnation than a peer's surviving ledger holds (no silent-Dedup collision). The durable
+     boot-counter that also survives a wall-clock REWIND is R-6 (P6/P7). **R-2b
      coverage scope (post-impl review `wf_93fc5909`, which caught + I FIXED an off-by-the-header oversize poison-window
      CRITICAL before commit):** the SENDER FSM correctness (buffer-first, replay-batch exactly-once, the framed-oversize
      reject incl. the boundary, the reconnect-resets-an-existing-lane path) is proven by the io-prod unit+integration
      tests (mesh.rs 94.70%). The LIVE end-to-end multi-frame replay over a REAL redial (a peer that drops then RECOVERS
      mid-stream) needs `MeshControl::drop_connections()` — R-3'/R-5' (`kill()` cannot blip-recover) — so that
      end-to-end proof is the R-5' `mesh_under_loss.rs` capstone, NOT an R-2b gap.
+     **✅ R-3' LANDED (this commit; design+3-adversarial-review `wf_b469b353` — 13 blocking findings incl. 2 CRITICALs
+     resolved BEFORE code; R-2b+R-3' are ONE correctness unit).** THE RECEIVER: a node-wide `RecvLedger` (`(peer,class)
+     → RecvState{incarnation,epoch,hw,primed}`) that SURVIVES connection teardown + a pure `classify_reliable` verdict
+     ladder (incarnation ▸ epoch ▸ contiguity; StaleEpoch decided BEFORE any hw compare = the reverted-R-1 cross-stream
+     cure). **CRITICAL#1 (the reverted CRITICAL's twin) designed out:** the higher-incarnation A1 arm resets to
+     `{hw:0,primed:false}` and FALLS THROUGH — a reset-window reorder surfaces as Gap (a MUST-BE-0 alert), NEVER a silent
+     Dedup burying a lower never-delivered seq. THE ACK LANE: acks ride the reverse direction ON THE SAME connection they
+     arrived on — the data receiver's `serve_connection` opens ONE `STREAM_KIND_ACK` uni stream (cumulative, idle-flushed,
+     cancel-safe write OUTSIDE the select); the data sender's `peer_writer` gains an `accept_uni` ack-reader on its OWN
+     dialed connection → `on_ack` retires the prefix (clamped to `next_seq`, monotone `base`, epoch+incarnation matched).
+     **CRITICAL#2 (ack topology): the "MANDATORY AckRouter" that 2 of 3 reviewers demanded was REJECTED** — an AckRouter
+     couples two independent connections' liveness (a deadlock during a one-directional redial); the same-connection
+     reverse stream is buildable (quinn Connections are symmetric) and needs no NodeId→mpsc registry. **Folded refinement
+     (a review gap): on a reliable inbox-drop the whole `RecvState` ROLLS BACK to its pre-classify snapshot** (advancing
+     hw without delivering = permanent silent loss; contiguity, not the epoch check, is the anti-burying guard so the
+     rollback can't re-open the CRITICAL). A 1-byte `STREAM_KIND` tag demuxes DATA/ACK (a raw `read_exact(1)` BEFORE the
+     framing loop — `read_one_reliable_frame` stays byte-identical, so the loopback bridge is untouched). `common_env`
+     now exports a per-launch wall-clock-ms `VD_PROCESS_INCARNATION` (the restart-collision precondition; a `dev_cluster_smoke`
+     test asserts two launches strictly increase). Tests: 16 pure classify/on_ack unit tests (each arm equality-asserted,
+     incl. the reset-window-reorder-⇒-Gap-not-Dedup case) + `mesh_redelivery.rs` (happy-burst-acks-retire, drop_connections
+     blip exactly-once, lone-frame idle-flush, sender-restart-higher-incarnation). `reliable_acked` is a 6th counter (a
+     stuck-at-0 = a dead ack path). NOTE: acks flow promptly (per-frame `ack_due`), so a blip's replay re-covers only the
+     un-acked tail (optimal) — the receiver dedup path is exercised deterministically by the pure `classify_dedups_*` test,
+     not asserted in the integration blip (which asserts no-loss + no-dup + a real disruption). **R-3' latent note (review
+     `wf_a909be64` LOW, provably correct TODAY, tied to R-6): `AckFrame` carries ONE `incarnation` scalar over its
+     per-class `entries`** — sound under the one-connection-one-sender-incarnation invariant (a `peer_writer` stamps every
+     DATA frame with its own `local`/incarnation, so one accepted connection is uniform; `ack_egress` mints a fresh
+     `last_sent` per connection). IF R-6's durable-incarnation work ever lets one accepted connection be REUSED across a
+     sender restart (two incarnations on one connection), this must move `incarnation` INTO `AckEntry` (per-class) or the
+     sender's `on_ack` silently rejects the mismatched entries = a dead-ack-path (retry grows to the R-4' shed), not loss.
      **(1a) `BatchHandoff::AwaitAdopt`** — the first-identified instance. A producer-less phase has NO `scan_deadlines` re-drive
      egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash);
      the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop). `AwaitAdopt`

@@ -160,13 +160,34 @@ fn str_pair(key: &'static str, value: impl ToString) -> (&'static str, String) {
     (key, value.to_string())
 }
 
-/// The env every node shares (trust bundle + transport knobs).
+/// A per-LAUNCH monotone process incarnation (wall-clock milliseconds since the UNIX epoch). The mesh's
+/// at-least-once receiver (R-3') resets its dedup high-water only when a peer's incarnation INCREASES — so a
+/// node that restarts (its per-(peer,class) seq counter resets to 0) while a peer keeps running must come up
+/// at a STRICTLY HIGHER incarnation than the value that peer's SURVIVING ledger still holds, or the restarted
+/// sender's fresh seq0.. would be silently deduped away (a silent-data-loss landmine that only bites after a
+/// restart — exactly the case R-3' exists to survive). A fresh `up` reads the clock again ⇒ a higher value (a real
+/// process teardown+respawn is ≫1ms apart). BEST-EFFORT for dev: a sub-ms crash-loop restart could mint an EQUAL
+/// incarnation (the same-ms residual) and a wall-clock REWIND a LOWER one — BOTH are accepted dev residuals closed by
+/// R-6 (P6/P7)'s durable monotone boot counter. Not a production identity source.
+#[must_use]
+pub fn launch_incarnation() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// The env every node shares (trust bundle + transport knobs + the per-launch process incarnation).
 #[must_use]
 pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, String)> {
     vec![
         ("VD_TRUST_DIR", trust_dir.to_owned()),
         str_pair("VD_OUTBOUND_CAP", p.outbound_cap),
         str_pair("VD_TICK_HZ", p.tick_hz),
+        str_pair("VD_PROCESS_INCARNATION", launch_incarnation()),
     ]
 }
 

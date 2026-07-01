@@ -94,6 +94,28 @@ pub(crate) struct DatagramFrame {
     bytes: Vec<u8>,
 }
 
+/// The cumulative ACK frame (R-3'): the reverse-lane, latest-wins acknowledgement a data RECEIVER sends
+/// back to a data SENDER so the sender can RETIRE its retained (unacked) reliable window. One `AckFrame`
+/// batches every reliable class on the connection. `incarnation` ECHOES the sender's process-incarnation as
+/// recorded in the receiver's ledger (uniform per connection — a connection belongs to ONE sender process),
+/// so the sender's `on_ack` rejects an ack minted against a since-restarted incarnation. Framed through the
+/// SAME `wire::framing` home as [`ReliableFrame`] (HR3), on a dedicated `STREAM_KIND_ACK` uni stream — never
+/// a datagram, never a `MsgClass` arm: acks live BELOW the frozen `Transport` seam (sim/node never see them).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AckFrame {
+    pub(crate) incarnation: u64,
+    pub(crate) entries: Vec<AckEntry>,
+}
+
+/// One class's cumulative acknowledgement inside an [`AckFrame`]: `ack_through` is the highest CONTIGUOUS
+/// seq the receiver has DELIVERED for `(peer, class)` at `epoch` (TCP-style — everything `<=` it retires).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AckEntry {
+    pub(crate) class: MsgClass,
+    pub(crate) epoch: u32,
+    pub(crate) ack_through: u64,
+}
+
 /// The sim-thread→writer queue item, shared by BOTH io-prod transports (the loopback `ProdTransport`
 /// bridge and the `mesh` `MeshTransport`) so their frame envelope cannot drift — the ONE crate-root
 /// struct that unifies the formerly-duplicated `OutboundFrame`/`OutFrame` (audit `wf_2c963246` DRY pin,
@@ -413,6 +435,34 @@ pub(crate) async fn read_one_reliable_frame(recv: &mut quinn::RecvStream) -> Opt
     postcard::from_bytes::<ReliableFrame>(payload).ok()
 }
 
+/// Frame + write ONE [`AckFrame`] on the reverse ACK uni stream, through the ONE `wire::framing` home (HR3)
+/// — mirrors [`write_reliable_frame`]. The framed bytes already carry the length prefix, so it is a single
+/// `write_all`.
+///
+/// ⚠️ CANCEL-SAFETY: the caller MUST keep this `.await` OUTSIDE any `select!`/`timeout` — quinn
+/// `write_all` is not cancel-safe, and a torn `AckFrame` permanently desyncs the sender-side ack reader.
+pub(crate) async fn write_ack_frame(send: &mut quinn::SendStream, ack: &AckFrame) -> Result<(), ()> {
+    let payload = postcard::to_allocvec(ack).map_err(|_| ())?;
+    let framed = vd_wire::framing::frame_payload(Ok(payload)).map_err(|_| ())?;
+    send.write_all(&framed).await.map_err(|_| ())
+}
+
+/// Read ONE `wire::framing` stream frame off the reverse ACK uni stream and decode its [`AckFrame`] —
+/// mirrors [`read_one_reliable_frame`] (the same cap-before-alloc + reserved-bit reject). `None` on clean
+/// EOF or any framing / decode error (the caller stops reading the stream).
+pub(crate) async fn read_one_ack_frame(recv: &mut quinn::RecvStream) -> Option<AckFrame> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await.ok()?;
+    let total_len = u32::from_be_bytes(len_buf);
+    if total_len == 0 || total_len > vd_wire::framing::MAX_STREAM_FRAME_BYTES {
+        return None;
+    }
+    let mut body = vec![0u8; total_len as usize];
+    recv.read_exact(&mut body).await.ok()?;
+    let payload = vd_wire::framing::frame_body_payload(&body).ok()?;
+    postcard::from_bytes::<AckFrame>(payload).ok()
+}
+
 async fn write_frame(
     conn: &quinn::Connection,
     stream: &mut Option<quinn::SendStream>,
@@ -446,30 +496,6 @@ pub(crate) async fn read_frames(mut recv: quinn::RecvStream, inbound_tx: Sender<
         {
             return;
         }
-    }
-}
-
-/// Read reliable frames off a uni stream into a shared bounded inbox (the mesh transport's receive
-/// path; bounding makes a slow consumer drop stale frames rather than OOM). Same `wire::framing`
-/// read as [`read_frames`], surfacing through the bounded-inbox chokepoint. R2': the redelivery
-/// metadata is INERT here (delivered as before); R3' inserts the contiguity verdict before `push_inbox`.
-pub(crate) async fn read_frames_into(
-    mut recv: quinn::RecvStream,
-    inbox: &std::sync::Arc<std::sync::Mutex<vd_sim::io::BoundedInbox>>,
-    stats: &mesh::MeshStats,
-) {
-    while let Some(frame) = read_one_reliable_frame(&mut recv).await {
-        // Through the ONE surfacing chokepoint (a dropped RELIABLE frame here is the loudest case
-        // of all — this is the reliable-stream reader).
-        mesh::push_inbox(
-            inbox,
-            stats,
-            Inbound::Wire {
-                from: frame.from,
-                class: frame.class,
-                bytes: vd_sim::io::bytes(frame.bytes),
-            },
-        );
     }
 }
 

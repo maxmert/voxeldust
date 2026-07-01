@@ -17,18 +17,36 @@
 //! ONLY because every link is mutually authenticated against the cluster trust — identity is never
 //! derived from source addresses (R2).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use tokio::sync::{Notify, watch};
+use tokio::task::JoinHandle;
 use vd_core::{MsgId, NodeId};
-use vd_sim::io::{BoundedInbox, Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
+use vd_sim::io::{BoundedInbox, Bytes, Inbound, InboxDrop, MsgClass, Reliability, SendError, Transport};
 
 use crate::trust::ClusterTrust;
-use crate::{DatagramFrame, OutFrame, ProdIoError, ReliableFrame, write_reliable_frame};
+use crate::{
+    AckEntry, AckFrame, DatagramFrame, OutFrame, ProdIoError, ReliableFrame, read_one_ack_frame,
+    read_one_reliable_frame, write_ack_frame, write_reliable_frame,
+};
+
+/// The 1-byte tag consumed FIRST on every mesh uni stream (before the `wire::framing` loop; never inside
+/// `frame_payload`). A DATA stream carries [`ReliableFrame`]s (the data sender → data receiver direction);
+/// an ACK stream carries [`AckFrame`]s back on the SAME connection (data receiver → data sender). The
+/// loopback bridge (lib.rs) is a SEPARATE transport that writes NO tag and never interoperates with the mesh.
+const STREAM_KIND_DATA: u8 = 0x00;
+const STREAM_KIND_ACK: u8 = 0x01;
+
+/// Registry of this node's DIALED (outbound) connections, keyed by dest peer (latest-wins on redial ⇒
+/// bounded). [`MeshControl::drop_connections`] closes them all — the transient-blip lever (the endpoint
+/// stays bound), DISTINCT from [`MeshControl::kill`] (which closes the endpoint). Closing connection C
+/// tears down BOTH the DATA streams (this→peer) AND their reverse ACK stream on C, coherently.
+type ConnRegistry = Arc<Mutex<BTreeMap<NodeId, quinn::Connection>>>;
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -205,6 +223,10 @@ pub struct MeshStats {
     /// max stream frame size (un-framable ⇒ rejected, never retained, bounced `NodeUnreachable`).
     /// R-4' adds the bounded-retry-buffer total shed on the same counter.
     pub reliable_shed: AtomicU64,
+    /// SENDER: cumulative reliable frames RETIRED by an incoming cumulative ack (the retry buffer draining,
+    /// R-3'). A value stuck at 0 while reliable traffic flows is a DEAD ACK PATH alert (the ack never
+    /// reached this peer's writer) — the retry buffer would then grow unbounded until the R-4' shed.
+    pub reliable_acked: AtomicU64,
 }
 
 /// A snapshot of the mesh counters (loads the atomics).
@@ -219,19 +241,20 @@ pub struct MeshStatsSnapshot {
     pub dedup_drop: u64,
     pub gap_drop: u64,
     pub reliable_shed: u64,
+    pub reliable_acked: u64,
 }
 
 /// THE inbound-push chokepoint: applies the BoundedInbox overflow policy AND surfaces
 /// the result (audit ROB-2 — the drop return exists to be surfaced, never discarded).
 /// A RELIABLE drop is the design's explicit overload ALERT: warned + counted. An
 /// unreliable drop is by-design latest-wins back-pressure: counted only.
-pub(crate) fn push_inbox(inbox: &SharedInbox, stats: &MeshStats, event: Inbound) {
+pub(crate) fn push_inbox(inbox: &SharedInbox, stats: &MeshStats, event: Inbound) -> Option<InboxDrop> {
     let dropped = inbox
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(event);
     match dropped {
-        Some(vd_sim::io::InboxDrop::Reliable) => {
+        Some(InboxDrop::Reliable) => {
             stats
                 .inbound_dropped_reliable
                 .fetch_add(1, Ordering::Relaxed);
@@ -240,13 +263,131 @@ pub(crate) fn push_inbox(inbox: &SharedInbox, stats: &MeshStats, event: Inbound)
                  (genuine overload — raise the inbound capacity or shed load upstream)"
             );
         }
-        Some(vd_sim::io::InboxDrop::Unreliable) => {
+        Some(InboxDrop::Unreliable) => {
             stats
                 .inbound_dropped_unreliable
                 .fetch_add(1, Ordering::Relaxed);
         }
         None => {}
     }
+    dropped
+}
+
+/// The receiver dedup state for ONE `(peer, class)` — pure, `Copy`, the unit-testable core of the R-3'
+/// contiguity verdict. `primed=false` distinguishes "hw=0, nothing delivered yet" from "delivered seq0
+/// (hw=0)". Held in the node-wide [`RecvLedger`] that SURVIVES connection teardown — the SSOT that makes
+/// the cross-stream cure work (a straggler on an old stream can never corrupt a fresh stream's watermark).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct RecvState {
+    /// Sender process-incarnation. A HIGHER value ⇒ the sender restarted ⇒ RESET (the sender-restart
+    /// seq-reset cure); a LOWER value ⇒ a straggler from a since-restarted sender ⇒ drop.
+    incarnation: u64,
+    /// Per-(peer,class) redial counter. A LOWER value ⇒ an old-stream straggler ⇒ `StaleEpoch` BEFORE any
+    /// hw compare (the reverted-R-1 CRITICAL cure); a HIGHER value ⇒ adopt-forward WITHOUT resetting hw.
+    epoch: u32,
+    /// Highest CONTIGUOUS seq DELIVERED to the inbox; next expected = `hw + 1`.
+    hw: u64,
+    /// False until the first frame of this incarnation is delivered (so a first-frame seq>0 after a reset
+    /// surfaces as a Gap, never a silent Dedup of a lower never-delivered seq).
+    primed: bool,
+}
+
+/// The node-wide receiver ledger: one [`RecvState`] per `(peer, class)`, shared by ALL `serve_connection`
+/// readers across ALL connections/redials. Keyed FOREVER — never per-connection/per-stream (that WAS the
+/// reverted-R-1 bug). Created once in [`spawn_mesh`].
+type RecvLedger = Arc<Mutex<BTreeMap<(NodeId, MsgClass), RecvState>>>;
+
+/// The contiguity verdict for one reliable frame. Distinct arms (not a bool) so each is equality-asserted
+/// in unit tests (HR5(d)) and counted on its own never-silent [`MeshStats`] counter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    /// Deliver: contiguous advance (`seq == hw+1`) or a fresh-entry prime.
+    Accept,
+    /// Deliver: the FIRST frame of a higher incarnation (the sender restarted). Distinct from `Accept`
+    /// only for the counter/coverage; delivered identically.
+    Reset,
+    /// Drop: a straggler from a since-restarted sender (`inc < recorded`). hw untouched.
+    StaleIncarnation,
+    /// Drop: a straggler on an OLD stream (`epoch < recorded`), dropped BEFORE the hw compare — the
+    /// cross-stream-race cure. hw untouched.
+    StaleEpoch,
+    /// Drop: an expected replay (`seq <= hw`) — the sim never sees a dup. hw untouched.
+    Dedup,
+    /// Drop: a contiguity GAP (`seq > hw+1`) — a MUST-BE-0 alert (the wire epoch keeps it genuinely 0 in a
+    /// healthy run; a reset-window reorder or a mid-window inbox-drop can surface it transiently). hw untouched.
+    Gap,
+}
+
+/// THE receiver verdict ladder — pure, tokio-free, fully unit-testable. Mutates `st` in place and returns
+/// the [`Verdict`]. The order (incarnation ▸ epoch ▸ seq) is load-bearing: incarnation dominates epoch
+/// dominates seq. STALE-EPOCH is decided BEFORE any hw compare — the reverted-R-1 CRITICAL cure (a6f8e7d /
+/// 731b377). For `Accept`/`Reset` it advances `hw` (to `seq`) + sets `primed`; the CALLER captures `st.hw`
+/// under the SAME lock for the ack watermark, and ROLLS the whole state back if the inbox then drops the
+/// frame (advancing hw without delivering = permanent loss).
+fn classify_reliable(st: &mut RecvState, incarnation: u64, epoch: u32, seq: u64) -> Verdict {
+    // A1: higher incarnation ⇒ the sender restarted. Reset to the NOT-PRIMED shape and FALL THROUGH so the
+    // first frame primes via the seq0 gate — NEVER set hw=seq here (that would bury a lower late frame: the
+    // reverted CRITICAL's twin). A reset-window redial reorder then surfaces as Gap, never a silent Dedup.
+    if incarnation > st.incarnation {
+        *st = RecvState {
+            incarnation,
+            epoch,
+            hw: 0,
+            primed: false,
+        };
+        return prime_or_contiguous(st, seq, true);
+    }
+    // A2: lower incarnation ⇒ a straggler from a since-restarted sender. NEVER touch hw.
+    if incarnation < st.incarnation {
+        return Verdict::StaleIncarnation;
+    }
+    // A3: THE CURE — an older epoch is dropped WITHOUT consulting hw (an old-stream straggler can never
+    // advance the watermark past a never-delivered low).
+    if epoch < st.epoch {
+        return Verdict::StaleEpoch;
+    }
+    // A4: a newer epoch ⇒ adopt-forward. hw is CARRIED (a redial replays base..; base == hw+1 keeps it
+    // contiguous), NEVER reset (the bug one candidate design made).
+    if epoch > st.epoch {
+        st.epoch = epoch;
+    }
+    prime_or_contiguous(st, seq, false)
+}
+
+/// Monomorphic helper (keeps `classify_reliable`'s branching coverable per-arm; HR5(a)). Primes ONLY at
+/// seq0 — a restarted sender ALWAYS resets `next_seq` to 0, so a fresh-incarnation first-frame seq>0 is a
+/// genuine reset-window loss/reorder (Gap), never a prime. A brand-new ENTRY (not a restart) may legitimately
+/// adopt-forward from a sender base>0 (documented: trust the sender's delivery frontier).
+fn prime_or_contiguous(st: &mut RecvState, seq: u64, fresh_incarnation: bool) -> Verdict {
+    if !st.primed {
+        if seq == 0 {
+            st.hw = 0;
+            st.primed = true;
+            return if fresh_incarnation {
+                Verdict::Reset
+            } else {
+                Verdict::Accept
+            };
+        }
+        if !fresh_incarnation {
+            // adopt-forward: a brand-new entry whose first observed frame is seq>0.
+            st.hw = seq;
+            st.primed = true;
+            return Verdict::Accept;
+        }
+        // fresh incarnation + first frame seq>0 ⇒ a reset-window loss/reorder. VISIBLE, never primed.
+        return Verdict::Gap;
+    }
+    if seq == st.hw + 1 {
+        // Contiguous advance. `fresh_incarnation` is always false here (a fresh incarnation is never primed
+        // at this point — it routes through the prime branch above), so this arm is unconditionally Accept.
+        st.hw = seq;
+        return Verdict::Accept;
+    }
+    if seq <= st.hw {
+        return Verdict::Dedup;
+    }
+    Verdict::Gap
 }
 
 /// One reliable send LANE — the per-(peer,class) at-least-once sender FSM (R-2b). Lazily created on
@@ -267,12 +408,15 @@ struct ReliableLaneSender {
     /// a burned write leaves no gap and re-uses no seq).
     next_seq: u64,
     /// Unacked frames keyed by seq. `BTreeMap` ⇒ ascending key = ascending seq = exact replay order;
-    /// holds the FULLY-BUILT [`ReliableFrame`] so replay re-stamps `epoch` only. R-2b has no ack
-    /// PRODUCER, so this never drains at runtime (the ledgered non-draining-retry window R-2b→R-3'/R-4').
-    /// The cumulative-ack RETIRE (`on_ack` + a `base` watermark) and the byte-total for the buffer SHED
-    /// (`retry_bytes`) are the sender half of the R-3'/R-4' protocols and land WITH their consumers —
-    /// not added speculatively here.
+    /// holds the FULLY-BUILT [`ReliableFrame`] so replay re-stamps `epoch` only. R-3' drains it via
+    /// [`ReliableLaneSender::on_ack`] as cumulative acks arrive; the byte-total for the buffer SHED
+    /// (`retry_bytes`) is the R-4' half and lands WITH its consumer — not added speculatively here.
     retry: BTreeMap<u64, ReliableFrame>,
+    /// The sender's belief of the receiver's `hw + 1`: `retry` holds exactly `base..next_seq`. Starts 0.
+    /// NEVER decreases (monotone — a lower/stale ack retires nothing). `on_ack` advances it as the acked
+    /// prefix retires; `replay_batch` (via `retry.values()`) then starts at `base`, so the first replayed
+    /// frame is always `<= receiver_hw + 1` (Accept-or-Dedup, never a Gap).
+    base: u64,
 }
 
 impl ReliableLaneSender {
@@ -283,7 +427,29 @@ impl ReliableLaneSender {
             epoch: 0,
             next_seq: 0,
             retry: BTreeMap::new(),
+            base: 0,
         }
+    }
+
+    /// Retire the acked prefix on a cumulative [`AckFrame`] entry (R-3'). Ignores an ack minted against a
+    /// DIFFERENT incarnation (a since-restarted sender) or a since-superseded `epoch` — retiring on either
+    /// could drop a frame the current lane still owes (the epoch guard is the finding-#4 base/hw-coupling
+    /// cure). The retire loop is CLAMPED to `next_seq` (never remove a key we never assigned — defends a
+    /// torn/duplicated/forged `ack_through`) and MONOTONE (`base` never rolls back). Release-safe: the
+    /// clamp is real logic, not the `debug_assert` (which compiles out on the Tier-B stable build).
+    /// Returns the number of frames RETIRED (0 for a stale/duplicate/lower ack) — the sender's
+    /// `reliable_acked` observability (a stuck-at-0 counter is a dead ack path).
+    fn on_ack(&mut self, ack_incarnation: u64, ack_epoch: u32, ack_through: u64) -> usize {
+        if ack_incarnation != self.incarnation || ack_epoch != self.epoch {
+            return 0;
+        }
+        let base_before = self.base;
+        while self.base < self.next_seq && self.base <= ack_through {
+            self.retry.remove(&self.base);
+            self.base += 1;
+        }
+        debug_assert!(self.base <= self.next_seq);
+        (self.base - base_before) as usize
     }
 
     /// BUFFER-FIRST: stamp a NEW seq, build the frame at `(incarnation, epoch, seq)`, and — IF it frames
@@ -366,6 +532,8 @@ pub struct MeshTransport {
 pub struct MeshControl {
     endpoint: quinn::Endpoint,
     stats: Arc<MeshStats>,
+    /// This node's dialed (outbound) connections — the [`MeshControl::drop_connections`] blip lever.
+    connections: ConnRegistry,
 }
 
 impl MeshControl {
@@ -382,6 +550,22 @@ impl MeshControl {
     pub fn kill(&self) {
         self.endpoint
             .close(quinn::VarInt::from_u32(1), b"killed by harness");
+    }
+
+    /// A transient CONNECTION blip (R-3'/R-5' lever): close every dialed connection this node holds — the
+    /// endpoint STAYS BOUND, so the next reliable send re-dials, re-opens its lane streams, and REPLAYS its
+    /// unacked window under a bumped epoch (at-least-once recovery). DISTINCT from [`MeshControl::kill`]
+    /// (which closes the endpoint — a permanent death). Closing connection C tears down BOTH its DATA
+    /// streams and their reverse ACK stream, so the epoch-bump + replay + ledger-survival story stays coherent.
+    pub fn drop_connections(&self) {
+        let mut reg = self
+            .connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for conn in reg.values() {
+            conn.close(quinn::VarInt::from_u32(2), b"drop_connections blip");
+        }
+        reg.clear();
     }
 
     /// The transport honesty counters (dropped-datagram metrics; GW-1 never-silent).
@@ -403,6 +587,7 @@ impl MeshControl {
             dedup_drop: self.stats.dedup_drop.load(Ordering::Relaxed),
             gap_drop: self.stats.gap_drop.load(Ordering::Relaxed),
             reliable_shed: self.stats.reliable_shed.load(Ordering::Relaxed),
+            reliable_acked: self.stats.reliable_acked.load(Ordering::Relaxed),
         }
     }
 }
@@ -447,6 +632,10 @@ pub fn spawn_mesh(
 
     let inbox: SharedInbox = Arc::new(Mutex::new(BoundedInbox::new(cfg.inbound_capacity)));
     let stats = Arc::new(MeshStats::default());
+    // The node-wide receiver ledger (SURVIVES connection teardown — the cross-stream cure) and the dialed-
+    // connection registry (the drop_connections blip lever), created ONCE and shared by every task.
+    let ledger: RecvLedger = Arc::new(Mutex::new(BTreeMap::new()));
+    let connections: ConnRegistry = Arc::new(Mutex::new(BTreeMap::new()));
 
     // Accept loop: a Semaphore caps concurrently-served connections so a connection
     // flood cannot task-flood the node (TRANSPORT-4). Each connection serves BOTH
@@ -454,6 +643,8 @@ pub fn spawn_mesh(
     let accept_endpoint = endpoint.clone();
     let accept_inbox = Arc::clone(&inbox);
     let accept_stats = Arc::clone(&stats);
+    let accept_ledger = Arc::clone(&ledger);
+    let ack_flush = cfg.reliability.ack_idle_flush_interval;
     let permits = Arc::new(tokio::sync::Semaphore::new(
         cfg.max_inbound_connections.max(1),
     ));
@@ -464,12 +655,13 @@ pub fn spawn_mesh(
             };
             let inbox = Arc::clone(&accept_inbox);
             let stats = Arc::clone(&accept_stats);
+            let ledger = Arc::clone(&accept_ledger);
             tokio::spawn(async move {
                 let _permit = permit; // held for the connection's lifetime
                 let Ok(connection) = incoming.await else {
                     return; // handshake failed (foreign trust): drop, never serve
                 };
-                serve_connection(connection, inbox, stats).await;
+                serve_connection(connection, inbox, stats, ledger, ack_flush).await;
             });
         }
     });
@@ -484,6 +676,7 @@ pub fn spawn_mesh(
         handle.spawn(peer_writer(PeerWriter {
             endpoint: endpoint.clone(),
             local: cfg.local,
+            dest: peer,
             addr,
             rx,
             inbox: Arc::clone(&inbox),
@@ -491,6 +684,7 @@ pub fn spawn_mesh(
             backoff_min: cfg.redial_backoff_min,
             backoff_max: cfg.redial_backoff_max,
             incarnation: cfg.process_incarnation,
+            connections: Arc::clone(&connections),
         }));
         lanes.insert(peer, PeerLane { tx });
     }
@@ -502,31 +696,57 @@ pub fn spawn_mesh(
             inbox,
             next_msg_id: 0,
         },
-        MeshControl { endpoint, stats },
+        MeshControl {
+            endpoint,
+            stats,
+            connections,
+        },
     ))
 }
 
-/// Serve one accepted connection: reliable uni streams AND unreliable datagrams,
-/// both feeding the shared bounded inbox.
+/// Serve one accepted connection (the DATA-RECEIVER side): reliable uni streams (through the R-3'
+/// contiguity verdict) + unreliable datagrams into the shared inbox, AND the reverse cumulative-ACK stream
+/// back to the data sender ON THIS SAME connection (the directional-mesh topology — no AckRouter).
 async fn serve_connection(
     connection: quinn::Connection,
     inbox: SharedInbox,
     stats: Arc<MeshStats>,
+    ledger: RecvLedger,
+    ack_flush: Duration,
 ) {
+    // Per-connection ack coordination: the (peer,class) keys seen on THIS connection (all share one peer =
+    // the dialer) + a wake signal. The data readers populate/notify; the ack-egress task snapshots + writes.
+    let acked_keys: Arc<Mutex<BTreeSet<(NodeId, MsgClass)>>> = Arc::new(Mutex::new(BTreeSet::new()));
+    let ack_due = Arc::new(Notify::new());
+
+    // ACK-EGRESS: acks for this connection's peer ride the reverse direction on THIS SAME connection.
+    let ack_task = tokio::spawn(ack_egress(
+        connection.clone(),
+        Arc::clone(&ledger),
+        Arc::clone(&acked_keys),
+        Arc::clone(&ack_due),
+        ack_flush,
+    ));
+
+    // DATA streams: one reader task per accepted uni stream.
     let stream_conn = connection.clone();
     let stream_inbox = Arc::clone(&inbox);
     let stream_stats = Arc::clone(&stats);
-    // Reliable streams.
+    let stream_ledger = Arc::clone(&ledger);
     let streams = tokio::spawn(async move {
         while let Ok(recv) = stream_conn.accept_uni().await {
-            let inbox = Arc::clone(&stream_inbox);
-            let stats = Arc::clone(&stream_stats);
-            tokio::spawn(async move {
-                crate::read_frames_into(recv, &inbox, &stats).await;
-            });
+            tokio::spawn(serve_data_stream(
+                recv,
+                Arc::clone(&stream_inbox),
+                Arc::clone(&stream_stats),
+                Arc::clone(&stream_ledger),
+                Arc::clone(&acked_keys),
+                Arc::clone(&ack_due),
+            ));
         }
     });
-    // Unreliable datagrams on the same connection.
+
+    // Unreliable datagrams on the same connection (UNCHANGED hot path — byte-for-byte the R-1' split shape).
     while let Ok(datagram) = connection.read_datagram().await {
         if let Ok(frame) = postcard::from_bytes::<DatagramFrame>(&datagram) {
             push_inbox(
@@ -541,12 +761,171 @@ async fn serve_connection(
         }
         // A malformed datagram is silently dropped: unreliable carriers tolerate it.
     }
+    // The connection closed (peer gone / drop_connections / kill): tear down its reader + ack tasks.
     streams.abort();
+    ack_task.abort();
+}
+
+/// Read ONE accepted uni stream: consume the 1-byte `STREAM_KIND` tag FIRST (before the framing loop, never
+/// inside `frame_payload`), then — for a DATA stream — run every frame through the contiguity verdict. An
+/// ACK stream misrouted here (acks are consumed by `peer_writer`'s ack-reader, not `serve_connection`) or an
+/// unknown tag or a torn stream is dropped WHOLESALE, never touching the ledger.
+async fn serve_data_stream(
+    mut recv: quinn::RecvStream,
+    inbox: SharedInbox,
+    stats: Arc<MeshStats>,
+    ledger: RecvLedger,
+    acked_keys: Arc<Mutex<BTreeSet<(NodeId, MsgClass)>>>,
+    ack_due: Arc<Notify>,
+) {
+    let mut kind = [0u8; 1];
+    if recv.read_exact(&mut kind).await.is_err() {
+        return; // peer opened + finished, or a torn stream: clean silent close
+    }
+    if kind[0] != STREAM_KIND_DATA {
+        return; // an ACK stream never rides an accepted conn; unknown tag ⇒ drop, ledger untouched
+    }
+    while let Some(frame) = read_one_reliable_frame(&mut recv).await {
+        classify_and_deliver(&inbox, &stats, &ledger, &frame);
+        // Every DATA frame (even a Dedup) makes this (peer,class) ack-relevant and re-acks it — a lost ack
+        // is recovered because the sender replays until it sees the cumulative ack advance.
+        acked_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((frame.from, frame.class));
+        ack_due.notify_one();
+    }
+}
+
+/// Classify ONE reliable frame under the ledger lock and deliver it (or count the drop). The ledger guard
+/// is held across the SYNCHRONOUS `push_inbox` (never across an await): if the RELIABLE frame is dropped by
+/// a full inbox (genuine overload), the whole `RecvState` is ROLLED BACK to its pre-classify snapshot —
+/// advancing `hw` without delivering would Dedup every redelivery = permanent silent loss. Contiguity (the
+/// Gap arm), not the epoch check, is the anti-burying guard, so this rollback cannot re-open the reverted-R-1
+/// CRITICAL; a later redelivery re-drives the transition cleanly.
+fn classify_and_deliver(inbox: &SharedInbox, stats: &MeshStats, ledger: &RecvLedger, frame: &ReliableFrame) {
+    let mut led = ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let st = led.entry((frame.from, frame.class)).or_insert(RecvState {
+        incarnation: frame.incarnation,
+        epoch: frame.epoch,
+        hw: 0,
+        primed: false,
+    });
+    let before = *st;
+    match classify_reliable(st, frame.incarnation, frame.epoch, frame.seq) {
+        Verdict::Accept | Verdict::Reset => {
+            let dropped = push_inbox(
+                inbox,
+                stats,
+                Inbound::Wire {
+                    from: frame.from,
+                    class: frame.class,
+                    bytes: vd_sim::io::bytes(frame.bytes.clone()),
+                },
+            );
+            if matches!(dropped, Some(InboxDrop::Reliable)) {
+                // Not delivered ⇒ hw must NOT advance (push_inbox already counted+warned the reliable drop).
+                *st = before;
+            }
+        }
+        Verdict::StaleIncarnation => {
+            stats.stale_incarnation_drop.fetch_add(1, Ordering::Relaxed);
+        }
+        Verdict::StaleEpoch => {
+            stats.stale_epoch_drop.fetch_add(1, Ordering::Relaxed);
+        }
+        Verdict::Dedup => {
+            stats.dedup_drop.fetch_add(1, Ordering::Relaxed);
+        }
+        Verdict::Gap => {
+            stats.gap_drop.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                from = frame.from.0,
+                seq = frame.seq,
+                "reliable contiguity GAP (seq > hw+1) — MUST-BE-0 alert"
+            );
+        }
+    }
+}
+
+/// The reverse cumulative-ACK writer for one accepted connection: open ONE `STREAM_KIND_ACK` uni stream on
+/// THIS connection, then flush the current cumulative acks whenever a data frame arrives (coalesced) or the
+/// idle timer fires (so a lone damage/death/despawn is acked without follow-up traffic).
+///
+/// ⚠️ CANCEL-SAFETY: `write_ack_frame().await` is OUTSIDE the `select!` — the select only DECIDES to flush.
+/// quinn `write_all` is not cancel-safe, and a torn `AckFrame` permanently desyncs the sender's ack reader
+/// (the reverted-R-1 bug class, reverse lane). On a write error the stream is dropped and cumulative acks
+/// self-recover on the next connection.
+async fn ack_egress(
+    connection: quinn::Connection,
+    ledger: RecvLedger,
+    acked_keys: Arc<Mutex<BTreeSet<(NodeId, MsgClass)>>>,
+    ack_due: Arc<Notify>,
+    flush_interval: Duration,
+) {
+    let mut send = match connection.open_uni().await {
+        Ok(s) => s,
+        Err(_) => return, // the connection is already gone
+    };
+    if send.write_all(&[STREAM_KIND_ACK]).await.is_err() {
+        return;
+    }
+    let mut interval = tokio::time::interval(flush_interval);
+    let mut last_sent: Vec<AckEntry> = Vec::new();
+    loop {
+        // DECIDE to flush; NO write future inside the select (cancel-safety).
+        tokio::select! {
+            () = ack_due.notified() => {}
+            _ = interval.tick() => {}
+        }
+        // Snapshot the cumulative acks: per (peer,class) read (incarnation, epoch, hw) atomically under ONE
+        // ledger lock hold, copy out, DROP the guard — never held across the write below.
+        let (incarnation, entries) = {
+            let keys = acked_keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let led = ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut incarnation = 0u64;
+            let mut entries = Vec::new();
+            for &(peer, class) in keys.iter() {
+                if let Some(st) = led.get(&(peer, class)) {
+                    // ECHO the sender's incarnation (uniform per connection = one sender process), so the
+                    // sender's on_ack matches it against its own lane incarnation.
+                    incarnation = st.incarnation;
+                    entries.push(AckEntry {
+                        class,
+                        epoch: st.epoch,
+                        ack_through: st.hw,
+                    });
+                }
+            }
+            (incarnation, entries)
+        };
+        // Nothing to ack yet, or identical to the last flush (dedup the idle busy-write; race-free — any
+        // note that raced in is reflected in this very snapshot).
+        if entries.is_empty() || entries == last_sent {
+            continue;
+        }
+        let frame = AckFrame {
+            incarnation,
+            entries: entries.clone(),
+        };
+        if write_ack_frame(&mut send, &frame).await.is_err() {
+            return;
+        }
+        last_sent = entries;
+    }
 }
 
 struct PeerWriter {
     endpoint: quinn::Endpoint,
     local: NodeId,
+    /// The peer this writer dials (the ConnRegistry key; latest-wins on redial).
+    dest: NodeId,
     addr: SocketAddr,
     rx: tokio::sync::mpsc::Receiver<OutFrame>,
     inbox: SharedInbox,
@@ -555,6 +934,9 @@ struct PeerWriter {
     backoff_max: Duration,
     /// This process's incarnation, stamped on every reliable frame this lane sends (R-2b).
     incarnation: u64,
+    /// This node's dialed-connection registry — this writer inserts its connection on dial (for
+    /// [`MeshControl::drop_connections`]).
+    connections: ConnRegistry,
 }
 
 /// One peer's writer: drains its lane in FIFO order, dialing on demand, with
@@ -568,54 +950,117 @@ async fn peer_writer(mut w: PeerWriter) {
     let mut connection: Option<quinn::Connection> = None;
     let mut lanes: BTreeMap<MsgClass, ReliableLaneSender> = BTreeMap::new();
     let mut backoff = w.backoff_min;
-    while let Some(frame) = w.rx.recv().await {
-        let sent = write_frame(
-            &w.endpoint,
-            w.addr,
-            &mut connection,
-            &mut lanes,
-            w.local,
-            w.incarnation,
-            &frame,
-            &w.stats,
-        )
-        .await;
-        match sent {
-            Ok(()) => backoff = w.backoff_min,
-            Err(()) => {
-                // FULL connection drop — REQUIRED for old-stream cleanup: dropping the quinn
-                // Connection tears down its streams, which terminates the RECEIVER's per-stream
-                // reader tasks. NEVER downgrade this to a stream-only reset without adding a
-                // receiver-side stream reaper (DEFERRED: the stream-only-error optimization).
-                connection = None;
-                // Every lane's stream lived on the dead connection: reset each + bump its epoch, so
-                // the next send per lane re-dials, re-opens, and REPLAYS its unacked window under the
-                // new epoch (the cross-stream-race cure). The epoch bump (recovery) is DISTINCT from
-                // the backoff sleep (anti-connect-storm) below.
-                for lane in lanes.values_mut() {
-                    lane.on_write_error();
+    // The reverse-ACK path (R-3'): a child ack-reader accept_uni's the peer's ACK stream on OUR dialed
+    // connection and forwards each decoded AckFrame here via a latest-wins watch (a lost ack is superseded
+    // by the next cumulative one — never a stale lower ack winning). Re-created per dial, aborted on drop.
+    let (ack_tx, mut ack_rx) = watch::channel::<Option<AckFrame>>(None);
+    let mut ack_reader: Option<JoinHandle<()>> = None;
+    loop {
+        tokio::select! {
+            biased; // drain acks first so the retry buffer retires promptly (never starve the ack path)
+            changed = ack_rx.changed() => {
+                if changed.is_ok()
+                    && let Some(ack) = ack_rx.borrow_and_update().clone()
+                {
+                    for e in &ack.entries {
+                        if let Some(lane) = lanes.get_mut(&e.class) {
+                            let retired = lane.on_ack(ack.incarnation, e.epoch, e.ack_through);
+                            if retired > 0 {
+                                w.stats
+                                    .reliable_acked
+                                    .fetch_add(retired as u64, Ordering::Relaxed);
+                            }
+                        }
+                    }
                 }
-                // Reliable senders are waiting on an ack path; tell them the peer is unreachable.
-                // (R-4' refines this to confirmed-dead-after-N-retries; R-2b keeps the per-frame
-                // bounce.) Unreliable (datagram) loss is silent by design.
-                if frame.class.reliability() == Reliability::Reliable {
-                    push_inbox(
-                        &w.inbox,
-                        &w.stats,
-                        Inbound::NodeUnreachable {
-                            to: frame.to,
-                            class: frame.class,
-                            undelivered: frame.msg_id,
-                        },
-                    );
+                // changed Err ⇒ every ack-reader Sender dropped; peer_writer still holds `ack_tx`, so this
+                // is effectively unreachable while the writer runs — keep draining sends regardless.
+            }
+            maybe = w.rx.recv() => {
+                let Some(frame) = maybe else { break };
+                let sent = write_frame(
+                    &w.endpoint,
+                    w.dest,
+                    w.addr,
+                    &mut connection,
+                    &mut lanes,
+                    &mut ack_reader,
+                    &ack_tx,
+                    &w.connections,
+                    w.local,
+                    w.incarnation,
+                    &frame,
+                    &w.stats,
+                )
+                .await;
+                match sent {
+                    Ok(()) => backoff = w.backoff_min,
+                    Err(()) => {
+                        // FULL connection drop — REQUIRED for old-stream cleanup: dropping the quinn
+                        // Connection tears down its streams, which terminates the RECEIVER's per-stream
+                        // reader tasks. NEVER downgrade this to a stream-only reset without adding a
+                        // receiver-side stream reaper (DEFERRED: the stream-only-error optimization).
+                        connection = None;
+                        // The ack-reader lived on the dead connection: abort it before re-dial (no task
+                        // leak, no stale reader racing a late ack into the watch — the epoch guard + the
+                        // monotone base double-cover a straggler ack anyway).
+                        if let Some(h) = ack_reader.take() {
+                            h.abort();
+                        }
+                        // Every lane's stream lived on the dead connection: reset each + bump its epoch, so
+                        // the next send per lane re-dials, re-opens, and REPLAYS its unacked window under the
+                        // new epoch (the cross-stream-race cure). The epoch bump (recovery) is DISTINCT from
+                        // the backoff sleep (anti-connect-storm) below.
+                        for lane in lanes.values_mut() {
+                            lane.on_write_error();
+                        }
+                        // Reliable senders are waiting on an ack path; tell them the peer is unreachable.
+                        // (R-4' refines this to confirmed-dead-after-N-retries; R-3' keeps the per-frame
+                        // bounce.) Unreliable (datagram) loss is silent by design.
+                        if frame.class.reliability() == Reliability::Reliable {
+                            push_inbox(
+                                &w.inbox,
+                                &w.stats,
+                                Inbound::NodeUnreachable {
+                                    to: frame.to,
+                                    class: frame.class,
+                                    undelivered: frame.msg_id,
+                                },
+                            );
+                        }
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(w.backoff_max);
+                    }
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(w.backoff_max);
             }
         }
     }
-    // Loop exit = the per-peer channel closed = clean shutdown; lane streams drop here (quinn
-    // implicit-finish on the still-live connection, or no-op on an already-dead one).
+    // Loop exit = the per-peer channel closed = clean shutdown; abort the ack-reader, then lane streams drop
+    // here (quinn implicit-finish on the still-live connection, or no-op on an already-dead one).
+    if let Some(h) = ack_reader.take() {
+        h.abort();
+    }
+}
+
+/// The child ack-reader for one dialed connection (R-3'): the peer's `serve_connection` opens ONE reverse
+/// `STREAM_KIND_ACK` uni stream on THIS connection; accept it, consume the tag, and forward every decoded
+/// `AckFrame` to `peer_writer` via the latest-wins watch. Ends when the connection closes (peer gone /
+/// drop_connections) or `peer_writer` drops the watch.
+async fn ack_reader_task(connection: quinn::Connection, ack_tx: watch::Sender<Option<AckFrame>>) {
+    while let Ok(mut recv) = connection.accept_uni().await {
+        let mut kind = [0u8; 1];
+        if recv.read_exact(&mut kind).await.is_err() {
+            continue; // a torn/finished stream: try the next
+        }
+        if kind[0] != STREAM_KIND_ACK {
+            continue; // only ACK streams ride the dialed connection; ignore anything else
+        }
+        while let Some(ack) = read_one_ack_frame(&mut recv).await {
+            if ack_tx.send(Some(ack)).is_err() {
+                return; // peer_writer gone
+            }
+        }
+    }
 }
 
 /// Ensure a connection (dial on demand) and write one frame on the carrier its class mandates. The
@@ -627,9 +1072,13 @@ async fn peer_writer(mut w: PeerWriter) {
 #[allow(clippy::too_many_arguments)] // writer state threaded explicitly
 async fn write_frame(
     endpoint: &quinn::Endpoint,
+    dest: NodeId,
     addr: SocketAddr,
     connection: &mut Option<quinn::Connection>,
     lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    ack_reader: &mut Option<JoinHandle<()>>,
+    ack_tx: &watch::Sender<Option<AckFrame>>,
+    connections: &ConnRegistry,
     local: NodeId,
     incarnation: u64,
     frame: &OutFrame,
@@ -642,6 +1091,18 @@ async fn write_frame(
             .map_err(|_| ())?
             .await
             .map_err(|_| ())?;
+        // Register the dialed connection for drop_connections (latest-wins on redial ⇒ bounded).
+        connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(dest, conn.clone());
+        // Spawn the child ack-reader on THIS connection (acks ride back on the same conn). Abort any prior
+        // reader first (belt-and-suspenders — the write-error path already aborts, but a caller might redial
+        // without one), so there is never more than one reader per lane feeding the watch.
+        if let Some(h) = ack_reader.take() {
+            h.abort();
+        }
+        *ack_reader = Some(tokio::spawn(ack_reader_task(conn.clone(), ack_tx.clone())));
         *connection = Some(conn);
         // A fresh connection invalidates every lane's stream (the old ones died with the old conn).
         for lane in lanes.values_mut() {
@@ -682,7 +1143,11 @@ async fn write_frame(
                 // (re)opened stream: write EXACTLY replay_batch(), which by construction includes the
                 // just-assigned frame as its HIGHEST entry ⇒ the new frame is written exactly once,
                 // inside the batch. Never falls through to the steady-state write below.
-                let send = conn.open_uni().await.map_err(|_| ())?;
+                let mut send = conn.open_uni().await.map_err(|_| ())?;
+                // Tag the DATA stream ONCE, before any frame — consumed by serve_data_stream's read_exact(1)
+                // BEFORE the framing loop, never inside frame_payload (read_one_reliable_frame stays byte-
+                // identical, so the loopback bridge that shares it is unaffected).
+                send.write_all(&[STREAM_KIND_DATA]).await.map_err(|_| ())?;
                 lane.stream = Some(send);
                 let batch = lane.replay_batch();
                 debug_assert_eq!(
@@ -1030,6 +1495,229 @@ mod tests {
             confirm_zero.validate().expect_err("rejected"),
             MeshReliabilityTuningError::ConfirmRetriesZero
         );
+    }
+
+    // ---- Pure classify_reliable receiver-verdict tests (tokio-free — the R-3' contiguity correctness core) ----
+
+    fn rs(incarnation: u64, epoch: u32, hw: u64, primed: bool) -> RecvState {
+        RecvState {
+            incarnation,
+            epoch,
+            hw,
+            primed,
+        }
+    }
+
+    #[test]
+    fn classify_primes_at_seq0_then_advances_contiguously() {
+        let mut st = rs(5, 0, 0, false);
+        assert_eq!(classify_reliable(&mut st, 5, 0, 0), Verdict::Accept);
+        assert_eq!((st.hw, st.primed), (0, true));
+        assert_eq!(classify_reliable(&mut st, 5, 0, 1), Verdict::Accept);
+        assert_eq!(classify_reliable(&mut st, 5, 0, 2), Verdict::Accept);
+        assert_eq!(st.hw, 2);
+    }
+
+    #[test]
+    fn classify_dedups_at_and_below_hw_without_moving_hw() {
+        let mut st = rs(5, 0, 3, true);
+        assert_eq!(classify_reliable(&mut st, 5, 0, 3), Verdict::Dedup);
+        assert_eq!(classify_reliable(&mut st, 5, 0, 0), Verdict::Dedup);
+        assert_eq!(st.hw, 3, "a dedup never moves the high-water");
+    }
+
+    #[test]
+    fn classify_gaps_above_hw_plus_one_without_moving_hw() {
+        let mut st = rs(5, 0, 3, true);
+        assert_eq!(classify_reliable(&mut st, 5, 0, 5), Verdict::Gap);
+        assert_eq!(st.hw, 3, "a gap never moves the high-water");
+    }
+
+    #[test]
+    fn classify_drops_stale_epoch_before_any_hw_compare() {
+        // THE reverted-R-1 CRITICAL cure (a6f8e7d/731b377): an old-stream straggler (lower epoch) is dropped
+        // BEFORE the hw compare, so it can never advance the watermark past a never-delivered low.
+        let mut st = rs(5, 3, 10, true);
+        assert_eq!(classify_reliable(&mut st, 5, 2, 999), Verdict::StaleEpoch);
+        assert_eq!(
+            (st.epoch, st.hw),
+            (3, 10),
+            "a stale-epoch straggler leaves epoch AND hw untouched"
+        );
+    }
+
+    #[test]
+    fn classify_adopts_a_higher_epoch_and_carries_hw() {
+        let mut st = rs(5, 3, 10, true);
+        // A redial replays from base==hw+1 at the new epoch — contiguous, hw CARRIED (never reset).
+        assert_eq!(classify_reliable(&mut st, 5, 4, 11), Verdict::Accept);
+        assert_eq!((st.epoch, st.hw), (4, 11));
+        // A replay of an already-delivered seq at the adopted epoch dedups.
+        assert_eq!(classify_reliable(&mut st, 5, 4, 8), Verdict::Dedup);
+        assert_eq!(st.hw, 11);
+    }
+
+    #[test]
+    fn classify_drops_a_lower_incarnation_straggler_leaving_state_untouched() {
+        let mut st = rs(5, 2, 7, true);
+        let before = st;
+        assert_eq!(classify_reliable(&mut st, 4, 0, 0), Verdict::StaleIncarnation);
+        assert_eq!(
+            st, before,
+            "a straggler from a since-restarted sender changes nothing"
+        );
+    }
+
+    #[test]
+    fn classify_higher_incarnation_reset_window_reorder_is_gap_not_dedup() {
+        // CRITICAL#1 fix: at a fresh incarnation, a reset-window reorder (seq2 before seq1) surfaces as Gap,
+        // NEVER a silent Dedup that buries a lower never-delivered seq (the reverted CRITICAL's twin).
+        let mut st = rs(5, 7, 10, true);
+        assert_eq!(
+            classify_reliable(&mut st, 6, 0, 0),
+            Verdict::Reset,
+            "a fresh incarnation primes at seq0"
+        );
+        assert_eq!((st.incarnation, st.epoch, st.hw, st.primed), (6, 0, 0, true));
+        assert_eq!(
+            classify_reliable(&mut st, 6, 0, 2),
+            Verdict::Gap,
+            "seq2 before seq1 ⇒ Gap, NOT a silent Dedup"
+        );
+        assert_eq!(st.hw, 0, "the gap did not advance hw");
+        assert_eq!(
+            classify_reliable(&mut st, 6, 0, 1),
+            Verdict::Accept,
+            "seq1 fills the gap"
+        );
+        assert_eq!(st.hw, 1);
+    }
+
+    #[test]
+    fn classify_fresh_incarnation_first_frame_seq_gt_0_is_gap_and_unprimed() {
+        // A restarted sender ALWAYS resets next_seq to 0 — a fresh-incarnation first-frame seq>0 is a genuine
+        // reset-window loss, never a prime.
+        let mut st = rs(5, 0, 4, true);
+        assert_eq!(classify_reliable(&mut st, 9, 0, 3), Verdict::Gap);
+        assert_eq!(
+            (st.incarnation, st.hw, st.primed),
+            (9, 0, false),
+            "the reset shape, not primed"
+        );
+    }
+
+    #[test]
+    fn classify_fresh_entry_adopts_forward_from_a_nonzero_first_seq() {
+        // A brand-new ENTRY (not a restart: inc == recorded) whose first observed frame is seq5 trusts the
+        // sender's delivery frontier (documented adopt-forward).
+        let mut st = rs(5, 0, 0, false);
+        assert_eq!(classify_reliable(&mut st, 5, 0, 5), Verdict::Accept);
+        assert_eq!((st.hw, st.primed), (5, true));
+    }
+
+    // ---- Pure ReliableLaneSender::on_ack retire tests (the sender half of the R-3' cumulative ack) ----
+
+    #[test]
+    fn on_ack_retires_the_acked_prefix_and_advances_base() {
+        let mut lane = ReliableLaneSender::new(7);
+        for b in [b"a".as_slice(), b"b", b"c", b"d"] {
+            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+        }
+        assert_eq!(lane.on_ack(7, 0, 1), 2, "retires seq 0 and 1"); // epoch 0 == lane epoch
+        assert_eq!(lane.base, 2);
+        assert_eq!(lane.retry.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn on_ack_ignores_a_stale_epoch_ack() {
+        let mut lane = ReliableLaneSender::new(7);
+        lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
+        lane.on_write_error(); // epoch -> 1
+        lane.assign_and_retain(FROM, CLASS, b"b").expect("fits");
+        assert_eq!(lane.on_ack(7, 0, 5), 0, "an ack at the OLD epoch 0 retires nothing");
+        assert_eq!(lane.base, 0, "a stale-epoch ack retires nothing");
+        assert_eq!(lane.retry.len(), 2);
+    }
+
+    #[test]
+    fn on_ack_ignores_a_prior_incarnation_ack() {
+        let mut lane = ReliableLaneSender::new(7);
+        lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
+        assert_eq!(lane.on_ack(6, 0, 0), 0, "an ack against a DIFFERENT incarnation retires nothing");
+        assert_eq!(lane.base, 0);
+    }
+
+    #[test]
+    fn on_ack_is_monotone_a_lower_ack_never_rolls_base_back() {
+        let mut lane = ReliableLaneSender::new(7);
+        for b in [b"a".as_slice(), b"b", b"c", b"d", b"e", b"f"] {
+            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+        }
+        assert_eq!(lane.on_ack(7, 0, 4), 5, "retire 0..=4"); // base -> 5
+        assert_eq!(lane.base, 5);
+        assert_eq!(lane.on_ack(7, 0, 1), 0, "a reordered LOWER ack retires nothing");
+        assert_eq!(lane.base, 5, "base is monotone");
+        assert_eq!(lane.retry.keys().copied().collect::<Vec<_>>(), vec![5]);
+    }
+
+    #[test]
+    fn on_ack_clamps_to_next_seq_so_base_never_overruns() {
+        let mut lane = ReliableLaneSender::new(7);
+        lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"b").expect("fits");
+        assert_eq!(lane.on_ack(7, 0, 999), 2, "a forged/torn ack_through is clamped to next_seq");
+        assert_eq!(lane.base, lane.next_seq, "base clamped to next_seq");
+        assert_eq!(lane.base, 2);
+        assert!(lane.retry.is_empty(), "everything assigned was acked");
+    }
+
+    #[test]
+    fn replay_batch_starts_at_base_after_a_retire() {
+        let mut lane = ReliableLaneSender::new(7);
+        for b in [b"a".as_slice(), b"b", b"c"] {
+            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+        }
+        lane.on_ack(7, 0, 0); // retire seq0, base -> 1
+        lane.on_write_error(); // epoch -> 1
+        let batch = lane.replay_batch();
+        assert_eq!(
+            batch.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            vec![1, 2],
+            "replay starts at base, not 0"
+        );
+        assert!(batch.iter().all(|f| f.epoch == 1));
+    }
+
+    #[test]
+    fn on_ack_never_advances_base_past_next_seq_under_interleaving() {
+        // A bounded deterministic sweep of {assign, on_ack(current epoch, ahead-of-window), write_error,
+        // on_ack(stale epoch)}: base <= next_seq must hold ALWAYS (so the first replayed frame is
+        // Accept-or-Dedup, never a Gap) and retry stays exactly base..next_seq.
+        let mut lane = ReliableLaneSender::new(1);
+        for step in 0u64..200 {
+            match step % 4 {
+                0 => {
+                    lane.assign_and_retain(FROM, CLASS, b"x").expect("fits");
+                }
+                1 => {
+                    lane.on_ack(1, lane.epoch, step / 2); // an ack sometimes ahead of next_seq
+                }
+                2 => lane.on_write_error(),
+                _ => {
+                    lane.on_ack(1, lane.epoch.wrapping_sub(1), step); // a stale-epoch ack: ignored
+                }
+            }
+            assert!(
+                lane.base <= lane.next_seq,
+                "base must never overrun next_seq (step {step})"
+            );
+            assert!(
+                lane.retry
+                    .keys()
+                    .all(|&k| k >= lane.base && k < lane.next_seq),
+                "retry stays exactly base..next_seq (step {step})"
+            );
+        }
     }
 
     fn runtime() -> tokio::runtime::Runtime {

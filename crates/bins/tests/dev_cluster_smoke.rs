@@ -12,8 +12,18 @@ use std::process::{Command, Stdio};
 // The slot constants, the on-disk layout, the launcher runner, and the down-on-drop guard
 // are the SHARED vd_bins definitions (one registry/layout for every process-tier test —
 // they can never drift from the launcher or collide with each other).
-use vd_bins::{DevClusterDown, RECOVERY_SLOT, SMOKE_SLOT, devcluster, slot_runfile, slot_workdir};
+use vd_bins::{
+    DEV, DevClusterDown, RECOVERY_SLOT, SMOKE_SLOT, common_env, devcluster, slot_runfile, slot_workdir,
+};
 use vd_devproto::DevPortScheme;
+
+/// The `VD_PROCESS_INCARNATION` value from a rendered `common_env`.
+fn incarnation_of(env: &[(&'static str, String)]) -> u64 {
+    env.iter()
+        .find(|(k, _)| *k == "VD_PROCESS_INCARNATION")
+        .and_then(|(_, v)| v.parse().ok())
+        .expect("common_env exports VD_PROCESS_INCARNATION")
+}
 
 /// The node PIDs recorded in the runfile (empty if not up).
 fn recorded_pids(slot: u16) -> Vec<u32> {
@@ -93,6 +103,20 @@ fn dev_cluster_comes_up_over_quic_and_tears_down_without_leaking() {
             "QUIC port {port} must be free after down (no leaked node)"
         );
     }
+}
+
+#[test]
+fn two_launches_export_a_strictly_increasing_process_incarnation() {
+    // R-3' precondition: a node that restarts while a peer keeps running must come up at a STRICTLY HIGHER
+    // VD_PROCESS_INCARNATION than the peer's surviving mesh ledger holds, or its seq-reset-to-0 frames are
+    // silently deduped. `common_env` stamps a per-launch wall-clock-ms incarnation; two launches must differ.
+    let first = incarnation_of(&common_env("trust", &DEV));
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let second = incarnation_of(&common_env("trust", &DEV));
+    assert!(
+        first > 0 && second > first,
+        "launch incarnation must be monotone and nonzero: {first} -> {second}"
+    );
 }
 
 #[test]
