@@ -96,8 +96,9 @@ pub const DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES: u32 = 3;
 /// blip-tolerance from `confirm_unreachable_after_retries` until R-4'.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeshReliabilityTuning {
-    /// Per-lane unacked-retry-buffer byte ceiling. The R-4' shed point (counted in R-2b); must be at
-    /// least one max-size frame or a single large reliable frame could never be retained.
+    /// Per-lane unacked-retry-buffer byte ceiling (R-4b, the shed point). Must be at least one MAXIMAL FRAMED
+    /// frame (`MAX_STREAM_FRAME_BYTES` `total_len` + the 4-byte length prefix) or a single large reliable frame
+    /// could never be retained — the byte accounting is on the on-wire `framed_len`, not the raw payload.
     pub retry_buffer_max_bytes: usize,
     /// Cadence for flushing a lone cumulative ack (R-3'). Must be > 0 (a 0 timer would busy-spin).
     pub ack_idle_flush_interval: Duration,
@@ -118,7 +119,7 @@ impl Default for MeshReliabilityTuning {
 /// A `MeshReliabilityTuning` field out of range — surfaced loud at `spawn_mesh` boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MeshReliabilityTuningError {
-    #[error("retry_buffer_max_bytes must be >= the max stream frame size")]
+    #[error("retry_buffer_max_bytes must be >= one maximal framed frame (max stream frame + 4-byte prefix)")]
     RetryBufferTooSmall,
     #[error("ack_idle_flush_interval must be > 0")]
     AckFlushZero,
@@ -133,7 +134,12 @@ impl MeshReliabilityTuning {
     /// # Errors
     /// The specific [`MeshReliabilityTuningError`] for the first out-of-range field.
     pub fn validate(&self) -> Result<(), MeshReliabilityTuningError> {
-        if self.retry_buffer_max_bytes < vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize {
+        // The cap is on the ON-WIRE `framed_len` = `total_len` (<= MAX_STREAM_FRAME_BYTES) + the 4-byte length
+        // prefix, so one MAXIMAL framed frame is `MAX + size_of::<u32>()`. Requiring at least that keeps R-4b
+        // from BufferFull-rejecting a single max frame on an empty buffer (review aa95e10c off-by-envelope).
+        if self.retry_buffer_max_bytes
+            < vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize + std::mem::size_of::<u32>()
+        {
             return Err(MeshReliabilityTuningError::RetryBufferTooSmall);
         }
         if self.ack_idle_flush_interval.is_zero() {
@@ -394,6 +400,30 @@ fn prime_or_contiguous(st: &mut RecvState, seq: u64, fresh_incarnation: bool) ->
 /// the first reliable frame for a class to a peer. ALL FSM logic (seq assign, retain, replay framing,
 /// ack-retire) is SYNCHRONOUS + unit-testable WITHOUT tokio/quinn; only the stream open/write (in
 /// `write_frame`) is async. One stream per class so a stalled class never head-of-line-blocks another.
+/// R-4b: a retained frame + its FROZEN worst-case-epoch framed length. The on-wire varint for `epoch` grows
+/// from 1 byte (epoch 0) to 5 bytes (>= 2^28) as `replay_batch` re-stamps on each redial, so the framed
+/// length of a retained frame CHANGES over its life. `framed_len` is the length at `epoch=u32::MAX` (the same
+/// `encode_frame` output `assign_and_retain` already produced for the oversize cap check), so it UPPER-BOUNDS
+/// every future re-stamp — `retry_bytes` can never drift below the true on-wire size, and the cap check + the
+/// accounting share ONE number (the H3 cure).
+struct RetainedFrame {
+    frame: ReliableFrame,
+    framed_len: u32,
+}
+
+/// R-4b: why `assign_and_retain` refused to retain a reliable frame. Both are shed-loud (`reliable_shed` +
+/// a `NodeUnreachable` bounce); nothing is retained, so neither can poison the lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AssignReject {
+    /// The FRAMED frame exceeds `MAX_STREAM_FRAME_BYTES` — a PERMANENT reject (never sendable).
+    Unframable,
+    /// The per-lane retry buffer is at `retry_buffer_max_bytes` — producer backpressure. The receiver is
+    /// strictly contiguous, so a retained frame can NEVER be safely shed (dropping any seq wedges/loses the
+    /// window); the only loss-safe shed is to refuse the NEW send. A full buffer means acks stopped (a dead
+    /// ack path) — `reliable_acked` stuck-at-0 is the corroborating alarm.
+    BufferFull,
+}
+
 struct ReliableLaneSender {
     /// THIS lane's QUIC uni stream. `None` until the first send opens it; reset to `None` on any write
     /// error (re-opened lazily on the next send after the peer re-dial).
@@ -407,11 +437,18 @@ struct ReliableLaneSender {
     /// Next seq to ASSIGN — monotone, NEVER reset, NEVER rolled back on a failed write (buffer-first ⇒
     /// a burned write leaves no gap and re-uses no seq).
     next_seq: u64,
-    /// Unacked frames keyed by seq. `BTreeMap` ⇒ ascending key = ascending seq = exact replay order;
-    /// holds the FULLY-BUILT [`ReliableFrame`] so replay re-stamps `epoch` only. R-3' drains it via
-    /// [`ReliableLaneSender::on_ack`] as cumulative acks arrive; the byte-total for the buffer SHED
-    /// (`retry_bytes`) is the R-4' half and lands WITH its consumer — not added speculatively here.
-    retry: BTreeMap<u64, ReliableFrame>,
+    /// Unacked frames keyed by seq. `BTreeMap` ⇒ ascending key = ascending seq = exact replay order; each
+    /// value is a [`RetainedFrame`] (the fully-built [`ReliableFrame`], which replay re-stamps `epoch` on, +
+    /// its frozen worst-case framed length). R-3' drains it via [`ReliableLaneSender::on_ack`] as cumulative
+    /// acks arrive; R-4b caps its byte total at `retry_buffer_max_bytes` (`retry_bytes`).
+    retry: BTreeMap<u64, RetainedFrame>,
+    /// R-4b: the sum of every retained frame's `framed_len` — kept in LOCKSTEP with `retry` (`assign_and_retain`
+    /// adds, `on_ack` subtracts the SAME number). When it would exceed `retry_cap` a new send is refused
+    /// (`AssignReject::BufferFull` ⇒ shed-loud) — producer backpressure, never a retained-frame drop.
+    retry_bytes: usize,
+    /// R-4b: this lane's retry-buffer byte ceiling (`MeshReliabilityTuning::retry_buffer_max_bytes`, threaded
+    /// in at construction). Constant for the lane's life; the `assign_and_retain` BufferFull gate.
+    retry_cap: usize,
     /// The sender's belief of the receiver's `hw + 1`: `retry` holds exactly `base..next_seq`. Starts 0.
     /// NEVER decreases (monotone — a lower/stale ack retires nothing). `on_ack` advances it as the acked
     /// prefix retires; `replay_batch` (via `retry.values()`) then starts at `base`, so the first replayed
@@ -430,13 +467,15 @@ struct ReliableLaneSender {
 }
 
 impl ReliableLaneSender {
-    fn new(incarnation: u64) -> ReliableLaneSender {
+    fn new(incarnation: u64, retry_cap: usize) -> ReliableLaneSender {
         ReliableLaneSender {
             stream: None,
             incarnation,
             epoch: 0,
             next_seq: 0,
             retry: BTreeMap::new(),
+            retry_bytes: 0,
+            retry_cap,
             base: 0,
             consecutive_failures: 0,
             last_msg_id: None,
@@ -478,7 +517,10 @@ impl ReliableLaneSender {
         }
         let base_before = self.base;
         while self.base < self.next_seq && self.base <= ack_through {
-            self.retry.remove(&self.base);
+            if let Some(rf) = self.retry.remove(&self.base) {
+                // R-4b: keep `retry_bytes` in LOCKSTEP — subtract the SAME frozen framed_len assign added.
+                self.retry_bytes -= rf.framed_len as usize;
+            }
             self.base += 1;
         }
         debug_assert!(self.base <= self.next_seq);
@@ -486,28 +528,28 @@ impl ReliableLaneSender {
     }
 
     /// BUFFER-FIRST: stamp a NEW seq, build the frame at `(incarnation, epoch, seq)`, and — IF it frames
-    /// within the cap — retain it + advance `next_seq`, returning the assigned SEQ. Returns `Err(())`
-    /// WITHOUT retaining or advancing `next_seq` if the framed `ReliableFrame` would exceed
-    /// `MAX_STREAM_FRAME_BYTES`. The check is on the ENCODED frame (the envelope varints + codec byte can
-    /// push a near-cap payload over the cap), routed through the ONE codec/framing home `encode_frame`
-    /// (HR3) — NOT the raw payload length. An un-framable frame must NEVER enter `retry`: it can never be
-    /// sent, so it would poison the lane (replayed-and-failed every redial, a permanent contiguity wall).
-    /// There is exactly ONE frame object (in `retry`), which the write path reads back — a frame can never
-    /// be written from two objects. Pure: no I/O; a write failure AFTER a successful assign never rolls
-    /// it back (the no-burned-seq guarantee).
+    /// within the stream cap AND retaining it stays within the per-lane byte cap — retain it + advance
+    /// `next_seq`, returning the assigned SEQ. Returns without retaining or advancing `next_seq` on either
+    /// reject (R-4b): `Unframable` if the framed `ReliableFrame` would exceed `MAX_STREAM_FRAME_BYTES` (the
+    /// check is on the ENCODED frame — the envelope varints + codec byte can push a near-cap payload over —
+    /// routed through the ONE codec/framing home `encode_frame`, HR3), or `BufferFull` if it would push
+    /// `retry_bytes` over `cap` (producer backpressure — the receiver is strictly contiguous, so a retained
+    /// frame can NEVER be safely shed). An un-framable frame must NEVER enter `retry` (it can never be sent
+    /// ⇒ a permanent contiguity wall). There is exactly ONE frame object (in `retry`), which the write path
+    /// reads back. Pure: no I/O; a write failure AFTER a successful assign never rolls it back (no burned seq).
     fn assign_and_retain(
         &mut self,
         from: NodeId,
         class: MsgClass,
         bytes: &[u8],
-    ) -> Result<u64, ()> {
+    ) -> Result<u64, AssignReject> {
         let seq = self.next_seq;
         // Build the frame stamped at the WORST-CASE epoch (`u32::MAX`, a 5-byte varint) for the framing
-        // CHECK: `replay_batch` re-stamps a retained frame to an ever-HIGHER epoch on each redial, and the
-        // epoch varint grows from 1 byte (epoch 0) to 5 bytes (>= 2^28). Checking at `u32::MAX` guarantees
-        // an ACCEPTED frame frames within the cap at EVERY future re-stamp — so a near-cap frame can never
-        // overflow on the replay path (the relocated-poison residual, audit `wf_93fc5909` re-verify). The
-        // REAL epoch is set below before retaining; the same one frame object (ONE `bytes` clone) is reused.
+        // CHECK + the stored `framed_len`: `replay_batch` re-stamps a retained frame to an ever-HIGHER epoch
+        // on each redial, and the epoch varint grows from 1 byte (epoch 0) to 5 bytes (>= 2^28). Encoding at
+        // `u32::MAX` guarantees an ACCEPTED frame frames within the cap at EVERY future re-stamp (the
+        // relocated-poison residual, audit `wf_93fc5909`) AND that `framed_len` UPPER-BOUNDS the on-wire size
+        // for accounting (H3). The REAL epoch is set below before retaining; ONE `bytes` clone is reused.
         let mut frame = ReliableFrame {
             from,
             class,
@@ -516,10 +558,18 @@ impl ReliableLaneSender {
             seq,
             bytes: bytes.to_vec(),
         };
-        // Reject on the FRAMED size, before retaining (the same encode+frame the write performs).
-        vd_wire::framing::encode_frame(&frame).map_err(|_| ())?;
+        // ONE encode, reused for BOTH the oversize reject AND the stored framed_len (H3 — no re-encode).
+        let encoded =
+            vd_wire::framing::encode_frame(&frame).map_err(|_| AssignReject::Unframable)?;
+        let framed_len = encoded.len() as u32; // <= MAX_STREAM_FRAME_BYTES + envelope ⇒ fits u32
+        // R-4b producer backpressure: refuse the NEW send if retaining it would exceed the byte cap. NEVER
+        // shed a retained frame. `saturating_add` guards the (unreachable) usize overflow.
+        if self.retry_bytes.saturating_add(framed_len as usize) > self.retry_cap {
+            return Err(AssignReject::BufferFull);
+        }
         frame.epoch = self.epoch; // the real epoch for retention + the first write
-        self.retry.insert(seq, frame);
+        self.retry.insert(seq, RetainedFrame { frame, framed_len });
+        self.retry_bytes += framed_len as usize;
         self.next_seq += 1;
         Ok(seq)
     }
@@ -541,9 +591,9 @@ impl ReliableLaneSender {
     fn replay_batch(&self) -> Vec<ReliableFrame> {
         self.retry
             .values()
-            .map(|f| ReliableFrame {
+            .map(|rf| ReliableFrame {
                 epoch: self.epoch,
-                ..f.clone()
+                ..rf.frame.clone()
             })
             .collect()
     }
@@ -1031,6 +1081,7 @@ async fn peer_writer(mut w: PeerWriter) {
                     &w.connections,
                     w.local,
                     w.incarnation,
+                    w.reliability.retry_buffer_max_bytes,
                     &frame,
                     &w.stats,
                 )
@@ -1364,6 +1415,7 @@ async fn write_frame(
     connections: &ConnRegistry,
     local: NodeId,
     incarnation: u64,
+    retry_cap: usize,
     frame: &OutFrame,
     stats: &MeshStats,
 ) -> Result<(), WriteFail> {
@@ -1380,25 +1432,36 @@ async fn write_frame(
             let seq = {
                 let lane = lanes
                     .entry(frame.class)
-                    .or_insert_with(|| ReliableLaneSender::new(incarnation));
+                    .or_insert_with(|| ReliableLaneSender::new(incarnation, retry_cap));
                 match lane.assign_and_retain(local, frame.class, &frame.bytes) {
                     Ok(seq) => {
                         // R-4a: remember the id ONLY of a RETAINED frame, so the threshold-gated confirm
                         // bounce (which has no OutFrame) can never carry the id of a rejected/never-retained
-                        // (oversize) frame — that frame already got its own immediate Shed bounce (post-impl
-                        // review wf_b1d0610c).
+                        // frame — that frame already got its own immediate Shed bounce (post-impl review
+                        // wf_b1d0610c).
                         lane.last_msg_id = Some(frame.msg_id);
                         seq
                     }
-                    Err(()) => {
+                    Err(reject) => {
+                        // R-4b: BOTH rejects are shed-loud (counted + a bounce via the Shed arm), nothing
+                        // retained ⇒ neither can poison the lane, neither arms the timer or drops the
+                        // (healthy) connection. Unframable = a permanent oversize reject; BufferFull = producer
+                        // backpressure (a full buffer means the ack path is dead — reliable_acked stuck).
                         stats.reliable_shed.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(
-                            "reliable frame (payload {}) would exceed MAX_STREAM_FRAME_BYTES framed; \
-                             rejected (counted, not retained)",
-                            frame.bytes.len()
-                        );
-                        // A PERMANENT reject (never framable) — the Shed arm bounces once, does NOT arm the
-                        // timer or drop the (healthy) connection.
+                        match reject {
+                            AssignReject::Unframable => tracing::warn!(
+                                "reliable frame (payload {}) would exceed MAX_STREAM_FRAME_BYTES framed; \
+                                 rejected (counted, not retained)",
+                                frame.bytes.len()
+                            ),
+                            AssignReject::BufferFull => tracing::warn!(
+                                "reliable retry buffer FULL ({} bytes) — the ack drain is not keeping up \
+                                 (check reliable_acked progress; a stuck-at-0 value = a dead ack path); \
+                                 shedding a new {}-byte send (producer backpressure, NO retained frame dropped)",
+                                lane.retry_bytes,
+                                frame.bytes.len()
+                            ),
+                        }
                         return Err(WriteFail::Shed);
                     }
                 }
@@ -1451,7 +1514,7 @@ async fn write_frame(
                 // steady state: stream open ⇒ write ONLY the new frame (NEVER the backlog). Read the
                 // single frame object back out of `retry`, copying its fields so the immutable borrow of
                 // `retry` ends before the mutable borrow of `stream`.
-                let nf = lane.retry.get(&seq).ok_or(WriteFail::Down)?;
+                let nf = &lane.retry.get(&seq).ok_or(WriteFail::Down)?.frame;
                 let (f_from, f_class, f_inc, f_epoch, f_bytes) = (
                     nf.from,
                     nf.class,
@@ -1559,10 +1622,13 @@ mod tests {
 
     const FROM: NodeId = NodeId(1);
     const CLASS: MsgClass = MsgClass::Saga;
+    /// A retry-buffer cap so large no FSM test ever trips `AssignReject::BufferFull` (R-4b is exercised by a
+    /// dedicated small-cap test).
+    const BIG_CAP: usize = usize::MAX;
 
     #[test]
     fn sender_assigns_monotone_seq_and_retains() {
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         assert_eq!(lane.assign_and_retain(FROM, CLASS, b"a"), Ok(0));
         assert_eq!(lane.assign_and_retain(FROM, CLASS, b"bb"), Ok(1));
         assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ccc"), Ok(2));
@@ -1572,11 +1638,11 @@ mod tests {
             vec![0, 1, 2]
         );
         assert_eq!(
-            lane.retry[&1].bytes, b"bb",
+            lane.retry[&1].frame.bytes, b"bb",
             "the retained frame holds its payload"
         );
         // Frames are stamped with the lane's incarnation + current epoch (0).
-        let f0 = &lane.retry[&0];
+        let f0 = &lane.retry[&0].frame;
         assert_eq!((f0.incarnation, f0.epoch, f0.seq), (7, 0, 0));
     }
 
@@ -1584,12 +1650,12 @@ mod tests {
     fn write_error_does_not_roll_back_seq() {
         // BUFFER-FIRST: a failed write (modelled by on_write_error after an assign) never burns or
         // re-uses a seq — the next assign is the next monotone value, at the bumped epoch.
-        let mut lane = ReliableLaneSender::new(0);
+        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
         assert_eq!(lane.assign_and_retain(FROM, CLASS, b"x"), Ok(0));
         lane.on_write_error();
         assert_eq!(lane.assign_and_retain(FROM, CLASS, b"y"), Ok(1)); // not reused 0, not skipped 2
         assert_eq!(
-            lane.retry[&1].epoch, 1,
+            lane.retry[&1].frame.epoch, 1,
             "the post-error assign carries the bumped epoch"
         );
         assert_eq!(lane.retry.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
@@ -1597,7 +1663,7 @@ mod tests {
 
     #[test]
     fn replay_batch_is_ascending_seq_with_current_epoch() {
-        let mut lane = ReliableLaneSender::new(0);
+        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
             lane.assign_and_retain(FROM, CLASS, b).expect("fits");
         }
@@ -1622,7 +1688,7 @@ mod tests {
     #[test]
     fn replay_batch_restamps_latest_epoch_after_two_bumps_with_intervening_assign() {
         // No stale-epoch frame leaks into a fresh replay even when assigns interleave with bumps.
-        let mut lane = ReliableLaneSender::new(0);
+        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
         lane.assign_and_retain(FROM, CLASS, b"0").expect("fits"); // seq0 @ e0
         lane.assign_and_retain(FROM, CLASS, b"1").expect("fits"); // seq1 @ e0
         lane.on_write_error(); // e1
@@ -1644,7 +1710,7 @@ mod tests {
         // The CRITICAL double-write cure (sender side): replay_batch() — the write set when a stream
         // is (re)opened — contains EACH retained seq EXACTLY once, with the just-assigned seq present
         // exactly once and LAST (so the steady-state path never re-writes it).
-        let mut lane = ReliableLaneSender::new(0);
+        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
         lane.assign_and_retain(FROM, CLASS, b"0").expect("fits");
         lane.on_write_error();
         let new_seq = lane.assign_and_retain(FROM, CLASS, b"1").expect("fits");
@@ -1672,7 +1738,7 @@ mod tests {
         // R-2b has no ack producer, so `retry` never drains: keys are 0..next_seq (the ledgered
         // non-draining-retry window). The cumulative-ack RETIRE (`on_ack`/`base`) + its tests land WITH
         // the R-3' ack producer; the byte-total for the buffer SHED lands with R-4'.
-        let mut lane = ReliableLaneSender::new(0);
+        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
             lane.assign_and_retain(FROM, CLASS, b).expect("fits");
         }
@@ -1694,9 +1760,12 @@ mod tests {
         // at exactly MAX frames OVER the cap. assign must REJECT it without retaining or burning a seq:
         // an un-framable frame can never be sent, so retaining it would poison the lane (replayed-and-
         // failed every redial). (Regression for the off-by-the-header poison window, audit wf_93fc5909.)
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         let at_cap = vec![0u8; vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize];
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, &at_cap), Err(()));
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, &at_cap),
+            Err(AssignReject::Unframable)
+        );
         assert!(
             lane.retry.is_empty(),
             "an un-framable frame is NOT retained"
@@ -1704,6 +1773,78 @@ mod tests {
         assert_eq!(lane.next_seq, 0, "a rejected assign does not burn a seq");
         // The lane is NOT poisoned: a normal frame after a rejection assigns cleanly at seq 0.
         assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ok"), Ok(0));
+    }
+
+    /// The worst-case (epoch=u32::MAX) framed length of a `bytes` payload — the SAME number assign stores as
+    /// `framed_len` (so a test can size the cap exactly).
+    fn framed_len(bytes: &[u8]) -> usize {
+        vd_wire::framing::encode_frame(&ReliableFrame {
+            from: FROM,
+            class: CLASS,
+            incarnation: 7,
+            epoch: u32::MAX,
+            seq: 0,
+            bytes: bytes.to_vec(),
+        })
+        .expect("frames")
+        .len()
+    }
+
+    #[test]
+    fn a_full_retry_buffer_refuses_the_new_send_as_producer_backpressure() {
+        // R-4b: the receiver is strictly contiguous, so a retained frame can NEVER be safely shed — the only
+        // loss-safe shed is to refuse the NEW send when the byte cap is reached. A cap that holds exactly two
+        // frames fills after two assigns; the third returns BufferFull WITHOUT retaining or burning a seq, and
+        // the retained window + retry_bytes are untouched (NOTHING dropped). Backpressure is transient: an ack
+        // frees a slot and the next send is accepted.
+        let one = framed_len(b"hello");
+        let mut lane = ReliableLaneSender::new(7, one * 2);
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello"), Ok(0));
+        assert_eq!(lane.retry_bytes, one, "one frame accounted");
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello"), Ok(1));
+        assert_eq!(lane.retry_bytes, one * 2, "two frames = full");
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"hello"),
+            Err(AssignReject::BufferFull)
+        );
+        assert_eq!(lane.next_seq, 2, "a refused send does not burn a seq");
+        assert_eq!(lane.retry.len(), 2, "nothing new retained");
+        assert_eq!(
+            lane.retry_bytes,
+            one * 2,
+            "retry_bytes unchanged — NO retained frame dropped (producer backpressure, not a shed)"
+        );
+        lane.on_ack(7, 0, 0); // retire seq0 -> a slot frees
+        assert_eq!(lane.retry_bytes, one, "one frame freed");
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"hello"),
+            Ok(2),
+            "backpressure is transient: a freed slot accepts the next send"
+        );
+    }
+
+    #[test]
+    fn retry_bytes_stays_in_lockstep_with_retry_across_assign_ack_and_re_stamp() {
+        // R-4b (the H3 accounting invariant): retry_bytes == the sum of every retained frame's FROZEN
+        // framed_len — invariant across assigns, acks, AND an epoch re-stamp (framed_len is the worst-case
+        // length, so it never drifts even as the on-wire epoch varint grows).
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
+        for b in [b"a".as_slice(), b"bb", b"ccc", b"dddd"] {
+            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+        }
+        let sum = |l: &ReliableLaneSender| {
+            l.retry.values().map(|rf| rf.framed_len as usize).sum::<usize>()
+        };
+        assert_eq!(lane.retry_bytes, sum(&lane), "assign accounting");
+        lane.on_write_error(); // epoch -> 1: replay would re-stamp, but framed_len is frozen
+        assert_eq!(
+            lane.retry_bytes,
+            sum(&lane),
+            "an epoch re-stamp never drifts retry_bytes (H3)"
+        );
+        lane.on_ack(7, 1, 1); // retire seq0,1 at the bumped epoch
+        assert_eq!(lane.retry_bytes, sum(&lane), "retire accounting");
+        assert_eq!(lane.retry.len(), 2);
     }
 
     #[test]
@@ -1718,16 +1859,16 @@ mod tests {
         let accepted = (0..48)
             .map(|d| max - d)
             .find(|&n| {
-                ReliableLaneSender::new(u64::MAX)
+                ReliableLaneSender::new(u64::MAX, BIG_CAP)
                     .assign_and_retain(FROM, CLASS, &vec![0u8; n])
                     .is_ok()
             })
             .expect("some near-cap payload is accepted");
-        let mut lane = ReliableLaneSender::new(u64::MAX);
+        let mut lane = ReliableLaneSender::new(u64::MAX, BIG_CAP);
         let seq = lane
             .assign_and_retain(FROM, CLASS, &vec![0u8; accepted])
             .expect("accepted");
-        let mut replayed = lane.retry[&seq].clone();
+        let mut replayed = lane.retry[&seq].frame.clone();
         replayed.epoch = u32::MAX;
         assert!(
             vd_wire::framing::encode_frame(&replayed).is_ok(),
@@ -1739,15 +1880,15 @@ mod tests {
     fn sibling_error_does_not_leak_epoch_into_a_fresh_lane() {
         // Lazy lane creation always starts epoch 0 — a sibling class's write error never bleeds into
         // a freshly-created lane.
-        let mut a = ReliableLaneSender::new(5);
+        let mut a = ReliableLaneSender::new(5, BIG_CAP);
         a.assign_and_retain(FROM, MsgClass::Control, b"x")
             .expect("fits");
         a.on_write_error(); // A -> epoch 1
-        let mut b = ReliableLaneSender::new(5);
+        let mut b = ReliableLaneSender::new(5, BIG_CAP);
         b.assign_and_retain(FROM, MsgClass::Saga, b"y")
             .expect("fits");
         assert_eq!(
-            b.retry[&0].epoch, 0,
+            b.retry[&0].frame.epoch, 0,
             "a fresh lane starts at epoch 0, never a sibling's"
         );
     }
@@ -1779,6 +1920,27 @@ mod tests {
             confirm_zero.validate().expect_err("rejected"),
             MeshReliabilityTuningError::ConfirmRetriesZero
         );
+    }
+
+    #[test]
+    fn retry_buffer_cap_must_hold_one_maximal_framed_frame() {
+        // R-4b: the byte cap is on the ON-WIRE framed_len (total_len + the 4-byte length prefix). validate must
+        // reject a cap that could not retain ONE maximal framed frame (review aa95e10c off-by-envelope):
+        // `MAX` alone is short by the prefix; `MAX + size_of::<u32>()` is the minimum that boots.
+        let max = vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize;
+        let at_max = MeshReliabilityTuning {
+            retry_buffer_max_bytes: max,
+            ..MeshReliabilityTuning::default()
+        };
+        assert_eq!(
+            at_max.validate().expect_err("MAX alone is short by the 4-byte prefix"),
+            MeshReliabilityTuningError::RetryBufferTooSmall
+        );
+        let one_frame = MeshReliabilityTuning {
+            retry_buffer_max_bytes: max + std::mem::size_of::<u32>(),
+            ..MeshReliabilityTuning::default()
+        };
+        assert_eq!(one_frame.validate(), Ok(()));
     }
 
     // ---- Pure classify_reliable receiver-verdict tests (tokio-free — the R-3' contiguity correctness core) ----
@@ -1903,7 +2065,7 @@ mod tests {
 
     #[test]
     fn on_ack_retires_the_acked_prefix_and_advances_base() {
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c", b"d"] {
             lane.assign_and_retain(FROM, CLASS, b).expect("fits");
         }
@@ -1914,7 +2076,7 @@ mod tests {
 
     #[test]
     fn on_ack_ignores_a_stale_epoch_ack() {
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
         lane.on_write_error(); // epoch -> 1
         lane.assign_and_retain(FROM, CLASS, b"b").expect("fits");
@@ -1925,7 +2087,7 @@ mod tests {
 
     #[test]
     fn on_ack_ignores_a_prior_incarnation_ack() {
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
         assert_eq!(lane.on_ack(6, 0, 0), 0, "an ack against a DIFFERENT incarnation retires nothing");
         assert_eq!(lane.base, 0);
@@ -1933,7 +2095,7 @@ mod tests {
 
     #[test]
     fn on_ack_is_monotone_a_lower_ack_never_rolls_base_back() {
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c", b"d", b"e", b"f"] {
             lane.assign_and_retain(FROM, CLASS, b).expect("fits");
         }
@@ -1946,7 +2108,7 @@ mod tests {
 
     #[test]
     fn on_ack_clamps_to_next_seq_so_base_never_overruns() {
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
         lane.assign_and_retain(FROM, CLASS, b"b").expect("fits");
         assert_eq!(lane.on_ack(7, 0, 999), 2, "a forged/torn ack_through is clamped to next_seq");
@@ -1957,7 +2119,7 @@ mod tests {
 
     #[test]
     fn replay_batch_starts_at_base_after_a_retire() {
-        let mut lane = ReliableLaneSender::new(7);
+        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
             lane.assign_and_retain(FROM, CLASS, b).expect("fits");
         }
@@ -1977,7 +2139,7 @@ mod tests {
         // A bounded deterministic sweep of {assign, on_ack(current epoch, ahead-of-window), write_error,
         // on_ack(stale epoch)}: base <= next_seq must hold ALWAYS (so the first replayed frame is
         // Accept-or-Dedup, never a Gap) and retry stays exactly base..next_seq.
-        let mut lane = ReliableLaneSender::new(1);
+        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
         for step in 0u64..200 {
             match step % 4 {
                 0 => {
@@ -2008,7 +2170,7 @@ mod tests {
 
     #[test]
     fn a_lane_owes_redelivery_iff_stream_closed_and_window_non_empty() {
-        let mut lane = ReliableLaneSender::new(1);
+        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
         assert!(
             !lane.owes_redelivery(),
             "a fresh lane (empty window) owes nothing"
@@ -2027,7 +2189,7 @@ mod tests {
 
     #[test]
     fn lane_failure_counter_bumps_saturating_and_resets_per_lane() {
-        let mut lane = ReliableLaneSender::new(1);
+        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
         assert_eq!(lane.consecutive_failures, 0);
         lane.on_replay_failed();
         lane.on_replay_failed();
@@ -2043,7 +2205,7 @@ mod tests {
     fn any_lane_owes_reflects_the_owing_lanes() {
         let mut lanes: BTreeMap<MsgClass, ReliableLaneSender> = BTreeMap::new();
         assert!(!any_lane_owes(&lanes), "no lanes ⇒ nothing owes");
-        let mut lane = ReliableLaneSender::new(1);
+        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
         lane.assign_and_retain(FROM, CLASS, b"x").expect("fits");
         lanes.insert(CLASS, lane);
         assert!(any_lane_owes(&lanes), "an owing lane ⇒ the timer guard is live");

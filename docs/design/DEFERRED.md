@@ -1028,9 +1028,18 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      connection-drop fan-out; reset per-lane — the H2 cure) gates the `NodeUnreachable` bounce, so a blip that RECOVERS =
      ZERO bounce (proven by `an_idle_after_blip_lone_frame_is_re_driven_by_the_timer` + the zero-bounce blip test); a
      genuinely-dead peer still bounces after N. Buffer-first-before-dial: a first-dial failure leaves the frame RETAINED +
-     re-driven (never a silent drop). io-prod Tier-B 93.44% ≥ 90. **STILL OWED to flip this fully 🟩:** R-4b (shed-loud +
-     `retry_bytes` byte-cap = producer-backpressure-when-full, the only loss-safe shed since the receiver is strictly
-     contiguous — the M1 unbounded-growth cure), R-4c (`LivenessTuning::validate_against(&SagaTuning)` — the geometric-backoff
+     re-driven (never a silent drop). io-prod Tier-B 93.44% ≥ 90. **✅ R-4b LANDED (this commit; focused adversarial review
+     aa95e10c SHIP — the accounting is provably correct): `retry_bytes` byte-cap + shed-loud = the M1 unbounded-growth
+     cure.** `RetainedFrame{frame, framed_len}` stores the FROZEN worst-case (`u32::MAX`-epoch) framed length (the H3 fix —
+     it upper-bounds every re-stamp, so accounting never drifts as the epoch varint grows); `retry_bytes` tracks the total
+     in LOCKSTEP (`assign_and_retain` adds, `on_ack` subtracts the SAME number). `AssignReject{Unframable, BufferFull}` —
+     BufferFull = PRODUCER BACKPRESSURE (refuse the NEW send; NEVER shed a retained frame, since the receiver is strictly
+     contiguous so dropping any seq wedges/loses the window); both are shed-loud (`reliable_shed` + a bounce, no timer arm,
+     no connection drop — a full buffer = a dead ack path, `reliable_acked` stuck-at-0 corroborates). The mpsc bound is the
+     primary producer backpressure for a slow-but-alive path (D2 tier 1); the byte cap is the tier-2 dead-ack shed. Review
+     fix: `validate()` now requires `retry_buffer_max_bytes >= MAX_STREAM_FRAME_BYTES + 4` (the length prefix) so a single
+     maximal framed frame can always be retained (was off by the envelope). **STILL OWED to flip this fully 🟩:** R-4c
+     (`LivenessTuning::validate_against(&SagaTuning)` — the geometric-backoff
      confirm-ticks ≤ abort_deadline invariant, boot-asserted, the C3 cure), R-4d (MeshStats→`/metrics` MetricsSource, M4),
      R-4e (N-peer real-QUIC load test, L7 — also the natural home for a `replay_lanes` conn_died-mid-pass coverage test:
      the dial-succeeds-then-write-fails arm is Tier-B-uncovered today, floor still met, review wf_b1d0610c LOW). R-5' (the
