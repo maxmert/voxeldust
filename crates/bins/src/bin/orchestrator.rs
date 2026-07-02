@@ -52,7 +52,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env.peer_book("VD_PEERS")?,
         env.parse("VD_OUTBOUND_CAP")?,
         // R-2b: per-process incarnation stamped on reliable frames (default 0; R-6 durable counter).
-        env.parse_or("VD_PROCESS_INCARNATION", 0)?,
+        // R-6a: the DURABLE MONOTONE process incarnation (VD_PROCESS_INCARNATION explicit wins for dev/test;
+        // else the VD_BOOT_STATE_DIR boot-counter that survives a CrashLoop / clock rewind).
+        vd_bins::resolve_process_incarnation(&env)?,
     );
     // R-4d M4: RETAIN the MeshControl (was discarded) so the admin `/metrics` endpoint can read
     // the live mesh reliability counters (`MeshControl::stats()` — a pure atomic load off the hot path).

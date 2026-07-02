@@ -1286,7 +1286,26 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      `VD_PROCESS_INCARNATION` = wall-clock-ms is UNSAFE under k8s (CrashLoopBackOff restarts sub-second ⇒ EQUAL incarnation ⇒
      silent-Dedup LOSS; NTP/reschedule clock-skew ⇒ LOWER ⇒ StaleIncarnation-drops all restarted traffic) — R-6's durable
      monotone boot-counter is a HARD precondition on the SAME gate as the AwaitAdopt egress before ANY real deploy, NOT a "dev
-     residual". [L7→R-4'/R-5', load-test mandate] `mesh_redelivery.rs` is 2-node/1-class/1-lane — add an N-peer (16-64)
+     residual".
+     **R-6 DESIGN VETTED (design+3-review `wf_6c81f81c`, SOUND_TO_IMPLEMENT after de-scoping k3d; spec `scripts/r6_vetted_design.md`).
+     SUB-SLICED: R-6a (boot-counter core) → R-6c (L4 AckEntry per-class incarnation) → R-6b (LOOPBACK CrashLoop e2e proof) →
+     R-6d (durable outbox, follow-slice). ✅ R-6a LANDED: `crates/io-prod/src/boot.rs` — `BootCounter` (a 24-byte checksummed
+     sidecar file: ABSENT⇒genesis at `genesis_floor.max(1)`; VALID⇒`checked_add(1)`; CORRUPT⇒FAIL LOUD never-reset-to-lower;
+     atomic write-tmp→fsync→rename→fsync-dir, durable BEFORE `spawn_mesh` so a re-used value is never wired; MONOTONE + immune
+     to a wall-clock rewind, no `SystemTime` in the increment path) + a shared `check_durable_path` (durable-root ALLOW-list
+     when declared, else the temp DENY-list; `canon_lenient` resolves symlinks for an uncreated subdir). `bins::resolve_process_
+     incarnation` precedence: VD_PROCESS_INCARNATION explicit WINS (dev/test via common_env + future orchestrator-issued) → else
+     VD_BOOT_STATE_DIR durable self-counter (genesis_floor=launch_incarnation, VD_BOOT_DURABLE_ROOT allow-list, VD_BOOT_STATE_
+     EPHEMERAL_OK escape) → else FAIL LOUD. std-only NO new dep, NO frozen-seam touch, NO HR3 fork. 8 boot + 4 bins unit tests;
+     process_parity green (real bin boot path); Tier-B boot.rs 94.17%. Post-impl review `wf_b241ed1c`.
+     **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
+     service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
+     LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
+     CA-1 + L5 + D-13(admin-auth) + M3 slice.** [→R-6 follow-up, DRY] the orchestrator VD_STORE_PATH deny-list guard should be
+     lifted into the same shared `check_durable_path` (R-6a added the shared helper + the boot path's allow-list but did NOT
+     retouch the orch-crash-tested store boot path — a small DRY cleanup owed). [→R-6, JOINT-INVESTIGATION] self-count-PVC vs
+     orchestrator-ISSUED incarnation for hundreds of dynamically-provisioned shards is a user-decision (the R-6a precedence
+     `VD_PROCESS_INCARNATION`-wins makes the orchestrator-issued path a zero-rework supersede, so R-6a does NOT lock it in). [L7→R-4'/R-5', load-test mandate] `mesh_redelivery.rs` is 2-node/1-class/1-lane — add an N-peer (16-64)
      sustained-reliable-into-one-node test (no-loss/no-dup, `reliable_acked` keeps pace, no RX-plane collapse under a
      wall-clock bound); it's the companion to R-5' `mesh_under_loss.rs` and the test that empirically surfaces H2. [M2→R-5'
      belt-and-suspenders] add a source-side retained-ghost STALENESS REAPER for the one-shot `GhostFlow::Despawn` band-exit

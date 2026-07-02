@@ -1,7 +1,8 @@
 //! `vd-bins` library — the SINGLE SOURCE OF TRUTH for standing up a local cluster
 //! of the node binaries, shared by the `vd-devcluster` launcher AND the
 //! `process_parity` real-binary test. Without this shared module the two would
-//! hand-duplicate the 23-key `VD_*` env contract, the 14 operational params, the
+//! hand-duplicate the `VD_*` env contract (the dev-cluster keys + the optional prod-only R-6a durable-
+//! incarnation keys `VD_BOOT_STATE_DIR`/`VD_BOOT_DURABLE_ROOT`/`VD_BOOT_STATE_EPHEMERAL_OK`), the 14 operational params, the
 //! node roster, the dev auth identity, the peer-book formatter, and the child
 //! teardown — and silently DRIFT (the parity gate would stay green while the
 //! agent's cluster shipped half-configured). Everything that defines "what a dev
@@ -18,6 +19,7 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use vd_core::NodeId;
 use vd_devproto::{DevRequest, DevResponse, WORKTREE_SLOT_CEILING};
+use vd_io_prod::runtime::EnvConfig;
 use vd_io_prod::runtime::hex32_encode;
 
 // ---- node roster -------------------------------------------------------------
@@ -178,6 +180,80 @@ pub fn launch_incarnation() -> u64 {
             .as_millis(),
     )
     .unwrap_or(u64::MAX)
+}
+
+/// The sidecar file (under `VD_BOOT_STATE_DIR`) holding the R-6a durable monotone boot-counter.
+pub const BOOT_COUNTER_NAME: &str = "boot.counter";
+
+/// Strict boolean env parse — the shared `1/true/yes | 0/false/no | error` ladder (a present-but-unrecognized
+/// value is a LOUD config error, never a fail-OPEN footgun that silently disables a safety guard). Absent ⇒
+/// `false` (the production-safe default).
+///
+/// # Errors
+/// A present-but-non-boolean value.
+pub fn parse_bool_env(env: &EnvConfig, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    match env.string(key) {
+        Err(_) => Ok(false),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" | "" => Ok(false),
+            other => Err(format!(
+                "{key}={other:?} is not a boolean (use 1/true/yes or 0/false/no)"
+            )
+            .into()),
+        },
+    }
+}
+
+/// Resolve THE process incarnation stamped on every reliable frame (R-6a / M3), in precedence order:
+/// 1. `VD_PROCESS_INCARNATION` if EXPLICITLY set (the dev/test/loopback path via [`common_env`], and the
+///    future orchestrator-issued path) — WINS, so dev keeps the cheap [`launch_incarnation`] value and the
+///    provisioning slice can supersede at zero rework.
+/// 2. else `VD_BOOT_STATE_DIR` present ⇒ the DURABLE MONOTONE self-counter ([`vd_io_prod::boot::BootCounter`]
+///    — survives a k8s CrashLoop restart / a wall-clock rewind). Guarded by
+///    [`vd_io_prod::boot::check_durable_path`] (an allow-list under `VD_BOOT_DURABLE_ROOT` if declared, else
+///    the temp deny-list; `VD_BOOT_STATE_EPHEMERAL_OK=1` is the explicit dev escape). The genesis floor is
+///    [`launch_incarnation`] so a re-provisioned pod with a FRESH volume still exceeds a peer's surviving
+///    wall-clock-era ledger; steady state is purely counter+1.
+/// 3. else ⇒ FAIL LOUD (a prod pod that forgets both must NOT silently revert to the unsafe wall-clock path)
+///    unless `VD_BOOT_STATE_EPHEMERAL_OK=1` (then the wall-clock value, for a throwaway dev/test node).
+///
+/// # Errors
+/// A non-durable/mis-configured boot path, a corrupt counter file, or a mis-set env value.
+pub fn resolve_process_incarnation(env: &EnvConfig) -> Result<u64, Box<dyn std::error::Error>> {
+    // (1) An explicit value wins (dev/test via common_env; a future orchestrator-issued value).
+    if env.string("VD_PROCESS_INCARNATION").is_ok() {
+        return Ok(env.parse::<u64>("VD_PROCESS_INCARNATION")?);
+    }
+    let ephemeral_ok = parse_bool_env(env, "VD_BOOT_STATE_EPHEMERAL_OK")?;
+    // An EMPTY/whitespace value is treated as ABSENT — an unset-var expansion (`export X=$UNSET`) must NOT
+    // fail-OPEN the durability guard (an empty `VD_BOOT_DURABLE_ROOT` would make the allow-list pass every
+    // path) nor write the counter into CWD (an empty `VD_BOOT_STATE_DIR`).
+    let non_empty = |key: &str| {
+        env.string(key)
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    // (2) The durable monotone self-counter on a persistent volume.
+    if let Some(dir) = non_empty("VD_BOOT_STATE_DIR") {
+        let path = PathBuf::from(dir).join(BOOT_COUNTER_NAME);
+        let durable_root = non_empty("VD_BOOT_DURABLE_ROOT").map(PathBuf::from);
+        vd_io_prod::boot::check_durable_path(&path, durable_root.as_deref(), ephemeral_ok)?;
+        return Ok(vd_io_prod::boot::BootCounter::increment_on_boot(
+            &path,
+            launch_incarnation(),
+        )?);
+    }
+    // (3) Neither set: fail loud unless the explicit ephemeral escape (then the unsafe wall-clock value).
+    if ephemeral_ok {
+        return Ok(launch_incarnation());
+    }
+    Err("no durable process incarnation: set VD_BOOT_STATE_DIR to a persistent path (the M3 durable monotone \
+         boot-counter — required in the cloud so a CrashLoop/reschedule restart is not silently deduped), or \
+         set VD_PROCESS_INCARNATION explicitly. Set VD_BOOT_STATE_EPHEMERAL_OK=1 ONLY to accept the wall-clock \
+         incarnation for a throwaway dev/test node. Refusing to boot."
+        .into())
 }
 
 /// The env every node shares (trust bundle + transport knobs + the per-launch process incarnation).
@@ -561,5 +637,94 @@ impl Drop for Cluster {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod incarnation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn env(pairs: &[(&str, &str)]) -> EnvConfig {
+        EnvConfig::new(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    }
+
+    #[test]
+    fn parse_bool_env_ladder() {
+        assert!(parse_bool_env(&env(&[("K", "1")]), "K").expect("1"));
+        assert!(parse_bool_env(&env(&[("K", "TRUE")]), "K").expect("TRUE"));
+        assert!(parse_bool_env(&env(&[("K", "yes")]), "K").expect("yes"));
+        assert!(!parse_bool_env(&env(&[("K", "0")]), "K").expect("0"));
+        assert!(!parse_bool_env(&env(&[("K", "false")]), "K").expect("false"));
+        assert!(!parse_bool_env(&env(&[("K", "")]), "K").expect("empty"));
+        assert!(!parse_bool_env(&env(&[]), "K").expect("absent = false"));
+        assert!(
+            parse_bool_env(&env(&[("K", "maybe")]), "K").is_err(),
+            "a non-boolean is loud"
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_an_explicit_incarnation() {
+        assert_eq!(
+            resolve_process_incarnation(&env(&[("VD_PROCESS_INCARNATION", "42")]))
+                .expect("explicit wins"),
+            42
+        );
+        // Explicit-but-unparseable is a loud error (not a silent fall-through).
+        assert!(resolve_process_incarnation(&env(&[("VD_PROCESS_INCARNATION", "nope")])).is_err());
+    }
+
+    #[test]
+    fn resolve_uses_the_durable_counter_and_increments() {
+        let dir = std::env::temp_dir().join(format!("vd-resolve-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let _ = std::fs::remove_file(dir.join(BOOT_COUNTER_NAME));
+        // The scratch dir is under temp ⇒ the deny-list would reject it; EPHEMERAL_OK=1 is the test escape.
+        let e = env(&[
+            ("VD_BOOT_STATE_DIR", dir.to_str().expect("utf8")),
+            ("VD_BOOT_STATE_EPHEMERAL_OK", "1"),
+        ]);
+        let first = resolve_process_incarnation(&e).expect("boot1");
+        let second = resolve_process_incarnation(&e).expect("boot2");
+        assert!(first >= 1);
+        assert_eq!(
+            second,
+            first + 1,
+            "the durable counter increments monotonically"
+        );
+    }
+
+    #[test]
+    fn an_empty_durable_root_does_not_fail_open_the_guard() {
+        // An empty VD_BOOT_DURABLE_ROOT (an `export X=$UNSET` mistake) must be treated as ABSENT — NOT
+        // flip the allow-list into "root='' matches every path". A temp VD_BOOT_STATE_DIR must still be
+        // rejected by the deny-list (no ephemeral escape).
+        let temp_dir = std::env::temp_dir().join("vd-empty-root-test");
+        let e = env(&[
+            ("VD_BOOT_STATE_DIR", temp_dir.to_str().expect("utf8")),
+            ("VD_BOOT_DURABLE_ROOT", ""),
+        ]);
+        assert!(
+            resolve_process_incarnation(&e).is_err(),
+            "an empty durable root must not disable the temp deny-list"
+        );
+    }
+
+    #[test]
+    fn resolve_fails_loud_when_no_durable_source() {
+        // Neither VD_PROCESS_INCARNATION nor VD_BOOT_STATE_DIR, no ephemeral escape ⇒ refuse to boot.
+        assert!(resolve_process_incarnation(&env(&[])).is_err());
+        // With the explicit ephemeral escape, fall back to the wall-clock value (> 0).
+        assert!(
+            resolve_process_incarnation(&env(&[("VD_BOOT_STATE_EPHEMERAL_OK", "1")]))
+                .expect("escape")
+                > 0
+        );
     }
 }

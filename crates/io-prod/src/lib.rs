@@ -30,6 +30,7 @@
 //! Coverage: Tier-B — exercised by the process tier; ratcheted floor, never 100% (HR5).
 
 pub mod admin;
+pub mod boot;
 pub mod mesh;
 pub mod runtime;
 pub mod store;
