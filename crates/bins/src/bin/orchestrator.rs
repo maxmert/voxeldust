@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use vd_io_prod::admin::{SnapshotSource, admin_router};
+use vd_io_prod::admin::{MeshMetrics, SnapshotSource, admin_router};
 use vd_io_prod::mesh::{MeshConfig, spawn_mesh};
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
 use vd_io_prod::store::{RedbStore, StoreTuning};
@@ -54,7 +54,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // R-2b: per-process incarnation stamped on reliable frames (default 0; R-6 durable counter).
         env.parse_or("VD_PROCESS_INCARNATION", 0)?,
     );
-    let (transport, _control) = spawn_mesh(runtime.handle(), &trust, &mesh_cfg)?;
+    // R-4d M4: RETAIN the MeshControl (was discarded) so the admin `/metrics` endpoint can read
+    // the live mesh reliability counters (`MeshControl::stats()` — a pure atomic load off the hot path).
+    let (transport, control) = spawn_mesh(runtime.handle(), &trust, &mesh_cfg)?;
+    let control = Arc::new(control);
     let mut node = build_app(
         NodeConfig {
             node_id: local,
@@ -254,11 +257,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cell = Arc::new(ArcSwap::from_pointee(AdminSnapshot::default()));
     let admin_addr: std::net::SocketAddr = env.parse("VD_ADMIN_ADDR")?;
     let served = Arc::clone(&cell);
+    // R-4d M4: the live mesh-metrics source shares the retained MeshControl.
+    let metrics = Arc::new(MeshMetrics(Arc::clone(&control)));
     runtime.spawn(async move {
         let listener = tokio::net::TcpListener::bind(admin_addr)
             .await
             .expect("admin endpoint binds");
-        axum::serve(listener, admin_router(Arc::new(Published(served))))
+        axum::serve(listener, admin_router(Arc::new(Published(served)), metrics))
             .await
             .expect("admin endpoint serves");
     });

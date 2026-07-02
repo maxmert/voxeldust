@@ -1101,6 +1101,20 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      (`reliable_shed`/`reliable_acked`-stuck-at-0=dead-ack-path/`gap_drop`=MUST-BE-0/…) are BLIND in prod — every bin discards
      `_control`, `/metrics` serves hardcoded 0, `metric_names::ALL` omits them; wire `MeshControl::stats()` via a `MetricsSource`
      BEFORE any soak (a soak with invisible alarms proves nothing).
+     **✅ R-4d2 (M4) LANDED (design+3-review `wbt45dxj6`; post-impl review `wf_dbc1ca7a`): the 10 mesh counters are now
+     scraped on the orchestrator `/metrics`.** `metric_names::ALL` +9 (`_total` counters + the legacy un-suffixed
+     `vd_datagrams_dropped_too_large` kept as a frozen scraped name); a `MetricsSource` trait (mirrors `SnapshotSource`) with a
+     flat `MetricValues` + live `MeshMetrics(Arc<MeshControl>)` (reads `stats()` per scrape — a pure atomic load off the hot
+     path) + `FixedMetrics`; `render_metrics` EXHAUSTIVELY destructures `MetricValues` (no `..`) so a new field is a compile
+     error until paired (the registry-vs-struct completeness guard); 2-arg `admin_router` at both call sites; the orchestrator
+     RETAINS its `MeshControl` (was discarded). Tests: render pairing + both `find` branches + struct↔registry completeness +
+     the `/metrics` HTTP scrape reflecting live values + a NEW integration test proving the live `MeshMetrics`→`MeshControl`
+     bridge mirrors `stats()` field-for-field. Gate: Tier-A 100%, Tier-B ~93%, clippy/fmt clean.
+     **[→ M4 follow-up, before a soak dashboard]** `render_metrics` emits `# TYPE {name} untyped` for EVERY metric,
+     including the new `_total` COUNTERS — Prometheus convention pairs a `_total` name with `# TYPE counter`. Pre-existing
+     (the removed `render_metrics_shell` did the same); `rate()`/`increase()` still work on untyped, but a scraper/linter that
+     keys off TYPE will not classify these as counters. Give `metric_names` a per-name type tag and emit the right TYPE line
+     when the first soak dashboard is authored (post-impl review `wf_dbc1ca7a` LOW).
      **R-4d2 (M4) SCOPE (vetted `wbt45dxj6` HIGH): orchestrator-ONLY this slice.** The draft wanted gateway+shard `/metrics`
      listeners too, but that is UNDELIVERABLE in the dev cluster: `ClusterAddrs` has ONE `admin` field, `VD_ADMIN_ADDR` is set
      only in `orchestrator_env`, and `SlotPorts` allocates ONE `admin` port — so gateway/shard read `VD_ADMIN_ADDR` unset

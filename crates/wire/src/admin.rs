@@ -139,8 +139,44 @@ pub mod metric_names {
     /// Gauge: sagas currently in flight.
     pub const TRANSFERS_IN_FLIGHT: &str = "vd_transfers_in_flight";
     /// Counter: snapshot datagrams dropped because they exceeded the path MTU — a
-    /// partitioner-budget misconfiguration ALERT (must stay 0; audit GW-1).
+    /// partitioner-budget misconfiguration ALERT (must stay 0; audit GW-1). LEGACY
+    /// EXCEPTION: this name predates the `_total` counter convention and is already a
+    /// frozen scraped name, so it deliberately keeps its un-suffixed form (renaming a
+    /// live scraped metric breaks dashboards) — the R-4d M4 mesh counters below DO
+    /// carry `_total`.
     pub const DATAGRAMS_DROPPED_TOO_LARGE: &str = "vd_datagrams_dropped_too_large";
+
+    // --- R-4d M4: the io-prod mesh reliability counters (MeshStatsSnapshot). Surfaced so a
+    // soak/deploy can alert on a dead ack path (reliable_acked stuck at 0), a contiguity gap
+    // (gap_drop MUST be 0), or a saturated retry buffer / oversize frame (reliable_shed). ---
+
+    /// Counter: snapshot datagrams dropped on a failed transport send (the mesh datagram
+    /// hot path could not hand the frame to quinn) — distinct from the MTU-too-large drop.
+    pub const DATAGRAMS_DROPPED_SEND_TOTAL: &str = "vd_datagrams_dropped_send_total";
+    /// Counter: RELIABLE inbound messages dropped because the bounded inbox was saturated
+    /// with reliable traffic — a genuine overload ALERT (must stay 0 on a healthy run).
+    pub const INBOUND_DROPPED_RELIABLE_TOTAL: &str = "vd_inbound_dropped_reliable_total";
+    /// Counter: UNRELIABLE inbound messages evicted to bound the inbox — by-design
+    /// latest-wins back-pressure, not an alert.
+    pub const INBOUND_DROPPED_UNRELIABLE_TOTAL: &str = "vd_inbound_dropped_unreliable_total";
+    /// Counter: reliable frames dropped by the receiver as belonging to a STALE sender
+    /// incarnation (a restarted sender's ledger reset — R-3').
+    pub const STALE_INCARNATION_DROP_TOTAL: &str = "vd_stale_incarnation_drop_total";
+    /// Counter: reliable frames dropped by the receiver as belonging to a STALE lane epoch
+    /// (a pre-blip epoch after a redial — R-3').
+    pub const STALE_EPOCH_DROP_TOTAL: &str = "vd_stale_epoch_drop_total";
+    /// Counter: reliable frames the receiver DEDUPED (already delivered — a replay after a
+    /// blip re-covered an already-acked tail; benign, R-3').
+    pub const DEDUP_DROP_TOTAL: &str = "vd_dedup_drop_total";
+    /// Counter: reliable frames dropped leaving a contiguity GAP (seq > hw+1) — a
+    /// MUST-BE-0 alert (the wire epoch keeps it genuinely 0; R-3').
+    pub const GAP_DROP_TOTAL: &str = "vd_gap_drop_total";
+    /// Counter: reliable sends SHED at the sender — the retry buffer hit its byte cap
+    /// (dead ack path) or the frame was un-framable (oversize). Nonzero = an ALERT (R-4b/R-4d).
+    pub const RELIABLE_SHED_TOTAL: &str = "vd_reliable_shed_total";
+    /// Counter: reliable frames RETIRED by an incoming cumulative ack (the retry buffer
+    /// draining). Stuck at 0 while sends flow = a DEAD ACK PATH (R-3'/R-4a).
+    pub const RELIABLE_ACKED_TOTAL: &str = "vd_reliable_acked_total";
 
     /// Every registered name (the conformance test iterates this; adding a metric
     /// without listing it here is a review-rejectable defect).
@@ -153,6 +189,15 @@ pub mod metric_names {
         GHOST_STALENESS_TICKS,
         TRANSFERS_IN_FLIGHT,
         DATAGRAMS_DROPPED_TOO_LARGE,
+        DATAGRAMS_DROPPED_SEND_TOTAL,
+        INBOUND_DROPPED_RELIABLE_TOTAL,
+        INBOUND_DROPPED_UNRELIABLE_TOTAL,
+        STALE_INCARNATION_DROP_TOTAL,
+        STALE_EPOCH_DROP_TOTAL,
+        DEDUP_DROP_TOTAL,
+        GAP_DROP_TOTAL,
+        RELIABLE_SHED_TOTAL,
+        RELIABLE_ACKED_TOTAL,
     ];
 }
 

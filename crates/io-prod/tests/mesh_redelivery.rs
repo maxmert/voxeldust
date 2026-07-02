@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use vd_core::NodeId;
+use vd_io_prod::admin::{MeshMetrics, MetricsSource};
 use vd_io_prod::mesh::{MeshConfig, MeshControl, MeshTransport, spawn_mesh};
 use vd_io_prod::trust::ClusterTrust;
 use vd_sim::io::{Inbound, MsgClass, ShedReason, Transport};
@@ -514,4 +517,73 @@ fn a_full_retry_buffer_sheds_send_shed_retry_buffer_full_never_confirming_the_pe
     );
     // B is a live peer throughout; keep its handles alive to the end so the connection never tears down.
     let _ = (&mut b, &ctl_b);
+}
+
+#[test]
+fn mesh_metrics_source_reflects_the_live_mesh_counters() {
+    // R-4d M4: MeshMetrics reads MeshControl::stats() per scrape — the ACTUAL prod /metrics path
+    // (the admin.rs unit tests only cover render + FixedMetrics). Prove the LIVE bridge: after a
+    // burst retires, MetricsSource::values() mirrors the MeshControl snapshot field-for-field.
+    const N: usize = 20;
+    let rt = runtime();
+    let trust = ClusterTrust::generate("vd-mesh-metrics").expect("trust");
+    let (addr_a, addr_b) = (reserve(), reserve());
+    let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
+    let (mut a, ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
+    let (mut b, _ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
+
+    for i in 0..N {
+        send_reliable(&mut a, B, i as u8);
+    }
+    let mut got = Vec::new();
+    wait_until(
+        || {
+            drain_wire_values(&mut b, &mut got);
+            got.len() >= N
+        },
+        "B never received the burst",
+    );
+    // Wait for the window to fully retire so the counters are STABLE (no more traffic ⇒ no snapshot race).
+    wait_until(
+        || ctl_a.stats().reliable_acked as usize >= N,
+        "A's retry window never retired",
+    );
+
+    let ctl_a = Arc::new(ctl_a);
+    let metrics = MeshMetrics(Arc::clone(&ctl_a));
+    let v = metrics.values();
+    let s = ctl_a.stats();
+    // The live counter FLOWS through the MetricsSource, not a hardcoded 0.
+    assert_eq!(
+        v.reliable_acked, N as u64,
+        "the live retire count is reflected"
+    );
+    // And every field mirrors the MeshControl snapshot 1:1 (no transposition in the field copy).
+    assert_eq!(v.reliable_acked, s.reliable_acked);
+    assert_eq!(v.reliable_shed, s.reliable_shed);
+    assert_eq!(v.gap_drop, s.gap_drop);
+    assert_eq!(v.dedup_drop, s.dedup_drop);
+    assert_eq!(v.stale_incarnation_drop, s.stale_incarnation_drop);
+    assert_eq!(v.stale_epoch_drop, s.stale_epoch_drop);
+    assert_eq!(v.datagrams_dropped_too_large, s.datagrams_dropped_too_large);
+    assert_eq!(v.datagrams_dropped_send, s.datagrams_dropped_send);
+    assert_eq!(v.inbound_dropped_reliable, s.inbound_dropped_reliable);
+    assert_eq!(v.inbound_dropped_unreliable, s.inbound_dropped_unreliable);
+    let _ = &mut b;
 }
