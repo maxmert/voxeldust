@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -312,7 +313,20 @@ struct RecvState {
 /// The node-wide receiver ledger: one [`RecvState`] per `(peer, class)`, shared by ALL `serve_connection`
 /// readers across ALL connections/redials. Keyed FOREVER — never per-connection/per-stream (that WAS the
 /// reverted-R-1 bug). Created once in [`spawn_mesh`].
-type RecvLedger = Arc<Mutex<BTreeMap<(NodeId, MsgClass), RecvState>>>;
+///
+/// R-4e2 (H2 RX-plane re-key): keyed PER-PEER at the outer level so a frame from peer P no longer serializes
+/// against a frame from peer Q (the RX twin of the per-peer SEND lanes). The OUTER [`RwLock`] is shared-read
+/// on the steady-state hot path (fetch a peer's inner `Arc`); it is write-locked ONLY on the rare first frame
+/// from a never-seen peer (insert the peer's inner map). The INNER per-peer [`Mutex`] serializes only frames
+/// from the SAME peer — and that serialization is LOAD-BEARING: it is what makes the `StaleEpoch`-before-hw
+/// verdict + the reliable-inbox-drop rollback (`*st = before`) atomic against a concurrent same-`(peer,class)`
+/// frame (two `serve_data_stream` tasks for one `(peer,class)` genuinely overlap across a redial — quinn's
+/// close is async). LOCK ORDER (the only one; never reversed): outer-read → (drop) → inner-`Mutex` →
+/// (optionally, in `classify_and_deliver`) the inbox `Mutex`. `ack_egress` takes the ledger, NEVER the inbox;
+/// `acked_keys` is always acquired-then-released ABOVE (never inside) an inner-`Mutex` hold. RESIDUAL: after
+/// this re-key the node-wide `SharedInbox` `Mutex` is the NEXT RX serialization point (a future per-peer-inbox
+/// / lock-free-drain scaling slice — DEFERRED.md); the ledger re-key alone does NOT deliver full RX isolation.
+type RecvLedger = Arc<RwLock<BTreeMap<NodeId, Arc<Mutex<BTreeMap<MsgClass, RecvState>>>>>>;
 
 /// The contiguity verdict for one reliable frame. Distinct arms (not a bool) so each is equality-asserted
 /// in unit tests (HR5(d)) and counted on its own never-silent [`MeshStats`] counter.
@@ -729,7 +743,7 @@ pub fn spawn_mesh(
     let stats = Arc::new(MeshStats::default());
     // The node-wide receiver ledger (SURVIVES connection teardown — the cross-stream cure) and the dialed-
     // connection registry (the drop_connections blip lever), created ONCE and shared by every task.
-    let ledger: RecvLedger = Arc::new(Mutex::new(BTreeMap::new()));
+    let ledger: RecvLedger = Arc::new(RwLock::new(BTreeMap::new()));
     let connections: ConnRegistry = Arc::new(Mutex::new(BTreeMap::new()));
 
     // Accept loop: a Semaphore caps concurrently-served connections so a connection
@@ -906,10 +920,35 @@ fn classify_and_deliver(
     ledger: &RecvLedger,
     frame: &ReliableFrame,
 ) {
-    let mut led = ledger
+    // R-4e2: fetch this peer's inner lock. Steady state (the peer is already known) = a SHARED READ of the
+    // outer map, so a frame from peer P never contends with a frame from peer Q. Only the RARE first frame
+    // from a never-seen peer takes the outer WRITE lock to insert the peer's inner map.
+    let peer_lock = {
+        let outer = ledger
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        outer.get(&frame.from).cloned()
+    };
+    let peer_lock = match peer_lock {
+        Some(l) => l,
+        None => {
+            let mut outer = ledger
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(
+                outer
+                    .entry(frame.from)
+                    .or_insert_with(|| Arc::new(Mutex::new(BTreeMap::new()))),
+            )
+        }
+    };
+    // The inner per-peer lock: serializes only same-peer frames, and is HELD across classify + push_inbox +
+    // the rollback (the atomicity invariant — see the RecvLedger doc). The inner seed is byte-identical to
+    // the pre-re-key node-wide entry (only the OUTER insert above is new).
+    let mut classes = peer_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let st = led.entry((frame.from, frame.class)).or_insert(RecvState {
+    let st = classes.entry(frame.class).or_insert(RecvState {
         incarnation: frame.incarnation,
         epoch: frame.epoch,
         hw: 0,
@@ -982,27 +1021,38 @@ async fn ack_egress(
             () = ack_due.notified() => {}
             _ = interval.tick() => {}
         }
-        // Snapshot the cumulative acks: per (peer,class) read (incarnation, epoch, hw) atomically under ONE
-        // ledger lock hold, copy out, DROP the guard — never held across the write below.
-        let (incarnation, entries) = {
-            let keys = acked_keys
+        // Snapshot the cumulative acks. R-4e2: copy the key set (acked_keys grows-only, cumulative acks are
+        // monotone+idempotent, so a key added after this copy is picked up next flush — no atomicity needed),
+        // DROP acked_keys, THEN read the ledger — so acked_keys is never held across an inner peer lock (the
+        // lock-order invariant). Per key: outer-read → that peer's inner Mutex → read (incarnation,epoch,hw).
+        // The result is copied out; the write below stays OUTSIDE all locks (cancel-safety).
+        let keys: Vec<(NodeId, MsgClass)> = {
+            let g = acked_keys
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let led = ledger
-                .lock()
+            g.iter().copied().collect()
+        };
+        let (incarnation, entries) = {
+            let outer = ledger
+                .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut incarnation = 0u64;
             let mut entries = Vec::new();
-            for &(peer, class) in keys.iter() {
-                if let Some(st) = led.get(&(peer, class)) {
-                    // ECHO the sender's incarnation (uniform per connection = one sender process), so the
-                    // sender's on_ack matches it against its own lane incarnation.
-                    incarnation = st.incarnation;
-                    entries.push(AckEntry {
-                        class,
-                        epoch: st.epoch,
-                        ack_through: st.hw,
-                    });
+            for (peer, class) in keys {
+                if let Some(peer_lock) = outer.get(&peer) {
+                    let classes = peer_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(st) = classes.get(&class) {
+                        // ECHO the sender's incarnation (uniform per connection = one sender process), so the
+                        // sender's on_ack matches it against its own lane incarnation.
+                        incarnation = st.incarnation;
+                        entries.push(AckEntry {
+                            class,
+                            epoch: st.epoch,
+                            ack_through: st.hw,
+                        });
+                    }
                 }
             }
             (incarnation, entries)

@@ -1139,9 +1139,25 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      (per-`from` seq-set == 0..frames, per-sender `reliable_acked`, gap/stale/dedup==0) + a derived generous progress deadline;
      `just mesh-load` recipe (pinned N=64, validated GREEN 5/5 on the dev host, N=128 also green ~0.8s — the fan-in is
      correctness-bound not wall-clock-bound on loopback; re-validate the target host fd/port ceiling before a cloud soak). H2
-     UNCHANGED (proves the single-lock baseline is CORRECT under fan-in; the re-key is R-4e2). NEW DEFERRED item owed (R-5-audit):
-     after the H2 ledger re-key, the node-wide `SharedInbox` Mutex is the NEXT RX serialization point — per-peer inbox partition /
-     lock-free MPSC drain is a future scaling slice; the ledger re-key alone does NOT deliver full RX-plane isolation. [→R-6, CLOUD-BLOCKING,
+     UNCHANGED (proves the single-lock baseline is CORRECT under fan-in; the re-key is R-4e2).
+     **✅ R-4e2 LANDED (post-impl review `wf_13851c8e`, 2 opus concurrency lenses + synth → SOUND_TO_COMMIT, ZERO
+     correctness/liveness/deadlock defects): the H2 per-peer RecvLedger re-key.** `RecvLedger` is now
+     `Arc<RwLock<BTreeMap<NodeId, Arc<Mutex<BTreeMap<MsgClass, RecvState>>>>>>` (std-only, no new dep) — a frame from peer P no
+     longer serializes against peer Q. Outer `RwLock` shared-READ on the hot path; write-locked ONLY on a first-frame-from-a-new-
+     peer (`or_insert_with` idempotent for the concurrent-first-frame race). Inner per-peer `Mutex` HELD across
+     classify+push_inbox+`*st=before` rollback (the atomicity invariant — two `serve_data_stream` tasks for one (peer,class) overlap
+     across a redial). `ack_egress` copies acked_keys then two-level-reads (never nests acked_keys inside an inner lock); kept
+     per-key (no single-peer collapse). Lock order outer-read→inner→inbox, never reversed; all poison-safe. Review VERIFIED
+     byte-identical behavior vs the single-lock version + N=64 fan-in green 3/3 + Tier-B mesh.rs 93.98%. **2 LOWs, ledger-only:**
+     (i) `ack_egress`'s outer-peer-miss arm is a dead region unreachable-under-trust (acked_keys populated only after the peer is
+     inserted) — TOLERATED by the Tier-B 90% floor (a `coverage(off)` would over-engineer a region the tier deliberately tolerates;
+     the defensive None-guard stays per the "correct-even-if-multi-peer-ever-possible" invariant); (ii) std `RwLock` has no
+     writer-fairness guarantee — a first-frame WRITE could theoretically be delayed under sustained read pressure (bounded, once
+     per peer, empirically fine at N=64); if a churn-heavy soak ever shows first-frame admission latency, a writer-preferring
+     `parking_lot::RwLock` is the cure but a NEW-DEP JOINT-INVESTIGATION decision, NOT to be adopted unilaterally.
+     RESIDUAL (R-5-audit): after the ledger re-key the node-wide `SharedInbox` Mutex is the NEXT RX serialization point — per-peer
+     inbox partition / lock-free MPSC drain is a future scaling slice; the ledger re-key alone does NOT deliver full RX isolation.
+     NEXT R-4e3 (correlated-outage N=8 all-pairs + L5 ignore-guard + conn_died coverage) → R-4e4 (R-5 capstone + D-6 #1 partial-flip). [→R-6, CLOUD-BLOCKING,
      SHARPENED] confirm-dead AMPLIFIES the M3-incarnation wall-clock hazard: a CrashLooping peer is confirmed-dead (correct) but
      its fast-restart reliable traffic is silently Dedup/Stale-dropped ⇒ clear-on-ack never fires ⇒ a split-brain-ish stall; the
      durable monotone boot-counter is a HARD precondition before ANY real deploy, not a dev residual. [→P9] pin an
