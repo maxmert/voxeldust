@@ -79,6 +79,17 @@ orch-crash:
     cargo test -p vd-bins --features store-test-hooks --test orchestrator_crash -- --test-threads=1
     cargo test -p vd-bins --test boot_guard -- --test-threads=1
 
+# R-4e (L7): the N-peer real-QUIC LOAD/soak gate. Sustained reliable fan-in — VD_MESH_LOAD_NODES sender
+# endpoints into ONE receiver — proving no-loss/no-dup, reliable_acked keeps pace, gap_drop==0, and
+# inbound_dropped_reliable==0 (a SIZED receiver inbox makes that structural), i.e. NO RX-plane collapse
+# under N-peer fan-in. SLOW + resource-heavy (N real quinn endpoints on one host) ⇒ NOT in the default
+# `gate`; a STANDALONE BLOCKING soak/deploy precondition, run before any real deploy. The pinned soak N
+# (64) was validated green 5/5 on the dev host (12,800 reliable frames in ~0.1s; N=128 also green in
+# ~0.8s — the fan-in is correctness-bound, not wall-clock-bound on loopback). Re-validate against the
+# target host's fd/port ceiling before a cloud soak. `mesh_under_loss` is the R-5 capstone (lands R-4e4).
+mesh-load:
+    VD_MESH_LOAD_NODES=64 cargo test -p vd-io-prod --test mesh_load -- --nocapture --test-threads=1
+
 # The Tier-B (ratcheted-floor) coverage variant: the SIGKILLed orchestrator child's counters survive ONLY
 # in %c CONTINUOUS mode (the mmapped profraw is updated in place; no atexit flush after a SIGKILL). %p-%m
 # keep the two orchestrator boots (+ shard) distinct; the child INHERITS LLVM_PROFILE_FILE from this test

@@ -1128,7 +1128,20 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      bridge) with (a) a CORRELATED multi-peer outage (drop ≥50% simultaneously) asserting `inbound_dropped_reliable`≈0 for
      surviving-peer traffic — else coalesce confirm-dead to ONE notice/peer/window or give NodeUnreachable a priority lane; (b) a
      pod-reschedule/address-change scenario (L5: `peer_writer` captures `addr` once at spawn — a moved peer is dialed stale
-     forever; recovery needs address re-plumb); (c) the H2 RecvLedger-lock contention MEASUREMENT. [→R-6, CLOUD-BLOCKING,
+     forever; recovery needs address re-plumb); (c) the H2 RecvLedger-lock contention MEASUREMENT.
+     **R-4e DESIGN VETTED (design+3-review `wf_e096eefb`, SOUND_TO_IMPLEMENT; full spec `scripts/r4e_vetted_design.md`; caught a
+     CRITICAL — the `inbound_dropped_reliable==0` assertion was a drain-vs-fill FLAKE, cured by sizing the receiver inbox to the
+     full backlog). SUB-SLICED: R-4e1 (load harness + baseline, H2 UNCHANGED) → R-4e2 (H2 per-peer RecvLedger re-key) → R-4e3
+     (correlated-outage N=8 all-pairs + L5 `#[ignore]` red-guard + `conn_died` coverage) → R-4e4 (R-5 `mesh_under_loss.rs`
+     producer-less capstone + the D-6 #1 PARTIAL-flip). ✅ R-4e1 LANDED: `crates/io-prod/tests/mesh_load.rs` — fan-in (N senders
+     → 1 receiver), a `LoadShape` config (all consts homed; `VD_MESH_LOAD_NODES` env, default 16), the SIZED receiver inbox
+     (`senders*frames_per_sender+256` ⇒ `inbound_dropped_reliable==0` STRUCTURAL not a race), completion-gated EXACT assertions
+     (per-`from` seq-set == 0..frames, per-sender `reliable_acked`, gap/stale/dedup==0) + a derived generous progress deadline;
+     `just mesh-load` recipe (pinned N=64, validated GREEN 5/5 on the dev host, N=128 also green ~0.8s — the fan-in is
+     correctness-bound not wall-clock-bound on loopback; re-validate the target host fd/port ceiling before a cloud soak). H2
+     UNCHANGED (proves the single-lock baseline is CORRECT under fan-in; the re-key is R-4e2). NEW DEFERRED item owed (R-5-audit):
+     after the H2 ledger re-key, the node-wide `SharedInbox` Mutex is the NEXT RX serialization point — per-peer inbox partition /
+     lock-free MPSC drain is a future scaling slice; the ledger re-key alone does NOT deliver full RX-plane isolation. [→R-6, CLOUD-BLOCKING,
      SHARPENED] confirm-dead AMPLIFIES the M3-incarnation wall-clock hazard: a CrashLooping peer is confirmed-dead (correct) but
      its fast-restart reliable traffic is silently Dedup/Stale-dropped ⇒ clear-on-ack never fires ⇒ a split-brain-ish stall; the
      durable monotone boot-counter is a HARD precondition before ANY real deploy, not a dev residual. [→P9] pin an
