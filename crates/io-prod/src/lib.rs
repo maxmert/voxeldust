@@ -97,22 +97,27 @@ pub(crate) struct DatagramFrame {
 
 /// The cumulative ACK frame (R-3'): the reverse-lane, latest-wins acknowledgement a data RECEIVER sends
 /// back to a data SENDER so the sender can RETIRE its retained (unacked) reliable window. One `AckFrame`
-/// batches every reliable class on the connection. `incarnation` ECHOES the sender's process-incarnation as
-/// recorded in the receiver's ledger (uniform per connection — a connection belongs to ONE sender process),
-/// so the sender's `on_ack` rejects an ack minted against a since-restarted incarnation. Framed through the
-/// SAME `wire::framing` home as [`ReliableFrame`] (HR3), on a dedicated `STREAM_KIND_ACK` uni stream — never
-/// a datagram, never a `MsgClass` arm: acks live BELOW the frozen `Transport` seam (sim/node never see them).
+/// batches every reliable class on the connection. Framed through the SAME `wire::framing` home as
+/// [`ReliableFrame`] (HR3), on a dedicated `STREAM_KIND_ACK` uni stream — never a datagram, never a
+/// `MsgClass` arm: acks live BELOW the frozen `Transport` seam (sim/node never see them).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AckFrame {
-    pub(crate) incarnation: u64,
     pub(crate) entries: Vec<AckEntry>,
 }
 
 /// One class's cumulative acknowledgement inside an [`AckFrame`]: `ack_through` is the highest CONTIGUOUS
 /// seq the receiver has DELIVERED for `(peer, class)` at `epoch` (TCP-style — everything `<=` it retires).
+/// `incarnation` ECHOES the sender's process-incarnation as recorded in the receiver's ledger, so the
+/// sender's `on_ack` rejects an ack minted against a since-restarted incarnation. It is PER-CLASS (R-6c/L4):
+/// a single `AckFrame`-level scalar was last-class-wins (`ack_egress` overwrote it each loop iteration), so
+/// once the durable-incarnation work (R-6a) makes sender restart first-class — and if a connection is ever
+/// REUSED across a restart carrying two classes at DIFFERENT incarnations — a shared scalar would retire one
+/// class's window against the other's incarnation (a silent send stall). Per-entry eliminates that latent
+/// invariant dependency (a greenfield hard cutover — no rolling-version mix before the first cloud deploy).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AckEntry {
     pub(crate) class: MsgClass,
+    pub(crate) incarnation: u64,
     pub(crate) epoch: u32,
     pub(crate) ack_through: u64,
 }

@@ -1032,11 +1032,10 @@ async fn ack_egress(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             g.iter().copied().collect()
         };
-        let (incarnation, entries) = {
+        let entries = {
             let outer = ledger
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut incarnation = 0u64;
             let mut entries = Vec::new();
             for (peer, class) in keys {
                 if let Some(peer_lock) = outer.get(&peer) {
@@ -1044,18 +1043,19 @@ async fn ack_egress(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(st) = classes.get(&class) {
-                        // ECHO the sender's incarnation (uniform per connection = one sender process), so the
-                        // sender's on_ack matches it against its own lane incarnation.
-                        incarnation = st.incarnation;
+                        // Stamp THIS class's incarnation per-entry (R-6c/L4) so the sender's on_ack matches
+                        // it against that lane's own incarnation — correct even if the connection ever
+                        // carries two classes at different incarnations (no last-class-wins scalar).
                         entries.push(AckEntry {
                             class,
+                            incarnation: st.incarnation,
                             epoch: st.epoch,
                             ack_through: st.hw,
                         });
                     }
                 }
             }
-            (incarnation, entries)
+            entries
         };
         // Nothing to ack yet, or identical to the last flush (dedup the idle busy-write; race-free — any
         // note that raced in is reflected in this very snapshot).
@@ -1063,7 +1063,6 @@ async fn ack_egress(
             continue;
         }
         let frame = AckFrame {
-            incarnation,
             entries: entries.clone(),
         };
         if write_ack_frame(&mut send, &frame).await.is_err() {
@@ -1124,7 +1123,9 @@ async fn peer_writer(mut w: PeerWriter) {
                 {
                     for e in &ack.entries {
                         if let Some(lane) = lanes.get_mut(&e.class) {
-                            let retired = lane.on_ack(ack.incarnation, e.epoch, e.ack_through);
+                            // R-6c/L4: retire against THIS entry's own class incarnation (per-entry), not a
+                            // single frame-level scalar.
+                            let retired = lane.on_ack(e.incarnation, e.epoch, e.ack_through);
                             if retired > 0 {
                                 w.stats
                                     .reliable_acked
@@ -1778,6 +1779,76 @@ mod tests {
         // Frames are stamped with the lane's incarnation + current epoch (0).
         let f0 = &lane.retry[&0].frame;
         assert_eq!((f0.incarnation, f0.epoch, f0.seq), (7, 0, 0));
+    }
+
+    #[test]
+    fn r6c_a_per_class_ack_incarnation_retires_each_lane_against_its_own() {
+        // L4: acks carry a PER-CLASS incarnation, so two lanes at DIFFERENT incarnations (the future
+        // connection-reuse-across-a-restart case) each retire against ITS OWN. The single frame-level scalar
+        // that preceded R-6c was last-class-wins (ack_egress overwrote it each loop iteration) and would
+        // stall whichever lane did not match the emitted scalar.
+        let mut saga = ReliableLaneSender::new(5, BIG_CAP);
+        let mut ghost = ReliableLaneSender::new(9, BIG_CAP);
+        assert_eq!(saga.assign_and_retain(FROM, MsgClass::Saga, b"a"), Ok(0));
+        assert_eq!(
+            ghost.assign_and_retain(FROM, MsgClass::GhostReliable, b"b"),
+            Ok(0)
+        );
+
+        // The ack frame carries each class's own incarnation; the peer_writer fan-out retires each lane
+        // against ITS entry's incarnation.
+        let entries = [
+            AckEntry {
+                class: MsgClass::Saga,
+                incarnation: 5,
+                epoch: 0,
+                ack_through: 0,
+            },
+            AckEntry {
+                class: MsgClass::GhostReliable,
+                incarnation: 9,
+                epoch: 0,
+                ack_through: 0,
+            },
+        ];
+        assert_eq!(
+            saga.on_ack(
+                entries[0].incarnation,
+                entries[0].epoch,
+                entries[0].ack_through
+            ),
+            1
+        );
+        assert_eq!(
+            ghost.on_ack(
+                entries[1].incarnation,
+                entries[1].epoch,
+                entries[1].ack_through
+            ),
+            1
+        );
+        assert!(
+            saga.retry.is_empty() && ghost.retry.is_empty(),
+            "both classes' windows retired against their own incarnation"
+        );
+
+        // The MISFIRE the per-class design removes: a WRONG-incarnation ack (what a shared last-class-wins
+        // scalar would apply to the non-matching lane) retires NOTHING — a silent send stall.
+        let mut stalled = ReliableLaneSender::new(9, BIG_CAP);
+        assert_eq!(
+            stalled.assign_and_retain(FROM, MsgClass::GhostReliable, b"c"),
+            Ok(0)
+        );
+        assert_eq!(
+            stalled.on_ack(5, 0, 0),
+            0,
+            "an ack minted at a wrong incarnation retires nothing"
+        );
+        assert_eq!(
+            stalled.retry.len(),
+            1,
+            "the lane's window is stranded — the latent stall R-6c removes"
+        );
     }
 
     #[test]

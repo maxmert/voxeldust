@@ -1310,9 +1310,14 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      wall-clock bound); it's the companion to R-5' `mesh_under_loss.rs` and the test that empirically surfaces H2. [M2→R-5'
      belt-and-suspenders] add a source-side retained-ghost STALENESS REAPER for the one-shot `GhostFlow::Despawn` band-exit
      (#4 below) — it has NO saga so a per-saga re-solicit structurally cannot reach it, and a lost Despawn = a phantom
-     cross-boundary COLLIDER (violates players-physically-collide). [L4→R-6] promote the `AckFrame` single-incarnation to a
-     NAMED R-6 acceptance item (move `incarnation` into `AckEntry` per-class OR prove one-conn-one-incarnation holds under
-     durable-incarnation connection-reuse). [L5→provisioning slice] `peer_writer`'s `addr` is captured once at spawn — a
+     cross-boundary COLLIDER (violates players-physically-collide). **✅ L4 LANDED (R-6c): `incarnation` MOVED from
+     `AckFrame` (a single last-class-wins scalar `ack_egress` overwrote each loop iteration) INTO `AckEntry` (per-class).**
+     `ack_egress` stamps each entry with its `(peer,class)` incarnation; the `peer_writer` fan-out calls `on_ack(e.incarnation,
+     e.epoch, e.ack_through)` per entry. Removes the latent silent send-stall that R-6a's first-class sender-restart could reach
+     if a connection is ever reused across a restart carrying two classes at different incarnations. Greenfield hard cutover (no
+     rolling-version mix pre-first-deploy). New test `r6c_a_per_class_ack_incarnation_retires_each_lane_against_its_own` proves
+     each lane retires against ITS own incarnation + that a wrong-incarnation ack retires nothing (the misfire the fix removes).
+     Below the frozen seam (AckFrame is `pub(crate)`). io-prod full suite green, Tier-B mesh.rs 94.30%. [L5→provisioning slice] `peer_writer`'s `addr` is captured once at spawn — a
      NodeId that moves IP needs the writer to RE-READ its address (not just re-dial), so the dynamic-address (CA-1/orch
      provisioning) slice must re-plumb the address, not only the connection.
      **(1a) `BatchHandoff::AwaitAdopt`** — the first-identified instance. A producer-less phase has NO `scan_deadlines` re-drive
