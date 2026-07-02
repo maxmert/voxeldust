@@ -1298,6 +1298,20 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      VD_BOOT_STATE_DIR durable self-counter (genesis_floor=launch_incarnation, VD_BOOT_DURABLE_ROOT allow-list, VD_BOOT_STATE_
      EPHEMERAL_OK escape) → else FAIL LOUD. std-only NO new dep, NO frozen-seam touch, NO HR3 fork. 8 boot + 4 bins unit tests;
      process_parity green (real bin boot path); Tier-B boot.rs 94.17%. Post-impl review `wf_b241ed1c`.
+     **✅ R-6c LANDED (c7a7255): the ack `incarnation` moved from a single `AckFrame` scalar (`ack_egress` overwrote it each
+     loop iteration = last-class-wins) INTO `AckEntry` (per-class); `peer_writer` fan-out calls `on_ack(e.incarnation, …)` per
+     entry — removes the latent silent send-stall R-6a's first-class sender-restart could reach on a reused connection carrying
+     two classes at different incarnations. Greenfield hard cutover, below the frozen seam.**
+     **✅ R-6b LANDED — M3 CAPSTONE 🟩: `crates/bins/tests/boot_counter_crashloop.rs` (Tier-B, gated via `just orch-crash` with
+     `--test-threads=1`) is the LOOPBACK CrashLoop e2e proof. A real SIGKILL + sub-second shard restart, over the real QUIC mesh,
+     PAIRED: RED control (fixed `VD_PROCESS_INCARNATION` reused across the restart) ⇒ the orchestrator silently DEDUPS the
+     restarted shard's reliable realm re-grant (observed `vd_dedup_drop_total`+2/+3 over 3 runs); GREEN (durable boot-counter ⇒
+     strictly-higher incarnation) ⇒ the receiver's A1 ladder resets the dedup high-water ⇒ Accepted, `dedup_drop`+0/`stale`+0.
+     Same shard re-grant behavior; only the incarnation source differs — so the pairing PROVES the boot-counter fixes exactly what
+     the wall-clock version breaks. Adversarial review (opus) verdict SOUND_WITH_NITS — both nits (gate-wiring with a thread guard;
+     RAII temp cleanup) folded before commit. This flips the M3 milestone: `VD_PROCESS_INCARNATION`=wall-clock is no longer the
+     only incarnation source; the durable monotone boot-counter is proven end-to-end across a real process crash.** Only R-6d
+     (durable outbox, the AwaitAdopt SOURCE-CRASH egress = D-6 #1 residual) remains in the R-6 arc.
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

@@ -621,6 +621,21 @@ impl Cluster {
         None
     }
 
+    /// SIGKILL + REAP the most-recently-pushed child labelled `name`, and REMOVE it from the reap set (so
+    /// its bind port frees for an immediate restart). Panics if no such child is present. For CrashLoop /
+    /// restart process tests: the child stays RAII-reaped by the `Cluster` until this is called, so a panic
+    /// between spawn and kill never leaks it (unlike a bare `Child`, which does not kill on drop).
+    pub fn kill_and_reap(&mut self, name: &'static str) {
+        let idx = self
+            .children
+            .iter()
+            .rposition(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("Cluster has no child named {name} to kill"));
+        let (_, mut child) = self.children.remove(idx);
+        let _ = child.kill(); // SIGKILL on Unix
+        let _ = child.wait(); // reap (release the port + the zombie)
+    }
+
     /// Disarm: hand back the PIDs and forget the children WITHOUT killing them
     /// (the runfile is now the kill record). Call only once bring-up succeeded.
     #[must_use]

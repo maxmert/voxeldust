@@ -73,11 +73,15 @@ client-load:
 # D-6 D-delta: the orchestrator durability crash gates. `orchestrator_crash` is the SIGKILL-mid-fsync proof
 # (a real kill-9 while a directory grant sits submitted-but-pre-fsync loses <=1 batch + recovers
 # consistently); it builds the orchestrator binary WITH the writer-pause hook (`store-test-hooks`).
-# `boot_guard` (always compiled) locks the HR1 ephemeral-store boot guard's reject + accept arms. Serial
-# (each spawns a real cluster + SIGKILLs a process).
+# `boot_guard` (always compiled) locks the HR1 ephemeral-store boot guard's reject + accept arms.
+# `boot_counter_crashloop` is the R-6b M3 CAPSTONE: a real SIGKILL + sub-second shard restart, proving the
+# durable boot-counter (higher incarnation) keeps the orchestrator from silently DEDUP-dropping the restart's
+# reliable re-grant (RED control: a fixed incarnation DOES get deduped). Serial + single-threaded (each
+# spawns a real cluster + SIGKILLs a process — concurrent cluster tests would contend for CPU/ports).
 orch-crash:
     cargo test -p vd-bins --features store-test-hooks --test orchestrator_crash -- --test-threads=1
     cargo test -p vd-bins --test boot_guard -- --test-threads=1
+    cargo test -p vd-bins --test boot_counter_crashloop -- --test-threads=1
 
 # R-4e (L7): the N-peer real-QUIC LOAD/soak gate. Sustained reliable fan-in — VD_MESH_LOAD_NODES sender
 # endpoints into ONE receiver — proving no-loss/no-dup, reliable_acked keeps pace, gap_drop==0, and
