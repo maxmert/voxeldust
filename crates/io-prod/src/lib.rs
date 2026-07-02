@@ -441,7 +441,10 @@ pub(crate) async fn read_one_reliable_frame(recv: &mut quinn::RecvStream) -> Opt
 ///
 /// ⚠️ CANCEL-SAFETY: the caller MUST keep this `.await` OUTSIDE any `select!`/`timeout` — quinn
 /// `write_all` is not cancel-safe, and a torn `AckFrame` permanently desyncs the sender-side ack reader.
-pub(crate) async fn write_ack_frame(send: &mut quinn::SendStream, ack: &AckFrame) -> Result<(), ()> {
+pub(crate) async fn write_ack_frame(
+    send: &mut quinn::SendStream,
+    ack: &AckFrame,
+) -> Result<(), ()> {
     let payload = postcard::to_allocvec(ack).map_err(|_| ())?;
     let framed = vd_wire::framing::frame_payload(Ok(payload)).map_err(|_| ())?;
     send.write_all(&framed).await.map_err(|_| ())

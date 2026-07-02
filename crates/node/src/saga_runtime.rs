@@ -370,6 +370,12 @@ pub struct SagaRuntimeRes {
     /// insert-only code would have abandoned on) AND that `dest_unreachable_resolutions == 0` (the cure:
     /// a recoverable blip toward a healthy dest no longer abandons the batch). 0 on a no-fault run.
     liveness_notices: u64,
+    /// R-4d M3 orchestrator-side shed observable: total `Inbound::SendShed` notices seen. A shed is a
+    /// LOCAL transport refusal (a lane hit its retry-buffer byte cap, or an oversize frame) — it says
+    /// NOTHING about the peer's liveness, so it is counted here and NEVER fed to `record_unreachable`
+    /// (the false-confirm cure). 0 on a healthy run; `> 0` cross-references the mesh `reliable_shed`
+    /// counter (an ALERT: a saturated retry buffer / a mis-sized frame).
+    sends_shed: u64,
     /// D-3 Slice 4: the universe tick the expiry REAPER last swept, re-armed on fire so the O(directory)
     /// sweep runs at most once per `reaper_interval_ticks` (never per tick — like `scan_deadlines`' `since`).
     last_reap_tick: UniverseTick,
@@ -534,6 +540,15 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn liveness_notices(&self) -> u64 {
         self.liveness_notices
+    }
+
+    /// R-4d M3 orchestrator-side shed observable: total `Inbound::SendShed` notices seen. 0 on a healthy
+    /// run; `> 0` = a lane hit its retry cap or an oversize frame was refused (cross-reference the mesh
+    /// `reliable_shed` counter). A shed NEVER accrues to the liveness tracker — the regression proof is
+    /// that a burst of sheds toward a live peer leaves it un-confirmed-dead.
+    #[must_use]
+    pub fn sends_shed(&self) -> u64 {
+        self.sends_shed
     }
 }
 
@@ -1671,6 +1686,15 @@ pub fn drive_sagas(
                 runtime.liveness_notices += 1;
                 continue;
             }
+            // R-4d M3: a LOCAL send shed says NOTHING about `to`'s liveness — routing it to
+            // `record_unreachable` would false-confirm a live-but-ack-stalled peer dead and trip a
+            // destructive re-home. Count it and CONTINUE; NEVER touch the liveness tracker, and NEVER
+            // clear liveness evidence (a shed is orthogonal to the peer's inbound stream — `record_ack`
+            // still fires only on `Inbound::Wire`).
+            Inbound::SendShed { .. } => {
+                runtime.sends_shed += 1;
+                continue;
+            }
         };
         if *class != MsgClass::Saga {
             continue;
@@ -1816,14 +1840,15 @@ mod tests {
     use super::*;
     use crate::app::{NodeConfig, build_app};
     use crate::orchestrator::{OrchestratorConfig, register_orchestrator_with_store};
+    use vd_core::MsgId;
     use vd_core::entity_kind::{DurabilityClass, EntityKind};
     use vd_core::glam::DVec3;
     use vd_core::pose::{FrameRef, RealmId};
     use vd_core::{EntityId, EpochId, Fence, SessionId, UniverseTick};
     use vd_sim::capability::NodeKind;
     use vd_sim::directory::DirectoryTuning;
-    use vd_sim::io::Transport;
     use vd_sim::io::mem::{MemHub, MemStore};
+    use vd_sim::io::{ShedReason, Transport};
     use vd_sim::saga::BatchHandoffPhase;
     use vd_wire::intershard::TRANSIENT_COMPLETE_STEP;
     use vd_wire::seams::directory::{DirectoryKey, DirectoryOp};
@@ -3018,6 +3043,49 @@ mod tests {
         assert!(
             !runtime.liveness.is_confirmed_dead(SOURCE, UniverseTick(1)),
             "the recovered orchestrator kept its configured n = 3 margin, not the n = 1 default"
+        );
+    }
+
+    #[test]
+    fn a_send_shed_is_counted_and_never_confirms_a_live_peer_dead() {
+        // R-4d M3 regression (the false-confirm cure): a LOCAL send-shed toward a LIVE peer is a
+        // transport backpressure/oversize refusal — it says NOTHING about that peer's liveness. It
+        // must be counted (`sends_shed`) and NEVER routed to `record_unreachable`; otherwise a
+        // live-but-ack-stalled peer accrues false death evidence and gets destructively re-homed.
+        let mut rig = Rig::new();
+        // Default margin is n = 1 (one notice confirms). Drive THREE sheds toward DEST — far past the
+        // margin. If ANY leaked to `record_unreachable`, DEST would be confirmed dead.
+        {
+            let mut inbox = rig.orch.world_mut().resource_mut::<InboundBox>();
+            inbox.0 = (0..3u64)
+                .map(|i| Inbound::SendShed {
+                    to: DEST,
+                    class: MsgClass::Saga,
+                    undelivered: MsgId(i),
+                    reason: ShedReason::RetryBufferFull,
+                })
+                .collect();
+        }
+        // Run the schedule directly (NOT step_tick — its drain would clobber the seeded inbox, and the
+        // MemHub cannot produce a shed): drive_sagas reads the seeded InboundBox in place.
+        let (world, schedule) = rig.orch.parts_mut();
+        schedule.run(world);
+
+        let now = rig.orch.world_mut().resource::<ClockSample>().universe_tick;
+        let runtime = rig.orch.world_mut().resource::<SagaRuntimeRes>();
+        assert_eq!(
+            runtime.sends_shed(),
+            3,
+            "every shed is counted on sends_shed"
+        );
+        assert_eq!(
+            runtime.liveness_notices(),
+            0,
+            "no shed ever incremented liveness_notices — proof none reached record_unreachable"
+        );
+        assert!(
+            !runtime.liveness.is_confirmed_dead(DEST, now),
+            "a burst of sheds must NEVER confirm a live peer dead (the false-confirm cure)"
         );
     }
 

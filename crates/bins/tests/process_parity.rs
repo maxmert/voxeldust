@@ -90,6 +90,10 @@ impl ProcessClient {
                 Inbound::NodeUnreachable { .. } => {
                     // The gateway wasn't up yet for an early frame; retried below.
                 }
+                Inbound::SendShed { .. } => {
+                    // A local send-shed (R-4d M3): this test client's sends are tiny + its buffer
+                    // ample, so this never fires — present for Inbound exhaustiveness.
+                }
             }
         }
         self.tick += 1;

@@ -72,7 +72,11 @@ fn relay_node(fabric: &FaultFabric, id: NodeId, peer: NodeId) -> Box<dyn Steppab
             // (a killed peer) are observed and dropped, never forwarded.
             let first_wire = inbox.0.iter().find_map(|m| match m {
                 Inbound::Wire { class, bytes, .. } => Some((*class, bytes.clone())),
-                Inbound::NodeUnreachable { .. } => None,
+                // Notices (a killed peer's NodeUnreachable, or a local SendShed — R-4d M3) are
+                // observed and dropped, never forwarded around the ring. One arm: the fabric never
+                // sheds, so a distinct SendShed arm would be uncoverable, and a new Inbound variant
+                // still forces this to be reconsidered.
+                Inbound::NodeUnreachable { .. } | Inbound::SendShed { .. } => None,
             });
             if let Some((class, bytes)) = first_wire {
                 outbox.0.push((peer, class, bytes));

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use vd_core::NodeId;
 use vd_io_prod::mesh::{MeshConfig, MeshControl, MeshTransport, spawn_mesh};
 use vd_io_prod::trust::ClusterTrust;
-use vd_sim::io::{Inbound, MsgClass, Transport};
+use vd_sim::io::{Inbound, MsgClass, ShedReason, Transport};
 
 const DEADLINE: Duration = Duration::from_secs(30);
 const A: NodeId = NodeId(1);
@@ -86,8 +86,24 @@ fn happy_burst_acks_retire_the_whole_window_reliable_acked_reaches_n() {
     let trust = ClusterTrust::generate("vd-mesh-redeliver").expect("trust");
     let (addr_a, addr_b) = (reserve(), reserve());
     let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
-    let (mut a, ctl_a) = node(rt.handle(), &trust, A, addr_a, &book, Duration::from_millis(20), 1);
-    let (mut b, ctl_b) = node(rt.handle(), &trust, B, addr_b, &book, Duration::from_millis(20), 1);
+    let (mut a, ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
+    let (mut b, ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
 
     for i in 0..N {
         send_reliable(&mut a, B, i as u8);
@@ -115,7 +131,10 @@ fn happy_burst_acks_retire_the_whole_window_reliable_acked_reaches_n() {
         "A's retry window never fully retired (dead ack path?)",
     );
     let sa = ctl_a.stats();
-    assert_eq!(sa.reliable_acked as usize, N, "every frame retired exactly once");
+    assert_eq!(
+        sa.reliable_acked as usize, N,
+        "every frame retired exactly once"
+    );
     assert_eq!(sa.reliable_shed, 0, "no shed on the happy path");
     // Receiver honesty: no gaps, no dedups on the happy (blip-free) path.
     let sb = ctl_b.stats();
@@ -145,8 +164,24 @@ fn a_drop_connections_blip_mid_burst_delivers_exactly_once() {
     let trust = ClusterTrust::generate("vd-mesh-redeliver").expect("trust");
     let (addr_a, addr_b) = (reserve(), reserve());
     let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
-    let (mut a, ctl_a) = node(rt.handle(), &trust, A, addr_a, &book, Duration::from_millis(20), 1);
-    let (mut b, ctl_b) = node(rt.handle(), &trust, B, addr_b, &book, Duration::from_millis(20), 1);
+    let (mut a, ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
+    let (mut b, ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
 
     // Phase 1: deliver a chunk, then blip. Let the CONNECTION_CLOSE propagate (sleep) BEFORE driving phase-2,
     // so phase-2's first write PROVABLY hits the dead connection (→ NodeUnreachable bounce → epoch bump →
@@ -197,7 +232,11 @@ fn a_drop_connections_blip_mid_burst_delivers_exactly_once() {
         "a recovering blip must bounce ZERO NodeUnreachable (R-4a confirm-dead-after-N)"
     );
     // The epoch/replay kept contiguity — no frame was ever a MUST-BE-0 gap.
-    assert_eq!(ctl_b.stats().gap_drop, 0, "gap_drop must stay 0 across the blip");
+    assert_eq!(
+        ctl_b.stats().gap_drop,
+        0,
+        "gap_drop must stay 0 across the blip"
+    );
     // The endpoint SURVIVED (drop_connections is a blip, NOT a kill).
     assert!(
         ctl_a.local_addr().is_ok(),
@@ -216,8 +255,24 @@ fn an_idle_after_blip_lone_frame_is_re_driven_by_the_timer() {
     let trust = ClusterTrust::generate("vd-mesh-redeliver").expect("trust");
     let (addr_a, addr_b) = (reserve(), reserve());
     let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
-    let (mut a, ctl_a) = node(rt.handle(), &trust, A, addr_a, &book, Duration::from_millis(20), 1);
-    let (mut b, _ctl_b) = node(rt.handle(), &trust, B, addr_b, &book, Duration::from_millis(20), 1);
+    let (mut a, ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
+    let (mut b, _ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
 
     // Establish the connection with one delivered frame.
     send_reliable(&mut a, B, 0);
@@ -260,8 +315,24 @@ fn a_lone_reliable_frame_is_acked_via_the_idle_flush() {
     let trust = ClusterTrust::generate("vd-mesh-redeliver").expect("trust");
     let (addr_a, addr_b) = (reserve(), reserve());
     let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
-    let (mut a, ctl_a) = node(rt.handle(), &trust, A, addr_a, &book, Duration::from_millis(30), 1);
-    let (mut b, _ctl_b) = node(rt.handle(), &trust, B, addr_b, &book, Duration::from_millis(30), 1);
+    let (mut a, ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(30),
+        1,
+    );
+    let (mut b, _ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(30),
+        1,
+    );
 
     a.send(B, MsgClass::Saga, vec![7].into()).expect("enqueued");
 
@@ -294,11 +365,27 @@ fn a_sender_restart_at_a_higher_incarnation_is_not_deduped() {
     let addr_a2 = reserve();
     // B never dials A (it only receives + acks on the reverse stream), so A may restart on a NEW port.
     let book_b: BTreeMap<_, _> = [(A, addr_a1), (B, addr_b)].into();
-    let (mut b, ctl_b) = node(rt.handle(), &trust, B, addr_b, &book_b, Duration::from_millis(30), 9);
+    let (mut b, ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book_b,
+        Duration::from_millis(30),
+        9,
+    );
 
     // Incarnation 1: A sends M frames (values 0..M). B records incarnation 1 with hw = M-1.
     let book_a1: BTreeMap<_, _> = [(B, addr_b)].into();
-    let (mut a1, ctl_a1) = node(rt.handle(), &trust, A, addr_a1, &book_a1, Duration::from_millis(30), 1);
+    let (mut a1, ctl_a1) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a1,
+        &book_a1,
+        Duration::from_millis(30),
+        1,
+    );
     for i in 0..M {
         send_reliable(&mut a1, B, i);
     }
@@ -316,7 +403,15 @@ fn a_sender_restart_at_a_higher_incarnation_is_not_deduped() {
     drop(a1);
     drop(ctl_a1);
     let book_a2: BTreeMap<_, _> = [(B, addr_b)].into();
-    let (mut a2, _ctl_a2) = node(rt.handle(), &trust, A, addr_a2, &book_a2, Duration::from_millis(30), 2);
+    let (mut a2, _ctl_a2) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a2,
+        &book_a2,
+        Duration::from_millis(30),
+        2,
+    );
 
     // A' sends M fresh frames (values 100..100+M) with seq RESET to 0 — delivered, NOT deduped.
     for i in 0..M {
@@ -335,4 +430,88 @@ fn a_sender_restart_at_a_higher_incarnation_is_not_deduped() {
         0,
         "a HIGHER incarnation RESETS the ledger, it never drops the restarted sender's frames"
     );
+}
+
+#[test]
+fn a_full_retry_buffer_sheds_send_shed_retry_buffer_full_never_confirming_the_peer_dead() {
+    // R-4d M3 (the transport-boundary false-confirm cure): when a lane's retry buffer saturates —
+    // frames retained faster than the reverse acks can retire them — the transport SHEDS the new
+    // send as `Inbound::SendShed{RetryBufferFull}` (producer backpressure, R-4b). It must NOT be an
+    // `Inbound::NodeUnreachable`: the peer B is ALIVE (its connection is healthy), so a local
+    // buffer-full shed must never be mistaken for peer death. This gates the peer_writer
+    // `WriteFail::Shed(RetryBufferFull)` -> `SendShed` emit path end-to-end (the R-4b unit test only
+    // reaches `assign_and_retain`'s `Err(BufferFull)`, never the bounce).
+    let rt = runtime();
+    let trust = ClusterTrust::generate("vd-mesh-shed").expect("trust");
+    let (addr_a, addr_b) = (reserve(), reserve());
+    let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
+
+    // A's retry buffer is the MINIMUM (one maximal framed frame). Each frame below is near-maximal
+    // (fits quinn's ~1.25 MB stream window, so the write returns BEFORE B receives + acks it), so ONE
+    // frame fills the buffer and the NEXT — dequeued before the first's cross-loopback ack can round
+    // trip — physically cannot be retained. The overflow is deterministic, not a timing race.
+    let min_buffer = vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize + std::mem::size_of::<u32>();
+    let mut cfg_a = MeshConfig::new(A, addr_a, book.clone(), 256, 1);
+    cfg_a.reliability.retry_buffer_max_bytes = min_buffer;
+    let (mut a, ctl_a) = spawn_mesh(rt.handle(), &trust, &cfg_a).expect("mesh A");
+    let (mut b, ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(20),
+        1,
+    );
+
+    // Near-maximal payload: framable (framed `total_len` < MAX) yet large enough that one fills the
+    // min buffer. The 128-byte headroom leaves room for the frame envelope + length prefix.
+    let big = vec![0x5Au8; vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize - 128];
+    // A rapid burst: frame 1 retains; the rest hit the full buffer before its ack returns.
+    for _ in 0..6 {
+        let _ = a.send(B, MsgClass::Saga, big.clone().into());
+    }
+
+    // The reject is COUNTED on reliable_shed...
+    wait_until(
+        || ctl_a.stats().reliable_shed >= 1,
+        "A's retry buffer never shed under the large-frame burst",
+    );
+
+    // ...and surfaces on A's inbound as SendShed{RetryBufferFull}, NEVER as NodeUnreachable.
+    let mut shed_seen = false;
+    let mut unreachable_seen = false;
+    wait_until(
+        || {
+            for ev in a.drain_inbound() {
+                match ev {
+                    Inbound::SendShed { class, reason, .. } => {
+                        assert_eq!(class, MsgClass::Saga, "the shed names the lane's class");
+                        assert_eq!(
+                            reason,
+                            ShedReason::RetryBufferFull,
+                            "a buffer-full shed carries the RetryBufferFull reason, not Unframable"
+                        );
+                        shed_seen = true;
+                    }
+                    Inbound::NodeUnreachable { .. } => unreachable_seen = true,
+                    Inbound::Wire { .. } => {}
+                }
+            }
+            shed_seen
+        },
+        "A never drained a SendShed{RetryBufferFull} bounce",
+    );
+    assert!(
+        !unreachable_seen,
+        "a retry-buffer shed must NEVER be reported as NodeUnreachable — the peer is alive"
+    );
+    // The peer stayed healthy: no oversize (Unframable) shed occurred, only buffer-full backpressure.
+    assert_eq!(
+        ctl_a.stats().datagrams_dropped_send,
+        0,
+        "no datagram path involved — this is a reliable-lane buffer shed"
+    );
+    // B is a live peer throughout; keep its handles alive to the end so the connection never tears down.
+    let _ = (&mut b, &ctl_b);
 }

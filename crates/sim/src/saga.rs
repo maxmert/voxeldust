@@ -250,7 +250,10 @@ fn transport_run_spread_ticks(
 ) -> u64 {
     let lo = confirm_retries.saturating_add(1);
     let hi = confirm_retries.saturating_add(n_consecutive); // (N+1) + (n-1) = N+n, exclusive
-    duration_to_ticks_ceil(backoff_series_sum(lo, hi, backoff_min, backoff_max), tick_hz)
+    duration_to_ticks_ceil(
+        backoff_series_sum(lo, hi, backoff_min, backoff_max),
+        tick_hz,
+    )
 }
 
 /// R-4c cross-config error: the saga liveness WINDOW (ticks) and the transport redial backoff (wall-clock),
@@ -1915,13 +1918,22 @@ mod tests {
     fn r4c_backoff_series_sum_windows() {
         let (min, max) = (Duration::from_millis(50), Duration::from_secs(5));
         // interval(i) = min(50ms * 2^(i-1), 5s): 50,100,200,400,800,1600,3200,(6400->5000),5000,...
-        assert_eq!(backoff_series_sum(1, 4, min, max), Duration::from_millis(350)); // 50+100+200
-        assert_eq!(backoff_series_sum(1, 9, min, max), Duration::from_millis(11350)); // ...+5000(capped)
+        assert_eq!(
+            backoff_series_sum(1, 4, min, max),
+            Duration::from_millis(350)
+        ); // 50+100+200
+        assert_eq!(
+            backoff_series_sum(1, 9, min, max),
+            Duration::from_millis(11350)
+        ); // ...+5000(capped)
         // Empty window (lo >= hi) is ZERO — a single notice has no spread.
         assert_eq!(backoff_series_sum(3, 3, min, max), Duration::ZERO);
         assert_eq!(backoff_series_sum(5, 2, min, max), Duration::ZERO);
         // The LATE segment [4,6) = 400+800 (the run-spread gaps); the [1,4) prefix is advanced, not summed.
-        assert_eq!(backoff_series_sum(4, 6, min, max), Duration::from_millis(1200));
+        assert_eq!(
+            backoff_series_sum(4, 6, min, max),
+            Duration::from_millis(1200)
+        );
         // A far window sits entirely at the cap.
         assert_eq!(backoff_series_sum(9, 11, min, max), Duration::from_secs(10)); // 5000 + 5000
     }
@@ -1930,9 +1942,15 @@ mod tests {
     fn r4c_series_saturates_on_a_huge_index_never_panics() {
         let (min, max) = (Duration::from_millis(50), Duration::from_secs(5));
         // indices 1-7 = 6350ms, indices 8-40 (33 gaps) at the 5s cap = 165000ms.
-        assert_eq!(backoff_series_sum(1, 41, min, max), Duration::from_millis(171350));
+        assert_eq!(
+            backoff_series_sum(1, 41, min, max),
+            Duration::from_millis(171350)
+        );
         // A large `lo` prefix-advance still saturates cleanly.
-        assert_eq!(backoff_series_sum(35, 40, min, max), Duration::from_secs(25)); // 5 gaps at the cap
+        assert_eq!(
+            backoff_series_sum(35, 40, min, max),
+            Duration::from_secs(25)
+        ); // 5 gaps at the cap
     }
 
     #[test]
@@ -1946,7 +1964,10 @@ mod tests {
             duration_to_ticks_ceil(Duration::from_secs(3), 1)
         );
         // An enormous Duration saturates to u64::MAX (exercises the try_from Err arm).
-        assert_eq!(duration_to_ticks_ceil(Duration::from_secs(u64::MAX), 2), u64::MAX);
+        assert_eq!(
+            duration_to_ticks_ceil(Duration::from_secs(u64::MAX), 2),
+            u64::MAX
+        );
     }
 
     #[test]
@@ -1975,7 +1996,10 @@ mod tests {
         // Prod n=3, window 64 >= run_spread 24 @ 20Hz -> Ok.
         assert_eq!(prod(64).validate_against(3, min, max, 20), Ok(()));
         // The DEV/kill-only default (n=1) has zero run-spread -> always Ok.
-        assert_eq!(LivenessTuning::default().validate_against(3, min, max, 20), Ok(()));
+        assert_eq!(
+            LivenessTuning::default().validate_against(3, min, max, 20),
+            Ok(())
+        );
         // A narrow window (20 < 24) is REJECTED — the never-confirm strand the naive check missed.
         assert_eq!(
             prod(20).validate_against(3, min, max, 20),

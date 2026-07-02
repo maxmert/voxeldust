@@ -13,7 +13,8 @@ use std::process::{Command, Stdio};
 // are the SHARED vd_bins definitions (one registry/layout for every process-tier test —
 // they can never drift from the launcher or collide with each other).
 use vd_bins::{
-    DEV, DevClusterDown, RECOVERY_SLOT, SMOKE_SLOT, common_env, devcluster, slot_runfile, slot_workdir,
+    DEV, DevClusterDown, RECOVERY_SLOT, SMOKE_SLOT, common_env, devcluster, slot_runfile,
+    slot_workdir,
 };
 use vd_devproto::DevPortScheme;
 

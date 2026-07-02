@@ -118,11 +118,42 @@ pub enum Inbound {
         class: MsgClass,
         undelivered: MsgId,
     },
+    /// A LOCAL send was SHED by the transport — refused at THIS node's sender before it
+    /// reached the wire, so it says NOTHING about `to`'s liveness (the peer may be alive).
+    /// DISTINCT from [`Inbound::NodeUnreachable`] precisely so a liveness tracker never
+    /// counts a local shed as evidence a peer is dead (R-4d M3: the false-confirm cure — a
+    /// shed routed to `record_unreachable` would trip a destructive re-home of a
+    /// live-but-ack-stalled peer). Both causes come from the io-prod mesh's bounded retry
+    /// buffer (R-4b). Reliable feedback, like `NodeUnreachable` — never dropped to make
+    /// inbox room. `undelivered` obeys the same FIFO-correlation contract as
+    /// `NodeUnreachable.undelivered`.
+    SendShed {
+        to: NodeId,
+        class: MsgClass,
+        undelivered: MsgId,
+        /// Why it was shed — lets a consumer/metric tell a permanent oversize reject from
+        /// transient dead-ack-path backpressure without peeking at opaque payloads.
+        reason: ShedReason,
+    },
+}
+
+/// Why the transport shed a local send (the [`Inbound::SendShed`] cause). A CLOSED taxonomy.
+/// Kept in `sim::io` (the seam owns its taxonomy): the io-prod mesh maps its private
+/// `AssignReject` onto it, so `AssignReject` never leaks across the crate boundary. Never
+/// serialized (`Inbound` is a local runtime enum), so it belongs here, not in `vd-wire`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShedReason {
+    /// The framed frame exceeds the stream frame cap — a PERMANENT reject (a partitioner/
+    /// budget defect). Retrying is futile; the send can NEVER be delivered as framed.
+    Unframable,
+    /// The per-lane retry buffer hit its byte ceiling — the ack drain stalled (a dead ack
+    /// path; the peer MAY be alive). Producer backpressure, never a retained-frame drop.
+    RetryBufferFull,
 }
 
 impl Inbound {
-    /// The carrier reliability of this inbound event (a `NodeUnreachable` notice is
-    /// reliable control feedback — it must never be dropped to make room).
+    /// The carrier reliability of this inbound event (a `NodeUnreachable`/`SendShed` notice
+    /// is reliable control feedback — it must never be dropped to make room).
     #[must_use]
     pub fn reliability(&self) -> Reliability {
         match self {
@@ -130,6 +161,9 @@ impl Inbound {
             // An unreachability notice is a reliable signal regardless of the failed
             // message's class: losing it would strand the sender's error handling.
             Inbound::NodeUnreachable { .. } => Reliability::Reliable,
+            // A shed notice is reliable feedback for the same reason (losing it strands the
+            // sender's accounting), independent of `ShedReason`.
+            Inbound::SendShed { .. } => Reliability::Reliable,
         }
     }
 }
@@ -268,6 +302,11 @@ pub trait Clock {
 ///    (audit `wf_d0a91a43` H1).
 /// 4. `drain_inbound` returns everything delivered since the previous drain, in
 ///    delivery order, without blocking.
+/// 5. A LOCAL send the transport refuses at THIS node's sender (never reached the wire)
+///    surfaces as [`Inbound::SendShed`] — NOT [`Inbound::NodeUnreachable`]: a shed is
+///    orthogonal to `to`'s liveness (R-4d M3). Async local-failure feedback, like
+///    `NodeUnreachable`; a consumer that tracks peer liveness MUST route the two
+///    differently (a shed to a metric, an unreachability to the liveness tracker).
 ///
 /// ⚠️ DELIVERY SEMANTICS (R-3' UPDATE, DEFERRED.md D-6): the io-prod `MeshTransport` is now AT-LEAST-ONCE
 /// across a connection blip FOR A `(peer,class)` LANE THAT KEEPS CARRYING TRAFFIC (per-lane seq +
@@ -358,6 +397,28 @@ mod tests {
                 to: NodeId(2),
                 class: MsgClass::Input,
                 undelivered: MsgId(0),
+            }
+            .reliability(),
+            Reliability::Reliable
+        );
+        // A SendShed notice is reliable for BOTH shed reasons (constructs each variant,
+        // covering the closed ShedReason enum + the new reliability() arm — R-4d M3).
+        assert_eq!(
+            Inbound::SendShed {
+                to: NodeId(2),
+                class: MsgClass::Saga,
+                undelivered: MsgId(0),
+                reason: ShedReason::Unframable,
+            }
+            .reliability(),
+            Reliability::Reliable
+        );
+        assert_eq!(
+            Inbound::SendShed {
+                to: NodeId(2),
+                class: MsgClass::Saga,
+                undelivered: MsgId(0),
+                reason: ShedReason::RetryBufferFull,
             }
             .reliability(),
             Reliability::Reliable

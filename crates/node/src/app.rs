@@ -66,6 +66,12 @@ pub struct TickReport {
     pub reliable_shed: usize,
     /// `NodeUnreachable` notices observed among the drained inbound.
     pub unreachable: usize,
+    /// `SendShed` notices observed among the drained inbound (R-4d M3): a LOCAL send the
+    /// transport refused — a lane's retry buffer full or an oversize frame. Counted SEPARATELY
+    /// from `unreachable` because a shed is NOT a peer-unreachability (the peer may be alive):
+    /// conflating them here would re-introduce, at the reporting layer, the exact ambiguity M3
+    /// removes at the routing layer. MUST be 0 on a healthy run.
+    pub shed: usize,
 }
 
 /// A node: private world, single-threaded schedule, injected transport.
@@ -109,6 +115,7 @@ pub struct TickPrologue {
     tick: TickId,
     drained: usize,
     unreachable: usize,
+    shed: usize,
 }
 
 impl<T: Transport> ShardNode<T> {
@@ -121,12 +128,13 @@ impl<T: Transport> ShardNode<T> {
     pub fn run_schedule(&mut self) -> TickPrologue {
         self.tick = self.tick.next();
         set_local_tick(&mut self.world, self.tick);
-        let (drained, unreachable) = drain_phase(&mut self.transport, &mut self.world);
+        let (drained, unreachable, shed) = drain_phase(&mut self.transport, &mut self.world);
         self.schedule.run(&mut self.world);
         TickPrologue {
             tick: self.tick,
             drained,
             unreachable,
+            shed,
         }
     }
 
@@ -144,6 +152,7 @@ impl<T: Transport> ShardNode<T> {
             staging_shed,
             reliable_shed,
             unreachable: prologue.unreachable,
+            shed: prologue.shed,
         }
     }
 
@@ -189,17 +198,24 @@ fn set_local_tick(world: &mut World, tick: TickId) {
     world.resource_mut::<ClockSample>().local_tick = tick;
 }
 
-/// Monomorphic drain: pull everything delivered since last tick into the world.
-fn drain_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usize) {
+/// Monomorphic drain: pull everything delivered since last tick into the world. Counts the two
+/// async delivery-failure notices SEPARATELY (R-4d M3): `unreachable` (peer down) vs `shed` (a
+/// local send refused — orthogonal to peer liveness). The full inbound vec (both included) still
+/// goes to the `InboundBox` for the schedule's consumers.
+fn drain_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usize, usize) {
     let inbound = transport.drain_inbound();
     let drained = inbound.len();
     let unreachable = inbound
         .iter()
         .filter(|m| matches!(m, Inbound::NodeUnreachable { .. }))
         .count();
+    let shed = inbound
+        .iter()
+        .filter(|m| matches!(m, Inbound::SendShed { .. }))
+        .count();
     let mut inbox = world.resource_mut::<InboundBox>();
     inbox.0 = inbound;
-    (drained, unreachable)
+    (drained, unreachable, shed)
 }
 
 /// Monomorphic flush: push system-emitted messages in order, PER-PEER resilient.
@@ -429,6 +445,9 @@ mod tests {
         caps: BTreeMap<NodeId, usize>,
         delivered: BTreeMap<NodeId, Vec<Bytes>>,
         next: u64,
+        /// Inbound to hand back on the NEXT `drain_inbound` (drained once). Lets a test inject an
+        /// arbitrary notice — e.g. an `Inbound::SendShed` the MemHub cannot produce (R-4d M3).
+        inbound: Vec<Inbound>,
     }
 
     struct PerPeerLanes {
@@ -466,7 +485,7 @@ mod tests {
             Ok(id)
         }
         fn drain_inbound(&mut self) -> Vec<Inbound> {
-            Vec::new()
+            std::mem::take(&mut self.state.borrow_mut().inbound)
         }
         fn local_id(&self) -> NodeId {
             self.local
@@ -522,6 +541,37 @@ mod tests {
                 (X, MsgClass::Input, vec![2].into()),
                 (X, MsgClass::Input, vec![4].into()),
             ]
+        );
+    }
+
+    #[test]
+    fn a_send_shed_is_counted_separately_from_an_unreachable() {
+        use vd_sim::io::ShedReason;
+        // MemHub can never produce a SendShed (no retry buffer), so inject via the lane-state seam.
+        let (transport, state) = PerPeerLanes::with_caps(A, &[]);
+        // One shed + one unreachable toward the same peer, in one drain: drain_phase must tally them
+        // into the DISTINCT report fields (R-4d M3 — a shed is NOT a peer-unreachability, so conflating
+        // them at the reporting layer would re-introduce the ambiguity M3 removes at routing).
+        state.borrow_mut().inbound = vec![
+            Inbound::SendShed {
+                to: B,
+                class: MsgClass::Saga,
+                undelivered: MsgId(0),
+                reason: ShedReason::RetryBufferFull,
+            },
+            Inbound::NodeUnreachable {
+                to: B,
+                class: MsgClass::Saga,
+                undelivered: MsgId(1),
+            },
+        ];
+        let mut node = build_app(stub_cfg(A), transport);
+        let report = node.step_tick();
+        assert_eq!(report.drained, 2);
+        assert_eq!(report.shed, 1, "the SendShed is counted as a shed");
+        assert_eq!(
+            report.unreachable, 1,
+            "the NodeUnreachable is counted separately, not folded into shed"
         );
     }
 

@@ -10,6 +10,11 @@
 //! - Delivery happens on an explicit [`MemHub::pump`] step (the analog of the prod
 //!   writer task draining), moving outbound frames into peer inbound queues in FIFO
 //!   order, or converting them into [`Inbound::NodeUnreachable`] if the peer is dead.
+//!
+//! The mem hub has NO bounded retry buffer and no oversize framing, so it never emits
+//! [`Inbound::SendShed`] (R-4d M3) — a shed is an io-prod-mesh-only signal. Consumers treat
+//! its in-process absence as normal; mem/mesh parity is preserved by ABSENCE, not by
+//! fabricating a mem shed path.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -322,7 +322,12 @@ impl SteppableNode for ScriptedClient {
                         other => panic!("unexpected class toward a client: {other:?}"),
                     }
                 }
-                Inbound::NodeUnreachable { .. } => unreachable += 1,
+                // The ScriptedClient is an in-process test double over FabricTransport, which has no
+                // retry buffer and so never sheds (R-4d M3 mem/fabric parity) — a SendShed cannot
+                // arise here. Folded with NodeUnreachable (one arm — a new Inbound variant still
+                // forces reconsideration) as a delivery-failure notice; `shed` on the report it builds
+                // stays structurally 0. The REAL client (vd-client `net.rs`) ignores both via let-else.
+                Inbound::NodeUnreachable { .. } | Inbound::SendShed { .. } => unreachable += 1,
             }
         }
 
@@ -364,6 +369,8 @@ impl SteppableNode for ScriptedClient {
             staging_shed: 0,
             reliable_shed: 0,
             unreachable,
+            // A ScriptedClient's FabricTransport never sheds (R-4d M3) — structurally 0.
+            shed: 0,
         }
     }
 

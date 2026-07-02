@@ -1083,10 +1083,34 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      peer (a frozen source shard) can accrue to `n_consecutive_unreachable` and FALSE-confirm a live-but-ack-stalled peer.
      Non-triggering at default (clear-on-ack fires on ANY inbound Wire; a shed is one-shot per new send, no timer/counter), but
      the clean cure is a DISTINCT `Inbound::SendShed` arm the saga routes to a METRIC, never to `record_unreachable` (an
-     additive `Inbound` seam change → frozen-wire review). Scope BEFORE a real deploy. [→R-4d, M4] the 7+ `MeshStats` counters
+     additive `Inbound` seam change → frozen-wire review). Scope BEFORE a real deploy.
+     **✅ R-4d1 (M3) LANDED (design+3-review `wbt45dxj6` caught a HIGH + 6 MEDIUMs pre-code; post-impl review `wf_d11fdb03`):**
+     `Inbound::SendShed{to,class,undelivered,reason:ShedReason{Unframable,RetryBufferFull}}` added to the frozen `sim::io`
+     seam (reliability()=Reliable); `WriteFail::Shed(ShedReason)` maps `AssignReject` at the mesh reject-site (never leaks the
+     private reject across the crate boundary) → `peer_writer` emits `SendShed` (NOT `NodeUnreachable`) + a debug_assert that
+     the shed is reliable-lane-only; `saga_runtime` routes `SendShed`→`runtime.sends_shed` counter, NEVER `record_unreachable`
+     (regression test proves a burst of sheds leaves `liveness_notices==0` + peer un-confirmed-dead); `app.rs` `TickReport`
+     gains a DISTINCT `shed` count (not folded into `unreachable`). Coverage deviation (HR5): the four fabric/mem-driven Tier-A
+     consumers (tracer, harness client/chaos/fabric-test) that can NEVER produce a shed use an exhaustive OR-PATTERN merge
+     (SendShed folded with the nearest covered arm) — preserves compile-time exhaustiveness without an uncoverable region;
+     the load-bearing distinction (seam/saga/app) stays distinct+injected-covered; the design's `TraceEvent::SendShed` was
+     DROPPED (never-constructed → uncoverable derives). Caught + fixed a design-missed consumer (`mesh.rs` filter_map arm). NEW
+     io-prod integration test proves the `RetryBufferFull`→`SendShed` emit path end-to-end (min buffer + near-MAX frames =
+     deterministic shed, asserting no `NodeUnreachable`). Gate: Tier-A 100% region+branch, Tier-B 93.44%, clippy/fmt clean.
+     [→R-4d, M4] the 7+ `MeshStats` counters
      (`reliable_shed`/`reliable_acked`-stuck-at-0=dead-ack-path/`gap_drop`=MUST-BE-0/…) are BLIND in prod — every bin discards
      `_control`, `/metrics` serves hardcoded 0, `metric_names::ALL` omits them; wire `MeshControl::stats()` via a `MetricsSource`
-     BEFORE any soak (a soak with invisible alarms proves nothing). [→R-4e, M6+cloud] make R-4e REAL-QUIC (not the loopback
+     BEFORE any soak (a soak with invisible alarms proves nothing).
+     **R-4d2 (M4) SCOPE (vetted `wbt45dxj6` HIGH): orchestrator-ONLY this slice.** The draft wanted gateway+shard `/metrics`
+     listeners too, but that is UNDELIVERABLE in the dev cluster: `ClusterAddrs` has ONE `admin` field, `VD_ADMIN_ADDR` is set
+     only in `orchestrator_env`, and `SlotPorts` allocates ONE `admin` port — so gateway/shard read `VD_ADMIN_ADDR` unset
+     (spawn no listener = dead capability) or, via `common_env`, collide three binds on one port. So R-4d2 lands the mesh-metrics
+     capability wired into the orchestrator's existing `VD_ADMIN_ADDR` axum serve (`MetricsSource`/`MetricValues`/`MeshMetrics`,
+     `metric_names::ALL` +9, a `render_metrics` that exhaustively destructures `MetricValues` so a new field is a compile error,
+     the 2-arg `admin_router` at BOTH call sites incl. the `admin.rs:88` in-crate test helper). **[→ per-node admin ports, owed
+     with the gateway/shard soak]** gateway/shard mesh counters stay UNSCRAPED until real port work: 3 admin fields on
+     `ClusterAddrs`, 3 `SlotPorts` ports at new offsets, 3 distinct per-node `VD_ADMIN_ADDR`s, curl-all-three in the smoke test.
+     [→R-4e, M6+cloud] make R-4e REAL-QUIC (not the loopback
      bridge) with (a) a CORRELATED multi-peer outage (drop ≥50% simultaneously) asserting `inbound_dropped_reliable`≈0 for
      surviving-peer traffic — else coalesce confirm-dead to ONE notice/peer/window or give NodeUnreachable a priority lane; (b) a
      pod-reschedule/address-change scenario (L5: `peer_writer` captures `addr` once at spawn — a moved peer is dialed stale
