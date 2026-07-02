@@ -62,8 +62,8 @@ impl std::fmt::Display for BootCounterError {
             }
             BootCounterError::Ephemeral { path, detail } => write!(
                 f,
-                "boot-counter path {path} is not durable ({detail}) — the process incarnation MUST survive a \
-                 restart on a persistent volume; set VD_BOOT_STATE_EPHEMERAL_OK=1 ONLY for a throwaway \
+                "durable path {path} is not durable ({detail}) — durable state MUST live on a persistent \
+                 volume so it survives a restart; set the caller's *_EPHEMERAL_OK=1 ONLY for a throwaway \
                  dev/test cluster. Refusing to boot."
             ),
             BootCounterError::Io { path, source } => {
@@ -459,13 +459,16 @@ mod tests {
             .to_string()
             .contains("refusing to boot")
         );
+        // The message is caller-agnostic (the shared guard serves the boot-counter, the R-6d outbox, and
+        // the orchestrator store — each with its own `*_EPHEMERAL_OK` escape), so it names the generic form.
+        let ephemeral = BootCounterError::Ephemeral {
+            path: "/tmp/x".into(),
+            detail: "under a temp dir".into(),
+        }
+        .to_string();
         assert!(
-            BootCounterError::Ephemeral {
-                path: "/tmp/x".into(),
-                detail: "under a temp dir".into(),
-            }
-            .to_string()
-            .contains("VD_BOOT_STATE_EPHEMERAL_OK")
+            ephemeral.contains("_EPHEMERAL_OK") && ephemeral.contains("Refusing to boot"),
+            "the Ephemeral message must name the escape + the refusal: {ephemeral}"
         );
         assert!(
             BootCounterError::Overflow { path: "/p".into() }

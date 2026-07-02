@@ -256,6 +256,41 @@ pub fn resolve_process_incarnation(env: &EnvConfig) -> Result<u64, Box<dyn std::
         .into())
 }
 
+/// The per-node durable OUTBOX (R-6d) — opened iff `VD_OUTBOX_PATH` names a non-empty path, else `None` (a
+/// node with no producer-less durable reliable flow runs without one, and `step_tick` stays byte-identical).
+/// The path is guarded by the SAME [`check_durable_path`] the M3 boot-counter uses (F2, DRY): an ALLOW-list
+/// under `VD_STORE_DURABLE_ROOT` when declared (the mounted persistent volume — catches a k8s `emptyDir` a
+/// prefix deny-list cannot enumerate), else the temp DENY-list; `VD_OUTBOX_EPHEMERAL_OK=1` is the explicit
+/// dev/test escape (a throwaway cluster legitimately stores its outbox under `$TMPDIR`).
+///
+/// [`check_durable_path`]: vd_io_prod::boot::check_durable_path
+///
+/// # Errors
+/// A non-durable / mis-configured outbox path, an unopenable store, or a mis-set boolean env value.
+pub fn open_node_outbox(
+    env: &EnvConfig,
+) -> Result<Option<vd_io_prod::outbox::NodeOutbox>, Box<dyn std::error::Error>> {
+    let path = match env.string("VD_OUTBOX_PATH") {
+        Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+        _ => return Ok(None), // absent / empty ⇒ no durable outbox on this node
+    };
+    // Create the parent FIRST so the guard can canonicalize it (resolve symlinks) — mirrors the store path.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let durable_root = env
+        .string("VD_STORE_DURABLE_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from);
+    let ephemeral_ok = parse_bool_env(env, "VD_OUTBOX_EPHEMERAL_OK")?;
+    vd_io_prod::boot::check_durable_path(&path, durable_root.as_deref(), ephemeral_ok)?;
+    Ok(Some(vd_io_prod::outbox::NodeOutbox::open(
+        &path,
+        vd_io_prod::store::StoreTuning::default(),
+    )?))
+}
+
 /// The env every node shares (trust bundle + transport knobs + the per-launch process incarnation).
 #[must_use]
 pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, String)> {
@@ -740,6 +775,94 @@ mod incarnation_tests {
             resolve_process_incarnation(&env(&[("VD_BOOT_STATE_EPHEMERAL_OK", "1")]))
                 .expect("escape")
                 > 0
+        );
+    }
+
+    /// A unique temp dir per case, removed on drop (the success cases open a real redb file).
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            TempDir(std::env::temp_dir().join(format!(
+                "vd-obx-{tag}-{}-{:p}",
+                std::process::id(),
+                &tag
+            )))
+        }
+        fn file(&self, name: &str) -> String {
+            self.0.join(name).display().to_string()
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn open_node_outbox_absent_or_blank_path_is_none() {
+        assert!(open_node_outbox(&env(&[])).expect("absent ok").is_none());
+        assert!(
+            open_node_outbox(&env(&[("VD_OUTBOX_PATH", "   ")]))
+                .expect("blank ok")
+                .is_none(),
+            "a blank path is treated as absent (an unset-var expansion must not open a CWD store)"
+        );
+    }
+
+    #[test]
+    fn open_node_outbox_refuses_a_temp_path_without_the_escape() {
+        let d = TempDir::new("reject");
+        // NodeOutbox is not Debug, so match rather than expect_err (which would need Ok: Debug).
+        let e = match open_node_outbox(&env(&[("VD_OUTBOX_PATH", &d.file("out.redb"))])) {
+            Err(e) => e,
+            Ok(_) => panic!("a temp path with no durable-root + no escape must be refused"),
+        };
+        assert!(
+            e.to_string().contains("temp"),
+            "the refusal names the temp hazard: {e}"
+        );
+    }
+
+    #[test]
+    fn open_node_outbox_opens_under_the_ephemeral_escape() {
+        let d = TempDir::new("escape");
+        let path = d.file("out.redb");
+        let ob = open_node_outbox(&env(&[
+            ("VD_OUTBOX_PATH", &path),
+            ("VD_OUTBOX_EPHEMERAL_OK", "1"),
+        ]))
+        .expect("opens with the ephemeral escape");
+        assert!(ob.is_some(), "a Some outbox on a valid escape path");
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "the redb file was created"
+        );
+    }
+
+    #[test]
+    fn open_node_outbox_allow_lists_a_path_under_the_declared_root() {
+        // F2: a declared VD_STORE_DURABLE_ROOT admits a path UNDER it (the cloud PV case) even under $TMPDIR,
+        // where the deny-list would reject it; a path OUTSIDE the root is still refused.
+        let d = TempDir::new("root");
+        let root = d.0.display().to_string();
+        let inside = open_node_outbox(&env(&[
+            ("VD_OUTBOX_PATH", &d.file("sub/out.redb")),
+            ("VD_STORE_DURABLE_ROOT", &root),
+        ]))
+        .expect("a path under the declared root is admitted");
+        assert!(inside.is_some());
+
+        let outside = TempDir::new("outside");
+        let e = match open_node_outbox(&env(&[
+            ("VD_OUTBOX_PATH", &outside.file("x.redb")),
+            ("VD_STORE_DURABLE_ROOT", &root),
+        ])) {
+            Err(e) => e,
+            Ok(_) => panic!("a path outside the declared root must be refused"),
+        };
+        assert!(
+            e.to_string().contains("durable root"),
+            "names the root violation: {e}"
         );
     }
 }

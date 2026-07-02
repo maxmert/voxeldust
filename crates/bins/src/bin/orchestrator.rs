@@ -140,51 +140,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = store_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    // HR1 EPHEMERAL GUARD. Canonicalize the store's parent + the temp dir so symlinked spellings collapse
-    // to one form (macOS `/tmp`→`/private/tmp`, `/var`→`/private/var`) before the prefix test, and reject
-    // the canonical temp roots explicitly. ⚠️ A prefix DENY-list cannot enumerate every ephemeral mount;
-    // the production-grade enforcement is a durable-root ALLOW-list (a `VD_STORE_DURABLE_ROOT` the deploy
-    // points at its mounted volume), OWED WITH the deploy preconditions (DEFERRED.md D-6 #1 / redelivering
-    // transport — there is no production deploy yet). Until then this courtesy guard + the REQUIRED
-    // `VD_STORE_PATH` (no in-memory fallback) is the dev-safety net against the old `/tmp` data-loss bug.
-    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let tmp = canon(&std::env::temp_dir());
-    let probe = match store_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(parent) => canon(parent),
-        None => store_path.clone(),
-    };
-    let under_temp =
-        probe.starts_with(&tmp) || probe.starts_with("/tmp") || probe.starts_with("/private/tmp");
-    // VD_STORE_EPHEMERAL_OK is the EXPLICIT dev/test escape (a throwaway local cluster legitimately stores
-    // under $TMPDIR, cleaned by `dev-cluster down`). STRICT parse — a present-but-unrecognized value is a
-    // LOUD config error, never a fail-OPEN footgun (`=0`/`=false` must NOT silently disable the guard).
-    let ephemeral_ok = match env.string("VD_STORE_EPHEMERAL_OK") {
-        Err(_) => false, // absent = off (production-safe default)
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" => true,
-            "0" | "false" | "no" | "" => false,
-            other => {
-                return Err(format!(
-                    "VD_STORE_EPHEMERAL_OK={other:?} is not a boolean (use 1/true/yes or 0/false/no)"
-                )
-                .into());
-            }
-        },
-    };
-    if under_temp && !ephemeral_ok {
-        return Err(format!(
-            "VD_STORE_PATH ({}) is under a temp dir ({}) — durable orchestrator state (directory + saga \
-             WAL + clock ceiling) MUST live on a persistent volume (HR1; the old /tmp data-loss bug). Set \
-             VD_STORE_EPHEMERAL_OK=1 ONLY for a throwaway dev/test cluster. Refusing to boot.",
-            store_path.display(),
-            tmp.display()
-        )
-        .into());
-    }
-    if under_temp {
+    // HR1 DURABLE-PATH GUARD — the SHARED `check_durable_path` (F2, DRY with the M3 boot-counter + the R-6d
+    // outbox: ONE guard for every node durable path). When `VD_STORE_DURABLE_ROOT` is declared it is an
+    // ALLOW-list (the store must canonicalize UNDER the mounted persistent volume — catching a k8s `emptyDir`
+    // mounted outside the volume that a prefix DENY-list cannot enumerate); otherwise the temp deny-list (the
+    // dev-safety net against the old `/tmp` data-loss bug). `VD_STORE_EPHEMERAL_OK=1` is the explicit dev/test
+    // escape (a throwaway $TMPDIR cluster cleaned by `dev-cluster down`). The REQUIRED `VD_STORE_PATH` (no
+    // in-memory fallback) still stands.
+    let durable_root = env
+        .string("VD_STORE_DURABLE_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
+    let ephemeral_ok = vd_bins::parse_bool_env(&env, "VD_STORE_EPHEMERAL_OK")?;
+    // Stringify so main's default `{:?}` error print surfaces the Display message (the "Refusing to boot"
+    // guidance) rather than the struct-Debug of BootCounterError.
+    vd_io_prod::boot::check_durable_path(&store_path, durable_root.as_deref(), ephemeral_ok)
+        .map_err(|e| e.to_string())?;
+    if ephemeral_ok {
         tracing::warn!(
-            "orchestrator durable store is under a TEMP dir ({}) with VD_STORE_EPHEMERAL_OK set — this is a \
-             dev/test cluster; recovery survives a restart but NOT a host reboot / tmp reap. Never production.",
+            "orchestrator durable store at {} has VD_STORE_EPHEMERAL_OK set (a dev/test escape) — recovery \
+             survives a restart but NOT a host reboot / tmp reap. Never production.",
             store_path.display()
         );
     }

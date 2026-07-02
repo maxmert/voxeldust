@@ -1351,6 +1351,18 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      loses its batch until R-6d). F2 (orchestrator VD_STORE_PATH hand-rolled deny-list → reuse the tested `check_durable_
      path` allow-list, closes the emptyDir-defeats-the-guard cloud hole) FOLDS INTO R-6d1 (which opens per-node stores
      through the same helper). No re-audit required.**
+     **✅ R-6d1 LANDED (1a=79439d8; 1b this commit). R-6d1a: `crates/io-prod/src/outbox.rs` — the durable outbox STORAGE
+     PRIMITIVE (OutboxKey 26-byte BE key with a stable class byte-map [not the implicit discriminant]; the OutboxSink
+     seam retain/release/commit/scan_all/gc_below; redb-backed NodeOutbox with a SYNCHRONOUSLY-DURABLE commit = the
+     durable-before-send gate; opaque already-framed value behind a 1-byte format-version envelope, HR1-clean). 8 tests;
+     Tier-B outbox.rs 99.56% region/100% branch. R-6d1b: `open_node_outbox` bins helper (VD_OUTBOX_PATH; the SAME
+     `check_durable_path` guard — allow-list under VD_STORE_DURABLE_ROOT else temp deny-list; VD_OUTBOX_EPHEMERAL_OK
+     escape; absent→None so step_tick stays byte-identical) + 4 tests. **F2 CLOSED: the orchestrator VD_STORE_PATH guard
+     now uses `check_durable_path` (allow-list catches a k8s emptyDir the old deny-list missed) + `parse_bool_env` (DRY);
+     the shared guard's Ephemeral message genericized (`*_EPHEMERAL_OK`, serves 3 callers).** Gate: bins lib 9, io-prod
+     lib+boot 9, `just orch-crash` (boot_guard/orchestrator_crash/boot_counter_crashloop all green — F2 regression-safe),
+     clippy/fmt clean, Tier-B TOTAL 94.28%. NEXT = R-6d2 (the additive `send(Durability)` seam across all 4 Transport
+     impls + the ReliableLaneSender write-through/delete-through wiring NodeOutbox into the FSM).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
