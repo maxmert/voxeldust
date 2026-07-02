@@ -1363,6 +1363,18 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      lib+boot 9, `just orch-crash` (boot_guard/orchestrator_crash/boot_counter_crashloop all green — F2 regression-safe),
      clippy/fmt clean, Tier-B TOTAL 94.28%. NEXT = R-6d2 (the additive `send(Durability)` seam across all 4 Transport
      impls + the ReliableLaneSender write-through/delete-through wiring NodeOutbox into the FSM).**
+     **POST-R-6d1 /goal AUDIT (wf_225ebe05, 6 opus dims + verify + synth): DONE_NO_CRITICAL — ALL 6 dimensions HEALTHY
+     (incl. the sharpened DRY/modular/elegant lens), 0 CRITICAL, 0 unaddressed HIGH; 5 MEDIUM (3 R-6d2/d3-gated, 2
+     scale ceilings owed at cloud) + 7 LOW, all ledgered. Ruled R-6d1+F2 a SOUND/DRY/modular/elegant foundation for
+     R-6d2/d3 (check_durable_path is THE ONE durable-path guard; NodeOutbox a clean RedbStore facade; OutboxSink
+     right-sized; commit() durable-before-send gate verified correct). ✅ FOLDED MEDIUM-1 (this pass): `MsgClass` is
+     de-facto WIRE-FROZEN (rides every postcard frame via its variant index + the outbox key byte) but had NO reorder
+     guard, unlike `class_to_byte`/`intershard.rs` — added an APPEND-ONLY doc warning + `msgclass_wire_discriminant_is_
+     frozen_append_only` golden test (postcard [0]..[6], Tier-A) so a reorder fails the build. **TWO items KEPT ON THE
+     R-6d2 CRITICAL PATH (do NOT defer past it): (i) DONE now — the MsgClass wire-freeze test; (ii) the §7 producer-less
+     `Durability` marker CONFORMANCE test (exhaustive-over-InterShardFlow that every producer-less reliable arm carries
+     the marker, turning a forgotten-marker silent-loss into a build failure) — lands WITH R-6d2 when the marker exists.**
+     No re-audit required.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

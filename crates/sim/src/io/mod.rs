@@ -38,6 +38,14 @@ pub fn bytes(v: Vec<u8>) -> Bytes {
 /// of bulk) and by the fault fabric to target faults at a class of traffic. The class
 /// also DETERMINES the carrier reliability ([`MsgClass::reliability`]) — the design's
 /// channel table is enforced by the type, not by per-call-site choice.
+///
+/// ⚠️ WIRE-FROZEN, APPEND-ONLY. This enum rides EVERY postcard frame (`ReliableFrame`/`DatagramFrame`) via
+/// its implicit variant index AND the R-6d durable outbox key's stable class byte. NEVER reorder or remove a
+/// variant, and never add explicit `#[repr]`/discriminants that diverge from declaration order — either would
+/// silently shift the on-wire class identity of live traffic and every retained-on-disk outbox row. ADD new
+/// variants at the END ONLY. Pinned by `msgclass_wire_discriminant_is_frozen_append_only` (a reorder fails the
+/// build), mirroring the `class_to_byte` golden pin (io-prod `outbox.rs`) and the `intershard.rs` append-only
+/// arms — the three encodings of `MsgClass` identity must never drift.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum MsgClass {
     /// Reliable control-plane traffic (session lifecycle, subscriptions).
@@ -377,6 +385,38 @@ mod tests {
             from: NodeId(1),
             class,
             bytes: vec![0].into(),
+        }
+    }
+
+    #[test]
+    fn msgclass_wire_discriminant_is_frozen_append_only() {
+        // MsgClass is wire-frozen: it rides every postcard frame (ReliableFrame/DatagramFrame) via its
+        // variant index. Pin each variant's ACTUAL postcard byte so a REORDER or REMOVAL fails the build
+        // (postcard encodes a fieldless enum as its 0-based variant index, a single varint byte for 0..=6).
+        // Keep in lockstep with io-prod `outbox.rs` class_to_byte (the durable outbox KEY encoding).
+        let pc = |c: MsgClass| postcard::to_allocvec(&c).expect("MsgClass encodes");
+        assert_eq!(pc(MsgClass::Control), vec![0]);
+        assert_eq!(pc(MsgClass::Saga), vec![1]);
+        assert_eq!(pc(MsgClass::Snapshot), vec![2]);
+        assert_eq!(pc(MsgClass::Input), vec![3]);
+        assert_eq!(pc(MsgClass::Membership), vec![4]);
+        assert_eq!(pc(MsgClass::GhostReliable), vec![5]);
+        assert_eq!(pc(MsgClass::GhostDelta), vec![6]);
+        // Round-trip closes the loop: the byte decodes back to the same variant.
+        for (b, c) in [
+            (0u8, MsgClass::Control),
+            (1, MsgClass::Saga),
+            (2, MsgClass::Snapshot),
+            (3, MsgClass::Input),
+            (4, MsgClass::Membership),
+            (5, MsgClass::GhostReliable),
+            (6, MsgClass::GhostDelta),
+        ] {
+            assert_eq!(
+                postcard::from_bytes::<MsgClass>(&[b]).expect("decodes"),
+                c,
+                "byte {b} must decode to {c:?}"
+            );
         }
     }
 
