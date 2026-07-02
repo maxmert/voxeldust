@@ -1375,6 +1375,27 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      `Durability` marker CONFORMANCE test (exhaustive-over-InterShardFlow that every producer-less reliable arm carries
      the marker, turning a forgotten-marker silent-loss into a build failure) — lands WITH R-6d2 when the marker exists.**
      No re-audit required.**
+     **R-6d2 DESIGN VETTED (design-refinement+3-review+synth wf_ad6e7936; spec scripts/r6d2_vetted_design.md). Verdict
+     REVISE — architecture SOUND but a CRITICAL caught PRE-CODE: the design agent's §7 conformance test was VACUOUS
+     (a `Transfer(env) => match { TransientBatch => ProducerLess, _ => ReDriven }` wildcard would silently swallow a
+     future producer-less payload, e.g. a durable Signal/block-edit forward — false assurance on the exact generalize
+     axis). Corrected + 2 HIGH (incomplete send-caller + OutboundBox-push-site enumeration). RESOLUTIONS: Durability
+     enum {Ephemeral(default),Retained} in sim::io; `send` grows a trailing `durability: Durability` LOCKSTEP across
+     ALL 6 impls (Mem/Fabric/PerPeerLanes/Mock ignore; Prod/Mesh→OutFrame.durability) + ~70 caller sites (all Ephemeral
+     except the 2 push_flow producer-less sites); OutboundBox 4-tuple + push_flow param (Tier-A sim/runtime.rs, NOT
+     io-prod). (A) RULING: DEFER the real shared sink to R-6d3 — thread the sink param through only the SYNC FSM
+     (assign_and_retain/on_ack, MockOutboxSink-tested), pass None in prod, do NOT thread inert plumbing through the
+     async write_frame/peer_writer. (B) RULING: a wildcard-free `durability_class()` classifier in vd-wire (sibling of
+     effect_class) — a new arm/GhostFlow/TransitionPayload variant fails to compile until classified — + a rig-driven
+     marker test. **✅ R-6d2a LANDED (this commit): `FlowDurabilityClass{ReDriven,ProducerLessReliable,Unreliable}` +
+     `InterShardFlow::durability_class()` (wildcard-free, exhaustive at every nesting level) in wire/intershard.rs +
+     the `durability_class_pins_the_producer_less_reliable_set` golden test (drives every_arm, pins the producer-less
+     set = EXACTLY {Ghost::Despawn, Transfer(TransientBatch)}). This is the ANTI-VACUITY core: a future durable Signal
+     is a new TransitionPayload → compile-forced classification → the marker test fails unless its push carries Retained.
+     Tier-A 100% (intershard.rs 100% region/branch/fn), clippy clean.** NEXT = R-6d2b (the big churn: the Durability
+     seam + all 6 impls + ~70 callers + OutboundBox/push_flow + the FSM write-through + MockOutboxSink tests + the
+     rig-driven marker-on-push test). THEN R-6d3 (the durable-before-send GATE in the writer + boot replay + the C2/C3
+     saga+dest closure) → R-6d4 (both-ends-restart proptest + SIGKILL-source-in-AwaitAdopt proof).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

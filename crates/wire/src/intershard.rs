@@ -196,6 +196,24 @@ pub enum IdempotencyKey {
     },
 }
 
+/// Whether an [`InterShardFlow`] arm's SENDER re-drives it after a crash — the axis that decides if a
+/// reliable one-shot needs the R-6d durable outbox. ORTHOGONAL to [`EffectClass`] (idempotency) and to the
+/// per-entity `DurabilityClass` (Durable-vs-Transient KIND, HR2); this is a per-FLOW recovery property.
+/// Classified for every arm by [`InterShardFlow::durability_class`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowDurabilityClass {
+    /// A PRODUCER re-drives it on a crash (the orchestrator saga's `scan_deadlines` re-emits the step), so
+    /// the in-RAM `ReliableLaneSender.retry` buffer + reconnect replay suffices — no durable outbox needed.
+    ReDriven,
+    /// A reliable ONE-SHOT with NO re-driver: if the SOURCE process crashes before it is acked, the RAM
+    /// retry is lost and nothing re-emits it (D-6 #1). Its `push_flow` site MUST carry `Durability::Retained`
+    /// so the R-6d durable outbox mirrors + replays it. The forgotten-marker trap this whole classifier exists
+    /// to convert into a build failure.
+    ProducerLessReliable,
+    /// A latest-wins UNRELIABLE datagram (ghost pose feed): loss is correct by design, never durable.
+    Unreliable,
+}
+
 impl InterShardFlow {
     /// Classify an arm. EXHAUSTIVE by construction — adding a variant without
     /// classifying it does not compile, which is the G-SEALED conformance hook.
@@ -285,6 +303,53 @@ impl InterShardFlow {
                     step_id: cmd.step_id,
                 },
             },
+        }
+    }
+
+    /// Classify an arm's crash-recovery property (R-6d §7). EXHAUSTIVE by construction at EVERY nesting
+    /// level — NO `_` wildcard anywhere — so adding a variant (or a `GhostFlow`/`TransitionPayload` variant)
+    /// does not compile until it is classified. This is the G-SEALED discipline of [`effect_class`] applied
+    /// to durability: a `ProducerLessReliable` flow whose `push_flow` site forgets `Durability::Retained` is
+    /// silently lost on a source crash, and the only defense is that a NEW producer-less flow cannot be added
+    /// without a compiler-forced decision here PLUS the marker test (`intershard_closed.rs`) that pins each
+    /// producer-less arm's push site to `Retained`. Sibling of, not reusable from, `effect_class` (which is
+    /// payload-blind on `Transfer` and coarse on `Ghost`).
+    #[must_use]
+    pub fn durability_class(&self) -> FlowDurabilityClass {
+        match self {
+            // Ghost lifecycle: Spawn re-derives from band geometry (the feed re-spawns); Delta is the 20Hz
+            // latest-wins datagram; Despawn is a band-exit ONE-SHOT — a direct shard↔shard emit with NO saga
+            // re-driver, so it needs the durable outbox.
+            InterShardFlow::Ghost(g) => match g {
+                GhostFlow::Spawn { .. } => FlowDurabilityClass::ReDriven,
+                GhostFlow::Delta { .. } => FlowDurabilityClass::Unreliable,
+                GhostFlow::Despawn { .. } => FlowDurabilityClass::ProducerLessReliable,
+            },
+            // The entity crossing: InitialSpawn/StubCrossing are saga steps (the orchestrator re-drives them
+            // via scan_deadlines); TransientBatch is the SOURCE-shard emit that precedes the saga's AwaitAdopt
+            // — no re-driver, the D-6 #1 producer-less case.
+            InterShardFlow::Transfer(env) => match &env.payload {
+                TransitionPayload::InitialSpawn { .. } => FlowDurabilityClass::ReDriven,
+                TransitionPayload::StubCrossing { .. } => FlowDurabilityClass::ReDriven,
+                TransitionPayload::TransientBatch { .. } => {
+                    FlowDurabilityClass::ProducerLessReliable
+                }
+            },
+            // Every remaining arm is orchestrator/saga-driven — a producer crash is recovered by the saga's
+            // scan_deadlines re-drive, so the RAM retry suffices (grouped, DRY — the effect_class discipline).
+            InterShardFlow::Directory(_)
+            | InterShardFlow::Saga(_)
+            | InterShardFlow::SagaAck(_)
+            | InterShardFlow::DirectoryReply(_)
+            | InterShardFlow::FlushSource(_)
+            | InterShardFlow::TransferAck(_)
+            | InterShardFlow::Demote(_)
+            | InterShardFlow::Promote(_)
+            | InterShardFlow::TransientRelease(_)
+            | InterShardFlow::TransientDrop(_)
+            | InterShardFlow::ReleaseComplete(_)
+            | InterShardFlow::TransientAbandon(_)
+            | InterShardFlow::ReHome(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }

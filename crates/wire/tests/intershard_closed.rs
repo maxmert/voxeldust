@@ -17,8 +17,9 @@ use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
 use vd_wire::intershard::{
-    EffectClass, FLUSH_SOURCE_STEP, FlushSource, GhostFlow, IdempotencyKey, InterShardFlow,
-    STUB_CROSSING_STEP, TransferAck, TransferEnvelope, TransferStepRejectReason, TransitionPayload,
+    EffectClass, FLUSH_SOURCE_STEP, FlowDurabilityClass, FlushSource, GhostFlow, IdempotencyKey,
+    InterShardFlow, STUB_CROSSING_STEP, TransferAck, TransferEnvelope, TransferStepRejectReason,
+    TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
@@ -268,6 +269,44 @@ fn every_arm_roundtrips_postcard_and_classifies_coherently() {
             }
         }
     }
+}
+
+#[test]
+fn durability_class_pins_the_producer_less_reliable_set() {
+    // R-6d §7 conformance: the wildcard-free `durability_class` match makes the classification TOTAL (a new
+    // arm / GhostFlow / TransitionPayload variant fails to compile until classified). This golden pin asserts
+    // the PRODUCER-LESS-RELIABLE set — the arms whose `push_flow` site MUST carry `Durability::Retained`, or
+    // the one-shot is silently lost on a source crash — is EXACTLY {Ghost::Despawn, Transfer(TransientBatch)}.
+    // Growing it is a deliberate edit that trips BOTH this pin AND (at R-6d2b) the marker-on-push test — so a
+    // future durable Signal / block-edit forward cannot slip in producer-less without a marker.
+    let mut producer_less = Vec::new();
+    for flow in every_arm() {
+        let expect = match &flow {
+            InterShardFlow::Ghost(GhostFlow::Despawn { .. }) => {
+                FlowDurabilityClass::ProducerLessReliable
+            }
+            InterShardFlow::Ghost(GhostFlow::Delta { .. }) => FlowDurabilityClass::Unreliable,
+            InterShardFlow::Transfer(env)
+                if matches!(env.payload, TransitionPayload::TransientBatch { .. }) =>
+            {
+                FlowDurabilityClass::ProducerLessReliable
+            }
+            _ => FlowDurabilityClass::ReDriven,
+        };
+        assert_eq!(
+            flow.durability_class(),
+            expect,
+            "arm misclassified: {flow:?}"
+        );
+        if flow.durability_class() == FlowDurabilityClass::ProducerLessReliable {
+            producer_less.push(flow);
+        }
+    }
+    assert_eq!(
+        producer_less.len(),
+        2,
+        "exactly two producer-less-reliable arms today (Ghost::Despawn + TransientBatch): {producer_less:?}"
+    );
 }
 
 #[test]
