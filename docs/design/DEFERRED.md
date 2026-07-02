@@ -1157,6 +1157,14 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      `parking_lot::RwLock` is the cure but a NEW-DEP JOINT-INVESTIGATION decision, NOT to be adopted unilaterally.
      RESIDUAL (R-5-audit): after the ledger re-key the node-wide `SharedInbox` Mutex is the NEXT RX serialization point — per-peer
      inbox partition / lock-free MPSC drain is a future scaling slice; the ledger re-key alone does NOT deliver full RX isolation.
+     **NEW RESIDUAL (/goal `wf_58cc14fb`, MEDIUM — the one UNCAPPED receive structure): the per-peer `RecvLedger` outer map + the
+     `acked_keys` set GROW FOREVER.** A first frame from a NodeId inserts a never-removed outer entry (mesh.rs `classify_and_deliver`
+     first-frame arm) + an `acked_keys` insert (`serve_data_stream`); neither is ever evicted. Bounded + fine for the static-roster
+     dev/cloud tier (a fixed peer set), but under HIGH PEER CHURN or a spoofed-NodeId flood it is an unbounded memory leak / DoS
+     vector — contrast the retry buffer (byte-capped, R-4b) and the inbox (BoundedInbox). NOT a live hazard at the current tier
+     (peers come only from the trusted static book/roster over mTLS). **Owed (M6/cloud, before an untrusted/churny peer set):** evict
+     a peer's ledger+acked entry on last-activity (gated on the durable incarnation so a legit reconnect re-seeds cleanly) OR cap the
+     tracked-peer count with a loud shed. Cheap to add when peer identity becomes dynamic; ledger-only for now.
      NEXT R-4e3 (correlated-outage N=8 all-pairs + L5 ignore-guard + conn_died coverage) → R-4e4 (R-5 capstone + D-6 #1 partial-flip). [→R-6, CLOUD-BLOCKING,
      SHARPENED] confirm-dead AMPLIFIES the M3-incarnation wall-clock hazard: a CrashLooping peer is confirmed-dead (correct) but
      its fast-restart reliable traffic is silently Dedup/Stale-dropped ⇒ clear-on-ack never fires ⇒ a split-brain-ish stall; the
@@ -1241,8 +1249,14 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      NodeId that moves IP needs the writer to RE-READ its address (not just re-dial), so the dynamic-address (CA-1/orch
      provisioning) slice must re-plumb the address, not only the connection.
      **(1a) `BatchHandoff::AwaitAdopt`** — the first-identified instance. A producer-less phase has NO `scan_deadlines` re-drive
-     egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash);
-     the io-prod `MeshTransport` (mesh.rs:357-395) is at-most-once (`NodeUnreachable`-and-drop). `AwaitAdopt`
+     egress, so a lost message is resent ONLY by the harness `FaultFabric` (at-least-once, surviving a receiver crash).
+     **⚠️ STATUS UPDATE (post-R-4a/R-4b, /goal `wf_58cc14fb`):** the io-prod `MeshTransport` is NO LONGER purely at-most-once —
+     after R-1'..R-4b the sender path (`peer_writer`/`confirm_and_maybe_bounce`, mesh.rs ~1101-1361) is AT-LEAST-ONCE across a
+     blip for a traffic-carrying reliable lane, and R-4a closed the idle-after-blip re-drive (see this entry's own 996-1049 log).
+     So the STILL-OWED piece for `AwaitAdopt` is narrower than "at-most-once": (i) the genuinely-idle producer-less re-drive PROOF
+     (R-4e4/R-5 `mesh_under_loss.rs`), and (ii) the SOURCE-CRASH residual — the retry buffer is RAM, so a source restart before
+     the dest adopts is not covered by the transport (the saga self-promote at saga.rs:915-922 recovers it, but its
+     `SourceUnreachable` trigger is gated on M3 durable-incarnation + L5 addr-reread). `AwaitAdopt`
      (saga.rs:563-571,631-634): the dest adopts off the source's envelope; the orchestrator only awaits `BatchAdopted`.
      **Owed cure (preferred): a real re-solicit egress on Timeout** (orchestrator re-prompts the source to re-emit the
      `TransientBatch`, or the dest to re-ack) so saga recovery is SELF-SUFFICIENT and stops depending on an un-promised
