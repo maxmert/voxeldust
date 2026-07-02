@@ -1312,6 +1312,45 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      RAII temp cleanup) folded before commit. This flips the M3 milestone: `VD_PROCESS_INCARNATION`=wall-clock is no longer the
      only incarnation source; the durable monotone boot-counter is proven end-to-end across a real process crash.** Only R-6d
      (durable outbox, the AwaitAdopt SOURCE-CRASH egress = D-6 #1 residual) remains in the R-6 arc.
+     **R-6d DESIGN VETTED (design+3-adversarial-review+synthesis wf_0af5fa8e; full spec `scripts/r6d_vetted_design.md`).
+     Verdict REVISE — the core layering DECISION is SOUND + code-confirmed, but 3 CRITICALs proved the transport outbox
+     ALONE does NOT close D-6 #1; the synthesis folded all fixes into a corrected 4-sub-slice plan (implement-ready).
+     LAYERING (fact): Shape (A′) TRANSPORT-OWNED write-through mirror of `ReliableLaneSender.retry`, its OWN fsync, NOT
+     atomic with any above-seam saga step — Shape (B) saga-runtime-owned is INFEASIBLE (the `(peer,class,incarnation,seq)`
+     key is minted async INSIDE the writer task `assign_and_retain`, does not exist above the seam). SCOPE: producer-less
+     one-shots ONLY (`TransientBatch` + `GhostFlow::Despawn`) via a per-send `Durability` marker — NEVER all reliable
+     traffic (no fsync-per-send), NEVER an HR3 fork. **3 CRITICALs (all REQUIRED, none alone closes D-6 #1):** (C1) the
+     durability fsync-gate must live in the WRITER task (`write_frame` Reliable arm), NOT `flush_outbox` (which only
+     enqueues → `send()` returns a `MsgId`, no seq yet); (C2) a NEW `InterShardFlow::TransientDiscard` arm + dest-side
+     `on_transient_discard` — the assumed dest-side GC of orphaned `Arriving` items does NOT exist, so abandon-then-replay
+     strands a silent `Arriving` orphan (poison `TRANSIENT_BATCH_STEP` so a late replayed adopt is AlreadyApplied); (C3)
+     `(BatchHandoff, SourceUnreachable)` self-promotes WRONGLY from `AwaitAdopt` (empty dest) AND is UNREACHABLE there
+     (no orchestrator→source lane ⇒ parks forever) — split the arm by phase + add an `AwaitAdopt` re-solicit egress
+     (DEFERRED.md:280 FSM-field template) so confirm-dead is reachable + resolve as accounted loss (discard-to-dest +
+     `batch_lost_source_crash` count), budget-gated on `abort_deadline_ticks` (a source that RESTARTS within budget wins
+     via its outbox replay). **ADDITIVE FROZEN-SEAM CHANGE (HIGH-2, owned): `Transport::send` grows a `Durability` param
+     across all 4 impls (Mem/Mesh/Prod/Fabric) lockstep — mem/fabric no-op it.** SUB-SLICES: R-6d1 (per-node RedbStore
+     for shard+gateway + writer durability handle; `open_node_outbox` reuses `check_durable_path`; tick-loop split gated
+     on `outbox.is_some()` so `step_tick` stays byte-identical) → R-6d2 (`OutboxSink` seam [retain/release/commit/
+     scan_all/gc_below, 26-byte BE key] + FSM write-through/delete-through + the additive `send(durability)`) → R-6d3
+     (the C1 durability gate + boot replay [MEDIUM-1 send-based, HIGH-3 GC-after-durable] + the C2/C3 saga+dest closure)
+     → R-6d4 (named gates: the mock-backed both-ends-restart replay proptest [io-prod pure] + the SIGKILL-source-in-
+     AwaitAdopt process proof with a RED no-outbox control). HR1/HR3/HR5/no-new-dep all MET; boot replay deterministically
+     Accepted (verified vs classify_reliable A1). NOT near-term (follow-slice, gated behind M3✅+L5); LARGER than the
+     original sketch (seam-touching + a new wire arm + saga FSM changes).
+     **POST-M3 /goal AUDIT (wf_3191067b, 6 opus dimensions + adversarial-verify + synth): DONE_NO_CRITICAL — 0 CRITICAL,
+     0 in-scope-unaddressed HIGH; 4 dimensions HEALTHY (compose/DRY/end-goal-readiness/HR-seal+coverage), 2 CONCERNS
+     (scale-PvP + cloud, both roadmap-truth not M3 regressions); all 10 findings MEDIUM/LOW + already honestly ledgered.
+     RULED: the AwaitAdopt orphan HAS siblings (D-6#1 producer-less class: AwaitAdopt / durable EmitCrossing / GhostFlow
+     Despawn) but they are EXHAUSTIVELY enumerated with ONE shared root cure (redelivering transport + the D-37-2d
+     re-solicit template) — R-6d is a clean bounded increment, NOT hidden rot; searched the transient tier + saga FSM for
+     a 5th un-GC-d orphan, found none new. Two cheap correctness-hygiene fixes DONE this pass (zero behavior change): F1 —
+     corrected the FALSE saga.rs:909 "every BatchHandoff phase is post-adopt ⇒ zero loss" comment to flag the AwaitAdopt
+     exception + point to R-6d; F7 — narrowed the orchestrator boot-warn from the stale unqualified "mesh is at-most-once"
+     to name the actual residual (at-least-once for source-stays-up per R-1..R-5+M3; only a SOURCE crash in AwaitAdopt
+     loses its batch until R-6d). F2 (orchestrator VD_STORE_PATH hand-rolled deny-list → reuse the tested `check_durable_
+     path` allow-list, closes the emptyDir-defeats-the-guard cloud hole) FOLDS INTO R-6d1 (which opens per-node stores
+     through the same helper). No re-audit required.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

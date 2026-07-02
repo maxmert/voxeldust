@@ -226,15 +226,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pause_marker_path: sentinel.as_ref().map(|(_, _, marker)| marker.clone()),
     };
     let (store, durability) = RedbStore::open(&store_path, store_tuning)?;
-    // The Store is now durable; the REMAINING production precondition (DEFERRED.md D-6) is the transport:
-    // the mesh is at-most-once, so a producer-less recovery phase (`AwaitAdopt`) could wedge on a real
-    // kill-9 even WITH this durable store — recovery is proven vs the harness at-least-once model. A
-    // redelivering transport is owed before a rolling production deploy.
+    // The Store is now durable. REMAINING transport production precondition (DEFERRED.md D-6): the
+    // redelivering mesh transport is at-least-once for a source that STAYS UP (R-1..R-5 + M3 durable
+    // incarnation, both proven), but a SOURCE that CRASHES inside the producer-less `AwaitAdopt` recovery
+    // phase still loses its un-acked batch until R-6d's durable outbox lands. Owed before a rolling deploy.
     tracing::warn!(
         "orchestrator durable store at {} (redb, off-tick fsync). REMAINING production precondition \
-         (DEFERRED.md D-6): the mesh transport is at-most-once, so a producer-less recovery phase \
-         (AwaitAdopt) could wedge on a real kill-9 even with this durable store; a redelivering transport \
-         is owed before a rolling production deploy.",
+         (DEFERRED.md D-6): the redelivering mesh transport is at-least-once for a source that stays up \
+         (R-1..R-5 + M3), but a SOURCE crash inside the producer-less AwaitAdopt phase still loses its \
+         un-acked batch until R-6d's durable outbox lands.",
         store_path.display()
     );
     register_orchestrator_with_store(

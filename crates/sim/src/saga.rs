@@ -906,9 +906,16 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             E::Timeout,
         ) => (state, vec![A::EmitReleaseComplete { fence: new_fence }]),
         // D-7d DEAD-RESOLUTION (terminal on FIRST fire — straight to Done, NEVER back to BatchHandoff,
-        // structurally avoiding the D-37 forever-bounce). SOURCE dead: every BatchHandoff phase is
-        // post-adopt, so the dest holds the batch and the go-token is the SOLE promote authority →
-        // self-promote the dest (zero loss). DEST dead: the only promote target is gone → ABANDON the
+        // structurally avoiding the D-37 forever-bounce). SOURCE dead: for a POST-ADOPT phase
+        // (AwaitRelease/AwaitPromote/AwaitComplete) the dest holds the batch and the go-token is the SOLE
+        // promote authority → self-promote the dest (zero loss).
+        // ⚠️ NOT SO FOR `AwaitAdopt` (PRE-adopt, entered on `CasWon` with no egress, exited only by
+        // `BatchAdopted`): a source crash there self-promotes a dest that never received the batch = the
+        // D-6 #1 silent-loss residual. The phase-wildcard `..` below is therefore INACCURATE for AwaitAdopt;
+        // R-6d splits this arm BY PHASE (accounted-loss discard-to-dest for AwaitAdopt + a re-solicit egress
+        // so the restart wins via its durable outbox) and adds the dest-side `TransientDiscard` GC. It is not
+        // reachable in the current in-proc/loopback posture — the confirm-dead trigger toward the source needs
+        // CA-1/L5 (unlanded; mesh.rs CA-1 red-guard). DEST dead: the only promote target is gone → ABANDON the
         // source's retained copy as an accounted loss-within-budget. The go-token is NOT GC'd here (it
         // backs the dest's Held authority + the TRANSIENT-AUTHORITY-HELD oracle; bounded GC is owed
         // D-7d Slice 2, which co-designs the drop-completion signal without breaking the quiescence count).
