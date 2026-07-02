@@ -829,7 +829,7 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   message stays an inert no-op until 1e (1c uses the input-flow marker, not `CutEmitted`).
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
-### D-6 🟧 Durable saga WAL: S0–S5 + the redb backend (Slice P3-PERSIST-1: C1/C2 + Slice D α/β/γ/δ) LANDED — orchestrator crash-durable & SIGKILL-mid-fsync-proven; only the deploy preconditions (#1 AwaitAdopt egress / redelivering transport, #3 WAL version+Tombstone, durable-outbox, durable-root allow-list) remain OWED
+### D-6 🟧 Durable saga WAL: S0–S5 + the redb backend (Slice P3-PERSIST-1: C1/C2 + Slice D α/β/γ/δ) LANDED — orchestrator crash-durable & SIGKILL-mid-fsync-proven; the redelivering transport is 🟩 (R-3'→R-4e, R-5 capstone proves producer-less at-least-once for a source-that-stays-up); only the deploy preconditions (#1 AwaitAdopt SOURCE-CRASH egress = M3+L5, #3 WAL version+Tombstone, durable-outbox, durable-root allow-list) remain OWED
 - **▶ Slice P3-PERSIST-1 — the redb backend (design `wf_83d5a428`, judge-panel of 4; user-decided: Store A redb
   now + single-file/split-ready-seam):** ONE generic `RedbStore` behind the frozen `sim::io::Store` seam in
   `crates/io-prod/src/store.rs`, TARGETING the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling — the
@@ -938,9 +938,35 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     barrier key-bytes (no drift; covered by a Tier-A unit test). `just orch-crash` recipe + `orch-crash-cov`
     (`%c` continuous-mode merge for the SIGKILLed child) + `store-test-hooks` in `lint-combos`, `orch-crash`
     wired into `gate`. io-prod/bins Tier-B; Tier-A still 100%. **Slice D COMPLETE.**
-  - **STILL OWED after Slice D** (separate items, ledgered): precondition **#1** (the `BatchHandoff::AwaitAdopt`
-    re-solicit egress — a durable Store A ALONE does not make prod kill-9 recovery work; the at-most-once
-    `MeshTransport` boot-warn clause STAYS until #1 lands); precondition **#3** (`WAL_FORMAT_VERSION` +
+  - **✅ D-6 #1 PARTIAL FLIP (R-4e4 / R-5 `mesh_under_loss.rs`, `2123c19..`): the TRANSPORT-LAYER redelivery is 🟩 GREEN.**
+    The redelivering `MeshTransport` (R-3' RX ledger + per-lane replay + R-4a idle-after-blip timer + R-4b bounded
+    retry + R-4d SendShed) is now proven AT-LEAST-ONCE across a blip for a PRODUCER-LESS reliable flow whose SOURCE
+    STAYS UP — the R-5 capstone drives a real `GhostFlow::Despawn` (band-exit, no saga, no `scan_deadlines` re-driver)
+    across a `drop_connections` blip + idle and asserts B receives it EXACTLY ONCE via the timer alone, the envelope
+    round-trips byte-exact, `gap_drop==0`, ZERO `NodeUnreachable` (blip≠death), the endpoint survives. This subsumes
+    the GhostReliable Despawn, the durable `EmitCrossing` (D-6 3rd phase), and the D-37 re-home (cured in 2d) FOR THE
+    SOURCE-STAYS-UP case. **The `MeshTransport` is NO LONGER "at-most-once" — the boot-warn premise is retired for the
+    source-up path.**
+  - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
+    SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
+    adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT
+    "producer-less-with-no-recovery":** the saga HAS a source-crash resolution — `(BatchHandoff, SourceUnreachable)`
+    self-promotes the dest (`saga.rs:915-922`), triggered by `rehome_event_for` once `is_confirmed_dead(ctx.source)`.
+    That trigger is gated on **M3** (durable monotone incarnation — else a sub-second CrashLoop restart at equal/lower
+    incarnation silent-Dedups + never confirms dead) **AND L5** (addr-reread — a source rescheduled to a new addr is
+    never re-dialed, so its death is never confirmed) — both already-tracked HARD deploy preconditions (R-6 + CA-1).
+    ⚠️ **BUT M3+L5 are NECESSARY-NOT-SUFFICIENT for #1** (review `wf_182e1507` LOW): they make the confirm-dead
+    trigger FIRE, but the `(BatchHandoff, SourceUnreachable)` self-promote (saga.rs:915-918) matches ANY BatchHandoff
+    phase via `..` and does NOT check dest-adopted, so if the source crashes IN `AwaitAdopt` — entered on CasWon,
+    saga.rs:815-819, exited only by `E::BatchAdopted` — BEFORE its `TransientBatch` envelope reached the dest, the
+    self-promote promotes a dest that NEVER received the batch ⇒ silent loss. Closing THAT window REQUIRES (not
+    "optionally") the durable-outbox / the 2d re-solicit-egress (an `AwaitAdopt` Timeout re-prompting the source to
+    re-emit) — the true SELF-SUFFICIENT cure; confirm-dead alone is a lean. (Ledger: the saga.rs:508/909-911
+    "every BatchHandoff phase is post-adopt ⇒ zero loss" comment is INACCURATE for `AwaitAdopt`; the self-promote arm
+    should arguably be gated to post-adopt phases, OR the AwaitAdopt-pre-delivery loss window is the exact residual
+    the durable-outbox closes — a pre-existing saga property, not R-4e4's, recorded here so #1 is not mistaken as
+    M3+L5-complete.) NONE of this blocks the R-5 TRANSPORT-layer proof (which flips only the source-stays-up path).
+    Precondition **#3** (`WAL_FORMAT_VERSION` +
     `universe_epoch_id` byte + fallible quarantining decode replacing the bare `.expect` decodes) + the
     `StoreKey::Tombstone` family; the **durable-outbox** refinement (a permanent-fsync-fault re-drive that loses
     nothing); the **durable-root ALLOW-list** (review HIGH: a prefix deny-list cannot enumerate every ephemeral
@@ -1179,7 +1205,15 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      a tight cross-lane race (the connection must die in the window between two lane writes in one replay pass) — not
      deterministically triggerable without an injectable fault seam, and it is Tier-B DEFENSE-IN-DEPTH already above the 90 floor
      (io-prod ~93.98%). Owed with R-4e5/an injectable-write-fault seam (xref R-4a post-impl review `wf_b1d0610c` LOW); NOT worth a
-     flaky race test now. NEXT R-4e4 (R-5 capstone + D-6 #1 partial-flip). [→R-6, CLOUD-BLOCKING, [→R-6, CLOUD-BLOCKING,
+     flaky race test now.
+     **✅ R-4e4 LANDED: the R-5 producer-less capstone (`crates/io-prod/tests/mesh_under_loss.rs`) + the D-6 #1 PARTIAL flip
+     (transport-layer redelivery → 🟩, above).** A real `GhostFlow::Despawn` (band-exit, producer-less — no saga/scan_deadlines)
+     is driven across a `drop_connections` blip + idle; B receives it EXACTLY ONCE via the R-4a timer alone, the envelope
+     round-trips byte-exact, `gap_drop==0`, ZERO `NodeUnreachable` (blip≠death), endpoint survives — stable 5/5 standalone
+     + green in the full concurrent io-prod suite, ~0.22s. Run by
+     `just mesh-load` alongside the N-peer load gate. **R-4e COMPLETE** (R-4e1 load harness / R-4e2 H2 RX re-key / R-4e3
+     correlated-outage+L5 / R-4e4 R-5 capstone all landed); the D-6 #1 SOURCE-CRASH residual is narrowed + gated on M3+L5 (above).
+     [→R-6, CLOUD-BLOCKING,
      SHARPENED] confirm-dead AMPLIFIES the M3-incarnation wall-clock hazard: a CrashLooping peer is confirmed-dead (correct) but
      its fast-restart reliable traffic is silently Dedup/Stale-dropped ⇒ clear-on-ack never fires ⇒ a split-brain-ish stall; the
      durable monotone boot-counter is a HARD precondition before ANY real deploy, not a dev residual. [→P9] pin an

@@ -89,6 +89,7 @@ orch-crash:
 # target host's fd/port ceiling before a cloud soak. `mesh_under_loss` is the R-5 capstone (lands R-4e4).
 mesh-load:
     VD_MESH_LOAD_NODES=64 cargo test -p vd-io-prod --test mesh_load -- --nocapture --test-threads=1
+    cargo test -p vd-io-prod --test mesh_under_loss -- --nocapture
 
 # The Tier-B (ratcheted-floor) coverage variant: the SIGKILLed orchestrator child's counters survive ONLY
 # in %c CONTINUOUS mode (the mmapped profraw is updated in place; no atexit flush after a SIGKILL). %p-%m
