@@ -1165,7 +1165,21 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      (peers come only from the trusted static book/roster over mTLS). **Owed (M6/cloud, before an untrusted/churny peer set):** evict
      a peer's ledger+acked entry on last-activity (gated on the durable incarnation so a legit reconnect re-seeds cleanly) OR cap the
      tracked-peer count with a loud shed. Cheap to add when peer identity becomes dynamic; ledger-only for now.
-     NEXT R-4e3 (correlated-outage N=8 all-pairs + L5 ignore-guard + conn_died coverage) → R-4e4 (R-5 capstone + D-6 #1 partial-flip). [→R-6, CLOUD-BLOCKING,
+     **✅ R-4e3 LANDED (tests-only, NO product change): the correlated-outage proof + the L5 red-guard.** Item 3
+     (`a_correlated_half_cluster_outage_never_evicts_surviving_peer_traffic`, mesh.rs): 8 nodes all-pairs, kill 4 SIMULTANEOUSLY,
+     drive the 4 survivors; gated on survivor-1 receiving every frame from the 3 live survivors loss-free AND the dead-lane bounce
+     stressor being ACTIVELY present (≥ dead_lanes NodeUnreachable in the same inbox) — asserts `inbound_dropped_reliable==0`.
+     PASSES ⇒ **the coalesce cure is NOT needed** (the backoff-paced re-bounce cadence can't out-produce the drain, as the R-4b
+     audit predicted); the `last_bounced_unreachable` coalesce stays a documented if-it-ever-reds fallback, not built. Item 4
+     (`l5_a_rescheduled_peer_at_a_new_address_is_reachable`, `#[ignore]`d): a RED GUARD mirroring `ca1_reply_on_connection` — A's
+     book points B at a stale addr (B binds elsewhere = a rescheduled pod); asserts the TARGET (B reachable at its real addr) and
+     FAILS BY CONSTRUCTION today (verified: "timed out; got []" — A dials the once-captured stale addr forever). Flips green when
+     the addr re-plumb (CA-1/provisioning) lands; the exact line to flip is named in the test. **Item 5 (`replay_lanes`
+     conn_died-mid-pass coverage) DEFERRED (design-sanctioned "time-box + ledger"):** the dial-ok-then-write-fails `Err(())` arm is
+     a tight cross-lane race (the connection must die in the window between two lane writes in one replay pass) — not
+     deterministically triggerable without an injectable fault seam, and it is Tier-B DEFENSE-IN-DEPTH already above the 90 floor
+     (io-prod ~93.98%). Owed with R-4e5/an injectable-write-fault seam (xref R-4a post-impl review `wf_b1d0610c` LOW); NOT worth a
+     flaky race test now. NEXT R-4e4 (R-5 capstone + D-6 #1 partial-flip). [→R-6, CLOUD-BLOCKING, [→R-6, CLOUD-BLOCKING,
      SHARPENED] confirm-dead AMPLIFIES the M3-incarnation wall-clock hazard: a CrashLooping peer is confirmed-dead (correct) but
      its fast-restart reliable traffic is silently Dedup/Stale-dropped ⇒ clear-on-ack never fires ⇒ a split-brain-ish stall; the
      durable monotone boot-counter is a HARD precondition before ANY real deploy, not a dev residual. [→P9] pin an

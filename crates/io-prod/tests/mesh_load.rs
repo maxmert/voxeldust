@@ -273,3 +273,44 @@ fn n_peer_fan_in_sustained_reliable_is_loss_free_and_acks_keep_pace() {
     // Keep the receiver handle alive to the end so no lane tears down mid-assert.
     let _ = &mut receiver;
 }
+
+/// R-4e3 (item 4): RED GUARD for L5 (pod-reschedule / address change, deferred to CA-1/provisioning).
+/// `peer_writer` captures a peer's `addr` ONCE at spawn (mesh.rs `PeerWriter.addr`) and `ensure_connection`
+/// dials THAT fixed addr forever (mesh.rs `endpoint.connect(addr, ..)`), so a NodeId whose real address
+/// differs from the booked one (a rescheduled pod) is dialed stale forever — A's sends bounce
+/// `NodeUnreachable`, B never hears them. The FIX needs a live address source (orchestrator provisioning
+/// re-plumb, DEFERRED.md D-6 precondition (1b)/CA-1). This asserts the TARGET (B, at its REAL addr,
+/// receives A's send) and FAILS BY CONSTRUCTION today (hence `#[ignore]`), pinning the exact mechanism so
+/// the guard flips green when the addr re-plumb lands. It lives in the INTEGRATION tier (not `src`), so its
+/// never-run `#[ignore]`d regions do not erode the Tier-B `src` coverage floor; it mirrors the src
+/// `ca1_reply_on_connection` `#[ignore]` pattern. To flip green: give `ensure_connection` a live address
+/// source instead of the once-captured `PeerWriter.addr`.
+#[test]
+#[ignore = "L5: peer_writer captures addr once; needs addr re-plumb (CA-1/provisioning, DEFERRED.md 1b)"]
+fn l5_a_rescheduled_peer_at_a_new_address_is_reachable() {
+    let rt = runtime(2);
+    let trust = ClusterTrust::generate("vd-mesh-l5").expect("trust");
+    // B's REAL bind addr + a STALE booked addr (nothing listens there) — a pod rescheduled AWAY from
+    // where A's book still points.
+    let (addr_a, addr_b_real, addr_b_stale) = (reserve(), reserve(), reserve());
+    let (a_id, b_id) = (NodeId(1), NodeId(2));
+    let a_book: BTreeMap<NodeId, SocketAddr> = [(b_id, addr_b_stale)].into();
+    let b_book: BTreeMap<NodeId, SocketAddr> = [(a_id, addr_a)].into();
+    let (mut a, _ca) = spawn_node(rt.handle(), &trust, a_id, addr_a, &a_book, None);
+    let (mut b, _cb) = spawn_node(rt.handle(), &trust, b_id, addr_b_real, &b_book, None);
+
+    a.send(b_id, MsgClass::Saga, vec![7u8].into())
+        .expect("enqueued (failure is async)");
+    // TARGET: B (at its real addr) receives A's send. Today A dials the stale booked addr forever ⇒ B
+    // never receives ⇒ this bounded wait times out ⇒ the test fails by construction (the pinned defect).
+    // Short deadline: a red guard only needs to demonstrate non-delivery, not wait the full 30s.
+    wait_until(
+        Duration::from_secs(5),
+        || {
+            b.drain_inbound().iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a_id && bytes[0] == 7),
+            )
+        },
+        "L5 red guard: a rescheduled peer must be reachable at its real addr once the addr re-plumb lands",
+    );
+}

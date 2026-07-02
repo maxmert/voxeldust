@@ -2691,6 +2691,127 @@ mod tests {
         );
     }
 
+    /// R-4e3 (item 3): a CORRELATED multi-peer outage. 8 nodes all-pairs; kill HALF (4)
+    /// SIMULTANEOUSLY; keep driving the 4 survivors. Each survivor's sends to the 4 DEAD peers bounce
+    /// `NodeUnreachable` into its OWN inbox (backoff-paced, R-4a) — the scale risk is that bounce storm
+    /// evicting a SURVIVING peer's reliable inbound from the shared node-wide inbox. Assert (exact,
+    /// completion-gated) survivor 1 receives every frame from survivors 2/3/4 loss-free, AND
+    /// `inbound_dropped_reliable == 0`. A SIZED inbox (capacity 256 ⇒ 2048 slots ≫ 3·BURST + the
+    /// geometric re-bounce cadence) makes the non-eviction STRUCTURAL — the R-4a bounce cadence can't
+    /// out-produce the drain. This converts the "confirm-dead can't flood the inbox" argument into
+    /// evidence (the post-R-4b audit proved slow≠unreachable are disjoint; this proves a MASS outage too).
+    #[test]
+    fn a_correlated_half_cluster_outage_never_evicts_surviving_peer_traffic() {
+        const N: u64 = 8;
+        const SURVIVORS: usize = 4; // ids 1..=4 survive; 5..=8 die together
+        const BURST: usize = 100; // < 256 ⇒ a u8 round is a unique per-frame id within a lane
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-outage").expect("trust");
+        let (mut nodes, controls) = cluster(rt.handle(), &trust, N, 256);
+        let ids: Vec<NodeId> = nodes.iter().map(MeshTransport::local_id).collect();
+
+        // Warm up all-pairs so every lane exists before the outage (sentinel payload 255, excluded below).
+        for sender in &mut nodes {
+            let from = sender.local_id();
+            for &to in &ids {
+                if to != from {
+                    let _ = sender.send(to, MsgClass::Saga, vec![255u8].into());
+                }
+            }
+        }
+        // Kill the second half SIMULTANEOUSLY (the correlated outage).
+        for c in &controls[SURVIVORS..] {
+            c.kill();
+        }
+        std::thread::sleep(Duration::from_millis(50)); // let the CONNECTION_CLOSE propagate
+
+        // The NO-LOSS traffic: each survivor sends BURST reliable to the OTHER survivors (this is what
+        // must arrive loss-free). A FEW sends to each DEAD node then trigger the bounce stressor without
+        // flooding a dead lane's retry buffer with QueueFull retry-spin (which would only slow the test,
+        // not change what it proves).
+        let survivor_ids = ids[..SURVIVORS].to_vec();
+        let dead_ids = ids[SURVIVORS..].to_vec();
+        for round in 0..BURST {
+            for node in nodes[..SURVIVORS].iter_mut() {
+                let from = node.local_id();
+                for &to in &survivor_ids {
+                    if to == from {
+                        continue;
+                    }
+                    let mut payload = vd_sim::io::bytes(vec![round as u8]);
+                    loop {
+                        match node.send(to, MsgClass::Saga, payload) {
+                            Ok(_) => break,
+                            Err(SendError::QueueFull(returned)) => {
+                                payload = returned;
+                                std::thread::sleep(Duration::from_micros(200));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A handful to each dead node from every survivor — enough to make each dead lane owe a
+        // redelivery and (after `confirm_unreachable_after_retries` backoff-paced failed replays) bounce.
+        for node in nodes[..SURVIVORS].iter_mut() {
+            for &dead in &dead_ids {
+                for _ in 0..4u8 {
+                    let _ = node.send(dead, MsgClass::Saga, vec![254u8].into());
+                }
+            }
+        }
+
+        // Survivor 1: wait until it has (a) every BURST round from EACH of survivors 2/3/4 AND (b) the
+        // dead-lane bounce stressor is ACTIVELY present (≥ one NodeUnreachable per dead lane — the bounces
+        // lag the Wire because they need `confirm_unreachable_after_retries` backoff-paced failed replays,
+        // so gating on BOTH is what makes the non-eviction assertion non-vacuous). Both are drained into
+        // node 1's ONE inbox concurrently — the exact eviction-competition the test exists to disprove.
+        let survivor_senders = [NodeId(2), NodeId(3), NodeId(4)];
+        let dead_lanes = N as usize - SURVIVORS; // 4 killed peers → ≥4 bounces expected
+        let got = wait_for(&mut nodes[0], |g| {
+            let wire_ok = survivor_senders.iter().all(|s| {
+                g.iter()
+                    .filter(|m| {
+                        matches!(m, Inbound::Wire { from, bytes, .. } if from == s && bytes[0] != 255)
+                    })
+                    .count()
+                    >= BURST
+            });
+            let bounces = g
+                .iter()
+                .filter(|m| matches!(m, Inbound::NodeUnreachable { .. }))
+                .count();
+            wire_ok && bounces >= dead_lanes
+        });
+        for s in survivor_senders {
+            let rounds: BTreeSet<u8> = got
+                .iter()
+                .filter_map(|m| match m {
+                    Inbound::Wire { from, bytes, .. } if *from == s && bytes[0] != 255 => {
+                        Some(bytes[0])
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                rounds.len(),
+                BURST,
+                "survivor 1 lost/duped frames from surviving peer {s}"
+            );
+        }
+        // THE eviction assertion: with the dead-lane bounce storm demonstrably present in node 1's inbox
+        // (the gate required ≥ dead_lanes NodeUnreachable) alongside the 3·BURST live-peer frames, the
+        // sized inbox dropped ZERO reliable — the backoff-paced re-bounce cadence cannot out-produce the
+        // drain, so a correlated outage never evicts surviving-peer reliable inbound. (If this ever REDs,
+        // the R-4e design's coalesce cure — a `last_bounced_unreachable` flag capping one bounce per
+        // dead-episode — is the fix; the passing test proves it is NOT needed at the current cadence.)
+        assert_eq!(
+            controls[0].stats().inbound_dropped_reliable,
+            0,
+            "a correlated-outage bounce storm must not evict surviving-peer reliable inbound"
+        );
+    }
+
     /// Unreliable datagrams deliver best-effort: on localhost a steady (non-flooding)
     /// snapshot stream arrives, exercising the end-to-end send_datagram/read_datagram
     /// path with newest-wins semantics.
