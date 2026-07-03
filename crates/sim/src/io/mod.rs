@@ -82,6 +82,25 @@ pub enum Reliability {
     Unreliable,
 }
 
+/// Per-send producer-intent marker (R-6d): does this reliable one-shot need to survive a SOURCE process
+/// crash? A property of the INDIVIDUAL send, stated at the [`push_flow`](crate::runtime::OutboundBox) site —
+/// NEVER inferred from [`MsgClass`] (`Saga`/`GhostReliable` each carry BOTH kinds) and NEVER a match on a
+/// shard kind (HR3). Consumed ONLY by the io-prod mesh reliable lane (write-through to the durable outbox +
+/// boot replay); every other `Transport` impl (mem/fabric/prod/mock) accepts and IGNORES it, behavior-
+/// identical to `Ephemeral`. The `Unreliable` datagram path ignores it unconditionally. Distinct from the
+/// per-entity `DurabilityClass` (the Durable-vs-Transient KIND, HR2) and the per-flow `FlowDurabilityClass`
+/// (`vd_wire`, the re-drive classifier that decides which sends carry `Retained`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Durability {
+    /// RAM retry buffer only; lost on a source crash, re-driven (if at all) by the producer. The default —
+    /// every existing reliable flow whose producer re-drives via `scan_deadlines`.
+    #[default]
+    Ephemeral,
+    /// Write-through to the durable outbox before send, replayed on boot. Producer-less reliable one-shots
+    /// ONLY (`FlowDurabilityClass::ProducerLessReliable`): `TransientBatch` + `GhostFlow::Despawn`.
+    Retained,
+}
+
 impl MsgClass {
     /// The carrier this class MUST ride. Snapshot/Input are unreliable latest-wins;
     /// everything else is reliable. (`connection_plane.md` channel table.)
@@ -334,8 +353,26 @@ pub trait Clock {
 /// D-6 precondition 1), whose owed cure (the same re-solicit-egress pattern, or a sender-side durable
 /// outbox) is owed before the redb backend / a real rolling deploy.
 pub trait Transport {
-    /// Enqueue an outbound message toward `to`.
-    fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError>;
+    /// Enqueue an outbound message toward `to` with its per-send [`Durability`] (R-6d). `durability` is a
+    /// producer-intent hint consumed ONLY by the io-prod mesh reliable lane (a `Retained` producer-less
+    /// one-shot is write-through-mirrored to the durable outbox + replayed on boot); every other impl
+    /// (mem/fabric/prod/mock) accepts and IGNORES it — behavior-identical to `Ephemeral` — and the
+    /// `Unreliable` datagram path ignores it unconditionally. This is the required method.
+    fn send_durable(
+        &mut self,
+        to: NodeId,
+        class: MsgClass,
+        bytes: Bytes,
+        durability: Durability,
+    ) -> Result<MsgId, SendError>;
+
+    /// Enqueue with the DEFAULT [`Durability::Ephemeral`] — the common case (every reliable flow whose
+    /// producer re-drives it). Only a producer-less one-shot needs [`send_durable`](Transport::send_durable)
+    /// with `Retained`; that deliberate exception is enforced by the `durability_class` conformance test, so
+    /// the 99% of sends stay a clean 3-arg call (DRY) rather than repeating `Durability::Ephemeral` everywhere.
+    fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
+        self.send_durable(to, class, bytes, Durability::Ephemeral)
+    }
 
     /// Drain everything delivered to this node since the last drain.
     fn drain_inbound(&mut self) -> Vec<Inbound>;

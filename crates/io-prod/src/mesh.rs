@@ -1527,6 +1527,11 @@ async fn write_frame(
 ) -> Result<(), WriteFail> {
     match frame.class.reliability() {
         Reliability::Reliable => {
+            // R-6d2b: the reliable lane is the SOLE consumer of the per-send `Durability` marker — lower it
+            // to a bool here. R-6d2c threads `durable` into `assign_and_retain`'s durable-outbox write-through
+            // (retain-on-send) + `on_ack` delete-through; today it is computed but not yet consumed (the
+            // `OutboxSink` handle is injected in R-6d2c).
+            let _durable = matches!(frame.durability, vd_sim::io::Durability::Retained);
             // BUFFER-FIRST, BEFORE any connection work: create the lane, capture the id, assign + retain. A
             // first-dial failure to a dead peer then leaves the frame RETAINED (the retransmit timer re-drives
             // it) and the confirm bounce has an id — a failed dial NEVER silently drops the frame. A failed
@@ -1709,7 +1714,13 @@ async fn write_frame(
 }
 
 impl Transport for MeshTransport {
-    fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
+    fn send_durable(
+        &mut self,
+        to: NodeId,
+        class: MsgClass,
+        bytes: Bytes,
+        durability: vd_sim::io::Durability,
+    ) -> Result<MsgId, SendError> {
         let Some(lane) = self.lanes.get(&to) else {
             // An unknown destination is permanent back-pressure: the payload is
             // returned, never silently dropped (the address book is config, and a
@@ -1722,6 +1733,7 @@ impl Transport for MeshTransport {
             class,
             bytes,
             msg_id,
+            durability,
         }) {
             Ok(()) => {
                 self.next_msg_id += 1;

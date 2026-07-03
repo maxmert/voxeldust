@@ -135,6 +135,9 @@ pub(crate) struct OutFrame {
     pub(crate) class: MsgClass,
     pub(crate) bytes: Bytes,
     pub(crate) msg_id: MsgId,
+    /// R-6d producer-intent: the mesh writer (`write_frame`) lowers `Retained` to the reliable lane's durable
+    /// write-through; the loopback bridge (ProdTransport) carries it for struct-completeness but ignores it.
+    pub(crate) durability: vd_sim::io::Durability,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,13 +163,20 @@ pub struct ProdTransport {
 }
 
 impl Transport for ProdTransport {
-    fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
+    fn send_durable(
+        &mut self,
+        to: NodeId,
+        class: MsgClass,
+        bytes: Bytes,
+        durability: vd_sim::io::Durability,
+    ) -> Result<MsgId, SendError> {
         let msg_id = MsgId(self.next_msg_id);
         match self.outbound_tx.try_send(OutFrame {
             to,
             class,
             bytes,
             msg_id,
+            durability,
         }) {
             Ok(()) => {
                 self.next_msg_id += 1;

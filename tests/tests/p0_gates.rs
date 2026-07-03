@@ -28,7 +28,12 @@ fn relay(fabric: &FaultFabric, id: NodeId, peer: NodeId) -> Box<dyn SteppableNod
               mut outbox: bevy_ecs::prelude::ResMut<OutboundBox>| {
             for msg in &inbox.0 {
                 if let Inbound::Wire { class, bytes, .. } = msg {
-                    outbox.0.push((peer, *class, bytes.clone()));
+                    outbox.0.push((
+                        peer,
+                        *class,
+                        bytes.clone(),
+                        vd_sim::io::Durability::Ephemeral,
+                    ));
                 }
             }
         },

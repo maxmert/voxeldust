@@ -24,7 +24,7 @@ use bevy_ecs::prelude::{Schedule, World};
 use bevy_ecs::schedule::ExecutorKind;
 use vd_core::{NodeId, TickId};
 use vd_sim::capability::NodeKind;
-use vd_sim::io::{Bytes, Inbound, MsgClass, Reliability, SendError, Transport};
+use vd_sim::io::{Bytes, Durability, Inbound, MsgClass, Reliability, SendError, Transport};
 // The per-tick runtime resources live in vd-sim (shared with feature systems and
 // the connection plane); re-exported here so node-level callers keep one path.
 pub use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox, OutboundStagingCap};
@@ -240,17 +240,17 @@ fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
     let mut sent = 0usize;
     // Peers that back-pressured THIS tick; their remaining frames requeue untried.
     let mut blocked: BTreeSet<NodeId> = BTreeSet::new();
-    let mut requeued: Vec<(NodeId, MsgClass, Bytes)> = Vec::new();
-    for (to, class, bytes) in pending {
+    let mut requeued: Vec<(NodeId, MsgClass, Bytes, Durability)> = Vec::new();
+    for (to, class, bytes, durability) in pending {
         if blocked.contains(&to) {
-            requeued.push((to, class, bytes));
+            requeued.push((to, class, bytes, durability));
             continue;
         }
-        match transport.send(to, class, bytes) {
+        match transport.send_durable(to, class, bytes, durability) {
             Ok(_) => sent += 1,
             Err(SendError::QueueFull(returned)) => {
                 blocked.insert(to);
-                requeued.push((to, class, returned));
+                requeued.push((to, class, returned, durability));
             }
         }
     }
@@ -267,14 +267,17 @@ fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
 /// still leaves the backlog over cap — and that reliable loss is its own distinct
 /// `error!`-level ALERT, never quietly lumped with snapshots. Survivors keep FIFO order.
 /// Returns `(total_shed, reliable_shed)`. Monomorphic (the generic flush stays a shim).
-fn shed_over_cap(requeued: &mut Vec<(NodeId, MsgClass, Bytes)>, cap: usize) -> (usize, usize) {
+fn shed_over_cap(
+    requeued: &mut Vec<(NodeId, MsgClass, Bytes, Durability)>,
+    cap: usize,
+) -> (usize, usize) {
     let over = requeued.len().saturating_sub(cap);
     if over == 0 {
         return (0, 0);
     }
     let unreliable_total = requeued
         .iter()
-        .filter(|(_, class, _)| class.reliability() == Reliability::Unreliable)
+        .filter(|(_, class, _, _)| class.reliability() == Reliability::Unreliable)
         .count();
     let unreliable_shed = over.min(unreliable_total);
     let reliable_shed = over - unreliable_shed;
@@ -282,7 +285,7 @@ fn shed_over_cap(requeued: &mut Vec<(NodeId, MsgClass, Bytes)>, cap: usize) -> (
     // frames (front-to-back walk = oldest-first); retain keeps the rest in FIFO order.
     let mut ud = unreliable_shed;
     let mut rd = reliable_shed;
-    requeued.retain(|(_, class, _)| match class.reliability() {
+    requeued.retain(|(_, class, _, _)| match class.reliability() {
         Reliability::Unreliable if ud > 0 => {
             ud -= 1;
             false
@@ -335,7 +338,12 @@ mod tests {
     fn echo_system(inbox: Res<InboundBox>, mut outbox: ResMut<OutboundBox>) {
         for msg in &inbox.0 {
             if let Inbound::Wire { from, class, bytes } = msg {
-                outbox.0.push((*from, *class, bytes.clone()));
+                outbox.0.push((
+                    *from,
+                    *class,
+                    bytes.clone(),
+                    vd_sim::io::Durability::Ephemeral,
+                ));
             }
         }
     }
@@ -348,10 +356,12 @@ mod tests {
         b.schedule_mut().add_systems(echo_system);
 
         // A sends one message by writing the outbox directly (no systems on A).
-        a.world_mut()
-            .resource_mut::<OutboundBox>()
-            .0
-            .push((B, MsgClass::Control, vec![42].into()));
+        a.world_mut().resource_mut::<OutboundBox>().0.push((
+            B,
+            MsgClass::Control,
+            vec![42].into(),
+            vd_sim::io::Durability::Ephemeral,
+        ));
         let report_a = a.step_tick();
         assert_eq!(report_a.tick, TickId(1));
         assert_eq!((report_a.sent, report_a.backpressured), (1, 0));
@@ -378,7 +388,12 @@ mod tests {
         {
             let mut outbox = a.world_mut().resource_mut::<OutboundBox>();
             for n in 0..4u8 {
-                outbox.0.push((B, MsgClass::Input, vec![n].into()));
+                outbox.0.push((
+                    B,
+                    MsgClass::Input,
+                    vec![n].into(),
+                    vd_sim::io::Durability::Ephemeral,
+                ));
             }
         }
         let report = a.step_tick();
@@ -387,8 +402,18 @@ mod tests {
         assert_eq!(
             a.world_mut().resource::<OutboundBox>().0,
             vec![
-                (B, MsgClass::Input, vec![2].into()),
-                (B, MsgClass::Input, vec![3].into())
+                (
+                    B,
+                    MsgClass::Input,
+                    vec![2].into(),
+                    vd_sim::io::Durability::Ephemeral
+                ),
+                (
+                    B,
+                    MsgClass::Input,
+                    vec![3].into(),
+                    vd_sim::io::Durability::Ephemeral
+                )
             ]
         );
 
@@ -406,10 +431,12 @@ mod tests {
         a.schedule_mut().add_systems(echo_system);
         let _b = hub.register(B, 8);
         hub.kill(B);
-        a.world_mut()
-            .resource_mut::<OutboundBox>()
-            .0
-            .push((B, MsgClass::Saga, vec![1].into()));
+        a.world_mut().resource_mut::<OutboundBox>().0.push((
+            B,
+            MsgClass::Saga,
+            vec![1].into(),
+            vd_sim::io::Durability::Ephemeral,
+        ));
         let r1 = a.step_tick();
         assert_eq!(r1.sent, 1, "enqueue succeeded; failure is async");
         hub.pump();
@@ -472,7 +499,13 @@ mod tests {
     }
 
     impl Transport for PerPeerLanes {
-        fn send(&mut self, to: NodeId, _class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
+        fn send_durable(
+            &mut self,
+            to: NodeId,
+            _class: MsgClass,
+            bytes: Bytes,
+            _durability: vd_sim::io::Durability,
+        ) -> Result<MsgId, SendError> {
             let mut st = self.state.borrow_mut();
             let cap = st.caps.get(&to).copied().unwrap_or(0);
             let lane = st.delivered.entry(to).or_default();
@@ -518,11 +551,36 @@ mod tests {
             let mut outbox = node.world_mut().resource_mut::<OutboundBox>();
             // Interleave X,Y,X,Y,X. A break-on-first-QueueFull would strand the
             // SECOND Y frame (idx 3) behind X's refusal at idx 2 — even though Y has room.
-            outbox.0.push((X, MsgClass::Input, vec![0].into()));
-            outbox.0.push((Y, MsgClass::Input, vec![1].into()));
-            outbox.0.push((X, MsgClass::Input, vec![2].into()));
-            outbox.0.push((Y, MsgClass::Input, vec![3].into()));
-            outbox.0.push((X, MsgClass::Input, vec![4].into()));
+            outbox.0.push((
+                X,
+                MsgClass::Input,
+                vec![0].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                Y,
+                MsgClass::Input,
+                vec![1].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                X,
+                MsgClass::Input,
+                vec![2].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                Y,
+                MsgClass::Input,
+                vec![3].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                X,
+                MsgClass::Input,
+                vec![4].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
         }
         let report = node.step_tick();
 
@@ -538,8 +596,18 @@ mod tests {
         assert_eq!(
             node.world_mut().resource::<OutboundBox>().0,
             vec![
-                (X, MsgClass::Input, vec![2].into()),
-                (X, MsgClass::Input, vec![4].into()),
+                (
+                    X,
+                    MsgClass::Input,
+                    vec![2].into(),
+                    vd_sim::io::Durability::Ephemeral
+                ),
+                (
+                    X,
+                    MsgClass::Input,
+                    vec![4].into(),
+                    vd_sim::io::Durability::Ephemeral
+                ),
             ]
         );
     }
@@ -587,7 +655,12 @@ mod tests {
             let mut outbox = node.world_mut().resource_mut::<OutboundBox>();
             // All UNRELIABLE (Input) — the disposable class; oldest-first shed.
             for n in 0..5u8 {
-                outbox.0.push((X, MsgClass::Input, vec![n].into()));
+                outbox.0.push((
+                    X,
+                    MsgClass::Input,
+                    vec![n].into(),
+                    vd_sim::io::Durability::Ephemeral,
+                ));
             }
         }
         let report = node.step_tick();
@@ -603,8 +676,18 @@ mod tests {
         assert_eq!(
             node.world_mut().resource::<OutboundBox>().0,
             vec![
-                (X, MsgClass::Input, vec![3].into()),
-                (X, MsgClass::Input, vec![4].into()),
+                (
+                    X,
+                    MsgClass::Input,
+                    vec![3].into(),
+                    vd_sim::io::Durability::Ephemeral
+                ),
+                (
+                    X,
+                    MsgClass::Input,
+                    vec![4].into(),
+                    vd_sim::io::Durability::Ephemeral
+                ),
             ]
         );
     }
@@ -620,11 +703,36 @@ mod tests {
         node.world_mut().insert_resource(OutboundStagingCap(2));
         {
             let mut outbox = node.world_mut().resource_mut::<OutboundBox>();
-            outbox.0.push((X, MsgClass::Saga, vec![0].into()));
-            outbox.0.push((X, MsgClass::Input, vec![1].into()));
-            outbox.0.push((X, MsgClass::Input, vec![2].into()));
-            outbox.0.push((X, MsgClass::Saga, vec![3].into()));
-            outbox.0.push((X, MsgClass::Input, vec![4].into()));
+            outbox.0.push((
+                X,
+                MsgClass::Saga,
+                vec![0].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                X,
+                MsgClass::Input,
+                vec![1].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                X,
+                MsgClass::Input,
+                vec![2].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                X,
+                MsgClass::Saga,
+                vec![3].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.0.push((
+                X,
+                MsgClass::Input,
+                vec![4].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
         }
         let report = node.step_tick();
 
@@ -636,8 +744,18 @@ mod tests {
         assert_eq!(
             node.world_mut().resource::<OutboundBox>().0,
             vec![
-                (X, MsgClass::Saga, vec![0].into()),
-                (X, MsgClass::Saga, vec![3].into()),
+                (
+                    X,
+                    MsgClass::Saga,
+                    vec![0].into(),
+                    vd_sim::io::Durability::Ephemeral
+                ),
+                (
+                    X,
+                    MsgClass::Saga,
+                    vec![3].into(),
+                    vd_sim::io::Durability::Ephemeral
+                ),
             ],
             "both reliable frames survive; only the disposable unreliable ones are shed"
         );
@@ -655,7 +773,12 @@ mod tests {
         {
             let mut outbox = node.world_mut().resource_mut::<OutboundBox>();
             for n in 0..3u8 {
-                outbox.0.push((X, MsgClass::Saga, vec![n].into()));
+                outbox.0.push((
+                    X,
+                    MsgClass::Saga,
+                    vec![n].into(),
+                    vd_sim::io::Durability::Ephemeral,
+                ));
             }
         }
         let report = node.step_tick();
@@ -668,7 +791,12 @@ mod tests {
         );
         assert_eq!(
             node.world_mut().resource::<OutboundBox>().0,
-            vec![(X, MsgClass::Saga, vec![2].into())],
+            vec![(
+                X,
+                MsgClass::Saga,
+                vec![2].into(),
+                vd_sim::io::Durability::Ephemeral
+            )],
             "the newest reliable frame survives; the two oldest are the reliable casualties"
         );
     }

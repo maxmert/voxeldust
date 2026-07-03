@@ -889,22 +889,37 @@ fn every_observer_delivered(sessions: &GatewaySessions, dest: NodeId) -> bool {
 
 fn push_control(outbox: &mut OutboundBox, to: NodeId, msg: &ServerControlMsg) {
     let bytes = postcard::to_allocvec(msg).expect("closed wire enums serialize infallibly");
-    outbox
-        .0
-        .push((to, MsgClass::Control, vd_sim::io::bytes(bytes)));
+    // The gateway is a ROUTER — every flow it emits is re-driven/loss-tolerant, so these direct pushes are
+    // Ephemeral (R-6d2b review LOW-1). If a future gateway flow is ever producer-less-reliable
+    // (`FlowDurabilityClass::ProducerLessReliable`) it MUST route through `OutboundBox::push_flow_durable`
+    // with `Retained` (whose debug_assert enforces it), NEVER a bare Ephemeral `.0.push`.
+    outbox.0.push((
+        to,
+        MsgClass::Control,
+        vd_sim::io::bytes(bytes),
+        vd_sim::io::Durability::Ephemeral,
+    ));
 }
 
 fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &GatewayToShard) {
     let bytes = postcard::to_allocvec(msg).expect("closed wire enums serialize infallibly");
-    outbox.0.push((to, class, vd_sim::io::bytes(bytes)));
+    outbox.0.push((
+        to,
+        class,
+        vd_sim::io::bytes(bytes),
+        vd_sim::io::Durability::Ephemeral,
+    ));
 }
 
 fn push_directory(outbox: &mut OutboundBox, to: NodeId, op: DirectoryOp) {
     let bytes = postcard::to_allocvec(&InterShardFlow::Directory(op))
         .expect("closed wire enums serialize infallibly");
-    outbox
-        .0
-        .push((to, MsgClass::Saga, vd_sim::io::bytes(bytes)));
+    outbox.0.push((
+        to,
+        MsgClass::Saga,
+        vd_sim::io::bytes(bytes),
+        vd_sim::io::Durability::Ephemeral,
+    ));
 }
 
 /// The ONE `SagaAck` encode-and-push — the exact inverse of the saga runtime's
@@ -1846,7 +1861,12 @@ fn on_shard_frame(
                     "the frame_id peek validated the sub varint, so the re-tag is infallible",
                 ))
             });
-        outbox.0.push((client, MsgClass::Snapshot, body.clone()));
+        outbox.0.push((
+            client,
+            MsgClass::Snapshot,
+            body.clone(),
+            vd_sim::io::Durability::Ephemeral,
+        ));
     }
 }
 
@@ -2061,7 +2081,7 @@ mod tests {
             self.schedule.run(&mut self.world);
             std::mem::take(&mut self.world.resource_mut::<OutboundBox>().0)
                 .into_iter()
-                .map(|(to, class, bytes)| (to, class, bytes.to_vec()))
+                .map(|(to, class, bytes, _)| (to, class, bytes.to_vec()))
                 .collect()
         }
 
@@ -4725,7 +4745,7 @@ mod tests {
         let owned: Vec<(NodeId, MsgClass, Vec<u8>)> = outbox
             .0
             .iter()
-            .map(|(t, c, b)| (*t, *c, b.to_vec()))
+            .map(|(t, c, b, _)| (*t, *c, b.to_vec()))
             .collect();
         decode_controls(&owned, to)
     }

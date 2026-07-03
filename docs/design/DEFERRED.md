@@ -1396,6 +1396,39 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      seam + all 6 impls + ~70 callers + OutboundBox/push_flow + the FSM write-through + MockOutboxSink tests + the
      rig-driven marker-on-push test). THEN R-6d3 (the durable-before-send GATE in the writer + boot replay + the C2/C3
      saga+dest closure) → R-6d4 (both-ends-restart proptest + SIGKILL-source-in-AwaitAdopt proof).**
+     **✅ R-6d2b LANDED (the Durability seam threaded end-to-end): `Durability{Ephemeral(default),Retained}` in sim::io;
+     `OutboundBox` is a 4-tuple carrying it; the mesh `OutFrame` + `write_frame` lowering consume it; `push_flow_durable`
+     at the 2 producer-less sites (stub TransientBatch + band-exit Ghost::Despawn) push `Retained`, all other pushes
+     default Ephemeral. ⚠️ DESIGN DEVIATION FROM THE VETTED R-6d2 SPEC (owned, flagged for post-impl review): the spec
+     chose EXPLICIT 4-arg `send`/`push_flow` at EVERY call site (~150 sites, `.send(` unscriptable due to mpsc/channel
+     ambiguity). Instead pivoted to 3-arg `send`/`push_flow` DEFAULTS delegating `Ephemeral` + `send_durable`/
+     `push_flow_durable` for the rare producer-less exceptions — MORE DRY (the 99% common case is a clean 3-arg call),
+     far less churn, and the marker-on-push CONFORMANCE test is now the load-bearing guarantee (it drives the real stub
+     rigs + asserts the 2 producer-less flows push Retained via `durability_class`). Landed the `producer_less_reliable_
+     flows_push_with_the_retained_marker` test (Tier-A) + a `Rig::tick_raw` durability-preserving harness helper.
+     DEFERRED to R-6d2c: the FSM WRITE-THROUGH itself — `assign_and_retain(.., durable, sink)`/`on_ack(.., sink)` +
+     the `OutboxSink` handle injection + MockOutboxSink FSM tests (today `write_frame` LOWERS `frame.durability` to a
+     `durable` bool but the sink is not yet wired — the `let _durable` bridge). Gate: workspace clippy -D clean (20m
+     rebuild), vd-sim 82+conformance, vd-node 190, vd-wire 63, full `--tests` compiles.
+     **✅ POST-IMPL REVIEW DONE (wf_ec38e817, 3 opus lenses + synth): verdict FIX_BEFORE_COMMIT + pivot ruling
+     KEEP_WITH_HARDENING (do NOT revert). The pivot is structurally sound — the frozen seam is correct additive-
+     lockstep (`send` default delegates `send_durable(Ephemeral)`, non-recursive; all 6 impls satisfy send_durable), the
+     20Hz datagram hot path is BYTE-IDENTICAL (durability read only in the Reliability::Reliable arm), HR1/HR3/HR5 all
+     MET, the DRY win real. But a reviewer EMPIRICALLY PROVED a HIGH: a future NESTED producer-less variant (the exact
+     P9 Signal / P6 BlockEdit path — a new TransitionPayload/GhostFlow) classified ProducerLessReliable slips the wire
+     golden pin VACUOUSLY (`every_arm` hand-maintained + `arm_tripwire` outer-only ⇒ len()==2 passes), shipping pushed
+     Ephemeral = D-6 #1 silent-loss with a GREEN suite. FIXES FOLDED before commit: (1) NESTED-variant tripwires
+     `payload_tripwire`/`ghost_tripwire` (wildcard-free, intershard_closed.rs) — a new nested variant now FAILS
+     COMPILATION until classified (exhaustive-by-construction, the load-bearing fix); (2) a RUNTIME guard debug_assert
+     in `push_flow_durable` (a ProducerLessReliable flow pushed Ephemeral panics — fires on EVERY producer-less push in
+     EVERY debug/test build, stronger than explicit-4-arg which forced only that SOME value be stated; release hot path
+     untouched) + a `#[should_panic]` test proving it + covering the panic arm; (3) gateway LOW-1 note (a future gateway
+     producer-less flow MUST use push_flow_durable). Gate after hardening: vd-wire 3 (tripwires) + vd-sim 191 (guard +
+     conformance) + workspace clippy -D clean + Tier-A 100% region/branch/fn. CONFIRMED (LOW-2): R-6d2b is
+     plumbing+classification ONLY — the `let _durable` bridge (mesh.rs) is unconsumed; the actual OutboxSink write-
+     through + boot replay that CLOSE D-6 #1 are R-6d2c/R-6d3 (a source crash of a TransientBatch/Despawn is STILL lost
+     today; this slice only prepares the cure). NEXT = R-6d2c (assign_and_retain/on_ack sink + OutboxSink injection +
+     MockOutboxSink FSM tests).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

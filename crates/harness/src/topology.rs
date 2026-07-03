@@ -623,7 +623,12 @@ mod tests {
             move |inbox: Res<InboundBox>, mut outbox: ResMut<OutboundBox>| {
                 for msg in &inbox.0 {
                     if let Inbound::Wire { class, bytes, .. } = msg {
-                        outbox.0.push((peer, *class, bytes.clone()));
+                        outbox.0.push((
+                            peer,
+                            *class,
+                            bytes.clone(),
+                            vd_sim::io::Durability::Ephemeral,
+                        ));
                     }
                 }
             },
@@ -1247,7 +1252,12 @@ mod tests {
             .schedule_mut()
             .add_systems(move |mut outbox: ResMut<OutboundBox>| {
                 for n in 0..4u8 {
-                    outbox.0.push((B, MsgClass::Saga, vec![n].into()));
+                    outbox.0.push((
+                        B,
+                        MsgClass::Saga,
+                        vec![n].into(),
+                        vd_sim::io::Durability::Ephemeral,
+                    ));
                 }
             });
         topo.add_node(Box::new(flood));

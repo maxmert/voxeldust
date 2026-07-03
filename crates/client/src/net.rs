@@ -534,7 +534,13 @@ mod tests {
         }
     }
     impl Transport for MockTransport {
-        fn send(&mut self, _to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
+        fn send_durable(
+            &mut self,
+            _to: NodeId,
+            class: MsgClass,
+            bytes: Bytes,
+            _durability: vd_sim::io::Durability,
+        ) -> Result<MsgId, SendError> {
             if self.refuse {
                 return Err(SendError::QueueFull(bytes));
             }

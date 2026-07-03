@@ -79,7 +79,9 @@ fn relay_node(fabric: &FaultFabric, id: NodeId, peer: NodeId) -> Box<dyn Steppab
                 Inbound::NodeUnreachable { .. } | Inbound::SendShed { .. } => None,
             });
             if let Some((class, bytes)) = first_wire {
-                outbox.0.push((peer, class, bytes));
+                outbox
+                    .0
+                    .push((peer, class, bytes, vd_sim::io::Durability::Ephemeral));
             }
         },
     );

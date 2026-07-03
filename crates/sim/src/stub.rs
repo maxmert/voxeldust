@@ -38,7 +38,7 @@ use vd_wire::seams::transfer_control::TransferControlAck;
 use vd_wire::session_flow::{GatewayToShard, ShardToGateway};
 
 use crate::authority::{Authority, AuthorityCmd};
-use crate::io::{Inbound, MsgClass};
+use crate::io::{Durability, Inbound, MsgClass};
 use crate::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 
 /// Stub-shard configuration (composer-provided; world params seed-derived, no
@@ -1117,9 +1117,12 @@ fn mint_entity(mint: &mut EntityMint, node: NodeId) -> EntityId {
 
 fn push_session_reply(outbox: &mut OutboundBox, to: NodeId, reply: &ShardToGateway) {
     let bytes = postcard::to_allocvec(reply).expect("closed wire enums serialize infallibly");
-    outbox
-        .0
-        .push((to, MsgClass::Control, crate::io::bytes(bytes)));
+    outbox.0.push((
+        to,
+        MsgClass::Control,
+        crate::io::bytes(bytes),
+        Durability::Ephemeral,
+    ));
 }
 
 /// The input path: fence gate → decode → seq gate → integrate. Every outcome lands
@@ -2131,7 +2134,12 @@ fn emit_transient_batch(
                 items: g.items,
             },
         };
-        outbox.push_flow(g.dest, MsgClass::Saga, &InterShardFlow::Transfer(env));
+        outbox.push_flow_durable(
+            g.dest,
+            MsgClass::Saga,
+            &InterShardFlow::Transfer(env),
+            Durability::Retained,
+        );
         stats.transients_emitted += 1;
     }
 }
@@ -2664,13 +2672,14 @@ fn feed_source_ghosts(
             // RELIABLE carrier (a lost Despawn would leak the collider) + DEREGISTER the feed. The
             // source tears the ghost down on receipt (`on_ghost_flow`). No vanish: the dest is the
             // sole render source by now (the destroy edge is sized past the handoff window).
-            outbox.push_flow(
+            outbox.push_flow_durable(
                 neighbor.source,
                 MsgClass::GhostReliable,
                 &InterShardFlow::Ghost(GhostFlow::Despawn {
                     entity: *entity,
                     source_fence: dot.authority.fence(),
                 }),
+                Durability::Retained,
             );
             exited.push(*entity);
             stats.ghost_band_exits += 1;
@@ -2808,7 +2817,12 @@ fn emit_frames(
             postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
         );
         for &gateway in &gateways {
-            outbox.0.push((gateway, MsgClass::Snapshot, bytes.clone()));
+            outbox.0.push((
+                gateway,
+                MsgClass::Snapshot,
+                bytes.clone(),
+                Durability::Ephemeral,
+            ));
         }
     }
 }
@@ -2882,7 +2896,25 @@ mod tests {
             self.schedule.run(&mut self.world);
             std::mem::take(&mut self.world.resource_mut::<OutboundBox>().0)
                 .into_iter()
-                .map(|(to, class, bytes)| (to, class, bytes.to_vec()))
+                .map(|(to, class, bytes, _)| (to, class, bytes.to_vec()))
+                .collect()
+        }
+
+        /// Like [`tick`](Self::tick) but PRESERVES each frame's [`Durability`] — for the R-6d marker
+        /// conformance (verifying a producer-less one-shot's push site carries `Retained`).
+        fn tick_raw(
+            &mut self,
+            inbound: Vec<Inbound>,
+        ) -> Vec<(NodeId, MsgClass, InterShardFlow, Durability)> {
+            self.world.resource_mut::<InboundBox>().0 = inbound;
+            self.schedule.run(&mut self.world);
+            std::mem::take(&mut self.world.resource_mut::<OutboundBox>().0)
+                .into_iter()
+                .filter_map(|(to, class, bytes, dur)| {
+                    postcard::from_bytes::<InterShardFlow>(&bytes)
+                        .ok()
+                        .map(|flow| (to, class, flow, dur))
+                })
                 .collect()
         }
 
@@ -2966,7 +2998,7 @@ mod tests {
     fn decode_flows(outbox: &mut OutboundBox) -> Vec<(NodeId, InterShardFlow)> {
         std::mem::take(&mut outbox.0)
             .into_iter()
-            .map(|(to, _class, bytes)| {
+            .map(|(to, _class, bytes, _)| {
                 (
                     to,
                     postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
@@ -6604,5 +6636,68 @@ mod tests {
         let after = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(after, before, "a duplicate grant head changes nothing");
         assert!(!acked(&sent, TransferId(7)), "no ack on a duplicate grant");
+    }
+
+    #[test]
+    fn producer_less_reliable_flows_push_with_the_retained_marker() {
+        // R-6d §7 CONFORMANCE: the two `FlowDurabilityClass::ProducerLessReliable` flows — the source-shard
+        // `TransientBatch` emit (D-6 #1) and the band-exit `Ghost::Despawn` — have NO scan_deadlines
+        // re-driver, so their push MUST carry `Durability::Retained` (the R-6d durable outbox mirrors +
+        // replays them across a source crash). The `send`/`push_flow` default is Ephemeral, so THIS test is
+        // the guarantee that these two sites opted into durability; a future producer-less flow (compile-
+        // forced-classified by `durability_class`, R-6d2a) whose author forgets the marker trips this.
+        use vd_wire::intershard::FlowDurabilityClass;
+        let producer_less = |sent: &[(NodeId, MsgClass, InterShardFlow, Durability)]| {
+            sent.iter()
+                .find(|(_, _, f, _)| {
+                    f.durability_class() == FlowDurabilityClass::ProducerLessReliable
+                })
+                .map(|(_, _, _, dur)| *dur)
+        };
+
+        // --- (a) TransientBatch (the emit_transient_batch producer-less one-shot) ---
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            EntityId::pack(EntityKind::Debris, 1, 7, 1),
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Crossing {
+                    dest: DEST_NODE,
+                    to_realm: RealmId::System(8),
+                    dst_realm_fence: Fence(2),
+                    batch: TransferId(0xB3),
+                },
+            },
+        );
+        assert_eq!(
+            producer_less(&rig.tick_raw(vec![])),
+            Some(Durability::Retained),
+            "the TransientBatch emit MUST push Durability::Retained (no re-driver, D-6 #1)"
+        );
+
+        // --- (b) band-exit Ghost::Despawn (reuses the_dest_feed_despawns...'s setup) ---
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]);
+        let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
+        let _ = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        rig.set_local_tick(6);
+        let _ = rig.tick(vec![]); // in-band: streams a Delta, keeps the feed
+        let exit_pos = crossing_pose().pos.offset() + DVec3::new(3.0, 0.0, 0.0);
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&SESSION)
+            .expect("the owned dot")
+            .pose
+            .pos = LatticePos::local(exit_pos);
+        assert_eq!(
+            producer_less(&rig.tick_raw(vec![])),
+            Some(Durability::Retained),
+            "the band-exit Ghost::Despawn MUST push Durability::Retained (no re-driver)"
+        );
     }
 }

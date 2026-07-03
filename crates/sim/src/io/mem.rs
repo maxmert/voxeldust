@@ -340,7 +340,15 @@ pub struct MemTransport {
 }
 
 impl Transport for MemTransport {
-    fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
+    // `_durability`: the mem tier has no durable outbox — a Retained one-shot is delivered like any other
+    // (behavior-identical to Ephemeral); the R-6d write-through is io-prod-only.
+    fn send_durable(
+        &mut self,
+        to: NodeId,
+        class: MsgClass,
+        bytes: Bytes,
+        _durability: super::Durability,
+    ) -> Result<MsgId, SendError> {
         let mut inner = self.hub.lock();
         let node = inner
             .nodes

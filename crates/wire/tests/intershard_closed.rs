@@ -242,6 +242,32 @@ fn arm_tripwire(flow: &InterShardFlow) {
     }
 }
 
+/// NESTED-VARIANT tripwires (R-6d2b review). `arm_tripwire` is exhaustive only at the OUTER `InterShardFlow`
+/// level (`Transfer(_)`/`Ghost(_)`), so a new NESTED `TransitionPayload`/`GhostFlow` variant — the natural
+/// shape of a FUTURE producer-less durable flow (P9 cross-shard Signal, P6 durable BlockEdit forward) —
+/// would NOT break compilation, would be omitted from `every_arm`, and would slip the `durability_class`
+/// golden pin (which iterates `every_arm`) VACUOUSLY: it would ship pushed with the `Durability::Ephemeral`
+/// default and be silently lost on a source crash (D-6 #1) with a GREEN suite. These wildcard-free matches
+/// force a new nested variant to FAIL COMPILATION here until it is classified — an eyes-open edit that (with
+/// the golden pin + the stub marker test it points at) forces representing it in `every_arm` and verifying
+/// its push-site `Retained` marker. This is the exhaustive-by-construction guard the per-send-`Durability`
+/// default relies on instead of the vetted explicit-4-arg. Never called; the body is the assertion.
+#[allow(dead_code)]
+fn payload_tripwire(p: &TransitionPayload) {
+    match p {
+        TransitionPayload::InitialSpawn { .. }
+        | TransitionPayload::StubCrossing { .. }
+        | TransitionPayload::TransientBatch { .. } => {}
+    }
+}
+
+#[allow(dead_code)]
+fn ghost_tripwire(g: &GhostFlow) {
+    match g {
+        GhostFlow::Spawn { .. } | GhostFlow::Delta { .. } | GhostFlow::Despawn { .. } => {}
+    }
+}
+
 #[test]
 fn every_arm_roundtrips_postcard_and_classifies_coherently() {
     for flow in every_arm() {

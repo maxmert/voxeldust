@@ -3680,8 +3680,8 @@ mod tests {
         outbox
             .0
             .iter()
-            .filter(|(to, _, _)| *to == node)
-            .filter_map(|(_, _, b)| postcard::from_bytes(b).ok())
+            .filter(|(to, _, _, _)| *to == node)
+            .filter_map(|(_, _, b, _)| postcard::from_bytes(b).ok())
             .collect()
     }
 
@@ -4588,7 +4588,7 @@ mod tests {
             1,
             "an Entity subject with a pose emits a crossing"
         );
-        let (to, class, bytes) = &outbox.0[0];
+        let (to, class, bytes, _) = &outbox.0[0];
         assert_eq!(*to, DEST);
         assert_eq!(*class, MsgClass::Saga);
         assert_eq!(

@@ -25,7 +25,7 @@ pub struct InboundBox(pub Vec<Inbound>);
 /// drop. The transport's own per-peer capacity bounds what it *accepts*, not what
 /// this staging buffer *holds* — those are distinct ceilings.
 #[derive(Resource, Debug, Default)]
-pub struct OutboundBox(pub Vec<(NodeId, MsgClass, Bytes)>);
+pub struct OutboundBox(pub Vec<(NodeId, MsgClass, Bytes, crate::io::Durability)>);
 
 /// Hard ceiling on the [`OutboundBox`] backlog a node carries across ticks under
 /// sustained per-peer back-pressure. Beyond it the flush sheds OLDEST-first but
@@ -66,10 +66,39 @@ impl OutboundBox {
         class: MsgClass,
         flow: &vd_wire::intershard::InterShardFlow,
     ) {
+        // The DEFAULT: Ephemeral (every re-driven flow — the common case). A producer-less one-shot uses
+        // [`push_flow_durable`](Self::push_flow_durable) with `Retained`; that exception is enforced by the
+        // `durability_class` conformance test, so the 99% of pushes stay a clean 3-arg call (DRY).
+        self.push_flow_durable(to, class, flow, crate::io::Durability::Ephemeral);
+    }
+
+    /// [`push_flow`](Self::push_flow) with an explicit [`Durability`](crate::io::Durability) — the producer-
+    /// less one-shots (`TransientBatch`, `GhostFlow::Despawn`, per `FlowDurabilityClass`) pass `Retained` so
+    /// the R-6d durable outbox mirrors + replays them across a source crash (D-6 #1).
+    pub fn push_flow_durable(
+        &mut self,
+        to: NodeId,
+        class: MsgClass,
+        flow: &vd_wire::intershard::InterShardFlow,
+        durability: crate::io::Durability,
+    ) {
+        // R-6d2b HARDENING (post-impl review): with `send`/`push_flow` defaulting `Ephemeral`, a producer-less
+        // reliable flow (`FlowDurabilityClass::ProducerLessReliable`) pushed WITHOUT `Retained` is silently
+        // lost on a source crash (D-6 #1). This fires at the push site on EVERY such push in EVERY debug/test
+        // build — so a forgotten marker (incl. on a future P9-Signal / P6-BlockEdit producer-less flow) fails
+        // LOUD immediately, not on manual test-authoring discipline. Debug-only (release hot path untouched);
+        // it forces the CORRECT durability, a guard stronger than the vetted explicit-4-arg (which forced only
+        // that SOME value be stated). The compile-time nested tripwires (`intershard_closed.rs`) are the twin.
+        debug_assert!(
+            !(flow.durability_class()
+                == vd_wire::intershard::FlowDurabilityClass::ProducerLessReliable
+                && matches!(durability, crate::io::Durability::Ephemeral)),
+            "producer-less-reliable flow pushed Ephemeral (needs Retained — D-6 #1 silent-loss): {flow:?}"
+        );
         let bytes = crate::io::bytes(
             postcard::to_allocvec(flow).expect("closed wire enums serialize infallibly"),
         );
-        self.0.push((to, class, bytes));
+        self.0.push((to, class, bytes, durability));
     }
 
     /// D-3 lease-liveness heartbeat: push one `LeaseRenew{key, fence}` per held key toward the
@@ -141,5 +170,26 @@ mod tests {
             ..a
         };
         assert_ne!(a, b);
+    }
+
+    /// The R-6d2b hardening guard: the DEFAULT `push_flow` (Ephemeral) must REJECT a producer-less-reliable
+    /// flow — proving a forgotten `Retained` fails loud at the push site (not on manual test authoring), and
+    /// covering the `debug_assert` panic arm. `#[cfg(debug_assertions)]` because the guard is debug-only.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "producer-less-reliable flow pushed Ephemeral")]
+    fn push_flow_default_rejects_a_producer_less_reliable_flow() {
+        use vd_wire::intershard::{GhostFlow, InterShardFlow};
+        let mut ob = OutboundBox::default();
+        // Ghost::Despawn is FlowDurabilityClass::ProducerLessReliable — pushing it via the Ephemeral default
+        // (instead of `push_flow_durable(.., Retained)`) is the D-6 #1 silent-loss the guard forbids.
+        ob.push_flow(
+            NodeId(2),
+            MsgClass::GhostReliable,
+            &InterShardFlow::Ghost(GhostFlow::Despawn {
+                entity: vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 7, 1),
+                source_fence: vd_core::Fence(1),
+            }),
+        );
     }
 }

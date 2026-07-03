@@ -513,7 +513,15 @@ pub struct FabricTransport {
 }
 
 impl Transport for FabricTransport {
-    fn send(&mut self, to: NodeId, class: MsgClass, bytes: Bytes) -> Result<MsgId, SendError> {
+    // `_durability`: the fabric models the at-least-once oracle already — a Retained one-shot needs no extra
+    // durable outbox here (behavior-identical to Ephemeral); R-6d durability is io-prod-only.
+    fn send_durable(
+        &mut self,
+        to: NodeId,
+        class: MsgClass,
+        bytes: Bytes,
+        _durability: vd_sim::io::Durability,
+    ) -> Result<MsgId, SendError> {
         let mut inner = self.fabric.lock();
         let policy = inner
             .policies
