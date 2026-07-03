@@ -33,6 +33,7 @@ use vd_sim::io::{
     Transport,
 };
 
+use crate::outbox::{OutboxKey, OutboxSink};
 use crate::trust::ClusterTrust;
 use crate::{
     AckEntry, AckFrame, DatagramFrame, OutFrame, ProdIoError, ReliableFrame, read_one_ack_frame,
@@ -434,6 +435,11 @@ fn prime_or_contiguous(st: &mut RecvState, seq: u64, fresh_incarnation: bool) ->
 struct RetainedFrame {
     frame: ReliableFrame,
     framed_len: u32,
+    /// R-6d2c: was this frame write-through-mirrored to the durable outbox (`durable && sink.is_some()` at
+    /// assign)? `on_ack` releases the outbox key ONLY for `retained` frames — so the outbox is a STRICT
+    /// SUBSET of `retry` (the Retained frames). Keyed by seq/incarnation (epoch-independent), so an epoch
+    /// bump never orphans a row.
+    retained: bool,
 }
 
 /// R-4b: why `assign_and_retain` refused to retain a reliable frame. Both are shed-loud (`reliable_shed` +
@@ -454,6 +460,12 @@ struct ReliableLaneSender {
     /// THIS lane's QUIC uni stream. `None` until the first send opens it; reset to `None` on any write
     /// error (re-opened lazily on the next send after the peer re-dial).
     stream: Option<quinn::SendStream>,
+    /// R-6d2c: the DEST peer this lane sends to (the ConnRegistry key = `dest`/`w.dest`, NOT
+    /// `ReliableFrame.from` which is the LOCAL sender). Constant for the lane's life. Supplies
+    /// `OutboxKey.peer` for the durable write-through/delete-through — `on_ack` has no `NodeId` in scope
+    /// otherwise. Class is NOT stored (it lives in every `RetainedFrame.frame.class`; the per-class-lane
+    /// invariant makes them equal, so `on_ack` reads `rf.frame.class`).
+    peer: NodeId,
     /// The sender's process-incarnation, stamped on every frame (constant for the lane's life). R-3'
     /// reads it to reset the receiver's dedup state when the sender restarts.
     incarnation: u64,
@@ -493,9 +505,10 @@ struct ReliableLaneSender {
 }
 
 impl ReliableLaneSender {
-    fn new(incarnation: u64, retry_cap: usize) -> ReliableLaneSender {
+    fn new(peer: NodeId, incarnation: u64, retry_cap: usize) -> ReliableLaneSender {
         ReliableLaneSender {
             stream: None,
+            peer,
             incarnation,
             epoch: 0,
             next_seq: 0,
@@ -505,6 +518,19 @@ impl ReliableLaneSender {
             base: 0,
             consecutive_failures: 0,
             last_msg_id: None,
+        }
+    }
+
+    /// R-6d2c: the ONE `OutboxKey` constructor — `peer`/`incarnation` single-sourced from the lane, the two
+    /// varying inputs (class, seq) passed explicitly. `retain` (in `assign_and_retain`) and `release` (in
+    /// `on_ack`) build the SAME key iff they pass the same `(class, seq)`; the per-class-lane invariant makes
+    /// `rf.frame.class == class`, so a release keys the exact row its retain wrote.
+    fn outbox_key(&self, class: MsgClass, seq: u64) -> OutboxKey {
+        OutboxKey {
+            peer: self.peer,
+            class,
+            incarnation: self.incarnation,
+            seq,
         }
     }
 
@@ -537,7 +563,13 @@ impl ReliableLaneSender {
     /// clamp is real logic, not the `debug_assert` (which compiles out on the Tier-B stable build).
     /// Returns the number of frames RETIRED (0 for a stale/duplicate/lower ack) — the sender's
     /// `reliable_acked` observability (a stuck-at-0 counter is a dead ack path).
-    fn on_ack(&mut self, ack_incarnation: u64, ack_epoch: u32, ack_through: u64) -> usize {
+    fn on_ack(
+        &mut self,
+        ack_incarnation: u64,
+        ack_epoch: u32,
+        ack_through: u64,
+        mut sink: Option<&mut dyn OutboxSink>,
+    ) -> usize {
         if ack_incarnation != self.incarnation || ack_epoch != self.epoch {
             return 0;
         }
@@ -546,6 +578,15 @@ impl ReliableLaneSender {
             if let Some(rf) = self.retry.remove(&self.base) {
                 // R-4b: keep `retry_bytes` in LOCKSTEP — subtract the SAME frozen framed_len assign added.
                 self.retry_bytes -= rf.framed_len as usize;
+                // R-6d2c: release ONLY a write-through-mirrored (durable) frame — an Ephemeral-heavy Saga
+                // lane must NOT stage a tombstone per acked ephemeral seq. `class` from the retired frame
+                // (per-class-lane invariant: `rf.frame.class` == this lane's class). `as_deref_mut` re-borrows
+                // the `Option<&mut dyn>` so multiple releases in one ack are fine.
+                if rf.retained
+                    && let Some(s) = sink.as_deref_mut()
+                {
+                    s.release(&self.outbox_key(rf.frame.class, self.base));
+                }
             }
             self.base += 1;
         }
@@ -568,6 +609,8 @@ impl ReliableLaneSender {
         from: NodeId,
         class: MsgClass,
         bytes: &[u8],
+        durable: bool,
+        sink: Option<&mut dyn OutboxSink>,
     ) -> Result<u64, AssignReject> {
         let seq = self.next_seq;
         // Build the frame stamped at the WORST-CASE epoch (`u32::MAX`, a 5-byte varint) for the framing
@@ -594,7 +637,31 @@ impl ReliableLaneSender {
             return Err(AssignReject::BufferFull);
         }
         frame.epoch = self.epoch; // the real epoch for retention + the first write
-        self.retry.insert(seq, RetainedFrame { frame, framed_len });
+        // R-6d2c: mirror ONLY a Retained frame to the durable outbox — and only when a sink is wired (`None`
+        // in prod until R-6d3). `retained` records the SAME predicate so `on_ack` releases exactly this
+        // subset. `encoded` (the epoch=u32::MAX framed bytes from the check above) is the outbox VALUE (the
+        // L2 seam contract: a full framed `ReliableFrame`; R-6d3 replay `decode_frame`s it + re-stamps epoch),
+        // still owned here — the `frame` move below does NOT touch it. NO re-encode. Straight-line
+        // monomorphic shim (HR5(a)): the only branch is the two-level `if let`; `retain` is a `dyn` call.
+        // Placed BEFORE the RAM insert — an INTENTIONAL deviation from the design-of-record (wf_5ca0a751 §3
+        // put it after): behaviour-identical (both reject arms already returned, so an un-retainable frame is
+        // never mirrored; `encoded` is owned + read here before the `frame` move), and this order sidesteps the
+        // move-then-borrow the design spent a paragraph reasoning about. `outbox ⊆ retained ⊆ never-shed` holds
+        // regardless of order.
+        let retained = durable && sink.is_some();
+        if let Some(s) = sink
+            && retained
+        {
+            s.retain(&self.outbox_key(class, seq), &encoded);
+        }
+        self.retry.insert(
+            seq,
+            RetainedFrame {
+                frame,
+                framed_len,
+                retained,
+            },
+        );
         self.retry_bytes += framed_len as usize;
         self.next_seq += 1;
         Ok(seq)
@@ -1125,7 +1192,7 @@ async fn peer_writer(mut w: PeerWriter) {
                         if let Some(lane) = lanes.get_mut(&e.class) {
                             // R-6c/L4: retire against THIS entry's own class incarnation (per-entry), not a
                             // single frame-level scalar.
-                            let retired = lane.on_ack(e.incarnation, e.epoch, e.ack_through);
+                            let retired = lane.on_ack(e.incarnation, e.epoch, e.ack_through, None);
                             if retired > 0 {
                                 w.stats
                                     .reliable_acked
@@ -1529,9 +1596,10 @@ async fn write_frame(
         Reliability::Reliable => {
             // R-6d2b: the reliable lane is the SOLE consumer of the per-send `Durability` marker — lower it
             // to a bool here. R-6d2c threads `durable` into `assign_and_retain`'s durable-outbox write-through
-            // (retain-on-send) + `on_ack` delete-through; today it is computed but not yet consumed (the
-            // `OutboxSink` handle is injected in R-6d2c).
-            let _durable = matches!(frame.durability, vd_sim::io::Durability::Retained);
+            // (retain-on-send) + `on_ack` delete-through. The `OutboxSink` handle itself is injected by the
+            // R-6d3 fsync-gate slice; until then this writer passes `None` (no mirror), so `durable` selects a
+            // no-op today but the FSM plumbing + retained-subset bookkeeping is exercised end-to-end now.
+            let durable = matches!(frame.durability, vd_sim::io::Durability::Retained);
             // BUFFER-FIRST, BEFORE any connection work: create the lane, capture the id, assign + retain. A
             // first-dial failure to a dead peer then leaves the frame RETAINED (the retransmit timer re-drives
             // it) and the confirm bounce has an id — a failed dial NEVER silently drops the frame. A failed
@@ -1543,8 +1611,8 @@ async fn write_frame(
             let seq = {
                 let lane = lanes
                     .entry(frame.class)
-                    .or_insert_with(|| ReliableLaneSender::new(incarnation, retry_cap));
-                match lane.assign_and_retain(local, frame.class, &frame.bytes) {
+                    .or_insert_with(|| ReliableLaneSender::new(dest, incarnation, retry_cap));
+                match lane.assign_and_retain(local, frame.class, &frame.bytes, durable, None) {
                     Ok(seq) => {
                         // R-4a: remember the id ONLY of a RETAINED frame, so the threshold-gated confirm
                         // bounce (which has no OutFrame) can never carry the id of a rejected/never-retained
@@ -1768,6 +1836,10 @@ mod tests {
     // ---- Pure ReliableLaneSender FSM tests (no tokio/quinn — the at-least-once correctness core) ----
 
     const FROM: NodeId = NodeId(1);
+    /// R-6d2c: the lane's DEST peer (the first `OutboxKey` field). Distinct from `FROM` (the local sender)
+    /// so a test that DOES wire a sink can tell a mis-keyed row from a correct one. For every sink-less FSM
+    /// test its value is behaviourally inert (the outbox is only touched when a `Some(sink)` is passed).
+    const PEER: NodeId = NodeId(2);
     const CLASS: MsgClass = MsgClass::Saga;
     /// A retry-buffer cap so large no FSM test ever trips `AssignReject::BufferFull` (R-4b is exercised by a
     /// dedicated small-cap test).
@@ -1775,10 +1847,10 @@ mod tests {
 
     #[test]
     fn sender_assigns_monotone_seq_and_retains() {
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"a"), Ok(0));
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"bb"), Ok(1));
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ccc"), Ok(2));
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"a", false, None), Ok(0));
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"bb", false, None), Ok(1));
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ccc", false, None), Ok(2));
         assert_eq!(lane.next_seq, 3);
         assert_eq!(
             lane.retry.keys().copied().collect::<Vec<_>>(),
@@ -1799,11 +1871,11 @@ mod tests {
         // connection-reuse-across-a-restart case) each retire against ITS OWN. The single frame-level scalar
         // that preceded R-6c was last-class-wins (ack_egress overwrote it each loop iteration) and would
         // stall whichever lane did not match the emitted scalar.
-        let mut saga = ReliableLaneSender::new(5, BIG_CAP);
-        let mut ghost = ReliableLaneSender::new(9, BIG_CAP);
-        assert_eq!(saga.assign_and_retain(FROM, MsgClass::Saga, b"a"), Ok(0));
+        let mut saga = ReliableLaneSender::new(PEER, 5, BIG_CAP);
+        let mut ghost = ReliableLaneSender::new(PEER, 9, BIG_CAP);
+        assert_eq!(saga.assign_and_retain(FROM, MsgClass::Saga, b"a", false, None), Ok(0));
         assert_eq!(
-            ghost.assign_and_retain(FROM, MsgClass::GhostReliable, b"b"),
+            ghost.assign_and_retain(FROM, MsgClass::GhostReliable, b"b", false, None),
             Ok(0)
         );
 
@@ -1828,7 +1900,7 @@ mod tests {
                 entries[0].incarnation,
                 entries[0].epoch,
                 entries[0].ack_through
-            ),
+            , None),
             1
         );
         assert_eq!(
@@ -1836,7 +1908,7 @@ mod tests {
                 entries[1].incarnation,
                 entries[1].epoch,
                 entries[1].ack_through
-            ),
+            , None),
             1
         );
         assert!(
@@ -1846,13 +1918,13 @@ mod tests {
 
         // The MISFIRE the per-class design removes: a WRONG-incarnation ack (what a shared last-class-wins
         // scalar would apply to the non-matching lane) retires NOTHING — a silent send stall.
-        let mut stalled = ReliableLaneSender::new(9, BIG_CAP);
+        let mut stalled = ReliableLaneSender::new(PEER, 9, BIG_CAP);
         assert_eq!(
-            stalled.assign_and_retain(FROM, MsgClass::GhostReliable, b"c"),
+            stalled.assign_and_retain(FROM, MsgClass::GhostReliable, b"c", false, None),
             Ok(0)
         );
         assert_eq!(
-            stalled.on_ack(5, 0, 0),
+            stalled.on_ack(5, 0, 0, None),
             0,
             "an ack minted at a wrong incarnation retires nothing"
         );
@@ -1867,10 +1939,10 @@ mod tests {
     fn write_error_does_not_roll_back_seq() {
         // BUFFER-FIRST: a failed write (modelled by on_write_error after an assign) never burns or
         // re-uses a seq — the next assign is the next monotone value, at the bumped epoch.
-        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"x"), Ok(0));
+        let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"x", false, None), Ok(0));
         lane.on_write_error();
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"y"), Ok(1)); // not reused 0, not skipped 2
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"y", false, None), Ok(1)); // not reused 0, not skipped 2
         assert_eq!(
             lane.retry[&1].frame.epoch, 1,
             "the post-error assign carries the bumped epoch"
@@ -1880,9 +1952,9 @@ mod tests {
 
     #[test]
     fn replay_batch_is_ascending_seq_with_current_epoch() {
-        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
-            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
         }
         lane.on_write_error(); // epoch -> 1
         let batch = lane.replay_batch();
@@ -1905,11 +1977,11 @@ mod tests {
     #[test]
     fn replay_batch_restamps_latest_epoch_after_two_bumps_with_intervening_assign() {
         // No stale-epoch frame leaks into a fresh replay even when assigns interleave with bumps.
-        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"0").expect("fits"); // seq0 @ e0
-        lane.assign_and_retain(FROM, CLASS, b"1").expect("fits"); // seq1 @ e0
+        let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
+        lane.assign_and_retain(FROM, CLASS, b"0", false, None).expect("fits"); // seq0 @ e0
+        lane.assign_and_retain(FROM, CLASS, b"1", false, None).expect("fits"); // seq1 @ e0
         lane.on_write_error(); // e1
-        lane.assign_and_retain(FROM, CLASS, b"2").expect("fits"); // seq2 @ e1
+        lane.assign_and_retain(FROM, CLASS, b"2", false, None).expect("fits"); // seq2 @ e1
         lane.on_write_error(); // e2
         let batch = lane.replay_batch();
         assert_eq!(
@@ -1927,10 +1999,10 @@ mod tests {
         // The CRITICAL double-write cure (sender side): replay_batch() — the write set when a stream
         // is (re)opened — contains EACH retained seq EXACTLY once, with the just-assigned seq present
         // exactly once and LAST (so the steady-state path never re-writes it).
-        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"0").expect("fits");
+        let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
+        lane.assign_and_retain(FROM, CLASS, b"0", false, None).expect("fits");
         lane.on_write_error();
-        let new_seq = lane.assign_and_retain(FROM, CLASS, b"1").expect("fits");
+        let new_seq = lane.assign_and_retain(FROM, CLASS, b"1", false, None).expect("fits");
         let batch = lane.replay_batch();
         let seqs: Vec<u64> = batch.iter().map(|f| f.seq).collect();
         assert_eq!(
@@ -1955,12 +2027,12 @@ mod tests {
         // R-2b has no ack producer, so `retry` never drains: keys are 0..next_seq (the ledgered
         // non-draining-retry window). The cumulative-ack RETIRE (`on_ack`/`base`) + its tests land WITH
         // the R-3' ack producer; the byte-total for the buffer SHED lands with R-4'.
-        let mut lane = ReliableLaneSender::new(0, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
-            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
         }
         lane.on_write_error();
-        lane.assign_and_retain(FROM, CLASS, b"d").expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"d", false, None).expect("fits");
         assert_eq!(
             lane.retry.keys().copied().collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
@@ -1977,10 +2049,10 @@ mod tests {
         // at exactly MAX frames OVER the cap. assign must REJECT it without retaining or burning a seq:
         // an un-framable frame can never be sent, so retaining it would poison the lane (replayed-and-
         // failed every redial). (Regression for the off-by-the-header poison window, audit wf_93fc5909.)
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         let at_cap = vec![0u8; vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize];
         assert_eq!(
-            lane.assign_and_retain(FROM, CLASS, &at_cap),
+            lane.assign_and_retain(FROM, CLASS, &at_cap, false, None),
             Err(AssignReject::Unframable)
         );
         assert!(
@@ -1989,7 +2061,7 @@ mod tests {
         );
         assert_eq!(lane.next_seq, 0, "a rejected assign does not burn a seq");
         // The lane is NOT poisoned: a normal frame after a rejection assigns cleanly at seq 0.
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ok"), Ok(0));
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ok", false, None), Ok(0));
     }
 
     /// The worst-case (epoch=u32::MAX) framed length of a `bytes` payload — the SAME number assign stores as
@@ -2015,13 +2087,13 @@ mod tests {
         // the retained window + retry_bytes are untouched (NOTHING dropped). Backpressure is transient: an ack
         // frees a slot and the next send is accepted.
         let one = framed_len(b"hello");
-        let mut lane = ReliableLaneSender::new(7, one * 2);
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello"), Ok(0));
+        let mut lane = ReliableLaneSender::new(PEER, 7, one * 2);
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello", false, None), Ok(0));
         assert_eq!(lane.retry_bytes, one, "one frame accounted");
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello"), Ok(1));
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello", false, None), Ok(1));
         assert_eq!(lane.retry_bytes, one * 2, "two frames = full");
         assert_eq!(
-            lane.assign_and_retain(FROM, CLASS, b"hello"),
+            lane.assign_and_retain(FROM, CLASS, b"hello", false, None),
             Err(AssignReject::BufferFull)
         );
         assert_eq!(lane.next_seq, 2, "a refused send does not burn a seq");
@@ -2031,10 +2103,10 @@ mod tests {
             one * 2,
             "retry_bytes unchanged — NO retained frame dropped (producer backpressure, not a shed)"
         );
-        lane.on_ack(7, 0, 0); // retire seq0 -> a slot frees
+        lane.on_ack(7, 0, 0, None); // retire seq0 -> a slot frees
         assert_eq!(lane.retry_bytes, one, "one frame freed");
         assert_eq!(
-            lane.assign_and_retain(FROM, CLASS, b"hello"),
+            lane.assign_and_retain(FROM, CLASS, b"hello", false, None),
             Ok(2),
             "backpressure is transient: a freed slot accepts the next send"
         );
@@ -2045,9 +2117,9 @@ mod tests {
         // R-4b (the H3 accounting invariant): retry_bytes == the sum of every retained frame's FROZEN
         // framed_len — invariant across assigns, acks, AND an epoch re-stamp (framed_len is the worst-case
         // length, so it never drifts even as the on-wire epoch varint grows).
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"bb", b"ccc", b"dddd"] {
-            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
         }
         let sum = |l: &ReliableLaneSender| {
             l.retry
@@ -2062,7 +2134,7 @@ mod tests {
             sum(&lane),
             "an epoch re-stamp never drifts retry_bytes (H3)"
         );
-        lane.on_ack(7, 1, 1); // retire seq0,1 at the bumped epoch
+        lane.on_ack(7, 1, 1, None); // retire seq0,1 at the bumped epoch
         assert_eq!(lane.retry_bytes, sum(&lane), "retire accounting");
         assert_eq!(lane.retry.len(), 2);
     }
@@ -2079,14 +2151,14 @@ mod tests {
         let accepted = (0..48)
             .map(|d| max - d)
             .find(|&n| {
-                ReliableLaneSender::new(u64::MAX, BIG_CAP)
-                    .assign_and_retain(FROM, CLASS, &vec![0u8; n])
+                ReliableLaneSender::new(PEER, u64::MAX, BIG_CAP)
+                    .assign_and_retain(FROM, CLASS, &vec![0u8; n], false, None)
                     .is_ok()
             })
             .expect("some near-cap payload is accepted");
-        let mut lane = ReliableLaneSender::new(u64::MAX, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, u64::MAX, BIG_CAP);
         let seq = lane
-            .assign_and_retain(FROM, CLASS, &vec![0u8; accepted])
+            .assign_and_retain(FROM, CLASS, &vec![0u8; accepted], false, None)
             .expect("accepted");
         let mut replayed = lane.retry[&seq].frame.clone();
         replayed.epoch = u32::MAX;
@@ -2100,12 +2172,12 @@ mod tests {
     fn sibling_error_does_not_leak_epoch_into_a_fresh_lane() {
         // Lazy lane creation always starts epoch 0 — a sibling class's write error never bleeds into
         // a freshly-created lane.
-        let mut a = ReliableLaneSender::new(5, BIG_CAP);
-        a.assign_and_retain(FROM, MsgClass::Control, b"x")
+        let mut a = ReliableLaneSender::new(PEER, 5, BIG_CAP);
+        a.assign_and_retain(FROM, MsgClass::Control, b"x", false, None)
             .expect("fits");
         a.on_write_error(); // A -> epoch 1
-        let mut b = ReliableLaneSender::new(5, BIG_CAP);
-        b.assign_and_retain(FROM, MsgClass::Saga, b"y")
+        let mut b = ReliableLaneSender::new(PEER, 5, BIG_CAP);
+        b.assign_and_retain(FROM, MsgClass::Saga, b"y", false, None)
             .expect("fits");
         assert_eq!(
             b.retry[&0].frame.epoch, 0,
@@ -2293,23 +2365,23 @@ mod tests {
 
     #[test]
     fn on_ack_retires_the_acked_prefix_and_advances_base() {
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c", b"d"] {
-            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
         }
-        assert_eq!(lane.on_ack(7, 0, 1), 2, "retires seq 0 and 1"); // epoch 0 == lane epoch
+        assert_eq!(lane.on_ack(7, 0, 1, None), 2, "retires seq 0 and 1"); // epoch 0 == lane epoch
         assert_eq!(lane.base, 2);
         assert_eq!(lane.retry.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
     }
 
     #[test]
     fn on_ack_ignores_a_stale_epoch_ack() {
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        lane.assign_and_retain(FROM, CLASS, b"a", false, None).expect("fits");
         lane.on_write_error(); // epoch -> 1
-        lane.assign_and_retain(FROM, CLASS, b"b").expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"b", false, None).expect("fits");
         assert_eq!(
-            lane.on_ack(7, 0, 5),
+            lane.on_ack(7, 0, 5, None),
             0,
             "an ack at the OLD epoch 0 retires nothing"
         );
@@ -2319,10 +2391,10 @@ mod tests {
 
     #[test]
     fn on_ack_ignores_a_prior_incarnation_ack() {
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        lane.assign_and_retain(FROM, CLASS, b"a", false, None).expect("fits");
         assert_eq!(
-            lane.on_ack(6, 0, 0),
+            lane.on_ack(6, 0, 0, None),
             0,
             "an ack against a DIFFERENT incarnation retires nothing"
         );
@@ -2331,14 +2403,14 @@ mod tests {
 
     #[test]
     fn on_ack_is_monotone_a_lower_ack_never_rolls_base_back() {
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c", b"d", b"e", b"f"] {
-            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
         }
-        assert_eq!(lane.on_ack(7, 0, 4), 5, "retire 0..=4"); // base -> 5
+        assert_eq!(lane.on_ack(7, 0, 4, None), 5, "retire 0..=4"); // base -> 5
         assert_eq!(lane.base, 5);
         assert_eq!(
-            lane.on_ack(7, 0, 1),
+            lane.on_ack(7, 0, 1, None),
             0,
             "a reordered LOWER ack retires nothing"
         );
@@ -2348,11 +2420,11 @@ mod tests {
 
     #[test]
     fn on_ack_clamps_to_next_seq_so_base_never_overruns() {
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"a").expect("fits");
-        lane.assign_and_retain(FROM, CLASS, b"b").expect("fits");
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        lane.assign_and_retain(FROM, CLASS, b"a", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"b", false, None).expect("fits");
         assert_eq!(
-            lane.on_ack(7, 0, 999),
+            lane.on_ack(7, 0, 999, None),
             2,
             "a forged/torn ack_through is clamped to next_seq"
         );
@@ -2363,11 +2435,11 @@ mod tests {
 
     #[test]
     fn replay_batch_starts_at_base_after_a_retire() {
-        let mut lane = ReliableLaneSender::new(7, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
-            lane.assign_and_retain(FROM, CLASS, b).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
         }
-        lane.on_ack(7, 0, 0); // retire seq0, base -> 1
+        lane.on_ack(7, 0, 0, None); // retire seq0, base -> 1
         lane.on_write_error(); // epoch -> 1
         let batch = lane.replay_batch();
         assert_eq!(
@@ -2383,18 +2455,18 @@ mod tests {
         // A bounded deterministic sweep of {assign, on_ack(current epoch, ahead-of-window), write_error,
         // on_ack(stale epoch)}: base <= next_seq must hold ALWAYS (so the first replayed frame is
         // Accept-or-Dedup, never a Gap) and retry stays exactly base..next_seq.
-        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 1, BIG_CAP);
         for step in 0u64..200 {
             match step % 4 {
                 0 => {
-                    lane.assign_and_retain(FROM, CLASS, b"x").expect("fits");
+                    lane.assign_and_retain(FROM, CLASS, b"x", false, None).expect("fits");
                 }
                 1 => {
-                    lane.on_ack(1, lane.epoch, step / 2); // an ack sometimes ahead of next_seq
+                    lane.on_ack(1, lane.epoch, step / 2, None); // an ack sometimes ahead of next_seq
                 }
                 2 => lane.on_write_error(),
                 _ => {
-                    lane.on_ack(1, lane.epoch.wrapping_sub(1), step); // a stale-epoch ack: ignored
+                    lane.on_ack(1, lane.epoch.wrapping_sub(1), step, None); // a stale-epoch ack: ignored
                 }
             }
             assert!(
@@ -2414,17 +2486,17 @@ mod tests {
 
     #[test]
     fn a_lane_owes_redelivery_iff_stream_closed_and_window_non_empty() {
-        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 1, BIG_CAP);
         assert!(
             !lane.owes_redelivery(),
             "a fresh lane (empty window) owes nothing"
         );
-        lane.assign_and_retain(FROM, CLASS, b"x").expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"x", false, None).expect("fits");
         assert!(
             lane.owes_redelivery(),
             "closed stream + non-empty window ⇒ owes a redelivery"
         );
-        lane.on_ack(1, 0, 0); // retire the only frame
+        lane.on_ack(1, 0, 0, None); // retire the only frame
         assert!(
             !lane.owes_redelivery(),
             "a drained window owes nothing (the timer stops)"
@@ -2433,7 +2505,7 @@ mod tests {
 
     #[test]
     fn lane_failure_counter_bumps_saturating_and_resets_per_lane() {
-        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
+        let mut lane = ReliableLaneSender::new(PEER, 1, BIG_CAP);
         assert_eq!(lane.consecutive_failures, 0);
         lane.on_replay_failed();
         lane.on_replay_failed();
@@ -2449,14 +2521,14 @@ mod tests {
     fn any_lane_owes_reflects_the_owing_lanes() {
         let mut lanes: BTreeMap<MsgClass, ReliableLaneSender> = BTreeMap::new();
         assert!(!any_lane_owes(&lanes), "no lanes ⇒ nothing owes");
-        let mut lane = ReliableLaneSender::new(1, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"x").expect("fits");
+        let mut lane = ReliableLaneSender::new(PEER, 1, BIG_CAP);
+        lane.assign_and_retain(FROM, CLASS, b"x", false, None).expect("fits");
         lanes.insert(CLASS, lane);
         assert!(
             any_lane_owes(&lanes),
             "an owing lane ⇒ the timer guard is live"
         );
-        lanes.get_mut(&CLASS).expect("lane").on_ack(1, 0, 0); // drain it
+        lanes.get_mut(&CLASS).expect("lane").on_ack(1, 0, 0, None); // drain it
         assert!(
             !any_lane_owes(&lanes),
             "a drained lane ⇒ the timer guard goes false"
@@ -3055,5 +3127,261 @@ mod tests {
             Err(other) => panic!("expected a Tuning error, got {other:?}"),
             Ok(_) => panic!("a zero tuning field must be rejected at boot"),
         }
+    }
+
+    // ---- R-6d2c: durable-outbox write-through / delete-through (the FSM half; sink=None in prod) ----
+
+    /// A recording `OutboxSink` for the FSM tests: `retain`/`release` push to `Vec`s so a test asserts the
+    /// EXACT keys (and, for retain, the framed value) the lane staged. `commit`/`scan_all`/`gc_below` are
+    /// inert — R-6d2c never calls them (the fsync barrier + boot replay are R-6d3).
+    #[derive(Default)]
+    struct MockOutboxSink {
+        retained: Vec<(OutboxKey, Vec<u8>)>,
+        released: Vec<OutboxKey>,
+    }
+    impl OutboxSink for MockOutboxSink {
+        fn retain(&mut self, key: &OutboxKey, framed: &[u8]) {
+            self.retained.push((*key, framed.to_vec()));
+        }
+        fn release(&mut self, key: &OutboxKey) {
+            self.released.push(*key);
+        }
+        fn commit(&mut self) {}
+        fn scan_all(&self) -> Vec<(OutboxKey, Vec<u8>)> {
+            Vec::new()
+        }
+        fn gc_below(&mut self, _incarnation: u64) {}
+    }
+
+    /// The EXACT framed value the write-through mirrors for `(from, class, incarnation, seq, bytes)`: the
+    /// `encode_frame` output at the worst-case epoch `u32::MAX` (the L2 seam contract — R-6d3 replay strips
+    /// the envelope, `decode_frame`s, then re-stamps epoch). Reproduces `assign_and_retain`'s `encoded` byte
+    /// for byte, so T1 pins the stored VALUE, not just its key.
+    fn expected_encoded(
+        from: NodeId,
+        class: MsgClass,
+        incarnation: u64,
+        seq: u64,
+        bytes: &[u8],
+    ) -> Vec<u8> {
+        vd_wire::framing::encode_frame(&ReliableFrame {
+            from,
+            class,
+            incarnation,
+            epoch: u32::MAX,
+            seq,
+            bytes: bytes.to_vec(),
+        })
+        .expect("frame encodes")
+    }
+
+    /// A per-process-unique redb path for the T8 real-`NodeOutbox` glue test; the guard removes it on drop.
+    fn temp_outbox_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "vd-mesh-outbox-{tag}-{}-{:p}.redb",
+            std::process::id(),
+            &tag
+        ))
+    }
+    struct TempOutbox {
+        path: std::path::PathBuf,
+    }
+    impl Drop for TempOutbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn r6d2c_t1_durable_with_sink_retains_exact_key_and_encoded_value() {
+        let mut mock = MockOutboxSink::default();
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"x", true, Some(&mut mock)),
+            Ok(0)
+        );
+        // ONE row: keyed peer=DEST (PEER≠FROM), the lane's incarnation, the assigned seq, the per-send class,
+        // AND the u32::MAX-epoch framed value (the replay contract). Covers `durable ∧ sink=Some`.
+        assert_eq!(
+            mock.retained,
+            vec![(
+                OutboxKey {
+                    peer: PEER,
+                    class: CLASS,
+                    incarnation: 7,
+                    seq: 0,
+                },
+                expected_encoded(FROM, CLASS, 7, 0, b"x"),
+            )]
+        );
+        assert!(mock.released.is_empty());
+    }
+
+    #[test]
+    fn r6d2c_t2_durable_false_with_sink_records_nothing() {
+        let mut mock = MockOutboxSink::default();
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        // durable=false with a LIVE sink: the `&& durable` false-arm ⇒ no retain, `retained` flag stays false.
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"x", false, Some(&mut mock)),
+            Ok(0)
+        );
+        assert!(mock.retained.is_empty());
+    }
+
+    #[test]
+    fn r6d2c_t3_durable_true_no_sink_is_a_noop_matching_prod() {
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        // durable=true but sink=None (the prod path until R-6d3): the RAM assign happens; nothing is mirrored.
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"x", true, None), Ok(0));
+        // seq still advances exactly as an ordinary send — `durable` is behaviourally inert without a sink.
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"y", true, None), Ok(1));
+    }
+
+    #[test]
+    fn r6d2c_t4_on_ack_releases_only_the_retained_retired_keys() {
+        let mut mock = MockOutboxSink::default();
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        // seq0 durable (mirrored), seq1 ephemeral (not) — same lane, same ack window.
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"a", true, Some(&mut mock)),
+            Ok(0)
+        );
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"b", false, Some(&mut mock)),
+            Ok(1)
+        );
+        // The ack retires BOTH (base -> 2) ...
+        assert_eq!(lane.on_ack(7, 0, 1, Some(&mut mock)), 2);
+        // ... but ONLY the durable seq0 releases an outbox row — the strict-subset property.
+        assert_eq!(
+            mock.released,
+            vec![OutboxKey {
+                peer: PEER,
+                class: CLASS,
+                incarnation: 7,
+                seq: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn r6d2c_t5_on_ack_with_no_sink_releases_nothing() {
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        // A durable frame retained WITHOUT a sink (nothing mirrored) then acked WITHOUT a sink: retire, no panic.
+        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"a", true, None), Ok(0));
+        assert_eq!(lane.on_ack(7, 0, 0, None), 1);
+    }
+
+    #[test]
+    fn r6d2c_t6_a_stale_ack_releases_nothing_even_with_a_live_sink() {
+        let mut mock = MockOutboxSink::default();
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"a", true, Some(&mut mock)),
+            Ok(0)
+        );
+        // Wrong incarnation ⇒ the guard returns 0 BEFORE the retire loop ⇒ no release despite the live sink.
+        assert_eq!(lane.on_ack(999, 0, 0, Some(&mut mock)), 0);
+        assert!(mock.released.is_empty());
+    }
+
+    #[test]
+    fn r6d2c_t7_a_redial_epoch_bump_does_not_double_retain() {
+        let mut mock = MockOutboxSink::default();
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"a", true, Some(&mut mock)),
+            Ok(0)
+        );
+        // A write-error redial bumps epoch + replays the retained frame for RE-SEND — it must NOT re-mirror
+        // (replay_batch is `&self`; on_write_error has no sink). Pins the §b subset invariant across redials.
+        lane.on_write_error();
+        let _ = lane.replay_batch();
+        assert_eq!(mock.retained.len(), 1, "replay re-sends but never re-mirrors");
+    }
+
+    #[test]
+    fn r6d2c_t8_real_node_outbox_stores_a_replay_decodable_frame() {
+        let path = temp_outbox_path("glue");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = crate::outbox::NodeOutbox::open(&path, crate::store::StoreTuning::default())
+            .expect("open");
+        let mut lane = ReliableLaneSender::new(PEER, 3, BIG_CAP);
+        lane.assign_and_retain(FROM, MsgClass::Saga, b"payload", true, Some(&mut ob))
+            .expect("assign");
+        ob.commit();
+        let scanned = ob.scan_all();
+        assert_eq!(scanned.len(), 1);
+        let (k, v) = &scanned[0];
+        let expected_key = OutboxKey {
+            peer: PEER,
+            class: MsgClass::Saga,
+            incarnation: 3,
+            seq: 0,
+        };
+        assert_eq!(*k, expected_key);
+        // `scan_all` ALREADY stripped the OUTBOX_FORMAT_VERSION envelope — `decode_frame` reads the value
+        // DIRECTLY (a second strip would eat the frame's u32 length-prefix). The stored value is a wire frame,
+        // byte-identical to `write_reliable_frame`'s output, so R-6d3 boot replay round-trips it.
+        let (rf, _) =
+            vd_wire::framing::decode_frame::<ReliableFrame>(v).expect("replay-decodes");
+        assert_eq!(rf.bytes, b"payload");
+        // F2 (review): pin the FULL stored value byte-for-byte through the REAL redb `encode_value`/`decode_value`
+        // envelope round-trip — not just `rf.bytes`. R-6d3 boot-replay dedups on (from, incarnation, seq), so a
+        // future envelope/version-byte bug that shifted those header bytes must fail HERE, not silently survive.
+        assert_eq!(
+            *v,
+            expected_encoded(FROM, MsgClass::Saga, 3, 0, b"payload"),
+            "the redb-stored value is the exact u32::MAX-epoch wire frame"
+        );
+        // F1 (review): the FULL lifecycle through REAL redb — an ack RELEASES the row, netting `scan_all` to
+        // empty. This is precisely what the MockOutboxSink tests CANNOT prove: their `released` log is driven by
+        // the `retained` BOOKKEEPING bit, so neutering the actual `s.retain()` store write leaves them green
+        // (mutation-blind). Here the retain WROTE a real redb row and on_ack's release must DELETE that SAME row
+        // — proving `outbox_key` is single-sourced identically across retain + release, and that neither half is
+        // a no-op. seq0 acked at the lane's (incarnation=3, epoch=0) ⇒ base -> 1, one release fired.
+        assert_eq!(lane.on_ack(3, 0, 0, Some(&mut ob)), 1);
+        ob.commit();
+        assert!(
+            ob.scan_all().is_empty(),
+            "the acked durable row is deleted from redb — retain+release net to empty"
+        );
+    }
+
+    #[test]
+    fn r6d2c_t10_on_ack_releases_every_retained_key_in_a_multi_durable_window() {
+        let mut mock = MockOutboxSink::default();
+        let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
+        // TWO durable frames retired by ONE ack — the ONLY test exercising the `sink.as_deref_mut()` re-borrow
+        // across loop iterations (on_ack:585). A regression to a move-out API (`sink.take()`) would release only
+        // seq0 and slip every other test (each of which retires ≤1 durable seq). Pins the multi-release contract.
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"a", true, Some(&mut mock)),
+            Ok(0)
+        );
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"b", true, Some(&mut mock)),
+            Ok(1)
+        );
+        assert_eq!(lane.on_ack(7, 0, 1, Some(&mut mock)), 2);
+        assert_eq!(
+            mock.released,
+            vec![
+                OutboxKey {
+                    peer: PEER,
+                    class: CLASS,
+                    incarnation: 7,
+                    seq: 0,
+                },
+                OutboxKey {
+                    peer: PEER,
+                    class: CLASS,
+                    incarnation: 7,
+                    seq: 1,
+                },
+            ],
+            "both durable seqs released, in ascending base order"
+        );
     }
 }

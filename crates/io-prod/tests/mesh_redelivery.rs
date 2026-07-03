@@ -15,7 +15,7 @@ use vd_core::NodeId;
 use vd_io_prod::admin::{MeshMetrics, MetricsSource};
 use vd_io_prod::mesh::{MeshConfig, MeshControl, MeshTransport, spawn_mesh};
 use vd_io_prod::trust::ClusterTrust;
-use vd_sim::io::{Inbound, MsgClass, ShedReason, Transport};
+use vd_sim::io::{Durability, Inbound, MsgClass, ShedReason, Transport};
 
 const DEADLINE: Duration = Duration::from_secs(30);
 const A: NodeId = NodeId(1);
@@ -586,4 +586,60 @@ fn mesh_metrics_source_reflects_the_live_mesh_counters() {
     assert_eq!(v.inbound_dropped_reliable, s.inbound_dropped_reliable);
     assert_eq!(v.inbound_dropped_unreliable, s.inbound_dropped_unreliable);
     let _ = &mut b;
+}
+
+/// R-6d2c T9 — a `Durability::Retained` reliable send drives the `matches!(frame.durability, Retained)`
+/// TRUE arm in `write_frame` (mesh.rs) — the ONLY io-prod site that lowers the per-send `Durability` marker
+/// to the lane's `durable` bool. The FSM unit tests (mesh.rs T1-T8) call `assign_and_retain` directly and so
+/// never touch `write_frame`; without this end-to-end Retained send that TRUE region is uncovered (HR5 Tier-B
+/// region floor). In production the outbox `sink` is `None` until R-6d3, so a Retained send behaves BYTE-
+/// IDENTICALLY to an Ephemeral one (no outbox row) — this test asserts exactly that: delivery is unchanged.
+#[test]
+fn a_retained_durable_send_is_delivered_exactly_like_an_ephemeral_one() {
+    let rt = runtime();
+    let trust = ClusterTrust::generate("vd-mesh-redeliver").expect("trust");
+    let (addr_a, addr_b) = (reserve(), reserve());
+    let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
+    let (mut a, ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(30),
+        1,
+    );
+    let (mut b, _ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(30),
+        1,
+    );
+
+    // The `Retained` marker (D-6 #1: producer-less-reliable flows use it) — driven through the SAME reliable
+    // lane as an ordinary send, via the explicit 4-arg `send_durable`.
+    a.send_durable(B, MsgClass::Saga, vec![42].into(), Durability::Retained)
+        .expect("enqueued");
+
+    let mut got = Vec::new();
+    wait_until(
+        || {
+            drain_wire_values(&mut b, &mut got);
+            !got.is_empty()
+        },
+        "the retained frame never arrived",
+    );
+    assert_eq!(
+        got,
+        vec![42],
+        "a Retained send delivers identically to Ephemeral"
+    );
+
+    wait_until(
+        || ctl_a.stats().reliable_acked == 1,
+        "the retained frame was never acked",
+    );
 }

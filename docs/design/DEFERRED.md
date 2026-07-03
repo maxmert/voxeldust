@@ -1429,6 +1429,54 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      through + boot replay that CLOSE D-6 #1 are R-6d2c/R-6d3 (a source crash of a TransientBatch/Despawn is STILL lost
      today; this slice only prepares the cure). NEXT = R-6d2c (assign_and_retain/on_ack sink + OutboxSink injection +
      MockOutboxSink FSM tests).**
+     **✅ R-6d2c LANDED (the FSM durable write-through / delete-through — io-prod-ONLY, per vetted design wf_5ca0a751,
+     SOUND_TO_IMPLEMENT with 1 HIGH + 1 MEDIUM folded): `ReliableLaneSender` grows `peer: NodeId` (the DEST — the
+     `OutboxKey.peer`, distinct from `ReliableFrame.from`=local sender; `on_ack` had no `NodeId` otherwise) + a
+     `RetainedFrame.retained: bool` (the strict-subset flag) + a ONE-home `outbox_key(class, seq)` helper (MED-1 fix,
+     single-sources peer+incarnation). `assign_and_retain(from, class, bytes, durable, sink)` mirrors ONLY a Retained
+     frame to the `OutboxSink` (`durable && sink.is_some()`) with the epoch=u32::MAX framed value (the L2 replay
+     contract — byte-identical to `write_reliable_frame`, `decode_frame`-round-trippable, no re-encode); both rejects
+     (Unframable/BufferFull) PRECEDE the insert so a shed frame is never mirrored (outbox ⊆ retained ⊆ never-shed).
+     `on_ack(.., sink)` releases ONLY the `rf.retained` subset in the retire loop (an Ephemeral-heavy Saga lane stages
+     no tombstone per acked ephemeral seq); the incarnation/epoch guard still returns 0 BEFORE the loop (a stale ack
+     releases nothing). §b ruling CONFIRMED against code: `replay_batch` (`&self`) + `on_write_error` re-SEND but never
+     re-RETAIN, and OutboxKey excludes epoch, so a redial epoch-bump neither doubles nor orphans a row. PROD PATH
+     UNCHANGED: `write_frame` now consumes the `durable` bool (was `let _durable`) and passes `(durable, None)`; the
+     peer_writer passes `on_ack(.., None)` — the sink is `None` until R-6d3 injects the real `Arc<Mutex<NodeOutbox>>`,
+     so a Retained send is BYTE-IDENTICAL to Ephemeral today (no outbox row written). Tests: MockOutboxSink + T1–T7
+     (retain-exact-key+value / durable-false-no-record / no-sink-noop / on_ack-releases-only-retained /
+     no-sink-releases-nothing / stale-ack-releases-nothing / redial-no-double-retain) + T8 real-`NodeOutbox` glue
+     (scan_all→decode_frame DIRECTLY, LOW-2 fix — no double-strip) + T9 integration (a `send_durable(.., Retained)` over
+     real QUIC loopback drives the `matches!` TRUE arm in `write_frame`, HIGH-1 fix — the FSM unit tests never touch
+     `write_frame`). The ~57 test-caller sweep (26 `new`+PEER / 38 `assign_and_retain`+`false,None` / 16 `on_ack`+`None`)
+     was a paren-matching transform restricted to the test module (all 3 prod call sites untouched). Gate: vd-io-prod
+     100 lib + all integration green, clippy -D clean, Tier-B floor `--fail-under-regions 90` PASS (TOTAL 94.47%,
+     mesh.rs 94.70%), workspace build green. R-6d3 PRECONDITIONS carried (LOW-3: R-6d2c STAGES retains but never
+     `commit()`s — R-6d3 MUST call `commit()` before the QUIC send or every staged retain is inert-not-on-disk;
+     LOW-4: the SAME sink MUST reach both `assign_and_retain` AND `on_ack` for a lane or a durable row leaks). NEXT =
+     R-6d3 (the durable-before-send fsync GATE + the real `Arc<Mutex<NodeOutbox>>` sink injection through peer_writer +
+     boot replay `scan_all`→re-drive + `gc_below` sweep + the saga/dest AwaitAdopt closure — this actually CLOSES
+     D-6 #1 — then R-6d4 the both-ends-restart replay proptest + the SIGKILL-source-in-AwaitAdopt e2e proof).**
+     **✅ POST-IMPL REVIEW DONE (wf_38cdb045, 3 opus lenses [FSM-correctness / test-rigor / HR+seam-integrity] +
+     synth): verdict COMMIT_CLEAN — NO CRITICAL/HIGH, NO production correctness bug; prod provably byte-identical
+     (both call sites pass literal `None` ⇒ `retained = durable && sink.is_some()` is always false in prod). The
+     retained-subset invariant is airtight by code trace (retain 1 site, release 1 site, same `retained` predicate,
+     `retry.remove` co-located with release, `outbox_key` single-sourced, epoch deliberately NOT a key field so
+     redials can't diverge keys, `encoded` owned, both shed rejects precede the write-through). The review's real
+     catch (MEDIUM F1, this project's HR5 real-not-theater standard): the MockOutboxSink tests were MUTATION-BLIND —
+     `on_ack` releases on the stored `retained` BOOKKEEPING bit, so neutering the actual `s.retain()` STORE write
+     left T4/T5/T6 green (T8 never acked ⇒ no full lifecycle through redb). FOLDED BEFORE COMMIT (cheap, reuse T8
+     scaffolding): (F1) T8 extended — after retain+commit+scan(len==1) it now `on_ack(.., Some(&mut ob))`+commit and
+     asserts `scan_all().is_empty()`, driving the FULL retain→ack→release→empty lifecycle through REAL redb (catches
+     either half becoming a no-op + pins the retain↔delete key match); (F2) T8 now asserts the FULL stored value
+     `== expected_encoded(..)` through the real `encode_value`/`decode_value` envelope (not just `rf.bytes` — R-6d3
+     boot-replay dedups on from/incarnation/seq); (F3) new T10 pins the multi-release `sink.as_deref_mut()` re-borrow
+     (2 durable seqs retired by 1 ack ⇒ both released in order — a `sink.take()` regression would release only seq0
+     and slip every other test); (F4) code comment noting the write-through's before-insert placement is an
+     INTENTIONAL deviation from wf_5ca0a751 §3 (behaviour-identical, sidesteps move-then-borrow). F5 (T9 proves
+     region-coverage not durable-behaviour) needs no change — already honestly documented. Gate after fold: vd-io-prod
+     101 lib (+T10) + all integration green, clippy -D clean, Tier-B `--fail-under-regions 90` PASS (TOTAL 94.46%,
+     mesh.rs 94.67%), workspace + vd-bins build green.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
