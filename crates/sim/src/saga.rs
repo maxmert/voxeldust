@@ -504,9 +504,18 @@ pub enum SagaEvent {
     /// NEW ack `on_release_complete` now emits): the choreography is complete → `AwaitComplete→Done`.
     SourceRetired,
     /// D-7d DEAD-RESOLUTION — `scan_deadlines` learned (via a kill-only `NodeUnreachable`) that the
-    /// SOURCE is unreachable while the saga is in `BatchHandoff` AND the redrive deadline elapsed: the
-    /// dest already adopted, so self-promote it from the go-token (zero loss). Terminal on first fire.
+    /// SOURCE is unreachable while the saga is in a POST-adopt `BatchHandoff` phase
+    /// (`AwaitRelease`/`AwaitPromote`/`AwaitComplete`) AND the redrive deadline elapsed: the dest already
+    /// adopted, so self-promote it from the go-token (zero loss). Terminal on first fire. Distinct from
+    /// [`SourceUnreachablePreAdopt`] (the producer emits this ONLY for a post-adopt phase; a stale one
+    /// reaching `AwaitAdopt` falls through the terminal-absorb no-op catch-all).
     SourceUnreachable,
+    /// R-6d3c — the SOURCE is confirmed unreachable while the saga is in `BatchHandoff::AwaitAdopt`
+    /// (PRE-adopt: the dest never received the batch). Distinct from [`SourceUnreachable`] (post-adopt,
+    /// self-promote): this resolves as an ACCOUNTED LOSS — discard-to-dest + count — NEVER a self-promote
+    /// of an empty dest. Terminal on first fire (the producer emits it ONLY for `AwaitAdopt`; a stale one
+    /// reaching a post-adopt phase falls through the terminal-absorb no-op catch-all).
+    SourceUnreachablePreAdopt,
     /// D-7d — the DEST is unreachable mid-`BatchHandoff`: the only promote target is gone, so ABANDON
     /// the source's retained copy as an accounted loss-within-budget. Terminal on first fire.
     DestUnreachable,
@@ -613,6 +622,20 @@ pub enum SagaAction {
     EmitTransientAbandon {
         fence: Fence,
     },
+    /// R-6d3c — tell the DEST to DISCARD any late-replayed `Arriving` copy of this batch + poison its
+    /// adopt (the source died in `AwaitAdopt`, PRE-adopt). Target `SagaCtx.dest` + step
+    /// `TRANSIENT_DISCARD_STEP`. A PROPER new action (NOT the source-addressed `EmitTransientAbandon`,
+    /// NOT `EmitTransientPromote` of an empty dest): the dest never received the batch, so there is
+    /// nothing to promote — only a possible late replay to neutralize.
+    EmitTransientDiscard {
+        fence: Fence,
+    },
+    /// R-6d3c — count the batch lost because the SOURCE crashed PRE-adopt (distinct from the dead-DEST
+    /// `EmitTransientAbandon` loss so the two failure causes are never conflated in the ledger). The
+    /// wrapper counts it in `scan_deadlines` PRE-delivery (this executor arm is a straight-line no-op);
+    /// the anti-double-resolution guarantee is the phase-structure (post-adopt phases cannot route here)
+    /// + the dest adopt-poison, NOT this counter or the budget-gate ordering.
+    CountBatchLostSourceCrash,
     /// Durable checkpoint — exactly two per happy path (after Prepared, at CAS won),
     /// group-committed by the wrapper.
     PersistCheckpoint,
@@ -905,24 +928,47 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             },
             E::Timeout,
         ) => (state, vec![A::EmitReleaseComplete { fence: new_fence }]),
-        // D-7d DEAD-RESOLUTION (terminal on FIRST fire — straight to Done, NEVER back to BatchHandoff,
-        // structurally avoiding the D-37 forever-bounce). SOURCE dead: for a POST-ADOPT phase
-        // (AwaitRelease/AwaitPromote/AwaitComplete) the dest holds the batch and the go-token is the SOLE
-        // promote authority → self-promote the dest (zero loss).
-        // ⚠️ NOT SO FOR `AwaitAdopt` (PRE-adopt, entered on `CasWon` with no egress, exited only by
-        // `BatchAdopted`): a source crash there self-promotes a dest that never received the batch = the
-        // D-6 #1 silent-loss residual. The phase-wildcard `..` below is therefore INACCURATE for AwaitAdopt;
-        // R-6d splits this arm BY PHASE (accounted-loss discard-to-dest for AwaitAdopt + a re-solicit egress
-        // so the restart wins via its durable outbox) and adds the dest-side `TransientDiscard` GC. It is not
-        // reachable in the current in-proc/loopback posture — the confirm-dead trigger toward the source needs
-        // CA-1/L5 (unlanded; mesh.rs CA-1 red-guard). DEST dead: the only promote target is gone → ABANDON the
-        // source's retained copy as an accounted loss-within-budget. The go-token is NOT GC'd here (it
-        // backs the dest's Held authority + the TRANSIENT-AUTHORITY-HELD oracle; bounded GC is owed
-        // D-7d Slice 2, which co-designs the drop-completion signal without breaking the quiescence count).
-        (S::BatchHandoff { new_fence, .. }, E::SourceUnreachable) => (
+        // D-7d / R-6d3c DEAD-RESOLUTION (terminal on FIRST fire — straight to Done, NEVER back to
+        // BatchHandoff, structurally avoiding the D-37 forever-bounce). SOURCE dead, POST-ADOPT phase
+        // (AwaitRelease/AwaitPromote/AwaitComplete): the dest provably holds the batch and the go-token is
+        // the SOLE promote authority → self-promote the dest (zero loss). R-6d3c narrowed this from the
+        // former phase-WILDCARD (which mis-self-promoted an empty dest in AwaitAdopt — the D-6 #1 residual).
+        (
+            S::BatchHandoff {
+                phase: P::AwaitRelease | P::AwaitPromote | P::AwaitComplete,
+                new_fence,
+            },
+            E::SourceUnreachable,
+        ) => (
             S::Done { new_fence },
             vec![A::EmitTransientPromote { fence: new_fence }, A::Tombstone],
         ),
+        // SOURCE dead, PRE-ADOPT (`AwaitAdopt`, entered on `CasWon` with no egress, exited only by
+        // `BatchAdopted`): the dest NEVER received the batch → NEVER self-promote an empty dest. Resolve
+        // as an ACCOUNTED loss: tell the dest to DISCARD any late-replayed `Arriving` copy + poison its
+        // adopt (`EmitTransientDiscard`), count the loss (`CountBatchLostSourceCrash`), and Tombstone. The
+        // producer emits `SourceUnreachablePreAdopt` ONLY for `AwaitAdopt` (a restart-within-budget wins
+        // via its durable outbox replay first — the budget-gate in `rehome_event_for`). Reachability of
+        // the confirm-dead trigger toward a silent source is CA-1/L5-gated (DEFERRED.md); this arm is the
+        // reachable-NOW correctness (a direct-inject test drives it without the trigger).
+        (
+            S::BatchHandoff {
+                phase: P::AwaitAdopt,
+                new_fence,
+            },
+            E::SourceUnreachablePreAdopt,
+        ) => (
+            S::Done { new_fence },
+            vec![
+                A::EmitTransientDiscard { fence: new_fence },
+                A::CountBatchLostSourceCrash,
+                A::Tombstone,
+            ],
+        ),
+        // DEST dead: the only promote target is gone → ABANDON the source's retained copy as an accounted
+        // loss-within-budget. The go-token is NOT GC'd here (it backs the dest's Held authority + the
+        // TRANSIENT-AUTHORITY-HELD oracle; bounded GC is owed D-7d Slice 2, which co-designs the drop-
+        // completion signal without breaking the quiescence count).
         (S::BatchHandoff { new_fence, .. }, E::DestUnreachable) => (
             S::Done { new_fence },
             vec![A::EmitTransientAbandon { fence: new_fence }, A::Tombstone],
@@ -1526,14 +1572,39 @@ mod tests {
 
     #[test]
     fn batch_handoff_resolves_terminally_on_a_dead_participant() {
-        // D-7d dead-resolution arms (terminal on FIRST fire — straight to Done + Tombstone from ANY
-        // phase, NEVER back to BatchHandoff, so the D-37 forever-bounce is structurally impossible). A
-        // dead SOURCE self-promotes the dest from the go-token (zero loss); a dead DEST abandons the
-        // source's retained copy (accounted loss). Exercised from every phase (the `..` phase wildcard).
+        // D-7d / R-6d3c dead-resolution arms (terminal on FIRST fire — straight to Done + Tombstone,
+        // NEVER back to BatchHandoff, so the D-37 forever-bounce is structurally impossible). A dead DEST
+        // abandons the source's retained copy (accounted loss) from EVERY phase (the `..` phase wildcard).
+        // A dead SOURCE splits BY PHASE (R-6d3c): a POST-ADOPT phase self-promotes the dest from the
+        // go-token (zero loss, `SourceUnreachable`); PRE-adopt `AwaitAdopt` discards-to-dest + counts the
+        // loss (`SourceUnreachablePreAdopt`) — NEVER self-promotes an empty dest.
         let c = ctx_class(false, DurabilityClass::Transient);
         let nf = Fence(5).next();
+        // DEST-dead abandon: every phase (unchanged wildcard arm).
         for phase in [
             BatchHandoffPhase::AwaitAdopt,
+            BatchHandoffPhase::AwaitRelease,
+            BatchHandoffPhase::AwaitPromote,
+            BatchHandoffPhase::AwaitComplete,
+        ] {
+            let st = SagaState::BatchHandoff {
+                phase,
+                new_fence: nf,
+            };
+            assert_eq!(
+                step(&c, st, SagaEvent::DestUnreachable),
+                (
+                    SagaState::Done { new_fence: nf },
+                    vec![
+                        SagaAction::EmitTransientAbandon { fence: nf },
+                        SagaAction::Tombstone
+                    ]
+                ),
+                "dead dest → abandon the source copy as accounted loss, then Done"
+            );
+        }
+        // SOURCE-dead POST-ADOPT: self-promote the dest from the go-token.
+        for phase in [
             BatchHandoffPhase::AwaitRelease,
             BatchHandoffPhase::AwaitPromote,
             BatchHandoffPhase::AwaitComplete,
@@ -1551,18 +1622,66 @@ mod tests {
                         SagaAction::Tombstone
                     ]
                 ),
-                "dead source → self-promote the dest from the go-token, then Done"
+                "dead source POST-adopt → self-promote the dest from the go-token, then Done"
             );
+        }
+        // SOURCE-dead PRE-ADOPT (AwaitAdopt): discard-to-dest + count the loss, then Done.
+        let await_adopt = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitAdopt,
+            new_fence: nf,
+        };
+        assert_eq!(
+            step(&c, await_adopt, SagaEvent::SourceUnreachablePreAdopt),
+            (
+                SagaState::Done { new_fence: nf },
+                vec![
+                    SagaAction::EmitTransientDiscard { fence: nf },
+                    SagaAction::CountBatchLostSourceCrash,
+                    SagaAction::Tombstone
+                ]
+            ),
+            "dead source PRE-adopt → discard-to-dest + count the loss (NEVER self-promote an empty dest)"
+        );
+    }
+
+    #[test]
+    fn await_adopt_source_unreachable_is_a_noop() {
+        // The CROSSED event: a stale post-adopt `SourceUnreachable` reaching `AwaitAdopt` must NOT
+        // self-promote an empty dest — the producer never emits it there (it emits
+        // `SourceUnreachablePreAdopt`), so it falls through the terminal-absorb no-op catch-all.
+        let c = ctx_class(false, DurabilityClass::Transient);
+        let nf = Fence(5).next();
+        let st = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitAdopt,
+            new_fence: nf,
+        };
+        assert_eq!(
+            step(&c, st, SagaEvent::SourceUnreachable),
+            (st, vec![]),
+            "a stale SourceUnreachable at AwaitAdopt is an idempotent no-op (never self-promotes)"
+        );
+    }
+
+    #[test]
+    fn post_adopt_source_unreachable_pre_adopt_is_a_noop() {
+        // The CROSSED event: a stale `SourceUnreachablePreAdopt` reaching a POST-adopt phase must NOT
+        // discard a batch the dest already holds — the producer never emits it there, so it falls
+        // through the terminal-absorb no-op catch-all.
+        let c = ctx_class(false, DurabilityClass::Transient);
+        let nf = Fence(5).next();
+        for phase in [
+            BatchHandoffPhase::AwaitRelease,
+            BatchHandoffPhase::AwaitPromote,
+            BatchHandoffPhase::AwaitComplete,
+        ] {
+            let st = SagaState::BatchHandoff {
+                phase,
+                new_fence: nf,
+            };
             assert_eq!(
-                step(&c, st, SagaEvent::DestUnreachable),
-                (
-                    SagaState::Done { new_fence: nf },
-                    vec![
-                        SagaAction::EmitTransientAbandon { fence: nf },
-                        SagaAction::Tombstone
-                    ]
-                ),
-                "dead dest → abandon the source copy as accounted loss, then Done"
+                step(&c, st, SagaEvent::SourceUnreachablePreAdopt),
+                (st, vec![]),
+                "a stale SourceUnreachablePreAdopt at a post-adopt phase is an idempotent no-op"
             );
         }
     }

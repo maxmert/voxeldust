@@ -30,8 +30,9 @@ use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, part
 use vd_wire::intershard::{
     DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP,
     ReHomeCmd, ReHomeState, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP,
-    TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
-    TransferAck, TransferEnvelope, TransientHandoff, TransientItem, TransitionPayload,
+    TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP,
+    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransientItem,
+    TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -575,6 +576,13 @@ pub struct StubStats {
     /// anti-vacuity proof. Each increment ALSO feeds `transients_lost_in_handover` (the SAME budget the
     /// realm self-fence feeds, DRY) — so `verify_transient_loss_budget` sees a deterministic, named loss.
     pub transients_departure_cancelled: u64,
+    /// R-6d3c — transients DISCARDED at the DEST by `on_transient_discard` (the source died in
+    /// `BatchHandoff::AwaitAdopt` PRE-adopt, so a late-replayed `Arriving` copy is removed as an ACCOUNTED
+    /// loss + the adopt is poisoned). 0 on every happy path and on a RESTART recovery (which adopts
+    /// normally); `> 0` is the never-restart cell's anti-vacuity proof. Each increment WITH A DECODABLE
+    /// kind also feeds `transients_lost_in_handover`; a corrupt-tag item is removed + counted HERE but NOT
+    /// attributed (the `from_tag` Err arm — HR2, never decode-to-default).
+    pub transients_discarded_source_crash: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2348,6 +2356,48 @@ fn on_transient_abandon(
     }
 }
 
+/// DEST — R-6d3c NEVER-restart closure: on `TransientDiscard` (the source died in
+/// `BatchHandoff::AwaitAdopt`, PRE-adopt, so the batch is being counted lost) REMOVE any
+/// `Arriving{batch==transfer}` item as an ACCOUNTED loss AND POISON `(transfer, TRANSIENT_BATCH_STEP)`
+/// — so a LATE outbox replay of the batch adopts as `AlreadyApplied` and never re-inserts an orphan
+/// (the exact silent-loss interleave; `adopt_transient_batch` hits its `AlreadyApplied` arm,
+/// `stub.rs` `TRANSIENT_BATCH_STEP`). Journaled idempotent by `(transfer, TRANSIENT_DISCARD_STEP)`: a
+/// redelivery short-circuits, so the loss counts EXACTLY once. Ack-FREE — the resolving saga is
+/// terminal (mirroring `on_transient_abandon`). A corrupt kind tag (HR2 — never decode-to-default) is
+/// still removed + counted in `transients_discarded_source_crash` but NOT bucketed (the `Err` arm).
+fn on_transient_discard(
+    discard: TransientHandoff,
+    owned: &mut OwnedTransients,
+    applied: &mut AppliedSteps,
+    stats: &mut StubStats,
+) {
+    match applied.journal_step(discard.transfer, TRANSIENT_DISCARD_STEP) {
+        StepOutcome::FirstApply => {
+            // POISON the adopt: record `(transfer, TRANSIENT_BATCH_STEP)` so a late replayed
+            // `adopt_transient_batch` is `AlreadyApplied` (never re-inserts). The return value is
+            // ignored — we only need the row present. (If the adopt already ran, this is a harmless
+            // no-op insert; its `Arriving` items are then removed by the loop below.)
+            let _ = applied.journal_step(discard.transfer, TRANSIENT_BATCH_STEP);
+            let mut to_remove: Vec<EntityId> = Vec::new();
+            for (entity, t) in owned.0.iter() {
+                if let TransientStatus::Arriving { batch } = t.status
+                    && batch == discard.transfer
+                {
+                    to_remove.push(*entity);
+                }
+            }
+            for entity in to_remove {
+                owned.0.remove(&entity);
+                stats.transients_discarded_source_crash += 1;
+                if let Ok(kind) = EntityKind::from_tag(entity.kind_tag()) {
+                    *stats.transients_lost_in_handover.entry(kind).or_insert(0) += 1;
+                }
+            }
+        }
+        StepOutcome::AlreadyApplied => stats.transient_release_noop += 1,
+    }
+}
+
 /// On a realm SELF-FENCE (the lease was taken over / revoked), DROP every transient this shard
 /// tracked (D-7) — they were anchored to the now-lost lease with NO hand-off: a counted LOSS (the
 /// declared-loss path; D-7b's `LossBudget` gate reads `transients_dropped`). Durable dots are
@@ -2470,6 +2520,13 @@ fn on_directory_reply(
         // live source, and a lost abandon falls back to the realm self-fence loss path).
         Ok(InterShardFlow::TransientAbandon(abandon)) => {
             on_transient_abandon(abandon, owned_transients, applied, stats);
+            return;
+        }
+        // DEST: the R-6d3c NEVER-restart resolution — the source died in AwaitAdopt (pre-adopt), so
+        // remove any late-replayed Arriving copy of this batch AND poison the adopt as an accounted loss
+        // (no ack: the resolving saga is already terminal, exactly like TransientAbandon).
+        Ok(InterShardFlow::TransientDiscard(discard)) => {
+            on_transient_discard(discard, owned_transients, applied, stats);
             return;
         }
         // SOURCE: the saga-pushed ordered Demote (1d.5b.1) — Owned→Frozen→Ghost + DemoteAck.
@@ -3815,6 +3872,170 @@ mod tests {
             stats.transient_release_noop, 1,
             "the redelivery is a counted journal no-op"
         );
+    }
+
+    #[test]
+    fn on_transient_discard_removes_arriving_poisons_adopt_and_is_idempotent() {
+        // R-6d3c NEVER-restart resolution (DEST role): the source died in AwaitAdopt pre-adopt, so the
+        // discard REMOVES this batch's `Arriving{this}` items as an accounted loss — a decodable Debris
+        // is bucketed, a corrupt kind tag is removed but NOT bucketed (the from_tag Err arm). An
+        // `Arriving{other}` (batch mismatch), a `Held{None}` resident, and a `Departing{this}` (non-
+        // Arriving) are UNTOUCHED — the false arms. A redelivery is a journaled no-op (loss counts once).
+        let this = TransferId(0x6D3C);
+        let other = TransferId(0xBEEF);
+        let mk = |status| Transient {
+            pose: transient_pose(),
+            anchor_fence: Fence(4),
+            status,
+        };
+        let mut owned = OwnedTransients::default();
+        let arr_this = EntityId::pack(EntityKind::Debris, 1, 1, 0);
+        let corrupt = EntityId(99u128 << 120); // tag 99 → from_tag Err (removed, not bucketed)
+        let arr_other = EntityId::pack(EntityKind::Debris, 1, 2, 0);
+        let resident = EntityId::pack(EntityKind::Debris, 1, 3, 0);
+        let dep_this = EntityId::pack(EntityKind::Debris, 1, 4, 0);
+        owned
+            .0
+            .insert(arr_this, mk(TransientStatus::Arriving { batch: this }));
+        owned
+            .0
+            .insert(corrupt, mk(TransientStatus::Arriving { batch: this }));
+        owned
+            .0
+            .insert(arr_other, mk(TransientStatus::Arriving { batch: other }));
+        owned
+            .0
+            .insert(resident, mk(TransientStatus::Held { outbound: None }));
+        owned
+            .0
+            .insert(dep_this, mk(TransientStatus::Departing { batch: this }));
+        let mut applied = AppliedSteps::default();
+        let mut stats = StubStats::default();
+        let discard = TransientHandoff {
+            transfer: this,
+            step_id: TRANSIENT_DISCARD_STEP,
+            fence: Fence(4),
+        };
+
+        on_transient_discard(discard, &mut owned, &mut applied, &mut stats);
+        // THIS batch's Arriving items (the decodable + the corrupt) are removed.
+        assert!(!owned.0.contains_key(&arr_this));
+        assert!(!owned.0.contains_key(&corrupt));
+        // The OTHER batch's Arriving, the settled resident, and a Departing item survive (false arms).
+        assert!(owned.0.contains_key(&arr_other));
+        assert!(owned.0.contains_key(&resident));
+        assert!(owned.0.contains_key(&dep_this));
+        assert_eq!(
+            stats.transients_discarded_source_crash, 2,
+            "2 Arriving items discarded (1 Debris + 1 corrupt)"
+        );
+        assert_eq!(
+            stats.transients_lost_in_handover.get(&EntityKind::Debris),
+            Some(&1),
+            "only the decodable Debris is bucketed (the corrupt kind is removed but not attributable)"
+        );
+
+        // REDELIVERY: the journal short-circuits — no double-count, the survivors are untouched.
+        on_transient_discard(discard, &mut owned, &mut applied, &mut stats);
+        assert_eq!(
+            stats.transients_discarded_source_crash, 2,
+            "the redelivery did not re-count"
+        );
+        assert_eq!(
+            stats.transient_release_noop, 1,
+            "the redelivery is a counted journal no-op"
+        );
+        assert_eq!(owned.0.len(), 3, "the survivors are untouched by the redelivery");
+    }
+
+    #[test]
+    fn discard_before_adopt_poisons_so_a_late_replay_never_orphans() {
+        // THE target interleave (Defect A closed): the discard fires FIRST on an EMPTY owned set (the
+        // dest never received the batch — the source died pre-adopt) → it removes nothing but POISONS
+        // `(transfer, TRANSIENT_BATCH_STEP)`. A LATE outbox replay of the batch then adopts as
+        // `AlreadyApplied` — inserting NOTHING — so no `Arriving` orphan is ever stranded.
+        let this = TransferId(0x6D3C);
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 0);
+        let mut owned = OwnedTransients::default();
+        let mut applied = AppliedSteps::default();
+        let mut stats = StubStats::default();
+        let mut outbox = OutboundBox::default();
+
+        let discard = TransientHandoff {
+            transfer: this,
+            step_id: TRANSIENT_DISCARD_STEP,
+            fence: Fence(4),
+        };
+        on_transient_discard(discard, &mut owned, &mut applied, &mut stats);
+        assert_eq!(
+            stats.transients_discarded_source_crash, 0,
+            "nothing to remove on an empty dest — the discard only poisons the adopt"
+        );
+
+        // The LATE batch replay: the adopt hits its `AlreadyApplied` arm (poisoned) — no insert.
+        adopt_transient_batch(
+            this,
+            Fence(5),
+            vec![TransientItem {
+                entity,
+                pose: transient_pose(),
+                state: vec![],
+            }],
+            ORCH,
+            &mut owned,
+            &mut applied,
+            &mut stats,
+            &mut outbox,
+        );
+        assert!(
+            owned.0.is_empty(),
+            "the poisoned adopt inserts nothing — no Arriving orphan"
+        );
+        assert_eq!(
+            stats.transients_adopt_redelivered, 1,
+            "the adopt short-circuited on the poisoned step"
+        );
+        assert_eq!(stats.transients_adopted, 0, "no item was ever adopted");
+    }
+
+    #[test]
+    fn transient_discard_flows_through_the_inbound_dispatch() {
+        // Covers the `on_directory_reply` DISPATCH arm for `TransientDiscard` (the direct-call tests
+        // above cover the handler itself): a DEST holding an `Arriving` copy receives the discard, drops
+        // it as an accounted loss, and emits NOTHING (ack-FREE — the resolving saga is terminal).
+        let mut rig = Rig::new();
+        rig.grant_realm(); // authority.0 = Some(Fence(1))
+        let debris = EntityId::pack(EntityKind::Debris, 1, 7, 0);
+        let batch = TransferId(0xB7);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            debris,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Arriving { batch },
+            },
+        );
+        let discard = TransientHandoff {
+            transfer: batch,
+            step_id: TRANSIENT_DISCARD_STEP,
+            fence: Fence(1),
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientDiscard(discard),
+        )]);
+        assert!(
+            !rig.world.resource::<OwnedTransients>().0.contains_key(&debris),
+            "the Arriving copy was discarded"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .transients_discarded_source_crash,
+            1
+        );
+        assert_eq!(sent, vec![], "the discard is ack-free (terminal saga)");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! express a new cross-shard flow you MUST add a variant here, under review.
 //!
 //! Arms freeze INCREMENTALLY with their first consumer (the closed-set guarantee is
-//! the per-release conformance test below, not a day-one empty freeze). LANDED (15 arms):
+//! the per-release conformance test below, not a day-one empty freeze). LANDED (16 arms):
 //! - P0: `Ghost`, `Transfer` (Durable class), `Directory`.
 //! - P2 route swap: `Saga` (saga→gateway transfer commands) + `SagaAck` (gateway→saga acks).
 //! - P2 transfer machinery (1d.1/1d.5b): `DirectoryReply`, `FlushSource`, `TransferAck`, `Demote`,
@@ -15,6 +15,9 @@
 //!   `ReleaseComplete`/`TransientAbandon` (the structural drop-before-promote handoff + the dead-DEST abandon).
 //! - P3 permanent-kill recovery (D-37): `ReHome` (the forward re-home adopt — a DEDICATED arm, never a
 //!   `Promote` reuse).
+//! - R-6d3c (D-6 #1 NEVER-restart closure): `TransientDiscard` (orch→dest discard-poison — the source
+//!   died in `BatchHandoff::AwaitAdopt` pre-adopt, so a late-replayed `Arriving` copy is removed + its
+//!   adopt poisoned; reuses `TransientHandoff`).
 //!
 //! RESERVED (variant lands with its consumer): `BlockEdit` (P6), `Coupling` `EffectFree` ports (P8),
 //! `Signal` (P9 cross-shard functional-block signals).
@@ -82,6 +85,13 @@ pub const TRANSIENT_ABANDON_STEP: u32 = 15;
 /// target's `PromoteAck` (the target becomes the Owned authority). Journaled idempotent by
 /// `(transfer, RE_HOME_STEP)` at the target so a redelivery re-acks without re-adopting.
 pub const RE_HOME_STEP: u32 = 16;
+/// D-6 #1 NEVER-restart closure (R-6d3c): the orchestrator→DEST discard command — the source died
+/// in `BatchHandoff::AwaitAdopt` (PRE-adopt) so the batch is being counted lost, but a late outbox
+/// replay could still insert `Arriving{batch}` at the dest; the discard REMOVES any such item AND
+/// poisons [`TRANSIENT_BATCH_STEP`] so a later replayed adopt is `AlreadyApplied` (never re-inserts an
+/// orphan). Journaled idempotent by `(transfer, TRANSIENT_DISCARD_STEP)`. 17 is the next free id —
+/// disjoint from 0–6 route-swap + 7–16 state/transient/rehome steps (asserted in tests).
+pub const TRANSIENT_DISCARD_STEP: u32 = 17;
 
 /// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
 /// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
@@ -163,6 +173,17 @@ pub enum InterShardFlow {
     /// target acks `PromoteAck` (it is now the Owned authority). APPENDED (preserves every existing
     /// postcard discriminant).
     ReHome(ReHomeCmd),
+    /// Orchestrator → DEST shard (R-6d3c): the source died in `BatchHandoff::AwaitAdopt` (PRE-adopt) so
+    /// the batch is counted lost; REMOVE any `Arriving{batch==transfer}` item AND poison `(transfer,
+    /// TRANSIENT_BATCH_STEP)` so a late outbox replay's adopt is `AlreadyApplied` (never re-inserts an
+    /// orphan). Reuses [`TransientHandoff`] (shares the shape + one classification arm with the other
+    /// transient handoff commands, DRY). Side-effecting, ack-FREE (the resolving saga is terminal);
+    /// idempotent by `(transfer, TRANSIENT_DISCARD_STEP)`. Classified [`FlowDurabilityClass::ReDriven`]
+    /// because it is orchestrator-EMITTED (it does NOT grow the producer-less outbox set / trip the
+    /// push-`Ephemeral` debug_assert) — NOT because `scan_deadlines` re-drives it: it is a FIRE-ONCE
+    /// terminal egress, its lost-delivery residual is covered by the CA-1/L5 re-solicit (DEFERRED.md),
+    /// NOT by a re-driver. APPENDED (preserves every existing postcard discriminant).
+    TransientDiscard(TransientHandoff),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -284,11 +305,13 @@ impl InterShardFlow {
             // The transient structural drop-before-promote handoff commands (D-7b) + the D-7d dead-DEST
             // ABANDON: side-effecting authority moves at the source/dest, journaled by `(transfer,
             // step_id)` (idempotent by local held-status — the batched twin of the demote/promote
-            // idempotency). All FOUR share the `TransientHandoff` shape and one classification arm (DRY).
+            // idempotency). All FIVE share the `TransientHandoff` shape and one classification arm (DRY):
+            // the R-6d3c `TransientDiscard` (orch→dest discard-poison) joins the group unchanged.
             InterShardFlow::TransientRelease(h)
             | InterShardFlow::TransientDrop(h)
             | InterShardFlow::ReleaseComplete(h)
-            | InterShardFlow::TransientAbandon(h) => EffectClass::SideEffecting {
+            | InterShardFlow::TransientAbandon(h)
+            | InterShardFlow::TransientDiscard(h) => EffectClass::SideEffecting {
                 idempotency: IdempotencyKey::TransferStep {
                     transfer: h.transfer,
                     step_id: h.step_id,
@@ -349,7 +372,10 @@ impl InterShardFlow {
             | InterShardFlow::TransientDrop(_)
             | InterShardFlow::ReleaseComplete(_)
             | InterShardFlow::TransientAbandon(_)
-            | InterShardFlow::ReHome(_) => FlowDurabilityClass::ReDriven,
+            | InterShardFlow::ReHome(_)
+            // R-6d3c: the orchestrator-EMITTED discard-poison — NOT producer-less (it does not grow the
+            // outbox set); a FIRE-ONCE terminal egress, its lost-delivery residual is CA-1/L5-gated.
+            | InterShardFlow::TransientDiscard(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -911,6 +937,15 @@ mod tests {
                 }),
                 TRANSIENT_RELEASE_STEP,
             ),
+            // R-6d3c: the orch→dest discard-poison rides the SAME classification arm (DRY).
+            (
+                InterShardFlow::TransientDiscard(TransientHandoff {
+                    transfer: TransferId(11),
+                    step_id: TRANSIENT_DISCARD_STEP,
+                    fence: Fence(6),
+                }),
+                TRANSIENT_DISCARD_STEP,
+            ),
         ] {
             assert_eq!(
                 flow.effect_class(),
@@ -999,8 +1034,9 @@ mod tests {
     #[test]
     fn transfer_state_step_ids_are_disjoint_from_route_swap_phases() {
         use std::collections::BTreeSet;
-        // Every entity-STATE step (flush/crossing/demote/promote) is disjoint from the 0–6 route-swap
-        // phases AND from each other — so a state step can never alias a phase in any journal.
+        // Every entity-STATE step (flush/crossing/demote/promote/transient/rehome/discard) is disjoint
+        // from the 0–6 route-swap phases AND pairwise distinct — so a state step can never alias a phase
+        // (or another state step) in any `(transfer, step_id)` journal. The FULL 7–17 step-id space.
         let state_steps = [
             FLUSH_SOURCE_STEP,
             STUB_CROSSING_STEP,
@@ -1009,6 +1045,10 @@ mod tests {
             TRANSIENT_BATCH_STEP,
             TRANSIENT_DROP_STEP,
             TRANSIENT_RELEASE_STEP,
+            TRANSIENT_COMPLETE_STEP,
+            TRANSIENT_ABANDON_STEP,
+            RE_HOME_STEP,
+            TRANSIENT_DISCARD_STEP,
         ];
         for phase in 0u32..=6 {
             assert!(

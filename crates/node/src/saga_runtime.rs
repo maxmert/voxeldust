@@ -49,13 +49,14 @@ use vd_sim::directory::{DirectoryCore, DirectoryTuning};
 use vd_sim::io::{Bytes, Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_sim::saga::{
-    self, AbortReason, LivenessTuning, SagaAction, SagaCtx, SagaEvent, SagaState, SagaTuning,
+    self, AbortReason, BatchHandoffPhase, LivenessTuning, SagaAction, SagaCtx, SagaEvent, SagaState,
+    SagaTuning,
 };
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
     PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION,
-    TRANSIENT_ABANDON_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck,
-    TransferEnvelope, TransientHandoff, TransitionPayload,
+    TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
+    TransferAck, TransferEnvelope, TransientHandoff, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -186,13 +187,17 @@ struct LiveSaga {
     /// it is `Some` before the CAS for an Entity subject, so `EmitCrossing` never ships a None pose.
     /// (The TLV state blob joins this at 1d.6; pose-only now.)
     flushed_pose: Option<StampedPose>,
-    /// D-3 — the universe tick this saga's DEST was first observed CONFIRMED-DEAD while in `BatchHandoff`
-    /// (`None` otherwise). The DESTRUCTIVE dest-abandon (`EmitTransientAbandon`) waits the LARGE
-    /// `abort_deadline_ticks` measured FROM HERE — NOT from `since` (which `scan_deadlines` re-arms to
-    /// `now` on every fire, making a `now - since >= abort` gate structurally unsatisfiable). RAM-ONLY
-    /// (NOT persisted in `SagaSnapshot`): on rehydrate it re-derives `None`, so a restarted orchestrator
-    /// re-accrues the abort budget from scratch rather than firing an irreversible abandon immediately.
-    dead_observed_since: Option<UniverseTick>,
+    /// D-3 — WHICH participant was first observed CONFIRMED-DEAD and WHEN, while this saga awaits a
+    /// destructive resolution (`None` otherwise). A DESTRUCTIVE resolution (dest-abandon, source
+    /// discard/self-promote, dest re-home) waits the LARGE `abort_deadline_ticks` measured FROM the tick
+    /// here — NOT from `since` (which `scan_deadlines` re-arms to `now` on every fire, making a `now -
+    /// since >= abort` gate structurally unsatisfiable). R-6d3c keys it by `NodeId`: a CAUSE-SWITCH (dest
+    /// confirmed dead → the dest RECOVERS via `record_ack` → the SOURCE is confirmed dead) RE-ANCHORS to
+    /// `now` (`dead_budget_elapsed`), so the new participant's budget is never measured from the OTHER
+    /// participant's stale first-dead observation. RAM-ONLY (NOT persisted in `SagaSnapshot`): on rehydrate
+    /// it re-derives `None`, so a restarted orchestrator re-accrues the abort budget from scratch rather
+    /// than firing an irreversible resolution immediately.
+    dead_observed_since: Option<(NodeId, UniverseTick)>,
 }
 
 /// A pending create-on-trigger. Enqueued by [`SagaRuntimeRes::start_transfer`] and processed
@@ -359,6 +364,12 @@ pub struct SagaRuntimeRes {
     /// `> 0` is the proof a crash cell's resolution actually fired (not that the happy path completed).
     source_unreachable_resolutions: u64,
     dest_unreachable_resolutions: u64,
+    /// R-6d3c anti-vacuity observable: dead-SOURCE PRE-adopt resolutions (`AwaitAdopt` +
+    /// `SourceUnreachablePreAdopt`) — the batch is counted lost (discard-to-dest, NOT self-promote).
+    /// Distinct from `source_unreachable_resolutions` (post-adopt, zero-loss self-promote) so the two
+    /// dead-source causes are never conflated in the ledger. 0 on every healthy run and on a RESTART
+    /// recovery; `> 0` is the never-restart cell's proof its resolution fired.
+    batch_lost_source_crash: u64,
     /// D-6 — durable writes STAGED this tick by `commit_result` (saga snapshots + go-tokens, encoded at
     /// the monomorphic call site), drained to the [`StoreRes`] + group-committed ONCE at the end of
     /// `drive_sagas` (the ~1-fsync/tick barrier). `Some(bytes)` = put, `None` = delete (a tombstoned
@@ -533,6 +544,15 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn dest_unreachable_resolutions(&self) -> u64 {
         self.dest_unreachable_resolutions
+    }
+
+    /// R-6d3c — the count of dead-SOURCE PRE-adopt resolutions (`AwaitAdopt` +
+    /// `SourceUnreachablePreAdopt`): the batch was counted lost + discarded-to-dest (NOT self-promoted).
+    /// 0 on every healthy run and on a RESTART recovery; `> 0` proves the never-restart cell's resolution
+    /// fired (anti-vacuity for the accounted-loss-on-detection).
+    #[must_use]
+    pub fn batch_lost_source_crash(&self) -> u64 {
+        self.batch_lost_source_crash
     }
 
     /// D-3 anti-vacuity: total `NodeUnreachable` notices observed (the CSCALE-1 flap cell asserts `> 0`,
@@ -875,6 +895,24 @@ fn run_to_quiescence(
                         }),
                     );
                 }
+                // R-6d3c NEVER-restart resolution: the source died in AwaitAdopt (pre-adopt), so tell the
+                // DEST to DISCARD any late-replayed Arriving copy + poison its adopt. Pure egress to
+                // ctx.dest carrying the go-token fence; the dest journals `(transfer, TRANSIENT_DISCARD_
+                // STEP)`. Ack-FREE — the resolving saga is terminal (mirroring the abandon egress).
+                SagaAction::EmitTransientDiscard { fence } => {
+                    outbox.push_flow(
+                        ctx.dest,
+                        MsgClass::Saga,
+                        &InterShardFlow::TransientDiscard(TransientHandoff {
+                            transfer: ctx.transfer,
+                            step_id: TRANSIENT_DISCARD_STEP,
+                            fence,
+                        }),
+                    );
+                }
+                // R-6d3c — the batch-lost-source-crash count is applied in `scan_deadlines` PRE-delivery
+                // (beside `source_unreachable_resolutions`), so this executor arm is a straight-line no-op.
+                SagaAction::CountBatchLostSourceCrash => {}
                 // D-6: durability is REAL now — `commit_result` stages the QUIESCENT saga snapshot at
                 // EVERY transition (this checkpoint's `Send`/`EmitCrossing` effect included), and the
                 // end-of-tick `Store::commit()` barrier flushes it BEFORE the node's flush phase sends
@@ -1252,12 +1290,35 @@ fn deadline_for(state: &SagaState, tuning: &SagaTuning) -> u64 {
 /// measured from `dead_observed_since` (the CSCALE-1 cure — a recoverable blip that clears in time never
 /// resolves a healthy dest); `dead_observed_since` is the per-saga budget anchor, NOT `since` (which
 /// re-armed to `now`), so the budget accrues across re-drives rather than resetting every fire.
+/// R-6d3c — the DESTRUCTIVE-resolution budget elapsed for `node`, keyed by the confirmed-dead
+/// PARTICIPANT so a CAUSE-SWITCH re-anchors. A single per-saga `Option<(NodeId, UniverseTick)>` times
+/// "how long has THIS participant been observed dead"; if the anchor is unset OR held by a DIFFERENT node
+/// (the dest was confirmed dead, then RECOVERED, then the source was confirmed dead) it RE-ANCHORS to
+/// `now` — so the new participant's `abort_deadline_ticks` budget is never measured from the OTHER
+/// participant's stale first-dead observation (the shared-anchor regression the R-6d3c review caught: a
+/// destructive source resolution would otherwise fire before its own budget elapsed). Monomorphic — the
+/// re-anchor branch is covered ONCE here so both call sites stay branchless (HR5).
+fn dead_budget_elapsed(
+    anchor: &mut Option<(NodeId, UniverseTick)>,
+    node: NodeId,
+    now: UniverseTick,
+) -> u64 {
+    let observed = match *anchor {
+        Some((n, t)) if n == node => t,
+        _ => {
+            *anchor = Some((node, now));
+            now
+        }
+    };
+    now.0.saturating_sub(observed.0)
+}
+
 #[allow(clippy::too_many_arguments)] // the dead-aware decision needs the full saga + liveness + roster context
 fn rehome_event_for(
     state: &SagaState,
     ctx: &SagaCtx,
     liveness: &LivenessTracker,
-    dead_observed_since: &mut Option<UniverseTick>,
+    dead_observed_since: &mut Option<(NodeId, UniverseTick)>,
     tuning: &SagaTuning,
     now: UniverseTick,
     roster: &BTreeMap<NodeId, ShardProfile>,
@@ -1265,15 +1326,34 @@ fn rehome_event_for(
     subject_owner: NodeId,
 ) -> SagaEvent {
     match state {
-        // D-7d transient batch hand-off: source-dead self-promotes the dest, dest-dead abandons the
-        // source's retained copy (DESTRUCTIVE, budget-gated).
-        SagaState::BatchHandoff { .. } => {
+        // D-7d / R-6d3c transient batch hand-off: dest-dead abandons the source's retained copy; source-
+        // dead splits BY PHASE — a POST-adopt phase self-promotes the dest (zero loss), PRE-adopt
+        // `AwaitAdopt` discards-to-dest + counts the loss (`SourceUnreachablePreAdopt`, R-6d3c). BOTH the
+        // source-dead and dest-dead resolutions are DESTRUCTIVE now (self-promoting an unadopted batch, or
+        // discarding+accounting a loss, are both irreversible), so BOTH are budget-gated on
+        // `abort_deadline_ticks` measured from `dead_observed_since` — a source that RESTARTS within budget
+        // delivers via its durable outbox replay FIRST (the two recoveries race; the budget picks the
+        // restart winner). R-6d3c ADDED the source-dead budget-gate (the former immediate self-promote
+        // could not lose a race, but the AwaitAdopt discard MUST give the restart a chance).
+        SagaState::BatchHandoff { phase, .. } => {
             if liveness.is_confirmed_dead(ctx.source, now) {
-                *dead_observed_since = None;
-                SagaEvent::SourceUnreachable
+                // Keyed by ctx.source so a dest-dead-then-source-dead cause-switch re-anchors (does NOT
+                // measure the source's restart-race budget from the dest's stale first-dead observation).
+                if dead_budget_elapsed(dead_observed_since, ctx.source, now)
+                    >= tuning.abort_deadline_ticks
+                {
+                    *dead_observed_since = None;
+                    match phase {
+                        BatchHandoffPhase::AwaitAdopt => SagaEvent::SourceUnreachablePreAdopt,
+                        _ => SagaEvent::SourceUnreachable,
+                    }
+                } else {
+                    SagaEvent::Timeout // cheap re-drive while the restart-race budget accrues
+                }
             } else if liveness.is_confirmed_dead(ctx.dest, now) {
-                let observed = *dead_observed_since.get_or_insert(now);
-                if now.0.saturating_sub(observed.0) >= tuning.abort_deadline_ticks {
+                if dead_budget_elapsed(dead_observed_since, ctx.dest, now)
+                    >= tuning.abort_deadline_ticks
+                {
                     SagaEvent::DestUnreachable
                 } else {
                     SagaEvent::Timeout // cheap re-drive while the abort budget accrues (corpse won't ack)
@@ -1311,8 +1391,11 @@ fn rehome_event_for(
         // dead forever), bumping the fence past the journal-gated adopt into a FenceMismatch.
         SagaState::Promoting { .. } => {
             if liveness.is_confirmed_dead(subject_owner, now) {
-                let observed = *dead_observed_since.get_or_insert(now);
-                if now.0.saturating_sub(observed.0) >= tuning.abort_deadline_ticks {
+                // Keyed by subject_owner (the committed dead dest); a Promoting saga only ever times this
+                // one participant, but the keyed anchor keeps the budget honest if the owner ever changes.
+                if dead_budget_elapsed(dead_observed_since, subject_owner, now)
+                    >= tuning.abort_deadline_ticks
+                {
                     match select_rehome_target(req, roster, liveness, now) {
                         Some(target) => SagaEvent::ReHomeTo { target },
                         None => SagaEvent::Timeout, // no capable live target → stay parked
@@ -1532,6 +1615,10 @@ fn scan_deadlines(
         match event {
             SagaEvent::SourceUnreachable => runtime.source_unreachable_resolutions += 1,
             SagaEvent::DestUnreachable => runtime.dest_unreachable_resolutions += 1,
+            // R-6d3c: the never-restart PRE-adopt resolution (accounted loss, discard-to-dest). Counted
+            // HERE — this `_ => {}` wildcard is the ONE place a missing counter arm would compile green
+            // (unlike every other new SagaEvent/SagaAction, which the total FSM/executor match rejects).
+            SagaEvent::SourceUnreachablePreAdopt => runtime.batch_lost_source_crash += 1,
             _ => {}
         }
         deliver(runtime, dir, outbox, epoch, now, transfer, event);
@@ -3947,7 +4034,7 @@ mod tests {
         let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1
 
         // (i) dest HEALTHY (not confirmed dead) → Timeout, and a stale budget is cleared.
-        let mut dos = Some(UniverseTick(5));
+        let mut dos = Some((DEST, UniverseTick(5)));
         let ev = rehome_event_for(
             &promoting,
             &c,
@@ -3980,8 +4067,8 @@ mod tests {
         assert_eq!(ev, SagaEvent::Timeout);
         assert_eq!(
             dos,
-            Some(UniverseTick(0)),
-            "the abort budget anchors on the first dead observation"
+            Some((DEST, UniverseTick(0))),
+            "the abort budget anchors on the first dead observation (keyed by the dead node)"
         );
         let ev = rehome_event_for(
             &promoting,
@@ -4020,7 +4107,7 @@ mod tests {
 
         // (iv) dest DEAD, PAST budget, NO capable live target (empty roster) → Timeout (stay PARKED, honest).
         let empty_roster: BTreeMap<NodeId, ShardProfile> = BTreeMap::new();
-        let mut dos = Some(UniverseTick(0));
+        let mut dos = Some((DEST, UniverseTick(0)));
         let ev = rehome_event_for(
             &promoting,
             &c,
@@ -4312,18 +4399,35 @@ mod tests {
             ..DirectoryTuning::default()
         });
 
-        // SOURCE dead → self-promote the dest (TransientDrop to DEST), tombstone, count once. The
-        // zero-loss self-promote is NOT abort-gated, so it fires on the first due scan once confirmed
-        // (n == 1 in the default liveness tuning → one NodeUnreachable confirms).
+        // SOURCE dead in a POST-ADOPT phase (AwaitPromote) → self-promote the dest (TransientDrop to
+        // DEST), tombstone, count once. R-6d3c budget-gated the source-dead path too (so a source that
+        // RESTARTS within budget delivers via its outbox replay FIRST): the first confirmed scan RE-DRIVES,
+        // the resolution fires only past `abort_deadline_ticks` from the first observation.
         let mut runtime = mk();
         runtime.liveness.record_unreachable(SOURCE, UniverseTick(8));
         let mut outbox = OutboundBox::default();
+        // First due scan: source CONFIRMED dead, but the restart-race budget has not elapsed → re-drive.
         scan_deadlines(
             &mut runtime,
             &mut dir,
             &mut outbox,
             EpochId(1),
             UniverseTick(8),
+        );
+        assert_eq!(
+            runtime.live(),
+            1,
+            "the source self-promote waits the restart-race budget — not fired on the first observation"
+        );
+        assert_eq!(runtime.source_unreachable_resolutions(), 0);
+        // After `abort_deadline_ticks` from the first observation: the self-promote fires.
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8 + saga::DEFAULT_ABORT_DEADLINE_TICKS),
         );
         assert_eq!(
             runtime.live(),
@@ -4343,6 +4447,11 @@ mod tests {
         );
         assert_eq!(runtime.source_unreachable_resolutions(), 1);
         assert_eq!(runtime.dest_unreachable_resolutions(), 0);
+        assert_eq!(
+            runtime.batch_lost_source_crash(),
+            0,
+            "a POST-adopt source death is a zero-loss self-promote, NOT a counted loss"
+        );
 
         // DEST dead → abandon the source copy — but the DESTRUCTIVE abandon (irreversible accounted loss)
         // is gated behind the LARGE abort budget from the FIRST confirmed-dead observation (the CSCALE-1
@@ -4401,6 +4510,210 @@ mod tests {
         assert_eq!(runtime.live(), 1, "neither dead → re-drive, not resolve");
         assert_eq!(runtime.source_unreachable_resolutions(), 0);
         assert_eq!(runtime.dest_unreachable_resolutions(), 0);
+    }
+
+    #[test]
+    fn rehome_event_for_await_adopt_source_dead_emits_pre_adopt_past_budget_else_redrives() {
+        // R-6d3c producer discrimination (HR5: all corners in the monomorphic helper). A dead SOURCE in
+        // BatchHandoff is now BUDGET-gated (so a restart-within-budget wins its outbox-replay race), and
+        // the resolution event is PHASE-discriminated: AwaitAdopt → SourceUnreachablePreAdopt (accounted
+        // loss); a post-adopt phase → SourceUnreachable (zero-loss self-promote). abort_deadline=24.
+        let tuning = SagaTuning::default();
+        let c = ctx(DurabilityClass::Transient, Fence(1));
+        let await_adopt = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitAdopt,
+            new_fence: Fence(2),
+        };
+        let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
+        let roster: BTreeMap<NodeId, ShardProfile> = [(NodeId(9), empty)].into_iter().collect();
+        let req = CapRequest::default();
+        let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1
+
+        // (i) source HEALTHY → Timeout, and a stale budget is cleared.
+        let mut dos = Some((SOURCE, UniverseTick(5)));
+        let ev = rehome_event_for(
+            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(30), &roster, &req, DEST,
+        );
+        assert_eq!(ev, SagaEvent::Timeout);
+        assert_eq!(dos, None, "a healthy source clears the stale budget");
+
+        // Confirm SOURCE dead (n == 1 → one notice confirms).
+        liveness.record_unreachable(SOURCE, UniverseTick(0));
+        // (ii) source DEAD but WITHIN the restart-race budget → cheap Timeout re-drive (budget anchored).
+        let mut dos = None;
+        let ev = rehome_event_for(
+            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(0), &roster, &req, DEST,
+        );
+        assert_eq!(ev, SagaEvent::Timeout);
+        assert_eq!(
+            dos,
+            Some((SOURCE, UniverseTick(0))),
+            "the restart-race budget anchors on the first dead observation (keyed by the dead node)"
+        );
+        let ev = rehome_event_for(
+            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(10), &roster, &req, DEST,
+        );
+        assert_eq!(ev, SagaEvent::Timeout, "still within the 24-tick budget at tick 10");
+
+        // (iii) source DEAD, PAST budget, PRE-adopt (AwaitAdopt) → SourceUnreachablePreAdopt (accounted
+        // loss, discard-to-dest — NEVER self-promote an empty dest).
+        let ev = rehome_event_for(
+            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &roster, &req, DEST,
+        );
+        assert_eq!(ev, SagaEvent::SourceUnreachablePreAdopt);
+        assert_eq!(dos, None, "the resolution clears the budget");
+
+        // (iv) source DEAD, PAST budget, POST-adopt (AwaitPromote) → SourceUnreachable (NOT PreAdopt) —
+        // closes the mis-pairing gap (a post-adopt phase self-promotes; it must never discard an adopted
+        // batch).
+        let post_adopt = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitPromote,
+            new_fence: Fence(2),
+        };
+        let mut dos = Some((SOURCE, UniverseTick(0)));
+        let ev = rehome_event_for(
+            &post_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &roster, &req, DEST,
+        );
+        assert_eq!(
+            ev,
+            SagaEvent::SourceUnreachable,
+            "a post-adopt phase resolves as a zero-loss self-promote, NOT a PreAdopt discard"
+        );
+    }
+
+    #[test]
+    fn rehome_event_for_reanchors_the_budget_on_a_source_dest_cause_switch() {
+        // R-6d3c budget-gate regression guard (the post-impl review's blocker): `dead_observed_since` is
+        // keyed by the confirmed-dead NODE, so a CAUSE-SWITCH (the DEST is confirmed dead → the dest
+        // RECOVERS → the SOURCE is confirmed dead) RE-ANCHORS the destructive-resolution budget to `now`
+        // instead of measuring the source's restart-race grace from the DEST's stale first-dead tick. A
+        // POST-adopt phase (AwaitPromote) is used because its orch->source egress makes
+        // `is_confirmed_dead(source)` reachable-NOW — the pre-fix shared anchor would fire early.
+        let tuning = SagaTuning::default(); // abort_deadline = 24
+        let c = ctx(DurabilityClass::Transient, Fence(1));
+        let state = SagaState::BatchHandoff {
+            phase: BatchHandoffPhase::AwaitPromote,
+            new_fence: Fence(2),
+        };
+        let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
+        let roster: BTreeMap<NodeId, ShardProfile> = [(NodeId(9), empty)].into_iter().collect();
+        let req = CapRequest::default();
+        let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1, window = 64
+        let mut dos = None;
+
+        // DEST confirmed dead at tick 0 → the budget anchors on DEST, within budget → Timeout.
+        liveness.record_unreachable(DEST, UniverseTick(0));
+        let ev = rehome_event_for(
+            &state, &c, &liveness, &mut dos, &tuning, UniverseTick(0), &roster, &req, DEST,
+        );
+        assert_eq!(ev, SagaEvent::Timeout);
+        assert_eq!(dos, Some((DEST, UniverseTick(0))), "anchored on the dead DEST");
+
+        // CAUSE-SWITCH at tick 30 (already PAST 24 from the DEST's tick-0 anchor): the DEST RECOVERS and
+        // the SOURCE is confirmed dead. The shared-anchor BUG would fire SourceUnreachable now (30-0 >= 24);
+        // the keyed anchor RE-ANCHORS to (SOURCE, 30) and returns Timeout — the source gets its OWN budget.
+        liveness.record_ack(DEST);
+        liveness.record_unreachable(SOURCE, UniverseTick(30));
+        let ev = rehome_event_for(
+            &state, &c, &liveness, &mut dos, &tuning, UniverseTick(30), &roster, &req, DEST,
+        );
+        assert_eq!(
+            ev,
+            SagaEvent::Timeout,
+            "the cause-switch re-anchors — the source is NOT resolved off the dest's stale budget"
+        );
+        assert_eq!(
+            dos,
+            Some((SOURCE, UniverseTick(30))),
+            "re-anchored on the newly-dead SOURCE"
+        );
+
+        // The source's OWN budget elapses at tick 54 (30 + 24) → the post-adopt self-promote fires.
+        let ev = rehome_event_for(
+            &state, &c, &liveness, &mut dos, &tuning, UniverseTick(54), &roster, &req, DEST,
+        );
+        assert_eq!(
+            ev,
+            SagaEvent::SourceUnreachable,
+            "past the source's OWN re-anchored budget → the post-adopt self-promote fires"
+        );
+        assert_eq!(dos, None, "the resolution clears the budget");
+    }
+
+    #[test]
+    fn scan_deadlines_resolves_an_await_adopt_batch_as_accounted_loss_and_counts_it() {
+        // R-6d3c end-to-end producer (M2 — the scan_deadlines counter arm the `_ => {}` wildcard would
+        // silently drop): an AwaitAdopt BatchHandoff whose SOURCE is confirmed dead, PAST the restart-race
+        // budget, resolves as an ACCOUNTED loss — it emits `TransientDiscard` to the DEST, tombstones, and
+        // increments `batch_lost_source_crash` (NOT the zero-loss `source_unreachable_resolutions`). A late
+        // `BatchAdopted` for the tombstoned saga is then absorbed as a no-op (M1 — no second resolution).
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive=8, abort=24
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
+        });
+        inject_saga(
+            &mut runtime,
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitAdopt,
+                new_fence: Fence(2),
+            },
+            UniverseTick(0),
+        );
+        runtime.liveness.record_unreachable(SOURCE, UniverseTick(8));
+
+        // First due scan (tick 8): source confirmed dead but the restart-race budget has not elapsed → re-drive.
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(8));
+        assert_eq!(runtime.live(), 1, "the accounted-loss discard waits the restart-race budget");
+        assert_eq!(runtime.batch_lost_source_crash(), 0);
+
+        // Past `abort_deadline_ticks` from the first observation: the discard-to-dest + count fires.
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8 + saga::DEFAULT_ABORT_DEADLINE_TICKS),
+        );
+        assert_eq!(runtime.live(), 0, "the accounted-loss resolution tombstoned the saga");
+        assert!(
+            flows_to_node(&outbox, DEST).contains(&InterShardFlow::TransientDiscard(
+                TransientHandoff {
+                    transfer: XFER,
+                    step_id: TRANSIENT_DISCARD_STEP,
+                    fence: Fence(2),
+                }
+            )),
+            "discard-to-dest (poison the late replay): {:?}",
+            outbox.0
+        );
+        assert_eq!(
+            runtime.batch_lost_source_crash(),
+            1,
+            "the never-restart PRE-adopt loss is counted (M2 — the scan_deadlines counter arm)"
+        );
+        assert_eq!(
+            runtime.source_unreachable_resolutions(),
+            0,
+            "a PRE-adopt loss is NOT a zero-loss self-promote"
+        );
+
+        // M1: a LATE BatchAdopted for the now-tombstoned saga is a no-op — no second resolution, no egress.
+        let mut outbox = OutboundBox::default();
+        deliver(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8 + saga::DEFAULT_ABORT_DEADLINE_TICKS + 1),
+            XFER,
+            SagaEvent::BatchAdopted,
+        );
+        assert_eq!(runtime.live(), 0, "the tombstoned saga stays gone");
+        assert_eq!(runtime.batch_lost_source_crash(), 1, "no double-count on the late ack");
+        assert!(outbox.0.is_empty(), "no second egress on the late BatchAdopted");
     }
 
     #[test]

@@ -947,6 +947,18 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     the GhostReliable Despawn, the durable `EmitCrossing` (D-6 3rd phase), and the D-37 re-home (cured in 2d) FOR THE
     SOURCE-STAYS-UP case. **The `MeshTransport` is NO LONGER "at-most-once" — the boot-warn premise is retired for the
     source-up path.**
+  - **⚠️ SUPERSEDED-IN-PART by R-6d3c (see the LANDED block below, ~line 1697):** the saga half of #1 below is DONE —
+    the `(BatchHandoff, SourceUnreachable)` arm was SPLIT by phase (post-adopt self-promote; `AwaitAdopt` +
+    `SourceUnreachablePreAdopt` → discard-to-dest + count), the dest `on_transient_discard` poisons a late replay so no
+    orphan strands, and the saga.rs comment was corrected. So "the self-promote matches ANY phase via `..`" and "the
+    comment is INACCURATE for AwaitAdopt" (in the paragraph below) are HISTORICAL — do NOT read them as live bugs. What
+    remains CA-1/L5-gated is only the confirm-dead TRIGGER (the AwaitAdopt re-solicit egress that MAKES
+    `is_confirmed_dead(source)` reachable) + the lost-discard reliability. R-6d4 RESIDUAL (review `wf_f3bed49f` finding
+    2, ledgered): once that re-solicit egress lands, the `AwaitAdopt` discard keys purely on `is_confirmed_dead(source)`
+    + budget + `phase==AwaitAdopt`, NOT on whether the dest adopted — so a dest that ADOPTED but whose `BatchAdopted`
+    ack is in-flight past `abort_deadline_ticks` would be over-discarded. R-6d4 must gate `abort_deadline_ticks >
+    transport max-reliable-ack-redelivery bound` (a live dest's ack always wins) OR check dest-adopted before discard.
+    Not reachable-now (AwaitAdopt has an EMPTY orch→source egress today ⇒ the trigger never fires in prod).
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT
@@ -1668,6 +1680,75 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      BINDING forward-input to R-6d (when a gateway durable-to-client flow lands): departed-client peer entries in the
      gateway `VD_PEERS` would re-drive forever + trip the peer-count>256 guard (F-F) — gated behind `None` today.
      ⇒ D-6 #1 RESTART case CLOSED; the NEVER-restart case is R-6d3c (saga AwaitAdopt split + dest TransientDiscard).**
+     **📐 R-6d3c DESIGN DONE (wf_9e5f126d, 3 opus lenses ALL SOUND_TO_IMPLEMENT + synth, 4 folded must-fixes) — ready
+     to implement (NOT yet coded). SCOPE resolved: the PURE-LOGIC never-restart closure lands NOW; the confirm-dead
+     TRIGGER is CA-1-gated. Sub-slices: R-6d3c-1 (vd-wire, Tier-A) — a NEW `InterShardFlow::TransientDiscard`
+     (reusing the flat `TransientHandoff`, an OUTER arm so the nested tripwires are untouched) + `TRANSIENT_DISCARD_
+     STEP=17` (APPENDED, preserves postcard discriminants) through ALL 3 closed-set gates (effect_class
+     SideEffecting/TransferStep, durability_class `ReDriven` [NOT ProducerLessReliable — that would trip the
+     push-Ephemeral debug_assert with no re-emitter + break the producer_less.len()==2 pin], the golden byte-freeze,
+     the "16-arm" header). R-6d3c-2 (vd-sim, Tier-A) — `on_transient_discard`: REMOVE `Arriving{batch==transfer}` +
+     POISON `(transfer, TRANSIENT_BATCH_STEP)` via journal_step [so a LATE outbox-replayed `adopt_transient_batch` is
+     `AlreadyApplied` ⇒ never re-inserts an orphan — the ACTUAL dest cure, lands COMPLETE] + bucket the loss into
+     `transients_lost_in_handover` by kind + a discard-specific counter. R-6d3c-3 (vd-sim FSM + producer) —
+     `SagaEvent::SourceUnreachablePreAdopt` + `SagaAction::{EmitTransientDiscard,CountBatchLostSourceCrash}`; split the
+     `saga.rs:922` BatchHandoff wildcard BY PHASE (post-adopt → self-promote unchanged; AwaitAdopt → discard-to-dest +
+     count + Tombstone, terminal-on-first-fire, budget-gated on abort_deadline_ticks). MUST-FIXES folded: (M1) the
+     budget-gate is a restart-window WIDENING, NOT the anti-double-resolution proof — that is the phase-structure
+     (post-adopt makes the AwaitAdopt arm unreachable) + the adopt-poison (a late BatchAdopted at a Done saga is a
+     terminal-absorb no-op); (M2) the `scan_deadlines` counter match has a `_ => {}` wildcard — the new counter arm
+     MUST be added there (the ONE place a missing arm compiles green) + covered by BOTH a scan_deadlines test AND a
+     direct-deliver test; (NIT-A) the budget-gate affected test is saga_runtime.rs:4293 (AwaitPromote) ONLY, NOT :3806
+     (Demoting); the EntityKind::from_tag Err arm needs a test (Tier-A 100% branch). NET NOW: the dest can NEVER strand
+     an Arriving orphan regardless of replay timing + the saga resolves to a bounded accounted terminal. STILL
+     CA-1-gated (⇒ D-6 #1 never-restart "closed ON delivered-discard"): the AwaitAdopt RE-SOLICIT egress (idempotent
+     orch→source re-prompt) that makes `is_confirmed_dead(source)` REACHABLE in AwaitAdopt (fires the discard) AND the
+     lost-discard reliability (a lost fire-once discard + a late batch replay re-orphans — same CA-1 reliability gate
+     as the trigger). Full crash proof (SIGKILL-source-in-AwaitAdopt + zero-orphaned-Arriving) = R-6d4.**
+     **✅ R-6d3c LANDED (the NEVER-restart CORRECTNESS closure, per the vetted design of record; all 3 sub-slices in ONE
+     Tier-A pass). R-6d3c-1 (vd-wire): `InterShardFlow::TransientDiscard(TransientHandoff)` APPENDED (postcard
+     discriminants preserved) + `TRANSIENT_DISCARD_STEP=17`, through all 3 closed-set gates (effect_class
+     SideEffecting/TransferStep folded into the transient group; durability_class `ReDriven` folded into the big group —
+     the golden `producer_less.len()==2` pin STAYS 2, proving the arm does NOT grow the outbox set); `arm_tripwire` +
+     `every_arm` + the in-module g_sealed loop + the step-disjointness pin (now the FULL 7–17 space) + the "16-arm"
+     header. R-6d3c-2 (vd-sim): `on_transient_discard` REMOVES `Arriving{batch==transfer}` + POISONS `(transfer,
+     TRANSIENT_BATCH_STEP)` (a late replayed `adopt_transient_batch` is `AlreadyApplied` ⇒ never re-inserts an orphan —
+     the ACTUAL dest cure, proven by `discard_before_adopt_poisons_so_a_late_replay_never_orphans`) + buckets the loss by
+     kind into `transients_lost_in_handover` + the discard-specific `transients_discarded_source_crash` counter;
+     idempotent by `TRANSIENT_DISCARD_STEP`; ack-FREE dispatch arm in `on_directory_reply` (mirrors `TransientAbandon`);
+     the corrupt-tag `from_tag` Err arm covered. R-6d3c-3 (vd-sim FSM + vd-node producer): `SourceUnreachablePreAdopt` +
+     `EmitTransientDiscard`/`CountBatchLostSourceCrash`; the `saga.rs` BatchHandoff arm SPLIT by phase (post-adopt →
+     self-promote unchanged; AwaitAdopt → discard-to-dest + count + Tombstone, terminal-on-first-fire); the crossed
+     events fall through the total no-op catch-all (2 FSM no-op tests). `rehome_event_for` BatchHandoff now
+     phase-discriminates + BUDGET-gates the source-dead path (a restart-within-budget wins its outbox-replay race);
+     `batch_lost_source_crash` counter + accessor; the M2 fold — the counter arm added to the `scan_deadlines`
+     `_ => {}` wildcard (the one place a missing arm compiles green), covered by BOTH a scan_deadlines test AND the
+     rehome_event_for producer test; NIT-A — only `scan_deadlines_resolves_a_batch_handoff_with_a_dead_participant`
+     (AwaitPromote, source-dead now budget-gated) MODIFIED, `:3806` (Demoting) untouched; M1 — the late-BatchAdopted-at-a-
+     tombstoned-saga no-op proven in the scan_deadlines test. NET: the dest can NEVER strand an `Arriving` orphan
+     regardless of replay timing, and the saga resolves to a bounded accounted terminal (loud
+     `batch_lost_source_crash`/`transients_discarded_source_crash`) instead of self-promoting an empty dest. Gate: vd-wire
+     66 + vd-sim 200 + vd-node 84 all green; full workspace green. ⇒ D-6 #1 RESTART case 🟩 (R-6d3b-2b); NEVER-restart
+     CORRECTNESS 🟩 closed ON DELIVERED-DISCARD by R-6d3c; NEVER-restart DETECTION-IN-PROD (the confirm-dead trigger +
+     the AwaitAdopt re-solicit egress + the lost-discard reliability) 🟧 CA-1/L5-gated; SIGKILL-source-in-AwaitAdopt e2e
+     + both-ends-restart proptest = R-6d4.**
+     **✅ R-6d3c POST-IMPL REVIEW DONE (wf_f3bed49f, 3 opus lenses + synth, verdict FIX_BEFORE_COMMIT → all blockers
+     FIXED). Headline claims CONFIRMED SOUND: dest no-loss + adopt-poison (both interleave orders orphan-free), the
+     phase-split + crossed-event no-ops (no double-resolution), the closed-set landing (discriminant unshifted, verified
+     by a reviewer's throwaway postcard-discriminant probe; ReDriven not producer-less; producer_less.len()==2 intact),
+     the M2 scan_deadlines counter arm (exercised by a real scan test). BLOCKERS FIXED: (1) [MEDIUM, real regression I
+     introduced] the shared `dead_observed_since` budget anchor conflated the source-dead and dest-dead causes — a
+     cause-switch (dest confirmed dead → dest RECOVERS via record_ack → source confirmed dead) measured the source's
+     restart-race budget from the DEST's stale first-dead tick, firing the destructive source resolution early
+     (reachable-NOW in post-adopt phases, which emit orch→source egress). CURED: the anchor is now keyed by the dead
+     NodeId (`Option<(NodeId, UniverseTick)>`) via a monomorphic `dead_budget_elapsed` helper that RE-ANCHORS on a
+     participant switch + a `rehome_event_for_reanchors_the_budget_on_a_source_dest_cause_switch` guard test. (3) [LOW]
+     the canonical arm enumeration in `wire/src/lib.rs` said "15 arms" (the copy `intershard_closed.rs` names as
+     authoritative) — updated to 16 + `TransientDiscard`. DEFERRED (non-blocking): finding 2 [→ R-6d4] once the
+     AwaitAdopt re-solicit egress lands, gate `abort_deadline_ticks > transport max-reliable-ack bound` (or check
+     dest-adopted) so a live dest's in-flight `BatchAdopted` never gets over-discarded — ledgered above (~line 950);
+     finding 4 [doc] the stale saga-phase-wildcard residual annotated SUPERSEDED. Scope split judged HONEST (no
+     over-claim). Re-gate after fixes: full workspace + clippy -D + coverage-fast (Tier-A 100%) all green.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
