@@ -310,6 +310,29 @@ const REPLAY_POLL_BACKOFF: Duration = Duration::from_millis(1);
 /// peer-writer is stuck (never scheduled) ⇒ fail LOUD (leaving the prior window un-gc'd = SAFE), never hang.
 const REPLAY_FENCE_DEADLINE: Duration = Duration::from_secs(30);
 
+/// R-6d4-C: the replay retry/deadline bounds, made INJECTABLE so the `LaneStuck`/`FenceTimeout` error arms
+/// fire FAST in unit tests (the release values are ~10s retry-cap / 30s fence — a real wedged drain / stuck
+/// peer-writer, far too slow for a unit test). [`ReplayLimits::release`] IS the module consts, so the prod
+/// path is byte-identical (`replay_outbox` delegates with it); this is a pure test-speed seam, NOT a prod
+/// knob (no env/config surface). The BRANCH structure is unchanged — only the loop bound + deadline differ —
+/// so Tier coverage of the arms is preserved.
+#[derive(Clone, Copy)]
+struct ReplayLimits {
+    max_send_retries: u32,
+    poll_backoff: Duration,
+    fence_deadline: Duration,
+}
+impl ReplayLimits {
+    /// The production bounds (the module consts). `replay_outbox` uses exactly this — no behavior change.
+    const fn release() -> Self {
+        ReplayLimits {
+            max_send_retries: REPLAY_SEND_MAX_RETRIES,
+            poll_backoff: REPLAY_POLL_BACKOFF,
+            fence_deadline: REPLAY_FENCE_DEADLINE,
+        }
+    }
+}
+
 /// R-6d3b-2 boot-replay REFUSE-TO-BOOT failure — a transient/infra pathology that must fail LOUD (gc is
 /// SKIPPED, so every retained row survives for the next boot). Distinct from a QUARANTINE (a poison/roster-gone
 /// row is RETAINED + loud-counted and the boot PROCEEDS — see [`ReplayCounts`]); a durable row is NEVER
@@ -370,20 +393,21 @@ fn send_durable_with_retry(
     peer: NodeId,
     class: MsgClass,
     payload: Bytes,
+    limits: ReplayLimits,
 ) -> Result<(), ReplayError> {
     let mut pay = payload;
-    for _ in 0..REPLAY_SEND_MAX_RETRIES {
+    for _ in 0..limits.max_send_retries {
         match transport.send_durable(peer, class, pay, Durability::Retained) {
             Ok(_) => return Ok(()),
             Err(SendError::QueueFull(returned)) => {
                 // RC-2b: distinguish a DEAD lane (the peer_writer task exited ⇒ the mpsc is closed) from a
                 // transiently-full one. A dead lane can NEVER drain ⇒ fail FAST (LaneDead) rather than spin
-                // ~REPLAY_SEND_MAX_RETRIES×backoff (~10s) on a corpse before LaneStuck. `send_durable`'s
+                // ~max_send_retries×backoff (~10s) on a corpse before LaneStuck. `send_durable`'s
                 // frozen-seam contract is unchanged — the disambiguation is an out-of-band `lane_alive` probe.
                 if !transport.lane_alive(peer) {
                     return Err(ReplayError::LaneDead { peer });
                 }
-                std::thread::sleep(REPLAY_POLL_BACKOFF);
+                std::thread::sleep(limits.poll_backoff);
                 pay = returned; // reuse the returned payload — no re-clone
             }
         }
@@ -431,6 +455,20 @@ pub fn replay_outbox(
     transport: &mut dyn ReplayTransport,
     peers: &BTreeMap<NodeId, SocketAddr>,
 ) -> Result<ReplayCounts, ReplayError> {
+    // The prod entry: the release retry/deadline bounds (byte-identical to the pre-R-6d4-C body). The
+    // `_with_limits` seam only shortens those bounds so the LaneStuck/FenceTimeout arms are unit-testable fast.
+    replay_outbox_with_limits(shared, transport, peers, ReplayLimits::release())
+}
+
+/// R-6d4-C: [`replay_outbox`] with injectable [`ReplayLimits`] — the ONE body; the public wrapper passes the
+/// release bounds. Tests pass a tiny retry-cap + short fence-deadline so the wedged-lane / stuck-writer arms
+/// fire in milliseconds instead of ~10s / 30s.
+fn replay_outbox_with_limits(
+    shared: &SharedOutbox,
+    transport: &mut dyn ReplayTransport,
+    peers: &BTreeMap<NodeId, SocketAddr>,
+    limits: ReplayLimits,
+) -> Result<ReplayCounts, ReplayError> {
     // (1) ONE brief lock: snapshot the retained rows + a DurabilityHandle clone + the base submit watermark.
     let (rows, durability, base) = {
         let g = shared.lock().unwrap_or_else(PoisonError::into_inner);
@@ -474,7 +512,7 @@ pub fn replay_outbox(
             counts.quarantined += 1;
             continue;
         };
-        send_durable_with_retry(transport, key.peer, key.class, payload)?; // LaneStuck/LaneDead ?-bail (loud)
+        send_durable_with_retry(transport, key.peer, key.class, payload, limits)?; // LaneStuck/LaneDead ?-bail
         replayed_keys.push(*key);
         counts.replayed += 1;
     }
@@ -497,13 +535,13 @@ pub fn replay_outbox(
     );
     let start = Instant::now();
     while durability.last_submitted() < target {
-        if start.elapsed() >= REPLAY_FENCE_DEADLINE {
+        if start.elapsed() >= limits.fence_deadline {
             return Err(ReplayError::FenceTimeout {
                 submitted: durability.last_submitted(),
                 expected: target,
             });
         }
-        std::thread::sleep(REPLAY_POLL_BACKOFF);
+        std::thread::sleep(limits.poll_backoff);
     }
     durability.wait_durable_through(target);
 
@@ -775,7 +813,13 @@ mod tests {
         // reused (no re-clone) and delivered once the lane drains.
         let mut t = FlakyTransport::new(3); // lane_alive = true
         assert_eq!(
-            send_durable_with_retry(&mut t, NodeId(2), MsgClass::Saga, bytes(vec![7])),
+            send_durable_with_retry(
+                &mut t,
+                NodeId(2),
+                MsgClass::Saga,
+                bytes(vec![7]),
+                ReplayLimits::release()
+            ),
             Ok(())
         );
         assert_eq!(
@@ -793,7 +837,13 @@ mod tests {
         t.lane_alive = false;
         let start = Instant::now();
         assert_eq!(
-            send_durable_with_retry(&mut t, NodeId(2), MsgClass::Saga, bytes(vec![7])),
+            send_durable_with_retry(
+                &mut t,
+                NodeId(2),
+                MsgClass::Saga,
+                bytes(vec![7]),
+                ReplayLimits::release()
+            ),
             Err(ReplayError::LaneDead { peer: NodeId(2) })
         );
         assert!(
@@ -970,5 +1020,152 @@ mod tests {
             vec![(k, b"despawn-envelope".to_vec())],
             "the retained frame survived the reopen"
         );
+    }
+
+    // ---- R-6d4-C: the replay_outbox ERROR ARMS (F-C, the R-6d3b-2b review left them uncovered) ----------
+
+    /// A mock [`OutboxSink`] whose `durability()` is `already_durable()` (base = `u64::MAX`) — the ONLY way to
+    /// drive `replay_outbox`'s `base.checked_add(N)` overflow arm (a real `NodeOutbox` base grows from real
+    /// submits, never near `u64::MAX`). `scan_all` returns exactly the seeded rows so replay reaches the send.
+    struct MockOutboxSink {
+        rows: Vec<(OutboxKey, Vec<u8>)>,
+    }
+    impl OutboxSink for MockOutboxSink {
+        fn retain(&mut self, _key: &OutboxKey, _framed: &[u8]) {}
+        fn release(&mut self, _key: &OutboxKey) {}
+        fn commit(&mut self) {}
+        fn scan_all(&self) -> Vec<(OutboxKey, Vec<u8>)> {
+            self.rows.clone()
+        }
+        fn gc_below(&mut self, _incarnation: u64) {}
+        fn gc_replayed(&mut self, _replayed_keys: &[OutboxKey]) {}
+        fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)> {
+            Some((1, DurabilityHandle::already_durable()))
+        }
+        fn durability(&self) -> DurabilityHandle {
+            DurabilityHandle::already_durable() // last_submitted() == u64::MAX
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "saturated")]
+    fn replay_outbox_overflow_base_plus_n_panics_loud() {
+        // The count-fence `base.checked_add(counts.replayed).expect(...)` (outbox.rs) refuses LOUD rather than
+        // wrap when `base == u64::MAX` — only reachable against a mock/`already_durable` sink, never a real
+        // store. One routable+decodable row is re-driven (replayed = 1) ⇒ `u64::MAX + 1` overflows ⇒ panic.
+        let mock = MockOutboxSink {
+            rows: vec![(key(2, MsgClass::Saga, 1, 0), framed_row(b"x"))],
+        };
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
+        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
+        let mut t = FlakyTransport::new(0); // sends OK ⇒ replayed = 1 ⇒ the fence computes base + 1
+        let _ = replay_outbox(&shared, &mut t, &peers); // panics inside the expect (caught by should_panic)
+    }
+
+    #[test]
+    fn replay_error_display_and_error_impls() {
+        // Every ReplayError variant Displays a distinct, actionable message + coerces to &dyn std::error::Error
+        // (so the bin `?`-propagation at boot has a real Error). Exact strings (no matches! false arm).
+        let stuck = ReplayError::LaneStuck { peer: NodeId(7) };
+        let dead = ReplayError::LaneDead { peer: NodeId(7) };
+        let timeout = ReplayError::FenceTimeout {
+            submitted: 3,
+            expected: 5,
+        };
+        assert_eq!(
+            stuck.to_string(),
+            "boot replay: the lane to peer 7 stayed full past the retry cap (drain wedged)"
+        );
+        assert_eq!(
+            dead.to_string(),
+            "boot replay: the lane to peer 7 is dead (its writer task exited)"
+        );
+        assert_eq!(
+            timeout.to_string(),
+            "boot replay: the durability fence timed out (3/5 fresh rows submitted) — a peer-writer is stuck"
+        );
+        // Coerce each to the trait object the bin boot path relies on.
+        for e in [stuck, dead, timeout] {
+            let dyn_err: &dyn std::error::Error = &e;
+            assert!(!dyn_err.to_string().is_empty(), "the Error impl renders");
+        }
+    }
+
+    /// Tiny, fast replay bounds so the wedged-lane / stuck-writer arms fire in milliseconds (the release
+    /// bounds are ~10s / 30s). ONLY the loop cap + deadline differ; the branch structure is identical.
+    fn fast_limits() -> ReplayLimits {
+        ReplayLimits {
+            max_send_retries: 5,
+            poll_backoff: Duration::from_millis(1),
+            fence_deadline: Duration::from_millis(50),
+        }
+    }
+
+    #[test]
+    fn replay_outbox_lane_stuck_refuses_boot_without_gc() {
+        // A LIVE lane (lane_alive = true) that stays FULL past the retry cap ⇒ LaneStuck (refuse-to-boot,
+        // loud). The `?` bails BEFORE the fence/gc ⇒ the row SURVIVES for the next boot (no silent sweep).
+        let path = temp_path("lanestuck");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        ob.retain(&key(2, MsgClass::Saga, 1, 0), &framed_row(b"x")); // routable + decodable
+        ob.commit();
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
+        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
+        let mut t = FlakyTransport::new(u32::MAX); // always QueueFull, lane_alive = true ⇒ retries then LaneStuck
+        assert_eq!(
+            replay_outbox_with_limits(&shared, &mut t, &peers, fast_limits()),
+            Err(ReplayError::LaneStuck { peer: NodeId(2) })
+        );
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .scan_all()
+                .len(),
+            1,
+            "refuse-to-boot skips gc ⇒ the row SURVIVES"
+        );
+    }
+
+    #[test]
+    fn replay_outbox_fence_timeout_refuses_boot_without_gc() {
+        // The row SENDS (the mock transport records it) but never SUBMITS back to the store (a real
+        // MeshTransport would re-mirror; FlakyTransport does not), so `last_submitted` never reaches base + 1
+        // ⇒ FenceTimeout past the short deadline (refuse-to-boot, loud). The `?` bails before gc ⇒ the row
+        // SURVIVES. This is the count-fence deadline arm no other test reaches (the real-QUIC test passes it).
+        let path = temp_path("fencetimeout");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        ob.retain(&key(2, MsgClass::Saga, 1, 0), &framed_row(b"x"));
+        ob.commit();
+        let base = {
+            let g = ob;
+            let dh = g.durability();
+            let b = dh.last_submitted();
+            let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(g) as Box<dyn OutboxSink + Send>));
+            let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
+            let mut t = FlakyTransport::new(0); // sends OK (records) but never re-mirrors ⇒ no new submit
+            let err = replay_outbox_with_limits(&shared, &mut t, &peers, fast_limits());
+            assert_eq!(
+                err,
+                Err(ReplayError::FenceTimeout {
+                    submitted: b,
+                    expected: b + 1,
+                }),
+                "one row re-driven but never re-submitted ⇒ the fence times out at base + 1"
+            );
+            assert_eq!(
+                shared
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .scan_all()
+                    .len(),
+                1,
+                "refuse-to-boot skips gc ⇒ the row SURVIVES"
+            );
+            b
+        };
+        let _ = base;
     }
 }

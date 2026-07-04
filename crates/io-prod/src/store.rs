@@ -204,21 +204,19 @@ impl DurabilityHandle {
             if self.last_durable.load(Ordering::Acquire) >= seq {
                 return;
             }
-            match tokio::time::timeout(WRITER_WAIT_POLL, notified).await {
-                Ok(()) => {} // woken by the writer's bump (or its death) ⇒ the loop re-checks
-                Err(_elapsed) => {
-                    // Liveness backstop (mirrors `park_until_durable`): a writer that DIED can never bump
-                    // `last_durable`; fail LOUD rather than await forever. The death-wake (finding E) makes
-                    // this ~immediate, but the timeout is the guarantee even without it.
-                    if self.last_durable.load(Ordering::Acquire) < seq
-                        && !self.writer_alive.load(Ordering::Acquire)
-                    {
-                        panic!(
-                            "wait_durable_through_async: the durable writer thread died before seq {seq} — \
-                             refusing to hang the send (a refusal is never a loss; recovery re-drives)"
-                        );
-                    }
-                }
+            // Await either a writer wake (a durable bump OR its death `notify_waiters`) or the poll
+            // backstop; on EITHER outcome fall through to the SHARED death-check below. R-6d4-M: a
+            // death-wake fails loud IMMEDIATELY here (a durable bump returns at the loop top) — the old
+            // `Ok(()) => {}` re-enrolled a FRESH `notified` that the already-fired death-notify would never
+            // wake, so death cost a full `WRITER_WAIT_POLL`; the collapsed check makes it prompt.
+            let _ = tokio::time::timeout(WRITER_WAIT_POLL, notified).await;
+            // A writer that DIED can never bump `last_durable`; fail LOUD rather than await forever (the
+            // timeout is the guarantee even if the death-wake were lost; the death-wake makes it prompt).
+            // A live-but-slow writer (disk stall, still `writer_alive`) simply re-loops under back-pressure.
+            if self.last_durable.load(Ordering::Acquire) < seq
+                && !self.writer_alive.load(Ordering::Acquire)
+            {
+                writer_died_panic(seq);
             }
         }
     }
@@ -320,6 +318,18 @@ fn apply_batch(db: &Database, batch: &Batch) -> bool {
     }
 }
 
+/// R-6d4-M: the SINGLE fail-loud site for a durable-writer death before `seq`, called by BOTH the sync
+/// [`park_until_durable`] liveness escape and the async [`RedbStore::wait_durable_through_async`] death
+/// short-circuit (one message, `#[cold]`, `-> !`). A refusal is NEVER a loss (recovery rehydrates the last
+/// durable state + the producer re-drives idempotently); hanging the send forever is strictly worse.
+#[cold]
+fn writer_died_panic(seq: u64) -> ! {
+    panic!(
+        "the durable writer thread died before seq {seq} — refusing to hang the send \
+         (a refusal is never a loss; recovery rehydrates + re-drives)"
+    );
+}
+
 /// Park (not hot-spin) until `last_durable >= target`. The shared core of BOTH durability waits — the
 /// `RedbStore`'s own (Drop/tests, liveness via its `JoinHandle`) and the bin-side [`DurabilityHandle`]'s
 /// (the persist-before-effect gate, liveness via the shared `writer_alive` flag it can read without the
@@ -340,16 +350,17 @@ fn park_until_durable(
     let (lock, cv) = durable_cv;
     let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
     while last_durable.load(Ordering::Acquire) < target {
-        let (g, res) = cv
+        let (g, _res) = cv
             .wait_timeout(guard, WRITER_WAIT_POLL)
             .unwrap_or_else(PoisonError::into_inner);
         guard = g;
-        if res.timed_out() && last_durable.load(Ordering::Acquire) < target && is_writer_dead() {
+        // R-6d4-M: check death on EVERY wake, not only on `res.timed_out()` — the writer's death
+        // `notify_all` (WriterExitSignal::drop) wakes us WITHOUT a timeout, so gating the escape on
+        // `timed_out()` cost a full extra `WRITER_WAIT_POLL`. A genuine durable bump exits the `while`
+        // (no panic); a death-wake with `last_durable < target` fails loud promptly here.
+        if last_durable.load(Ordering::Acquire) < target && is_writer_dead() {
             drop(guard);
-            panic!(
-                "RedbStore: the durable writer thread died without reaching seq {target} — refusing to \
-                 hang the caller (a refusal is never a loss; recovery rehydrates + re-drives)"
-            );
+            writer_died_panic(target);
         }
     }
 }

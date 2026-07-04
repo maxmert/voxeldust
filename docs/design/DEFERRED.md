@@ -1749,6 +1749,59 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      dest-adopted) so a live dest's in-flight `BatchAdopted` never gets over-discarded — ledgered above (~line 950);
      finding 4 [doc] the stale saga-phase-wildcard residual annotated SUPERSEDED. Scope split judged HONEST (no
      over-claim). Re-gate after fixes: full workspace + clippy -D + coverage-fast (Tier-A 100%) all green.**
+     **✅ HOLISTIC /goal AUDIT DONE post-R-6d3c (wf_062637c0, HEAD ff6cbb7; 5 read-only Explore+opus lenses + synth):
+     VERDICT DONE_NO_CRITICAL — architecture SOUND (no rewrite), R-6d3c a clean regression-free never-restart closure,
+     zero CRITICAL, every dense-crowd/PvP wall honestly additive. FIX-NOW: none. FIX-BEFORE-P4: none. Three cheap
+     LEDGER items owed (recorded so the "phase-not-done-until-entries-flip" gate catches them):
+     • **F1 (poison durability, lands with the CA-1 confirm-dead trigger):** `on_transient_discard` poisons `(transfer,
+       TRANSIENT_BATCH_STEP)` into the in-RAM `AppliedSteps` (stub.rs:615,2380); a DEST restart between the discard and a
+       late adopt-replay would lose the poison and reopen the orphan. NOT reachable-now (the discard is only emitted once
+       the CA-1/L5 confirm-dead-toward-source trigger fires, and the durable `applied_steps` table is D-22 — both arrive
+       TOGETHER). When the trigger lands, the poison + the Arriving removal MUST write to the durable D-22 `applied_steps`
+       table in the SAME barrier. No code change at this posture (not P4-blocking; the trigger is not P4).
+     • **F2 (loss-budget oracle shape, FIX-BEFORE-P11):** `oracle.rs:440-455` judges the transient loss budget as a
+       CUMULATIVE-ABSOLUTE count summed flat over all shards for the whole scenario, vs a per-entity `LossBudget(u16)`
+       (entity_kind.rs). A long P11 dense-PvP firefight soak with the crash matrix injecting genuine kills will sum
+       handover losses past the absolute bound at a perfectly healthy per-crash FRACTION → a false RED on a spec-correct
+       system. TEST-SCAFFOLD gap ONLY (the runtime never sheds to stay in budget — the budget JUDGES, never CAUSES). Before
+       the P11 firefight fixture relies on this gate, re-base `LossBudget` to a RATE/FRACTION (lost/attempted ppm) or a
+       per-window / per-injected-crash bound. Runtime path unchanged; not P4-blocking (P4 is terrain, no combat volume).
+     • **F3 (observability, M4/CA-1-era):** a QUARANTINED-retained outbox row (roster-gone / undecodable — outbox.rs:452-476,
+       fail-SAFE: retained, never swept, never mis-decoded) is surfaced only in the boot log, not a live `MeshStats`/admin
+       gauge — a roster-gone row re-quarantines every boot and can accumulate on the PV with no alertable cloud signal. Add
+       an `outbox_retained_rows` gauge / admin report with the CA-1-era cloud-deploy hardening. Correctness-neutral.
+     • F4 (cosmetic DRY, optional): `on_transient_abandon`/`on_transient_discard` share the FirstApply-drain + per-kind
+       loss-bucket tail (the kind-attribution line appears 3×) — an optional `bucket_loss_by_kind` extraction, not
+       load-bearing. NITs (no action): corrupt-tag counted-not-bucketed is the intentional HR2 no-decode-to-default stance;
+       the discard `AlreadyApplied` reuses the generic `transient_release_noop`; `replay_outbox` `checked_add().expect()` is
+       test/mock-only reachable. Direct /goal answers all GREEN: complementary, DRY, robust (fail-safe every arm), scalable
+       (G-TIER one-row-per-batch holds; walls ledgered+additive), cloud-ready (modulo CA-1/L5/M3), elegant, not error-prone,
+       AAA/PvP/hundreds-in-one-location/new-feature-ready on track (RESERVED wire arms + seams shaped additively).**
+     **📐 R-6d4 DESIGN DONE (wf_ca465bbc, 1 designer + 3 adversarial opus lenses + adjudication; read-only Explore agents
+     per feedback_review_workflows_readonly). Verdict REVISE → all 7 blockers folded → SOUND_TO_IMPLEMENT; full design of
+     record in scripts/r6d4_vetted_design.md. The review earned its cost: it caught that B4 as first-designed was
+     MUTATION-BLIND (killing notify_waiters would NOT turn it red — the exact wf_75a225d0 gap R-6d4 exists to close) ⇒
+     needs R-6d4-M (a one-line prod death short-circuit); that F2's numeric abort_deadline>ack-bound guard is ILL-DEFINED
+     now (a live-but-slow dest emits ZERO transport bounces — slow≠unreachable — so it measures the wrong clock) ⇒ DEFER
+     to CA-1, land only an inert tripwire; that B4's "drop the paused store" self-hangs (writer join) ⇒ permanent-fsync-
+     fault exit; and that D's pause-seed produces a LOST (not durable-unacked) row + a killed shard has no admin surface.
+     Sub-slices: M (prod death short-circuit) → C1/Cseam/C2 (replay error arms) → A (both-ends-restart proptest) →
+     B1/B2/B3/B4 (store-test-hooks deterministic+mutation-sensitive pins) → D (process-tier SIGKILL-restart +
+     boot-counter-by-1) → F2 (inert CA-1 tripwire). CA-1 boundary OUT (the SIGKILL-source-in-AwaitAdopt real-QUIC e2e).**
+     **✅ R-6d4-M + R-6d4-C LANDED (io-prod hardening batch 1). M (prod, store.rs): the durable-writer death now
+     short-circuits BOTH durability waits — `wait_durable_through_async` collapses its match into ONE shared post-await
+     death-check (a death `notify_waiters` fails loud IMMEDIATELY instead of re-enrolling a fresh `notified` the fired
+     notify would never wake — the old code cost a full WRITER_WAIT_POLL); `park_until_durable` checks death on EVERY
+     wake (not only `res.timed_out()`); both call the new `#[cold] writer_died_panic(seq) -> !` (one fail-loud site).
+     A strict correctness sharpening (prompt fail-loud; happy path unchanged) + the enabler for B4's mutation-sensitivity
+     (its full mutation-proof lands with B4). C (outbox.rs): the replay error arms the R-6d3b-2b review left uncovered
+     (F-C) — a `ReplayLimits` test-speed seam (`replay_outbox_with_limits`; prod delegates with `::release()`, byte-
+     identical) drives `LaneStuck` (live lane full past a tiny retry cap ⇒ refuse-boot, row survives) + `FenceTimeout`
+     (a re-driven row that never re-submits ⇒ fence times out at base+1, row survives) in ms; a `MockOutboxSink`
+     (already_durable ⇒ base=u64::MAX) drives the count-fence `checked_add` overflow `#[should_panic]`; + the
+     `Display`/`std::error::Error` impls for all 3 variants. Gate: vd-io-prod 116 lib green, clippy -D clean,
+     coverage-io-prod Tier-B floor PASS (region 94.41% ≥ 90). NEXT: R-6d4-A (proptest) → B1-B4 (pins, need the
+     OutboxKey-prefix + WRITER_WAIT_POLL-override + fsync-fault seams) → D (process-tier) → F2 (tripwire).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
