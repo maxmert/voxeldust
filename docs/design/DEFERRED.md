@@ -1618,6 +1618,56 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      (store-test-hooks tier): the mutation-proof no-premature-gc DETERMINISTIC pin (writer-pause) alongside F1. Gate
      after folds: vd-io-prod 110 lib + all integration green, clippy -D clean, Tier-B PASS (TOTAL 94.40%, outbox.rs
      98.29%), workspace build 0.**
+     **✅ HOLISTIC /goal AUDIT (wf_c158c7d0, 6 opus dims + synth, HEAD 1789e49): DONE_NO_CRITICAL — 5/6 SOUND
+     (compose / scale / DRY-HR / robust-crash / feature-readiness), 1 CONCERNS (test-coverage) whose only HIGH is a
+     MISSING future LOAD gate (D-9), not a broken thing. No CRITICAL, no HIGH-that-is-a-real-defect-in-the-built-
+     surface. Rewarded: the compiler-closed InterShardFlow + runtime debug_assert (future Signal/BlockEdit silent-loss
+     = build failure), the count-anchored no-premature-gc fence (every error arm ?-bails before gc — verified
+     fail-safe), the SIGKILL-mid-fsync orchestrator proof. BINDING FORWARD INPUTS (latent TODAY — bins pass None — but
+     go LIVE the moment R-6d3b-2b flips a bin off None; fold into the 2b/2c design BEFORE wiring):
+     • R-6d3b-2b RC-2a: `replay_outbox` error DISPOSITION must honor the OUTBOX_FORMAT_VERSION quarantine promise
+       (outbox.rs:47) — QUARANTINE + loud-count + boot-PROCEED for `Undecodable` (a permanent poison row) and a
+       roster-diff `Unroutable` (a peer legitimately gone from the book); refuse-to-boot ONLY for transient
+       `LaneStuck`/`FenceTimeout`. Else a fail-loud 2b boot WEDGES on one poison/absent-peer row. + a poison-row
+       boot-progress test.
+     • R-6d3b-2b RC-2b: `send_durable` folds `TrySendError::Full | Closed` into ONE `QueueFull` (mesh.rs:1913-1916) —
+       split `Closed` → `Inbound::NodeUnreachable`/a LaneDead signal (+ observe the peer_writer `JoinHandle`s) so a
+       DEAD lane surfaces as unreachable, not transient backpressure; else `send_durable_with_retry` spins ~10s on a
+       corpse before `LaneStuck` instead of failing fast.
+     • R-6d3c RC-3 (cheap pre-stage available now): split the `rehome_event_for` BatchHandoff phase-wildcard
+       (saga.rs:922) — AwaitAdopt on a confirmed-dead source → `Timeout`/PARK (admin-visible) NOT `SourceUnreachable`/
+       self-promote; removes the only in-code dead-source→silent-promote path ahead of the full R-6d3c closure.
+     • RC-1 (correctly P6-deferred, NOT blocking): the hundreds-in-one-location snapshot LOAD gate — `emit_frames`
+       (stub.rs:2752) is whole-realm-broadcast O(entities×clients), largest fixture CLIENTS=32; land the N-in-one-realm
+       ratcheted-bytes fixture before any dense-PvP soak, the AoI reshape at P6 (D-9, DEFERRED.md).**
+     **✅ R-6d3b-2b LANDED (the durable outbox is now LIVE in the bins — CLOSES the D-6 #1 RESTART case; per design
+     wf_e91a84e5 + post-impl review wf_d926fe08 verdict COMMIT_CLEAN): Sub-slice A (RC-2a, outbox.rs) — `replay_outbox`
+     → `Result<ReplayCounts{replayed,quarantined}, ReplayError{LaneStuck,LaneDead,FenceTimeout}>`; a roster-gone peer
+     or an undecodable frame is QUARANTINED (warn+count+continue, RETAINED) so the boot PROCEEDS (one bad row never
+     wedges the node); the count-fence targets `base + replayed` (NOT rows.len() — a quarantined row never submits);
+     gc uses the NEW `gc_replayed(&replayed_keys)` [sweeps ONLY the re-driven keys] not `gc_below` — the F1 fix (my
+     original `gc_below(new_incarnation)` was a D-6 #1 regression that would sweep a recoverable roster-gone row);
+     `replayed==0` early-returns with no fence + no gc; the `new_incarnation` param dropped (gc is key-based).
+     Sub-slice B (RC-2b, mesh.rs) — a NEW pub supertrait `ReplayTransport: Transport` + `lane_alive` (via
+     `tx.is_closed()`); `send_durable_with_retry` fast-fails `LaneDead` on a dead lane (no ~10s corpse-spin);
+     `send_durable` UNCHANGED (Full|Closed fold to QueueFull with NO msg_id consumed — F2; the FROZEN sim::io seam is
+     untouched, verified by an empty `git diff crates/sim/src/io/`). Sub-slice C (bins) — a NEW DRY
+     `vd_bins::boot_mesh_and_replay(env, runtime, trust)` used by BOTH shard + gateway (HR3): resolves the incarnation
+     ONCE (finding C — no double BootCounter increment), opens+wraps the outbox, `spawn_mesh(Some)`, `replay_outbox`
+     BEFORE `build_app`; the GW-1 assert moved before; `ReplayError` gained Display+Error. Replay fences on DURABILITY
+     not DELIVERY ⇒ no boot-hang on down-at-boot peers (their rows RETAIN + the R-4a timer re-drives). Post-impl review:
+     2/3 lenses COMMIT_CLEAN; the 3rd (bins-wiring) FIX_BEFORE_COMMIT was a SCOPE/coverage matter, not a defect — the
+     core is correct on every no-loss/no-premature-gc/no-hang/F2/frozen-seam/resolve-once axis (independently re-traced).
+     Tests: io-prod quarantine×2 (unroutable/undecodable RETAINED) + fast-fail-LaneDead + refuse-on-dead-lane-no-gc +
+     the real-QUIC MIXED-F1 end-to-end (1 re-driven SWEPT + 1 quarantined RETAINED) + a bins in-process Some-path glue
+     test (`boot_mesh_and_replay_wires_a_live_outbox_and_returns` — closes the F-A "glue never runs" gap; catches a
+     spawn-arg/ordering regression). Gate: vd-io-prod 112 lib + all integration, vd-bins green (incl. process_parity),
+     clippy -D (io-prod+bins) clean, Tier-B `--fail-under-regions 90` PASS (TOTAL 94.19%, outbox.rs 97.09%), workspace
+     build 0. OWED to R-6d4 (post-impl review, honestly deferred): the process-tier VD_OUTBOX_PATH SIGKILL-restart e2e +
+     boot-counter-by-exactly-1 (F-A full); the `LaneStuck`/`FenceTimeout`/overflow-expect/`Display` arm tests (F-C).
+     BINDING forward-input to R-6d (when a gateway durable-to-client flow lands): departed-client peer entries in the
+     gateway `VD_PEERS` would re-drive forever + trip the peer-count>256 guard (F-F) — gated behind `None` today.
+     ⇒ D-6 #1 RESTART case CLOSED; the NEVER-restart case is R-6d3c (saga AwaitAdopt split + dest TransientDiscard).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

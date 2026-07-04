@@ -1929,6 +1929,25 @@ impl Transport for MeshTransport {
     }
 }
 
+/// R-6d3b-2b (RC-2b): a boot-replay liveness probe layered on top of the FROZEN [`Transport`] seam (a NEW
+/// io-prod PUBLIC supertrait — the `sim::io::Transport` seam itself is UNTOUCHED). `replay_outbox` uses it to
+/// distinguish a transiently-full lane (retry) from a permanently DEAD one (its `peer_writer` task exited ⇒
+/// the mpsc closed), so a dead lane fast-fails ([`ReplayError::LaneDead`]) instead of a ~10s corpse-spin.
+///
+/// [`ReplayError::LaneDead`]: crate::outbox::ReplayError::LaneDead
+pub trait ReplayTransport: Transport {
+    /// True iff a live send lane exists for `peer` (its `peer_writer` task is alive). A dropped mpsc
+    /// receiver (the writer exited) closes the sender ⇒ `is_closed()`. O(1). A peer with NO lane (a roster
+    /// miss) also reports `false` — but `replay_outbox`'s pre-send membership check catches that first.
+    fn lane_alive(&self, peer: NodeId) -> bool;
+}
+
+impl ReplayTransport for MeshTransport {
+    fn lane_alive(&self, peer: NodeId) -> bool {
+        self.lanes.get(&peer).is_some_and(|l| !l.tx.is_closed())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3282,6 +3301,7 @@ mod tests {
             Vec::new()
         }
         fn gc_below(&mut self, _incarnation: u64) {}
+        fn gc_replayed(&mut self, _replayed_keys: &[OutboxKey]) {}
         fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)> {
             // Mirror `NodeOutbox`: a barrier only when something was staged (a retain happened). The FSM
             // tests always retain before submitting, so return a monotone seq + an always-durable handle.
@@ -3563,8 +3583,19 @@ mod tests {
                 &framed,
             );
         }
+        // R-6d3b-2b: a THIRD row keyed to a peer NOT in the book (NodeId 9, roster-gone) — the MIXED F1 proof
+        // that a re-driven row is swept while a QUARANTINED row is RETAINED (never blanket-gc'd by incarnation).
+        ob.retain(
+            &OutboxKey {
+                peer: NodeId(9),
+                class: MsgClass::Saga,
+                incarnation: 1,
+                seq: 0,
+            },
+            &expected_encoded(NodeId(1), MsgClass::Saga, 1, 0, &[99]),
+        );
         ob.commit();
-        assert_eq!(ob.scan_all().len(), 2, "2 prior-incarnation rows pre-seeded");
+        assert_eq!(ob.scan_all().len(), 3, "2 routable + 1 roster-gone prior-incarnation rows pre-seeded");
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
 
         // Spawn A at the FRESH incarnation 2 wired to the shared outbox; B plain.
@@ -3584,9 +3615,17 @@ mod tests {
         let mut a = a.expect("A");
         let mut b = b.expect("B");
 
-        // Boot replay: re-drive the 2 prior rows through A, fence on durability, gc incarnation < 2.
-        let n = crate::outbox::replay_outbox(&shared, &mut a, &book, 2).expect("replay ok");
-        assert_eq!(n, 2, "2 rows re-driven");
+        // Boot replay: re-drive the 2 routable rows through A (fence on durability, gc ONLY the re-driven
+        // keys); QUARANTINE the roster-gone NodeId-9 row (retained, counted).
+        let counts = crate::outbox::replay_outbox(&shared, &mut a, &book).expect("replay ok");
+        assert_eq!(
+            counts,
+            crate::outbox::ReplayCounts {
+                replayed: 2,
+                quarantined: 1
+            },
+            "2 re-driven + 1 quarantined"
+        );
 
         // B receives BOTH replayed payloads (re-drive proof; the test COMPLETING is the no-deadlock proof).
         let got = wait_for(&mut b, |g| {
@@ -3611,15 +3650,24 @@ mod tests {
             "both replayed payloads delivered, got {payloads:?}"
         );
 
-        // gc proof: the prior-incarnation (< 2) window is swept — the fresh rows re-mirrored at incarnation 2
-        // (finding D / HIGH-3: gc ran STRICTLY after the fresh rows were durable, no premature sweep).
+        // MIXED F1 proof: the RE-DRIVEN peer-2 incarnation-1 rows are gc_replayed-swept (gc ran STRICTLY after
+        // they were durable — finding D / HIGH-3), BUT the QUARANTINED roster-gone peer-9 incarnation-1 row is
+        // RETAINED (never blanket-swept by incarnation — the F1 no-loss invariant).
         let remaining = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .scan_all();
         assert!(
-            remaining.iter().all(|(k, _)| k.incarnation >= 2),
-            "the prior-incarnation window was gc'd; remaining {remaining:?}"
+            !remaining
+                .iter()
+                .any(|(k, _)| k.peer == NodeId(2) && k.incarnation == 1),
+            "the re-driven peer-2 prior-incarnation rows were gc_replayed-swept; remaining {remaining:?}"
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|(k, _)| k.peer == NodeId(9) && k.incarnation == 1),
+            "the QUARANTINED roster-gone peer-9 row is RETAINED (F1 no-loss); remaining {remaining:?}"
         );
         let _ = &mut a;
     }

@@ -291,6 +291,70 @@ pub fn open_node_outbox(
     )?))
 }
 
+/// R-6d3b-2b: THE one node boot sequence shared by `shard.rs` + `gateway.rs` (HR3 — no per-kind fork). It
+/// (1) resolves the process incarnation EXACTLY ONCE (finding C — a second [`resolve_process_incarnation`]
+/// would double-increment the durable BootCounter), (2) opens the durable outbox (`Some` iff `VD_OUTBOX_PATH`
+/// is set) + wraps it as the cloneable `SharedOutbox`, (3) spawns the mesh WITH the sink (the
+/// durable-before-send gate LIVE), then (4) REPLAYS the retained rows BEFORE the transport is handed to
+/// `build_app`. Returns the transport + `MeshControl`; the caller MUST keep the control AND the owning tokio
+/// runtime alive for the whole tick loop (dropping control closes the endpoint; dropping the runtime stops the
+/// peer-writer tasks).
+///
+/// The replay fences on DURABILITY (block A submit), NOT DELIVERY (block C QUIC send) — so it does NOT hang
+/// on peers down at boot; their rows are RETAINED + the R-4a retransmit timer re-drives on reconnect. A poison
+/// or roster-gone row is QUARANTINED (RETAINED + loud-counted) and the boot PROCEEDS (RC-2a) — one bad row
+/// never wedges the node; only a transient wedge (`LaneStuck`/`LaneDead`/`FenceTimeout`) refuses to boot.
+///
+/// # Errors
+/// A bad incarnation source; an unopenable/non-durable outbox path; a `spawn_mesh` failure; or a replay that
+/// hits a transient wedge.
+pub fn boot_mesh_and_replay(
+    env: &EnvConfig,
+    runtime: &tokio::runtime::Handle,
+    trust: &vd_io_prod::trust::ClusterTrust,
+) -> Result<
+    (vd_io_prod::mesh::MeshTransport, vd_io_prod::mesh::MeshControl),
+    Box<dyn std::error::Error>,
+> {
+    use vd_io_prod::mesh::{MeshConfig, spawn_mesh};
+
+    let local = env.node_id("VD_NODE_ID")?;
+    let peers = env.peer_book("VD_PEERS")?;
+    let new_incarnation = resolve_process_incarnation(env)?; // FINDING C: resolve ONCE, thread everywhere
+
+    let shared: Option<vd_io_prod::outbox::SharedOutbox> = open_node_outbox(env)?.map(|ob| {
+        std::sync::Arc::new(std::sync::Mutex::new(
+            Box::new(ob) as Box<dyn vd_io_prod::outbox::OutboxSink + Send>,
+        ))
+    });
+
+    let (mut transport, control) = spawn_mesh(
+        runtime,
+        trust,
+        &MeshConfig::new(
+            local,
+            env.parse("VD_BIND")?,
+            peers.clone(),
+            env.parse("VD_OUTBOUND_CAP")?,
+            new_incarnation,
+        ),
+        shared.clone(),
+    )?;
+
+    // Boot replay BEFORE `build_app` consumes the transport (the peer-writer tasks are already live).
+    if let Some(sh) = shared.as_ref() {
+        let counts = vd_io_prod::outbox::replay_outbox(sh, &mut transport, &peers)?;
+        if counts.replayed > 0 || counts.quarantined > 0 {
+            tracing::info!(
+                replayed = counts.replayed,
+                quarantined = counts.quarantined,
+                "boot replay: re-drove retained durable outbox rows (quarantined rows RETAINED for next boot)"
+            );
+        }
+    }
+    Ok((transport, control))
+}
+
 /// The env every node shares (trust bundle + transport knobs + the per-launch process incarnation).
 #[must_use]
 pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, String)> {

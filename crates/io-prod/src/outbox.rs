@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use vd_core::ids::NodeId;
-use vd_sim::io::{Bytes, Durability, MsgClass, SendError, Store, Transport, bytes};
+use vd_sim::io::{Bytes, Durability, MsgClass, SendError, Store, bytes};
 
+use crate::mesh::ReplayTransport;
 use crate::store::{DurabilityHandle, RedbStore, StoreError, StoreTuning};
 
 /// R-6d3b: the ONE durable outbox sink per node, shared (cloned `Arc`) by every mesh per-peer writer task AND
@@ -177,10 +178,22 @@ pub trait OutboxSink: Send {
     fn scan_all(&self) -> Vec<(OutboxKey, Vec<u8>)>;
 
     /// Stage the removal of every retained row whose incarnation is strictly BELOW `incarnation` — the
-    /// post-replay sweep of a prior process incarnation's window. Durable only after [`commit`].
+    /// WHOLE prior-window sweep. RETAINED for a future admin/whole-window use; NOT used by [`replay_outbox`]
+    /// (which sweeps only the re-driven keys — see [`gc_replayed`]). Durable only after [`commit`].
     ///
     /// [`commit`]: OutboxSink::commit
+    /// [`gc_replayed`]: OutboxSink::gc_replayed
     fn gc_below(&mut self, incarnation: u64);
+
+    /// R-6d3b-2b (the F1 no-loss fix): stage the removal of EXACTLY these keys — the rows RE-DRIVEN this boot
+    /// (now durable at the fresh incarnation, so the prior-incarnation copy is redundant). A row NOT in this
+    /// set — a QUARANTINED roster-gone/undecodable row, or a version-mismatched row `scan_all` filtered — is
+    /// RETAINED (never swept because it could NOT be re-driven; the D-6 #1 no-loss invariant). This REPLACES
+    /// the blunt `gc_below(new_incarnation)`, which could not tell a re-driven row from a skipped one and would
+    /// sweep a recoverable roster-gone row. Durable only after [`commit`].
+    ///
+    /// [`commit`]: OutboxSink::commit
+    fn gc_replayed(&mut self, replayed_keys: &[OutboxKey]);
 
     /// R-6d3a durable-before-send GATE (MF-1/MF-2/MF-3): submit the CURRENTLY-STAGED batch WITHOUT any
     /// blocking wait, returning `(seq, handle)` — the submitted batch seq and a cloned durability watermark
@@ -265,6 +278,14 @@ impl OutboxSink for NodeOutbox {
         }
     }
 
+    fn gc_replayed(&mut self, replayed_keys: &[OutboxKey]) {
+        // Delete EXACTLY the re-driven keys — a straight-line loop over the caller's set (the caller has
+        // already excluded quarantined/undecodable rows). Durable at the caller's `commit`.
+        for key in replayed_keys {
+            self.store.delete(&key.to_bytes());
+        }
+    }
+
     fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)> {
         // Non-blocking submit (no block-on-prior under the caller's shared lock — MF-1/MF-3); the seq is the
         // caller's gate target, awaited on the cloned handle OUTSIDE the lock. `None` ⇒ nothing staged (MF-2).
@@ -289,17 +310,47 @@ const REPLAY_POLL_BACKOFF: Duration = Duration::from_millis(1);
 /// peer-writer is stuck (never scheduled) ⇒ fail LOUD (leaving the prior window un-gc'd = SAFE), never hang.
 const REPLAY_FENCE_DEADLINE: Duration = Duration::from_secs(30);
 
-/// R-6d3b-2 boot-replay failure — a durable row is NEVER silently dropped on the recovery path.
+/// R-6d3b-2 boot-replay REFUSE-TO-BOOT failure — a transient/infra pathology that must fail LOUD (gc is
+/// SKIPPED, so every retained row survives for the next boot). Distinct from a QUARANTINE (a poison/roster-gone
+/// row is RETAINED + loud-counted and the boot PROCEEDS — see [`ReplayCounts`]); a durable row is NEVER
+/// silently dropped on the recovery path.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReplayError {
-    /// A retained row could not be decoded to a payload (a corrupt / version-mismatched value).
-    Undecodable,
-    /// A retained row's peer is not in the transport's route book — a permanent can't-route.
-    Unroutable { peer: NodeId },
     /// A live lane stayed full past [`REPLAY_SEND_MAX_RETRIES`] — the drain is wedged.
     LaneStuck { peer: NodeId },
+    /// The peer's send lane is DEAD (its `peer_writer` task exited ⇒ the mpsc is closed) while the peer is
+    /// still in the roster — an infra pathology (R-6d3b-2b RC-2b), fast-failed rather than a ~10s corpse-spin.
+    LaneDead { peer: NodeId },
     /// The fresh re-mirrored rows did not all submit within [`REPLAY_FENCE_DEADLINE`] — a peer-writer is stuck.
     FenceTimeout { submitted: u64, expected: u64 },
+}
+
+impl std::fmt::Display for ReplayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReplayError::LaneStuck { peer } => {
+                write!(f, "boot replay: the lane to peer {} stayed full past the retry cap (drain wedged)", peer.0)
+            }
+            ReplayError::LaneDead { peer } => {
+                write!(f, "boot replay: the lane to peer {} is dead (its writer task exited)", peer.0)
+            }
+            ReplayError::FenceTimeout { submitted, expected } => write!(
+                f,
+                "boot replay: the durability fence timed out ({submitted}/{expected} fresh rows submitted) — a peer-writer is stuck"
+            ),
+        }
+    }
+}
+impl std::error::Error for ReplayError {}
+
+/// R-6d3b-2b: the outcome of a boot replay — every retained row is accounted (RC-2a: no silent loss).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ReplayCounts {
+    /// Rows re-sent (block A durable, fence passed) then gc'd (the redundant prior-incarnation copy).
+    pub replayed: usize,
+    /// Rows QUARANTINED — RETAINED on disk (NOT swept), loud-counted: a roster-gone peer (recoverable once
+    /// the book is corrected) or an undecodable frame (on-disk corruption, preserved for admin forensics).
+    pub quarantined: usize,
 }
 
 /// Decode a stored (envelope already stripped by `scan_all`) framed `ReliableFrame` back to its PAYLOAD bytes.
@@ -315,7 +366,7 @@ fn decode_value_payload(framed: &[u8]) -> Option<Bytes> {
 /// caught by the caller's pre-send membership check, so a `QueueFull` HERE is definitionally a transient full
 /// lane; exhausting the retry is a wedged drain ⇒ `LaneStuck` (loud). NEVER a silent `let _ =` drop.
 fn send_durable_with_retry(
-    transport: &mut dyn Transport,
+    transport: &mut dyn ReplayTransport,
     peer: NodeId,
     class: MsgClass,
     payload: Bytes,
@@ -325,6 +376,13 @@ fn send_durable_with_retry(
         match transport.send_durable(peer, class, pay, Durability::Retained) {
             Ok(_) => return Ok(()),
             Err(SendError::QueueFull(returned)) => {
+                // RC-2b: distinguish a DEAD lane (the peer_writer task exited ⇒ the mpsc is closed) from a
+                // transiently-full one. A dead lane can NEVER drain ⇒ fail FAST (LaneDead) rather than spin
+                // ~REPLAY_SEND_MAX_RETRIES×backoff (~10s) on a corpse before LaneStuck. `send_durable`'s
+                // frozen-seam contract is unchanged — the disambiguation is an out-of-band `lane_alive` probe.
+                if !transport.lane_alive(peer) {
+                    return Err(ReplayError::LaneDead { peer });
+                }
                 std::thread::sleep(REPLAY_POLL_BACKOFF);
                 pay = returned; // reuse the returned payload — no re-clone
             }
@@ -356,17 +414,23 @@ fn send_durable_with_retry(
 /// never reaches `base + N` ⇒ `FenceTimeout` ⇒ the `?` skips gc ⇒ the old rows survive for the next boot,
 /// NO loss.)
 ///
+/// DISPOSITION (RC-2a, R-6d3b-2b): a poison/roster-gone row is QUARANTINED — RETAINED on disk + loud-counted,
+/// the boot PROCEEDS (a single bad row never wedges the node). ONLY a transient infra pathology (a wedged or
+/// dead lane, a stuck peer-writer) refuses-to-boot LOUD (gc SKIPPED ⇒ every row survives). gc sweeps ONLY the
+/// re-driven keys ([`OutboxSink::gc_replayed`]) — a NOT-re-driven row (quarantined, or version-mismatch-filtered
+/// by `scan_all`) is RETAINED (the D-6 #1 no-loss invariant; a durable row is never swept because it could not
+/// be re-driven). The fence counts the RE-DRIVEN rows only, not `rows.len()` — a quarantined row never submits.
+///
 /// # Errors
-/// A row whose peer is not in `peers` ([`ReplayError::Unroutable`]); a live lane wedged full
-/// ([`ReplayError::LaneStuck`]); an undecodable row ([`ReplayError::Undecodable`]); or a peer-writer that
-/// never submits its fresh row within [`REPLAY_FENCE_DEADLINE`] ([`ReplayError::FenceTimeout`]). On any error
-/// the gc is SKIPPED (the `?` bails first) so a not-yet-redelivered row's data is never swept.
+/// [`ReplayError::LaneStuck`] (a live lane wedged full past the retry cap), [`ReplayError::LaneDead`] (a peer's
+/// writer task died while still in the roster), or [`ReplayError::FenceTimeout`] (a peer-writer never submitted
+/// within [`REPLAY_FENCE_DEADLINE`]). On any error the gc is SKIPPED (the `?` bails first). A roster-gone peer
+/// or an undecodable frame is NOT an error — it is quarantined (see [`ReplayCounts::quarantined`]).
 pub fn replay_outbox(
     shared: &SharedOutbox,
-    transport: &mut dyn Transport,
+    transport: &mut dyn ReplayTransport,
     peers: &BTreeMap<NodeId, SocketAddr>,
-    new_incarnation: u64,
-) -> Result<usize, ReplayError> {
+) -> Result<ReplayCounts, ReplayError> {
     // (1) ONE brief lock: snapshot the retained rows + a DurabilityHandle clone + the base submit watermark.
     let (rows, durability, base) = {
         let g = shared.lock().unwrap_or_else(PoisonError::into_inner);
@@ -375,29 +439,59 @@ pub fn replay_outbox(
         (g.scan_all(), dh, base)
     };
     if rows.is_empty() {
-        return Ok(0); // genesis / already-drained: nothing to replay, nothing to gc
+        return Ok(ReplayCounts::default()); // genesis / already-drained: nothing to replay, nothing to gc
     }
-    let n = rows.len() as u64;
 
     // (2) NO LOCK: decode payload + pre-send route-membership check + send each. The peer-writers acquire the
-    // shared lock FREELY to re-mirror (no deadlock — this thread holds none). `?` bails before the fence/gc on
-    // any un-routable / undecodable / wedged row, so its data is never swept.
+    // shared lock FREELY to re-mirror (no deadlock — this thread holds none). A roster-gone peer or an
+    // undecodable row is QUARANTINED (RETAINED + loud-counted, continue) — the boot PROCEEDS; only a wedged/
+    // dead lane `?`-bails before the fence/gc (so a not-yet-redelivered row's data is never swept). The exact
+    // re-driven keys are collected for `gc_replayed` — a quarantined/skipped row is NEVER in that set.
+    let mut counts = ReplayCounts::default();
+    let mut replayed_keys: Vec<OutboxKey> = Vec::new();
     for (key, framed) in &rows {
         if !peers.contains_key(&key.peer) {
-            return Err(ReplayError::Unroutable { peer: key.peer });
+            tracing::warn!(
+                peer = key.peer.0,
+                class = ?key.class,
+                incarnation = key.incarnation,
+                seq = key.seq,
+                "boot replay QUARANTINE: a retained row's peer is no longer in the route book (roster diff) — \
+                 RETAINED for the next boot (recoverable once the roster is corrected); the boot PROCEEDS"
+            );
+            counts.quarantined += 1;
+            continue;
         }
-        let payload = decode_value_payload(framed).ok_or(ReplayError::Undecodable)?;
-        send_durable_with_retry(transport, key.peer, key.class, payload)?;
+        let Some(payload) = decode_value_payload(framed) else {
+            tracing::warn!(
+                peer = key.peer.0,
+                class = ?key.class,
+                incarnation = key.incarnation,
+                seq = key.seq,
+                "boot replay QUARANTINE: a retained row is undecodable (on-disk frame corruption) — RETAINED \
+                 (unrecoverable but preserved for admin forensics); the boot PROCEEDS"
+            );
+            counts.quarantined += 1;
+            continue;
+        };
+        send_durable_with_retry(transport, key.peer, key.class, payload)?; // LaneStuck/LaneDead ?-bail (loud)
+        replayed_keys.push(*key);
+        counts.replayed += 1;
     }
 
-    // (3) NO LOCK: the COUNT-anchored fence. Wait until all N fresh rows have SUBMITTED (each send = one +1 to
-    // last_submitted; at boot pre-`build_app` the replay sends are the ONLY submits), bounded fail-loud so a
-    // stuck-never-scheduled peer-writer refuses rather than hangs; THEN wait for durability through that seq
-    // (the writer's own death backstop panics loud if it dies). Only after this is gc safe.
-    // `checked_add`: a REAL `NodeOutbox` base grows from real submits (never near u64::MAX), but a test/mock
-    // sink whose `durability()` is `already_durable()` returns `base = u64::MAX` — refuse LOUD rather than
-    // wrap to a bogus target (which would pass the fence instantly ⇒ gc without real durability).
-    let target = base.checked_add(n).expect(
+    // Nothing re-driven ⇒ nothing to gc; every row was quarantined + RETAINED. No sweep at all.
+    if counts.replayed == 0 {
+        return Ok(counts);
+    }
+
+    // (3) NO LOCK: the COUNT-anchored fence over the RE-DRIVEN rows ONLY (a quarantined row never submits, so
+    // fencing on `rows.len()` would `FenceTimeout` on any boot that quarantined a row). Wait until all
+    // `replayed` fresh rows have SUBMITTED (each send = one +1 to last_submitted; at boot pre-`build_app` the
+    // replay sends are the ONLY submits), bounded fail-loud so a stuck peer-writer refuses rather than hangs;
+    // THEN wait for durability through that seq (the writer's own death backstop panics loud if it dies).
+    // `checked_add`: a REAL `NodeOutbox` base grows from real submits (never near u64::MAX); a test/mock sink
+    // whose `durability()` is `already_durable()` returns `base = u64::MAX` — refuse LOUD rather than wrap.
+    let target = base.checked_add(counts.replayed as u64).expect(
         "replay_outbox: durability watermark saturated (already_durable / not a real NodeOutbox) — base + N \
          overflow; replay must run against a real store",
     );
@@ -413,19 +507,21 @@ pub fn replay_outbox(
     }
     durability.wait_durable_through(target);
 
-    // (4) ONE brief lock (atomic): sweep the strictly-lower prior incarnation window + fsync — STRICTLY after
-    // every fresh row is durable (HIGH-3). Kept in ONE guard so it is one observable atomic gc step.
+    // (4) ONE brief lock (atomic): sweep ONLY the re-driven keys + fsync — STRICTLY after every fresh row is
+    // durable (HIGH-3). A quarantined/skipped row is NOT in `replayed_keys` ⇒ RETAINED (F1 no-loss). Kept in
+    // ONE guard so it is one observable atomic gc step.
     {
         let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        g.gc_below(new_incarnation);
+        g.gc_replayed(&replayed_keys);
         g.commit();
     }
-    Ok(rows.len())
+    Ok(counts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vd_sim::io::Transport; // FlakyTransport impls Transport (+ ReplayTransport via super::*)
 
     const ALL_CLASSES: [MsgClass; 7] = [
         MsgClass::Control,
@@ -628,11 +724,22 @@ mod tests {
         );
     }
 
-    /// A `Transport` that fails `send_durable` with `QueueFull` its first `fails_left` calls, then delivers —
-    /// exercises `send_durable_with_retry`'s bounded retry + payload-reuse deterministically (no real QUIC).
+    /// A `ReplayTransport` that fails `send_durable` with `QueueFull` its first `fails_left` calls, then
+    /// delivers — exercises `send_durable_with_retry`'s bounded retry + payload-reuse deterministically (no
+    /// real QUIC). `lane_alive` is the RC-2b probe: `false` makes the first `QueueFull` fast-fail `LaneDead`.
     struct FlakyTransport {
         fails_left: u32,
+        lane_alive: bool,
         sent: Vec<(NodeId, MsgClass, Vec<u8>)>,
+    }
+    impl FlakyTransport {
+        fn new(fails_left: u32) -> Self {
+            FlakyTransport {
+                fails_left,
+                lane_alive: true, // the common case: a live lane that is momentarily full
+                sent: Vec::new(),
+            }
+        }
     }
     impl Transport for FlakyTransport {
         fn send_durable(
@@ -656,15 +763,17 @@ mod tests {
             NodeId(1)
         }
     }
+    impl ReplayTransport for FlakyTransport {
+        fn lane_alive(&self, _peer: NodeId) -> bool {
+            self.lane_alive
+        }
+    }
 
     #[test]
     fn send_durable_with_retry_retries_a_full_lane_then_succeeds() {
-        // R-6d3b-2 finding B: a momentarily-full live lane is retried (NOT swallowed); the returned payload is
+        // R-6d3b-2 finding B: a momentarily-full LIVE lane is retried (NOT swallowed); the returned payload is
         // reused (no re-clone) and delivered once the lane drains.
-        let mut t = FlakyTransport {
-            fails_left: 3,
-            sent: Vec::new(),
-        };
+        let mut t = FlakyTransport::new(3); // lane_alive = true
         assert_eq!(
             send_durable_with_retry(&mut t, NodeId(2), MsgClass::Saga, bytes(vec![7])),
             Ok(())
@@ -676,7 +785,90 @@ mod tests {
         );
     }
 
-    /// A valid framed `ReliableFrame` value (as `scan_all` returns, envelope-stripped) carrying `payload`.
+    #[test]
+    fn send_durable_with_retry_fast_fails_on_a_dead_lane() {
+        // RC-2b: a DEAD lane (peer_writer gone ⇒ lane_alive=false) fast-fails LaneDead on the FIRST QueueFull
+        // — no ~10s corpse-spin. Wall-clock is a single poll; assert it is far below the retry-cap duration.
+        let mut t = FlakyTransport::new(u32::MAX);
+        t.lane_alive = false;
+        let start = Instant::now();
+        assert_eq!(
+            send_durable_with_retry(&mut t, NodeId(2), MsgClass::Saga, bytes(vec![7])),
+            Err(ReplayError::LaneDead { peer: NodeId(2) })
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a dead lane fast-fails, not a corpse-spin"
+        );
+    }
+
+    /// A dummy loopback addr for a `peers` book entry (never dialed — the mock quarantine tests never send).
+    fn dummy_addr() -> SocketAddr {
+        "127.0.0.1:9".parse().expect("addr")
+    }
+
+    #[test]
+    fn replay_outbox_quarantines_an_unroutable_row_retains_it_and_proceeds() {
+        // RC-2a: a retained row whose peer is no longer in the route book (roster diff) is QUARANTINED —
+        // RETAINED for the next boot (recoverable once the roster is fixed) + counted; the boot PROCEEDS (no
+        // wedge). With only this row, `replayed == 0` ⇒ no fence, no gc ⇒ the row SURVIVES on disk.
+        let path = temp_path("unroutable");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        ob.retain(&key(9, MsgClass::Saga, 1, 0), b"any-value"); // peer 9 (not in peers)
+        ob.commit();
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
+        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into(); // NO peer 9
+        let mut t = FlakyTransport::new(0);
+        assert_eq!(
+            replay_outbox(&shared, &mut t, &peers),
+            Ok(ReplayCounts {
+                replayed: 0,
+                quarantined: 1
+            })
+        );
+        assert!(t.sent.is_empty(), "quarantined before any send");
+        let remaining = shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .scan_all();
+        assert_eq!(remaining.len(), 1, "the roster-gone row SURVIVES — never swept");
+        assert_eq!(remaining[0].0.incarnation, 1, "the prior-incarnation row is intact");
+    }
+
+    #[test]
+    fn replay_outbox_quarantines_an_undecodable_row_and_retains_it() {
+        // RC-2a: a routable row whose value is not a decodable frame (on-disk corruption) is QUARANTINED —
+        // RETAINED (unrecoverable but preserved for forensics), counted; the boot PROCEEDS; the row is never
+        // mis-decoded nor swept.
+        let path = temp_path("undecodable");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        ob.retain(&key(2, MsgClass::Saga, 1, 0), b"not-a-valid-frame"); // garbage value, peer 2 (routable)
+        ob.commit();
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
+        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
+        let mut t = FlakyTransport::new(0);
+        assert_eq!(
+            replay_outbox(&shared, &mut t, &peers),
+            Ok(ReplayCounts {
+                replayed: 0,
+                quarantined: 1
+            })
+        );
+        assert!(t.sent.is_empty(), "quarantined at decode, before any send");
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .scan_all()
+                .len(),
+            1,
+            "the undecodable row SURVIVES — never swept"
+        );
+    }
+
+    /// A valid framed `ReliableFrame` value (as `scan_all` returns it, envelope-stripped) carrying `payload`.
     fn framed_row(payload: &[u8]) -> Vec<u8> {
         vd_wire::framing::encode_frame(&crate::ReliableFrame {
             from: NodeId(1),
@@ -689,60 +881,23 @@ mod tests {
         .expect("encode")
     }
 
-    /// A dummy loopback addr for a `peers` book entry (never dialed — these tests bail before any send).
-    fn dummy_addr() -> SocketAddr {
-        "127.0.0.1:9".parse().expect("addr")
-    }
-
     #[test]
-    fn replay_outbox_bails_on_an_unroutable_row_without_gc() {
-        // R-6d3b-2 finding B / boot-safety: a retained row whose peer is NOT in the route book is a permanent
-        // can't-route ⇒ `Unroutable` LOUD, and the gc is SKIPPED (the `?` bails first) so the prior-incarnation
-        // rows SURVIVE for the next boot — a durable row is never swept because it could not be re-driven.
-        let path = temp_path("unroutable");
+    fn replay_outbox_refuses_to_boot_on_a_dead_lane_without_gc() {
+        // RC-2a/RC-2b: a routable+decodable row whose lane is DEAD ⇒ `LaneDead` (refuse-to-boot, loud); the
+        // `?` bails BEFORE the fence/gc, so the row SURVIVES for the next boot (never swept). Fast (no spin).
+        let path = temp_path("deadlane");
         let _g = TempOutbox { path: path.clone() };
         let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
-        ob.retain(&key(9, MsgClass::Saga, 1, 0), &framed_row(b"x")); // peer 9
-        ob.commit();
-        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
-        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into(); // NO peer 9
-        let mut t = FlakyTransport {
-            fails_left: 0,
-            sent: Vec::new(),
-        };
-        assert_eq!(
-            replay_outbox(&shared, &mut t, &peers, 2),
-            Err(ReplayError::Unroutable { peer: NodeId(9) })
-        );
-        assert!(t.sent.is_empty(), "bailed before any send");
-        let remaining = shared
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .scan_all();
-        assert_eq!(remaining.len(), 1, "the un-routable row SURVIVES — gc was skipped");
-        assert_eq!(remaining[0].0.incarnation, 1, "the prior-incarnation row is intact");
-    }
-
-    #[test]
-    fn replay_outbox_bails_on_an_undecodable_row_without_gc() {
-        // Boot-safety: a retained row whose value is not a decodable frame ⇒ `Undecodable` LOUD, gc SKIPPED,
-        // the row SURVIVES (never mis-decoded, never swept).
-        let path = temp_path("undecodable");
-        let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
-        ob.retain(&key(2, MsgClass::Saga, 1, 0), b"not-a-valid-frame"); // garbage value, peer 2 (routable)
+        ob.retain(&key(2, MsgClass::Saga, 1, 0), &framed_row(b"x")); // routable + decodable
         ob.commit();
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
         let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
-        let mut t = FlakyTransport {
-            fails_left: 0,
-            sent: Vec::new(),
-        };
+        let mut t = FlakyTransport::new(u32::MAX);
+        t.lane_alive = false; // the lane is dead ⇒ fast-fail LaneDead on the first QueueFull
         assert_eq!(
-            replay_outbox(&shared, &mut t, &peers, 2),
-            Err(ReplayError::Undecodable)
+            replay_outbox(&shared, &mut t, &peers),
+            Err(ReplayError::LaneDead { peer: NodeId(2) })
         );
-        assert!(t.sent.is_empty(), "bailed at decode, before any send");
         assert_eq!(
             shared
                 .lock()
@@ -750,7 +905,7 @@ mod tests {
                 .scan_all()
                 .len(),
             1,
-            "the undecodable row SURVIVES — gc was skipped"
+            "refuse-to-boot skips gc ⇒ the row SURVIVES"
         );
     }
 

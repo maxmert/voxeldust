@@ -2,7 +2,6 @@
 //! P1 runs the stub profile). A thin shell: config → mesh → build_app → register
 //! → tick loop. All logic lives in the tested libs.
 
-use vd_io_prod::mesh::{MeshConfig, spawn_mesh};
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
 use vd_io_prod::trust::ClusterTrust;
 use vd_node::app::{NodeConfig, build_app};
@@ -19,30 +18,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let trust = ClusterTrust::from_der_dir(std::path::Path::new(&env.string("VD_TRUST_DIR")?))?;
-    let (transport, _control) = spawn_mesh(
-        runtime.handle(),
-        &trust,
-        &MeshConfig::new(
-            local,
-            env.parse("VD_BIND")?,
-            env.peer_book("VD_PEERS")?,
-            env.parse("VD_OUTBOUND_CAP")?,
-            // R-6a: the DURABLE MONOTONE process incarnation stamped on reliable frames (VD_PROCESS_INCARNATION
-            // explicit wins for dev/test; else the VD_BOOT_STATE_DIR boot-counter that survives a CrashLoop).
-            vd_bins::resolve_process_incarnation(&env)?,
-        ),
-        // R-6d3a: the durable outbox handle — `None` until R-6d3b opens + boot-replays the per-node store
-        // (the durable-before-send gate is inert without it: the same 2c-style inert-safe posture).
-        None,
-    )?;
-    // GW-1 §6.3: fail LOUD at boot if the snapshot budget exceeds the conservative
-    // datagram floor — a misconfiguration must never become a silent runtime drop.
+    // GW-1 §6.3: fail LOUD at boot if the snapshot budget exceeds the conservative datagram floor — a
+    // misconfiguration must never become a silent runtime drop. Checked BEFORE the mesh/replay so the loud
+    // guard is instantaneous (never after a bounded boot-replay fence).
     let snapshot_budget: usize = env.parse("VD_SNAPSHOT_BUDGET")?;
     assert!(
         snapshot_budget <= vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET,
         "VD_SNAPSHOT_BUDGET {snapshot_budget} exceeds the conservative datagram floor {}",
         vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET
     );
+    // R-6d3b-2b: the ONE shared boot sequence — resolve incarnation once, open+wrap the durable outbox, spawn
+    // the mesh WITH the sink (durable-before-send gate LIVE), replay retained rows BEFORE build_app. `_control`
+    // + `runtime` stay bound for the whole tick loop (dropping either tears down the endpoint / peer-writers).
+    let (transport, _control) = vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
     let mut node = build_app(
         NodeConfig {
             node_id: local,

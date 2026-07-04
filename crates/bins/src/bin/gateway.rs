@@ -2,7 +2,6 @@
 //! session/route logic). Config → mesh → build_app → register → tick loop.
 
 use vd_connection_plane::gateway::{GatewayConfig, TransportTuning, register_gateway};
-use vd_io_prod::mesh::{MeshConfig, spawn_mesh};
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
 use vd_io_prod::trust::ClusterTrust;
 use vd_node::app::{NodeConfig, build_app};
@@ -18,22 +17,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let trust = ClusterTrust::from_der_dir(std::path::Path::new(&env.string("VD_TRUST_DIR")?))?;
-    let (transport, _control) = spawn_mesh(
-        runtime.handle(),
-        &trust,
-        &MeshConfig::new(
-            local,
-            env.parse("VD_BIND")?,
-            env.peer_book("VD_PEERS")?,
-            env.parse("VD_OUTBOUND_CAP")?,
-            // R-6a: the DURABLE MONOTONE process incarnation stamped on reliable frames (VD_PROCESS_INCARNATION
-            // explicit wins for dev/test; else the VD_BOOT_STATE_DIR boot-counter that survives a CrashLoop).
-            vd_bins::resolve_process_incarnation(&env)?,
-        ),
-        // R-6d3a: the durable outbox handle — `None` for now. HR3 uniformity: the gateway will open one at
-        // R-6d3b (empty until it has a producer-less flow), but 3a keeps every bin on the inert `None` path.
-        None,
-    )?;
+    // R-6d3b-2b: the ONE shared boot sequence (HR3 — the SAME helper the shard uses). Resolves incarnation
+    // once, opens+wraps the durable outbox, spawns the mesh WITH the sink, replays retained rows before
+    // build_app. HR3 uniformity: the gateway opens one iff VD_OUTBOX_PATH is set (empty until it has a
+    // producer-less flow). `_control` + `runtime` stay bound for the tick loop.
+    let (transport, _control) = vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
     let mut node = build_app(
         NodeConfig {
             node_id: local,
