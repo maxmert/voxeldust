@@ -16,12 +16,23 @@
 //!
 //! [`ReliableLaneSender`]: crate::mesh
 
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use vd_core::ids::NodeId;
-use vd_sim::io::{Bytes, MsgClass, Store, bytes};
+use vd_sim::io::{Bytes, Durability, MsgClass, SendError, Store, Transport, bytes};
 
 use crate::store::{DurabilityHandle, RedbStore, StoreError, StoreTuning};
+
+/// R-6d3b: the ONE durable outbox sink per node, shared (cloned `Arc`) by every mesh per-peer writer task AND
+/// by the boot-replay path. The `Mutex` is held ONLY across brief `await`-free/fsync-free store ops (a stage
+/// plus a non-blocking submit in the writer's block A; a snapshot or gc in [`replay_outbox`]) — NEVER across
+/// a durability WAIT (that parks/awaits on a cloned [`DurabilityHandle`] outside the lock), so no thread holds
+/// the lock while waiting on the peer-writers. `None` (bins pre-R-6d3b-2b) = the inert byte-identical path.
+pub type SharedOutbox = Arc<Mutex<Box<dyn OutboxSink + Send>>>;
 
 /// The FIRST key byte of every outbox row — a private key-family tag so an outbox scan (`scan(&[OUTBOX_TAG])`)
 /// never collides with another table user of the same redb file (the outbox may share a node's store with
@@ -180,6 +191,11 @@ pub trait OutboxSink: Send {
     /// serialize every other peer-writer sharing this sink. Waiting on `seq` alone suffices — durability is
     /// monotone (the writer drains in seq order), so it subsumes every prior batch.
     fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)>;
+
+    /// R-6d3b-2: a clone of the durability watermark handle — so [`replay_outbox`] can capture it under the
+    /// brief snapshot lock and then FENCE (wait for the fresh re-mirrored rows to be submitted + durable)
+    /// OUTSIDE the lock. A test/mock sink returns an always-durable handle (its rows are never really staged).
+    fn durability(&self) -> DurabilityHandle;
 }
 
 /// The redb-backed [`OutboxSink`] — one per node, opened at boot. Holds the [`DurabilityHandle`] both to keep
@@ -256,6 +272,155 @@ impl OutboxSink for NodeOutbox {
             .submit_nonblocking()
             .map(|seq| (seq, self.durability.clone()))
     }
+
+    fn durability(&self) -> DurabilityHandle {
+        self.durability.clone()
+    }
+}
+
+/// R-6d3b-2: a momentarily-FULL live lane during boot replay retries this many times before it is declared
+/// wedged. Boot replay out-paces the async peer-writer drain on a small `outbound_capacity`; a bounded retry
+/// absorbs that, and exhausting it is a real fault (the drain is stuck) ⇒ fail loud. ONE home (HR no-magic-#).
+const REPLAY_SEND_MAX_RETRIES: u32 = 10_000;
+/// The backoff between replay-send retries AND the count-fence poll — the bin is on its own thread pre-`build_app`,
+/// so a `std::thread::sleep` here parks only that thread (never a tokio worker).
+const REPLAY_POLL_BACKOFF: Duration = Duration::from_millis(1);
+/// The total boot-replay fence deadline: if the fresh re-mirrored rows are not all SUBMITTED within this, a
+/// peer-writer is stuck (never scheduled) ⇒ fail LOUD (leaving the prior window un-gc'd = SAFE), never hang.
+const REPLAY_FENCE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// R-6d3b-2 boot-replay failure — a durable row is NEVER silently dropped on the recovery path.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReplayError {
+    /// A retained row could not be decoded to a payload (a corrupt / version-mismatched value).
+    Undecodable,
+    /// A retained row's peer is not in the transport's route book — a permanent can't-route.
+    Unroutable { peer: NodeId },
+    /// A live lane stayed full past [`REPLAY_SEND_MAX_RETRIES`] — the drain is wedged.
+    LaneStuck { peer: NodeId },
+    /// The fresh re-mirrored rows did not all submit within [`REPLAY_FENCE_DEADLINE`] — a peer-writer is stuck.
+    FenceTimeout { submitted: u64, expected: u64 },
+}
+
+/// Decode a stored (envelope already stripped by `scan_all`) framed `ReliableFrame` back to its PAYLOAD bytes.
+/// Boot replay re-sends the PAYLOAD (the send path re-frames it at the fresh incarnation/epoch/seq), NEVER the
+/// stored frame — re-sending the stored frame would double-frame + carry the stale incarnation.
+fn decode_value_payload(framed: &[u8]) -> Option<Bytes> {
+    vd_wire::framing::decode_frame::<crate::ReliableFrame>(framed)
+        .ok()
+        .map(|(rf, _)| bytes(rf.bytes))
+}
+
+/// Enqueue one replay send, tolerating a momentarily-full LIVE lane (bounded retry). A route-book miss is
+/// caught by the caller's pre-send membership check, so a `QueueFull` HERE is definitionally a transient full
+/// lane; exhausting the retry is a wedged drain ⇒ `LaneStuck` (loud). NEVER a silent `let _ =` drop.
+fn send_durable_with_retry(
+    transport: &mut dyn Transport,
+    peer: NodeId,
+    class: MsgClass,
+    payload: Bytes,
+) -> Result<(), ReplayError> {
+    let mut pay = payload;
+    for _ in 0..REPLAY_SEND_MAX_RETRIES {
+        match transport.send_durable(peer, class, pay, Durability::Retained) {
+            Ok(_) => return Ok(()),
+            Err(SendError::QueueFull(returned)) => {
+                std::thread::sleep(REPLAY_POLL_BACKOFF);
+                pay = returned; // reuse the returned payload — no re-clone
+            }
+        }
+    }
+    Err(ReplayError::LaneStuck { peer })
+}
+
+/// R-6d3b-2 BOOT REPLAY (the ONE home): re-drive every retained outbox row through `transport.send_durable`
+/// (so a producer-less one-shot lost to a source crash is redelivered), then GC the prior incarnation's
+/// window. Called by shard/gateway `main` at boot BEFORE `build_app` consumes the transport; the peer-writer
+/// tasks are already live (spawned by `spawn_mesh`), so the enqueued sends are drained + re-mirrored at the
+/// FRESH `new_incarnation` (ascending scan order ⇒ the fresh lane assigns seq 0,1,2.. ⇒ `classify_reliable`
+/// Reset-then-Accept, no gap). Returns the number of rows re-driven.
+///
+/// LOCK DISCIPLINE (deadlock-free, R-6d3b-2 correction): the shared `Mutex` is held ONLY for the brief snapshot
+/// (scan + handle + base) and the brief atomic gc — NEVER across the sends or the fence. If replay held the
+/// lock across the sends, a replayed `send_durable` would enqueue to a peer-writer whose block A re-`.lock()`s
+/// the SAME mutex to re-mirror ⇒ it blocks its tokio worker, and the fence would wait forever for a durability
+/// bump only that blocked writer can make (a certain deadlock). Here the peer-writers re-mirror FREELY.
+///
+/// FENCE (no premature-gc, R-6d3b-2 correction): the fence is COUNT-anchored, not high-water-anchored — it
+/// waits `last_submitted >= base + N` (each replay send = exactly one submit; a previously-retained row
+/// re-frames IDENTICALLY so it never sheds `Unframable` ⇒ N is exact) THEN `wait_durable_through(base + N)`.
+/// Waiting on the high-water alone would let the fence pass with only k<N fresh rows submitted (the peer-
+/// writers are async), and the subsequent `gc_below` would then sweep the OLD rows whose fresh copy never
+/// landed = D-6 #1 loss. (The ONE way a fresh row could fail to submit is a `BufferFull` shed — a >retry_cap
+/// single-(peer,class) backlog, unreachable at real peer counts; that is fail-SAFE: no submit ⇒ the fence
+/// never reaches `base + N` ⇒ `FenceTimeout` ⇒ the `?` skips gc ⇒ the old rows survive for the next boot,
+/// NO loss.)
+///
+/// # Errors
+/// A row whose peer is not in `peers` ([`ReplayError::Unroutable`]); a live lane wedged full
+/// ([`ReplayError::LaneStuck`]); an undecodable row ([`ReplayError::Undecodable`]); or a peer-writer that
+/// never submits its fresh row within [`REPLAY_FENCE_DEADLINE`] ([`ReplayError::FenceTimeout`]). On any error
+/// the gc is SKIPPED (the `?` bails first) so a not-yet-redelivered row's data is never swept.
+pub fn replay_outbox(
+    shared: &SharedOutbox,
+    transport: &mut dyn Transport,
+    peers: &BTreeMap<NodeId, SocketAddr>,
+    new_incarnation: u64,
+) -> Result<usize, ReplayError> {
+    // (1) ONE brief lock: snapshot the retained rows + a DurabilityHandle clone + the base submit watermark.
+    let (rows, durability, base) = {
+        let g = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let dh = g.durability();
+        let base = dh.last_submitted();
+        (g.scan_all(), dh, base)
+    };
+    if rows.is_empty() {
+        return Ok(0); // genesis / already-drained: nothing to replay, nothing to gc
+    }
+    let n = rows.len() as u64;
+
+    // (2) NO LOCK: decode payload + pre-send route-membership check + send each. The peer-writers acquire the
+    // shared lock FREELY to re-mirror (no deadlock — this thread holds none). `?` bails before the fence/gc on
+    // any un-routable / undecodable / wedged row, so its data is never swept.
+    for (key, framed) in &rows {
+        if !peers.contains_key(&key.peer) {
+            return Err(ReplayError::Unroutable { peer: key.peer });
+        }
+        let payload = decode_value_payload(framed).ok_or(ReplayError::Undecodable)?;
+        send_durable_with_retry(transport, key.peer, key.class, payload)?;
+    }
+
+    // (3) NO LOCK: the COUNT-anchored fence. Wait until all N fresh rows have SUBMITTED (each send = one +1 to
+    // last_submitted; at boot pre-`build_app` the replay sends are the ONLY submits), bounded fail-loud so a
+    // stuck-never-scheduled peer-writer refuses rather than hangs; THEN wait for durability through that seq
+    // (the writer's own death backstop panics loud if it dies). Only after this is gc safe.
+    // `checked_add`: a REAL `NodeOutbox` base grows from real submits (never near u64::MAX), but a test/mock
+    // sink whose `durability()` is `already_durable()` returns `base = u64::MAX` — refuse LOUD rather than
+    // wrap to a bogus target (which would pass the fence instantly ⇒ gc without real durability).
+    let target = base.checked_add(n).expect(
+        "replay_outbox: durability watermark saturated (already_durable / not a real NodeOutbox) — base + N \
+         overflow; replay must run against a real store",
+    );
+    let start = Instant::now();
+    while durability.last_submitted() < target {
+        if start.elapsed() >= REPLAY_FENCE_DEADLINE {
+            return Err(ReplayError::FenceTimeout {
+                submitted: durability.last_submitted(),
+                expected: target,
+            });
+        }
+        std::thread::sleep(REPLAY_POLL_BACKOFF);
+    }
+    durability.wait_durable_through(target);
+
+    // (4) ONE brief lock (atomic): sweep the strictly-lower prior incarnation window + fsync — STRICTLY after
+    // every fresh row is durable (HIGH-3). Kept in ONE guard so it is one observable atomic gc step.
+    {
+        let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        g.gc_below(new_incarnation);
+        g.commit();
+    }
+    Ok(rows.len())
 }
 
 #[cfg(test)]
@@ -435,6 +600,157 @@ mod tests {
         assert!(
             ob.submit_barrier().is_none(),
             "no stage ⇒ no barrier"
+        );
+    }
+
+    #[test]
+    fn decode_value_payload_recovers_the_payload_and_rejects_garbage() {
+        // R-6d3b-2: a stored (envelope-stripped) framed ReliableFrame decodes back to its PAYLOAD (not the
+        // frame) — replay re-sends the payload so the send path re-frames at the fresh incarnation/seq.
+        let framed = vd_wire::framing::encode_frame(&crate::ReliableFrame {
+            from: NodeId(1),
+            class: MsgClass::Saga,
+            incarnation: 5,
+            epoch: 9,
+            seq: 3,
+            bytes: b"payload".to_vec(),
+        })
+        .expect("encode");
+        assert_eq!(
+            decode_value_payload(&framed).as_deref(),
+            Some(&b"payload"[..]),
+            "the payload is recovered (frame header stripped)"
+        );
+        assert_eq!(
+            decode_value_payload(&[0u8; 2]),
+            None,
+            "an undecodable value ⇒ None (never a mis-decode)"
+        );
+    }
+
+    /// A `Transport` that fails `send_durable` with `QueueFull` its first `fails_left` calls, then delivers —
+    /// exercises `send_durable_with_retry`'s bounded retry + payload-reuse deterministically (no real QUIC).
+    struct FlakyTransport {
+        fails_left: u32,
+        sent: Vec<(NodeId, MsgClass, Vec<u8>)>,
+    }
+    impl Transport for FlakyTransport {
+        fn send_durable(
+            &mut self,
+            to: NodeId,
+            class: MsgClass,
+            bytes: Bytes,
+            _durability: Durability,
+        ) -> Result<vd_core::MsgId, SendError> {
+            if self.fails_left > 0 {
+                self.fails_left -= 1;
+                return Err(SendError::QueueFull(bytes)); // returns the payload for the retry to reuse
+            }
+            self.sent.push((to, class, bytes.to_vec()));
+            Ok(vd_core::MsgId(0))
+        }
+        fn drain_inbound(&mut self) -> Vec<vd_sim::io::Inbound> {
+            Vec::new()
+        }
+        fn local_id(&self) -> NodeId {
+            NodeId(1)
+        }
+    }
+
+    #[test]
+    fn send_durable_with_retry_retries_a_full_lane_then_succeeds() {
+        // R-6d3b-2 finding B: a momentarily-full live lane is retried (NOT swallowed); the returned payload is
+        // reused (no re-clone) and delivered once the lane drains.
+        let mut t = FlakyTransport {
+            fails_left: 3,
+            sent: Vec::new(),
+        };
+        assert_eq!(
+            send_durable_with_retry(&mut t, NodeId(2), MsgClass::Saga, bytes(vec![7])),
+            Ok(())
+        );
+        assert_eq!(
+            t.sent,
+            vec![(NodeId(2), MsgClass::Saga, vec![7])],
+            "delivered exactly once after 3 QueueFull retries, payload intact"
+        );
+    }
+
+    /// A valid framed `ReliableFrame` value (as `scan_all` returns, envelope-stripped) carrying `payload`.
+    fn framed_row(payload: &[u8]) -> Vec<u8> {
+        vd_wire::framing::encode_frame(&crate::ReliableFrame {
+            from: NodeId(1),
+            class: MsgClass::Saga,
+            incarnation: 1,
+            epoch: u32::MAX,
+            seq: 0,
+            bytes: payload.to_vec(),
+        })
+        .expect("encode")
+    }
+
+    /// A dummy loopback addr for a `peers` book entry (never dialed — these tests bail before any send).
+    fn dummy_addr() -> SocketAddr {
+        "127.0.0.1:9".parse().expect("addr")
+    }
+
+    #[test]
+    fn replay_outbox_bails_on_an_unroutable_row_without_gc() {
+        // R-6d3b-2 finding B / boot-safety: a retained row whose peer is NOT in the route book is a permanent
+        // can't-route ⇒ `Unroutable` LOUD, and the gc is SKIPPED (the `?` bails first) so the prior-incarnation
+        // rows SURVIVE for the next boot — a durable row is never swept because it could not be re-driven.
+        let path = temp_path("unroutable");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        ob.retain(&key(9, MsgClass::Saga, 1, 0), &framed_row(b"x")); // peer 9
+        ob.commit();
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
+        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into(); // NO peer 9
+        let mut t = FlakyTransport {
+            fails_left: 0,
+            sent: Vec::new(),
+        };
+        assert_eq!(
+            replay_outbox(&shared, &mut t, &peers, 2),
+            Err(ReplayError::Unroutable { peer: NodeId(9) })
+        );
+        assert!(t.sent.is_empty(), "bailed before any send");
+        let remaining = shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .scan_all();
+        assert_eq!(remaining.len(), 1, "the un-routable row SURVIVES — gc was skipped");
+        assert_eq!(remaining[0].0.incarnation, 1, "the prior-incarnation row is intact");
+    }
+
+    #[test]
+    fn replay_outbox_bails_on_an_undecodable_row_without_gc() {
+        // Boot-safety: a retained row whose value is not a decodable frame ⇒ `Undecodable` LOUD, gc SKIPPED,
+        // the row SURVIVES (never mis-decoded, never swept).
+        let path = temp_path("undecodable");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        ob.retain(&key(2, MsgClass::Saga, 1, 0), b"not-a-valid-frame"); // garbage value, peer 2 (routable)
+        ob.commit();
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
+        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
+        let mut t = FlakyTransport {
+            fails_left: 0,
+            sent: Vec::new(),
+        };
+        assert_eq!(
+            replay_outbox(&shared, &mut t, &peers, 2),
+            Err(ReplayError::Undecodable)
+        );
+        assert!(t.sent.is_empty(), "bailed at decode, before any send");
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .scan_all()
+                .len(),
+            1,
+            "the undecodable row SURVIVES — gc was skipped"
         );
     }
 

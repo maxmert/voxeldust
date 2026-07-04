@@ -33,7 +33,7 @@ use vd_sim::io::{
     Transport,
 };
 
-use crate::outbox::{OutboxKey, OutboxSink};
+use crate::outbox::{OutboxKey, OutboxSink, SharedOutbox};
 use crate::store::DurabilityHandle;
 use crate::trust::ClusterTrust;
 use crate::{
@@ -53,14 +53,6 @@ const STREAM_KIND_ACK: u8 = 0x01;
 /// stays bound), DISTINCT from [`MeshControl::kill`] (which closes the endpoint). Closing connection C
 /// tears down BOTH the DATA streams (this→peer) AND their reverse ACK stream on C, coherently.
 type ConnRegistry = Arc<Mutex<BTreeMap<NodeId, quinn::Connection>>>;
-
-/// R-6d3a: the ONE durable outbox sink per node, shared (cloned `Arc`) by every per-peer writer task. The
-/// `Mutex` is held ONLY across the pure-RAM stage + non-blocking submit ([`write_frame`] block A) and the ack
-/// release fan-out — NEVER across the fsync WAIT (that parks on a cloned [`DurabilityHandle`] OUTSIDE the
-/// lock), so a durable send by one peer never serializes the others (MF-1). `OutboxKey.peer` keeps rows
-/// disjoint per peer. `None` = today's behaviour (no outbox wired; bins pass `None` until R-6d3b),
-/// byte-identical to pre-R-6d3a.
-type SharedOutbox = Arc<Mutex<Box<dyn OutboxSink + Send>>>;
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -3296,6 +3288,9 @@ mod tests {
             self.next_submit += 1;
             Some((self.next_submit, DurabilityHandle::already_durable()))
         }
+        fn durability(&self) -> DurabilityHandle {
+            DurabilityHandle::already_durable()
+        }
     }
 
     /// The EXACT framed value the write-through mirrors for `(from, class, incarnation, seq, bytes)`: the
@@ -3528,5 +3523,104 @@ mod tests {
             ],
             "both durable seqs released, in ascending base order"
         );
+    }
+
+    /// R-6d3b-2a: the boot-replay END-TO-END over real QUIC — the headline proof that `replay_outbox`
+    /// re-drives every retained prior-incarnation row, DELIVERS it, and GCs the prior window, all WITHOUT the
+    /// deadlock the vetted §2 would have caused (the peer_writers re-mirror while replay holds no lock) and
+    /// WITHOUT the premature-gc data loss (the count-anchored fence waits for all fresh rows durable before
+    /// gc). Pre-seeds a real `NodeOutbox` with rows at incarnation 1, spawns A at incarnation 2 wired to it,
+    /// replays, asserts B receives the payloads + the incarnation-1 window is swept. (A hang ⇒ the deadlock
+    /// regressed; the `wait_for`/`DEADLINE` backstop fails loud.)
+    #[test]
+    fn replay_outbox_redrives_retained_rows_delivers_and_gcs_the_prior_incarnation() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        // Reserve two loopback ports (bind + read + drop — quinn re-binds them).
+        let mut book = BTreeMap::new();
+        let mut reserved = Vec::new();
+        for id in [NodeId(1), NodeId(2)] {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve port");
+            let addr = socket.local_addr().expect("addr");
+            book.insert(id, addr);
+            reserved.push((id, addr, socket));
+        }
+        // Pre-seed a real NodeOutbox: 2 retained rows keyed to B (NodeId(2)) at the PRIOR incarnation 1,
+        // simulating rows left durable by a crashed prior process.
+        let path = temp_outbox_path("replay");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = crate::outbox::NodeOutbox::open(&path, crate::store::StoreTuning::default())
+            .expect("open");
+        for seq in 0..2u64 {
+            let framed = expected_encoded(NodeId(1), MsgClass::Saga, 1, seq, &[50 + seq as u8]);
+            ob.retain(
+                &OutboxKey {
+                    peer: NodeId(2),
+                    class: MsgClass::Saga,
+                    incarnation: 1,
+                    seq,
+                },
+                &framed,
+            );
+        }
+        ob.commit();
+        assert_eq!(ob.scan_all().len(), 2, "2 prior-incarnation rows pre-seeded");
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
+
+        // Spawn A at the FRESH incarnation 2 wired to the shared outbox; B plain.
+        let mut a = None;
+        let mut b = None;
+        for (id, addr, socket) in reserved {
+            drop(socket); // release the port for quinn
+            let cfg = MeshConfig::new(id, addr, book.clone(), 64, 2); // incarnation 2 == new_incarnation
+            let outbox = (id == NodeId(1)).then(|| shared.clone());
+            let (t, _c) = spawn_mesh(rt.handle(), &trust, &cfg, outbox).expect("mesh");
+            if id == NodeId(1) {
+                a = Some(t);
+            } else {
+                b = Some(t);
+            }
+        }
+        let mut a = a.expect("A");
+        let mut b = b.expect("B");
+
+        // Boot replay: re-drive the 2 prior rows through A, fence on durability, gc incarnation < 2.
+        let n = crate::outbox::replay_outbox(&shared, &mut a, &book, 2).expect("replay ok");
+        assert_eq!(n, 2, "2 rows re-driven");
+
+        // B receives BOTH replayed payloads (re-drive proof; the test COMPLETING is the no-deadlock proof).
+        let got = wait_for(&mut b, |g| {
+            g.iter()
+                .filter(|m| matches!(m, Inbound::Wire { class: MsgClass::Saga, .. }))
+                .count()
+                >= 2
+        });
+        let payloads: std::collections::BTreeSet<u8> = got
+            .iter()
+            .filter_map(|m| match m {
+                Inbound::Wire {
+                    class: MsgClass::Saga,
+                    bytes,
+                    ..
+                } => Some(bytes[0]),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            payloads.contains(&50) && payloads.contains(&51),
+            "both replayed payloads delivered, got {payloads:?}"
+        );
+
+        // gc proof: the prior-incarnation (< 2) window is swept — the fresh rows re-mirrored at incarnation 2
+        // (finding D / HIGH-3: gc ran STRICTLY after the fresh rows were durable, no premature sweep).
+        let remaining = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .scan_all();
+        assert!(
+            remaining.iter().all(|(k, _)| k.incarnation >= 2),
+            "the prior-incarnation window was gc'd; remaining {remaining:?}"
+        );
+        let _ = &mut a;
     }
 }

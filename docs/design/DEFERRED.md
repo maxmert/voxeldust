@@ -1565,7 +1565,59 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      (the deterministic ordering pin) + `two_peers_do_not_starve_workers` + the writer-death-wake test. The landed CODE
      is concurrency-correct (the coverage gap is test-theater honestly deferred, not a defect); the async timeout/panic
      arms ride the Tier-B floor like the sync sibling (F-2, R-6d4). NEXT = R-6d3b-2 (flip the sink live: open_node_outbox
-     → SharedOutbox → spawn_mesh in shard/gateway main + `NodeOutbox::replay_all`).**
+     → SharedOutbox → spawn_mesh in shard/gateway main + the boot replay).**
+     **⚠️ R-6d3b-2 DESIGN CORRECTED before impl (implementer + opus verifier — TWO CONFIRMED HOLES in the vetted §2
+     `replay_all`; full corrected design in scripts/r6d3b_vetted_design.md tail). HOLE 1 DEADLOCK (certain): §2 called
+     `shared.lock().replay_all(&mut self, transport, ..)` holding the shared `std::sync::Mutex` across send+fence, but a
+     replayed `send_durable(Retained)` re-enters a peer_writer's block A which re-`.lock()`s the SAME mutex to
+     re-mirror ⇒ the peer_writer blocks its tokio worker, the fence waits forever for a durability bump only that
+     blocked writer can make (2 blocked writers also exhaust worker_threads(2)). HOLE 2 PREMATURE-GC DATA LOSS: §2's
+     high-water fence `wait_durable_through(last_submitted())` reads `last_submitted` ONCE, but it bumps ASYNC as
+     peer_writers reach block A ⇒ the fence can pass with only k<N fresh rows submitted, then `gc_below` sweeps the OLD
+     rows whose fresh re-mirror never landed = the exact D-6 #1 loss. CORRECTED DESIGN (verified deadlock-free + no
+     premature-gc): a FREE fn `replay_outbox(&SharedOutbox, transport, peers, new_incarnation)` — LOCK-SCOPED: brief
+     lock to snapshot rows + a `DurabilityHandle` clone + `base=last_submitted` (⇒ ADD `fn durability(&self) ->
+     DurabilityHandle` to `OutboxSink`); RELEASE; lock-free decode+peers-membership-check+`send_durable_with_retry`
+     (peer_writers re-mirror freely — no deadlock); lock-free COUNT-ANCHORED fence `last_submitted >= base + N` (each
+     replay send = exactly one submit; a previously-retained row re-frames IDENTICALLY ⇒ N is exact, no Unframable
+     shed), fail-loud-bounded, THEN `wait_durable_through(base+N)`; then ONE brief lock for atomic `gc_below`+`commit`.
+     Sub-slice for impl: R-6d3b-2a (io-prod replay MACHINERY + a real-QUIC test proving re-drive+deliver+gc WITHOUT
+     deadlock/premature-gc), R-6d3b-2b (bin wiring: shard/gateway main open+wrap+pass + the boot-replay call +
+     resolve-incarnation-ONCE, finding C).**
+     **✅ R-6d3b-2a LANDED (io-prod ONLY — the boot-replay MACHINERY, from the corrected design; inert until 2b wires
+     the bins): `SharedOutbox` moved to `outbox.rs` (pub) + `fn durability(&self) -> DurabilityHandle` added to
+     `OutboxSink` (NodeOutbox → its clone; MockOutboxSink → `already_durable()`); `ReplayError` +
+     `REPLAY_SEND_MAX_RETRIES`/`REPLAY_POLL_BACKOFF`/`REPLAY_FENCE_DEADLINE` (named, one home); `decode_value_payload`
+     (decode_frame→`.bytes`, the PAYLOAD not the frame — finding A, keys read in-crate); `send_durable_with_retry`
+     (peers-membership pre-check ⇒ `Unroutable` loud; QueueFull ⇒ bounded retry ⇒ `LaneStuck` loud; NEVER swallows —
+     finding B); and the pub `replay_outbox(shared, transport, peers, new_incarnation)` — LOCK-SCOPED (brief scan-lock
+     to snapshot rows + a `DurabilityHandle` clone + `base=last_submitted` → RELEASE → lock-free decode+route+send →
+     lock-free COUNT-anchored fence [`last_submitted >= base+N` bounded by `REPLAY_FENCE_DEADLINE`, then
+     `wait_durable_through(base+N)`] → ONE brief lock for atomic `gc_below`+`commit`), so the peer-writers re-mirror
+     the replayed sends FREELY (HOLE-1 deadlock cured) and gc runs STRICTLY after all N fresh rows are durable (HOLE-2
+     premature-gc data-loss cured; N exact — a previously-retained row re-frames identically ⇒ none shed). Tests:
+     outbox `decode_value_payload` (recover+reject-garbage) + `send_durable_with_retry` (QueueFull×3-then-succeed via
+     a FlakyTransport mock) + a real-QUIC end-to-end `replay_outbox_redrives_retained_rows_delivers_and_gcs_the_prior_
+     incarnation` (pre-seed 2 rows @incarnation-1 → A@incarnation-2 wired to the shared outbox + B → replay → B gets
+     both payloads + scan_all has NO incarnation<2 rows; the test COMPLETING is the no-deadlock proof). Gate:
+     vd-io-prod 108 lib + all integration green, clippy -D clean, Tier-B `--fail-under-regions 90` PASS (TOTAL 94.29%,
+     outbox.rs 97.71%), workspace build 0. `resolve_process_incarnation` is NOT called here (finding C — the bin passes
+     `new_incarnation` in 2b). NEXT = R-6d3b-2b (shard/gateway `main`: `open_node_outbox` → wrap `SharedOutbox` → pass
+     to `spawn_mesh` + call `replay_outbox` before `build_app`, resolve-incarnation ONCE) ⇒ CLOSES the D-6 #1 RESTART
+     case.**
+     **✅ POST-IMPL REVIEW DONE (wf_7183b0d1, 3 opus lenses + synth): verdict COMMIT_CLEAN — BOTH headline holes
+     VERIFIED FIXED in the landed code (the reviewer confirmed the +1-per-submit mechanic the fence relies on:
+     `submit_nonblocking` bumps `last_submitted` by exactly one per block-A submit; the ack/release path stages a
+     delete but NEVER submits; so `base+N` is reached iff all N fresh rows submitted ⇒ no premature gc; the lock is
+     held only for the brief scan-snapshot + brief gc, never across send/fence ⇒ no deadlock). Findings A/B/C/D hold.
+     FOLDED before commit (cheap, default-tier — the boot-safety proofs this slice EXISTS for): the LOW
+     `base.checked_add(n).expect(..)` overflow guard (disarms the `already_durable` u64::MAX foot-gun for 2b's own
+     mock tests) + two abort-before-gc tests (`replay_outbox_bails_on_an_unroutable_row_without_gc` +
+     `..._undecodable_..._without_gc` — each asserts `Err` AND the prior-incarnation rows SURVIVE, gc skipped) + the
+     doc NIT (BufferFull-shed is fail-SAFE: no submit ⇒ FenceTimeout ⇒ gc skipped ⇒ no loss). DEFERRED to R-6d4
+     (store-test-hooks tier): the mutation-proof no-premature-gc DETERMINISTIC pin (writer-pause) alongside F1. Gate
+     after folds: vd-io-prod 110 lib + all integration green, clippy -D clean, Tier-B PASS (TOTAL 94.40%, outbox.rs
+     98.29%), workspace build 0.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
