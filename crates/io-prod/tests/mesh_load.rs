@@ -107,7 +107,7 @@ fn spawn_node(
     if let Some(cap) = inbound_capacity {
         cfg.inbound_capacity = cap;
     }
-    spawn_mesh(handle, trust, &cfg).expect("mesh node")
+    spawn_mesh(handle, trust, &cfg, None).expect("mesh node")
 }
 
 /// Enqueue one reliable frame, tolerating per-peer back-pressure (retry until accepted). The payload is

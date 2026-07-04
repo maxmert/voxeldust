@@ -38,7 +38,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, SendError, Sender, bounded};
+use crossbeam_channel::{Receiver, SendError, Sender, TrySendError, bounded};
 use redb::{Database, ReadableTableMetadata, TableDefinition};
 use vd_sim::io::{Bytes, Store, bytes};
 
@@ -180,6 +180,21 @@ impl DurabilityHandle {
     #[must_use]
     pub fn backpressure_stalls(&self) -> u64 {
         self.fsync_backpressure.load(Ordering::Acquire)
+    }
+
+    /// TEST-ONLY: a handle already durable through `u64::MAX` with the writer reading as alive, so
+    /// `is_durable_through`/`wait_durable_through` fast-return for ANY seq. Lets a `MockOutboxSink` drive the
+    /// R-6d3a durable-before-send gate (its `submit_barrier` returns this handle) without a real store/writer.
+    #[cfg(any(test, feature = "store-test-hooks"))]
+    #[must_use]
+    pub fn already_durable() -> DurabilityHandle {
+        DurabilityHandle {
+            last_durable: Arc::new(AtomicU64::new(u64::MAX)),
+            last_submitted: Arc::new(AtomicU64::new(u64::MAX)),
+            fsync_backpressure: Arc::new(AtomicU64::new(0)),
+            durable_cv: Arc::new((Mutex::new(()), Condvar::new())),
+            writer_alive: Arc::new(AtomicBool::new(true)),
+        }
     }
 }
 
@@ -497,6 +512,65 @@ impl RedbStore {
     /// [`DurabilityHandle`]'s own `wait_durable_through` (same park) gating the per-tick outbox flush.
     pub fn flush_blocking(&self) {
         self.wait_durable_through(self.last_submitted.load(Ordering::Acquire));
+    }
+
+    /// R-6d3a: submit the staged batch to the writer WITHOUT the block-on-prior wait, returning the assigned
+    /// batch seq (the caller awaits it on a cloned [`DurabilityHandle`] OUTSIDE any shared lock — the MF-1
+    /// durable-before-send gate), or `None` if nothing was staged (MF-2). Distinct from [`Store::commit`],
+    /// which block-on-priors under the caller's lock — the cross-peer-serialization hazard when ONE store is
+    /// shared by N concurrent writer tasks (the outbox case). The seq-assign + `try_send` are ATOMIC here
+    /// (called under the caller's lock), so the writer drains in strict seq order and durability stays
+    /// monotone. The CALLER is responsible for bounding in-flight: the outbox sizes its channel
+    /// [`OUTBOX_WRITER_CHANNEL_DEPTH`](crate::outbox::OUTBOX_WRITER_CHANNEL_DEPTH) >> its peer count (each
+    /// peer-writer submits at most one un-durable batch before parking on the gate), so a `Full` here is an
+    /// impossible-capacity-violation tripwire, NEVER a load-reachable back-pressure path (blocking under the
+    /// shared lock is the very hazard this method exists to avoid). An un-fsynced in-channel batch is an
+    /// un-SENT frame (the gate holds the send until durable), re-emitted by the restarted source on crash —
+    /// so the outbox needs NO depth-1 crash-loss bound, only this per-send gate (MF-3).
+    pub(crate) fn submit_nonblocking(&mut self) -> Option<u64> {
+        if self.staged.is_empty() {
+            return None; // MF-2: an idle / release-only span produces no durable barrier
+        }
+        let batch = std::mem::take(&mut self.staged);
+        let seq = self.next_seq + 1;
+        let tx = match &self.submit_tx {
+            Some(tx) => tx.clone(),
+            None => {
+                // No sender (only reachable mid-Drop) → retain (fail-safe) + LOUD, mirroring `commit`.
+                tracing::error!(
+                    "RedbStore::submit_nonblocking with no writer (post-Drop) — staged batch retained"
+                );
+                self.staged = batch;
+                return None;
+            }
+        };
+        match tx.try_send((seq, batch)) {
+            Ok(()) => {
+                self.next_seq = seq;
+                self.last_submitted.store(seq, Ordering::Release);
+                Some(seq)
+            }
+            Err(TrySendError::Full((_, batch))) => {
+                // Depth ≫ peer count ⇒ unreachable under any realistic concurrency; if it EVER fires the
+                // capacity assumption was violated. Retain (fail-safe) + fail LOUD rather than block under
+                // the caller's shared lock (the MF-1 cross-peer-serialization hazard; a refusal is never a
+                // loss — recovery rehydrates + the source re-drives).
+                self.staged = batch;
+                panic!(
+                    "RedbStore::submit_nonblocking: writer channel full — concurrent durable submits \
+                     exceeded the channel depth; refusing to block under the shared sink lock"
+                );
+            }
+            Err(TrySendError::Disconnected((_, batch))) => {
+                // Writer DIED while the store is live — same fail-loud posture as `commit` (channel gone ⇒
+                // un-persistable state). Retain (fail-safe) + panic; recovery rehydrates + re-drives.
+                self.staged = batch;
+                panic!(
+                    "RedbStore::submit_nonblocking: the durable writer thread died (channel disconnected) — \
+                     refusing to run on un-persistable state (a refusal is never a loss)"
+                );
+            }
+        }
     }
 
     /// Park (not hot-spin) until `last_durable >= target`. Fast-path the common already-durable case; on a

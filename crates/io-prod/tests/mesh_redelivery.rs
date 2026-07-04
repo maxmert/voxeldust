@@ -49,7 +49,7 @@ fn node(
 ) -> (MeshTransport, MeshControl) {
     let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, incarnation);
     cfg.reliability.ack_idle_flush_interval = ack_flush;
-    spawn_mesh(handle, trust, &cfg).expect("mesh node")
+    spawn_mesh(handle, trust, &cfg, None).expect("mesh node")
 }
 
 /// Drain the node's inbound and collect the first payload byte of every delivered `Wire` event.
@@ -456,7 +456,7 @@ fn a_full_retry_buffer_sheds_send_shed_retry_buffer_full_never_confirming_the_pe
     let min_buffer = vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize + std::mem::size_of::<u32>();
     let mut cfg_a = MeshConfig::new(A, addr_a, book.clone(), 256, 1);
     cfg_a.reliability.retry_buffer_max_bytes = min_buffer;
-    let (mut a, ctl_a) = spawn_mesh(rt.handle(), &trust, &cfg_a).expect("mesh A");
+    let (mut a, ctl_a) = spawn_mesh(rt.handle(), &trust, &cfg_a, None).expect("mesh A");
     let (mut b, ctl_b) = node(
         rt.handle(),
         &trust,

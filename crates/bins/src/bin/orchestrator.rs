@@ -58,7 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // R-4d M4: RETAIN the MeshControl (was discarded) so the admin `/metrics` endpoint can read
     // the live mesh reliability counters (`MeshControl::stats()` — a pure atomic load off the hot path).
-    let (transport, control) = spawn_mesh(runtime.handle(), &trust, &mesh_cfg)?;
+    // R-6d3a: `spawn_mesh` takes an optional durable outbox; the orchestrator wires `None` — its saga flows
+    // re-drive via `scan_deadlines`, so they need no transport outbox (the outbox is for the producer-less
+    // shard one-shots, wired at R-6d3b).
+    let (transport, control) = spawn_mesh(runtime.handle(), &trust, &mesh_cfg, None)?;
     let control = Arc::new(control);
     let mut node = build_app(
         NodeConfig {

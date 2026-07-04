@@ -31,6 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // explicit wins for dev/test; else the VD_BOOT_STATE_DIR boot-counter that survives a CrashLoop).
             vd_bins::resolve_process_incarnation(&env)?,
         ),
+        // R-6d3a: the durable outbox handle — `None` until R-6d3b opens + boot-replays the per-node store
+        // (the durable-before-send gate is inert without it: the same 2c-style inert-safe posture).
+        None,
     )?;
     // GW-1 §6.3: fail LOUD at boot if the snapshot budget exceeds the conservative
     // datagram floor — a misconfiguration must never become a silent runtime drop.

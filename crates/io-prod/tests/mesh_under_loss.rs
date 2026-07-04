@@ -12,14 +12,22 @@
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use vd_core::entity_kind::EntityKind;
 use vd_core::{EntityId, Fence, NodeId};
 use vd_io_prod::mesh::{MeshConfig, MeshControl, MeshTransport, spawn_mesh};
+use vd_io_prod::outbox::{NodeOutbox, OutboxSink};
+use vd_io_prod::store::StoreTuning;
 use vd_io_prod::trust::ClusterTrust;
-use vd_sim::io::{Inbound, MsgClass, Transport};
+use vd_sim::io::{Durability, Inbound, MsgClass, Transport};
 use vd_wire::intershard::{GhostFlow, InterShardFlow};
+
+/// R-6d3a: the shared durable outbox handle the T-DBS tests inject into `spawn_mesh` — type-identical to the
+/// mesh's private `SharedOutbox` alias (a transparent alias, so this concrete `Arc<Mutex<Box<dyn ...>>>`
+/// passes through the `Option<SharedOutbox>` parameter).
+type SharedOutbox = Arc<Mutex<Box<dyn OutboxSink + Send>>>;
 
 const DEADLINE: Duration = Duration::from_secs(30);
 const A: NodeId = NodeId(1);
@@ -47,10 +55,11 @@ fn node(
     addr: SocketAddr,
     book: &BTreeMap<NodeId, SocketAddr>,
     ack_flush: Duration,
+    outbox: Option<SharedOutbox>,
 ) -> (MeshTransport, MeshControl) {
     let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, 1);
     cfg.reliability.ack_idle_flush_interval = ack_flush;
-    spawn_mesh(handle, trust, &cfg).expect("mesh node")
+    spawn_mesh(handle, trust, &cfg, outbox).expect("mesh node")
 }
 
 /// Enqueue one reliable frame on a chosen class, tolerating per-peer back-pressure.
@@ -95,6 +104,7 @@ fn a_producer_less_ghost_despawn_survives_an_idle_after_blip_via_the_timer() {
         addr_a,
         &book,
         Duration::from_millis(20),
+        None,
     );
     let (mut b, ctl_b) = node(
         rt.handle(),
@@ -103,6 +113,7 @@ fn a_producer_less_ghost_despawn_survives_an_idle_after_blip_via_the_timer() {
         addr_b,
         &book,
         Duration::from_millis(20),
+        None,
     );
 
     // Establish the GhostReliable lane with a SPAWN marker (delivered) so `drop_connections` has a live
@@ -184,4 +195,145 @@ fn a_producer_less_ghost_despawn_survives_an_idle_after_blip_via_the_timer() {
     );
     assert!(ctl_a.local_addr().is_ok(), "A's endpoint survived the blip");
     let _ = &mut b;
+}
+
+// ---- R-6d3a: the durable-before-send GATE + real shared-outbox injection (T-DBS) ----
+
+/// Open a real per-node `NodeOutbox` on a temp redb file, wrapped as the shared sink `spawn_mesh` takes. The
+/// returned `Arc` is cloned into the mesh AND kept by the test so it can `scan_all`/`commit` the same store.
+fn shared_outbox(tag: &str) -> (SharedOutbox, std::path::PathBuf) {
+    let path = std::env::temp_dir().join(format!(
+        "vd-mesh-udl-outbox-{tag}-{}.redb",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open outbox");
+    let sink: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
+    (sink, path)
+}
+
+/// T-DBS-1: a `Durability::Retained` producer-less one-shot (a band-exit `Despawn` rides `GhostReliable`)
+/// wired through a REAL `NodeOutbox` on the sender. This EXERCISES the new R-6d3a regions end-to-end over real
+/// QUIC — `write_frame` block A (lock + retain + `submit_barrier`), block B (the durable wait), and the
+/// peer_writer `on_ack` release-through — and proves the durable write-through reaches real redb + is released
+/// on ack through the SAME shared `Arc` (LOW-4). It does NOT deterministically pin the durable-BEFORE-wire
+/// ORDERING: the off-tick writer fsyncs concurrently, so `scan_all()` usually observes the row via the writer
+/// racing ahead, independent of block B (a block-B deletion is caught only ~1-in-8 runs). The DETERMINISTIC
+/// ordering pin (a `pause_on_key_prefix` park proving the row is NOT durable until block B waits) is R-6d4's
+/// `store-test-hooks` SIGKILL-window proof — see DEFERRED.md (post-impl F1).
+#[test]
+fn a_retained_frame_is_durable_through_the_shared_sink_and_released_on_ack() {
+    let rt = runtime();
+    let trust = ClusterTrust::generate("vd-mesh-under-loss").expect("trust");
+    let (addr_a, addr_b) = (reserve(), reserve());
+    let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
+    let (sink, path) = shared_outbox("dbs1");
+    let (mut a, ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(20),
+        Some(Arc::clone(&sink)),
+    );
+    let (mut b, _ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(20),
+        None,
+    );
+
+    a.send_durable(B, MsgClass::GhostReliable, vec![7].into(), Durability::Retained)
+        .expect("enqueued");
+
+    let mut got = Vec::new();
+    wait_until(
+        || {
+            drain_ghost(&mut b, &mut got);
+            !got.is_empty()
+        },
+        "the retained frame never arrived",
+    );
+    assert_eq!(got, vec![vec![7]]);
+
+    // Delivery implies block B completed ⇒ the retain is COMMITTED to disk. Exactly one durable row exists
+    // (its exact key — peer=DEST, class, incarnation, seq — is pinned at the unit level by R-6d2c T1/T8; this
+    // e2e proves the write-through reached the REAL redb store through the shared sink).
+    let scanned = sink.lock().expect("lock").scan_all();
+    assert_eq!(
+        scanned.len(),
+        1,
+        "exactly one retained row on disk after a Retained send (durable-before-send fired through real redb)"
+    );
+
+    // The ack retires the frame ⇒ `on_ack` STAGES a release through the SAME shared sink. Release is staged
+    // only (no fsync in the ack path); a commit flushes it ⇒ `scan_all` empties — proving the SAME `Arc`
+    // reached both the retain and the release (no durable-row leak, LOW-4).
+    wait_until(
+        || ctl_a.stats().reliable_acked == 1,
+        "the retained frame was never acked",
+    );
+    sink.lock().expect("lock").commit();
+    assert!(
+        sink.lock().expect("lock").scan_all().is_empty(),
+        "the acked row is released through the shared sink"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// T-DBS-2: an `Ephemeral` reliable send (the DEFAULT — every re-driven flow) takes the byte-identical fast
+/// path even with a real sink wired: the gate is skipped (`durable == false` ⇒ no lock, `gate == None` ⇒ no
+/// durable wait), NOTHING is mirrored. Exercises the Ephemeral skip of the new regions.
+#[test]
+fn an_ephemeral_frame_takes_the_fast_path_leaving_the_outbox_empty() {
+    let rt = runtime();
+    let trust = ClusterTrust::generate("vd-mesh-under-loss").expect("trust");
+    let (addr_a, addr_b) = (reserve(), reserve());
+    let book: BTreeMap<_, _> = [(A, addr_a), (B, addr_b)].into();
+    let (sink, path) = shared_outbox("dbs2");
+    let (mut a, _ctl_a) = node(
+        rt.handle(),
+        &trust,
+        A,
+        addr_a,
+        &book,
+        Duration::from_millis(20),
+        Some(Arc::clone(&sink)),
+    );
+    let (mut b, _ctl_b) = node(
+        rt.handle(),
+        &trust,
+        B,
+        addr_b,
+        &book,
+        Duration::from_millis(20),
+        None,
+    );
+
+    a.send(B, MsgClass::GhostReliable, vec![9].into())
+        .expect("enqueued");
+
+    let mut got = Vec::new();
+    wait_until(
+        || {
+            drain_ghost(&mut b, &mut got);
+            !got.is_empty()
+        },
+        "the ephemeral frame never arrived",
+    );
+    assert_eq!(got, vec![vec![9]]);
+    // F7 (post-impl review): commit BEFORE scanning so an erroneously-STAGED (but un-submitted) Ephemeral
+    // retain would surface too — scan_all reads committed redb, and an ephemeral send must have staged nothing.
+    sink.lock().expect("lock").commit();
+    assert!(
+        sink.lock().expect("lock").scan_all().is_empty(),
+        "an Ephemeral send writes NO outbox row (fast path unchanged even with a sink wired)"
+    );
+
+    let _ = std::fs::remove_file(&path);
 }

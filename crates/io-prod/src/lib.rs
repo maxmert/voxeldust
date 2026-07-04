@@ -29,6 +29,12 @@
 //!
 //! Coverage: Tier-B — exercised by the process tier; ratcheted floor, never 100% (HR5).
 
+// R-6d3a F5 (post-impl review): the durable-before-send gate holds a `std::sync::Mutex` guard across the
+// non-blocking outbox submit but DROPS it before the block-B durability wait + block-C QUIC `.await`s (MF-1 —
+// a fsync wait under the shared lock would serialize every peer). This lint fails the build if a future edit
+// ever lets a lock guard cross an `.await`, mechanically guarding the invariant the slice depends on.
+#![warn(clippy::await_holding_lock)]
+
 pub mod admin;
 pub mod boot;
 pub mod mesh;

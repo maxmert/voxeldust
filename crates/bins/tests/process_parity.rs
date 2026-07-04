@@ -219,6 +219,7 @@ fn p1_parity_real_binaries_over_quic() {
             rt.handle(),
             &trust,
             &MeshConfig::new(id, bind, client_book.clone(), 64, 0),
+            None,
         )
         .expect("client mesh");
         std::mem::forget(_c); // keep the endpoint alive for the test's duration

@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // buffered frames at the gateway — R-6's durable boot-counter / R-3' session reset close it.
             0,
         ),
+        None, // R-6d3a: the client has no producer-less durable flows — no outbox needed.
     )?;
     let core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
 

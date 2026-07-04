@@ -34,6 +34,7 @@ use vd_sim::io::{
 };
 
 use crate::outbox::{OutboxKey, OutboxSink};
+use crate::store::DurabilityHandle;
 use crate::trust::ClusterTrust;
 use crate::{
     AckEntry, AckFrame, DatagramFrame, OutFrame, ProdIoError, ReliableFrame, read_one_ack_frame,
@@ -52,6 +53,14 @@ const STREAM_KIND_ACK: u8 = 0x01;
 /// stays bound), DISTINCT from [`MeshControl::kill`] (which closes the endpoint). Closing connection C
 /// tears down BOTH the DATA streams (this→peer) AND their reverse ACK stream on C, coherently.
 type ConnRegistry = Arc<Mutex<BTreeMap<NodeId, quinn::Connection>>>;
+
+/// R-6d3a: the ONE durable outbox sink per node, shared (cloned `Arc`) by every per-peer writer task. The
+/// `Mutex` is held ONLY across the pure-RAM stage + non-blocking submit ([`write_frame`] block A) and the ack
+/// release fan-out — NEVER across the fsync WAIT (that parks on a cloned [`DurabilityHandle`] OUTSIDE the
+/// lock), so a durable send by one peer never serializes the others (MF-1). `OutboxKey.peer` keeps rows
+/// disjoint per peer. `None` = today's behaviour (no outbox wired; bins pass `None` until R-6d3b),
+/// byte-identical to pre-R-6d3a.
+type SharedOutbox = Arc<Mutex<Box<dyn OutboxSink + Send>>>;
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -776,12 +785,25 @@ pub fn spawn_mesh(
     handle: &tokio::runtime::Handle,
     trust: &ClusterTrust,
     cfg: &MeshConfig,
+    outbox: Option<SharedOutbox>,
 ) -> Result<(MeshTransport, MeshControl), ProdIoError> {
     // FAIL LOUD before binding the endpoint or spawning any task: a mis-tuned redelivery layer must
     // never come up half-configured (R-2b). This is the FIRST statement.
     cfg.reliability
         .validate()
         .map_err(|e| ProdIoError::Tuning(e.to_string()))?;
+    // R-6d3a F3 (post-impl review): the durable-outbox non-blocking submit is `Full`-safe ONLY while the peer
+    // count fits the outbox writer channel — peak in-flight = one un-durable batch per parked peer-writer ≤
+    // peer count. Beyond `OUTBOX_WRITER_CHANNEL_DEPTH` a `try_send` would hit `Full` and PANIC. Fail LOUD at
+    // boot (never a silent runtime crash) — but ONLY when an outbox is actually wired (bins pass `None` today).
+    if outbox.is_some() && cfg.peers.len() > crate::outbox::OUTBOX_WRITER_CHANNEL_DEPTH {
+        return Err(ProdIoError::Tuning(format!(
+            "peer count {} exceeds the durable outbox writer channel depth {} — a durable send under this \
+             fan-out could overflow the non-blocking submit; raise OUTBOX_WRITER_CHANNEL_DEPTH",
+            cfg.peers.len(),
+            crate::outbox::OUTBOX_WRITER_CHANNEL_DEPTH,
+        )));
+    }
     // Shared transport tuning: keepalive holds connections open across idle ticks,
     // a bounded idle timeout reaps a truly-dead half-open connection, and a uni-stream
     // cap bounds per-connection reader tasks (TRANSPORT-3/4/8).
@@ -862,6 +884,7 @@ pub fn spawn_mesh(
             incarnation: cfg.process_incarnation,
             connections: Arc::clone(&connections),
             reliability: cfg.reliability,
+            outbox: outbox.clone(),
         }));
         lanes.insert(peer, PeerLane { tx });
     }
@@ -1157,6 +1180,11 @@ struct PeerWriter {
     connections: ConnRegistry,
     /// The at-least-once redelivery tuning (R-4a reads `confirm_unreachable_after_retries`).
     reliability: MeshReliabilityTuning,
+    /// R-6d3a: the ONE shared durable outbox sink (cloned `Arc`), or `None` when no outbox is wired (bins pass
+    /// `None` until R-6d3b — byte-identical to pre-R-6d3a). The SAME handle reaches both the send path
+    /// (`write_frame` retain + durable-before-send gate) and the ack path (`on_ack` release), so a retained
+    /// durable row is released on the same store — no leak (LOW-4).
+    outbox: Option<SharedOutbox>,
 }
 
 /// One peer's writer: drains its lane in FIFO order, dialing on demand, with
@@ -1188,11 +1216,31 @@ async fn peer_writer(mut w: PeerWriter) {
                 if changed.is_ok()
                     && let Some(ack) = ack_rx.borrow_and_update().clone()
                 {
+                    // R-6d3a: lock the shared durable sink ONCE for the whole ack fan-out (LOW-4 — the SAME
+                    // `Arc` `write_frame` retained on releases here). Release-through is STAGED only, no fsync
+                    // in the ack path (a tombstone rides the next retain's submit / a future flush-tick; a
+                    // crash before it is durable harmlessly re-delivers an already-acked frame, receiver
+                    // dedups). The lock spans only the pure-RAM `store.delete` staging — no wait under it.
+                    let mut guard = w
+                        .outbox
+                        .as_ref()
+                        .map(|o| o.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+                    let mut sink: Option<&mut dyn OutboxSink> =
+                        guard.as_deref_mut().map(|b| &mut **b as &mut dyn OutboxSink);
                     for e in &ack.entries {
                         if let Some(lane) = lanes.get_mut(&e.class) {
                             // R-6c/L4: retire against THIS entry's own class incarnation (per-entry), not a
-                            // single frame-level scalar.
-                            let retired = lane.on_ack(e.incarnation, e.epoch, e.ack_through, None);
+                            // single frame-level scalar. R-6d3a: `sink.as_deref_mut()` re-borrows the shared
+                            // sink per class so each lane's retired-durable rows are released (staged).
+                            // Explicit per-iteration reborrow (`as_mut().map(|s| &mut **s)`) so each `on_ack`
+                            // gets a FRESH short-lived `&mut dyn` — `as_deref_mut` here ties the reborrow to
+                            // the outer `guard` borrow and the loop rejects it (E0499).
+                            let retired = lane.on_ack(
+                                e.incarnation,
+                                e.epoch,
+                                e.ack_through,
+                                sink.as_mut().map(|s| &mut **s as &mut dyn OutboxSink),
+                            );
                             if retired > 0 {
                                 w.stats
                                     .reliable_acked
@@ -1220,6 +1268,7 @@ async fn peer_writer(mut w: PeerWriter) {
                     w.reliability.retry_buffer_max_bytes,
                     &frame,
                     &w.stats,
+                    w.outbox.as_ref(),
                 )
                 .await;
                 match sent {
@@ -1591,14 +1640,14 @@ async fn write_frame(
     retry_cap: usize,
     frame: &OutFrame,
     stats: &MeshStats,
+    outbox: Option<&SharedOutbox>,
 ) -> Result<(), WriteFail> {
     match frame.class.reliability() {
         Reliability::Reliable => {
             // R-6d2b: the reliable lane is the SOLE consumer of the per-send `Durability` marker — lower it
-            // to a bool here. R-6d2c threads `durable` into `assign_and_retain`'s durable-outbox write-through
-            // (retain-on-send) + `on_ack` delete-through. The `OutboxSink` handle itself is injected by the
-            // R-6d3 fsync-gate slice; until then this writer passes `None` (no mirror), so `durable` selects a
-            // no-op today but the FSM plumbing + retained-subset bookkeeping is exercised end-to-end now.
+            // to a bool here. R-6d2c wired the FSM write-through/delete-through; R-6d3a (below) now injects the
+            // real shared `OutboxSink` + the durable-before-send gate. `durable && outbox.is_some()` selects
+            // the gate; `None` (bins until R-6d3b) or Ephemeral keeps the byte-identical fast path.
             let durable = matches!(frame.durability, vd_sim::io::Durability::Retained);
             // BUFFER-FIRST, BEFORE any connection work: create the lane, capture the id, assign + retain. A
             // first-dial failure to a dead peer then leaves the frame RETAINED (the retransmit timer re-drives
@@ -1608,11 +1657,28 @@ async fn write_frame(
             // envelope + codec byte can push a near-cap payload over `MAX_STREAM_FRAME_BYTES`): an un-framable
             // frame can NEVER be sent, so retaining it would poison the lane forever; it returns `Err` WITHOUT
             // retaining ⇒ shed-count + Shed (peer_writer bounces), nothing in `retry`.
-            let seq = {
+            //
+            // R-6d3a BLOCK A — the sink is locked for THIS span ONLY: a pure-RAM stage (`assign_and_retain`'s
+            // `retain`) + a NON-BLOCKING `submit_barrier` (channel hand-off, no fsync). NOTHING that blocks on
+            // the fsync runs under the lock (MF-1); the guard drops at the block's end, before BLOCK B's wait.
+            // `gate` carries the durable outbox STORE batch seq (distinct from the lane `seq`) + a cloned
+            // durability handle. Ephemeral / no-sink ⇒ no lock, `gate = None`, byte-identical fast path.
+            let (seq, gate): (u64, Option<(u64, DurabilityHandle)>) = {
+                let mut guard = if durable {
+                    outbox.map(|o| o.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+                } else {
+                    None
+                };
                 let lane = lanes
                     .entry(frame.class)
                     .or_insert_with(|| ReliableLaneSender::new(dest, incarnation, retry_cap));
-                match lane.assign_and_retain(local, frame.class, &frame.bytes, durable, None) {
+                let seq = match lane.assign_and_retain(
+                    local,
+                    frame.class,
+                    &frame.bytes,
+                    durable,
+                    guard.as_deref_mut().map(|b| &mut **b as &mut dyn OutboxSink),
+                ) {
                     Ok(seq) => {
                         // R-4a: remember the id ONLY of a RETAINED frame, so the threshold-gated confirm
                         // bounce (which has no OutFrame) can never carry the id of a rejected/never-retained
@@ -1654,8 +1720,45 @@ async fn write_frame(
                         };
                         return Err(WriteFail::Shed(reason));
                     }
-                }
+                };
+                // R-6d3a: submit the just-staged retain NON-BLOCKING and capture the durability barrier — only
+                // for a durable frame with a live sink (else inert). The barrier is `(outbox STORE batch seq, a
+                // cloned handle)` — the store seq is distinct from the lane `seq` and is what block B awaits. A
+                // durable retain ALWAYS stages a row (MF-2), so `submit_barrier` is `Some` here EXCEPT the
+                // narrow store-mid-Drop race (`submit_tx` gone ⇒ `None`); that violation is caught fail-loud
+                // AFTER the guard drops (below), not by a debug-only assert (which is compiled out of release).
+                let gate = if durable {
+                    guard.as_deref_mut().and_then(|b| b.submit_barrier())
+                } else {
+                    None
+                };
+                (seq, gate)
+                // `guard` drops HERE ⇒ the shared sink lock is released BEFORE block B's wait (MF-1: the fsync
+                // wait never happens under the lock, so a durable send never serializes the other peers).
             };
+
+            // R-6d3a F4 (post-impl review): a durable frame with a LIVE sink MUST have produced a barrier (its
+            // retain staged a row). A `None` means the store was mid-Drop (`submit_tx` gone) — proceeding to
+            // block C would send the frame WITHOUT its row durable (a silent durable-before-send violation in a
+            // RELEASE build, where the MF-2 debug assert is absent). Fail LOUD: the frame stays retained in the
+            // lane (Down arms the retransmit ⇒ it re-drives), never sent un-durable. `outbox` is `Copy`
+            // (`Option<&_>`), so this re-read does not disturb the move above.
+            if durable && outbox.is_some() && gate.is_none() {
+                tracing::error!(
+                    "durable reliable send produced no outbox barrier (store mid-Drop?) — refusing to send \
+                     the frame before its row is durable (it stays retained; the retransmit re-drives it)"
+                );
+                return Err(WriteFail::Down);
+            }
+
+            // R-6d3a BLOCK B — the durable-before-send BARRIER, OUTSIDE the lock, on the cloned handle: park
+            // until this batch's outbox row is fsynced, so the row is on disk BEFORE the wire send (block C).
+            // A single wait on the store batch seq suffices — durability is monotone (the writer drains in seq
+            // order), MF-3. No-op for an Ephemeral / no-sink frame (`gate == None`) ⇒ the fast path is
+            // byte-identical. Synchronous condvar park (not an `.await`), so cancel-safety is preserved.
+            if let Some((batch_seq, durability)) = gate {
+                durability.wait_durable_through(batch_seq);
+            }
 
             // Dial on demand through the ONE dial home (shared with the retransmit path's replay_lanes). A
             // dial failure ⇒ Down; the frame is already retained above ⇒ the timer re-drives it.
@@ -2572,6 +2675,7 @@ mod tests {
                 handle,
                 trust,
                 &MeshConfig::new(id, addr, book.clone(), capacity, 0),
+                None,
             )
             .expect("mesh node");
             transports.push(t);
@@ -3122,10 +3226,34 @@ mod tests {
         cfg.reliability.retry_buffer_max_bytes = 0; // below one max frame ⇒ invalid
         // `match` (not `expect_err`): the Ok type `(MeshTransport, MeshControl)` is not `Debug`. The Ok
         // arm panics without formatting, so the validation must fail loud BEFORE any endpoint binds.
-        match spawn_mesh(rt.handle(), &trust, &cfg) {
+        match spawn_mesh(rt.handle(), &trust, &cfg, None) {
             Err(ProdIoError::Tuning(_)) => {}
             Err(other) => panic!("expected a Tuning error, got {other:?}"),
             Ok(_) => panic!("a zero tuning field must be rejected at boot"),
+        }
+    }
+
+    /// R-6d3a F3 (post-impl review): a peer fan-out larger than the outbox writer channel is rejected LOUD at
+    /// boot — but ONLY when an outbox is actually wired (the depth is irrelevant without a durable sink). This
+    /// closes the silent panic-at-scale ceiling of the non-blocking submit (a `Full` would panic a live node).
+    #[test]
+    fn spawn_mesh_rejects_an_oversized_peer_fan_out_only_when_an_outbox_is_wired() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("addr");
+        // One more peer than the outbox channel can hold.
+        let mut book = BTreeMap::new();
+        for i in 1..=(crate::outbox::OUTBOX_WRITER_CHANNEL_DEPTH as u64 + 1) {
+            book.insert(NodeId(i), addr);
+        }
+        let cfg = MeshConfig::new(NodeId(1), addr, book, 8, 0);
+        let sink: SharedOutbox =
+            Arc::new(Mutex::new(Box::new(MockOutboxSink::default()) as Box<dyn OutboxSink + Send>));
+        // With an outbox wired ⇒ rejected LOUD before any endpoint binds (the F3 boot check).
+        match spawn_mesh(rt.handle(), &trust, &cfg, Some(sink)) {
+            Err(ProdIoError::Tuning(_)) => {}
+            Err(other) => panic!("expected a Tuning error, got {other:?}"),
+            Ok(_) => panic!("an oversized peer fan-out with an outbox must be rejected at boot"),
         }
     }
 
@@ -3133,11 +3261,14 @@ mod tests {
 
     /// A recording `OutboxSink` for the FSM tests: `retain`/`release` push to `Vec`s so a test asserts the
     /// EXACT keys (and, for retain, the framed value) the lane staged. `commit`/`scan_all`/`gc_below` are
-    /// inert — R-6d2c never calls them (the fsync barrier + boot replay are R-6d3).
+    /// inert — the R-6d2c FSM tests never call them (the fsync barrier + boot replay are R-6d3). R-6d3a adds
+    /// `submit_barrier` returning a MONOTONE non-zero seq (never aliased to genesis `0`) + an always-durable
+    /// handle, so a gate-fired assertion is unambiguous without a real store/writer.
     #[derive(Default)]
     struct MockOutboxSink {
         retained: Vec<(OutboxKey, Vec<u8>)>,
         released: Vec<OutboxKey>,
+        next_submit: u64,
     }
     impl OutboxSink for MockOutboxSink {
         fn retain(&mut self, key: &OutboxKey, framed: &[u8]) {
@@ -3151,6 +3282,12 @@ mod tests {
             Vec::new()
         }
         fn gc_below(&mut self, _incarnation: u64) {}
+        fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)> {
+            // Mirror `NodeOutbox`: a barrier only when something was staged (a retain happened). The FSM
+            // tests always retain before submitting, so return a monotone seq + an always-durable handle.
+            self.next_submit += 1;
+            Some((self.next_submit, DurabilityHandle::already_durable()))
+        }
     }
 
     /// The EXACT framed value the write-through mirrors for `(from, class, incarnation, seq, bytes)`: the

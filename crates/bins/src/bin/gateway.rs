@@ -30,6 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // explicit wins for dev/test; else the VD_BOOT_STATE_DIR boot-counter that survives a CrashLoop).
             vd_bins::resolve_process_incarnation(&env)?,
         ),
+        // R-6d3a: the durable outbox handle — `None` for now. HR3 uniformity: the gateway will open one at
+        // R-6d3b (empty until it has a producer-less flow), but 3a keeps every bin on the inert `None` path.
+        None,
     )?;
     let mut node = build_app(
         NodeConfig {

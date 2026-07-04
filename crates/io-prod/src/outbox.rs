@@ -36,6 +36,18 @@ pub(crate) const OUTBOX_KEY_LEN: usize = 1 + 8 + 1 + 8 + 8;
 /// mis-framing it. Bump on ANY change to the stored value layout.
 pub(crate) const OUTBOX_FORMAT_VERSION: u8 = 1;
 
+/// R-6d3a (MF-3): the outbox store's off-tick-writer hand-off channel depth. Unlike the orchestrator's
+/// depth-2 store (which block-on-priors under its SINGLE sim-thread caller to bound crash-loss to ≤1 batch),
+/// the outbox is fed by N CONCURRENT mesh peer-writer tasks sharing ONE store. Each submits at most one
+/// un-durable batch before parking on the durable-before-send gate, so the peak in-flight is bounded by the
+/// live peer count; a depth far above any realistic node's peer fan-out makes the writer channel FULL an
+/// impossible-capacity tripwire (`submit_nonblocking` panics rather than block under the shared sink lock —
+/// the MF-1 cross-peer-serialization hazard) instead of a load-reachable path. The outbox needs NO depth-1
+/// crash-loss bound: an un-fsynced in-channel batch is an un-SENT frame (the gate withholds the wire send
+/// until durable), re-emitted by the restarted source — so a deeper channel never widens loss, only the
+/// harmless un-sent set. ONE home for the value (HR "no magic numbers").
+pub const OUTBOX_WRITER_CHANNEL_DEPTH: usize = 256;
+
 /// The STABLE durable byte for a `MsgClass` — deliberately NOT the implicit enum discriminant (a variant
 /// REORDER must never silently re-map on-disk keys). Exhaustive: adding a `MsgClass` variant fails to compile
 /// until it is given a stable byte here (a forced decision, not a silent default). Round-trips via
@@ -158,6 +170,16 @@ pub trait OutboxSink: Send {
     ///
     /// [`commit`]: OutboxSink::commit
     fn gc_below(&mut self, incarnation: u64);
+
+    /// R-6d3a durable-before-send GATE (MF-1/MF-2/MF-3): submit the CURRENTLY-STAGED batch WITHOUT any
+    /// blocking wait, returning `(seq, handle)` — the submitted batch seq and a cloned durability watermark
+    /// the caller awaits (`handle.wait_durable_through(seq)`) OUTSIDE the shared sink lock, so the row is on
+    /// disk BEFORE its frame hits the wire. Returns `None` if nothing was staged (an idle / release-only
+    /// span — the caller must NOT then treat the send as durable-gated; on the durable path a `retain` always
+    /// precedes ⇒ `Some`). Non-blocking under the lock is the whole point: `commit` block-on-priors and would
+    /// serialize every other peer-writer sharing this sink. Waiting on `seq` alone suffices — durability is
+    /// monotone (the writer drains in seq order), so it subsumes every prior batch.
+    fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)>;
 }
 
 /// The redb-backed [`OutboxSink`] — one per node, opened at boot. Holds the [`DurabilityHandle`] both to keep
@@ -171,7 +193,13 @@ pub struct NodeOutbox {
 
 impl NodeOutbox {
     /// Open (or create at genesis) the durable outbox at `path`, spawning the store's off-tick writer.
-    pub fn open(path: impl AsRef<Path>, tuning: StoreTuning) -> Result<NodeOutbox, StoreError> {
+    ///
+    /// R-6d3a (MF-3): the outbox forces its writer channel to [`OUTBOX_WRITER_CHANNEL_DEPTH`] regardless of
+    /// the caller's tuning — the multi-producer non-blocking submit needs slack well above the peer count so
+    /// `submit_nonblocking` never blocks under the shared sink lock. Test-only tuning fields (the SIGKILL
+    /// pause hooks) pass through unchanged.
+    pub fn open(path: impl AsRef<Path>, mut tuning: StoreTuning) -> Result<NodeOutbox, StoreError> {
+        tuning.writer_channel_depth = OUTBOX_WRITER_CHANNEL_DEPTH;
         let (store, durability) = RedbStore::open(path, tuning)?;
         Ok(NodeOutbox { store, durability })
     }
@@ -219,6 +247,14 @@ impl OutboxSink for NodeOutbox {
         for k in stale {
             self.store.delete(&k);
         }
+    }
+
+    fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)> {
+        // Non-blocking submit (no block-on-prior under the caller's shared lock — MF-1/MF-3); the seq is the
+        // caller's gate target, awaited on the cloned handle OUTSIDE the lock. `None` ⇒ nothing staged (MF-2).
+        self.store
+            .submit_nonblocking()
+            .map(|seq| (seq, self.durability.clone()))
     }
 }
 
@@ -364,6 +400,41 @@ mod tests {
             ob.scan_all(),
             vec![(k2, b"frame-1".to_vec())],
             "released k1 is gone; k2 remains"
+        );
+    }
+
+    #[test]
+    fn submit_barrier_gives_monotone_durable_seqs_and_none_on_an_empty_span() {
+        // R-6d3a: the durable-before-send gate primitive — a retain then `submit_barrier` hands back the STORE
+        // batch seq (monotone, > 0) + a cloned handle; awaiting it makes the row durable (readable by
+        // `scan_all`). Distinct submits get ASCENDING seqs (so a single wait on `seq` subsumes every prior,
+        // MF-3). An empty span (nothing staged) returns `None` (MF-2). This is the non-blocking multi-producer
+        // path — the channel is forced to `OUTBOX_WRITER_CHANNEL_DEPTH` by `open`, so it never blocks.
+        let path = temp_path("barrier");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+
+        let k1 = key(1, MsgClass::Saga, 7, 0);
+        ob.retain(&k1, b"f0");
+        let (s1, h1) = ob.submit_barrier().expect("a staged retain ⇒ Some");
+        assert!(s1 > 0, "the store batch seq is non-zero (never aliased to genesis)");
+        h1.wait_durable_through(s1);
+        assert_eq!(
+            ob.scan_all(),
+            vec![(k1, b"f0".to_vec())],
+            "the row is durable once the barrier seq is fsynced (durable-before-send holds)"
+        );
+
+        let k2 = key(2, MsgClass::GhostReliable, 7, 0);
+        ob.retain(&k2, b"f1");
+        let (s2, h2) = ob.submit_barrier().expect("a staged retain ⇒ Some");
+        assert!(s2 > s1, "monotone ascending store seq across submits (waiting on s2 subsumes s1)");
+        h2.wait_durable_through(s2);
+
+        // An empty span (nothing staged) ⇒ None: block B must NOT treat it as durable-gated (MF-2).
+        assert!(
+            ob.submit_barrier().is_none(),
+            "no stage ⇒ no barrier"
         );
     }
 

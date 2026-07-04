@@ -1477,6 +1477,56 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      region-coverage not durable-behaviour) needs no change — already honestly documented. Gate after fold: vd-io-prod
      101 lib (+T10) + all integration green, clippy -D clean, Tier-B `--fail-under-regions 90` PASS (TOTAL 94.46%,
      mesh.rs 94.67%), workspace + vd-bins build green.**
+     **✅ R-6d3a LANDED (the durable-before-send GATE + real shared-outbox injection — io-prod + a `None` arg at every
+     bin, per vetted design wf_e8bea726 SOUND_TO_IMPLEMENT): `spawn_mesh` gains `outbox: Option<SharedOutbox>` where
+     `SharedOutbox = Arc<Mutex<Box<dyn OutboxSink + Send>>>` — ONE store shared by every per-peer writer task
+     (`OutboxKey.peer` keeps rows disjoint). `write_frame`'s Reliable arm is now BLOCK A (lock the sink for THIS span
+     only: `assign_and_retain` retain + a NON-BLOCKING `submit_barrier`; guard dropped) → BLOCK B (OUTSIDE the lock, on
+     a cloned `DurabilityHandle`: `wait_durable_through(batch_seq)` so the row is fsynced BEFORE the wire) → BLOCK C
+     (the verbatim QUIC send). Ephemeral / no-sink ⇒ no lock, `gate=None`, byte-identical fast path (the 20Hz datagram
+     path untouched). `peer_writer` locks the SAME `Arc` once per ack fan-out and threads it into `on_ack` (release-
+     through, LOW-4). ⚠️ MF-3 CONCURRENCY DEVIATION FROM THE VETTED SYNTH (implementer finding, adversarially verified
+     opus, FLAW CONFIRMED + FIX SOUND): the synth's MF-1 fix (`submit_nonblocking` + depth-2 channel + try_send-panic-
+     on-Full) PANICS under ≥3 concurrent distinct peer-writers piling batches into a depth-2 channel before one fsync
+     drains (the "≤1 in-flight" proof is per-writer-iteration, NOT per-node — exactly the "source fans TransientBatch to
+     many dest peers + Despawn to neighbors" load). CURE: the OUTBOX store gets its OWN generous
+     `OUTBOX_WRITER_CHANNEL_DEPTH` (named const 256 ≫ peer count, HR no-magic-numbers) so `Full` is an impossible-
+     capacity tripwire not a load path; `submit_nonblocking` stays block-on-prior-FREE with seq-assign+`try_send` UNDER
+     the lock (the sole out-of-order-send hazard avoided); block B waits on a SINGLE `bar.seq` (durability monotone ⇒
+     subsumes prior). The outbox needs NO depth-1 crash-loss bound (unlike the orchestrator store): an un-fsynced
+     in-channel batch is an un-SENT frame (the gate withholds the wire until durable), re-emitted by the restarted
+     source — proven leg-by-leg (durable-before-send / seq-durability monotonicity / crash-safety; no false-durable, no
+     out-of-order, bounded memory). New: `store.rs` `submit_nonblocking` + `DurabilityHandle::already_durable()` test-
+     ctor; `outbox.rs` `OUTBOX_WRITER_CHANNEL_DEPTH` + `submit_barrier` + open forces the depth; `mesh.rs` `SharedOutbox`
+     + the gate + `MockOutboxSink::submit_barrier`. Tests: outbox `submit_barrier` unit (monotone durable seqs +
+     None-on-empty) + T-DBS-1 (real `NodeOutbox` + real QUIC: a Retained send is durable on disk BEFORE delivery,
+     released on ack through the shared sink) + T-DBS-2 (Ephemeral fast path leaves the outbox empty). SCOPE: bins pass
+     `None` (inert-safe like 2c) — R-6d3b opens+boot-replays the real store; so D-6 #1 is STILL open (3a builds the gate
+     but no bin writes to it yet). Gate: vd-io-prod 102 lib + all integration green, clippy io-prod + vd-bins -D clean,
+     Tier-B `--fail-under-regions 90` PASS (TOTAL 94.05%), workspace build green. NEXT = R-6d3b (open the per-node store
+     in shard/gateway `main` + the boot replay `scan_all`→re-drive→`gc_below` + the tick-loop split) — THEN R-6d3c (the
+     saga AwaitAdopt split + dest TransientDiscard) actually CLOSES D-6 #1, then R-6d4 the SIGKILL e2e + proptest.**
+     **✅ POST-IMPL REVIEW DONE (wf_cfdde7cc, 3 opus lenses + synth): verdict COMMIT_CLEAN — the MF-3 fix is re-derived
+     SOUND in the landed code (seq-assign+try_send atomic under the lock ⇒ FIFO seq-ordered drain + monotone
+     last_durable; guard dropped before block B ⇒ no cross-peer serialization; depth 256 ⇒ Full unreachable for ≤256
+     peers; Ephemeral byte-identical). NO CRITICAL, NO MUST-FIX-BEFORE-COMMIT — every finding ships INERT (all bins pass
+     `None`). FOLDED BEFORE COMMIT (cheap, improve THIS slice): **F3** a fail-loud boot check in `spawn_mesh` (peer count
+     > `OUTBOX_WRITER_CHANNEL_DEPTH` ⇒ Tuning error, ONLY when an outbox is wired) — closes the silent panic-at-scale
+     ceiling; **F4** the durable-path None-barrier is now a RELEASE-safe fail-loud `WriteFail::Down` (was a debug-only
+     assert compiled out of release ⇒ a store-mid-Drop race could send un-durable); **F5** `#![warn(clippy::
+     await_holding_lock)]` on io-prod (mechanical guard for the guard-dropped-before-await invariant; verified clean
+     crate-wide); **F1-doc** T-DBS-1 no longer overclaims a deterministic block-B ordering pin (it exercises the regions
+     + proves durable-write-through-to-redb, but the off-tick writer races `scan_all` so a block-B deletion is caught
+     only ~1/8 — the DETERMINISTIC ordering pin is R-6d4's `pause_on_key_prefix`); **F7** T-DBS-2 commits before scanning.
+     ⚠️ TWO HARD GATES ON R-6d3b (the slice that flips `None`→live sink) — NOT commit blockers for 3a (gate inert): **F2**
+     the block-B `wait_durable_through` is a SYNCHRONOUS condvar park; on the 2-worker tokio runtime two peer-writers
+     parked in block B occupy BOTH workers and STARVE the mesh RECV/ACK/ACCEPT I/O path for the fsync duration (the sim
+     tick loop is on the MAIN thread, NOT starved — reviewer self-corrected). R-6d3b MUST land one of: `spawn_blocking`
+     the park / an async `Notify`-based wait / raise `worker_threads` (documented) + a ≥2-concurrent-durable-send
+     progress test. **F1-pin** land the deterministic `store-test-hooks` `pause_on_key_prefix` ordering proof (row NOT in
+     `scan_all` until block B waits) — R-6d4 (or R-6d3b). Gate after folds: vd-io-prod 103 lib/unit + all integration
+     green, clippy io-prod (+await_holding_lock) + vd-bins -D clean, Tier-B PASS. (F6: store.rs region % is mostly
+     pre-existing helper/monomorph surface + the new panic tripwires — not a regression; floor is on TOTAL.)**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
