@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError, bounded};
 use redb::{Database, ReadableTableMetadata, TableDefinition};
+use tokio::sync::Notify;
 use vd_sim::io::{Bytes, Store, bytes};
 
 /// The writer retries a failed fsync this many times (a TRANSIENT disk blip recovers) before declaring the
@@ -130,6 +131,13 @@ pub struct DurabilityHandle {
     /// The writer's durability notify — so the bin's [`wait_durable_through`](Self::wait_durable_through)
     /// PARKS (not hot-spins) under a disk stall, sharing the writer's wake.
     durable_cv: Arc<(Mutex<()>, Condvar)>,
+    /// R-6d3b F2: the ASYNC twin of `durable_cv` — a `tokio::sync::Notify` the writer `notify_waiters()` on
+    /// each `last_durable` bump (AND on writer death), so [`wait_durable_through_async`] yields the tokio
+    /// worker instead of parking it. Distinct from `durable_cv` (the sim/main-thread sync park) so the two
+    /// wait styles never interfere; both are woken by the same writer, at the same site.
+    ///
+    /// [`wait_durable_through_async`]: Self::wait_durable_through_async
+    durable_notify: Arc<Notify>,
     /// `true` while the off-tick writer lives; `false` once it has EXITED. The handle has no `JoinHandle`,
     /// so this flag is its liveness signal for the fail-loud escape.
     writer_alive: Arc<AtomicBool>,
@@ -174,6 +182,47 @@ impl DurabilityHandle {
             !self.writer_alive.load(Ordering::Acquire)
         });
     }
+
+    /// R-6d3b F2: the ASYNC durable-before-send gate — awaits until every batch through `seq` is durable
+    /// WITHOUT parking a thread. The mesh `write_frame` block B `.await`s this on a tokio worker, which is
+    /// RELEASED at each `.await` — so N concurrent producer-less durable sends yield N workers rather than
+    /// parking N (the `worker_threads(2)` starvation the sync [`wait_durable_through`] would cause on the mesh
+    /// I/O pool). ADDITIVE: the sync variant stays THE persist-before-effect gate for the orchestrator's
+    /// MAIN-thread caller. Lost-wakeup-free: the `Notified` future is enrolled BEFORE the `last_durable`
+    /// re-read, and the writer `notify_waiters()` AFTER its `last_durable.store` (Release) — so a bump racing
+    /// between our enroll and await still wakes us. Fails LOUD (panic) if the writer dies before `seq`,
+    /// mirroring the sync park's liveness escape — a refusal is never a loss (recovery re-drives).
+    pub async fn wait_durable_through_async(&self, seq: u64) {
+        if self.last_durable.load(Ordering::Acquire) >= seq {
+            return; // fast path: already durable ⇒ no enroll, no await (the ~always case at 50Hz)
+        }
+        self.fsync_backpressure.fetch_add(1, Ordering::Relaxed); // same disk-stall back-pressure counter
+        loop {
+            // ENROLL before the re-read (lost-wakeup-free): a `notify_waiters()` after this point but before
+            // the `.await` still completes the captured `Notified`.
+            let notified = self.durable_notify.notified();
+            if self.last_durable.load(Ordering::Acquire) >= seq {
+                return;
+            }
+            match tokio::time::timeout(WRITER_WAIT_POLL, notified).await {
+                Ok(()) => {} // woken by the writer's bump (or its death) ⇒ the loop re-checks
+                Err(_elapsed) => {
+                    // Liveness backstop (mirrors `park_until_durable`): a writer that DIED can never bump
+                    // `last_durable`; fail LOUD rather than await forever. The death-wake (finding E) makes
+                    // this ~immediate, but the timeout is the guarantee even without it.
+                    if self.last_durable.load(Ordering::Acquire) < seq
+                        && !self.writer_alive.load(Ordering::Acquire)
+                    {
+                        panic!(
+                            "wait_durable_through_async: the durable writer thread died before seq {seq} — \
+                             refusing to hang the send (a refusal is never a loss; recovery re-drives)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// How many `commit()`s had to STALL on the previous fsync (the back-pressure counter — 0 on a healthy
     /// run; `> 0` means the disk could not keep up with the tick rate, the correct durability-over-liveness
     /// signal, mirroring the `TickPacer` overrun discipline).
@@ -193,6 +242,7 @@ impl DurabilityHandle {
             last_submitted: Arc::new(AtomicU64::new(u64::MAX)),
             fsync_backpressure: Arc::new(AtomicU64::new(0)),
             durable_cv: Arc::new((Mutex::new(()), Condvar::new())),
+            durable_notify: Arc::new(Notify::new()),
             writer_alive: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -316,6 +366,9 @@ fn park_until_durable(
 struct WriterExitSignal {
     writer_alive: Arc<AtomicBool>,
     durable_cv: Arc<(Mutex<()>, Condvar)>,
+    /// R-6d3b F2 (finding E): the async waiters' notify — woken on death too, so an async block-B waiter
+    /// fails loud PROMPTLY (not after a full `WRITER_WAIT_POLL`), symmetric with the sync condvar wake.
+    durable_notify: Arc<Notify>,
 }
 
 impl Drop for WriterExitSignal {
@@ -324,6 +377,9 @@ impl Drop for WriterExitSignal {
         let (lock, cv) = &*self.durable_cv;
         let _g = lock.lock().unwrap_or_else(PoisonError::into_inner);
         cv.notify_all();
+        // Wake async waiters on death too (finding E) — `notify_waiters()` needs no runtime handle, so it is
+        // sound from this std-thread Drop; the timeout backstop is the guarantee, this just makes it prompt.
+        self.durable_notify.notify_waiters();
     }
 }
 
@@ -351,16 +407,18 @@ fn run_writer(
     rx: Receiver<(u64, Batch)>,
     last_durable: Arc<AtomicU64>,
     durable_cv: Arc<(Mutex<()>, Condvar)>,
+    durable_notify: Arc<Notify>,
     writer_alive: Arc<AtomicBool>,
     #[cfg(feature = "store-test-hooks")] pause_prefix: Option<Vec<u8>>,
     #[cfg(feature = "store-test-hooks")] pause_marker: Option<PathBuf>,
 ) {
     // The guard publishes death on ANY exit below (incl. an unexpected panic-unwind), so the liveness
-    // escape can never miss it. Holds its own `durable_cv` clone; the loop keeps the original for the
-    // per-batch success notify.
+    // escape can never miss it. Holds its own `durable_cv`/`durable_notify` clones; the loop keeps the
+    // originals for the per-batch success notify.
     let _exit = WriterExitSignal {
         writer_alive,
         durable_cv: Arc::clone(&durable_cv),
+        durable_notify: Arc::clone(&durable_notify),
     };
     'drain: while let Ok((first_seq, first)) = rx.recv() {
         let mut max_seq = first_seq;
@@ -382,9 +440,12 @@ fn run_writer(
         loop {
             if apply_batch(&db, &merged) {
                 last_durable.store(max_seq, Ordering::Release);
+                // Wake BOTH wait styles, AFTER the Release store (lost-wakeup-free for both): the sync
+                // condvar (orchestrator/main-thread) and the async Notify (mesh block-B, R-6d3b F2).
                 let (lock, cv) = &*durable_cv;
                 let _g = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 cv.notify_all();
+                durable_notify.notify_waiters();
                 break;
             }
             attempt += 1;
@@ -428,11 +489,13 @@ impl RedbStore {
         let last_submitted = Arc::new(AtomicU64::new(0));
         let fsync_backpressure = Arc::new(AtomicU64::new(0));
         let durable_cv = Arc::new((Mutex::new(()), Condvar::new()));
+        let durable_notify = Arc::new(Notify::new());
         let writer_alive = Arc::new(AtomicBool::new(true));
         let writer = {
             let db = Arc::clone(&db);
             let last_durable = Arc::clone(&last_durable);
             let durable_cv = Arc::clone(&durable_cv);
+            let durable_notify = Arc::clone(&durable_notify);
             let writer_alive = Arc::clone(&writer_alive);
             #[cfg(feature = "store-test-hooks")]
             let pause_prefix = tuning.pause_on_key_prefix.clone();
@@ -446,6 +509,7 @@ impl RedbStore {
                         rx,
                         last_durable,
                         durable_cv,
+                        durable_notify,
                         writer_alive,
                         #[cfg(feature = "store-test-hooks")]
                         pause_prefix,
@@ -460,6 +524,7 @@ impl RedbStore {
             last_submitted: Arc::clone(&last_submitted),
             fsync_backpressure: Arc::clone(&fsync_backpressure),
             durable_cv: Arc::clone(&durable_cv),
+            durable_notify: Arc::clone(&durable_notify),
             writer_alive: Arc::clone(&writer_alive),
         };
         let store = RedbStore {
@@ -851,6 +916,45 @@ mod tests {
                 "the seq advanced monotonically"
             );
             assert_eq!(h.durable_through(), s.last_submitted());
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// R-6d3b F2: the async gate FAST-RETURNS when the target seq is already durable — no enroll, no await
+    /// (the ~always case at 50Hz). If it hung, the current-thread runtime's `block_on` would never complete.
+    #[test]
+    fn async_wait_fast_returns_when_already_durable() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            DurabilityHandle::already_durable()
+                .wait_durable_through_async(42)
+                .await;
+        });
+    }
+
+    /// R-6d3b F2: the async gate on a NOT-yet-durable seq enrolls + awaits the writer's `notify_waiters()`
+    /// (or fast-returns if the off-tick writer raced ahead) and returns ONLY once the row is fsynced — the
+    /// durable-before-send guarantee at the async seam. `submit_nonblocking` submits WITHOUT the sync
+    /// block-on-prior wait, so the await genuinely gates on the async writer.
+    #[test]
+    fn async_wait_returns_after_a_real_submit_is_fsynced() {
+        let path = temp_path();
+        {
+            let (mut s, h) = open(&path);
+            s.put(b"k", &b(b"v"));
+            let seq = s.submit_nonblocking().expect("a staged put ⇒ submitted");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("rt");
+            rt.block_on(async { h.wait_durable_through_async(seq).await });
+            assert!(
+                h.is_durable_through(seq),
+                "the async wait returns ONLY once the submitted seq is durable"
+            );
         }
         let _ = std::fs::remove_file(&path);
     }

@@ -1527,6 +1527,45 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      `scan_all` until block B waits) — R-6d4 (or R-6d3b). Gate after folds: vd-io-prod 103 lib/unit + all integration
      green, clippy io-prod (+await_holding_lock) + vd-bins -D clean, Tier-B PASS. (F6: store.rs region % is mostly
      pre-existing helper/monomorph surface + the new panic tripwires — not a regression; floor is on TOTAL.)**
+     **✅ R-6d3b DESIGN DONE (wf_ab97227a, verdict REVISE with all fixes folded; F2 async-wait SOUND_TO_IMPLEMENT).
+     Sub-sliced: R-6d3b-1 (io-prod, LANDED below) = the F2 async block-B wait; R-6d3b-2 = bin wiring + boot replay via
+     an io-prod-internal `NodeOutbox::replay_all` (folds finding A `pub(crate)` `OutboxKey`/`ReliableFrame` ⇒ the
+     replay MUST live in io-prod, not the bin; B `QueueFull` no-swallow + a pre-send peer-membership check; C resolve
+     the incarnation ONCE — re-calling `resolve_process_incarnation` double-increments the durable BootCounter; D
+     fence on the `last_submitted` high-water not a `scan_all` count; STRICT gc-after-all-durable, HIGH-3). F1 (the
+     deterministic `pause_release` ordering pin) + `two_peers_do_not_starve_workers` + the writer-death-wake test →
+     R-6d4 (store-test-hooks tier). R-6d3c (saga AwaitAdopt split + dest TransientDiscard) = the NEVER-restart closure
+     that actually retires D-6 #1.**
+     **✅ R-6d3b-1 LANDED (io-prod ONLY — the F2 fix, makes block B production-safe; inert in prod, bins still None):
+     the durable-before-send block-B wait is now ASYNC so a stalled producer-less durable send YIELDS its tokio worker
+     instead of parking it — closing the R-6d3a F2 gate (on `worker_threads(2)`, two peer-writers parked in a SYNC
+     durability park occupy BOTH workers + starve the mesh recv/ack/accept I/O). `DurabilityHandle` gains
+     `durable_notify: Arc<tokio::sync::Notify>` + a NEW `wait_durable_through_async(seq)` (fast-path ⇒ return; else
+     fetch_add backpressure then loop{ enroll `notified()` BEFORE the re-read (lost-wakeup-free) → recheck →
+     `timeout(WRITER_WAIT_POLL, notified).await` → on elapsed fail-loud iff writer dead }). The writer
+     `notify_waiters()` AFTER `last_durable.store(Release)` alongside `cv.notify_all()`; `WriterExitSignal::Drop` fires
+     it too (finding-E prompt death-wake). The SYNC `wait_durable_through` is BYTE-UNCHANGED — the orchestrator
+     persist-before-effect gate (orchestrator.rs:280, MAIN thread) is untouched; `durable_notify` is NOT a `RedbStore`
+     field (it never reads it — no dead code), only cloned into the writer + handle at `open`. mesh.rs block B:
+     `wait_durable_through_async(batch_seq).await` (the guard from block A still drops BEFORE it — the
+     `#![warn(clippy::await_holding_lock)]` lint now MECHANICALLY proves that). Tests: 2 store.rs async-wait unit tests
+     (fast-return-when-durable; returns-after-a-real-submit-fsynced) + T-DBS-1 runs the async block-B PATH end-to-end
+     over real QUIC. Gate: vd-io-prod 105 lib + all integration green, clippy -D (incl await_holding_lock) clean,
+     Tier-B `--fail-under-regions 90` PASS (TOTAL 94.09%, store.rs 90.43%↑), workspace build 0.
+     **✅ POST-IMPL REVIEW DONE (wf_75a225d0, 3 opus lenses + synth): verdict COMMIT_CLEAN — concurrency-fidelity +
+     no-regression lenses both CLEAN (enroll-`notified()`-BEFORE-recheck ⇒ lost-wakeup-free; writer stores(Release)
+     THEN notify_waiters; timeout backstop + writer-death panic bound liveness; cancel-safe at the sole `w.rx.recv()`
+     cancel point; SYNC `wait_durable_through` byte-unchanged ⇒ orchestrator untouched; `durable_notify` correctly NOT
+     a `RedbStore` field ⇒ no dead code; `await_holding_lock` mechanically proves the guard drops before block B). ONE
+     real finding, dispositioned FIX-IN-R-6d4 (NOT a commit blocker): the 2 async tests + T-DBS-1 are MUTATION-BLIND to
+     the async WAKE — a reviewer NEUTERED `notify_waiters()` and BOTH async tests still passed (they fell into the
+     100ms `WRITER_WAIT_POLL` re-read); T-DBS-1 pins the durable-before-send OUTCOME, which BOTH the sync and async
+     waits satisfy, so it does NOT distinguish the swap. A reliable wake-mechanism / non-serialization regression guard
+     needs the `store-test-hooks` writer-pause (a default-tier latency test would be racy) ⇒ OWED at R-6d4 alongside F1
+     (the deterministic ordering pin) + `two_peers_do_not_starve_workers` + the writer-death-wake test. The landed CODE
+     is concurrency-correct (the coverage gap is test-theater honestly deferred, not a defect); the async timeout/panic
+     arms ride the Tier-B floor like the sync sibling (F-2, R-6d4). NEXT = R-6d3b-2 (flip the sink live: open_node_outbox
+     → SharedOutbox → spawn_mesh in shard/gateway main + `NodeOutbox::replay_all`).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

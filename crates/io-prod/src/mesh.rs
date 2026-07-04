@@ -1751,13 +1751,21 @@ async fn write_frame(
                 return Err(WriteFail::Down);
             }
 
-            // R-6d3a BLOCK B — the durable-before-send BARRIER, OUTSIDE the lock, on the cloned handle: park
+            // R-6d3a BLOCK B — the durable-before-send BARRIER, OUTSIDE the lock, on the cloned handle: wait
             // until this batch's outbox row is fsynced, so the row is on disk BEFORE the wire send (block C).
             // A single wait on the store batch seq suffices — durability is monotone (the writer drains in seq
-            // order), MF-3. No-op for an Ephemeral / no-sink frame (`gate == None`) ⇒ the fast path is
-            // byte-identical. Synchronous condvar park (not an `.await`), so cancel-safety is preserved.
+            // order), MF-3. No-op for an Ephemeral / no-sink frame (`gate == None`) ⇒ byte-identical fast path.
+            //
+            // R-6d3b F2: the wait is ASYNC (`wait_durable_through_async`, not the sync park) so a stalled
+            // durable send YIELDS its tokio worker instead of occupying it — N concurrent durable sends cost 0
+            // parked workers, never starving the mesh recv/ack/accept I/O pool (worker_threads(2)). CANCEL-
+            // SAFETY: this adds an `.await` to `write_frame`, but `write_frame` is `.await`ed as the plain body
+            // of the `w.rx.recv()` select arm (never wrapped in timeout/select), so a task drop here cancels
+            // BEFORE the wire send with the frame retained + its row durable-or-becoming-durable but NOT sent —
+            // exactly crash-table row 4 (durable-not-sent ⇒ the retransmit / boot replay re-drives). No
+            // half-sent state; the cancel-safety invariant (sole cancel point = `w.rx.recv()`) is preserved.
             if let Some((batch_seq, durability)) = gate {
-                durability.wait_durable_through(batch_seq);
+                durability.wait_durable_through_async(batch_seq).await;
             }
 
             // Dial on demand through the ONE dial home (shared with the retransmit path's replay_lanes). A
