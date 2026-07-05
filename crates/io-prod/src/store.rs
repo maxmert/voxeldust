@@ -90,6 +90,22 @@ pub struct StoreTuning {
     /// so it can never publish the signal). Existence ⟺ sentinel batch submitted but not yet fsynced.
     #[cfg(feature = "store-test-hooks")]
     pub pause_marker_path: Option<PathBuf>,
+    /// TEST-ONLY (R-6d4-B4; feature `store-test-hooks`, ABSENT from release). When `Some(prefix)`, the writer
+    /// treats the fsync of the FIRST batch whose key-set contains a key starting with `prefix` as a PERMANENT
+    /// fault (`apply_batch` forced to fail) — so after `WRITER_FSYNC_MAX_RETRIES` it `break 'drain`s and DIES,
+    /// firing `WriterExitSignal`. Distinct from `pause_on_key_prefix` (which parks forever, hanging Drop's
+    /// join): this makes the writer EXIT deterministically, so a durability waiter enrolled on that seq takes
+    /// the R-6d4-M death short-circuit (proving the prompt fail-loud, not the timeout backstop).
+    #[cfg(feature = "store-test-hooks")]
+    pub fail_fsync_on_key_prefix: Option<Vec<u8>>,
+    /// TEST-ONLY (R-6d4-B4; feature `store-test-hooks`). Overrides [`WRITER_WAIT_POLL`] for the ASYNC
+    /// durability wait ([`DurabilityHandle::wait_durable_through_async`]) — set LARGE (e.g. 10s) so a
+    /// mutation that neuters the death `notify_waiters()` visibly HANGS to this timeout, while the live
+    /// death-wake short-circuit panics in ~ms: the gap is what makes the prompt-wake assertion mutation-
+    /// sensitive (the exact `wf_75a225d0` gap — a 100ms release poll is too tight to distinguish). `None` ⇒
+    /// the release const (prod is byte-identical).
+    #[cfg(feature = "store-test-hooks")]
+    pub wait_poll_override: Option<Duration>,
 }
 
 impl Default for StoreTuning {
@@ -100,6 +116,10 @@ impl Default for StoreTuning {
             pause_on_key_prefix: None,
             #[cfg(feature = "store-test-hooks")]
             pause_marker_path: None,
+            #[cfg(feature = "store-test-hooks")]
+            fail_fsync_on_key_prefix: None,
+            #[cfg(feature = "store-test-hooks")]
+            wait_poll_override: None,
         }
     }
 }
@@ -141,6 +161,10 @@ pub struct DurabilityHandle {
     /// `true` while the off-tick writer lives; `false` once it has EXITED. The handle has no `JoinHandle`,
     /// so this flag is its liveness signal for the fail-loud escape.
     writer_alive: Arc<AtomicBool>,
+    /// The ASYNC-wait poll backstop (`WRITER_WAIT_POLL` in release; a test may override it via
+    /// `StoreTuning::wait_poll_override` — R-6d4-B4's mutation-sensitivity seam). Read every
+    /// `wait_durable_through_async` iteration; keeps that method free of a `#[cfg]` on the const.
+    wait_poll: Duration,
 }
 
 impl DurabilityHandle {
@@ -209,7 +233,7 @@ impl DurabilityHandle {
             // death-wake fails loud IMMEDIATELY here (a durable bump returns at the loop top) — the old
             // `Ok(()) => {}` re-enrolled a FRESH `notified` that the already-fired death-notify would never
             // wake, so death cost a full `WRITER_WAIT_POLL`; the collapsed check makes it prompt.
-            let _ = tokio::time::timeout(WRITER_WAIT_POLL, notified).await;
+            let _ = tokio::time::timeout(self.wait_poll, notified).await;
             // A writer that DIED can never bump `last_durable`; fail LOUD rather than await forever (the
             // timeout is the guarantee even if the death-wake were lost; the death-wake makes it prompt).
             // A live-but-slow writer (disk stall, still `writer_alive`) simply re-loops under back-pressure.
@@ -242,6 +266,7 @@ impl DurabilityHandle {
             durable_cv: Arc::new((Mutex::new(()), Condvar::new())),
             durable_notify: Arc::new(Notify::new()),
             writer_alive: Arc::new(AtomicBool::new(true)),
+            wait_poll: WRITER_WAIT_POLL,
         }
     }
 }
@@ -413,6 +438,10 @@ fn maybe_pause_before_fsync(prefix: Option<&[u8]>, marker: Option<&Path>, merged
     }
 }
 
+// The writer owns the shared durability atomics/notifies + (under the feature) the three content-keyed test
+// hooks (pause / pause-marker / fsync-fault); grouping them into a struct would only move the arg list, so
+// the internal spawn fn is allowed its wide signature.
+#[allow(clippy::too_many_arguments)]
 fn run_writer(
     db: Arc<Database>,
     rx: Receiver<(u64, Batch)>,
@@ -422,6 +451,7 @@ fn run_writer(
     writer_alive: Arc<AtomicBool>,
     #[cfg(feature = "store-test-hooks")] pause_prefix: Option<Vec<u8>>,
     #[cfg(feature = "store-test-hooks")] pause_marker: Option<PathBuf>,
+    #[cfg(feature = "store-test-hooks")] fail_prefix: Option<Vec<u8>>,
 ) {
     // The guard publishes death on ANY exit below (incl. an unexpected panic-unwind), so the liveness
     // escape can never miss it. Holds its own `durable_cv`/`durable_notify` clones; the loop keeps the
@@ -447,9 +477,19 @@ fn run_writer(
         // Retry the fsync (the writer still HOLDS `merged`, so a TRANSIENT disk blip recovers losing
         // nothing); a PERMANENT fault EXITS the writer so the persist-before-effect gate fails LOUD (the
         // liveness escape in `park_until_durable` panics rather than hang the orchestrator).
+        // R-6d4-B4: a content-keyed PERMANENT fsync fault — the merged batch carrying `fail_prefix` is
+        // treated as unwritable so the writer exhausts its retries + `break 'drain`s (DIES) deterministically,
+        // exercising the death path (vs `pause_prefix`, which parks forever + hangs Drop's join). Computed
+        // ONCE per batch outside the retry loop (the fault is permanent for this batch).
+        #[cfg(feature = "store-test-hooks")]
+        let forced_fault = fail_prefix
+            .as_deref()
+            .is_some_and(|p| merged.keys().any(|k| k.starts_with(p)));
+        #[cfg(not(feature = "store-test-hooks"))]
+        let forced_fault = false;
         let mut attempt = 0u32;
         loop {
-            if apply_batch(&db, &merged) {
+            if !forced_fault && apply_batch(&db, &merged) {
                 last_durable.store(max_seq, Ordering::Release);
                 // Wake BOTH wait styles, AFTER the Release store (lost-wakeup-free for both): the sync
                 // condvar (orchestrator/main-thread) and the async Notify (mesh block-B, R-6d3b F2).
@@ -512,6 +552,8 @@ impl RedbStore {
             let pause_prefix = tuning.pause_on_key_prefix.clone();
             #[cfg(feature = "store-test-hooks")]
             let pause_marker = tuning.pause_marker_path.clone();
+            #[cfg(feature = "store-test-hooks")]
+            let fail_prefix = tuning.fail_fsync_on_key_prefix.clone();
             std::thread::Builder::new()
                 .name("vd-store-writer".into())
                 .spawn(move || {
@@ -526,6 +568,8 @@ impl RedbStore {
                         pause_prefix,
                         #[cfg(feature = "store-test-hooks")]
                         pause_marker,
+                        #[cfg(feature = "store-test-hooks")]
+                        fail_prefix,
                     )
                 })
                 .map_err(|e| StoreError::Spawn(e.to_string()))?
@@ -537,6 +581,12 @@ impl RedbStore {
             durable_cv: Arc::clone(&durable_cv),
             durable_notify: Arc::clone(&durable_notify),
             writer_alive: Arc::clone(&writer_alive),
+            // R-6d4-B4: honor the test override (LARGE) so the async death-wake mutation gap is robust;
+            // release has no override field ⇒ the const, byte-identical.
+            #[cfg(feature = "store-test-hooks")]
+            wait_poll: tuning.wait_poll_override.unwrap_or(WRITER_WAIT_POLL),
+            #[cfg(not(feature = "store-test-hooks"))]
+            wait_poll: WRITER_WAIT_POLL,
         };
         let store = RedbStore {
             db,
@@ -970,6 +1020,71 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// R-6d4-B4 (the /goal-audit BINDING GATE on R-6d4-M): a durable writer that DIES (permanent fsync
+    /// fault) wakes an enrolled ASYNC durability waiter via `notify_waiters()`, and the R-6d4-M death
+    /// short-circuit panics it PROMPTLY — not after the `WRITER_WAIT_POLL` backstop. MUTATION-SENSITIVITY:
+    /// `wait_poll_override` is set LARGE (10s), so a neutered death `notify_waiters()` (or a lost R-6d4-M
+    /// short-circuit) would HANG the await to that 10s timeout — far past the <2s assert ⇒ RED. This is the
+    /// exact `wf_75a225d0` gap (a 100ms release poll was too tight to distinguish wake-vs-timeout). The
+    /// content-keyed fsync fault kills the writer DETERMINISTICALLY (vs `pause_on_key_prefix`, which parks
+    /// forever + hangs Drop's join). Flips M's death branch from region-floor-tolerated to PROVEN.
+    #[cfg(feature = "store-test-hooks")]
+    #[test]
+    fn async_wait_wakes_and_fails_loud_promptly_on_writer_death() {
+        let path = temp_path();
+        let prefix = b"\x09DIE".to_vec();
+        let tuning = StoreTuning {
+            fail_fsync_on_key_prefix: Some(prefix.clone()),
+            wait_poll_override: Some(Duration::from_secs(10)), // >> the prompt death-wake ⇒ mutation gap
+            ..StoreTuning::default()
+        };
+        let (mut s, h) = RedbStore::open(&path, tuning).expect("open with the fault + poll-override hooks");
+
+        // Stage a row whose key carries the fault prefix + submit (no sync wait): the writer receives this
+        // batch, force-fails its fsync WRITER_FSYNC_MAX_RETRIES times (~30ms), then `break 'drain`s + DIES.
+        let mut key = prefix.clone();
+        key.extend_from_slice(b"-row");
+        s.put(&key, &b(b"v"));
+        let seq = s.submit_nonblocking().expect("a staged put ⇒ submitted");
+
+        let h_check = h.clone(); // the task consumes `h`; keep a clone for the post-death durability assert
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rt");
+        let start = std::time::Instant::now();
+        let joined = rt.block_on(async move {
+            // The enrolled await wakes on the writer's death `notify_waiters` ⇒ the R-6d4-M short-circuit
+            // PANICS it; the spawned task surfaces that panic as a JoinError (never returns Ok).
+            tokio::spawn(async move { h.wait_durable_through_async(seq).await }).await
+        });
+        let elapsed = start.elapsed();
+
+        let join_err = joined.expect_err("the death short-circuit panics the await (never returns Ok)");
+        assert!(join_err.is_panic(), "the task PANICKED on writer death (not cancelled)");
+        let panic = join_err.into_panic();
+        let msg = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            msg.contains("died before seq"),
+            "the fail-loud death message (not a timeout hang): {msg:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the death WAKE panics PROMPTLY ({elapsed:?}) — far under the injected 10s poll; a neutered \
+             notify_waiters / lost short-circuit would hang to ~10s, so this asserts the WAKE mechanism"
+        );
+        // The writer DIED forcing the fault ⇒ the batch was never fsynced: a refusal, never a durable lie.
+        assert!(!h_check.is_durable_through(seq), "the faulted batch was never made durable");
+        // The writer already EXITED (break 'drain), so Drop's join returns immediately — no hang, no forget.
+        drop(s);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn drop_joins_the_writer_and_flushes_pending() {
         // Graceful shutdown loses nothing: commit WITHOUT flush_blocking, then drop — Drop drops the
@@ -1092,9 +1207,9 @@ mod tests {
         let marker = path.with_extension("paused");
         let _ = std::fs::remove_file(&marker);
         let tuning = StoreTuning {
-            writer_channel_depth: 2,
             pause_on_key_prefix: Some(b"\x09SENT".to_vec()),
             pause_marker_path: Some(marker.clone()),
+            ..StoreTuning::default()
         };
         let (mut s, h) = RedbStore::open(&path, tuning).expect("open with pause hook");
 

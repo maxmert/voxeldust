@@ -203,6 +203,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pause_on_key_prefix: sentinel.as_ref().map(|(_, prefix, _)| prefix.clone()),
         #[cfg(feature = "store-test-hooks")]
         pause_marker_path: sentinel.as_ref().map(|(_, _, marker)| marker.clone()),
+        // R-6d4-B4's fault / poll-override hooks are unit-test-only ⇒ never set by the orchestrator bin.
+        #[cfg(feature = "store-test-hooks")]
+        fail_fsync_on_key_prefix: None,
+        #[cfg(feature = "store-test-hooks")]
+        wait_poll_override: None,
     };
     let (store, durability) = RedbStore::open(&store_path, store_tuning)?;
     // The Store is now durable. REMAINING transport production precondition (DEFERRED.md D-6): the

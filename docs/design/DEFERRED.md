@@ -1802,6 +1802,40 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      `Display`/`std::error::Error` impls for all 3 variants. Gate: vd-io-prod 116 lib green, clippy -D clean,
      coverage-io-prod Tier-B floor PASS (region 94.41% ≥ 90). NEXT: R-6d4-A (proptest) → B1-B4 (pins, need the
      OutboxKey-prefix + WRITER_WAIT_POLL-override + fsync-fault seams) → D (process-tier) → F2 (tripwire).**
+     **✅ HOLISTIC /goal AUDIT DONE post-R-6d4-M+C (wf_ddc01e94, HEAD 336c914; 3 read-only Explore+opus lenses + synth):
+     VERDICT DONE_NO_CRITICAL — zero criticals. M is PRODUCTION-CORRECT (verified end-to-end incl. the pinned tokio
+     `Notify` source: `notified()` captures the counter at creation so a bump racing enroll→await is never lost; the
+     death panic requires BOTH `last_durable < seq` AND `!writer_alive` so a live-slow writer never false-aborts; the
+     writer stores `writer_alive=false` Release THEN `notify_waiters()` ⇒ prompt real death). R-6d investment PROPORTIONATE
+     (protects EXACTLY the 2 producer-less arms {Ghost::Despawn, TransientBatch}; Delta=Unreliable, all saga/dir=ReDriven
+     are OFF the durable path; ~1 fsync/batch — critical-path traffic, not gold-plating). No drift, no scale-regression,
+     HR1/HR2/HR3 hold (shard-kind grep empty), ReplayLimits REFUTED as premature-abstraction (release()==the consts,
+     prod byte-identical). Findings (all LOW/NIT): (1) **BINDING GATE** — M's death branches (store.rs writer_died_panic
+     + the two death-checks) ride the region-only Tier-B floor (`coverage-io-prod` gates `--fail-under-regions 90` with
+     NO `--branch`), NOT a real fail-loud test; **R-6d4-B4 MUST land a REAL covered `#[should_panic]` writer-kill test
+     flipping them from floor-tolerated to PROVEN before R-6d4 is called done** (safe to ship M ahead of B4: strict fail-
+     loud superset + timeout backstop retained). (2) H2 RecvLedger inner-lock across push_inbox → LEDGER-ONLY, measure at
+     P3/P6 D-9 dense-crowd fixture. (3) D-9 whole-realm snapshot broadcast → LEDGER-ONLY, verified-additive, the
+     mandatory N-in-one-realm per-client-bytes floor stays a hard gate before any dense-PvP soak. (4) NIT F3 outbox
+     retained-row gauge → M4-era. (5) NIT the outbox.rs replay-seed `MockOutboxSink` name-collides with the mesh.rs
+     recording mock → optional cosmetic rename to `OverflowSeedSink` when R-6d4-B next touches outbox.rs (no action req).**
+     **✅ R-6d4-B4 LANDED — the /goal-audit BINDING GATE on M is SATISFIED (M's death branches are now PROVEN, not
+     region-floor-tolerated). `store.rs` gains TWO store-test-hooks seams: `fail_fsync_on_key_prefix` (a content-keyed
+     PERMANENT fsync fault — the writer force-fails the marked batch's fsync, exhausts `WRITER_FSYNC_MAX_RETRIES`, then
+     `break 'drain`s + DIES deterministically, vs `pause_on_key_prefix` which parks forever + hangs Drop's join) +
+     `wait_poll_override` (overrides `WRITER_WAIT_POLL` for the async wait; `DurabilityHandle` gains an always-present
+     `wait_poll` field, release=const so prod is byte-identical). Test `async_wait_wakes_and_fails_loud_promptly_on_
+     writer_death`: enrolls an async `wait_durable_through_async(seq)`, kills the writer via the fault, asserts the task
+     PANICS via the R-6d4-M death short-circuit with the "died before seq" message + PROMPTLY (elapsed < 2s) while
+     `wait_poll_override` is 10s — so a neutered death `notify_waiters()` / a lost R-6d4-M short-circuit would hang to
+     ~10s ⇒ RED (the exact wf_75a225d0 mutation the old 100ms-poll tests could not catch). `run_writer` gained an
+     `#[allow(clippy::too_many_arguments)]` (9 args under the feature); the orchestrator bin's `StoreTuning` literal
+     lists the 2 new fields (None). Gate: vd-io-prod 116 lib (no feature) + 118 (store-test-hooks incl. B4) green,
+     clippy -D clean BOTH configs, coverage-io-prod Tier-B floor PASS (region 94.43% ≥ 90), workspace + vd-bins(feature)
+     build 0. FORMAL coverage-INSTRUMENTATION of the death branches (a coverage pass WITH store-test-hooks) rides with
+     R-6d4-B1/B2 (which also need the feature-coverage). NEXT R-6d4: B3 (two-peers-no-starve) → B1/B2 (ordering +
+     no-premature-gc, pause-hook pins) → A (both-ends-restart proptest — needs a controllable-DurabilityHandle fence
+     seam, its own focused model design) → D (process-tier) → F2 (tripwire).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
