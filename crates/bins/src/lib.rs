@@ -724,6 +724,12 @@ impl Cluster {
     /// its bind port frees for an immediate restart). Panics if no such child is present. For CrashLoop /
     /// restart process tests: the child stays RAII-reaped by the `Cluster` until this is called, so a panic
     /// between spawn and kill never leaks it (unlike a bare `Child`, which does not kill on drop).
+    /// SIGKILL the named child and REAP it (block on `wait()`) before returning. The `wait()` reap is
+    /// LOAD-BEARING for the immediate same-address restart pattern (e.g. `outbox_sigkill_restart`): it releases
+    /// the kernel's hold on the bound UDP port + the redb lock synchronously, so the boot-2 process can rebind
+    /// the SAME `reserve_udp_addr()` without a bind race. Dropping the `wait()` (or a future `into_pids`-style
+    /// disarm here) would make same-addr restart tests non-deterministically flaky. Reaps the LAST child of the
+    /// given name (rposition) so a restart re-`push`ed under the same name kills the right generation.
     pub fn kill_and_reap(&mut self, name: &'static str) {
         let idx = self
             .children
@@ -732,7 +738,7 @@ impl Cluster {
             .unwrap_or_else(|| panic!("Cluster has no child named {name} to kill"));
         let (_, mut child) = self.children.remove(idx);
         let _ = child.kill(); // SIGKILL on Unix
-        let _ = child.wait(); // reap (release the port + the zombie)
+        let _ = child.wait(); // reap (release the port + the redb lock + the zombie) — load-bearing, see doc
     }
 
     /// Disarm: hand back the PIDs and forget the children WITHOUT killing them

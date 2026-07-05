@@ -1967,6 +1967,34 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      SIGKILL loses the final counter flush (why io-prod is a ratcheted floor, never 100%). CA-1 boundary honest: the
      SIGKILL-source-in-AwaitAdopt real-QUIC e2e stays OUT (AwaitAdopt egress empty ⇒ needs CA-1+M3, ledgered).
      REMAINING R-6d4: F2 (the inert CA-1 tripwire at the saga AwaitAdopt discard site) closes the reachable-now arc.**
+     **✅ HOLISTIC /goal AUDIT DONE post-R-6d4-D (wf_607da1cf, HEAD 2ec392e; 5 read-only Explore+opus survey lenses →
+     adversarial refute-each-finding → opus adjudication): VERDICT DONE_NO_CRITICAL — 0 critical, 0 high. drift_check =
+     PROPORTIONATE, NO DRIFT (R-6d4-D closes the RESTART half of D-6 #1 — a lost reliable one-shot is the mechanism
+     behind a phantom cross-boundary collider from a lost GhostFlow::Despawn, so it is core transport-robustness, not
+     peripheral; correctly bounded both ends — does not overreach past the CA-1+M3 line, does not under-prove). 2 of 11
+     survived findings were DISMISSED on verification (the seed epoch-divergence "bug" is a FALSE POSITIVE — mesh.rs
+     retains the epoch=u32::MAX bytes byte-identical to frame_reliable; the exactly-once happens-before concern is
+     structural since incarnation is a required data-dependency of the send path). The other 9 are all LOW/NIT. FOLDED
+     this pass (doc/comment/test-only, no prod-logic change): [F6] kill_and_reap now documents the load-bearing wait()
+     reap (same-addr restart determinism); [F9] vd-outbox-testnode hoists the tokio runtime + trust into the boot-2 arm
+     so "boot-1 builds no mesh" is STRUCTURALLY true; [F5] the orch-crash-cov comment now covers ALL SIGKILL-only
+     children (incl. the two outbox_sigkill_restart boots), not just the orchestrator. LEDGERED-FORWARD (bigger, honest
+     deferrals): [F3, the audit's TOP follow-up] D-40 — fold the process-tier %c merge into an ENFORCED
+     `cargo llvm-cov report --fail-under-regions <floor>` over the merged %p-%m%c profraws (scoped to the spawned bin
+     paths incl. vd-outbox-testnode) and wire into `coverage`/`gate`; until then the mirrored io-prod unit tests are the
+     enforced floor (the SIGKILL-restart coverage rests on the ledger + those mirrors, not yet a gate). [F1] the
+     per-node-PVC-vs-orchestrator-issued incarnation choice stays a JOINT-INVESTIGATION user-decision (VD_PROCESS_INCARNATION
+     precedence makes it a zero-rework supersede). [F7] the anti-theater twin's 5s empty-B settle could become a
+     deterministic replayed==0 marker (surface ReplayCounts from boot_mesh_and_replay) — optional hardening, non-vacuous
+     as-is (the counter-by-1 assert blocks a fully vacuous green; the 5s clock starts only AFTER replay fast-returns on
+     the empty outbox). CA-1 SCOPING NOTE for when it lands [F2+F4]: the CA-1 slice must cover BOTH halves — (i) inbound
+     reply-on-connection AND (ii) the outbound addr re-plumb (L5: peer_writer must re-read the peer addr from an
+     updatable topology source on each redial, not a spawn-time cfg.peers copy), with an acceptance criterion that a peer
+     rescheduled to a new IP is redelivered-to, not confirm-dead-bounced; and cross-link the OUTBOX_WRITER_CHANNEL_DEPTH=256
+     fail-loud fan-out ceiling (F-F) to the hundreds-of-shards sizing note (additive escape hatch: raise the const /
+     per-peer outbox stores — do NOT raise speculatively; 256 is generously above the static-roster tier). WON'T-FIX
+     [F8]: the two same-named MockOutboxSink test mocks (outbox.rs vs mesh.rs) are distinct private test modules with zero
+     compile ambiguity — closed as harmless, no rename churn (retires the perpetual "opportunistic rename" ledger nit).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

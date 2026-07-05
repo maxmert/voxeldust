@@ -105,10 +105,13 @@ mesh-load:
     VD_MESH_LOAD_NODES=64 cargo test -p vd-io-prod --test mesh_load -- --nocapture --test-threads=1
     cargo test -p vd-io-prod --test mesh_under_loss -- --nocapture
 
-# The Tier-B (ratcheted-floor) coverage variant: the SIGKILLed orchestrator child's counters survive ONLY
-# in %c CONTINUOUS mode (the mmapped profraw is updated in place; no atexit flush after a SIGKILL). %p-%m
-# keep the two orchestrator boots (+ shard) distinct; the child INHERITS LLVM_PROFILE_FILE from this test
-# process (spawn_node forwards the parent env). Fold into the process-tier `coverage` merge (P3) when it lands.
+# The Tier-B (ratcheted-floor) coverage variant: EVERY child process spawned under these recipes exits ONLY
+# by SIGKILL, so its counters survive ONLY in %c CONTINUOUS mode (the mmapped profraw is updated in place; no
+# atexit flush after a SIGKILL). This covers all three tests' children: the orchestrator_crash boots (+ shard),
+# and the outbox_sigkill_restart node (boot-1 SIGKILLed by `kill_and_reap` while parked at the seed marker;
+# boot-2 park-forever, SIGKILLed only by `Cluster::drop` at teardown). %p-%m keep the distinct boots separate;
+# each child INHERITS LLVM_PROFILE_FILE from this test process (spawn_node forwards the parent env). D-40 owes
+# the enforced `--fail-under` floor over the merged %p-%m%c profraws (this recipe only ACCUMULATES today).
 orch-crash-cov:
     #!/usr/bin/env bash
     set -euo pipefail

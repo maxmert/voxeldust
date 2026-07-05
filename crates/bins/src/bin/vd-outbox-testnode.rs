@@ -16,17 +16,12 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use vd_core::NodeId;
     use vd_io_prod::outbox::OutboxSink;
-    use vd_sim::io::MsgClass;
     use vd_io_prod::runtime::EnvConfig;
     use vd_io_prod::trust::ClusterTrust;
+    use vd_sim::io::MsgClass;
 
     tracing_subscriber::fmt().with_env_filter("info").init();
     let env = EnvConfig::from_process_env();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()?;
-    let trust = ClusterTrust::from_der_dir(std::path::Path::new(&env.string("VD_TRUST_DIR")?))?;
 
     match env.string("VD_OUTBOX_TEST_SEED") {
         // BOOT 1: seed a durable-unacked row, then idle for the SIGKILL.
@@ -52,8 +47,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::park();
             }
         }
-        // BOOT 2: replay the retained row across the restart + keep the mesh alive to deliver it.
+        // BOOT 2: replay the retained row across the restart + keep the mesh alive to deliver it. The tokio
+        // runtime + trust are built ONLY here (where boot_mesh_and_replay consumes them), so "boot 1 builds no
+        // mesh" is structurally true — the seed path above never constructs a runtime it does not use.
         _ => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            let trust = ClusterTrust::from_der_dir(std::path::Path::new(&env.string("VD_TRUST_DIR")?))?;
             let (_transport, _control) =
                 vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
             // The "boot done" signal (mesh up, incarnation minted, retained rows re-driven) — the
