@@ -1857,6 +1857,27 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      90). REMAINING R-6d4: A (both-ends-restart proptest — reuses `controllable()` for its fence seam, own focused model
      design) → D (process-tier SIGKILL-restart + boot-counter-by-1) → F2 (inert CA-1 tripwire); the mesh-block-B-uses-
      async coupling guard (B3's "should") is minor-OWED (the `await_holding_lock` lint + T-DBS-1 already cover it).**
+     **📐 R-6d4-A DESIGN DONE (wf_ec22b736, 1 designer + 3 adversarial opus lenses + adjudication, read-only Explore;
+     3× REVISE → 12 folded must-fixes → SOUND_TO_IMPLEMENT; full DOR scripts/r6d4a_vetted_design.md). The both-ends-
+     restart replay PROPTEST — drives the REAL `replay_outbox` through arbitrary crash/restart/redeliver interleavings
+     and cross-checks disk state against a HAND-MAINTAINED `Ref` computed from an INDEPENDENT source (the anti-vacuity
+     core — an agreement assert is load-bearing). Pieces: a `ModelOutboxSink` (committed/staged two-set = the RAM/disk
+     crash boundary, mirrors NodeOutbox+RedbStore), a `DedupLedger` backed by the REAL `classify_reliable` receiver
+     ladder (exposed `#[cfg(test)] pub(crate)` in mesh.rs — so an incarnation-reset mutation turns it RED, not a
+     hand-rolled dedup), a `CaptureTransport` (bumps the `controllable()` submitted+durable atomics per send = block A+B
+     synchronously; `fail_after`/`lane_alive` drive the LaneStuck/LaneDead arms via `replay_outbox_with_limits(fast)`).
+     4 invariants each argued NON-vacuous + NON-falsely-red: INV-1 no-loss (`sink.committed==Ref.committed` + independent
+     `scan_all` decode; staged-lost-to-crash is CORRECT loss), INV-2 no-orphan (`gc_swept ⊆ expected_deliveries`, ∩
+     committed = ∅), INV-3 exactly-once (SPLIT: source-idempotence [2nd BootReplay ⇒ replayed==0] + receiver-exactly-once
+     [real classify_reliable]), INV-4 accounting (`replayed+quarantined==scanned`). Anti-vacuity: a 4-flag in-strategy
+     coverage floor (crash-with-staged / redrive-after-crash / redeliver-of-delivered / quarantine) asserted after the
+     run + 3 hand-written witnesses + a crash-mid-replay regression (fail_after ⇒ LaneStuck ⇒ ?-bail ⇒ no partial sweep,
+     then fresh replay ⇒ dedup to one effect) + a differential-vs-real-redb witness. ChaCha-seeded `TestRunner`
+     ([0x6d;32], 1024 cases, 0..=48 ops) ⇒ byte-reproducible. PREREQ edits: `OutboxKey` derive +PartialOrd/Ord/Hash;
+     mesh receiver ladder `#[cfg(test)] pub(crate)`; `proptest` io-prod dev-dep. Plain `#[test]` (rides `controllable()`)
+     ⇒ runs in the default coverage-io-prod gate. SCOPE: A proves cross-crash exactly-once + no-loss/no-orphan
+     accounting; B2 still owns the block-B no-premature-gc PARK (both survive, non-overlapping). IMPLEMENT NEXT
+     (checkpointed after the vetted design — a large fresh unit, not rushed at the tail of a marathon session).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
