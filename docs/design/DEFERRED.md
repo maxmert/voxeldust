@@ -1995,6 +1995,32 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      per-peer outbox stores — do NOT raise speculatively; 256 is generously above the static-roster tier). WON'T-FIX
      [F8]: the two same-named MockOutboxSink test mocks (outbox.rs vs mesh.rs) are distinct private test modules with zero
      compile ambiguity — closed as harmless, no rename churn (retires the perpetual "opportunistic rename" ledger nit).**
+     **✅ R-6d4-F2 LANDED (the INERT CA-1 tripwire — closes the R-6d4 reachable-now arc). Design wf_fc8c02b4
+     (1 designer + 3 adversarial opus lenses + adjudicator, read-only Explore): the designer's proposed numeric
+     `SagaTuning::validate_against_transport` boot-time cross-config validator was REJECTED by all 3 lenses + the
+     adjudicator on TWO critical grounds — (i) WRONG CLOCK / LANE CONFLATION: the over-discard risk is a live dest's
+     `BatchAdopted` ack lost on the DEST→ORCHESTRATOR TransferAck lane (redelivered on THAT lane's own backoff clock),
+     but the designer's bound was derived from the dead-SOURCE confirm-redial series — the wrong clock (cf. the R-4c
+     author's note ~saga.rs:289 declining a similar cross-check because a live-slow peer emits ZERO transport bounces);
+     the dest-lane bound is genuinely ILL-DEFINED until the CA-1 re-solicit cadence exists; and (ii) the numeric guard
+     would FAIL at the prod default (abort=24 < the corrected bound) — a real inertness violation — and contradicts the
+     prior adjudicated disposition (r6d4_vetted_design.md item 4) that deferred it. FOLDED to the correct shape: an
+     INERT DOCUMENTED TRIPWIRE — a doc marker at BOTH discard sites (the FSM arm `(BatchHandoff{AwaitAdopt},
+     SourceUnreachablePreAdopt)` in saga.rs, and its producer `rehome_event_for`'s `AwaitAdopt→SourceUnreachablePreAdopt`
+     mapping in saga_runtime.rs — the exact two places the CA-1 author must edit to wire the re-solicit egress, so the
+     marker is unmissable in that diff) carrying the CORRECTLY-stated invariant: once CA-1/L5 makes
+     `is_confirmed_dead(source)` reachable, this discard does NOT check dest-adopted, so a live dest whose ack was lost
+     would be over-discarded ⇒ BEFORE wiring the egress you MUST either (a) check dest-adopted, OR (b) gate
+     `abort_deadline_ticks >= the DEST-LANE max reliable-ack redelivery bound` (guard at orchestrator boot beside
+     `LivenessTuning::validate_against`). Coverage: doc-comments ONLY ⇒ ZERO new Tier-A regions/branches ⇒ HR5 100% by
+     construction, no new tests, no debug_assert panic-arm trap (the review's key HR5 point: a bare `debug_assert` on a
+     runtime value is an uncoverable branch; a doc marker + the const `_: () = assert!` idiom are the coverage-clean
+     tools — the const marker was skipped as a near-tautology, DEFAULT_ABORT>=DEFAULT_REDRIVE already enforced by
+     `SagaTuning::validate`). Inert-today: both FSM/producer bodies are byte-identical; no runtime path changes. THE
+     NUMERIC GUARD (dest-adopted check OR the dest-lane `abort_deadline >= ack-redelivery-bound` boot invariant) STAYS
+     OWED/CA-1-gated — it lands WITH the CA-1 re-solicit egress, against the CORRECT dest-lane clock, with its own tests.
+     This CLOSES the reachable-now R-6d4 arc (M+C+B+A+D+F2). NEXT: CA-1 (no-DNS peer addressing) — the last cloud
+     precondition, which will also carry the L5 outbound addr re-plumb + this F2 numeric guard.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

@@ -1344,6 +1344,15 @@ fn rehome_event_for(
                 {
                     *dead_observed_since = None;
                     match phase {
+                        // ⚠️ R-6d4-F2 CA-1 TRIPWIRE (paired with the FSM-arm marker at saga.rs, the
+                        // (BatchHandoff{AwaitAdopt}, SourceUnreachablePreAdopt) arm). This is the PRODUCER
+                        // whose `abort_deadline_ticks` budget gate (above) a future numeric guard must
+                        // dominate: once the CA-1/L5 re-solicit egress makes `is_confirmed_dead(source)`
+                        // reachable toward a silent source, this fires the DESTRUCTIVE over-discard without
+                        // checking dest-adopted — so a live dest whose `BatchAdopted` ack was lost (on the
+                        // dest→orch lane's OWN backoff clock, NOT this source-redial series) would be
+                        // over-discarded. Before wiring that egress: check dest-adopted here, OR gate
+                        // `abort_deadline_ticks >= dest-lane ack-redelivery bound` at boot. OWED (DEFERRED.md).
                         BatchHandoffPhase::AwaitAdopt => SagaEvent::SourceUnreachablePreAdopt,
                         _ => SagaEvent::SourceUnreachable,
                     }

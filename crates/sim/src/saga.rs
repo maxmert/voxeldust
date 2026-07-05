@@ -951,6 +951,20 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         // via its durable outbox replay first — the budget-gate in `rehome_event_for`). Reachability of
         // the confirm-dead trigger toward a silent source is CA-1/L5-gated (DEFERRED.md); this arm is the
         // reachable-NOW correctness (a direct-inject test drives it without the trigger).
+        //
+        // ⚠️ R-6d4-F2 CA-1 TRIPWIRE (paired with the marker in `rehome_event_for`, saga_runtime.rs). This
+        // discard keys PURELY on `is_confirmed_dead(source) + budget + phase==AwaitAdopt`; it does NOT check
+        // whether the dest actually adopted. Today that is safe because the confirm-dead trigger toward a
+        // SILENT source is unreachable (empty AwaitAdopt orch→source egress). When the CA-1/L5 re-solicit
+        // egress lands and makes it reachable, a LIVE dest that DID adopt but whose `BatchAdopted` ack was
+        // lost/in-flight is still in `AwaitAdopt` and would be OVER-DISCARDED. That ack rides the
+        // dest→orchestrator TransferAck lane, redelivered on THAT lane's own backoff clock — NOT the
+        // source-redial series that drives `is_confirmed_dead(source)`, so the bound is ILL-DEFINED until the
+        // re-solicit cadence exists (see the R-4c author's note ~saga.rs:289 declining a cross-check because
+        // a live-slow peer emits ZERO transport bounces). BEFORE wiring that egress you MUST either (a) check
+        // dest-adopted before firing `SourceUnreachablePreAdopt`, OR (b) gate `abort_deadline_ticks >= the
+        // dest-lane max reliable-ack redelivery bound` (guard placed at orchestrator boot beside
+        // `LivenessTuning::validate_against`). The numeric guard stays OWED/CA-1-gated (DEFERRED.md).
         (
             S::BatchHandoff {
                 phase: P::AwaitAdopt,
