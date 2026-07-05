@@ -43,6 +43,13 @@ path = "src/bin/client.rs"
 name = "vdctl"
 path = "src/bin/vdctl.rs"
 
+# R-6d4-D: the process-tier SIGKILL-restart proof harness. A PLAIN [[bin]] (NOT required-features) so
+# `CARGO_BIN_EXE_vd-outbox-testnode` is always defined for the `outbox_sigkill_restart` test; its `main` body
+# is `#[cfg(feature = "store-test-hooks")]` (a release build compiles only the exit-2 stub — no test surface).
+[[bin]]
+name = "vd-outbox-testnode"
+path = "src/bin/vd-outbox-testnode.rs"
+
 [features]
 # The localhost dev-control listener (HR6). NON-default and cfg-gated, so a release
 # `cargo build -p vd-bins` contains NO listener code at all — absence is a compile

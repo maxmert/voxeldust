@@ -202,6 +202,16 @@ impl BootCounter {
         Ok(next)
     }
 
+    /// TEST-ONLY (R-6d4-D; feature `store-test-hooks`, ABSENT from release): read the CURRENT persisted counter
+    /// WITHOUT incrementing — so the process-tier SIGKILL-restart proof reads v1 before the kill + v2 after the
+    /// restart and asserts `v2 == v1 + 1` (the incarnation resolved EXACTLY once). A thin wrapper over the
+    /// private [`read`](Self::read) so the MAGIC + checksum validation stays in ONE place (never a raw byte read
+    /// at the call site). `Ok(None)` = absent, `Ok(Some(n))` = valid, `Err` = present-but-corrupt.
+    #[cfg(any(test, feature = "store-test-hooks"))]
+    pub fn current(path: &Path) -> Result<Option<u64>, BootCounterError> {
+        Self::read(path)
+    }
+
     /// Read + validate the current counter. `Ok(None)` = absent (genesis); `Ok(Some(n))` = valid; `Err` =
     /// present-but-corrupt (fail loud, never treated as genesis).
     fn read(path: &Path) -> Result<Option<u64>, BootCounterError> {
@@ -447,6 +457,19 @@ mod tests {
             BootCounter::increment_on_boot(&path, 1),
             Err(BootCounterError::Overflow { .. })
         ));
+    }
+
+    #[test]
+    fn current_reads_the_counter_without_incrementing() {
+        // R-6d4-D: `current` is the read-only peek the SIGKILL-restart proof uses (v1 before the kill, v2
+        // after) — it must NOT mutate. Absent ⇒ None; after two increments ⇒ Some(the last value), stable.
+        let dir = scratch();
+        let path = dir.join(format!("cur-{}.counter", line!()));
+        assert_eq!(BootCounter::current(&path).expect("absent read"), None, "absent ⇒ None");
+        assert_eq!(BootCounter::increment_on_boot(&path, 1).expect("v1"), 1);
+        assert_eq!(BootCounter::increment_on_boot(&path, 1).expect("v2"), 2);
+        assert_eq!(BootCounter::current(&path).expect("peek"), Some(2), "reads the last value");
+        assert_eq!(BootCounter::current(&path).expect("peek 2"), Some(2), "and does NOT increment");
     }
 
     #[test]

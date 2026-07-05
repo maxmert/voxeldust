@@ -91,6 +91,7 @@ orch-crash:
     cargo test -p vd-bins --features store-test-hooks --test orchestrator_crash -- --test-threads=1
     cargo test -p vd-bins --test boot_guard -- --test-threads=1
     cargo test -p vd-bins --test boot_counter_crashloop -- --test-threads=1
+    cargo test -p vd-bins --features store-test-hooks --test outbox_sigkill_restart -- --test-threads=1
 
 # R-4e (L7): the N-peer real-QUIC LOAD/soak gate. Sustained reliable fan-in — VD_MESH_LOAD_NODES sender
 # endpoints into ONE receiver — proving no-loss/no-dup, reliable_acked keeps pace, gap_drop==0, and
@@ -117,6 +118,8 @@ orch-crash-cov:
         -p vd-bins --features store-test-hooks --test orchestrator_crash -- --test-threads=1
     cargo +{{coverage_toolchain}} llvm-cov --no-report --branch \
         -p vd-bins --test boot_guard -- --test-threads=1
+    cargo +{{coverage_toolchain}} llvm-cov --no-report --branch \
+        -p vd-bins --features store-test-hooks --test outbox_sigkill_restart -- --test-threads=1
 
 # SPIKE-2a (the route-swap hot-path gate): the gateway 20Hz route decision stays wait-free
 # + torn-read-free under a concurrent route.store publisher, p99 < 50us. RELEASE build (a

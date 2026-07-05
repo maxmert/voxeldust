@@ -235,6 +235,47 @@ impl NodeOutbox {
         let (store, durability) = RedbStore::open(path, tuning)?;
         Ok(NodeOutbox { store, durability })
     }
+
+    /// TEST-ONLY (R-6d4-D; feature `store-test-hooks`, ABSENT from release): plant + DURABLY write ONE retained
+    /// `ReliableFrame` outbox row, so the process-tier SIGKILL-restart proof can seed a durable-and-unacked row
+    /// before the kill (the boot-2 replay then re-drives it). Builds+frames INTERNALLY (keeps `ReliableFrame`
+    /// pub(crate) — no bin touches it) and `commit()`s, which BLOCKS until fsynced (outbox.rs `commit`), so the
+    /// row is on disk on return. `from` is carried for honesty (the stored frame's `from` is inert — replay
+    /// re-frames from the decoded PAYLOAD only). Returns the durable batch seq (the caller asserts
+    /// `durability().is_durable_through(seq)` as a fail-loud belt-and-suspenders).
+    #[cfg(feature = "store-test-hooks")]
+    #[must_use]
+    pub fn seed_reliable_row(
+        &mut self,
+        from: NodeId,
+        peer: NodeId,
+        class: MsgClass,
+        incarnation: u64,
+        seq: u64,
+        payload: &[u8],
+    ) -> u64 {
+        let framed = frame_reliable(from, class, incarnation, seq, payload);
+        self.retain(&OutboxKey { peer, class, incarnation, seq }, &framed);
+        self.commit(); // submit + wait_durable_through ⇒ durable-on-return (no pause hook)
+        self.durability.last_submitted()
+    }
+}
+
+/// R-6d4-D/A: the ONE home that frames a `ReliableFrame` for a durable outbox row — used by the process-tier
+/// seed seam ([`NodeOutbox::seed_reliable_row`]) and the in-process proptest (`framed_row` delegates). Frames
+/// at `epoch = u32::MAX` (the write-path re-stamp): replay re-frames from the decoded PAYLOAD, so the stored
+/// `from`/`epoch` are inert — this is purely the on-disk-row builder. Gated to the two test surfaces.
+#[cfg(any(test, feature = "store-test-hooks"))]
+fn frame_reliable(from: NodeId, class: MsgClass, incarnation: u64, seq: u64, payload: &[u8]) -> Vec<u8> {
+    vd_wire::framing::encode_frame(&crate::ReliableFrame {
+        from,
+        class,
+        incarnation,
+        epoch: u32::MAX,
+        seq,
+        bytes: payload.to_vec(),
+    })
+    .expect("encode reliable frame")
 }
 
 impl OutboxSink for NodeOutbox {
@@ -923,15 +964,9 @@ mod tests {
 
     /// A valid framed `ReliableFrame` value (as `scan_all` returns it, envelope-stripped) carrying `payload`.
     fn framed_row(payload: &[u8]) -> Vec<u8> {
-        vd_wire::framing::encode_frame(&crate::ReliableFrame {
-            from: NodeId(1),
-            class: MsgClass::Saga,
-            incarnation: 1,
-            epoch: u32::MAX,
-            seq: 0,
-            bytes: payload.to_vec(),
-        })
-        .expect("encode")
+        // Delegate to the ONE frame-encode home (R-6d4-D DRY) so the test row + the process-tier seed row
+        // are byte-identical builders.
+        super::frame_reliable(NodeId(1), MsgClass::Saga, 1, 0, payload)
     }
 
     #[test]
@@ -1022,6 +1057,28 @@ mod tests {
             ob2.scan_all(),
             vec![(k, b"despawn-envelope".to_vec())],
             "the retained frame survived the reopen"
+        );
+    }
+
+    #[cfg(feature = "store-test-hooks")]
+    #[test]
+    fn seed_reliable_row_writes_one_durable_scannable_row() {
+        // R-6d4-D: the process-tier seed seam (vd-outbox-testnode calls it) plants ONE durable, decodable,
+        // scannable row and returns durable-on-commit. Exercised in-crate so `coverage-io-prod-hooks`
+        // instruments the seam + `frame_reliable` (the process-tier test that USES it lives in vd-bins, which
+        // io-prod's own coverage gate never compiles — "REAL not theater": cover the seam where it is defined).
+        let path = temp_path("seed");
+        let _g = TempOutbox { path: path.clone() };
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let seq = ob.seed_reliable_row(NodeId(1), NodeId(2), MsgClass::Saga, 5, 0, b"hello");
+        assert!(ob.durability().is_durable_through(seq), "the seeded row is durable-on-return");
+        let rows = ob.scan_all();
+        assert_eq!(rows.len(), 1, "exactly the one seeded row");
+        assert_eq!(rows[0].0, key(2, MsgClass::Saga, 5, 0), "under its (peer,class,incarnation,seq) key");
+        assert_eq!(
+            decode_value_payload(&rows[0].1).as_deref(),
+            Some(&b"hello"[..]),
+            "the framed row decodes back to the seeded payload (replay re-frames from THIS payload)"
         );
     }
 

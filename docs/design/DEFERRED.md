@@ -1915,6 +1915,58 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      root as #1); (5) NIT — differential witness pins the commit surface not the staged crash boundary (proven on
      RedbStore). All LEDGER-ONLY except #1 (prose, done). No CRITICAL/HIGH, no vacuous test, no prod-surface leak, no
      silent-loss, no HR violation, no drift.**
+     **📐 R-6d4-D DESIGN DONE (wf_bec6d1a6, 1 designer + 3 adversarial opus lenses + adjudication, read-only Explore; 3×
+     REVISE → 8 folded must-fixes → SOUND_TO_IMPLEMENT; full DOR scripts/r6d4d_vetted_design.md). The process-tier
+     SIGKILL-restart + boot-counter-by-EXACTLY-1 proof (the RESTART case at the real-process tier; the in-process proof
+     is R-6d4-A). Plan: (seed) a store-test-hooks `NodeOutbox::seed_reliable_row(from, peer, class, incarnation, seq,
+     payload)` — builds+frames a ReliableFrame via a new `frame_reliable` private helper (framed_row delegates, DRY;
+     ReliableFrame stays pub(crate)), retain()+commit() (DURABLE-on-return via commit's wait_durable_through — NO pause
+     hook), returns the durable batch seq. (reader) a store-test-hooks `BootCounter::current(path) -> Result<Option<u64>,
+     _>` thin wrapper over the private read (keeps MAGIC+checksum in one place). (bin) a NEW purpose-built
+     `vd-outbox-testnode` — a plain `[[bin]]` with a `#[cfg(feature=store-test-hooks)]` main() body (NOT required-features
+     ⇒ CARGO_BIN_EXE_* always defined for the test): boot-1 (VD_OUTBOX_TEST_SEED SET) `resolve_process_incarnation` FIRST
+     [mints v1 — the F-CRITICAL: else v2==v1+1 is unprovable] → open_node_outbox → seed_reliable_row → assert durable →
+     write .seeded marker → idle (park, keep outbox open, NO spawn_mesh/replay — else replay would gc the seed); boot-2
+     (seed UNSET) boot_mesh_and_replay + tick. The env is built BY HAND without VD_PROCESS_INCARNATION (so the durable
+     counter is used). (test) crates/bins/tests/outbox_sigkill_restart.rs: an IN-PROCESS receiver B (real MeshTransport,
+     stays up), reap-then-rebind-SAME-addr (Cluster::kill_and_reap, boot_counter_crashloop pattern — NOT
+     orchestrator_crash's fresh-addr), poll .seeded → read v1 → SIGKILL+reap → boot-2 → 30s deadline-drain B's inbound
+     for the re-drive (first-contact Accept) → assert v2==v1+1 (an INDEPENDENT exactly-once-incarnation check, not a
+     delivery precondition) + a fresh-store 0-re-drive anti-theater twin. (gate) add to orch-crash + orch-crash-cov
+     (%p-%m%c continuous-mode merge, --test-threads=1); Tier-B honesty (a SIGKILL loses the final counter flush).
+     CA-1 boundary honest: the SIGKILL-source-in-AwaitAdopt real-QUIC e2e stays OUT (AwaitAdopt egress empty; needs
+     CA-1+M3). IMPLEMENT NEXT (checkpointed after the vetted design — a large fresh process-tier unit: a new bin + test +
+     2 io-prod seams + justfile, not rushed at a marathon tail). After D: F2 (inert CA-1 tripwire) closes R-6d4.**
+     **✅ R-6d4-D LANDED (the process-tier SIGKILL-restart proof — the RESTART case at the REAL-process tier, closing
+     the loop the in-process R-6d4-A proptest opened). Implemented exactly to the vetted design: (seam-1, outbox.rs)
+     `#[cfg(store-test-hooks)] NodeOutbox::seed_reliable_row(from, peer, class, incarnation, seq, payload) -> u64`
+     frames a `ReliableFrame` via a new private `frame_reliable` (the test `framed_row` delegates — DRY; ReliableFrame
+     stays pub(crate)), `retain()`+`commit()` (DURABLE-on-return via commit's `wait_durable_through`, NO pause hook),
+     returns the durable batch seq. (seam-2, boot.rs) `#[cfg(any(test, store-test-hooks))] BootCounter::current(path)
+     -> Result<Option<u64>, _>` — a read-only peek over the private `read` (v1 before the kill / v2 after; MAGIC+
+     checksum stay in one place). (bin) NEW `vd-outbox-testnode` — a PLAIN `[[bin]]` (NOT required-features ⇒
+     CARGO_BIN_EXE_* always defined) with a `#[cfg(store-test-hooks)]` main body (release compiles only an exit-2
+     stub): boot-1 (VD_OUTBOX_TEST_SEED SET) `resolve_process_incarnation` FIRST [mints v1 — else v2==v1+1 is
+     unprovable] → `open_node_outbox` → `seed_reliable_row` → assert `is_durable_through` → write `.seeded` → park
+     (NO mesh/replay, else replay gc's the seed); boot-2 (seed UNSET) `boot_mesh_and_replay` → `.ready` → park. Env
+     built by hand WITHOUT VD_PROCESS_INCARNATION (so the durable counter is used). (test) crates/bins/tests/
+     outbox_sigkill_restart.rs: in-process receiver B (real MeshTransport, stays up — a killed shard has no admin
+     surface), `Cluster::kill_and_reap` + rebind-SAME-addr (boot_counter_crashloop pattern), poll `.seeded` → read v1
+     → SIGKILL+reap → boot-2 → 30s deadline-drain B for the re-drive (first-contact Accept) → assert v2==v1+1 (an
+     INDEPENDENT exactly-once-incarnation check, NOT a delivery precondition) + a fresh-store 0-re-drive anti-theater
+     twin (proves the positive isn't a false-positive from an unrelated delivery). (coverage) the two io-prod seams
+     get their OWN in-crate unit tests (`current_reads_the_counter_without_incrementing` [boot.rs, plain], and
+     `seed_reliable_row_writes_one_durable_scannable_row` [outbox.rs, #[cfg(store-test-hooks)]]) so the seams are
+     honestly instrumented by coverage-io-prod(-hooks), NOT merely by the uninstrumented vd-bins process test — REAL
+     not theater. (gate) wired into `orch-crash` + `orch-crash-cov` (%p-%m%c continuous-mode, --test-threads=1).
+     GATE GREEN: outbox_sigkill_restart 2/2 (both the redrive + the anti-theater twin); io-prod 130 lib + all
+     integration green both configs (one flaky quinn-loopback timing test re-confirmed clean 125/125 — test-only
+     change cannot touch a default-config prod path); clippy -D clean (io-prod ×2 + vd-bins store-test-hooks);
+     coverage-io-prod 94.81% + coverage-io-prod-hooks 95.11% (both ≥ 90 floor; outbox.rs 98.16% under hooks — the
+     seed seam now instrumented); vd-bins default (exit-2 stub) + workspace build clean. Tier-B honesty preserved: a
+     SIGKILL loses the final counter flush (why io-prod is a ratcheted floor, never 100%). CA-1 boundary honest: the
+     SIGKILL-source-in-AwaitAdopt real-QUIC e2e stays OUT (AwaitAdopt egress empty ⇒ needs CA-1+M3, ledgered).
+     REMAINING R-6d4: F2 (the inert CA-1 tripwire at the saga AwaitAdopt discard site) closes the reachable-now arc.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
