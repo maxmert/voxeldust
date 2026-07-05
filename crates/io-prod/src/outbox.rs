@@ -1332,8 +1332,13 @@ mod tests {
     // ============================ R-6d4-A: the both-ends-restart replay proptest ============================
     // Drives the REAL `replay_outbox` through arbitrary crash/restart/redeliver interleavings and cross-checks
     // disk state against a HAND-MAINTAINED `Ref` computed independently (an agreement assert is load-bearing).
-    // The dedup oracle drives the REAL `classify_reliable` receiver ladder (mesh.rs) so an incarnation-reset /
-    // dedup mutation turns it RED. Vetted design of record: scripts/r6d4a_vetted_design.md (wf_ec22b736).
+    // The dedup oracle drives the REAL `classify_reliable` receiver ladder (mesh.rs) so a SEQ-DEDUP regression
+    // (a re-delivered seq accepted twice) turns it RED — see `witness_redeliver_of_a_delivered_row_is_deduped`.
+    // SCOPE (honest, /goal wf_0b8c712a): this proptest proves the OUTBOX/REPLAY side end-to-end (no-loss,
+    // no-orphan, accounting, source-idempotence) + the seq-dedup INTEGRATION; the receiver's FULL verdict
+    // ladder (the A1 incarnation-reset, epoch, and Gap arms) is proven separately by mesh.rs's
+    // `classify_reliable` unit tests — the oracle feeds each row's STORED incarnation, so it does not exercise
+    // A1. Vetted design of record: scripts/r6d4a_vetted_design.md (wf_ec22b736).
     mod replay_proptest {
         use super::super::*; // the outbox module surface (OutboxKey/OutboxSink/replay_outbox/…)
         use super::{ALL_CLASSES, dummy_addr, fast_limits, framed_row};
@@ -1400,9 +1405,11 @@ mod tests {
             }
         }
 
-        /// The END-TO-END exactly-once oracle: drives the REAL `classify_reliable` (mesh.rs) per `(peer,class)`,
-        /// keyed on the full `OutboxKey` — so a mutation to the receiver's incarnation-reset / dedup turns the
-        /// proptest RED. `accept` returns true iff a FIRST delivery (a genuine new effect).
+        /// The receiver-integration oracle: drives the REAL `classify_reliable` (mesh.rs) per `(peer,class)`,
+        /// keyed on the full `OutboxKey`. `accept` returns true iff the ladder delivered (Accept/Reset). The
+        /// SEQ-DEDUP arm is asserted here (a re-delivered seq ⇒ `false`, `witness_redeliver...`); the A1
+        /// incarnation-reset / epoch / Gap arms are proven by mesh.rs's `classify_reliable` unit tests (the
+        /// oracle feeds each row's STORED incarnation, so it does not drive A1 — scope note above).
         struct DedupLedger {
             states: BTreeMap<(NodeId, MsgClass), RecvCell>,
             delivered: BTreeSet<OutboxKey>,

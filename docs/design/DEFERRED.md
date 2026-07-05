@@ -1898,6 +1898,23 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      clean both, coverage-io-prod 94.61% + coverage-io-prod-hooks 94.90% (both ≥ 90). REMAINING R-6d4: D (process-tier
      SIGKILL-restart + boot-counter-by-1 — needs a NodeOutbox::seed_reliable_row seam + an in-process receiver) → F2
      (inert CA-1 tripwire). Then CA-1 → P4 voxels.**
+     **✅ HOLISTIC /goal AUDIT DONE post-R-6d4-A (wf_0b8c712a, HEAD 39f4c59; 3 read-only Explore+opus lenses + synth):
+     VERDICT DONE_NO_CRITICAL — architecture SOUND; the proptest is GENUINELY load-bearing (not theater), the 3 prereq
+     prod edits are SAFE, the R-6d4 investment is PROPORTIONATE (no drift). The auditor ran a LIVE MUTATION (mutated
+     classify_reliable Reset→Dedup) + verified `cargo build --release` (no test-item leak), the `#[cfg(test)]` gating of
+     recv_test_hooks/controllable/fail_fsync/wait_poll_override, and that `OutboxKey`'s derived Ord == the big-endian
+     to_bytes order (MsgClass decl order == class_to_byte, doubly golden-pinned). Findings (all LOW/NIT): (1) **LOW,
+     FIXED IN PROSE now** — the proptest's dedup-oracle over-claimed "incarnation-reset mutation ⇒ RED": the mutation
+     experiment proved the A1 incarnation-reset arm is NOT exercised (the oracle feeds each row's STORED incarnation),
+     only the SEQ-dedup arm bites (via DestRedeliver); the A1/epoch/Gap arms are covered by mesh.rs's classify_reliable
+     unit tests. Tightened the module + DedupLedger doc-comments to state this scope honestly (no code/coverage change —
+     the proptest's OUTBOX/REPLAY proof [no-loss/no-orphan/accounting/source-idempotence] + seq-dedup integration is
+     unaffected + real). (2) NIT — class_byte round-trip test pins uniqueness not `class_to_byte(ALL_CLASSES[i])==i`
+     (near-zero risk, both orders from one decl); (3) NIT — differential-vs-redb witness uses only MsgClass::Saga (the
+     2 class golden pins cover the class axis); (4) NIT — f[1] post-crash-redrive flag doesn't certify A1 fired (same
+     root as #1); (5) NIT — differential witness pins the commit surface not the staged crash boundary (proven on
+     RedbStore). All LEDGER-ONLY except #1 (prose, done). No CRITICAL/HIGH, no vacuous test, no prod-surface leak, no
+     silent-loss, no HR violation, no drift.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
