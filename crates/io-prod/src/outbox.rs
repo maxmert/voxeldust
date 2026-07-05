@@ -1024,11 +1024,14 @@ mod tests {
 
     // ---- R-6d4-C: the replay_outbox ERROR ARMS (F-C, the R-6d3b-2b review left them uncovered) ----------
 
-    /// A mock [`OutboxSink`] whose `durability()` is `already_durable()` (base = `u64::MAX`) — the ONLY way to
-    /// drive `replay_outbox`'s `base.checked_add(N)` overflow arm (a real `NodeOutbox` base grows from real
-    /// submits, never near `u64::MAX`). `scan_all` returns exactly the seeded rows so replay reaches the send.
+    /// A mock [`OutboxSink`] with a real committed `rows` set (scanned + swept by `gc_replayed`) and a
+    /// TEST-CONTROLLED `durability` handle. C1 uses `already_durable()` (base = `u64::MAX`) to drive the
+    /// count-fence overflow arm; B2 uses a `controllable()` handle so the durability watermark parks the
+    /// replay fence mid-flight (the no-premature-gc window). `scan_all` returns the committed rows so replay
+    /// reaches the send loop; `gc_replayed` REALLY removes the swept keys (so B2's gc-not-run assert is honest).
     struct MockOutboxSink {
         rows: Vec<(OutboxKey, Vec<u8>)>,
+        durability: DurabilityHandle,
     }
     impl OutboxSink for MockOutboxSink {
         fn retain(&mut self, _key: &OutboxKey, _framed: &[u8]) {}
@@ -1038,12 +1041,14 @@ mod tests {
             self.rows.clone()
         }
         fn gc_below(&mut self, _incarnation: u64) {}
-        fn gc_replayed(&mut self, _replayed_keys: &[OutboxKey]) {}
+        fn gc_replayed(&mut self, replayed_keys: &[OutboxKey]) {
+            self.rows.retain(|(k, _)| !replayed_keys.contains(k));
+        }
         fn submit_barrier(&mut self) -> Option<(u64, DurabilityHandle)> {
-            Some((1, DurabilityHandle::already_durable()))
+            Some((1, self.durability.clone()))
         }
         fn durability(&self) -> DurabilityHandle {
-            DurabilityHandle::already_durable() // last_submitted() == u64::MAX
+            self.durability.clone()
         }
     }
 
@@ -1055,6 +1060,7 @@ mod tests {
         // store. One routable+decodable row is re-driven (replayed = 1) ⇒ `u64::MAX + 1` overflows ⇒ panic.
         let mock = MockOutboxSink {
             rows: vec![(key(2, MsgClass::Saga, 1, 0), framed_row(b"x"))],
+            durability: DurabilityHandle::already_durable(), // last_submitted() == u64::MAX
         };
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
         let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
@@ -1167,5 +1173,156 @@ mod tests {
             b
         };
         let _ = base;
+    }
+
+    /// R-6d4-B1 (the DEFERRED.md F1-pin, deterministic — the writer-pause hook, NOT a latency race): a
+    /// durable outbox row is INVISIBLE to `scan_all` until its block-B durability wait completes. Opens a
+    /// `NodeOutbox` whose store writer PARKS pre-fsync on the retained row's exact key (`pause_on_key_prefix
+    /// = key.to_bytes()`); while the marker proves the writer is parked (submitted-but-pre-fsync), `scan_all`
+    /// must NOT contain the row and the handle must report it NOT durable. MUTATION-SENSITIVE: a submit that
+    /// fsynced SYNCHRONOUSLY (breaking durable-before-send) would make the row visible while the marker is
+    /// present ⇒ the `scan_all().is_empty()` assert flips RED.
+    #[cfg(feature = "store-test-hooks")]
+    #[test]
+    fn a_row_is_not_visible_to_scan_all_until_block_b_waits() {
+        let path = temp_path("orderpin");
+        let _g = TempOutbox { path: path.clone() };
+        let marker = path.with_extension("paused");
+        let _ = std::fs::remove_file(&marker);
+        let k = key(2, MsgClass::Saga, 5, 0);
+        let tuning = StoreTuning {
+            pause_on_key_prefix: Some(k.to_bytes().to_vec()), // park on THIS row's exact durable key
+            pause_marker_path: Some(marker.clone()),
+            ..StoreTuning::default()
+        };
+        let mut ob = NodeOutbox::open(&path, tuning).expect("open with the pause hook");
+        ob.retain(&k, &framed_row(b"x"));
+        let (seq, h) = ob.submit_barrier().expect("a staged retain ⇒ submitted");
+
+        // Poll the marker to existence — the deterministic "submitted-but-pre-fsync window open" edge (the
+        // writer writes it the instant it parks), NOT a wall-clock sleep-guess.
+        let mut parked = false;
+        for _ in 0..500 {
+            if marker.exists() {
+                parked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(parked, "the writer parked pre-fsync on the submitted row (marker written)");
+        assert!(!h.is_durable_through(seq), "submitted but NOT durable (paused pre-fsync)");
+        assert!(h.durable_through() < seq, "the durable watermark lags the parked row");
+        assert!(
+            ob.scan_all().is_empty(),
+            "durable-before-send ORDERING: a submitted-but-pre-fsync row is INVISIBLE to scan_all until \
+             block B's durability wait completes (a synchronous-fsync submit would surface it here ⇒ RED)"
+        );
+
+        std::mem::forget(ob); // the parked writer never returns ⇒ Drop's join would hang
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// R-6d4-B2 (MUTATION-PROOF no-premature-gc): `replay_outbox`'s gc of the swept prior-incarnation copy is
+    /// fenced behind the DURABILITY of the re-driven rows, NOT merely their submission. A capture transport
+    /// bumps `submitted` (block A re-mirror) so the count-fence passes, but `durable` is held back (block B
+    /// parked); WHILE the replay is parked at `wait_durable_through`, the 2 recoverable prior rows MUST still
+    /// be present. MUTATION: moving gc before the durability wait (or fencing on submission) would sweep them
+    /// here while un-durable = the exact D-6 #1 loss ⇒ the "still present" assert flips RED. Deterministic
+    /// (test-driven watermarks, no fsync/timing race). A plain `#[test]` (`controllable()` needs no feature)
+    /// so it runs in the default `coverage-io-prod` gate.
+    #[test]
+    fn gc_never_runs_before_the_replayed_rows_are_durable_mutation_proof() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        /// Models the real peer-writer re-mirror: each `send_durable` bumps the shared `submitted` watermark
+        /// (block A), NEVER `durable` (block B's fsync is what the test controls) — so the replay's count-
+        /// fence passes but `wait_durable_through` parks: the no-premature-gc window.
+        struct RemirrorTransport {
+            submitted: Arc<AtomicU64>,
+        }
+        impl Transport for RemirrorTransport {
+            fn send_durable(
+                &mut self,
+                _to: NodeId,
+                _class: MsgClass,
+                _bytes: Bytes,
+                _d: Durability,
+            ) -> Result<vd_core::MsgId, SendError> {
+                self.submitted.fetch_add(1, Ordering::Release);
+                Ok(vd_core::MsgId(0))
+            }
+            fn drain_inbound(&mut self) -> Vec<vd_sim::io::Inbound> {
+                Vec::new()
+            }
+            fn local_id(&self) -> NodeId {
+                NodeId(1)
+            }
+        }
+        impl ReplayTransport for RemirrorTransport {
+            fn lane_alive(&self, _peer: NodeId) -> bool {
+                true
+            }
+        }
+
+        let (handle, submitted, durable) = DurabilityHandle::controllable();
+        let mock = MockOutboxSink {
+            rows: vec![
+                (key(2, MsgClass::Saga, 1, 0), framed_row(b"a")),
+                (key(2, MsgClass::Saga, 1, 1), framed_row(b"b")),
+            ],
+            durability: handle,
+        };
+        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
+        let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
+
+        // Replay on a background thread: it re-drives both rows (submitted → 2), the count-fence passes
+        // (2 >= base + 2), then PARKS at `wait_durable_through(2)` because `durable` is still 0.
+        let shared_bg = Arc::clone(&shared);
+        let sub_bg = Arc::clone(&submitted);
+        let replay = std::thread::spawn(move || {
+            let mut t = RemirrorTransport { submitted: sub_bg };
+            replay_outbox(&shared_bg, &mut t, &peers)
+        });
+
+        // Wait until both re-mirrors submitted (the fence is reached) — the replay is now parked pre-durable.
+        for _ in 0..1000 {
+            if submitted.load(Ordering::Acquire) >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            submitted.load(Ordering::Acquire),
+            2,
+            "both rows re-mirrored (block A submit) — the count-fence is reached"
+        );
+        assert!(
+            durable.load(Ordering::Acquire) < 2,
+            "but they are NOT yet durable — the replay parks at block B (the anti-vacuity guard)"
+        );
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .scan_all()
+                .len(),
+            2,
+            "no-premature-gc: the prior-incarnation rows SURVIVE until the re-driven rows are DURABLE (moving \
+             gc before the durability wait would sweep them here while un-durable = the D-6 #1 loss ⇒ RED)"
+        );
+
+        // Release the parked replay: bump `durable` past the fence ⇒ wait_durable_through returns ⇒ gc runs.
+        durable.store(2, Ordering::Release);
+        let counts = replay.join().expect("replay thread joins").expect("replay ok");
+        assert_eq!(counts.replayed, 2, "both rows were re-driven");
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .scan_all()
+                .len(),
+            0,
+            "AFTER durability, gc swept the now-redundant prior-incarnation rows"
+        );
     }
 }

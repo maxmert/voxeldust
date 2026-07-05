@@ -1836,6 +1836,27 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      R-6d4-B1/B2 (which also need the feature-coverage). NEXT R-6d4: B3 (two-peers-no-starve) → B1/B2 (ordering +
      no-premature-gc, pause-hook pins) → A (both-ends-restart proptest — needs a controllable-DurabilityHandle fence
      seam, its own focused model design) → D (process-tier) → F2 (tripwire).**
+     **✅ R-6d4-B1 + B2 + B3 LANDED (the deterministic + mutation-sensitive store-test-hooks pins) + the feature-coverage
+     GATE (closes the audit "REAL not theater" note — B4/B1/B3's hook branches are now INSTRUMENTED, not merely
+     region-tolerated). B1 `a_row_is_not_visible_to_scan_all_until_block_b_waits` (outbox.rs, store-test-hooks): opens a
+     NodeOutbox whose writer PARKS pre-fsync on the retained row's exact key (`pause_on_key_prefix = key.to_bytes()`);
+     while the marker proves the writer parked, `scan_all` is EMPTY + the row is not-durable (durable-before-send
+     ordering; a synchronous-fsync submit ⇒ RED). B2 `gc_never_runs_before_the_replayed_rows_are_durable_mutation_proof`
+     (outbox.rs, plain #[test] ⇒ runs in the default gate): a NEW `DurabilityHandle::controllable()` seam (test-driven
+     submitted/durable atomics) + a `RemirrorTransport` (bumps `submitted` per send = block A, never `durable`) + a
+     background `replay_outbox` that PARKS at `wait_durable_through` — while parked, the 2 recoverable prior rows MUST
+     still be present (gc is fenced behind DURABILITY not submission; moving gc before the wait ⇒ sweeps them un-durable
+     = the D-6 #1 loss ⇒ RED), with the anti-vacuity guard (submitted≥target && durable<target); after bumping durable,
+     gc sweeps them. `MockOutboxSink` refactored (a `durability` field + a REAL `gc_replayed`). B3
+     `two_parked_durability_waits_do_not_starve_a_third_worker_task` (store.rs, store-test-hooks): worker_threads(2), TWO
+     `wait_durable_through_async` waits parked on paused writers + a THIRD mesh-I/O-proxy task that STILL completes
+     (async YIELDS the worker; the sync park would occupy both ⇒ the 3rd starves ⇒ RED). Justfile: NEW
+     `coverage-io-prod-hooks` (io-prod cov WITH store-test-hooks, floored) wired into `coverage` — so the crash-proof
+     hook surface is gated alongside the release surface. Gate: vd-io-prod 117 (no-feature, incl. B2) + 121 (feature,
+     incl. B1/B3) green, clippy -D clean both configs, coverage-io-prod 94.45% + coverage-io-prod-hooks 94.74% (both ≥
+     90). REMAINING R-6d4: A (both-ends-restart proptest — reuses `controllable()` for its fence seam, own focused model
+     design) → D (process-tier SIGKILL-restart + boot-counter-by-1) → F2 (inert CA-1 tripwire); the mesh-block-B-uses-
+     async coupling guard (B3's "should") is minor-OWED (the `await_holding_lock` lint + T-DBS-1 already cover it).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

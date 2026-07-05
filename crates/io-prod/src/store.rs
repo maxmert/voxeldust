@@ -269,6 +269,28 @@ impl DurabilityHandle {
             wait_poll: WRITER_WAIT_POLL,
         }
     }
+
+    /// TEST-ONLY (R-6d4-B2 / R-6d4-A): a handle whose `last_submitted` / `last_durable` are DRIVEN BY THE
+    /// TEST via the returned atomics — modeling the real peer-writer re-mirror (a `send_durable` bumps
+    /// `submitted`; the fsync later bumps `durable`) WITHOUT a real store/writer/fsync. `writer_alive` reads
+    /// true, so `wait_durable_through(target)` genuinely PARKS while `durable < target` (the un-durable
+    /// window B2's no-premature-gc pin asserts across); the test bumps `durable` to release it for cleanup.
+    #[cfg(any(test, feature = "store-test-hooks"))]
+    #[must_use]
+    pub fn controllable() -> (DurabilityHandle, Arc<AtomicU64>, Arc<AtomicU64>) {
+        let last_submitted = Arc::new(AtomicU64::new(0));
+        let last_durable = Arc::new(AtomicU64::new(0));
+        let handle = DurabilityHandle {
+            last_durable: Arc::clone(&last_durable),
+            last_submitted: Arc::clone(&last_submitted),
+            fsync_backpressure: Arc::new(AtomicU64::new(0)),
+            durable_cv: Arc::new((Mutex::new(()), Condvar::new())),
+            durable_notify: Arc::new(Notify::new()),
+            writer_alive: Arc::new(AtomicBool::new(true)),
+            wait_poll: WRITER_WAIT_POLL,
+        };
+        (handle, last_submitted, last_durable)
+    }
 }
 
 /// The generic redb-backed [`Store`]. Staged mutations live in RAM; `commit()` hands them to the off-tick
@@ -1083,6 +1105,96 @@ mod tests {
         // The writer already EXITED (break 'drain), so Drop's join returns immediately — no hang, no forget.
         drop(s);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// R-6d4-B3: `wait_durable_through_async` YIELDS its tokio worker, so N producer-durability waits parked
+    /// on a stalled writer do NOT occupy N workers and starve the mesh recv/ack/accept I/O. On
+    /// `worker_threads(2)`: TWO waits are parked (both writers paused pre-fsync ⇒ genuinely un-durable) and a
+    /// THIRD "mesh-I/O proxy" task must STILL run to completion. MUTATION-SENSITIVITY: swapping
+    /// `wait_durable_through_async` for the SYNC `wait_durable_through` (a blocking condvar park) would occupy
+    /// BOTH workers ⇒ the third task never schedules ⇒ the bounded `timeout` fires ⇒ RED.
+    #[cfg(feature = "store-test-hooks")]
+    #[test]
+    fn two_parked_durability_waits_do_not_starve_a_third_worker_task() {
+        // Open a store whose writer PARKS pre-fsync on a keyed row, submit that row (no sync wait), and wait
+        // for the marker (writer parked) — the row is submitted-but-un-durable, so a wait on its seq blocks.
+        fn paused_store(prefix: &[u8]) -> (RedbStore, DurabilityHandle, u64) {
+            let path = temp_path();
+            let marker = path.with_extension("paused");
+            let _ = std::fs::remove_file(&marker);
+            let tuning = StoreTuning {
+                pause_on_key_prefix: Some(prefix.to_vec()),
+                pause_marker_path: Some(marker.clone()),
+                ..StoreTuning::default()
+            };
+            let (mut s, h) = RedbStore::open(&path, tuning).expect("open paused store");
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(b"row");
+            s.put(&key, &b(b"v"));
+            let seq = s.submit_nonblocking().expect("a staged put ⇒ submitted");
+            for _ in 0..500 {
+                if marker.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(marker.exists(), "the writer parked pre-fsync");
+            (s, h, seq)
+        }
+
+        let (s1, h1, seq1) = paused_store(b"\x09P1");
+        let (s2, h2, seq2) = paused_store(b"\x09P2");
+        let done1 = std::sync::Arc::new(AtomicBool::new(false));
+        let done2 = std::sync::Arc::new(AtomicBool::new(false));
+        let ran3 = std::sync::Arc::new(AtomicBool::new(false));
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            let (d1, d2, r3) = (
+                std::sync::Arc::clone(&done1),
+                std::sync::Arc::clone(&done2),
+                std::sync::Arc::clone(&ran3),
+            );
+            // Two producer-durability waits — parked forever (their writers are paused pre-fsync). Each
+            // YIELDS its worker on every `.await`, so neither pins a worker thread.
+            tokio::spawn(async move {
+                h1.wait_durable_through_async(seq1).await;
+                d1.store(true, Ordering::Release); // unreachable while paused (asserted below)
+            });
+            tokio::spawn(async move {
+                h2.wait_durable_through_async(seq2).await;
+                d2.store(true, Ordering::Release);
+            });
+            // The third "mesh-I/O proxy" task: must be schedulable on a freed worker while the two waits park.
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            let t3 = tokio::spawn(async move {
+                let _ = rx.await;
+                r3.store(true, Ordering::Release);
+            });
+            tokio::task::yield_now().await; // let the two waits get polled once + park at their `.await`
+            tx.send(()).expect("fire the third task");
+            tokio::time::timeout(Duration::from_secs(2), t3)
+                .await
+                .expect("the third worker task ran despite two parked durability waits (async yields)")
+                .expect("t3 joined");
+        });
+
+        assert!(
+            ran3.load(Ordering::Acquire),
+            "the third worker task ran to completion while two durability waits were parked (no starvation)"
+        );
+        assert!(
+            !done1.load(Ordering::Acquire),
+            "wait 1 is STILL parked (its writer is paused ⇒ never durable) — not spuriously completed"
+        );
+        assert!(!done2.load(Ordering::Acquire), "wait 2 is STILL parked");
+
+        std::mem::forget(s1); // parked writers never join
+        std::mem::forget(s2);
     }
 
     #[test]

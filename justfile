@@ -40,10 +40,19 @@ tier_b_floor := "90"
 coverage-io-prod:
     cargo +{{coverage_toolchain}} llvm-cov -p vd-io-prod --fail-under-regions {{tier_b_floor}}
 
-# Pre-merge: Tier-A 100% + the io-prod Tier-B ratcheted floor. The full process-tier %c merge (the spawned
-# node binaries via `show-env` + LLVM_PROFILE_FILE %p-%m%c — continuous mode is MANDATORY since the harness
-# SIGKILLs processes) is the DEEPER owed piece (DEFERRED.md D-40); `orch-crash-cov` already accumulates it.
-coverage: coverage-fast coverage-io-prod
+# R-6d4: the io-prod Tier-B floor WITH `store-test-hooks` — so the crash-proof pins (R-6d4-M's death
+# branches + writer_died_panic, B1 ordering, B2 no-premature-gc, B3 no-starve, B4 writer-death) and the
+# fault/pause/wait-poll hook paths are INSTRUMENTED + floored, not merely region-tolerated by the no-feature
+# pass (the /goal-audit "REAL not theater" note). A SECOND instrumented build so BOTH the release surface
+# (coverage-io-prod) and the hook surface are floored — a store-test-hooks-only regression cannot hide.
+coverage-io-prod-hooks:
+    cargo +{{coverage_toolchain}} llvm-cov -p vd-io-prod --features store-test-hooks --fail-under-regions {{tier_b_floor}}
+
+# Pre-merge: Tier-A 100% + the io-prod Tier-B ratcheted floor (release + store-test-hooks surfaces). The full
+# process-tier %c merge (the spawned node binaries via `show-env` + LLVM_PROFILE_FILE %p-%m%c — continuous
+# mode is MANDATORY since the harness SIGKILLs processes) is the DEEPER owed piece (DEFERRED.md D-40);
+# `orch-crash-cov` already accumulates it.
+coverage: coverage-fast coverage-io-prod coverage-io-prod-hooks
 
 # Open the HTML region report to SEE the uncovered region.
 coverage-html:
