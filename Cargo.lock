@@ -6336,6 +6336,7 @@ dependencies = [
  "axum",
  "crossbeam-channel",
  "postcard",
+ "proptest",
  "quinn",
  "rcgen",
  "redb",

@@ -1878,6 +1878,26 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      ⇒ runs in the default coverage-io-prod gate. SCOPE: A proves cross-crash exactly-once + no-loss/no-orphan
      accounting; B2 still owns the block-B no-premature-gc PARK (both survive, non-overlapping). IMPLEMENT NEXT
      (checkpointed after the vetted design — a large fresh unit, not rushed at the tail of a marathon session).**
+     **✅ R-6d4-A LANDED (the both-ends-restart replay proptest — the headline robustness proof). Per the DOR:
+     `ModelOutboxSink` (committed/staged two-set RAM/disk crash boundary, validated by the differential-vs-real-redb
+     witness) + a `DedupLedger` driving the REAL `classify_reliable` via an opaque `RecvCell` (mesh.rs `#[cfg(test)]
+     pub(crate) recv_test_hooks` — no visibility widening) + a `CaptureTransport` (bumps the `controllable()`
+     submitted+durable atomics per send = block A+B synchronously; `fail_after`/`lane_alive` drive LaneStuck via
+     `replay_outbox_with_limits`). A HAND-MAINTAINED `Ref` cross-checks the sink after every op (INV-1 no-loss +
+     independent scan_all; the accounting `replayed+quarantined==scanned`; source-idempotence; receiver-exactly-once).
+     Anti-vacuity: a 4-flag in-strategy coverage floor (crash-with-staged / redrive-after-crash / redeliver-deduped /
+     quarantine) ASSERTED after the 1024-case ChaCha-seeded run + 5 hand-written witnesses (incl. crash-mid-replay:
+     LaneStuck ⇒ ?-bail ⇒ no partial sweep, then fresh replay ⇒ dedup to one effect). THE FUZZER EARNED ITS KEEP
+     IMMEDIATELY — it caught TWO real model-fidelity bugs during bring-up: (1) a boot cloned the sink WITH its
+     uncommitted staged retain, and replay's final `commit()` drained it back in ⇒ FIX: a boot is a (re)start, staged
+     (RAM) is empty — clear it first; (2) a falsely-red cross-time `gc_swept ∩ committed` invariant (a key legitimately
+     re-committed after a boot gc'd it) ⇒ FIX: dropped it, the load-bearing no-orphan is the INV-1 equality (Ref keeps
+     quarantined rows; a gc-of-a-quarantined-row mutant ⇒ RED). PREREQ prod edits: `OutboxKey` +PartialOrd/Ord/Hash;
+     mesh `recv_test_hooks` (test-only); `proptest` io-prod dev-dep. Plain `#[test]` (rides `controllable()`) ⇒ runs in
+     the default coverage gate. Gate: vd-io-prod 124 (no-feature, incl. 7 proptest) + 128 (feature) green, clippy -D
+     clean both, coverage-io-prod 94.61% + coverage-io-prod-hooks 94.90% (both ≥ 90). REMAINING R-6d4: D (process-tier
+     SIGKILL-restart + boot-counter-by-1 — needs a NodeOutbox::seed_reliable_row seam + an in-process receiver) → F2
+     (inert CA-1 tripwire). Then CA-1 → P4 voxels.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

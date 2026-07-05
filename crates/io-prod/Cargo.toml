@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 vd-node = { workspace = true }
+proptest = { workspace = true } # R-6d4-A: the both-ends-restart replay proptest (dev-only)
 
 [lints]
 workspace = true

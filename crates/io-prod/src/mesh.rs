@@ -423,6 +423,39 @@ fn prime_or_contiguous(st: &mut RecvState, seq: u64, fresh_incarnation: bool) ->
     Verdict::Gap
 }
 
+/// R-6d4-A: expose the REAL receiver dedup ladder to the outbox both-ends-restart replay proptest via an
+/// OPAQUE `RecvCell` wrapper — its `DedupLedger` drives the SAME [`classify_reliable`] the mesh receiver
+/// uses, so a dedup/incarnation-reset mutation turns the proptest RED (not a hand-rolled dedup that could
+/// silently drift from production). Test-only (`#[cfg(test)]`), no release surface. A child mod may `use`
+/// its parent's private `classify_reliable`/`RecvState`/`Verdict` (no re-export, no visibility widening).
+#[cfg(test)]
+pub(crate) mod recv_test_hooks {
+    use super::{RecvState, Verdict, classify_reliable};
+
+    /// One opaque per-`(peer, class)` receiver dedup cell wrapping the REAL [`RecvState`] + ladder.
+    pub(crate) struct RecvCell(RecvState);
+    impl RecvCell {
+        /// A fresh (never-primed) cell — the shape the real ledger inserts on a first frame.
+        #[must_use]
+        pub(crate) fn fresh() -> Self {
+            RecvCell(RecvState {
+                incarnation: 0,
+                epoch: 0,
+                hw: 0,
+                primed: false,
+            })
+        }
+        /// Deliver one frame through the REAL verdict ladder; `true` iff a FIRST delivery (`Accept`/`Reset`),
+        /// `false` for a drop (`Dedup`/`StaleIncarnation`/`StaleEpoch`/`Gap`).
+        pub(crate) fn accept(&mut self, incarnation: u64, epoch: u32, seq: u64) -> bool {
+            matches!(
+                classify_reliable(&mut self.0, incarnation, epoch, seq),
+                Verdict::Accept | Verdict::Reset
+            )
+        }
+    }
+}
+
 /// One reliable send LANE — the per-(peer,class) at-least-once sender FSM (R-2b). Lazily created on
 /// the first reliable frame for a class to a peer. ALL FSM logic (seq assign, retain, replay framing,
 /// ack-retire) is SYNCHRONOUS + unit-testable WITHOUT tokio/quinn; only the stream open/write (in
