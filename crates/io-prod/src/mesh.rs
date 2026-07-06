@@ -1540,7 +1540,13 @@ async fn peer_writer(mut w: PeerWriter) {
                     // lane holds its own `ack_tx`, so its watch never closes while the writer runs — no-op here.
                     Err(_) if is_learned => {
                         for (&class, lane) in &lanes {
-                            if lane.owes_redelivery()
+                            // Bounce on a NON-EMPTY in-flight window (`retry`), NOT `owes_redelivery()`: at
+                            // connection-death the lane's `stream` may still be Some (the write succeeded; no
+                            // write-error nulled it), and `owes_redelivery()` requires `stream.is_none()` — so it
+                            // would UNDER-fire and SILENTLY drop an acknowledged-to-the-producer, unacked-in-
+                            // flight frame (milestone-audit HIGH). `!retry.is_empty()` surfaces it loudly for the
+                            // producer's re-drive regardless of stream state.
+                            if !lane.retry.is_empty()
                                 && let Some(msg_id) = lane.last_msg_id
                             {
                                 push_inbox(

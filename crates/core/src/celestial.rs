@@ -8,10 +8,14 @@
 //! - [`planet_soi`] — Hill-sphere style, mass-ratio based, METERS (planet capture).
 //! - [`system_soi`] (in `crate::geometry`) — luminosity based, GALAXY UNITS (warp range).
 //!
-//! Determinism note: `solve_kepler` is iterative; cross-binary bit-equality is
-//! protected by the determinism CI gate (FMA contraction forbidden here, pinned deps),
-//! but AUTHORITY never depends on it — the source shard computes transfer poses and
-//! ships them (`transfer_protocol.md` §6.1).
+//! Determinism note: `solve_kepler` is iterative. Cross-binary bit-equality is NOT yet
+//! gated — the current `p0_gates` determinism test only re-runs the SAME binary twice on
+//! one host, which cannot catch cross-build FMA-contraction/vectorization divergence. A
+//! real cross-target-cpu build-and-diff gate (SPIKE-6a: FMA contraction forbidden here +
+//! pinned/exact deps + a two-way build byte-diff) is OWED and lands with P4 terrain
+//! (`docs/design/DEFERRED.md`, `roadmap.json` SPIKE-6a). AUTHORITY never depends on this
+//! bit-equality regardless — the source shard computes transfer poses and ships them
+//! (`transfer_protocol.md` §6.1); the hole is determinism-hygiene for terrain, not authority.
 
 /// Gravitational constant in m³/(kg·s²).
 pub const G: f64 = 6.674e-11;

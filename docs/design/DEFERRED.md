@@ -2143,6 +2143,32 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      booked topology (lazy-open optimization). FOLLOW-ON SLICES: S2 (L5 outbound ArcSwap re-plumb + update_peer_addr,
      flips l5_a_rescheduled_peer), S3 (AwaitAdopt re-solicit egress, new InterShardFlow arm), S4 (F2 dest-lane
      numeric guard); then the real-cloud k3d CrashLoop/reschedule e2e; then P4 voxels.**
+     **✅ MILESTONE /goal AUDIT post-CA-1-core (wf_1ccb876a, HEAD 42d7f94; 5 read-only Explore+opus survey lenses →
+     adversarial refute → synth): HAS_CRITICAL_OR_HIGH (0 critical, 2 HIGH — BOTH FIXED this fold). drift_check =
+     PROPORTIONATE, NOT drift (CA-1 is tightly-scoped transfer-first hardening, io-prod-only, Tier-A untouched; the
+     adversarial-review-caught HIGH being fixed pre-milestone is the discipline working). scale_endgoal = scales on
+     the addressing/authority axis; hundreds-in-one-location rides AoI subs/datagrams NOT one durable lane per
+     player (the 256-slot submit channel is shard-to-shard-sized — architecturally sound, not yet load-proven, D-9
+     AoI owed). HIGH-1 FIXED (mesh.rs): the learned-lane conn-death bounce loop keyed on `owes_redelivery()` (which
+     requires stream.is_none()), but at conn-death the stream is stale-but-Some ⇒ it UNDER-fired ⇒ SILENTLY dropped
+     an acked-to-producer, unacked-in-flight window (a no-silent-loss violation on the exact reply path). Cured by
+     bouncing on `!lane.retry.is_empty()` (a non-empty in-flight window regardless of stream state). HIGH-2 FIXED
+     (celestial.rs, doc-only): the module claimed a cross-binary determinism CI gate "protects" solve_kepler, but
+     none exists (the p0_gates test only re-runs the SAME binary on one host). Corrected to state the real
+     cross-target-cpu build-and-diff gate is OWED (SPIKE-6a) and lands with P4 terrain; AUTHORITY never depends on
+     the bit-equality (poses ship from source) so it is determinism-hygiene, not an authority hole. NEWLY-SURFACED
+     OWED (ledgered, non-blocking): (LOW-9) the HIGH-1 loud-bounce BODY is un-exercised — the conn-death regression
+     asserts only termination/no-hot-spin; a deterministic bounce-assertion e2e needs an ack-PAUSE test hook (die
+     the accepted conn AFTER a learned-lane write but BEFORE its ack) — owed with a mesh test-hook; (LOW-6) when the
+     durable outbox goes live on a churny tier, spawn_mesh's OUTBOX_WRITER_CHANNEL_DEPTH boot guard must bound
+     booked + peak-active-LEARNED durable lanes (cfg.peers.len() + learned_peers_max), not booked alone (inert today
+     — bins pass outbox=None); (LOW-11) the io-prod Tier-B floor is regions-only + package-total (not --branch, not
+     per-file) — a known Tier-B honesty note. P4 PRECONDITIONS the audit sharpened (all ledgered): the REAL
+     cross-binary determinism gate (SPIKE-6a, + exact-pin glam =0.30.x); the D-41 re-centering MATH + its
+     exists-to-be-flipped tripwire (four sites atomic); the FrameSpace/AnchorGen seam (build reusing core::Fence as
+     AnchorGen; extend build_app per-capability, never a shard-kind match); the D-38 G-IDENTICAL fixture; the D-9
+     within-realm AoI filter. Verdict: the CA-1 core is correct + robust after the 2 HIGH folds; the endgoal is
+     gated on S2 outbound-initiate + D-9 AoI + a real determinism gate landing before/at P4.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
