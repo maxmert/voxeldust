@@ -2169,6 +2169,25 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      AnchorGen; extend build_app per-capability, never a shard-kind match); the D-38 G-IDENTICAL fixture; the D-9
      within-realm AoI filter. Verdict: the CA-1 core is correct + robust after the 2 HIGH folds; the endgoal is
      gated on S2 outbound-initiate + D-9 AoI + a real determinism gate landing before/at P4.**
+     **✅ CA-1 S2 LANDED (outbound L5 re-plumb) — the no-DNS addressing is now COMPLETE (reply + INITIATE). A
+     rescheduled/newly-provisioned peer is dialable at its CURRENT address, refreshed at runtime with NO static
+     book edit + NO DNS. Implemented: `type PeerTopology = Arc<ArcSwap<BTreeMap<NodeId,SocketAddr>>>` (reuse of the
+     workspace arc-swap dep — added to io-prod/Cargo.toml, NO new external dep), seeded from cfg.peers at
+     spawn_mesh; `ConnSource::Dial(SocketAddr)` → `ConnSource::Dial(PeerTopology)` so ensure_connection's Dial arm
+     RE-READS the peer's current addr on EVERY dial (None ⇒ Err ⇒ Down ⇒ retransmit re-reads next fire, for a peer
+     with no current address); `MeshControl::update_peer_addr(peer, addr)` rcu-publishes the new addr (lock-free
+     copy-on-write readers) + proactively closes+forgets any stale dialed connection so the peer_writer re-dials
+     the new addr on its next attempt. Booked addrs are updatable ONLY via this trusted control surface — never
+     via untrusted dial-in (which only populates LearnedPeers — the CA-1 authority split). GATE GREEN: the
+     l5_a_rescheduled_peer_at_a_new_address_is_reachable guard FLIPPED (was the R-4e3-item-4 #[ignore]d red guard)
+     — A INITIATES to a rescheduled B at its real addr after update_peer_addr, B receives it; io-prod lib 129 pass;
+     clippy -D clean; coverage-io-prod 95.09% (mesh.rs 95.15%, ≥ 90). REMAINING CA-1 follow-ons: S3 (AwaitAdopt
+     re-solicit egress, new InterShardFlow arm — the D-6 #1 detection trigger), S4 (F2 dest-lane numeric guard);
+     then the real-cloud k3d CrashLoop/reschedule e2e (update_peer_addr is the provisioning hook it drives); then
+     P4. Owed (ledgered): a fully-prompt live-reschedule re-dial (wake the parked peer_writer + null its local
+     conn — today the proactive registry close makes the re-dial happen on the writer's NEXT operation, correct
+     not instant); the update_peer_addr None-Dial-arm (peer removed) + the proactive-drop path want a direct unit
+     test (the l5 test covers the Some/re-plumb path).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate

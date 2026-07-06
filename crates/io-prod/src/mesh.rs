@@ -25,6 +25,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use vd_core::{MsgId, NodeId};
@@ -90,11 +91,19 @@ struct LearnedConn {
     ack_rx: watch::Receiver<Option<AckFrame>>,
 }
 
-/// The connection source for a `peer_writer` lane (CA-1). A BOOKED lane DIALS its static address on demand; a
-/// LEARNED lane NEVER dials — it adopts the held accepted connection the receive side recorded in `LearnedPeers`
-/// (its dispatcher + ack_egress are already owned by that connection's `serve_connection`).
+/// CA-1 S2 — the shared, UPDATABLE peer-address book: `NodeId → SocketAddr`, seeded from `cfg.peers` at
+/// `spawn_mesh`, read lock-free (copy-on-write) by every Dial-lane on each dial, and rcu-updated at runtime via
+/// [`MeshControl::update_peer_addr`] (the orchestrator/provisioning push). This is the outbound L5 re-plumb: a
+/// peer rescheduled to a new IP becomes dialable at its new addr on the next dial — no more once-captured
+/// spawn-time addr. Same ArcSwap idiom as the gateway route table (no new dep).
+type PeerTopology = Arc<ArcSwap<BTreeMap<NodeId, SocketAddr>>>;
+
+/// The connection source for a `peer_writer` lane (CA-1). A BOOKED lane DIALS the peer's CURRENT address, re-read
+/// from the shared [`PeerTopology`] on every dial (CA-1 S2 — never a spawn-time copy); a LEARNED lane NEVER dials
+/// — it adopts the held accepted connection the receive side recorded in `LearnedPeers` (its dispatcher +
+/// ack_egress are already owned by that connection's `serve_connection`).
 enum ConnSource {
-    Dial(SocketAddr),
+    Dial(PeerTopology),
     Learned(LearnedPeers),
 }
 
@@ -835,6 +844,9 @@ pub struct MeshControl {
     stats: Arc<MeshStats>,
     /// This node's dialed (outbound) connections — the [`MeshControl::drop_connections`] blip lever.
     connections: ConnRegistry,
+    /// CA-1 S2 — the shared updatable peer-address book (the same `Arc` every Dial-lane re-reads), refreshed by
+    /// [`MeshControl::update_peer_addr`] (the orchestrator/provisioning push for a rescheduled peer).
+    topology: PeerTopology,
 }
 
 impl MeshControl {
@@ -867,6 +879,29 @@ impl MeshControl {
             conn.close(quinn::VarInt::from_u32(2), b"drop_connections blip");
         }
         reg.clear();
+    }
+
+    /// CA-1 S2 — the OUTBOUND L5 re-plumb: push a peer's CURRENT address into the shared topology (the
+    /// orchestrator/provisioning tells this node where a (re)provisioned peer now lives), so this node can
+    /// INITIATE to a peer it has never contacted or one that rescheduled to a new IP — no DNS, no static book
+    /// edit. The rcu is copy-on-write (lock-free readers on the dial hot path). Any STALE dialed connection to
+    /// that peer is proactively closed + forgotten so the peer_writer re-dials the new addr on its next attempt
+    /// (rather than waiting out the idle timeout on the dead one). A booked peer's addr is updatable ONLY through
+    /// this trusted control surface — never via an untrusted dial-in (which only ever populates `LearnedPeers`,
+    /// the authority-split).
+    pub fn update_peer_addr(&self, peer: NodeId, addr: SocketAddr) {
+        self.topology.rcu(|cur| {
+            let mut next = (**cur).clone();
+            next.insert(peer, addr);
+            next
+        });
+        let mut reg = self
+            .connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(conn) = reg.remove(&peer) {
+            conn.close(quinn::VarInt::from_u32(3), b"peer addr updated");
+        }
     }
 
     /// The transport honesty counters (dropped-datagram metrics; GW-1 never-silent).
@@ -957,6 +992,9 @@ pub fn spawn_mesh(
     let learned: LearnedPeers = Arc::new(Mutex::new(BTreeMap::new()));
     let booked: Arc<BTreeSet<NodeId>> =
         Arc::new(cfg.peers.keys().copied().filter(|&p| p != cfg.local).collect());
+    // CA-1 S2 — the shared updatable peer-address topology, seeded from the static book; every Dial-lane re-reads
+    // it on each dial, and `MeshControl::update_peer_addr` rcu-refreshes it (the orchestrator/provisioning push).
+    let topology: PeerTopology = Arc::new(ArcSwap::from_pointee(cfg.peers.clone()));
 
     // Accept loop: a Semaphore caps concurrently-served connections so a connection
     // flood cannot task-flood the node (TRANSPORT-4). Each connection serves BOTH
@@ -996,9 +1034,11 @@ pub fn spawn_mesh(
         }
     });
 
-    // One isolated send lane per peer: bounded queue + dedicated writer task.
+    // One isolated send lane per peer: bounded queue + dedicated writer task. CA-1 S2: the lane reads the peer's
+    // address from the shared `topology` on each dial (not a per-peer captured addr), so a rescheduled peer is
+    // re-dialed at its refreshed addr.
     let mut lanes = BTreeMap::new();
-    for (&peer, &addr) in &cfg.peers {
+    for &peer in cfg.peers.keys() {
         if peer == cfg.local {
             continue; // no self-lane: a node never dials itself
         }
@@ -1007,7 +1047,7 @@ pub fn spawn_mesh(
             endpoint: endpoint.clone(),
             local: cfg.local,
             dest: peer,
-            source: ConnSource::Dial(addr),
+            source: ConnSource::Dial(Arc::clone(&topology)),
             rx,
             inbox: Arc::clone(&inbox),
             stats: Arc::clone(&stats),
@@ -1046,6 +1086,7 @@ pub fn spawn_mesh(
             endpoint,
             stats,
             connections,
+            topology,
         },
     ))
 }
@@ -1800,9 +1841,20 @@ async fn ensure_connection(
         // regardless of who dialed it; without the dialer-side ack_egress a reverse DATA flow could never be
         // acked back). Fresh per-connection acked_keys/ack_due, as the accept path builds. SNI is pinned to the
         // cluster-trust SAN; identity comes from mTLS, not DNS.
-        ConnSource::Dial(addr) => {
+        ConnSource::Dial(topology) => {
+            // CA-1 S2: re-read the peer's CURRENT address from the shared topology on EVERY dial (never a
+            // spawn-time copy) — so a rescheduled peer, once `update_peer_addr` refreshes its entry, is dialed at
+            // its NEW addr on the next redial. A peer with no current address (removed / not-yet-provisioned) is
+            // an Err (like a dead learned conn) → Down → the retransmit timer re-reads on its next fire.
+            let Some(addr) = topology
+                .load()
+                .get(&dest)
+                .copied()
+            else {
+                return Err(());
+            };
             let conn = endpoint
-                .connect(*addr, "localhost")
+                .connect(addr, "localhost")
                 .map_err(|_| ())?
                 .await
                 .map_err(|_| ())?;

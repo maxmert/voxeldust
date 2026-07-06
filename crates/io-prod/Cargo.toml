@@ -24,6 +24,10 @@ quinn = { workspace = true }
 rustls = { workspace = true }
 rcgen = { workspace = true }
 crossbeam-channel = { workspace = true }
+# CA-1 S2 — the shared updatable peer-address topology (outbound L5 re-plumb): lock-free copy-on-write reads on
+# the dial hot path, rcu updates via MeshControl::update_peer_addr. Reuse of the workspace ArcSwap dep (the same
+# idiom the gateway route table + orchestrator AdminSnapshot use); NO new external dependency.
+arc-swap = { workspace = true }
 redb = { workspace = true }
 vd-wire = { workspace = true }
 axum = { workspace = true }

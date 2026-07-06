@@ -6333,6 +6333,7 @@ dependencies = [
 name = "vd-io-prod"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "crossbeam-channel",
  "postcard",

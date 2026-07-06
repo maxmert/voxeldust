@@ -274,19 +274,14 @@ fn n_peer_fan_in_sustained_reliable_is_loss_free_and_acks_keep_pace() {
     let _ = &mut receiver;
 }
 
-/// R-4e3 (item 4): RED GUARD for L5 (pod-reschedule / address change, deferred to CA-1/provisioning).
-/// `peer_writer` captures a peer's `addr` ONCE at spawn (mesh.rs `PeerWriter.addr`) and `ensure_connection`
-/// dials THAT fixed addr forever (mesh.rs `endpoint.connect(addr, ..)`), so a NodeId whose real address
-/// differs from the booked one (a rescheduled pod) is dialed stale forever — A's sends bounce
-/// `NodeUnreachable`, B never hears them. The FIX needs a live address source (orchestrator provisioning
-/// re-plumb, DEFERRED.md D-6 precondition (1b)/CA-1). This asserts the TARGET (B, at its REAL addr,
-/// receives A's send) and FAILS BY CONSTRUCTION today (hence `#[ignore]`), pinning the exact mechanism so
-/// the guard flips green when the addr re-plumb lands. It lives in the INTEGRATION tier (not `src`), so its
-/// never-run `#[ignore]`d regions do not erode the Tier-B `src` coverage floor; it mirrors the src
-/// `ca1_reply_on_connection` `#[ignore]` pattern. To flip green: give `ensure_connection` a live address
-/// source instead of the once-captured `PeerWriter.addr`.
+/// CA-1 S2 — L5 outbound re-plumb (pod-reschedule / address change), now GREEN. A's static book points B at a
+/// STALE addr (nothing listens there — B rescheduled AWAY). Before CA-1 S2, `peer_writer` captured that addr
+/// ONCE at spawn and dialed it forever, so B was unreachable. Now `ensure_connection`'s Dial arm re-reads the
+/// peer's CURRENT address from the shared `PeerTopology` on every dial, and the orchestrator/provisioning push
+/// `MeshControl::update_peer_addr(B, real_addr)` refreshes it — so A can INITIATE to a peer that moved, with no
+/// DNS + no book edit. This asserts B (at its real addr) RECEIVES A's send after the push. (Was the R-4e3 item-4
+/// `#[ignore]`d red guard; the flip target was exactly "give ensure_connection a live address source.")
 #[test]
-#[ignore = "L5: peer_writer captures addr once; needs addr re-plumb (CA-1/provisioning, DEFERRED.md 1b)"]
 fn l5_a_rescheduled_peer_at_a_new_address_is_reachable() {
     let rt = runtime(2);
     let trust = ClusterTrust::generate("vd-mesh-l5").expect("trust");
@@ -296,14 +291,15 @@ fn l5_a_rescheduled_peer_at_a_new_address_is_reachable() {
     let (a_id, b_id) = (NodeId(1), NodeId(2));
     let a_book: BTreeMap<NodeId, SocketAddr> = [(b_id, addr_b_stale)].into();
     let b_book: BTreeMap<NodeId, SocketAddr> = [(a_id, addr_a)].into();
-    let (mut a, _ca) = spawn_node(rt.handle(), &trust, a_id, addr_a, &a_book, None);
+    let (mut a, ca) = spawn_node(rt.handle(), &trust, a_id, addr_a, &a_book, None);
     let (mut b, _cb) = spawn_node(rt.handle(), &trust, b_id, addr_b_real, &b_book, None);
 
+    // The provisioning push: the orchestrator tells A where B actually lives now (correcting the stale book).
+    ca.update_peer_addr(b_id, addr_b_real);
     a.send(b_id, MsgClass::Saga, vec![7u8].into())
         .expect("enqueued (failure is async)");
-    // TARGET: B (at its real addr) receives A's send. Today A dials the stale booked addr forever ⇒ B
-    // never receives ⇒ this bounded wait times out ⇒ the test fails by construction (the pinned defect).
-    // Short deadline: a red guard only needs to demonstrate non-delivery, not wait the full 30s.
+    // TARGET (now reachable): B at its real addr receives A's send — A's Dial-lane re-read the refreshed
+    // topology and dialed the real addr, not the stale booked one.
     wait_until(
         Duration::from_secs(5),
         || {
@@ -311,6 +307,6 @@ fn l5_a_rescheduled_peer_at_a_new_address_is_reachable() {
                 |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a_id && bytes[0] == 7),
             )
         },
-        "L5 red guard: a rescheduled peer must be reachable at its real addr once the addr re-plumb lands",
+        "L5: a rescheduled peer is reachable at its real addr after the update_peer_addr re-plumb",
     );
 }
