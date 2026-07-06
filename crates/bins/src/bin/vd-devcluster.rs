@@ -52,9 +52,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("vd-devcluster: {msg}");
-            eprintln!(
-                "usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>"
-            );
+            eprintln!("usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>");
             ExitCode::FAILURE
         }
     }

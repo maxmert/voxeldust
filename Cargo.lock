@@ -6217,6 +6217,7 @@ dependencies = [
  "crossbeam-channel",
  "ed25519-dalek",
  "image",
+ "libc",
  "postcard",
  "serde_json",
  "tokio",

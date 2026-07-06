@@ -69,8 +69,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
-    loop {
+    // Cloud-ready k3d Slice 1: poll a SIGTERM/SIGINT flag each tick so a routine pod-stop / gateway
+    // rolling-deploy drains cleanly instead of a hard SIGKILL crash-path.
+    let shutdown = vd_bins::install_shutdown_flag(runtime.handle());
+    while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
         let _ = pacer.wait();
     }
+    // GRACEFUL DRAIN: the gateway holds no un-fsynced durable state (its R-6d outbox — empty until it has a
+    // producer-less flow — is fsync-before-send; sessions re-adopt via their ResumeTicket on reconnect). A
+    // clean return drops `node`/`runtime`/`_control`, tearing down the endpoint + peer writers in order.
+    tracing::info!("gateway drained on shutdown signal — exiting cleanly");
+    Ok(())
 }

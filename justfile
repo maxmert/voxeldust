@@ -198,3 +198,45 @@ image-smoke: image-build
         sleep 1
     done
     echo "FAIL: /metrics never came up"; docker logs "$name" | tail -40; exit 1
+
+# Slice 1 drain proof (SIGTERM graceful-drain): `docker stop` sends SIGTERM (the EXACT signal a k8s
+# pod-stop / rolling-deploy sends) then escalates to SIGKILL after the grace. A clean drain must exit 0
+# WELL within grace; a 137 means the loop never broke and the SIGKILL escalation fired (drain broken).
+# The most cloud-representative SIGTERM test — the real container, the real signal.
+image-drain-smoke: image-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=vd-slice1-drain
+    trust=$(mktemp -d)
+    trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -rf "$trust"' EXIT
+    cargo run -q --bin vd-devcluster -- gen-trust "$trust"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" \
+        -e VD_NODE_ID=1 -e VD_BIND=0.0.0.0:9000 -e VD_ADMIN_ADDR=0.0.0.0:9100 \
+        -e VD_TRUST_DIR=/trust -e VD_STORE_PATH=/tmp/vd.redb -e VD_STORE_EPHEMERAL_OK=1 \
+        -e VD_EPOCH=1 -e VD_RESERVE_CHUNK=4096 -e VD_LEASE_TTL=10000 \
+        -e VD_OUTBOUND_CAP=256 -e VD_TICK_HZ=50 -e VD_PROCESS_INCARNATION=1 \
+        -e VD_PEERS= -e VD_CLOCK_PEERS= \
+        -v "$trust":/trust:ro -p 9101:9100 {{server_image}} vd-orchestrator
+    echo "waiting for /metrics (readiness before the stop) ..."
+    ready=0
+    for i in $(seq 1 30); do
+        if curl -sf http://127.0.0.1:9101/metrics >/dev/null 2>&1; then ready=1; break; fi
+        sleep 1
+    done
+    [ "$ready" = "1" ] || { echo "FAIL: never became ready"; docker logs "$name" | tail -30; exit 1; }
+    echo "sending SIGTERM via 'docker stop -t 10' ..."
+    docker stop -t 10 "$name" >/dev/null
+    code=$(docker wait "$name" 2>/dev/null || docker inspect -f '{{{{.State.ExitCode}}}}' "$name")
+    echo "container exit code: $code"
+    if [ "$code" = "0" ]; then
+        # exit 0 is necessary but NOT sufficient (a process can exit 0 for other reasons). The drain-log line
+        # is the LOAD-BEARING proof the graceful-drain path actually RAN — assert it as a conjunction, never
+        # `|| true` (which would make it cosmetic). Both must hold: clean exit AND the drain ran.
+        docker logs "$name" 2>&1 | grep -qi "drained on shutdown" \
+            || { echo "FAIL: exited 0 but the drain log is ABSENT — the graceful-drain path did not run"; docker logs "$name" | tail -20; exit 1; }
+        echo "OK: clean SIGTERM drain — exit 0 AND the drain path ran (loop broke + store Drop joined the writer)"
+        exit 0
+    fi
+    echo "FAIL: expected exit 0, got $code (137 = SIGKILL escalation ⇒ the drain did not exit within grace)"
+    docker logs "$name" | tail -30; exit 1

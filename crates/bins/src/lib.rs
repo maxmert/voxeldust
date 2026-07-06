@@ -22,6 +22,44 @@ use vd_devproto::{DevRequest, DevResponse, WORKTREE_SLOT_CEILING};
 use vd_io_prod::runtime::EnvConfig;
 use vd_io_prod::runtime::hex32_encode;
 
+// ---- graceful shutdown (cloud-ready k3d, Slice 1) ----------------------------
+
+/// Install a SHUTDOWN flag flipped on SIGTERM (the signal k8s sends on pod-stop/rolling-deploy, BEFORE
+/// its SIGKILL escalation after `terminationGracePeriodSeconds`) or SIGINT (dev Ctrl-C). The three server
+/// bins' synchronous tick loops poll this flag each iteration and BREAK to run their graceful drain — so a
+/// routine pod-stop stops being a hard SIGKILL crash-path (every restart re-hydrating from the durable
+/// store) and becomes a clean flush → fsync → exit. Spawns ONE task on the node's EXISTING tokio runtime
+/// (no new thread, no new dependency — tokio's `signal` rides `features = ["full"]`). Returns the flag the
+/// loop polls; the caller runs the drain AFTER the loop (see each bin). If the SIGTERM handler cannot be
+/// installed (unreachable on the unix deploy/dev targets) it degrades to Ctrl-C only — never a hard failure.
+#[must_use]
+pub fn install_shutdown_flag(
+    runtime: &tokio::runtime::Handle,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flag = Arc::new(AtomicBool::new(false));
+    let set = Arc::clone(&flag);
+    runtime.spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = ctrl_c => {}
+                }
+            }
+            // SIGTERM handler unavailable (not the unix deploy/dev path) — still honour Ctrl-C.
+            Err(_) => {
+                let _ = ctrl_c.await;
+            }
+        }
+        // Relaxed is sufficient: the tick loop polls this single flag with no other ordering dependency.
+        set.store(true, Ordering::Relaxed);
+    });
+    flag
+}
+
 // ---- node roster -------------------------------------------------------------
 
 /// The fixed P1 node identities. ONE definition for the launcher + parity test.

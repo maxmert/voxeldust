@@ -78,8 +78,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
-    loop {
+    // Cloud-ready k3d Slice 1: poll a SIGTERM/SIGINT flag each tick so a routine pod-stop breaks the loop
+    // and drains cleanly instead of being a hard SIGKILL crash-path.
+    let shutdown = vd_bins::install_shutdown_flag(runtime.handle());
+    while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
         let _ = pacer.wait();
     }
+    // GRACEFUL DRAIN: the shard holds no un-fsynced durable state — its R-6d outbox is fsync-BEFORE-send and
+    // any in-flight mesh send is recovery-covered by the outbox replay on restart. So a clean return
+    // suffices: `node`, `runtime`, and `_control` drop, tearing down the endpoint + peer writers in order.
+    tracing::info!("shard drained on shutdown signal — exiting cleanly");
+    Ok(())
 }

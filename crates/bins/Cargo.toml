@@ -93,6 +93,9 @@ postcard = { workspace = true }
 # for the Tier-A smoke assertions. image 0.25 is already pinned at the workspace root (a
 # dep of vd-client-render) — this is a dep MOVE into bins' test deps, not a new library.
 image = { workspace = true }
+# Cloud-ready k3d Slice 1: SIGTERM-send for the graceful-drain process test (sigterm_drain.rs) — the
+# gate-wired proof that a routine pod-stop drains cleanly (exit 0) instead of a SIGKILL crash-path.
+libc = { workspace = true }
 
 [lints]
 workspace = true

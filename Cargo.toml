@@ -64,6 +64,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rcgen = "0.13"
 redb = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Cloud-ready k3d Slice 1: a DEV-dep for the process-tier SIGTERM-drain test only (send SIGTERM to a spawned
+# child — std::process::Child has SIGKILL via .kill() but no SIGTERM). Already transitive (0.2.x), so zero
+# new supply-chain; a single `libc::kill(pid, SIGTERM)` FFI call, test-only. User-approved (no unilateral dep).
+libc = "0.2"
 
 # Deterministic world generation (pin exact noise version: cross-platform determinism)
 noise = "=0.9.0"

@@ -268,17 +268,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `last_submitted()` at flush time ALWAYS covers the flushed tick's effect-state. Today the barrier also
     // stages the Clock key every tick, so `last_submitted` advances every tick — but even if a future write-amp
     // pass skips that on a FULLY IDLE tick, an idle tick has no state-dependent egress (only loss-tolerant
-    // ClockSync, gated on the durable clock CEILING), so the gate holds. SHUTDOWN: this is an unconditional loop
-    // (killed by signal), so the
-    // final parked outbox is never flushed and `RedbStore::Drop`'s graceful join never runs — recovery
-    // covers it: rehydrate restores the last durable state + the Slice-2a producer re-drives every saga
-    // command idempotently. (All egress today is saga commands [re-driven] + loss-tolerant ClockSync; a
-    // future RELIABLE non-re-driven effect would need a graceful-shutdown flush, owed if/when one lands.)
+    // ClockSync, gated on the durable clock CEILING), so the gate holds. SHUTDOWN (cloud-ready k3d Slice 1):
+    // the loop is now `while !shutdown` — on SIGTERM/SIGINT it BREAKS and runs the graceful drain below (flush
+    // the final parked outbox + return → `RedbStore::Drop` joins the off-tick writer for a final fsync). A
+    // HARD kill (SIGKILL / OOM / the SIGKILL escalation after the grace) still skips the drain, and that path
+    // stays recovery-covered: rehydrate restores the last durable state + the Slice-2a producer re-drives
+    // every saga command idempotently (all egress today is re-driven saga commands + loss-tolerant ClockSync;
+    // a future RELIABLE non-re-driven effect would extend the drain's final-flush, the seam is already here).
     let mut pacer = TickPacer::new(tick_hz); // R-4c hoisted VD_TICK_HZ (also feeds validate_against)
     let mut parked: Option<(TickPrologue, u64)> = None;
     #[cfg(feature = "store-test-hooks")]
     let mut sentinel_injected = false;
-    loop {
+    // Cloud-ready k3d Slice 1: SIGTERM/SIGINT flips this flag; the loop breaks to run the graceful drain
+    // below (flush the final parked outbox + let RedbStore::Drop join the off-tick writer for a final fsync).
+    let shutdown = vd_bins::install_shutdown_flag(runtime.handle());
+    while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         // Flush the PREVIOUS tick's outbox now that its batch is durable. The world outbox still holds only
         // that tick's sends (this runs before the next run_schedule refills it), so the defer is exact.
         if let Some((prologue, seq)) = parked.take() {
@@ -308,4 +312,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cell.store(Arc::new(admin_snapshot(node.world_mut())));
         let _ = pacer.wait();
     }
+    // GRACEFUL DRAIN (Slice 1): the loop broke on SIGTERM/SIGINT. Flush the FINAL parked outbox — wait for
+    // its batch to be durable, then send it. Best-effort: this egress is re-driven saga commands +
+    // loss-tolerant ClockSync, so an unsent frame is recovery-covered on the peer's next need, but flushing
+    // it here cuts the successor's re-drive work. Then RETURN: dropping `node` drops the boxed `RedbStore`,
+    // whose `Drop` drains the writer channel + JOINS the off-tick writer thread (a final fsync) — so the
+    // durable directory / saga WAL / clock ceiling are consistent on disk before exit. `runtime` (declared
+    // earlier) drops AFTER `node`, tearing down the mesh + admin tasks last. This makes a routine
+    // rolling-deploy / pod-stop a clean flush-and-exit instead of a hard SIGKILL crash-path.
+    if let Some((prologue, seq)) = parked.take() {
+        durability.wait_durable_through(seq);
+        let _ = node.flush_outbox(prologue);
+    }
+    tracing::info!("orchestrator drained on shutdown signal — flushed store, exiting cleanly");
+    Ok(())
 }
