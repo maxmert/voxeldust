@@ -2198,6 +2198,34 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      teardown). Doc-only at this trusted-control-surface tier; the ledgered fully-prompt-wake refinement
      (generation-checked writer wake + null-local-conn) subsumes it, OR a re-read-topology-vs-registered-addr
      check before the connection.is_some() early-return.**
+     **📐 CA-1 S3+S4 DESIGN — DEFERRED TO THE DEPLOY-READINESS BUNDLE (2 design rounds wf_a9abdcc2 + wf_46104935,
+     1 designer + 3 adversarial opus lenses + adjudicator each; both NEEDS_ANOTHER_ROUND). DECISIONS LOCKED (user):
+     source handler = Option B (detection-only re-solicit — no source re-emit; recovery is already covered by the
+     R-6 durable outbox + R-4e transport; only a DEAD source needs detection); scope = S3+S4 COUPLED (S3's
+     reachable trigger ARMS the over-discard, so its guard must land with it). S3-B shape is SOUND + specified: a
+     NEW appended InterShardFlow::ReSolicitBatch(TransientHandoff) (the 18th arm, discriminant 17, RE_SOLICIT_STEP
+     =18 — the header/lib.rs closed-set counts LAG at 16/need fixing to 18), ReDriven, on the (AwaitAdopt, Timeout)
+     FSM arm (today a no-op catch-all) → EmitReSolicitAdopt → Ephemeral push_flow toward ctx.source → a dead
+     source bounces NodeUnreachable → is_confirmed_dead(source) reachable → the existing SourceUnreachablePreAdopt
+     discard fires. ⚠️ BUT S4 (the over-discard guard) IS UNSOUND AS A TIMING BOUND (the TRUE BLOCKER, verified
+     against real code): a lost BatchAdopted (dest→orch) is pushed Ephemeral via plain push_flow (stub.rs) with NO
+     producer redrive, and the transport only redelivers on STREAM-DROP (owes_redelivery = stream.is_none() &&
+     !retry.is_empty(), mesh.rs) — NOT on a live lane whose acks stopped. So a lost BatchAdopted on a live lane is
+     NEVER redelivered, and NO abort_deadline_ticks bound can guarantee it arrives before the discard (the code's
+     own saga.rs:961 + R-4c saga.rs:289 tripwires already flag this cross-check ILL-DEFINED). THE SOUND CURE is a
+     MECHANISM change, not a validator: make BatchAdopted a PRODUCER-REDRIVEN ack (a dest-side re-emit until the
+     saga advances, symmetric with S3's re-solicit) — then a live-adopted dest's ack ALWAYS eventually arrives →
+     exits AwaitAdopt → no discard; a never-adopted dest never sends it → discard fires correctly. NO timing bound
+     needed; the redrive distinguishes the cases. (Also owed: the ReSolicitBatch-carries-a-transfer-id vs the
+     FireAndForget "no transfer trigger" written-contract tension — resolve doc-vs-semantics; and the conservation
+     oracle does NOT backstop a wrong bound — an over-discard is a phantom uncounted-Arriving loss, not a dup, so
+     the oracle stays green.) WHY DEFER (SAFE): without S3 the AwaitAdopt egress stays EMPTY ⇒ is_confirmed_dead(
+     source) is UNREACHABLE in prod ⇒ the over-discard NEVER ARMS (the F2-tripwire invariant) ⇒ the system is safe
+     as-is; S3's ONLY payoff (detecting a dead source mid-transient-handoff) is reachable ONLY in a real cloud
+     deploy (a pod dying), which is deploy-readiness-gated. So S3 (detection reachable) + the redriven-BatchAdopted
+     cure + S4 land TOGETHER as the deploy-readiness bundle (with the k3d CrashLoop proofs that exercise them),
+     NOT now. NEXT: P4 voxels (the milestone audit confirmed P4 ready; first slices = SPIKE-6a determinism gate +
+     FrameSpace/AnchorGen + D-41 re-centering math).**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
