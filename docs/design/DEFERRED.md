@@ -2187,7 +2187,17 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      P4. Owed (ledgered): a fully-prompt live-reschedule re-dial (wake the parked peer_writer + null its local
      conn — today the proactive registry close makes the re-dial happen on the writer's NEXT operation, correct
      not instant); the update_peer_addr None-Dial-arm (peer removed) + the proactive-drop path want a direct unit
-     test (the l5 test covers the Some/re-plumb path).**
+     test (the l5 test covers the Some/re-plumb path). S2 POST-IMPL REVIEW (wf_838899e4, SOUND_NO_CRITICAL — 0
+     crit/high, verified no redelivery-core regression + rcu lost-update-safe + None-arm no-spin + l5
+     deterministic) flagged ONE narrow LOW TOCTOU: an in-flight dial that read the OLD addr at ensure_connection's
+     topology-load can complete + register a stale connection into the ConnRegistry AFTER update_peer_addr's
+     proactive remove already ran, escaping the proactive close (the sub-ms window between the dial's topology
+     read and its registry insert). SELF-HEALING in every realistic reschedule (the old addr is dead ⇒ the stale
+     conn fails on its next write ⇒ Down ⇒ re-dial reads the NEW addr); the update is only DELAYED (never lost),
+     and only if the OLD endpoint is still live-and-accepting during that window (a NAT/routing re-point, not a
+     teardown). Doc-only at this trusted-control-surface tier; the ledgered fully-prompt-wake refinement
+     (generation-checked writer wake + null-local-conn) subsumes it, OR a re-read-topology-vs-registered-addr
+     check before the connection.is_some() early-return.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
