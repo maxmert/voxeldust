@@ -255,7 +255,15 @@ impl NodeOutbox {
         payload: &[u8],
     ) -> u64 {
         let framed = frame_reliable(from, class, incarnation, seq, payload);
-        self.retain(&OutboxKey { peer, class, incarnation, seq }, &framed);
+        self.retain(
+            &OutboxKey {
+                peer,
+                class,
+                incarnation,
+                seq,
+            },
+            &framed,
+        );
         self.commit(); // submit + wait_durable_through ⇒ durable-on-return (no pause hook)
         self.durability.last_submitted()
     }
@@ -266,7 +274,13 @@ impl NodeOutbox {
 /// at `epoch = u32::MAX` (the write-path re-stamp): replay re-frames from the decoded PAYLOAD, so the stored
 /// `from`/`epoch` are inert — this is purely the on-disk-row builder. Gated to the two test surfaces.
 #[cfg(any(test, feature = "store-test-hooks"))]
-fn frame_reliable(from: NodeId, class: MsgClass, incarnation: u64, seq: u64, payload: &[u8]) -> Vec<u8> {
+fn frame_reliable(
+    from: NodeId,
+    class: MsgClass,
+    incarnation: u64,
+    seq: u64,
+    payload: &[u8],
+) -> Vec<u8> {
     vd_wire::framing::encode_frame(&crate::ReliableFrame {
         from,
         class,
@@ -396,12 +410,23 @@ impl std::fmt::Display for ReplayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReplayError::LaneStuck { peer } => {
-                write!(f, "boot replay: the lane to peer {} stayed full past the retry cap (drain wedged)", peer.0)
+                write!(
+                    f,
+                    "boot replay: the lane to peer {} stayed full past the retry cap (drain wedged)",
+                    peer.0
+                )
             }
             ReplayError::LaneDead { peer } => {
-                write!(f, "boot replay: the lane to peer {} is dead (its writer task exited)", peer.0)
+                write!(
+                    f,
+                    "boot replay: the lane to peer {} is dead (its writer task exited)",
+                    peer.0
+                )
             }
-            ReplayError::FenceTimeout { submitted, expected } => write!(
+            ReplayError::FenceTimeout {
+                submitted,
+                expected,
+            } => write!(
                 f,
                 "boot replay: the durability fence timed out ({submitted}/{expected} fresh rows submitted) — a peer-writer is stuck"
             ),
@@ -760,7 +785,10 @@ mod tests {
         let k1 = key(1, MsgClass::Saga, 7, 0);
         ob.retain(&k1, b"f0");
         let (s1, h1) = ob.submit_barrier().expect("a staged retain ⇒ Some");
-        assert!(s1 > 0, "the store batch seq is non-zero (never aliased to genesis)");
+        assert!(
+            s1 > 0,
+            "the store batch seq is non-zero (never aliased to genesis)"
+        );
         h1.wait_durable_through(s1);
         assert_eq!(
             ob.scan_all(),
@@ -771,14 +799,14 @@ mod tests {
         let k2 = key(2, MsgClass::GhostReliable, 7, 0);
         ob.retain(&k2, b"f1");
         let (s2, h2) = ob.submit_barrier().expect("a staged retain ⇒ Some");
-        assert!(s2 > s1, "monotone ascending store seq across submits (waiting on s2 subsumes s1)");
+        assert!(
+            s2 > s1,
+            "monotone ascending store seq across submits (waiting on s2 subsumes s1)"
+        );
         h2.wait_durable_through(s2);
 
         // An empty span (nothing staged) ⇒ None: block B must NOT treat it as durable-gated (MF-2).
-        assert!(
-            ob.submit_barrier().is_none(),
-            "no stage ⇒ no barrier"
-        );
+        assert!(ob.submit_barrier().is_none(), "no stage ⇒ no barrier");
     }
 
     #[test]
@@ -926,8 +954,15 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .scan_all();
-        assert_eq!(remaining.len(), 1, "the roster-gone row SURVIVES — never swept");
-        assert_eq!(remaining[0].0.incarnation, 1, "the prior-incarnation row is intact");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the roster-gone row SURVIVES — never swept"
+        );
+        assert_eq!(
+            remaining[0].0.incarnation, 1,
+            "the prior-incarnation row is intact"
+        );
     }
 
     #[test]
@@ -1071,10 +1106,17 @@ mod tests {
         let _g = TempOutbox { path: path.clone() };
         let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
         let seq = ob.seed_reliable_row(NodeId(1), NodeId(2), MsgClass::Saga, 5, 0, b"hello");
-        assert!(ob.durability().is_durable_through(seq), "the seeded row is durable-on-return");
+        assert!(
+            ob.durability().is_durable_through(seq),
+            "the seeded row is durable-on-return"
+        );
         let rows = ob.scan_all();
         assert_eq!(rows.len(), 1, "exactly the one seeded row");
-        assert_eq!(rows[0].0, key(2, MsgClass::Saga, 5, 0), "under its (peer,class,incarnation,seq) key");
+        assert_eq!(
+            rows[0].0,
+            key(2, MsgClass::Saga, 5, 0),
+            "under its (peer,class,incarnation,seq) key"
+        );
         assert_eq!(
             decode_value_payload(&rows[0].1).as_deref(),
             Some(&b"hello"[..]),
@@ -1122,7 +1164,8 @@ mod tests {
             rows: vec![(key(2, MsgClass::Saga, 1, 0), framed_row(b"x"))],
             durability: DurabilityHandle::already_durable(), // last_submitted() == u64::MAX
         };
-        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
+        let shared: SharedOutbox =
+            Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
         let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
         let mut t = FlakyTransport::new(0); // sends OK ⇒ replayed = 1 ⇒ the fence computes base + 1
         let _ = replay_outbox(&shared, &mut t, &peers); // panics inside the expect (caught by should_panic)
@@ -1209,7 +1252,8 @@ mod tests {
             let g = ob;
             let dh = g.durability();
             let b = dh.last_submitted();
-            let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(g) as Box<dyn OutboxSink + Send>));
+            let shared: SharedOutbox =
+                Arc::new(Mutex::new(Box::new(g) as Box<dyn OutboxSink + Send>));
             let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
             let mut t = FlakyTransport::new(0); // sends OK (records) but never re-mirrors ⇒ no new submit
             let err = replay_outbox_with_limits(&shared, &mut t, &peers, fast_limits());
@@ -1269,9 +1313,18 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(parked, "the writer parked pre-fsync on the submitted row (marker written)");
-        assert!(!h.is_durable_through(seq), "submitted but NOT durable (paused pre-fsync)");
-        assert!(h.durable_through() < seq, "the durable watermark lags the parked row");
+        assert!(
+            parked,
+            "the writer parked pre-fsync on the submitted row (marker written)"
+        );
+        assert!(
+            !h.is_durable_through(seq),
+            "submitted but NOT durable (paused pre-fsync)"
+        );
+        assert!(
+            h.durable_through() < seq,
+            "the durable watermark lags the parked row"
+        );
         assert!(
             ob.scan_all().is_empty(),
             "durable-before-send ORDERING: a submitted-but-pre-fsync row is INVISIBLE to scan_all until \
@@ -1332,7 +1385,8 @@ mod tests {
             ],
             durability: handle,
         };
-        let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
+        let shared: SharedOutbox =
+            Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
         let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
 
         // Replay on a background thread: it re-drives both rows (submitted → 2), the count-fence passes
@@ -1373,7 +1427,10 @@ mod tests {
 
         // Release the parked replay: bump `durable` past the fence ⇒ wait_durable_through returns ⇒ gc runs.
         durable.store(2, Ordering::Release);
-        let counts = replay.join().expect("replay thread joins").expect("replay ok");
+        let counts = replay
+            .join()
+            .expect("replay thread joins")
+            .expect("replay ok");
         assert_eq!(counts.replayed, 2, "both rows were re-driven");
         assert_eq!(
             shared
@@ -1440,7 +1497,10 @@ mod tests {
                 }
             }
             fn scan_all(&self) -> Vec<(OutboxKey, Vec<u8>)> {
-                self.committed.iter().map(|(k, v)| (*k, v.clone())).collect()
+                self.committed
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect()
             }
             fn gc_below(&mut self, incarnation: u64) {
                 self.committed.retain(|k, _| k.incarnation >= incarnation);
@@ -1482,7 +1542,10 @@ mod tests {
             }
             fn accept(&mut self, k: OutboxKey) -> bool {
                 self.arrivals += 1;
-                let cell = self.states.entry((k.peer, k.class)).or_insert_with(RecvCell::fresh);
+                let cell = self
+                    .states
+                    .entry((k.peer, k.class))
+                    .or_insert_with(RecvCell::fresh);
                 // The outbox re-frames at epoch = u32::MAX (framed_row / the write-path re-stamp), so the
                 // receiver sees that epoch; the incarnation/seq are the OutboxKey's.
                 if cell.accept(k.incarnation, u32::MAX, k.seq) {
@@ -1649,8 +1712,11 @@ mod tests {
                         }
                     }
                     Op::Ack { idx } => {
-                        let keys: Vec<OutboxKey> =
-                            committed_ref.keys().chain(staged_ref.keys()).copied().collect();
+                        let keys: Vec<OutboxKey> = committed_ref
+                            .keys()
+                            .chain(staged_ref.keys())
+                            .copied()
+                            .collect();
                         if !keys.is_empty() {
                             let k = keys[*idx % keys.len()];
                             model.release(&k);
@@ -1689,10 +1755,11 @@ mod tests {
                         // Drive the REAL replay against a fresh wrapping sharing the capture pair's atomics.
                         let (handle, mut transport) = fresh_capture_pair(None, true);
                         model.durability = handle;
-                        let shared: SharedOutbox =
-                            Arc::new(Mutex::new(Box::new(model.clone()) as Box<dyn OutboxSink + Send>));
-                        let counts =
-                            replay_outbox(&shared, &mut transport, &roster).expect("healthy replay ok");
+                        let shared: SharedOutbox = Arc::new(Mutex::new(
+                            Box::new(model.clone()) as Box<dyn OutboxSink + Send>
+                        ));
+                        let counts = replay_outbox(&shared, &mut transport, &roster)
+                            .expect("healthy replay ok");
                         // Extract the post-gc committed back (the code's gc is authoritative).
                         model.committed = shared
                             .lock()
@@ -1701,8 +1768,15 @@ mod tests {
                             .into_iter()
                             .collect();
                         // INV-4 ACCOUNTING (RC-2a no-silent-loss):
-                        assert_eq!(counts.replayed, expected.len(), "replayed == routable+decodable rows");
-                        assert_eq!(counts.quarantined, quarantined, "quarantined == off-roster + undecodable");
+                        assert_eq!(
+                            counts.replayed,
+                            expected.len(),
+                            "replayed == routable+decodable rows"
+                        );
+                        assert_eq!(
+                            counts.quarantined, quarantined,
+                            "quarantined == off-roster + undecodable"
+                        );
                         assert_eq!(
                             counts.replayed + counts.quarantined,
                             rows_scanned,
@@ -1712,11 +1786,15 @@ mod tests {
                         let want_sent: Vec<(NodeId, MsgClass, Vec<u8>)> = expected
                             .iter()
                             .map(|k| {
-                                let pay = decode_value_payload(&committed_ref[k]).expect("decodable");
+                                let pay =
+                                    decode_value_payload(&committed_ref[k]).expect("decodable");
                                 (k.peer, k.class, pay.to_vec())
                             })
                             .collect();
-                        assert_eq!(transport.sent, want_sent, "capture.sent == expected deliveries, in order");
+                        assert_eq!(
+                            transport.sent, want_sent,
+                            "capture.sent == expected deliveries, in order"
+                        );
                         // Ref: re-driven keys leave committed; quarantined keys STAY (no-orphan — verified
                         // against the sink's actual post-gc committed by the INV-1 equality below).
                         for k in &expected {
@@ -1738,7 +1816,10 @@ mod tests {
                         if !ks.is_empty() {
                             let k = ks[*idx % ks.len()];
                             let before = ledger.delivered.len();
-                            assert!(!ledger.accept(k), "a redelivery of a delivered row is deduped");
+                            assert!(
+                                !ledger.accept(k),
+                                "a redelivery of a delivered row is deduped"
+                            );
                             assert_eq!(ledger.delivered.len(), before, "dedup adds no new effect");
                             flags[2] = true;
                         }
@@ -1746,7 +1827,10 @@ mod tests {
                 }
                 // INV-1 NO-LOSS + INV-5 (independent scan_all): the model's durable set equals the hand-
                 // maintained committed reference after EVERY op.
-                assert_eq!(model.committed, committed_ref, "sink.committed == Ref.committed (no-loss)");
+                assert_eq!(
+                    model.committed, committed_ref,
+                    "sink.committed == Ref.committed (no-loss)"
+                );
                 assert_eq!(
                     model.scan_all(),
                     committed_ref
@@ -1760,7 +1844,10 @@ mod tests {
                 // (the pre-F1 blunt gc_below) would make model.committed lose it ⇒ the equality goes RED.
             }
             // INV-3 (receiver): arrivals never under-count distinct effects.
-            assert!(ledger.arrivals >= ledger.delivered.len(), "arrivals >= distinct effects");
+            assert!(
+                ledger.arrivals >= ledger.delivered.len(),
+                "arrivals >= distinct effects"
+            );
             cov.set(flags);
         }
 
@@ -1795,9 +1882,21 @@ mod tests {
             let cov = Cell::new([false; 4]);
             model_check(
                 &[
-                    Op::Retain { peer: 1, class: 0, seq: 0, payload: 1, garbage: false },
+                    Op::Retain {
+                        peer: 1,
+                        class: 0,
+                        seq: 0,
+                        payload: 1,
+                        garbage: false,
+                    },
                     Op::Commit,
-                    Op::Retain { peer: 1, class: 0, seq: 1, payload: 2, garbage: false }, // staged
+                    Op::Retain {
+                        peer: 1,
+                        class: 0,
+                        seq: 1,
+                        payload: 2,
+                        garbage: false,
+                    }, // staged
                     Op::SourceCrash,
                 ],
                 &cov,
@@ -1810,7 +1909,13 @@ mod tests {
             let cov = Cell::new([false; 4]);
             model_check(
                 &[
-                    Op::Retain { peer: 1, class: 0, seq: 0, payload: 7, garbage: false },
+                    Op::Retain {
+                        peer: 1,
+                        class: 0,
+                        seq: 0,
+                        payload: 7,
+                        garbage: false,
+                    },
                     Op::Commit,
                     Op::SourceCrash,
                     Op::BootReplay, // re-drives the durable row (committed empty after)
@@ -1826,7 +1931,13 @@ mod tests {
             let cov = Cell::new([false; 4]);
             model_check(
                 &[
-                    Op::Retain { peer: 2, class: 0, seq: 0, payload: 3, garbage: false },
+                    Op::Retain {
+                        peer: 2,
+                        class: 0,
+                        seq: 0,
+                        payload: 3,
+                        garbage: false,
+                    },
                     Op::Commit,
                     Op::BootReplay,               // delivers the row once
                     Op::DestRedeliver { idx: 0 }, // a duplicate ⇒ deduped (asserted inside)
@@ -1841,7 +1952,13 @@ mod tests {
             let cov = Cell::new([false; 4]);
             model_check(
                 &[
-                    Op::Retain { peer: 9, class: 0, seq: 0, payload: 5, garbage: false }, // off-roster
+                    Op::Retain {
+                        peer: 9,
+                        class: 0,
+                        seq: 0,
+                        payload: 5,
+                        garbage: false,
+                    }, // off-roster
                     Op::Commit,
                     Op::BootReplay, // quarantined + retained (asserted via accounting)
                 ],
@@ -1855,8 +1972,18 @@ mod tests {
             // The sharpest: a FIRST replay that dies partway (LaneStuck) skips gc (refuse-to-boot) ⇒ NO partial
             // sweep; a FRESH replay re-drives BOTH, and the row delivered twice across boots dedups to ONE effect.
             let roster = roster();
-            let k1 = OutboxKey { peer: NodeId(2), class: MsgClass::Saga, incarnation: 0, seq: 0 };
-            let k2 = OutboxKey { peer: NodeId(2), class: MsgClass::Saga, incarnation: 0, seq: 1 };
+            let k1 = OutboxKey {
+                peer: NodeId(2),
+                class: MsgClass::Saga,
+                incarnation: 0,
+                seq: 0,
+            };
+            let k2 = OutboxKey {
+                peer: NodeId(2),
+                class: MsgClass::Saga,
+                incarnation: 0,
+                seq: 1,
+            };
             let mut committed: BTreeMap<OutboxKey, Vec<u8>> = BTreeMap::new();
             committed.insert(k1, framed_row(&[1]));
             committed.insert(k2, framed_row(&[2]));
@@ -1864,28 +1991,53 @@ mod tests {
 
             // First replay: fail_after=1 ⇒ re-drives k1, then the k2 send stays QueueFull past the retry cap.
             let (handle, mut t1) = fresh_capture_pair(Some(1), true);
-            let sink1 = ModelOutboxSink { committed: committed.clone(), staged: BTreeMap::new(), durability: handle };
-            let shared1: SharedOutbox = Arc::new(Mutex::new(Box::new(sink1) as Box<dyn OutboxSink + Send>));
+            let sink1 = ModelOutboxSink {
+                committed: committed.clone(),
+                staged: BTreeMap::new(),
+                durability: handle,
+            };
+            let shared1: SharedOutbox =
+                Arc::new(Mutex::new(Box::new(sink1) as Box<dyn OutboxSink + Send>));
             let err = replay_outbox_with_limits(&shared1, &mut t1, &roster, fast_limits());
-            assert_eq!(err, Err(ReplayError::LaneStuck { peer: NodeId(2) }), "the partial replay refuses to boot");
             assert_eq!(
-                shared1.lock().unwrap_or_else(PoisonError::into_inner).scan_all().len(),
+                err,
+                Err(ReplayError::LaneStuck { peer: NodeId(2) }),
+                "the partial replay refuses to boot"
+            );
+            assert_eq!(
+                shared1
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .scan_all()
+                    .len(),
                 2,
                 "refuse-to-boot skips gc ⇒ BOTH rows survive (no partial sweep of the re-driven k1)"
             );
 
             // Fresh replay (healthy): re-drives BOTH; k1 is delivered a SECOND time across the two boots.
             let (handle2, mut t2) = fresh_capture_pair(None, true);
-            let sink2 = ModelOutboxSink { committed, staged: BTreeMap::new(), durability: handle2 };
-            let shared2: SharedOutbox = Arc::new(Mutex::new(Box::new(sink2) as Box<dyn OutboxSink + Send>));
+            let sink2 = ModelOutboxSink {
+                committed,
+                staged: BTreeMap::new(),
+                durability: handle2,
+            };
+            let shared2: SharedOutbox =
+                Arc::new(Mutex::new(Box::new(sink2) as Box<dyn OutboxSink + Send>));
             let counts = replay_outbox(&shared2, &mut t2, &roster).expect("healthy replay ok");
             assert_eq!(counts.replayed, 2, "the fresh replay re-drove both rows");
             // Feed the ledger in send order across BOTH boots: k1 (boot1), then k1,k2 (boot2).
             ledger.accept(k1);
             ledger.accept(k1); // the cross-boot re-delivery of k1 ⇒ deduped
             ledger.accept(k2);
-            assert_eq!(ledger.delivered, [k1, k2].into_iter().collect(), "exactly-once across a crash-mid-replay");
-            assert_eq!(ledger.arrivals, 3, "3 arrivals (k1 twice), 2 distinct effects");
+            assert_eq!(
+                ledger.delivered,
+                [k1, k2].into_iter().collect(),
+                "exactly-once across a crash-mid-replay"
+            );
+            assert_eq!(
+                ledger.arrivals, 3,
+                "3 arrivals (k1 twice), 2 distinct effects"
+            );
         }
 
         /// Differential-vs-redb (MF-3): pin the model sink's staged/committed semantics to the REAL
@@ -1900,7 +2052,12 @@ mod tests {
                 staged: BTreeMap::new(),
                 durability: DurabilityHandle::already_durable(),
             };
-            let k = |p, s| OutboxKey { peer: NodeId(p), class: MsgClass::Saga, incarnation: 1, seq: s };
+            let k = |p, s| OutboxKey {
+                peer: NodeId(p),
+                class: MsgClass::Saga,
+                incarnation: 1,
+                seq: s,
+            };
             let steps: &[(OutboxKey, Option<u8>)] = &[
                 (k(1, 0), Some(10)),
                 (k(1, 1), Some(11)),
@@ -1921,16 +2078,29 @@ mod tests {
                 }
                 real.commit();
                 model.commit();
-                assert_eq!(real.scan_all(), model.scan_all(), "model tracks NodeOutbox after each commit");
+                assert_eq!(
+                    real.scan_all(),
+                    model.scan_all(),
+                    "model tracks NodeOutbox after each commit"
+                );
             }
             // Cover the trait surface the replay proptest does not drive (submit_barrier / gc_below), keeping
             // the reference model honest to those NodeOutbox semantics too.
-            assert!(model.submit_barrier().is_none(), "empty staged ⇒ no barrier (matches NodeOutbox)");
+            assert!(
+                model.submit_barrier().is_none(),
+                "empty staged ⇒ no barrier (matches NodeOutbox)"
+            );
             model.retain(&k(3, 0), &framed_row(&[9]));
-            assert!(model.submit_barrier().is_some(), "a staged retain ⇒ a barrier");
+            assert!(
+                model.submit_barrier().is_some(),
+                "a staged retain ⇒ a barrier"
+            );
             model.commit();
             model.gc_below(2); // every row here is incarnation 1 ⇒ swept by the incarnation-2 floor
-            assert!(model.scan_all().is_empty(), "gc_below(2) swept the incarnation-1 rows");
+            assert!(
+                model.scan_all().is_empty(),
+                "gc_below(2) swept the incarnation-1 rows"
+            );
         }
     }
 }

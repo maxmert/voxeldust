@@ -247,8 +247,13 @@ fn a_retained_frame_is_durable_through_the_shared_sink_and_released_on_ack() {
         None,
     );
 
-    a.send_durable(B, MsgClass::GhostReliable, vec![7].into(), Durability::Retained)
-        .expect("enqueued");
+    a.send_durable(
+        B,
+        MsgClass::GhostReliable,
+        vec![7].into(),
+        Durability::Retained,
+    )
+    .expect("enqueued");
 
     let mut got = Vec::new();
     wait_until(

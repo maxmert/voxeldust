@@ -50,8 +50,15 @@ fn boot_mesh_and_replay_wires_a_live_outbox_and_returns() {
     // mis-ordered replay after build_app, passed `None`, or hung, this would fail/hang.
     let (transport, control) =
         boot_mesh_and_replay(&env, rt.handle(), &trust).expect("boot with a live outbox");
-    assert!(outbox_path.exists(), "the durable outbox was opened by the glue");
-    assert_eq!(transport.local_id(), a, "the mesh came up as the configured node");
+    assert!(
+        outbox_path.exists(),
+        "the durable outbox was opened by the glue"
+    );
+    assert_eq!(
+        transport.local_id(),
+        a,
+        "the mesh came up as the configured node"
+    );
 
     drop((transport, control));
     drop(rt); // stop the peer-writer tasks so the outbox store writer joins + releases the file

@@ -313,7 +313,10 @@ pub fn boot_mesh_and_replay(
     runtime: &tokio::runtime::Handle,
     trust: &vd_io_prod::trust::ClusterTrust,
 ) -> Result<
-    (vd_io_prod::mesh::MeshTransport, vd_io_prod::mesh::MeshControl),
+    (
+        vd_io_prod::mesh::MeshTransport,
+        vd_io_prod::mesh::MeshControl,
+    ),
     Box<dyn std::error::Error>,
 > {
     use vd_io_prod::mesh::{MeshConfig, spawn_mesh};
@@ -324,7 +327,7 @@ pub fn boot_mesh_and_replay(
 
     let shared: Option<vd_io_prod::outbox::SharedOutbox> = open_node_outbox(env)?.map(|ob| {
         std::sync::Arc::new(std::sync::Mutex::new(
-            Box::new(ob) as Box<dyn vd_io_prod::outbox::OutboxSink + Send>,
+            Box::new(ob) as Box<dyn vd_io_prod::outbox::OutboxSink + Send>
         ))
     });
 

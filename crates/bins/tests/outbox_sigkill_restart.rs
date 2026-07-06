@@ -94,7 +94,10 @@ fn wait_for_marker(marker: &std::path::Path, what: &str) {
     let start = Instant::now();
     while !marker.exists() {
         std::thread::sleep(Duration::from_millis(10));
-        assert!(start.elapsed() < DEADLINE, "timed out waiting for {what} marker {marker:?}");
+        assert!(
+            start.elapsed() < DEADLINE,
+            "timed out waiting for {what} marker {marker:?}"
+        );
     }
 }
 
@@ -117,13 +120,16 @@ fn spin_up_b(
     addr_b: SocketAddr,
 ) -> (tokio::runtime::Runtime, MeshTransport, MeshControl, String) {
     let trust = ClusterTrust::generate("vd-outbox-sigkill").expect("trust");
-    trust.write_der_dir(&paths.trust_dir).expect("write trust der"); // the child reads VD_TRUST_DIR
+    trust
+        .write_der_dir(&paths.trust_dir)
+        .expect("write trust der"); // the child reads VD_TRUST_DIR
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .expect("rt");
-    let book_map: BTreeMap<NodeId, SocketAddr> = [(SOURCE, addr_src), (B, addr_b)].into_iter().collect();
+    let book_map: BTreeMap<NodeId, SocketAddr> =
+        [(SOURCE, addr_src), (B, addr_b)].into_iter().collect();
     let cfg_b = MeshConfig::new(B, addr_b, book_map, 256, 1);
     let (b, ctl_b) = spawn_mesh(rt.handle(), &trust, &cfg_b, None).expect("spawn B");
     let book_str = book(&[(SOURCE, addr_src), (B, addr_b)]);
@@ -139,8 +145,12 @@ fn sigkill_restart_redrives_the_durable_outbox_row_and_boots_counter_by_exactly_
 
     // BOOT 1: seed a durable row to B, then idle for the SIGKILL. Cluster RAII-reaps on any panic.
     let mut cluster = Cluster::new();
-    let child = spawn_node(BIN, &[], &source_env(&paths, &book_str, addr_src, Some(PAYLOAD)))
-        .expect("spawn boot-1 source");
+    let child = spawn_node(
+        BIN,
+        &[],
+        &source_env(&paths, &book_str, addr_src, Some(PAYLOAD)),
+    )
+    .expect("spawn boot-1 source");
     cluster.push("src", child);
     wait_for_marker(&paths.store.with_extension("seeded"), "boot-1 seed-durable");
     let v1 = BootCounter::current(&paths.counter_path())
@@ -170,7 +180,11 @@ fn sigkill_restart_redrives_the_durable_outbox_row_and_boots_counter_by_exactly_
     let v2 = BootCounter::current(&paths.counter_path())
         .expect("read v2")
         .expect("boot-2 minted a durable incarnation v2");
-    assert_eq!(v2, v1 + 1, "the process incarnation resolved EXACTLY once across the SIGKILL-restart");
+    assert_eq!(
+        v2,
+        v1 + 1,
+        "the process incarnation resolved EXACTLY once across the SIGKILL-restart"
+    );
 }
 
 #[test]
@@ -189,7 +203,9 @@ fn fresh_outbox_re_drives_zero_rows() {
         .expect("spawn boot-1 (no seed)");
     cluster.push("src", child);
     wait_for_marker(&ready, "boot-1 ready");
-    let v1 = BootCounter::current(&paths.counter_path()).expect("v1").expect("v1 minted");
+    let v1 = BootCounter::current(&paths.counter_path())
+        .expect("v1")
+        .expect("v1 minted");
 
     // Restart (still no seed).
     cluster.kill_and_reap("src");
@@ -204,9 +220,18 @@ fn fresh_outbox_re_drives_zero_rows() {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         drain_b(&mut b, &mut got);
-        assert!(got.is_empty(), "a fresh (unseeded) outbox re-drove nothing, yet B received {got:?}");
+        assert!(
+            got.is_empty(),
+            "a fresh (unseeded) outbox re-drove nothing, yet B received {got:?}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let v2 = BootCounter::current(&paths.counter_path()).expect("v2").expect("v2 minted");
-    assert_eq!(v2, v1 + 1, "a genuine restart happened (counter + 1) — the 0-re-drive is not vacuous");
+    let v2 = BootCounter::current(&paths.counter_path())
+        .expect("v2")
+        .expect("v2 minted");
+    assert_eq!(
+        v2,
+        v1 + 1,
+        "a genuine restart happened (counter + 1) — the 0-re-drive is not vacuous"
+    );
 }

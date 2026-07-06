@@ -33,15 +33,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ob = vd_bins::open_node_outbox(&env)?
                 .ok_or("VD_OUTBOX_PATH must be set to seed a durable row")?;
             // Fixed topology: peer B = NodeId(2), class Saga, seq 0.
-            let seq = ob.seed_reliable_row(from, NodeId(2), MsgClass::Saga, incarnation, 0, &[payload]);
+            let seq =
+                ob.seed_reliable_row(from, NodeId(2), MsgClass::Saga, incarnation, 0, &[payload]);
             assert!(
                 ob.durability().is_durable_through(seq),
                 "seeded outbox row is durable-on-disk before the SIGKILL window opens"
             );
             // The decoupled "durable window open" signal the test polls (the writer already fsynced above).
-            let marker = std::path::PathBuf::from(env.string("VD_OUTBOX_PATH")?).with_extension("seeded");
+            let marker =
+                std::path::PathBuf::from(env.string("VD_OUTBOX_PATH")?).with_extension("seeded");
             std::fs::write(&marker, b"seeded")?;
-            tracing::info!(?marker, seq, "boot 1: seeded a durable outbox row; idling for SIGKILL");
+            tracing::info!(
+                ?marker,
+                seq,
+                "boot 1: seeded a durable outbox row; idling for SIGKILL"
+            );
             // Idle holding the outbox open — the test SIGKILLs here (do NOT drop: no graceful flush/join).
             loop {
                 std::thread::park();
@@ -55,14 +61,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .worker_threads(2)
                 .enable_all()
                 .build()?;
-            let trust = ClusterTrust::from_der_dir(std::path::Path::new(&env.string("VD_TRUST_DIR")?))?;
+            let trust =
+                ClusterTrust::from_der_dir(std::path::Path::new(&env.string("VD_TRUST_DIR")?))?;
             let (_transport, _control) =
                 vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
             // The "boot done" signal (mesh up, incarnation minted, retained rows re-driven) — the
             // anti-theater twin polls this before reading the counter + killing (no seed ⇒ no `.seeded`).
-            let ready = std::path::PathBuf::from(env.string("VD_OUTBOX_PATH")?).with_extension("ready");
+            let ready =
+                std::path::PathBuf::from(env.string("VD_OUTBOX_PATH")?).with_extension("ready");
             std::fs::write(&ready, b"ready")?;
-            tracing::info!("boot 2: boot_mesh_and_replay done (retained rows re-driven); keeping mesh alive");
+            tracing::info!(
+                "boot 2: boot_mesh_and_replay done (retained rows re-driven); keeping mesh alive"
+            );
             // Hold the transport + control + runtime alive so the peer-writer delivers the re-driven frame
             // to the in-process receiver B the test holds. The test observes B, then SIGKILLs us at teardown.
             loop {

@@ -465,11 +465,23 @@ mod tests {
         // after) — it must NOT mutate. Absent ⇒ None; after two increments ⇒ Some(the last value), stable.
         let dir = scratch();
         let path = dir.join(format!("cur-{}.counter", line!()));
-        assert_eq!(BootCounter::current(&path).expect("absent read"), None, "absent ⇒ None");
+        assert_eq!(
+            BootCounter::current(&path).expect("absent read"),
+            None,
+            "absent ⇒ None"
+        );
         assert_eq!(BootCounter::increment_on_boot(&path, 1).expect("v1"), 1);
         assert_eq!(BootCounter::increment_on_boot(&path, 1).expect("v2"), 2);
-        assert_eq!(BootCounter::current(&path).expect("peek"), Some(2), "reads the last value");
-        assert_eq!(BootCounter::current(&path).expect("peek 2"), Some(2), "and does NOT increment");
+        assert_eq!(
+            BootCounter::current(&path).expect("peek"),
+            Some(2),
+            "reads the last value"
+        );
+        assert_eq!(
+            BootCounter::current(&path).expect("peek 2"),
+            Some(2),
+            "and does NOT increment"
+        );
     }
 
     #[test]

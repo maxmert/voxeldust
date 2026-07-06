@@ -990,8 +990,13 @@ pub fn spawn_mesh(
     // booked NodeId is never learned, so no learned lane can shadow a booked one). Created ONCE, shared by the
     // accept path (which learns) + `MeshTransport` (which lazily spawns a learned lane on send).
     let learned: LearnedPeers = Arc::new(Mutex::new(BTreeMap::new()));
-    let booked: Arc<BTreeSet<NodeId>> =
-        Arc::new(cfg.peers.keys().copied().filter(|&p| p != cfg.local).collect());
+    let booked: Arc<BTreeSet<NodeId>> = Arc::new(
+        cfg.peers
+            .keys()
+            .copied()
+            .filter(|&p| p != cfg.local)
+            .collect(),
+    );
     // CA-1 S2 — the shared updatable peer-address topology, seeded from the static book; every Dial-lane re-reads
     // it on each dial, and `MeshControl::update_peer_addr` rcu-refreshes it (the orchestrator/provisioning push).
     let topology: PeerTopology = Arc::new(ArcSwap::from_pointee(cfg.peers.clone()));
@@ -1027,7 +1032,15 @@ pub fn spawn_mesh(
                     return; // handshake failed (foreign trust): drop, never serve
                 };
                 serve_connection(
-                    connection, inbox, stats, ledger, ack_flush, learned, booked, accept_local, accept_cap,
+                    connection,
+                    inbox,
+                    stats,
+                    ledger,
+                    ack_flush,
+                    learned,
+                    booked,
+                    accept_local,
+                    accept_cap,
                 )
                 .await;
             });
@@ -1229,9 +1242,7 @@ async fn serve_data_stream_body(
         // first authenticated frame. A SEPARATE `learned.lock()` inside `learn_dial_in_peer` — NEVER nested in
         // the ledger's inner Mutex (classify_and_deliver above obeys outer-read→inner→inbox and has fully
         // returned here), preserving the global lock order.
-        if !recorded
-            && let Some(ctx) = &learn
-        {
+        if !recorded && let Some(ctx) = &learn {
             recorded = true;
             learn_dial_in_peer(ctx, frame.from);
         }
@@ -1267,13 +1278,27 @@ fn learn_dial_in_peer(ctx: &LearnCtx, from: NodeId) {
     match t.get(&from) {
         Some(existing) if existing.conn.close_reason().is_none() => {} // live entry: keep (evict only on death)
         Some(_) => {
-            t.insert(from, LearnedConn { conn: ctx.conn.clone(), ack_rx: ctx.ack_rx.clone() });
+            t.insert(
+                from,
+                LearnedConn {
+                    conn: ctx.conn.clone(),
+                    ack_rx: ctx.ack_rx.clone(),
+                },
+            );
         }
         None if t.len() < ctx.cap => {
-            t.insert(from, LearnedConn { conn: ctx.conn.clone(), ack_rx: ctx.ack_rx.clone() });
+            t.insert(
+                from,
+                LearnedConn {
+                    conn: ctx.conn.clone(),
+                    ack_rx: ctx.ack_rx.clone(),
+                },
+            );
         }
         None => {
-            ctx.stats.learned_peers_rejected.fetch_add(1, Ordering::Relaxed);
+            ctx.stats
+                .learned_peers_rejected
+                .fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 from = from.0,
                 cap = ctx.cap,
@@ -1846,11 +1871,7 @@ async fn ensure_connection(
             // spawn-time copy) — so a rescheduled peer, once `update_peer_addr` refreshes its entry, is dialed at
             // its NEW addr on the next redial. A peer with no current address (removed / not-yet-provisioned) is
             // an Err (like a dead learned conn) → Down → the retransmit timer re-reads on its next fire.
-            let Some(addr) = topology
-                .load()
-                .get(&dest)
-                .copied()
-            else {
+            let Some(addr) = topology.load().get(&dest).copied() else {
                 return Err(());
             };
             let conn = endpoint
@@ -2080,7 +2101,9 @@ async fn write_frame(
                     frame.class,
                     &frame.bytes,
                     durable,
-                    guard.as_deref_mut().map(|b| &mut **b as &mut dyn OutboxSink),
+                    guard
+                        .as_deref_mut()
+                        .map(|b| &mut **b as &mut dyn OutboxSink),
                 ) {
                     Ok(seq) => {
                         // R-4a: remember the id ONLY of a RETAINED frame, so the threshold-gated confirm
@@ -2358,10 +2381,9 @@ impl Transport for MeshTransport {
             }));
             self.lanes.insert(to, PeerLane { tx });
         }
-        let lane = self
-            .lanes
-            .get(&to)
-            .expect("a live booked or freshly-spawned learned lane is present after the CA-1 ensure");
+        let lane = self.lanes.get(&to).expect(
+            "a live booked or freshly-spawned learned lane is present after the CA-1 ensure",
+        );
         let msg_id = MsgId(self.next_msg_id);
         match lane.tx.try_send(OutFrame {
             to,
@@ -2434,9 +2456,18 @@ mod tests {
     #[test]
     fn sender_assigns_monotone_seq_and_retains() {
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"a", false, None), Ok(0));
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"bb", false, None), Ok(1));
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ccc", false, None), Ok(2));
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"a", false, None),
+            Ok(0)
+        );
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"bb", false, None),
+            Ok(1)
+        );
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"ccc", false, None),
+            Ok(2)
+        );
         assert_eq!(lane.next_seq, 3);
         assert_eq!(
             lane.retry.keys().copied().collect::<Vec<_>>(),
@@ -2459,7 +2490,10 @@ mod tests {
         // stall whichever lane did not match the emitted scalar.
         let mut saga = ReliableLaneSender::new(PEER, 5, BIG_CAP);
         let mut ghost = ReliableLaneSender::new(PEER, 9, BIG_CAP);
-        assert_eq!(saga.assign_and_retain(FROM, MsgClass::Saga, b"a", false, None), Ok(0));
+        assert_eq!(
+            saga.assign_and_retain(FROM, MsgClass::Saga, b"a", false, None),
+            Ok(0)
+        );
         assert_eq!(
             ghost.assign_and_retain(FROM, MsgClass::GhostReliable, b"b", false, None),
             Ok(0)
@@ -2485,16 +2519,18 @@ mod tests {
             saga.on_ack(
                 entries[0].incarnation,
                 entries[0].epoch,
-                entries[0].ack_through
-            , None),
+                entries[0].ack_through,
+                None
+            ),
             1
         );
         assert_eq!(
             ghost.on_ack(
                 entries[1].incarnation,
                 entries[1].epoch,
-                entries[1].ack_through
-            , None),
+                entries[1].ack_through,
+                None
+            ),
             1
         );
         assert!(
@@ -2526,9 +2562,15 @@ mod tests {
         // BUFFER-FIRST: a failed write (modelled by on_write_error after an assign) never burns or
         // re-uses a seq — the next assign is the next monotone value, at the bumped epoch.
         let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"x", false, None), Ok(0));
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"x", false, None),
+            Ok(0)
+        );
         lane.on_write_error();
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"y", false, None), Ok(1)); // not reused 0, not skipped 2
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"y", false, None),
+            Ok(1)
+        ); // not reused 0, not skipped 2
         assert_eq!(
             lane.retry[&1].frame.epoch, 1,
             "the post-error assign carries the bumped epoch"
@@ -2540,7 +2582,8 @@ mod tests {
     fn replay_batch_is_ascending_seq_with_current_epoch() {
         let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
-            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None)
+                .expect("fits");
         }
         lane.on_write_error(); // epoch -> 1
         let batch = lane.replay_batch();
@@ -2564,10 +2607,13 @@ mod tests {
     fn replay_batch_restamps_latest_epoch_after_two_bumps_with_intervening_assign() {
         // No stale-epoch frame leaks into a fresh replay even when assigns interleave with bumps.
         let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"0", false, None).expect("fits"); // seq0 @ e0
-        lane.assign_and_retain(FROM, CLASS, b"1", false, None).expect("fits"); // seq1 @ e0
+        lane.assign_and_retain(FROM, CLASS, b"0", false, None)
+            .expect("fits"); // seq0 @ e0
+        lane.assign_and_retain(FROM, CLASS, b"1", false, None)
+            .expect("fits"); // seq1 @ e0
         lane.on_write_error(); // e1
-        lane.assign_and_retain(FROM, CLASS, b"2", false, None).expect("fits"); // seq2 @ e1
+        lane.assign_and_retain(FROM, CLASS, b"2", false, None)
+            .expect("fits"); // seq2 @ e1
         lane.on_write_error(); // e2
         let batch = lane.replay_batch();
         assert_eq!(
@@ -2586,9 +2632,12 @@ mod tests {
         // is (re)opened — contains EACH retained seq EXACTLY once, with the just-assigned seq present
         // exactly once and LAST (so the steady-state path never re-writes it).
         let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"0", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"0", false, None)
+            .expect("fits");
         lane.on_write_error();
-        let new_seq = lane.assign_and_retain(FROM, CLASS, b"1", false, None).expect("fits");
+        let new_seq = lane
+            .assign_and_retain(FROM, CLASS, b"1", false, None)
+            .expect("fits");
         let batch = lane.replay_batch();
         let seqs: Vec<u64> = batch.iter().map(|f| f.seq).collect();
         assert_eq!(
@@ -2615,10 +2664,12 @@ mod tests {
         // the R-3' ack producer; the byte-total for the buffer SHED lands with R-4'.
         let mut lane = ReliableLaneSender::new(PEER, 0, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
-            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None)
+                .expect("fits");
         }
         lane.on_write_error();
-        lane.assign_and_retain(FROM, CLASS, b"d", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"d", false, None)
+            .expect("fits");
         assert_eq!(
             lane.retry.keys().copied().collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
@@ -2647,7 +2698,10 @@ mod tests {
         );
         assert_eq!(lane.next_seq, 0, "a rejected assign does not burn a seq");
         // The lane is NOT poisoned: a normal frame after a rejection assigns cleanly at seq 0.
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"ok", false, None), Ok(0));
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"ok", false, None),
+            Ok(0)
+        );
     }
 
     /// The worst-case (epoch=u32::MAX) framed length of a `bytes` payload — the SAME number assign stores as
@@ -2674,9 +2728,15 @@ mod tests {
         // frees a slot and the next send is accepted.
         let one = framed_len(b"hello");
         let mut lane = ReliableLaneSender::new(PEER, 7, one * 2);
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello", false, None), Ok(0));
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"hello", false, None),
+            Ok(0)
+        );
         assert_eq!(lane.retry_bytes, one, "one frame accounted");
-        assert_eq!(lane.assign_and_retain(FROM, CLASS, b"hello", false, None), Ok(1));
+        assert_eq!(
+            lane.assign_and_retain(FROM, CLASS, b"hello", false, None),
+            Ok(1)
+        );
         assert_eq!(lane.retry_bytes, one * 2, "two frames = full");
         assert_eq!(
             lane.assign_and_retain(FROM, CLASS, b"hello", false, None),
@@ -2705,7 +2765,8 @@ mod tests {
         // length, so it never drifts even as the on-wire epoch varint grows).
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"bb", b"ccc", b"dddd"] {
-            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None)
+                .expect("fits");
         }
         let sum = |l: &ReliableLaneSender| {
             l.retry
@@ -2953,7 +3014,8 @@ mod tests {
     fn on_ack_retires_the_acked_prefix_and_advances_base() {
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c", b"d"] {
-            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None)
+                .expect("fits");
         }
         assert_eq!(lane.on_ack(7, 0, 1, None), 2, "retires seq 0 and 1"); // epoch 0 == lane epoch
         assert_eq!(lane.base, 2);
@@ -2963,9 +3025,11 @@ mod tests {
     #[test]
     fn on_ack_ignores_a_stale_epoch_ack() {
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"a", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"a", false, None)
+            .expect("fits");
         lane.on_write_error(); // epoch -> 1
-        lane.assign_and_retain(FROM, CLASS, b"b", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"b", false, None)
+            .expect("fits");
         assert_eq!(
             lane.on_ack(7, 0, 5, None),
             0,
@@ -2978,7 +3042,8 @@ mod tests {
     #[test]
     fn on_ack_ignores_a_prior_incarnation_ack() {
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"a", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"a", false, None)
+            .expect("fits");
         assert_eq!(
             lane.on_ack(6, 0, 0, None),
             0,
@@ -2991,7 +3056,8 @@ mod tests {
     fn on_ack_is_monotone_a_lower_ack_never_rolls_base_back() {
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c", b"d", b"e", b"f"] {
-            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None)
+                .expect("fits");
         }
         assert_eq!(lane.on_ack(7, 0, 4, None), 5, "retire 0..=4"); // base -> 5
         assert_eq!(lane.base, 5);
@@ -3007,8 +3073,10 @@ mod tests {
     #[test]
     fn on_ack_clamps_to_next_seq_so_base_never_overruns() {
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"a", false, None).expect("fits");
-        lane.assign_and_retain(FROM, CLASS, b"b", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"a", false, None)
+            .expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"b", false, None)
+            .expect("fits");
         assert_eq!(
             lane.on_ack(7, 0, 999, None),
             2,
@@ -3023,7 +3091,8 @@ mod tests {
     fn replay_batch_starts_at_base_after_a_retire() {
         let mut lane = ReliableLaneSender::new(PEER, 7, BIG_CAP);
         for b in [b"a".as_slice(), b"b", b"c"] {
-            lane.assign_and_retain(FROM, CLASS, b, false, None).expect("fits");
+            lane.assign_and_retain(FROM, CLASS, b, false, None)
+                .expect("fits");
         }
         lane.on_ack(7, 0, 0, None); // retire seq0, base -> 1
         lane.on_write_error(); // epoch -> 1
@@ -3045,7 +3114,8 @@ mod tests {
         for step in 0u64..200 {
             match step % 4 {
                 0 => {
-                    lane.assign_and_retain(FROM, CLASS, b"x", false, None).expect("fits");
+                    lane.assign_and_retain(FROM, CLASS, b"x", false, None)
+                        .expect("fits");
                 }
                 1 => {
                     lane.on_ack(1, lane.epoch, step / 2, None); // an ack sometimes ahead of next_seq
@@ -3077,7 +3147,8 @@ mod tests {
             !lane.owes_redelivery(),
             "a fresh lane (empty window) owes nothing"
         );
-        lane.assign_and_retain(FROM, CLASS, b"x", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"x", false, None)
+            .expect("fits");
         assert!(
             lane.owes_redelivery(),
             "closed stream + non-empty window ⇒ owes a redelivery"
@@ -3108,7 +3179,8 @@ mod tests {
         let mut lanes: BTreeMap<MsgClass, ReliableLaneSender> = BTreeMap::new();
         assert!(!any_lane_owes(&lanes), "no lanes ⇒ nothing owes");
         let mut lane = ReliableLaneSender::new(PEER, 1, BIG_CAP);
-        lane.assign_and_retain(FROM, CLASS, b"x", false, None).expect("fits");
+        lane.assign_and_retain(FROM, CLASS, b"x", false, None)
+            .expect("fits");
         lanes.insert(CLASS, lane);
         assert!(
             any_lane_owes(&lanes),
@@ -3378,17 +3450,26 @@ mod tests {
         )
         .expect("spawn A");
         let book_b: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
-        let (mut tb, _ctl_b) = spawn_mesh(rt.handle(), &trust, &MeshConfig::new(b, addr_b, book_b, 64, 0), None)
-            .expect("spawn B");
+        let (mut tb, _ctl_b) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, book_b, 64, 0),
+            None,
+        )
+        .expect("spawn B");
 
         // B → A over B's booked lane: A LEARNS B's return connection on this first authenticated frame.
         tb.send(a, MsgClass::Control, vec![0xB].into())
             .expect("B books A, so B->A is a normal booked send");
         let got_a = wait_for(&mut ta, |g| {
-            g.iter()
-                .any(|m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB))
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB),
+            )
         });
-        assert!(!got_a.is_empty(), "A received B's first frame (and learned B)");
+        assert!(
+            !got_a.is_empty(),
+            "A received B's first frame (and learned B)"
+        );
 
         // A → B: B is UNBOOKED in A, but LEARNED ⇒ the send is Ok (a lazily-spawned learned lane), not QueueFull.
         ta.send(b, MsgClass::Control, vec![0xA].into())
@@ -3396,10 +3477,14 @@ mod tests {
 
         // GATE (i): B RECEIVES A's reply over the held (accepted-by-A / dialed-by-B) connection.
         let got_b = wait_for(&mut tb, |g| {
-            g.iter()
-                .any(|m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a && bytes[0] == 0xA))
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a && bytes[0] == 0xA),
+            )
         });
-        assert!(!got_b.is_empty(), "CA-1 GATE (i): B received A's reply over the learned connection");
+        assert!(
+            !got_b.is_empty(),
+            "CA-1 GATE (i): B received A's reply over the learned connection"
+        );
 
         // GATE (ii): A's learned lane RETIRES its window (the round trip closes over the reverse-ack path) AND A
         // never false-bounces `NodeUnreachable` at the LIVE B (which a broken reverse-ack path would do). The
@@ -3413,7 +3498,10 @@ mod tests {
                 .drain_inbound()
                 .into_iter()
                 .any(|m| matches!(m, Inbound::NodeUnreachable { to, .. } if to == b));
-            assert!(!bounced, "CA-1: A false-bounced NodeUnreachable at the LIVE learned peer B");
+            assert!(
+                !bounced,
+                "CA-1: A false-bounced NodeUnreachable at the LIVE learned peer B"
+            );
             std::thread::sleep(Duration::from_millis(5));
             assert!(
                 started.elapsed() < DEADLINE,
@@ -3446,19 +3534,32 @@ mod tests {
         let addr_b = sock_b.local_addr().expect("addr b");
         drop(sock_a);
         drop(sock_b);
-        let (mut ta, _ctl_a) =
-            spawn_mesh(rt.handle(), &trust, &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0), None)
-                .expect("spawn A");
+        let (mut ta, _ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0),
+            None,
+        )
+        .expect("spawn A");
         let book_b: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
-        let (mut tb, ctl_b) = spawn_mesh(rt.handle(), &trust, &MeshConfig::new(b, addr_b, book_b, 64, 0), None)
-            .expect("spawn B");
-        tb.send(a, MsgClass::Control, vec![0xB].into()).expect("B->A");
+        let (mut tb, ctl_b) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, book_b, 64, 0),
+            None,
+        )
+        .expect("spawn B");
+        tb.send(a, MsgClass::Control, vec![0xB].into())
+            .expect("B->A");
         wait_for(&mut ta, |g| {
-            g.iter().any(|m| matches!(m, Inbound::Wire { from, .. } if *from == b))
+            g.iter()
+                .any(|m| matches!(m, Inbound::Wire { from, .. } if *from == b))
         });
-        ta.send(b, MsgClass::Control, vec![0xA].into()).expect("A->B learned");
+        ta.send(b, MsgClass::Control, vec![0xA].into())
+            .expect("A->B learned");
         wait_for(&mut tb, |g| {
-            g.iter().any(|m| matches!(m, Inbound::Wire { from, .. } if *from == a))
+            g.iter()
+                .any(|m| matches!(m, Inbound::Wire { from, .. } if *from == a))
         });
         // Kill B ⇒ A's accepted connection from B dies ⇒ A's learned lane's ack watch closes ⇒ it must TERMINATE.
         ctl_b.kill();
@@ -3495,16 +3596,30 @@ mod tests {
         cfg_a.learned_peers_max = 1;
         let (mut ta, ctl_a) = spawn_mesh(rt.handle(), &trust, &cfg_a, None).expect("spawn A");
         let book: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
-        let (mut tb, _cb) =
-            spawn_mesh(rt.handle(), &trust, &MeshConfig::new(b, addr_b, book.clone(), 64, 0), None)
-                .expect("spawn B");
-        let (mut tc, _cc) = spawn_mesh(rt.handle(), &trust, &MeshConfig::new(c, addr_c, book, 64, 0), None)
-            .expect("spawn C");
+        let (mut tb, _cb) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, book.clone(), 64, 0),
+            None,
+        )
+        .expect("spawn B");
+        let (mut tc, _cc) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(c, addr_c, book, 64, 0),
+            None,
+        )
+        .expect("spawn C");
         let _ = (&mut tb, &mut tc); // held so their tasks live
-        tb.send(a, MsgClass::Control, vec![0xB].into()).expect("B->A");
-        tc.send(a, MsgClass::Control, vec![0xC].into()).expect("C->A");
+        tb.send(a, MsgClass::Control, vec![0xB].into())
+            .expect("B->A");
+        tc.send(a, MsgClass::Control, vec![0xC].into())
+            .expect("C->A");
         wait_for(&mut ta, |g| {
-            g.iter().filter(|m| matches!(m, Inbound::Wire { .. })).count() >= 2
+            g.iter()
+                .filter(|m| matches!(m, Inbound::Wire { .. }))
+                .count()
+                >= 2
         });
         let started = Instant::now();
         loop {
@@ -3877,8 +3992,9 @@ mod tests {
             book.insert(NodeId(i), addr);
         }
         let cfg = MeshConfig::new(NodeId(1), addr, book, 8, 0);
-        let sink: SharedOutbox =
-            Arc::new(Mutex::new(Box::new(MockOutboxSink::default()) as Box<dyn OutboxSink + Send>));
+        let sink: SharedOutbox = Arc::new(Mutex::new(
+            Box::new(MockOutboxSink::default()) as Box<dyn OutboxSink + Send>
+        ));
         // With an outbox wired ⇒ rejected LOUD before any endpoint binds (the F3 boot check).
         match spawn_mesh(rt.handle(), &trust, &cfg, Some(sink)) {
             Err(ProdIoError::Tuning(_)) => {}
@@ -4069,7 +4185,11 @@ mod tests {
         // (replay_batch is `&self`; on_write_error has no sink). Pins the §b subset invariant across redials.
         lane.on_write_error();
         let _ = lane.replay_batch();
-        assert_eq!(mock.retained.len(), 1, "replay re-sends but never re-mirrors");
+        assert_eq!(
+            mock.retained.len(),
+            1,
+            "replay re-sends but never re-mirrors"
+        );
     }
 
     #[test]
@@ -4095,8 +4215,7 @@ mod tests {
         // `scan_all` ALREADY stripped the OUTBOX_FORMAT_VERSION envelope — `decode_frame` reads the value
         // DIRECTLY (a second strip would eat the frame's u32 length-prefix). The stored value is a wire frame,
         // byte-identical to `write_reliable_frame`'s output, so R-6d3 boot replay round-trips it.
-        let (rf, _) =
-            vd_wire::framing::decode_frame::<ReliableFrame>(v).expect("replay-decodes");
+        let (rf, _) = vd_wire::framing::decode_frame::<ReliableFrame>(v).expect("replay-decodes");
         assert_eq!(rf.bytes, b"payload");
         // F2 (review): pin the FULL stored value byte-for-byte through the REAL redb `encode_value`/`decode_value`
         // envelope round-trip — not just `rf.bytes`. R-6d3 boot-replay dedups on (from, incarnation, seq), so a
@@ -4206,7 +4325,11 @@ mod tests {
             &expected_encoded(NodeId(1), MsgClass::Saga, 1, 0, &[99]),
         );
         ob.commit();
-        assert_eq!(ob.scan_all().len(), 3, "2 routable + 1 roster-gone prior-incarnation rows pre-seeded");
+        assert_eq!(
+            ob.scan_all().len(),
+            3,
+            "2 routable + 1 roster-gone prior-incarnation rows pre-seeded"
+        );
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
 
         // Spawn A at the FRESH incarnation 2 wired to the shared outbox; B plain.
@@ -4241,7 +4364,15 @@ mod tests {
         // B receives BOTH replayed payloads (re-drive proof; the test COMPLETING is the no-deadlock proof).
         let got = wait_for(&mut b, |g| {
             g.iter()
-                .filter(|m| matches!(m, Inbound::Wire { class: MsgClass::Saga, .. }))
+                .filter(|m| {
+                    matches!(
+                        m,
+                        Inbound::Wire {
+                            class: MsgClass::Saga,
+                            ..
+                        }
+                    )
+                })
                 .count()
                 >= 2
         });

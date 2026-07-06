@@ -1060,7 +1060,8 @@ mod tests {
             wait_poll_override: Some(Duration::from_secs(10)), // >> the prompt death-wake ⇒ mutation gap
             ..StoreTuning::default()
         };
-        let (mut s, h) = RedbStore::open(&path, tuning).expect("open with the fault + poll-override hooks");
+        let (mut s, h) =
+            RedbStore::open(&path, tuning).expect("open with the fault + poll-override hooks");
 
         // Stage a row whose key carries the fault prefix + submit (no sync wait): the writer receives this
         // batch, force-fails its fsync WRITER_FSYNC_MAX_RETRIES times (~30ms), then `break 'drain`s + DIES.
@@ -1083,8 +1084,12 @@ mod tests {
         });
         let elapsed = start.elapsed();
 
-        let join_err = joined.expect_err("the death short-circuit panics the await (never returns Ok)");
-        assert!(join_err.is_panic(), "the task PANICKED on writer death (not cancelled)");
+        let join_err =
+            joined.expect_err("the death short-circuit panics the await (never returns Ok)");
+        assert!(
+            join_err.is_panic(),
+            "the task PANICKED on writer death (not cancelled)"
+        );
         let panic = join_err.into_panic();
         let msg = panic
             .downcast_ref::<String>()
@@ -1101,7 +1106,10 @@ mod tests {
              notify_waiters / lost short-circuit would hang to ~10s, so this asserts the WAKE mechanism"
         );
         // The writer DIED forcing the fault ⇒ the batch was never fsynced: a refusal, never a durable lie.
-        assert!(!h_check.is_durable_through(seq), "the faulted batch was never made durable");
+        assert!(
+            !h_check.is_durable_through(seq),
+            "the faulted batch was never made durable"
+        );
         // The writer already EXITED (break 'drain), so Drop's join returns immediately — no hang, no forget.
         drop(s);
         let _ = std::fs::remove_file(&path);
@@ -1179,7 +1187,9 @@ mod tests {
             tx.send(()).expect("fire the third task");
             tokio::time::timeout(Duration::from_secs(2), t3)
                 .await
-                .expect("the third worker task ran despite two parked durability waits (async yields)")
+                .expect(
+                    "the third worker task ran despite two parked durability waits (async yields)",
+                )
                 .expect("t3 joined");
         });
 
