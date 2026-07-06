@@ -100,3 +100,14 @@ opt-level = 2
 
 # NOTE: re-add `[profile.dev.package.noise] opt-level = 3` when terrain generation
 # lands (P4) — debug-profile noise is ~40x slower and unusable for terrain gen.
+
+# Release profile for the container images (cloud-ready k3d, Slice 0). `strip` drops
+# symbols (smaller image layer); `lto = "thin"` is the size/perf-vs-build-time balance
+# (fat LTO's marginal gain isn't worth the Docker build cost). panic is left at the
+# default `unwind` DELIBERATELY: the server bins' graceful-drain + the process-tier
+# crash/restart semantics rely on unwind, and `abort` would change that behaviour.
+# `codegen-units` left at the default — `thin` LTO already does the cross-unit work,
+# and cgu=1 would roughly double the one-time image build with negligible payoff here.
+[profile.release]
+strip = true
+lto = "thin"

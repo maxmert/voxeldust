@@ -52,7 +52,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("vd-devcluster: {msg}");
-            eprintln!("usage: vd-devcluster <up|down|status|env> --slot <N>");
+            eprintln!(
+                "usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>"
+            );
             ExitCode::FAILURE
         }
     }
@@ -60,6 +62,16 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Result<(), String> {
     let cmd = args.first().ok_or("missing subcommand")?.as_str();
+    // `gen-trust <dir>` takes a DIRECTORY, not a slot — dispatch it before the slot-based
+    // subcommands. It is the cluster-secret distribution used by BOTH the docker-run smoke
+    // (mount the dir at VD_TRUST_DIR) and the k8s Secret (Slice 4: `kubectl create secret`
+    // from the three DER files). ONE bundle serves every node/pod — the node cert SANs are
+    // cluster_name + localhost and the mesh dials server-name "localhost" (mesh.rs), so pod
+    // IP / Service DNS never has to appear in a cert.
+    if cmd == "gen-trust" {
+        let dir = args.get(1).ok_or("gen-trust needs a <dir>")?;
+        return gen_trust(Path::new(dir));
+    }
     let slot = parse_slot(args)?;
     let ports = DevPortScheme::DEFAULT
         .slot_ports(slot)
@@ -72,6 +84,19 @@ fn run(args: &[String]) -> Result<(), String> {
         "env" => env_cmd(&work),
         other => Err(format!("unknown subcommand `{other}`")),
     }
+}
+
+/// Generate a fresh mTLS `ClusterTrust` bundle (`ca.der`/`node.der`/`key.der`) into `dir` — the
+/// same generation `up` does inline, exposed standalone so the k3d smoke + the Slice-4 Secret can
+/// mint the shared cluster secret WITHOUT spawning a cluster. Overwrites the dir's DER files.
+fn gen_trust(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create trust dir: {e}"))?;
+    let trust = ClusterTrust::generate("voxeldust").map_err(|e| format!("trust: {e}"))?;
+    trust
+        .write_der_dir(dir)
+        .map_err(|e| format!("write trust: {e}"))?;
+    println!("wrote ca.der/node.der/key.der to {}", dir.display());
+    Ok(())
 }
 
 /// Print the eval-able cluster contract for `client.sh` (keeps the temp-dir path
@@ -466,4 +491,25 @@ fn runfile(work: &Path) -> PathBuf {
 
 fn env_file(work: &Path) -> PathBuf {
     work.join("cluster.env")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gen_trust;
+    use vd_io_prod::trust::ClusterTrust;
+
+    #[test]
+    fn gen_trust_writes_a_bundle_the_mesh_can_load() {
+        // `gen-trust <dir>` mints the shared cluster secret: assert the three DER files exist and
+        // round-trip through `from_der_dir` — the exact load every node/pod does at boot (the k3d
+        // Secret + the docker-run smoke both mount what this writes).
+        let dir = std::env::temp_dir().join(format!("vd-gentrust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        gen_trust(&dir).expect("gen-trust writes the bundle");
+        assert!(dir.join("ca.der").exists(), "ca.der written");
+        assert!(dir.join("node.der").exists(), "node.der written");
+        assert!(dir.join("key.der").exists(), "key.der written");
+        ClusterTrust::from_der_dir(&dir).expect("the written bundle loads back");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
 }

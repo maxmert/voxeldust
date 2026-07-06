@@ -159,3 +159,42 @@ coverage-setup:
     rustup toolchain install nightly --component llvm-tools-preview
     cargo +nightly install cargo-llvm-cov --locked
     @echo "Pin the installed nightly via VD_COVERAGE_TOOLCHAIN (e.g. nightly-2026-06-01) in your shell or .envrc"
+
+# ---- Cloud-ready k3d (before P4) -------------------------------------------------------------
+# Slice 0: build the ONE multi-bin SERVER image (orchestrator+gateway+shard; HR3 — role is a
+# command+env, not a per-kind image). Bevy-free (default features). The build happens inside a
+# Linux glibc toolchain (the host is macOS); .dockerignore keeps target/ (~70 GB) out of context.
+server_image := env_var_or_default("VD_SERVER_IMAGE", "voxeldust-server:dev")
+image-build:
+    docker build -f docker/server.Dockerfile -t {{server_image}} .
+
+# Slice 0 smoke: run the orchestrator from the freshly-built image and assert it boots + serves
+# /metrics (the read-only ops endpoint). Mints a throwaway mTLS bundle on the host (portable DER,
+# mounted read-only) via the same `gen-trust` that feeds the Slice-4 Secret. Ephemeral store
+# in-container (VD_STORE_EPHEMERAL_OK=1 — a DEV escape, never a cloud manifest); a real PVC + durable
+# root land in Slice 4. VD_CLOCK_PEERS empty ⇒ a solo orchestrator (genesis clock, no quorum wait).
+image-smoke: image-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=vd-slice0-smoke
+    trust=$(mktemp -d)
+    trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -rf "$trust"' EXIT
+    cargo run -q --bin vd-devcluster -- gen-trust "$trust"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" \
+        -e VD_NODE_ID=1 -e VD_BIND=0.0.0.0:9000 -e VD_ADMIN_ADDR=0.0.0.0:9100 \
+        -e VD_TRUST_DIR=/trust -e VD_STORE_PATH=/tmp/vd.redb -e VD_STORE_EPHEMERAL_OK=1 \
+        -e VD_EPOCH=1 -e VD_RESERVE_CHUNK=4096 -e VD_LEASE_TTL=10000 \
+        -e VD_OUTBOUND_CAP=256 -e VD_TICK_HZ=50 -e VD_PROCESS_INCARNATION=1 \
+        -e VD_PEERS= -e VD_CLOCK_PEERS= \
+        -v "$trust":/trust:ro -p 9100:9100 {{server_image}} vd-orchestrator
+    echo "waiting for /metrics ..."
+    for i in $(seq 1 30); do
+        if curl -sf http://127.0.0.1:9100/metrics >/dev/null 2>&1; then
+            echo "OK: /metrics served by the containerized orchestrator"
+            curl -s http://127.0.0.1:9100/metrics | head -5
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "FAIL: /metrics never came up"; docker logs "$name" | tail -40; exit 1

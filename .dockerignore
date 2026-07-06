@@ -1,6 +1,10 @@
 target/
+.git
 .git/
 *.redb
 k8s/
 deploy/
 .claude/
+runs/
+scripts/
+**/*.log
