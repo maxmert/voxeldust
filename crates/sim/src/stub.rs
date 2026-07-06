@@ -583,6 +583,15 @@ pub struct StubStats {
     /// kind also feeds `transients_lost_in_handover`; a corrupt-tag item is removed + counted HERE but NOT
     /// attributed (the `from_tag` Err arm — HR2, never decode-to-default).
     pub transients_discarded_source_crash: u64,
+    /// CA-1 S3/S4 — DEST: `BatchAdopted` acks RE-DRIVEN by `redrive_pending_adoptions` (one per DISTINCT
+    /// `Arriving` batch per tick). The LIVENESS half of the over-discard guarantee: it keeps re-presenting
+    /// the adopt evidence to the orchestrator's `dest_adopted` latch so a transiently-lost single ack never
+    /// strands the batch. `> 0` whenever a batch sits `Arriving` for more than the initial adopt tick.
+    pub batch_adopts_redriven: u64,
+    /// CA-1 S3 — SOURCE: `ReSolicitBatch` liveness probes RECEIVED (a counted NO-OP — the probe's signal is
+    /// its SEND outcome at the orchestrator, not this handler; a LIVE source simply acknowledges receipt by
+    /// existing). Ops visibility that the AwaitAdopt probe reached a live source.
+    pub re_solicits_received: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -694,6 +703,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // self-fence) and BEFORE the egress systems (a holder that self-fences this tick drops its
     // transients and emits NO frames this tick — a stale partitioned owner stops affecting clients at
     // once). INERT unless `self_fence_grace_ticks > 0` (the pre-D-3 default and every single-shard rig).
+    // `redrive_pending_adoptions` (CA-1 S3/S4) runs AFTER `process_inbound` (this tick's promote/discard
+    // settled the Arriving set — a just-promoted item is Held, not re-driven) and AFTER
+    // `self_fence_lapsed_realm` (a self-fenced holder already dropped its Arriving items, so it re-drives
+    // nothing). It is an orchestrator-bound egress like `emit_transient_batch`.
     schedule.add_systems(
         (
             request_pending_grants,
@@ -701,6 +714,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             self_fence_lapsed_realm,
             readvance_transients,
             emit_transient_batch,
+            redrive_pending_adoptions,
             feed_source_ghosts,
             emit_frames,
         )
@@ -2198,6 +2212,44 @@ fn adopt_transient_batch(
     );
 }
 
+/// CA-1 S3/S4 DEST LIVENESS — re-emit `BatchAdopted` every tick for each DISTINCT batch this shard still
+/// holds `Arriving`. This is the liveness half of the over-discard guarantee: the orchestrator's
+/// `dest_adopted` latch is set from a `BatchAdopted` in the inbox, so re-presenting the ack every tick means
+/// a transiently-lost single ack never strands the batch (the latch is re-established the next tick the ack
+/// lane delivers) — and on the exact budget-maturity tick the ack is in the inbox to be latched pre-scan.
+/// Gated PURELY on `Arriving`-presence (adopt is LEASE-FREE — NO authority/realm gate; a `self_fence`
+/// would have already dropped the `Arriving` items via `self_fence_drop_transients`, so a self-fenced
+/// holder naturally re-drives nothing). DISTINCT batches only (`BTreeSet`, deterministic order): a batch of
+/// N items yields ONE ack, not N — the MMO-scale discipline (a 1000-bullet batch is one re-drive, never
+/// 1000). Idempotent at the orchestrator: a re-driven `BatchAdopted` on a saga past `AwaitAdopt` is absorbed
+/// by the FSM catch-all. TERMINATION: a permanently-orphaned `Arriving` item is dropped by the realm
+/// self-fence (`self_fence_grace_ticks > 0`, enforced at prod boot) → the re-drive then stops (nothing
+/// Arriving); in a finite test rig it is bounded by the run length.
+fn redrive_pending_adoptions(
+    config: Res<StubConfig>,
+    owned: Res<OwnedTransients>,
+    mut stats: ResMut<StubStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    let mut batches: BTreeSet<TransferId> = BTreeSet::new();
+    for t in owned.0.values() {
+        if let TransientStatus::Arriving { batch } = t.status {
+            batches.insert(batch);
+        }
+    }
+    for batch in batches {
+        outbox.push_flow(
+            config.orchestrator,
+            MsgClass::Saga,
+            &InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                transfer_id: batch,
+                step_id: TRANSIENT_BATCH_STEP,
+            }),
+        );
+        stats.batch_adopts_redriven += 1;
+    }
+}
+
 /// SOURCE — phase 1 of the structural drop-before-promote (D-7b): on `TransientRelease` flip this
 /// batch's `Held{outbound: Some(b)}` items to the UNCOUNTED `Departing{b}` tier (the source stops
 /// counting + rendering BEFORE the dest promotes — a clean hand-off, NOT a loss) and ALWAYS ack
@@ -2579,6 +2631,14 @@ fn on_directory_reply(
             );
             return;
         }
+        // CA-1 S3: the orchestrator's AwaitAdopt liveness PROBE. A COUNTED NO-OP — the probe's whole signal
+        // is its SEND OUTCOME at the orchestrator (a dead source's send fails → `NodeUnreachable`); a LIVE
+        // source that receives it need do nothing but exist (its regular lease-renewal inbound is what clears
+        // stale unreachable evidence). Counted for ops visibility; never a state change.
+        Ok(InterShardFlow::ReSolicitBatch(_)) => {
+            stats.re_solicits_received += 1;
+            return;
+        }
         Ok(_) => return,
         Err(_) => {
             stats.undecodable += 1;
@@ -2890,7 +2950,9 @@ mod tests {
     use crate::capability::NodeKind;
     use vd_core::pose::LatticePos; // only the tests construct a LatticePos directly; prod uses .map_offset/.offset
     use vd_core::{MsgId, UniverseTick};
-    use vd_wire::intershard::{DEMOTE_STEP, FLUSH_SOURCE_STEP, STUB_CROSSING_STEP};
+    use vd_wire::intershard::{
+        DEMOTE_STEP, FLUSH_SOURCE_STEP, RE_SOLICIT_STEP, STUB_CROSSING_STEP,
+    };
 
     const SHARD: NodeId = NodeId(10);
     const GATEWAY: NodeId = NodeId(20);
@@ -3945,7 +4007,11 @@ mod tests {
             stats.transient_release_noop, 1,
             "the redelivery is a counted journal no-op"
         );
-        assert_eq!(owned.0.len(), 3, "the survivors are untouched by the redelivery");
+        assert_eq!(
+            owned.0.len(),
+            3,
+            "the survivors are untouched by the redelivery"
+        );
     }
 
     #[test]
@@ -4026,7 +4092,10 @@ mod tests {
             &InterShardFlow::TransientDiscard(discard),
         )]);
         assert!(
-            !rig.world.resource::<OwnedTransients>().0.contains_key(&debris),
+            !rig.world
+                .resource::<OwnedTransients>()
+                .0
+                .contains_key(&debris),
             "the Arriving copy was discarded"
         );
         assert_eq!(
@@ -4036,6 +4105,106 @@ mod tests {
             1
         );
         assert_eq!(sent, vec![], "the discard is ack-free (terminal saga)");
+    }
+
+    #[test]
+    fn redrive_pending_adoptions_re_emits_one_ack_per_distinct_arriving_batch() {
+        // CA-1 S3/S4 LIVENESS: `redrive_pending_adoptions` re-emits `BatchAdopted` every tick for each
+        // DISTINCT `Arriving` batch (dedup — a batch of N items yields ONE ack, the MMO-scale discipline),
+        // and SKIPS settled `Held` items. Seed the tiers DIRECTLY + tick with an empty inbox so the ONLY
+        // egress is the re-drive (adopt itself is not exercised here).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let batch = TransferId(0xB7);
+        let other = TransferId(0xB8); // 0xB7 < 0xB8 → deterministic BTreeSet emit order
+        let arriving = |b| Transient {
+            pose: transient_pose(),
+            anchor_fence: Fence(1),
+            status: TransientStatus::Arriving { batch: b },
+        };
+        {
+            let mut owned = rig.world.resource_mut::<OwnedTransients>();
+            owned
+                .0
+                .insert(EntityId::pack(EntityKind::Debris, 1, 7, 0), arriving(batch));
+            // Second item, SAME batch → still ONE ack for `batch` (distinct-batch dedup).
+            owned
+                .0
+                .insert(EntityId::pack(EntityKind::Debris, 1, 7, 1), arriving(batch));
+            owned
+                .0
+                .insert(EntityId::pack(EntityKind::Debris, 1, 7, 2), arriving(other));
+            // A SETTLED resident (Held) is NOT re-driven — the `if let Arriving` false arm.
+            owned.0.insert(
+                EntityId::pack(EntityKind::Debris, 1, 7, 3),
+                Transient {
+                    pose: transient_pose(),
+                    anchor_fence: Fence(1),
+                    status: TransientStatus::Held { outbound: None },
+                },
+            );
+        }
+        let sent = rig.tick(vec![]);
+        let ack = |t| {
+            postcard::to_allocvec(&InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                transfer_id: t,
+                step_id: TRANSIENT_BATCH_STEP,
+            }))
+            .expect("encode")
+        };
+        // Exactly ONE ack per DISTINCT batch, in ascending BTreeSet order.
+        assert_eq!(
+            sent,
+            vec![
+                (ORCH, MsgClass::Saga, ack(batch)),
+                (ORCH, MsgClass::Saga, ack(other)),
+            ]
+        );
+        assert_eq!(rig.world.resource::<StubStats>().batch_adopts_redriven, 2);
+    }
+
+    #[test]
+    fn redrive_pending_adoptions_is_a_noop_when_nothing_is_arriving() {
+        // The empty-`Arriving` path (the `for batch in batches` empty loop + `if let` all-false): a shard
+        // holding only a settled `Held` transient re-drives nothing and emits no egress.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            EntityId::pack(EntityKind::Debris, 1, 7, 0),
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+            },
+        );
+        let sent = rig.tick(vec![]);
+        assert_eq!(sent, vec![], "nothing Arriving → no re-drive");
+        assert_eq!(rig.world.resource::<StubStats>().batch_adopts_redriven, 0);
+    }
+
+    #[test]
+    fn re_solicit_batch_is_a_counted_noop_at_the_source() {
+        // CA-1 S3: the orchestrator's AwaitAdopt liveness PROBE arriving at a (live) SOURCE is a counted
+        // no-op — no state change, no egress (the probe's signal is its SEND outcome at the orchestrator,
+        // not this handler). No `Arriving` items, so the re-drive adds nothing to `sent`.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let probe = TransientHandoff {
+            transfer: TransferId(0xB7),
+            step_id: RE_SOLICIT_STEP,
+            fence: Fence(1),
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::ReSolicitBatch(probe),
+        )]);
+        assert_eq!(rig.world.resource::<StubStats>().re_solicits_received, 1);
+        assert_eq!(
+            sent,
+            vec![],
+            "the probe is a pure no-op — no reply, no state change"
+        );
     }
 
     #[test]
@@ -4082,15 +4251,24 @@ mod tests {
             rig.world.resource::<OwnedTransients>().0[&debris].anchor_fence,
             Fence(1)
         );
-        // The ONLY egress is the BatchAdopted ack to the orchestrator (exact-vec equality — no
-        // filter/any closure with an uncoverable short-circuit arm, the HR5 test discipline).
+        // The egress is the BatchAdopted ack TWICE (exact-vec equality — no filter/any closure with an
+        // uncoverable short-circuit arm, the HR5 test discipline): the adopt handler acks it once (in
+        // `process_inbound`), then CA-1 S3/S4's `redrive_pending_adoptions` re-emits it the SAME tick (the
+        // item is now `Arriving`) — the liveness re-drive. Both are byte-identical; the orchestrator absorbs
+        // the duplicate (idempotent). Order is adopt-ack THEN re-drive (chain order).
         let expected_ack =
             postcard::to_allocvec(&InterShardFlow::TransferAck(TransferAck::BatchAdopted {
                 transfer_id: batch,
                 step_id: TRANSIENT_BATCH_STEP,
             }))
             .expect("encode");
-        assert_eq!(sent, vec![(ORCH, MsgClass::Saga, expected_ack)]);
+        assert_eq!(
+            sent,
+            vec![
+                (ORCH, MsgClass::Saga, expected_ack.clone()),
+                (ORCH, MsgClass::Saga, expected_ack),
+            ]
+        );
 
         // The TransientDrop dispatch arm PROMOTES the Arriving item → Held + acks DropApplied(DROP).
         let promote = TransientHandoff {

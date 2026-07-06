@@ -953,12 +953,52 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     orphan strands, and the saga.rs comment was corrected. So "the self-promote matches ANY phase via `..`" and "the
     comment is INACCURATE for AwaitAdopt" (in the paragraph below) are HISTORICAL — do NOT read them as live bugs. What
     remains CA-1/L5-gated is only the confirm-dead TRIGGER (the AwaitAdopt re-solicit egress that MAKES
-    `is_confirmed_dead(source)` reachable) + the lost-discard reliability. R-6d4 RESIDUAL (review `wf_f3bed49f` finding
-    2, ledgered): once that re-solicit egress lands, the `AwaitAdopt` discard keys purely on `is_confirmed_dead(source)`
-    + budget + `phase==AwaitAdopt`, NOT on whether the dest adopted — so a dest that ADOPTED but whose `BatchAdopted`
-    ack is in-flight past `abort_deadline_ticks` would be over-discarded. R-6d4 must gate `abort_deadline_ticks >
-    transport max-reliable-ack-redelivery bound` (a live dest's ack always wins) OR check dest-adopted before discard.
-    Not reachable-now (AwaitAdopt has an EMPTY orch→source egress today ⇒ the trigger never fires in prod).
+    `is_confirmed_dead(source)` reachable) + the lost-discard reliability.
+  - **✅ CA-1 S3/S4 LANDED (spec `scripts/ca1_s3s4_perfect_guarantee_spec.md`) — the over-discard residual is CLOSED
+    (the achievable HARD guarantee):** the `AwaitAdopt` re-solicit egress now exists (the new
+    `InterShardFlow::ReSolicitBatch` arm, discriminant 16 → 17-arm set, `RE_SOLICIT_STEP=18`; emitted by the FSM's
+    `(BatchHandoff{AwaitAdopt}, Timeout) => EmitReSolicit` arm every re-drive — the phase's first orch→source egress,
+    so a dead source's send fails and `is_confirmed_dead(source)` becomes reachable). The over-discard hole the
+    R-6d4 residual named is closed by the DECOMPOSED cure: (a) SAFETY — a monotone `dest_adopted` latch on `LiveSaga`,
+    set in a PRE-SCAN inbox pass (`latch_adopted_from_inbox`, BEFORE `scan_deadlines` — the intra-tick ordering that
+    makes it hard: latching in `deliver`, inside the post-scan drain, would be one tick too late on the exact
+    budget-maturity tick). In `rehome_event_for` the latch drives a `defer_to_dest` gate: once the dest has adopted an
+    `AwaitAdopt` batch it is the HOLDER-OF-RECORD, so its fate decides — the source-death resolutions
+    (discard-if-never-adopted / self-promote-if-post-adopt) apply ONLY when `!defer_to_dest`; an adopted batch defers
+    to the dest-death ladder (dest alive → re-drive + let the drain advance the phase; dest dead → the budget-gated
+    `DestUnreachable` abandon+tombstone). **The post-impl review (`wf_1eb86848`) caught a REGRESSION in the first cut —
+    a bare `!dest_adopted` guard let the source-death arm preempt the dest-death terminal, WEDGING the both-dead
+    double-crash (dest adopted-then-crashed + source dead) into a perpetual `Timeout`→`EmitReSolicit` loop (pre-CA-1-S3
+    that case resolved cleanly via the dest-dead `else if`, since the source trigger was inert). The `defer_to_dest`
+    restructure fixes it: the double-crash now terminates via `DestUnreachable` (admin-visible via
+    `dest_unreachable_resolutions`), the pre-change terminal restored.** (b) LIVENESS — the DEST re-emits `BatchAdopted`
+    every tick it holds `Arriving` (`redrive_pending_adoptions`, gated purely on Arriving-presence, one ack per DISTINCT
+    batch), so a transiently lost ack never strands the latch; (c) DETECTION — the `ReSolicitBatch` probe (above). A
+    live source no-ops the probe (counted). This chose the "check dest-adopted" cure over the `abort_deadline_ticks >
+    ack-bound` numeric gate (the perfect guarantee, not a bounded margin). **STILL OWED (deploy-bundle, ledgered — NOT
+    reachable-now blockers):**
+    (1) the ABSOLUTE-ZERO refinement — a sustained dest→orch shed of EVERY `BatchAdopted` across the whole abort
+    window still over-discards (the orch cannot prove adoption without receiving one ack; in that corner the dest is
+    anyway likely `is_confirmed_dead(dest)` → the dest-dead arm fires instead). Closing it needs a NON-SHEDDABLE ack
+    (a transport priority/reservation lane so the adoption ack can never be shed under R-4b overload) — a bigger
+    transport change, owed with the deploy bundle; (2) the permanent-orch-death TERMINATION of the dest re-drive
+    depends on `self_fence_grace_ticks > 0` (the self-fence drops an orphaned `Arriving` item → the re-drive stops).
+    **The SHIPPED prod default is `0` (shard.rs:49, `VD_SELF_FENCE_GRACE`; `validate_self_fence_cadence` checks only the
+    operator-supplied value — nothing forces `>0`), so in the default config an orphaned `Arriving` batch re-drives
+    `BatchAdopted` to a dead/absent orch every tick INDEFINITELY** (finite test rigs bound it by run length; the
+    double-crash wedge fix above removes the compounding orch-side loop). This is a COUPLED cloud prerequisite, not a
+    free-standing nice-to-have: the `grace > 0` boot assertion must land WITH the split-brain lease-timing coherence
+    (`lease_ttl < grace <= lease_ttl + max`) on the deploy config validation — NOT a half-measure now; (3) the real-cloud
+    k3d CrashLoop/reschedule e2e that exercises the `ReSolicitBatch` send-failure → confirm-dead path across a NAT'd
+    reschedule (driven by CA-1 `update_peer_addr`); (4) SCALE refinements (idempotent + sheddable today, non-blocking):
+    the dest re-drive is UNCONDITIONAL every `Arriving` tick, so it emits a duplicate `BatchAdopted` for the whole
+    (brief) NORMAL happy-path handoff window too — interval/first-seen gating would trim this steady-state orch-bound
+    traffic while keeping the re-drive present across the maturity tick; and `latch_adopted_from_inbox` is a SECOND full
+    postcard decode of every Saga-class inbound each tick (the drain re-decodes) — a shared adopted-this-tick
+    `BTreeSet<TransferId>` populated once would remove the duplicate decode. Both are pure common-path overhead worth
+    trimming at MMO scale, neither a correctness issue. **Also ledgered (prose):** the spec's "a single lost ack cannot
+    strand the latch" is precise only POST-first-ack (the monotone latch needs one delivered ack EVER); the
+    first-adopt-exactly-at-maturity-with-that-ack-lost corner is a strict sub-case of residual (1).
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT

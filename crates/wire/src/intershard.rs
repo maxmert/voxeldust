@@ -89,9 +89,15 @@ pub const RE_HOME_STEP: u32 = 16;
 /// in `BatchHandoff::AwaitAdopt` (PRE-adopt) so the batch is being counted lost, but a late outbox
 /// replay could still insert `Arriving{batch}` at the dest; the discard REMOVES any such item AND
 /// poisons [`TRANSIENT_BATCH_STEP`] so a later replayed adopt is `AlreadyApplied` (never re-inserts an
-/// orphan). Journaled idempotent by `(transfer, TRANSIENT_DISCARD_STEP)`. 17 is the next free id —
-/// disjoint from 0–6 route-swap + 7–16 state/transient/rehome steps (asserted in tests).
+/// orphan). Journaled idempotent by `(transfer, TRANSIENT_DISCARD_STEP)`. Disjoint from 0–6 route-swap +
+/// 7–16 state/transient/rehome steps (asserted in tests); `RE_SOLICIT_STEP` = 18 follows.
 pub const TRANSIENT_DISCARD_STEP: u32 = 17;
+/// CA-1 S3 (the over-discard DETECTION trigger): the orchestrator→SOURCE `ReSolicitBatch` liveness probe
+/// emitted every `BatchHandoff::AwaitAdopt` Timeout. It carries no state — its sole purpose is to give the
+/// AwaitAdopt phase an orch→source egress so a DEAD source's send FAILS (`NodeUnreachable`) and
+/// `is_confirmed_dead(source)` becomes reachable (the `SourceUnreachablePreAdopt` discard was inert
+/// without it). A LIVE source handles it as a counted no-op. 18 is the next free id.
+pub const RE_SOLICIT_STEP: u32 = 18;
 
 /// The control-plane schema version stamped on a [`TransferEnvelope`] (postcard, additive under
 /// minor negotiation). ONE home — never an inline literal at an emit site (the per-kind
@@ -184,6 +190,18 @@ pub enum InterShardFlow {
     /// terminal egress, its lost-delivery residual is covered by the CA-1/L5 re-solicit (DEFERRED.md),
     /// NOT by a re-driver. APPENDED (preserves every existing postcard discriminant).
     TransientDiscard(TransientHandoff),
+    /// Orchestrator → SOURCE shard (CA-1 S3): the AwaitAdopt liveness PROBE. Emitted every
+    /// `BatchHandoff::AwaitAdopt` Timeout (the phase's FIRST orch→source egress — before this, AwaitAdopt
+    /// was silent, so `is_confirmed_dead(source)` was unreachable and the pre-adopt discard was inert). A
+    /// DEAD source ⇒ the send fails ⇒ `NodeUnreachable` ⇒ confirm-dead ⇒ (past budget, `!dest_adopted`) the
+    /// `SourceUnreachablePreAdopt` discard fires; a LIVE source handles it as a COUNTED NO-OP (no re-emit —
+    /// its regular lease-renewal inbound is what clears stale unreachable evidence). Carries no state; reuses
+    /// [`TransientHandoff`] (shares the shape + one classification arm with the transient handoff commands,
+    /// DRY). Side-effecting, ack-FREE (the probe's signal is the SEND outcome, not a reply); idempotent by
+    /// `(transfer, RE_SOLICIT_STEP)`. Classified [`FlowDurabilityClass::ReDriven`]: orchestrator-EMITTED and
+    /// re-driven by `scan_deadlines` on every AwaitAdopt Timeout (it does NOT grow the producer-less outbox
+    /// set / trip the push-`Ephemeral` debug_assert). APPENDED (preserves every existing postcard discriminant).
+    ReSolicitBatch(TransientHandoff),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -311,7 +329,10 @@ impl InterShardFlow {
             | InterShardFlow::TransientDrop(h)
             | InterShardFlow::ReleaseComplete(h)
             | InterShardFlow::TransientAbandon(h)
-            | InterShardFlow::TransientDiscard(h) => EffectClass::SideEffecting {
+            | InterShardFlow::TransientDiscard(h)
+            // CA-1 S3: the AwaitAdopt liveness probe joins the group unchanged — correlated by
+            // `(transfer, RE_SOLICIT_STEP)`, delivered reliably (its send-outcome IS the signal).
+            | InterShardFlow::ReSolicitBatch(h) => EffectClass::SideEffecting {
                 idempotency: IdempotencyKey::TransferStep {
                     transfer: h.transfer,
                     step_id: h.step_id,
@@ -375,7 +396,10 @@ impl InterShardFlow {
             | InterShardFlow::ReHome(_)
             // R-6d3c: the orchestrator-EMITTED discard-poison — NOT producer-less (it does not grow the
             // outbox set); a FIRE-ONCE terminal egress, its lost-delivery residual is CA-1/L5-gated.
-            | InterShardFlow::TransientDiscard(_) => FlowDurabilityClass::ReDriven,
+            | InterShardFlow::TransientDiscard(_)
+            // CA-1 S3: the orchestrator-EMITTED AwaitAdopt probe — re-driven by scan_deadlines every
+            // Timeout, so the RAM retry suffices (a lost probe is re-emitted next Timeout); NOT producer-less.
+            | InterShardFlow::ReSolicitBatch(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -1034,9 +1058,9 @@ mod tests {
     #[test]
     fn transfer_state_step_ids_are_disjoint_from_route_swap_phases() {
         use std::collections::BTreeSet;
-        // Every entity-STATE step (flush/crossing/demote/promote/transient/rehome/discard) is disjoint
-        // from the 0–6 route-swap phases AND pairwise distinct — so a state step can never alias a phase
-        // (or another state step) in any `(transfer, step_id)` journal. The FULL 7–17 step-id space.
+        // Every entity-STATE step (flush/crossing/demote/promote/transient/rehome/discard/re-solicit) is
+        // disjoint from the 0–6 route-swap phases AND pairwise distinct — so a state step can never alias a
+        // phase (or another state step) in any `(transfer, step_id)` journal. The FULL 7–18 step-id space.
         let state_steps = [
             FLUSH_SOURCE_STEP,
             STUB_CROSSING_STEP,
@@ -1049,6 +1073,7 @@ mod tests {
             TRANSIENT_ABANDON_STEP,
             RE_HOME_STEP,
             TRANSIENT_DISCARD_STEP,
+            RE_SOLICIT_STEP,
         ];
         for phase in 0u32..=6 {
             assert!(

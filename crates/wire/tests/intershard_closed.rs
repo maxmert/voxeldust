@@ -2,7 +2,7 @@
 //! in-module unit test to the design-named INTEGRATION location so the closed-set
 //! guarantee is a per-release gate, not a convention (audit SEAL-2).
 //!
-//! The closed taxonomy `InterShardFlow` (the FULL current 16-arm set — see `wire/src/lib.rs`
+//! The closed taxonomy `InterShardFlow` (the FULL current 17-arm set — see `wire/src/lib.rs`
 //! for the canonical enumeration; this header does NOT re-list it to avoid a second copy that
 //! drifts, the exact staleness the `arm_tripwire` below structurally prevents) is the ONLY
 //! shape that crosses a shard boundary; every arm has a
@@ -222,6 +222,14 @@ fn every_arm() -> Vec<InterShardFlow> {
             step_id: vd_wire::intershard::TRANSIENT_DISCARD_STEP,
             fence: Fence(6),
         }),
+        // CA-1 S3 arm: the orch→source AwaitAdopt liveness probe (SIDE-EFFECTING, TransferStep-keyed by
+        // RE_SOLICIT_STEP; shares `TransientHandoff`). Classified ReDriven, NOT producer-less — so the
+        // golden pin below still asserts exactly TWO producer-less arms.
+        InterShardFlow::ReSolicitBatch(vd_wire::intershard::TransientHandoff {
+            transfer: TransferId(10),
+            step_id: vd_wire::intershard::RE_SOLICIT_STEP,
+            fence: Fence(6),
+        }),
     ]
 }
 
@@ -247,7 +255,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::ReleaseComplete(_)
         | InterShardFlow::TransientAbandon(_)
         | InterShardFlow::ReHome(_)
-        | InterShardFlow::TransientDiscard(_) => {}
+        | InterShardFlow::TransientDiscard(_)
+        | InterShardFlow::ReSolicitBatch(_) => {}
     }
 }
 

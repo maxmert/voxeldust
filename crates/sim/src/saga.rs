@@ -636,6 +636,15 @@ pub enum SagaAction {
     /// the anti-double-resolution guarantee is the phase-structure (post-adopt phases cannot route here)
     /// + the dest adopt-poison, NOT this counter or the budget-gate ordering.
     CountBatchLostSourceCrash,
+    /// CA-1 S3 — the AwaitAdopt liveness PROBE toward the SOURCE. Target `SagaCtx.source` + step
+    /// `RE_SOLICIT_STEP`. Emitted on every `AwaitAdopt+Timeout`: the phase's FIRST orch→source egress, so a
+    /// DEAD source's send FAILS (`NodeUnreachable`) and `is_confirmed_dead(source)` becomes reachable — the
+    /// gate that makes `SourceUnreachablePreAdopt` (the pre-adopt discard) able to fire at all. A LIVE source
+    /// treats the probe as a counted no-op. Fire-and-re-drive (idempotent): the probe carries no state and its
+    /// SEND outcome is the whole signal, so a lost probe is simply re-emitted next `AwaitAdopt` Timeout.
+    EmitReSolicit {
+        fence: Fence,
+    },
     /// Durable checkpoint — exactly two per happy path (after Prepared, at CAS won),
     /// group-committed by the wrapper.
     PersistCheckpoint,
@@ -904,9 +913,20 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             E::SourceRetired,
         ) => (S::Done { new_fence }, vec![A::Tombstone]),
         // Timeout re-drive: re-emit the CURRENT phase's pending egress idempotently (the shard journals
-        // by `(transfer, step)`, so a re-emit is a no-op). `AwaitAdopt` has NO orchestrator egress to
-        // re-drive (the dest adopts off the redelivered envelope), so it falls through to the no-op
-        // catch-all — the saga simply keeps awaiting `BatchAdopted`.
+        // by `(transfer, step)`, so a re-emit is a no-op). `AwaitAdopt` awaits the dest's `BatchAdopted`
+        // (which arrives off the redelivered envelope + the dest's per-tick re-drive) and has no
+        // orchestrator egress that advances it — but CA-1 S3 makes its Timeout emit the SOURCE liveness
+        // PROBE `EmitReSolicit`: the phase's first orch→source egress, so a dead source's send fails and
+        // `is_confirmed_dead(source)` becomes reachable (the gate for the `SourceUnreachablePreAdopt`
+        // discard). The probe never advances the phase (a LIVE source no-ops it); the saga still leaves
+        // `AwaitAdopt` only via `BatchAdopted` (happy) or `SourceUnreachablePreAdopt` (dead-source loss).
+        (
+            S::BatchHandoff {
+                phase: P::AwaitAdopt,
+                new_fence,
+            },
+            E::Timeout,
+        ) => (state, vec![A::EmitReSolicit { fence: new_fence }]),
         (
             S::BatchHandoff {
                 phase: P::AwaitRelease,
@@ -948,23 +968,20 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         // as an ACCOUNTED loss: tell the dest to DISCARD any late-replayed `Arriving` copy + poison its
         // adopt (`EmitTransientDiscard`), count the loss (`CountBatchLostSourceCrash`), and Tombstone. The
         // producer emits `SourceUnreachablePreAdopt` ONLY for `AwaitAdopt` (a restart-within-budget wins
-        // via its durable outbox replay first — the budget-gate in `rehome_event_for`). Reachability of
-        // the confirm-dead trigger toward a silent source is CA-1/L5-gated (DEFERRED.md); this arm is the
-        // reachable-NOW correctness (a direct-inject test drives it without the trigger).
+        // via its durable outbox replay first — the budget-gate in `rehome_event_for`).
         //
-        // ⚠️ R-6d4-F2 CA-1 TRIPWIRE (paired with the marker in `rehome_event_for`, saga_runtime.rs). This
-        // discard keys PURELY on `is_confirmed_dead(source) + budget + phase==AwaitAdopt`; it does NOT check
-        // whether the dest actually adopted. Today that is safe because the confirm-dead trigger toward a
-        // SILENT source is unreachable (empty AwaitAdopt orch→source egress). When the CA-1/L5 re-solicit
-        // egress lands and makes it reachable, a LIVE dest that DID adopt but whose `BatchAdopted` ack was
-        // lost/in-flight is still in `AwaitAdopt` and would be OVER-DISCARDED. That ack rides the
-        // dest→orchestrator TransferAck lane, redelivered on THAT lane's own backoff clock — NOT the
-        // source-redial series that drives `is_confirmed_dead(source)`, so the bound is ILL-DEFINED until the
-        // re-solicit cadence exists (see the R-4c author's note ~saga.rs:289 declining a cross-check because
-        // a live-slow peer emits ZERO transport bounces). BEFORE wiring that egress you MUST either (a) check
-        // dest-adopted before firing `SourceUnreachablePreAdopt`, OR (b) gate `abort_deadline_ticks >= the
-        // dest-lane max reliable-ack redelivery bound` (guard placed at orchestrator boot beside
-        // `LivenessTuning::validate_against`). The numeric guard stays OWED/CA-1-gated (DEFERRED.md).
+        // CA-1 S3/S4 — this discard is now LIVE and OVER-DISCARD-SAFE (retires the R-6d4-F2 tripwire). The
+        // confirm-dead trigger toward the source is made reachable by the `EmitReSolicit` probe (the
+        // AwaitAdopt Timeout egress above). The over-discard hole the tripwire warned of — a LIVE dest that
+        // DID adopt but whose `BatchAdopted` ack was lost/in-flight — is closed by the runtime's
+        // `dest_adopted` latch: `rehome_event_for` emits `SourceUnreachablePreAdopt` ONLY when
+        // `!dest_adopted` (saga_runtime.rs), and the latch is set in a PRE-SCAN inbox pass so a
+        // `BatchAdopted` arriving on the exact budget-maturity tick suppresses the discard THAT tick. The
+        // dest re-drives `BatchAdopted` every tick it holds `Arriving`, so the latch is re-presented
+        // continuously (liveness). Residual: a sustained dest→orch shed of EVERY ack across the whole abort
+        // window (then the dest is anyway `is_confirmed_dead` → the dest-dead arm) — the non-sheddable-ack
+        // transport refinement is ledgered (DEFERRED.md). This arm stays the reachable-NOW correctness (a
+        // direct-inject test drives it without the trigger).
         (
             S::BatchHandoff {
                 phase: P::AwaitAdopt,
@@ -1539,15 +1556,19 @@ mod tests {
         );
 
         // Each BatchHandoff phase RE-EMITS its one pending egress on a Timeout (the producer re-drive,
-        // idempotent — the shard journals by step). AwaitAdopt re-drives NOTHING (the dest adopts off the
-        // redelivered envelope), falling through to the no-op catch-all.
+        // idempotent — the shard journals by step). CA-1 S3: AwaitAdopt now emits the SOURCE liveness PROBE
+        // `EmitReSolicit` (the phase's first orch→source egress; the dest still adopts off the redelivered
+        // envelope + its own per-tick re-drive — the probe never advances the phase).
         let await_adopt = SagaState::BatchHandoff {
             phase: BatchHandoffPhase::AwaitAdopt,
             new_fence,
         };
         assert_eq!(
             step(&c, await_adopt, SagaEvent::Timeout),
-            (await_adopt, vec![])
+            (
+                await_adopt,
+                vec![SagaAction::EmitReSolicit { fence: new_fence }]
+            )
         );
         let await_release = SagaState::BatchHandoff {
             phase: BatchHandoffPhase::AwaitRelease,

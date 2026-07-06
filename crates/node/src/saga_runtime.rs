@@ -49,14 +49,14 @@ use vd_sim::directory::{DirectoryCore, DirectoryTuning};
 use vd_sim::io::{Bytes, Inbound, MsgClass, Store};
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_sim::saga::{
-    self, AbortReason, BatchHandoffPhase, LivenessTuning, SagaAction, SagaCtx, SagaEvent, SagaState,
-    SagaTuning,
+    self, AbortReason, BatchHandoffPhase, LivenessTuning, SagaAction, SagaCtx, SagaEvent,
+    SagaState, SagaTuning,
 };
 use vd_wire::intershard::{
     DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
-    PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION,
-    TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
-    TransferAck, TransferEnvelope, TransientHandoff, TransitionPayload,
+    PromoteCmd, RE_HOME_STEP, RE_SOLICIT_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP,
+    TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP,
+    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransitionPayload,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -198,6 +198,17 @@ struct LiveSaga {
     /// it re-derives `None`, so a restarted orchestrator re-accrues the abort budget from scratch rather
     /// than firing an irreversible resolution immediately.
     dead_observed_since: Option<(NodeId, UniverseTick)>,
+    /// CA-1 S3/S4 — the OVER-DISCARD SAFETY latch. Monotone `true` once the orchestrator has ANY evidence
+    /// the dest adopted this batch (a `BatchAdopted` seen in the inbox). `rehome_event_for` fires the
+    /// destructive `SourceUnreachablePreAdopt` discard ONLY when this is `false` — so the discard is a
+    /// genuine "the dest never got the batch" loss, never a "the ack is lost/in-flight" false loss. Set in
+    /// the PRE-SCAN inbox pass (`latch_adopted_from_inbox`) BEFORE `scan_deadlines`, so a `BatchAdopted`
+    /// arriving on the exact budget-maturity tick suppresses the discard THAT tick (latching in `deliver`,
+    /// which runs in the post-scan drain, would be one tick too late). RAM-ONLY (NOT in `SagaSnapshot`): re-
+    /// derives `false` on rehydrate — safe, because the liveness tracker is EMPTY on rehydrate (the D-6
+    /// freeze), so no discard can fire until fresh notices re-accrue, and the dest's per-tick `BatchAdopted`
+    /// re-drive re-establishes the latch long before then.
+    dest_adopted: bool,
 }
 
 /// A pending create-on-trigger. Enqueued by [`SagaRuntimeRes::start_transfer`] and processed
@@ -913,6 +924,21 @@ fn run_to_quiescence(
                 // R-6d3c — the batch-lost-source-crash count is applied in `scan_deadlines` PRE-delivery
                 // (beside `source_unreachable_resolutions`), so this executor arm is a straight-line no-op.
                 SagaAction::CountBatchLostSourceCrash => {}
+                // CA-1 S3 — the AwaitAdopt liveness PROBE to the SOURCE. Pure egress to ctx.source carrying
+                // the go-token fence, keyed `(transfer, RE_SOLICIT_STEP)`. Its SEND outcome is the signal: a
+                // dead source's send fails → `NodeUnreachable` → `is_confirmed_dead(source)` → the pre-adopt
+                // discard becomes reachable. A live source no-ops it. Re-driven every AwaitAdopt Timeout.
+                SagaAction::EmitReSolicit { fence } => {
+                    outbox.push_flow(
+                        ctx.source,
+                        MsgClass::Saga,
+                        &InterShardFlow::ReSolicitBatch(TransientHandoff {
+                            transfer: ctx.transfer,
+                            step_id: RE_SOLICIT_STEP,
+                            fence,
+                        }),
+                    );
+                }
                 // D-6: durability is REAL now — `commit_result` stages the QUIESCENT saga snapshot at
                 // EVERY transition (this checkpoint's `Send`/`EmitCrossing` effect included), and the
                 // end-of-tick `Store::commit()` barrier flushes it BEFORE the node's flush phase sends
@@ -1147,6 +1173,7 @@ pub(crate) fn rehydrate(
                 // D-3: NOT persisted — a rehydrated saga re-accrues its abort budget from scratch (so a
                 // restart never fires an immediate irreversible abandon; the RAM tracker is also empty).
                 dead_observed_since: None,
+                dest_adopted: false,
             },
         );
     }
@@ -1218,6 +1245,7 @@ fn process_starts(
                 since: now,
                 flushed_pose: None, // filled when the source flushes (after Freezing)
                 dead_observed_since: None,
+                dest_adopted: false,
             },
         );
         // Durable start = PrepareSubscribe (no EmitCrossing yet); transient start = the go-token
@@ -1324,6 +1352,7 @@ fn rehome_event_for(
     roster: &BTreeMap<NodeId, ShardProfile>,
     req: &CapRequest,
     subject_owner: NodeId,
+    dest_adopted: bool,
 ) -> SagaEvent {
     match state {
         // D-7d / R-6d3c transient batch hand-off: dest-dead abandons the source's retained copy; source-
@@ -1336,30 +1365,47 @@ fn rehome_event_for(
         // restart winner). R-6d3c ADDED the source-dead budget-gate (the former immediate self-promote
         // could not lose a race, but the AwaitAdopt discard MUST give the restart a chance).
         SagaState::BatchHandoff { phase, .. } => {
-            if liveness.is_confirmed_dead(ctx.source, now) {
+            // CA-1 S3/S4 OVER-DISCARD SAFETY (retires the R-6d4-F2 tripwire). Once the dest has ADOPTED an
+            // `AwaitAdopt` batch (`dest_adopted`, latched in the PRE-SCAN inbox pass), the DEST is the
+            // holder-of-record: its fate decides, NOT the source's. So DEFER to the dest-death ladder for
+            // that case and NEVER take the source-death resolution — because the `EmitReSolicit` probe now
+            // makes `is_confirmed_dead(source)` reachable in AwaitAdopt (it was inert before), and letting
+            // the source `if` win would (a) over-discard a batch the dest holds when the dest is alive, and
+            // (b) WEDGE forever when BOTH are dead (the source arm returns a bare Timeout that the dest-dead
+            // `else if` can never reach). Deferring restores the pre-CA-1-S3 terminal: dest alive → re-drive
+            // (the drain advances the phase off the latched `BatchAdopted`, then the post-adopt self-promote
+            // handles the dead source); dest dead → the budget-gated `DestUnreachable` abandon+tombstone
+            // (admin-visible via `dest_unreachable_resolutions`). The source-death resolutions
+            // (discard-if-never-adopted / self-promote-if-post-adopt) apply only when the dest is NOT the
+            // holder — i.e. `!defer_to_dest`.
+            let defer_to_dest = matches!(phase, BatchHandoffPhase::AwaitAdopt) && dest_adopted;
+            if liveness.is_confirmed_dead(ctx.source, now) && !defer_to_dest {
                 // Keyed by ctx.source so a dest-dead-then-source-dead cause-switch re-anchors (does NOT
                 // measure the source's restart-race budget from the dest's stale first-dead observation).
                 if dead_budget_elapsed(dead_observed_since, ctx.source, now)
                     >= tuning.abort_deadline_ticks
                 {
-                    *dead_observed_since = None;
                     match phase {
-                        // ⚠️ R-6d4-F2 CA-1 TRIPWIRE (paired with the FSM-arm marker at saga.rs, the
-                        // (BatchHandoff{AwaitAdopt}, SourceUnreachablePreAdopt) arm). This is the PRODUCER
-                        // whose `abort_deadline_ticks` budget gate (above) a future numeric guard must
-                        // dominate: once the CA-1/L5 re-solicit egress makes `is_confirmed_dead(source)`
-                        // reachable toward a silent source, this fires the DESTRUCTIVE over-discard without
-                        // checking dest-adopted — so a live dest whose `BatchAdopted` ack was lost (on the
-                        // dest→orch lane's OWN backoff clock, NOT this source-redial series) would be
-                        // over-discarded. Before wiring that egress: check dest-adopted here, OR gate
-                        // `abort_deadline_ticks >= dest-lane ack-redelivery bound` at boot. OWED (DEFERRED.md).
-                        BatchHandoffPhase::AwaitAdopt => SagaEvent::SourceUnreachablePreAdopt,
-                        _ => SagaEvent::SourceUnreachable,
+                        // PRE-adopt (`!defer_to_dest` ⇒ dest never adopted here): the dest never received
+                        // the batch → discard-to-dest + count the source-crash loss.
+                        BatchHandoffPhase::AwaitAdopt => {
+                            *dead_observed_since = None;
+                            SagaEvent::SourceUnreachablePreAdopt
+                        }
+                        // POST-adopt phase: the dest provably holds the batch → zero-loss self-promote.
+                        _ => {
+                            *dead_observed_since = None;
+                            SagaEvent::SourceUnreachable
+                        }
                     }
                 } else {
                     SagaEvent::Timeout // cheap re-drive while the restart-race budget accrues
                 }
             } else if liveness.is_confirmed_dead(ctx.dest, now) {
+                // The dest is confirmed dead — the DESTRUCTIVE budget gate (a recoverable blip that clears
+                // in time never abandons a healthy dest). Reached for a post-adopt dest-death AND (via
+                // `defer_to_dest`) for the AwaitAdopt-adopted-then-dead double-crash: both abandon the
+                // source's retained copy + tombstone (the go-token can no longer promote a dead dest).
                 if dead_budget_elapsed(dead_observed_since, ctx.dest, now)
                     >= tuning.abort_deadline_ticks
                 {
@@ -1368,7 +1414,7 @@ fn rehome_event_for(
                     SagaEvent::Timeout // cheap re-drive while the abort budget accrues (corpse won't ack)
                 }
             } else {
-                *dead_observed_since = None; // neither confirmed dead → clear stale budget, re-drive
+                *dead_observed_since = None; // neither confirmed dead (or deferring to a LIVE dest) → re-drive
                 SagaEvent::Timeout
             }
         }
@@ -1548,6 +1594,7 @@ fn process_rehome_starts(
                 since: now,
                 flushed_pose: None, // HR1: the dead owner's store is sealed; the adopt pose is owed Slice 4
                 dead_observed_since: None,
+                dest_adopted: false,
             },
         );
         // Parks immediately (start_rehome emits no actions); run_to_quiescence + commit_result PERSIST the
@@ -1614,6 +1661,7 @@ fn scan_deadlines(
                 roster,
                 &req,
                 subject_owner,
+                live.dest_adopted,
             );
             due.push((*transfer, event));
         }
@@ -1745,6 +1793,32 @@ fn reap_lapsed_leases(runtime: &mut SagaRuntimeRes, dir: &mut DirectoryCore, now
     runtime.pending_rehome.extend(to_rehome);
 }
 
+/// CA-1 S3/S4 PRE-SCAN latch pass. Sets `dest_adopted = true` for every live saga whose dest's
+/// `BatchAdopted` is present in THIS tick's inbox, BEFORE `scan_deadlines` runs. This is the intra-tick
+/// ordering that makes the AwaitAdopt over-discard guarantee HARD: `scan_deadlines` runs before the inbox
+/// drain, so latching in `deliver` (inside the drain) is one tick too late for a `BatchAdopted` that lands
+/// on the exact budget-maturity tick — the discard would already have fired + tombstoned. Decodes only
+/// enough to spot `BatchAdopted` (the drain re-decodes and acts on the same message); a non-Saga message, a
+/// decode failure, a non-adopt arm, or an adopt for an absent/tombstoned saga is a skip (no side effect).
+/// The latch is MONOTONE (never cleared) and RAM-only — the dest re-drives `BatchAdopted` every tick it
+/// holds `Arriving`, so the latch is re-established every tick the ack lane delivers.
+fn latch_adopted_from_inbox(runtime: &mut SagaRuntimeRes, inbox: &InboundBox) {
+    for msg in &inbox.0 {
+        if let Inbound::Wire {
+            class: MsgClass::Saga,
+            bytes,
+            ..
+        } = msg
+            && let Ok(InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                transfer_id, ..
+            })) = postcard::from_bytes::<InterShardFlow>(bytes)
+            && let Some(live) = runtime.sagas.get_mut(&transfer_id)
+        {
+            live.dest_adopted = true;
+        }
+    }
+}
+
 /// The orchestrator saga-runtime system: process new triggers, FIRE due deadlines (Slice 2a), then
 /// drive every live saga forward on the gateway acks delivered this tick. Runs on the orchestrator's
 /// single-threaded schedule; the directory CAS is a direct in-process call (no await, no lock across a send).
@@ -1760,6 +1834,11 @@ pub fn drive_sagas(
     let now = clock.universe_tick;
     let epoch = clock.epoch;
     process_starts(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
+    // CA-1 S3/S4 — latch `dest_adopted` from THIS tick's inbox BEFORE `scan_deadlines` decides any
+    // destructive resolution. The scan runs before the ack drain below, so a `BatchAdopted` arriving on the
+    // exact budget-maturity tick would otherwise be seen too late (the discard would already have fired +
+    // tombstoned). This pre-scan latch makes the AwaitAdopt over-discard guarantee HARD (see the latch doc).
+    latch_adopted_from_inbox(&mut runtime, &inbox);
     // Slice 2a: fire due deadlines BEFORE the ack loop — a saga that loses its ack this tick still
     // gets its Timeout re-drive/abort next tick (the producer is the R1 backstop, never a wedge).
     scan_deadlines(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
@@ -2557,6 +2636,7 @@ mod tests {
                     since: UniverseTick(0),
                     flushed_pose: None,
                     dead_observed_since: None,
+                    dest_adopted: false,
                 },
             );
         }
@@ -3667,6 +3747,7 @@ mod tests {
                 since: UniverseTick(0),
                 flushed_pose: None,
                 dead_observed_since: None,
+                dest_adopted: false,
             },
         );
         assert_eq!(
@@ -3768,6 +3849,7 @@ mod tests {
                 since,
                 flushed_pose: None,
                 dead_observed_since: None,
+                dest_adopted: false,
             },
         );
     }
@@ -4054,6 +4136,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
         assert_eq!(dos, None, "a healthy dest clears the stale abort budget");
@@ -4072,6 +4155,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
         assert_eq!(
@@ -4089,6 +4173,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            false,
         );
         assert_eq!(
             ev,
@@ -4107,6 +4192,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            false,
         );
         assert_eq!(
             ev,
@@ -4127,6 +4213,7 @@ mod tests {
             &empty_roster,
             &req,
             DEST,
+            false,
         );
         assert_eq!(
             ev,
@@ -4541,7 +4628,16 @@ mod tests {
         // (i) source HEALTHY → Timeout, and a stale budget is cleared.
         let mut dos = Some((SOURCE, UniverseTick(5)));
         let ev = rehome_event_for(
-            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(30), &roster, &req, DEST,
+            &await_adopt,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(30),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
         assert_eq!(dos, None, "a healthy source clears the stale budget");
@@ -4551,7 +4647,16 @@ mod tests {
         // (ii) source DEAD but WITHIN the restart-race budget → cheap Timeout re-drive (budget anchored).
         let mut dos = None;
         let ev = rehome_event_for(
-            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(0), &roster, &req, DEST,
+            &await_adopt,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(0),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
         assert_eq!(
@@ -4560,14 +4665,36 @@ mod tests {
             "the restart-race budget anchors on the first dead observation (keyed by the dead node)"
         );
         let ev = rehome_event_for(
-            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(10), &roster, &req, DEST,
+            &await_adopt,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(10),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
-        assert_eq!(ev, SagaEvent::Timeout, "still within the 24-tick budget at tick 10");
+        assert_eq!(
+            ev,
+            SagaEvent::Timeout,
+            "still within the 24-tick budget at tick 10"
+        );
 
         // (iii) source DEAD, PAST budget, PRE-adopt (AwaitAdopt) → SourceUnreachablePreAdopt (accounted
         // loss, discard-to-dest — NEVER self-promote an empty dest).
         let ev = rehome_event_for(
-            &await_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &roster, &req, DEST,
+            &await_adopt,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(24),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
         assert_eq!(ev, SagaEvent::SourceUnreachablePreAdopt);
         assert_eq!(dos, None, "the resolution clears the budget");
@@ -4581,12 +4708,50 @@ mod tests {
         };
         let mut dos = Some((SOURCE, UniverseTick(0)));
         let ev = rehome_event_for(
-            &post_adopt, &c, &liveness, &mut dos, &tuning, UniverseTick(24), &roster, &req, DEST,
+            &post_adopt,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(24),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
         assert_eq!(
             ev,
             SagaEvent::SourceUnreachable,
             "a post-adopt phase resolves as a zero-loss self-promote, NOT a PreAdopt discard"
+        );
+
+        // (v) CA-1 S3/S4 OVER-DISCARD SAFETY: source DEAD, PAST budget, AwaitAdopt, `dest_adopted = true`,
+        // and the dest is ALIVE (not confirmed dead) → `defer_to_dest` skips the source resolution and,
+        // since the dest is alive, falls to the neutral re-drive → Timeout, NOT the discard. The batch the
+        // dest actually holds is never over-discarded; the same-tick drain advances the phase off the
+        // latched `BatchAdopted` and the post-adopt self-promote then handles the dead source. Deferring to
+        // a LIVE dest clears the (now-moot) source budget anchor.
+        let mut dos = Some((SOURCE, UniverseTick(0)));
+        let ev = rehome_event_for(
+            &await_adopt,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(24),
+            &roster,
+            &req,
+            DEST,
+            true,
+        );
+        assert_eq!(
+            ev,
+            SagaEvent::Timeout,
+            "dest_adopted + live dest suppresses the pre-adopt discard (defer to the dest, re-drive)"
+        );
+        assert_eq!(
+            dos, None,
+            "deferring to a live dest clears the moot source budget anchor"
         );
     }
 
@@ -4613,10 +4778,23 @@ mod tests {
         // DEST confirmed dead at tick 0 → the budget anchors on DEST, within budget → Timeout.
         liveness.record_unreachable(DEST, UniverseTick(0));
         let ev = rehome_event_for(
-            &state, &c, &liveness, &mut dos, &tuning, UniverseTick(0), &roster, &req, DEST,
+            &state,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(0),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
-        assert_eq!(dos, Some((DEST, UniverseTick(0))), "anchored on the dead DEST");
+        assert_eq!(
+            dos,
+            Some((DEST, UniverseTick(0))),
+            "anchored on the dead DEST"
+        );
 
         // CAUSE-SWITCH at tick 30 (already PAST 24 from the DEST's tick-0 anchor): the DEST RECOVERS and
         // the SOURCE is confirmed dead. The shared-anchor BUG would fire SourceUnreachable now (30-0 >= 24);
@@ -4624,7 +4802,16 @@ mod tests {
         liveness.record_ack(DEST);
         liveness.record_unreachable(SOURCE, UniverseTick(30));
         let ev = rehome_event_for(
-            &state, &c, &liveness, &mut dos, &tuning, UniverseTick(30), &roster, &req, DEST,
+            &state,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(30),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
         assert_eq!(
             ev,
@@ -4639,7 +4826,16 @@ mod tests {
 
         // The source's OWN budget elapses at tick 54 (30 + 24) → the post-adopt self-promote fires.
         let ev = rehome_event_for(
-            &state, &c, &liveness, &mut dos, &tuning, UniverseTick(54), &roster, &req, DEST,
+            &state,
+            &c,
+            &liveness,
+            &mut dos,
+            &tuning,
+            UniverseTick(54),
+            &roster,
+            &req,
+            DEST,
+            false,
         );
         assert_eq!(
             ev,
@@ -4671,11 +4867,34 @@ mod tests {
         );
         runtime.liveness.record_unreachable(SOURCE, UniverseTick(8));
 
-        // First due scan (tick 8): source confirmed dead but the restart-race budget has not elapsed → re-drive.
+        // First due scan (tick 8): source confirmed dead but the restart-race budget has not elapsed → the
+        // (AwaitAdopt, Timeout) re-drive, which CA-1 S3 makes emit the `ReSolicitBatch` liveness PROBE to the
+        // SOURCE (the egress that makes `is_confirmed_dead(source)` reachable — proves the FSM arm + executor).
         let mut outbox = OutboundBox::default();
-        scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), UniverseTick(8));
-        assert_eq!(runtime.live(), 1, "the accounted-loss discard waits the restart-race budget");
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut outbox,
+            EpochId(1),
+            UniverseTick(8),
+        );
+        assert_eq!(
+            runtime.live(),
+            1,
+            "the accounted-loss discard waits the restart-race budget"
+        );
         assert_eq!(runtime.batch_lost_source_crash(), 0);
+        assert!(
+            flows_to_node(&outbox, SOURCE).contains(&InterShardFlow::ReSolicitBatch(
+                TransientHandoff {
+                    transfer: XFER,
+                    step_id: RE_SOLICIT_STEP,
+                    fence: Fence(2),
+                }
+            )),
+            "AwaitAdopt Timeout emits the source liveness probe: {:?}",
+            outbox.0
+        );
 
         // Past `abort_deadline_ticks` from the first observation: the discard-to-dest + count fires.
         let mut outbox = OutboundBox::default();
@@ -4686,7 +4905,11 @@ mod tests {
             EpochId(1),
             UniverseTick(8 + saga::DEFAULT_ABORT_DEADLINE_TICKS),
         );
-        assert_eq!(runtime.live(), 0, "the accounted-loss resolution tombstoned the saga");
+        assert_eq!(
+            runtime.live(),
+            0,
+            "the accounted-loss resolution tombstoned the saga"
+        );
         assert!(
             flows_to_node(&outbox, DEST).contains(&InterShardFlow::TransientDiscard(
                 TransientHandoff {
@@ -4721,8 +4944,217 @@ mod tests {
             SagaEvent::BatchAdopted,
         );
         assert_eq!(runtime.live(), 0, "the tombstoned saga stays gone");
-        assert_eq!(runtime.batch_lost_source_crash(), 1, "no double-count on the late ack");
-        assert!(outbox.0.is_empty(), "no second egress on the late BatchAdopted");
+        assert_eq!(
+            runtime.batch_lost_source_crash(),
+            1,
+            "no double-count on the late ack"
+        );
+        assert!(
+            outbox.0.is_empty(),
+            "no second egress on the late BatchAdopted"
+        );
+    }
+
+    #[test]
+    fn latch_adopted_from_inbox_latches_only_a_present_sagas_batch_adopted() {
+        // CA-1 S3/S4 — the pre-scan latch pass sets `dest_adopted` ONLY for a `BatchAdopted` (in a Saga-class
+        // Wire) whose transfer names a LIVE saga. Covers every branch: a non-Saga inbound is skipped; a
+        // Saga-class non-`BatchAdopted` arm is skipped; a `BatchAdopted` for an ABSENT saga is a no-op; a
+        // `BatchAdopted` for the PRESENT XFER saga latches it.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        inject_saga(
+            &mut runtime,
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitAdopt,
+                new_fence: Fence(2),
+            },
+            UniverseTick(0),
+        );
+        let batch_adopted = |t| {
+            flow_inbound(&InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                transfer_id: t,
+                step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
+            }))
+        };
+        let mut inbox = InboundBox::default();
+        inbox.0 = vec![
+            // (1-false) a non-Saga-Wire inbound → skipped.
+            Inbound::NodeUnreachable {
+                to: SOURCE,
+                class: MsgClass::Saga,
+                undelivered: MsgId(0),
+            },
+            // (2-false) a Saga-class Wire that is NOT a BatchAdopted → skipped.
+            demote_wire(Fence(2)),
+            // (3-false) a BatchAdopted for an ABSENT saga → no-op (no such saga).
+            batch_adopted(TransferId(999)),
+            // (all-true) a BatchAdopted for the PRESENT XFER saga → latch it.
+            batch_adopted(XFER),
+        ];
+        latch_adopted_from_inbox(&mut runtime, &inbox);
+        assert!(
+            runtime.sagas.get(&XFER).expect("saga present").dest_adopted,
+            "the present saga's dest_adopted latched from its BatchAdopted"
+        );
+    }
+
+    #[test]
+    fn pre_scan_latch_suppresses_the_await_adopt_over_discard_on_the_maturity_tick() {
+        // CA-1 S3/S4 the HARD over-discard guarantee, end-to-end in the intra-tick order `drive_sagas`
+        // performs (latch pre-scan → scan). On the EXACT budget-maturity tick, a racing `BatchAdopted` in the
+        // inbox is latched BEFORE `scan_deadlines`, so the destructive pre-adopt discard is SUPPRESSED (the
+        // saga survives + keeps probing). The CONTROL (no adopt evidence) fires the discard on the SAME tick
+        // — proving the latch is precisely what averts the over-discard, not a budget accident.
+        let mk = || {
+            let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive=8, abort=24
+            inject_saga(
+                &mut runtime,
+                SagaState::BatchHandoff {
+                    phase: BatchHandoffPhase::AwaitAdopt,
+                    new_fence: Fence(2),
+                },
+                UniverseTick(0),
+            );
+            runtime.liveness.record_unreachable(SOURCE, UniverseTick(8)); // source confirmed dead (n = 1)
+            runtime
+        };
+        let mk_dir = || {
+            DirectoryCore::new(DirectoryTuning {
+                lease_ttl_ticks: 10_000,
+                ..DirectoryTuning::default()
+            })
+        };
+        // The budget anchors on the FIRST due scan and elapses `abort_deadline_ticks` later (dead_budget_
+        // elapsed returns 0 on the anchoring call) — so, exactly like the accounted-loss test, an ANCHOR scan
+        // at tick 8 precedes the MATURITY scan at 8 + abort_deadline where the discard is reachable.
+        let anchor = UniverseTick(8);
+        let maturity = UniverseTick(8 + saga::DEFAULT_ABORT_DEADLINE_TICKS);
+
+        // --- WITH a racing BatchAdopted: the pre-scan latch suppresses the discard on the maturity tick ---
+        let mut runtime = mk();
+        let mut dir = mk_dir();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut OutboundBox::default(),
+            EpochId(1),
+            anchor,
+        );
+        let mut inbox = InboundBox::default();
+        inbox.0 = vec![flow_inbound(&InterShardFlow::TransferAck(
+            TransferAck::BatchAdopted {
+                transfer_id: XFER,
+                step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
+            },
+        ))];
+        latch_adopted_from_inbox(&mut runtime, &inbox); // the pre-scan pass drive_sagas runs FIRST
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), maturity);
+        assert_eq!(
+            runtime.live(),
+            1,
+            "the racing BatchAdopted latched dest_adopted → the discard is suppressed, the saga survives"
+        );
+        assert_eq!(runtime.batch_lost_source_crash(), 0, "NO over-discard");
+        assert!(
+            flows_to_node(&outbox, DEST).is_empty(),
+            "no discard (indeed no egress at all) to the dest — the batch it holds is untouched: {:?}",
+            outbox.0
+        );
+        assert!(
+            flows_to_node(&outbox, SOURCE).contains(&InterShardFlow::ReSolicitBatch(
+                TransientHandoff {
+                    transfer: XFER,
+                    step_id: RE_SOLICIT_STEP,
+                    fence: Fence(2),
+                }
+            )),
+            "the suppressed tick still re-drives the source probe: {:?}",
+            outbox.0
+        );
+
+        // --- CONTROL: no adopt evidence in the inbox → the GENUINE pre-adopt discard fires the same tick ---
+        let mut runtime = mk();
+        let mut dir = mk_dir();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut OutboundBox::default(),
+            EpochId(1),
+            anchor,
+        );
+        latch_adopted_from_inbox(&mut runtime, &InboundBox::default()); // empty inbox → nothing latched
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), maturity);
+        assert_eq!(
+            runtime.live(),
+            0,
+            "no adopt evidence → the pre-adopt loss discard fires + tombstones"
+        );
+        assert_eq!(
+            runtime.batch_lost_source_crash(),
+            1,
+            "the accounted loss is counted"
+        );
+        assert!(
+            flows_to_node(&outbox, DEST).contains(&InterShardFlow::TransientDiscard(
+                TransientHandoff {
+                    transfer: XFER,
+                    step_id: TRANSIENT_DISCARD_STEP,
+                    fence: Fence(2),
+                }
+            )),
+            "discard-to-dest poisons a late replay: {:?}",
+            outbox.0
+        );
+
+        // --- DOUBLE-CRASH (dest adopted THEN crashed + source also dead): resolve as the dest-dead abandon,
+        // NOT a wedge. This is the regression the post-impl review caught: making the source probe live must
+        // NOT let source-death preempt the dest-dead terminal into a perpetual Timeout loop. `defer_to_dest`
+        // routes the adopted-then-dead dest to the budget-gated `DestUnreachable` abandon + tombstone.
+        let mut runtime = mk();
+        runtime.liveness.record_unreachable(DEST, UniverseTick(8)); // the dest is ALSO confirmed dead
+        runtime
+            .sagas
+            .get_mut(&XFER)
+            .expect("saga present")
+            .dest_adopted = true; // it had adopted before dying
+        let mut dir = mk_dir();
+        scan_deadlines(
+            &mut runtime,
+            &mut dir,
+            &mut OutboundBox::default(),
+            EpochId(1),
+            anchor,
+        ); // anchors the DEST budget
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), maturity);
+        assert_eq!(
+            runtime.live(),
+            0,
+            "both dead → the dest-dead abandon terminates the saga (no wedge)"
+        );
+        assert_eq!(
+            runtime.dest_unreachable_resolutions(),
+            1,
+            "counted as a dest-dead resolution (admin-visible), NOT a silent park"
+        );
+        assert_eq!(
+            runtime.batch_lost_source_crash(),
+            0,
+            "an adopted-then-dead dest is NOT a source-crash discard"
+        );
+        assert!(
+            flows_to_node(&outbox, SOURCE).contains(&InterShardFlow::TransientAbandon(
+                TransientHandoff {
+                    transfer: XFER,
+                    step_id: TRANSIENT_ABANDON_STEP,
+                    fence: Fence(2),
+                }
+            )),
+            "abandon-to-source (the promote target is gone): {:?}",
+            outbox.0
+        );
     }
 
     #[test]
